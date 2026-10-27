@@ -402,10 +402,9 @@ async function assertPhoneHeader(page: Page): Promise<void> {
   await more.focus();
   await page.keyboard.press("Enter");
   const menu = page.locator(".af-appbar-tools");
-  for (const selector of [".af-viewnav", ".af-project-menu", ".af-theme-toggle", ".af-tab-menu", ".af-copy-link-phone"]) {
+  for (const selector of [".af-viewnav", ".af-project-menu", ".af-tab-menu", ".af-copy-link-phone"]) {
     await expect(menu.locator(selector)).toBeVisible();
   }
-  await expect(menu.getByRole("button", { name: "Disconnect", exact: true })).toBeVisible();
   const controls = menu.locator("button:visible:not(:disabled), a:visible[href]");
   const states = page.locator(".af-rail-list .af-operator-state");
   const seededRows = await states.count();
@@ -434,16 +433,20 @@ async function assertPhoneHeader(page: Page): Promise<void> {
     role: element.getAttribute("role") ?? (element.matches("a[href]") ? "link" : "button"),
     name: element.getAttribute("aria-label")?.trim() ||
       (element as HTMLElement).innerText.replace(/\s+/g, " ").trim(),
-  })))) as Array<{ role: ControlRole; name: string }>;
+    projectFocus: (element as HTMLElement).dataset.projectFocus ?? null,
+  })))) as Array<{ role: ControlRole; name: string; projectFocus: string | null }>;
   expect(controlOrder.every(({ name }) => name !== ""), "every phone control has an accessible name").toBe(true);
 
   let injectedRebuild = false;
   for (const [position, control] of controlOrder.entries()) {
     await page.keyboard.press("Tab");
-    await expect(
-      menu.getByRole(control.role, { name: control.name, exact: true }),
-      `Tab ${position + 1} focuses ${control.role} “${control.name}”`,
-    ).toBeFocused();
+    // A project row's name carries live counts ("4 sessions · 1 working"), so a
+    // Working flicker mid-walk renames it. Resolve rows by the identity the menu
+    // restores focus with (#4817); the name was already checked non-empty above.
+    const target = control.projectFocus === null
+      ? menu.getByRole(control.role, { name: control.name, exact: true })
+      : menu.getByRole(control.role).and(menu.locator(`[data-project-focus=${JSON.stringify(control.projectFocus)}]`));
+    await expect(target, `Tab ${position + 1} focuses ${control.role} “${control.name}”`).toBeFocused();
     if (control.role === "button" && control.name === "+ Add project") {
       // Force #4007 instead of waiting for daemon timing. Match the production
       // renderer by replacing every project-menu child with a fresh node, and
@@ -698,7 +701,6 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   await page.locator('.af-viewtab[data-view="tasks"]').click();
   const task = page.locator(".af-task-row").first();
   await expect.poll(async () => (await task.boundingBox())?.height ?? Infinity).toBeLessThanOrEqual(64);
-  await task.locator(".af-term-more").click();
   await shot("task-actions");
   await task.getByRole("button", { name: "Remove", exact: true }).click();
   await shot("remove-task");

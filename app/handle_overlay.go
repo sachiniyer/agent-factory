@@ -21,8 +21,21 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if shouldClose {
 		if m.selectionOverlay.IsSubmitted() {
 			idx := m.selectionOverlay.GetSelectedIndex()
-			picked := tmux.SupportedPrograms[idx]
+			// The rows are what the open picker actually showed — for a remote
+			// target that is the daemon's catalog, not the local enum (#4889
+			// review).
+			picks := m.programPickerChoices
+			if len(picks) == 0 {
+				picks = tmux.SupportedPrograms
+			}
+			picked := picks[idx]
+			m.programPickerChoices = nil
 			changed := picked != m.pendingProgram
+			// A picker submit is an explicit choice even when it re-picks the
+			// value already shown: it submits the concrete program on the wire
+			// rather than "" (#4889 review). String equality cannot tell this
+			// pick apart from an untouched field — this flag is what can.
+			m.pendingProgramChosen = true
 			if changed {
 				// An account belongs to ONE agent — claude's "work" and codex's "work"
 				// are different identities in different registries — so a program change
@@ -138,9 +151,9 @@ func (m *home) showSearchOverlay() (tea.Model, tea.Cmd) {
 // full manager lives in the tasks overlay. Cursor keys move the section's
 // selection, Enter opens the manager overlay on it, Esc returns focus to the
 // tree. Advertised global bindings (Tab/Shift-Tab focus ring, task manager,
-// hooks, ? help, q quit) keep working, while pane-management verbs are
-// consumed here so hidden `s`/`S`/`x`/pane-switch keys cannot mutate workspace
-// panes from Automations focus (#1417).
+// hooks, ? help, q quit) keep working, while pane-management and tab-mutation
+// verbs are consumed here so hidden `s`/`S`/`x`/pane-switch/`</>` keys cannot
+// mutate workspace panes or the roster from Automations focus (#1417).
 func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if m.ring.Active() != layout.RegionAutomations {
 		return m, nil, false
@@ -156,7 +169,7 @@ func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 		m.focusRegion(layout.RegionTree)
 		return m, nil, true
 	}
-	if automationsConsumesPaneVerb(msg) {
+	if automationsConsumesMutationVerb(msg) {
 		return m, nil, true
 	}
 	return m, nil, false
@@ -258,13 +271,21 @@ func projectsChromeFallthroughKey(msg tea.KeyMsg) bool {
 	return false
 }
 
-func automationsConsumesPaneVerb(msg tea.KeyMsg) bool {
+// automationsConsumesMutationVerb reports whether msg is a binding that must
+// stay inert while the Automations rail owns focus: pane management AND the
+// </> tab move. The rail's footer does not advertise these verbs, and a key
+// that fell through to the global dispatcher would mutate a session or pane
+// the user is not looking at (#1417). Named for what it protects, not the key
+// list it started with.
+func automationsConsumesMutationVerb(msg tea.KeyMsg) bool {
 	for _, name := range []keys.KeyName{
 		keys.KeyOpenPane,
 		keys.KeySplitPane,
 		keys.KeyHidePane,
 		keys.KeyPanePrev,
 		keys.KeyPaneNext,
+		keys.KeyMoveTabLeft,
+		keys.KeyMoveTabRight,
 	} {
 		if key.Matches(msg, keys.GlobalKeyBindings[name]) {
 			return true
@@ -315,12 +336,21 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleQuit()
 	}
 
-	if msg.String() == "D" && !sp.IsEditing() && !sp.IsCreating() {
+	// D deletes the selected task after confirmation. The gate mirrors list
+	// mode for the edit form too, but only at a selector/button stop: when a
+	// text field is focused D is an ordinary character (a capital D the user
+	// is typing into Name, the prompt, the path, …) and must fall through to
+	// the form. A create-mode D never deletes (there is no task yet) and is
+	// left to the form to type or ignore. Confirming cancels back to the form
+	// (or list); on confirm the pane deletes and returns to list mode.
+	if msg.String() == "D" && !sp.IsCreating() && !sp.IsTextFieldFocused() {
 		if selected, ok := sp.SelectedTask(); ok {
 			m.confirmActionWithDetail("Delete task "+selected.Name+"? Future runs will stop.", "Keep existing sessions.", nil)
 			m.confirmationOverlay.OnConfirm = func() {
 				// DeleteTask rechecks availability: a failed async refresh while
 				// confirming returns to the retained recovery notice unchanged.
+				// It also exits an open edit form so the deleted task's stale
+				// editor is not left standing.
 				sp.DeleteTask(selected.ID)
 				m.state = stateTasks
 			}

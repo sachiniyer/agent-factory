@@ -28,6 +28,8 @@ import {
   createVSCodeTab,
   deleteProject,
   registerProject,
+  rebindProject,
+  type RegisteredProject,
   errorText,
   fetchSessionSnapshot,
   killSession,
@@ -53,12 +55,20 @@ import {
   reorderTab,
   restoreSession,
   resumeFromLimit,
+  confirmHandoffDelivery,
   shouldForgetToken,
   storeToken,
   triggerTask,
   updateTask,
 } from "./api.js";
 import { createKeyedQueue, saveNotice } from "./config.js";
+import {
+  bindTerminalFontPersist,
+  setTerminalFontSizes,
+  stepTerminalFontSize,
+  terminalFontClassForKey,
+  terminalFontSizesFromConfig,
+} from "./terminal-font.js";
 import { emptyAccountsState } from "./accounts.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
@@ -69,8 +79,10 @@ import {
   confirmDeleteProjectModal,
   confirmModal,
   handoffModal,
+  markDeliveredModal,
   type ModalHandle,
   newSessionModal,
+  rebindProjectModal,
   removeTaskModal,
 } from "./modals.js";
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
@@ -98,13 +110,12 @@ import { registerServiceWorker } from "./serviceworker.js";
 import {
   bootStampTheme,
   connectionAttemptMayCommit,
-  hasConnectedToken,
   persistThemeChoice,
   refreshThemeMode,
   stampTheme,
   type ThemeChoice,
 } from "./theme.js";
-import { createFencedRefetcher, createLatestRequestGate } from "./refetch.js";
+import { createFencedRefetcher, createLatestRequestGate, retryWithBackoff, type LatestRequest } from "./refetch.js";
 import { addTaskModal, type AddTaskInput, buildTask, editTaskModal } from "./tasks.js";
 import type { ProgramCatalog } from "./programs.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -401,8 +412,16 @@ async function connect(candidate: string): Promise<void> {
     // Either way we land on the login view exactly once — no retry loop.
     if (shouldForgetToken(e)) {
       clearToken();
+      // The credential was rejected. Flip authRequired so loginView routes to the
+      // paste form with the "Login expired" title — mirroring the resync path that
+      // calls disconnect(describeError(error), true). Without this flip a tokenless
+      // client (authRequired === false from an earlier probe) stays routed to
+      // noAuthLoginView, which re-issues the same empty-token request that just 401'd
+      // and never surfaces a token field for in-app recovery.
+      store.set({ phase: "login", connecting: false, authRequired: true, loginError: describeError(e), loginCondition: "expired" });
+      return;
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : undefined });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: e instanceof ApiError && e.status === 0 ? "unavailable" : undefined });
     return;
   }
   if (!attempt.isCurrent()) return;
@@ -417,18 +436,40 @@ async function connect(candidate: string): Promise<void> {
   // not as a temporary session-backed fallback that would then stick (reconcile keeps
   // a valid current selection). A transport failure degrades to no tasks (the events
   // plane / a view switch refetches); the scope then falls back until they load.
-  const [taskResult, projectResult] = await Promise.all([
+  const [taskResult, projectResult, configResult] = await Promise.all([
     listTasks(candidate).then(tasks => ({ tasks, error: "" }))
       .catch(error => ({ tasks: [] as TaskData[], error: errorText(error) })),
     fetchRegisteredProjects(candidate),
+    // The terminal font sizes MUST be resolved before the first attach — #5500:
+    // an attach that opened at the compiled-in defaults and jumped when the
+    // config landed would size its first OpResize on the wrong pitch. A failed
+    // read degrades to those defaults, same as the tasks fetch degrades to
+    // none; the terminals still come up correctly formed, just unpersisted-
+    // sized until the next config read lands.
+    getConfig(candidate).catch(() => null),
   ]);
   const { tasks, error: tasksError } = taskResult;
   const { projects: registeredProjects, error: projectsError } = projectResult;
   // Fence the final app commit against a disconnect during tasks/projects loading.
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
+  // Landed ahead of phase:"app", so the first AttachTerminal's constructor —
+  // and the grid its initial OpResize reports — already reflects the persisted
+  // sizes rather than the defaults the controller started on.
+  if (configResult) {
+    setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
+  } else {
+    // The connect-time read fell back to the compiled defaults. That must not
+    // be the last word — a transient GetConfig failure would otherwise leave
+    // the terminal on un-persisted sizes until an unrelated action refetched,
+    // and on a reconnect the module singleton would keep the PREVIOUS
+    // connection's sizes. The bounded reconcile retries through the fenced
+    // refetcher, so the first landed read applies the served values through
+    // the normal commit — always, not only when this fetch succeeded.
+    void reconcileConfigRead(candidate, attempt);
+  }
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
-  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
   connectionGeneration++;
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
@@ -465,15 +506,22 @@ async function connect(candidate: string): Promise<void> {
   }
 }
 
-/** Fetches the daemon's registered-project roots for the #2456 union, degrading to
- *  none on a transport failure (like the tasks fetch): the union is additive, so a
+/** The roots of the daemon's registered projects — the #2456 union input the
+ *  derived project lists consume (projectSummaries / pickerProjects /
+ *  reconcileProject take roots; the registry's identity fields are what state
+ *  keeps the RECORDS for, so a stale registration can be rebound). */
+function projectRoots(projects: RegisteredProject[]): string[] {
+  return projects.map((p) => p.root);
+}
+
+/** Fetches the daemon's registered-project records for the #2456 union, degrading
+ *  to none on a transport failure (like the tasks fetch): the union is additive, so a
  *  missing registry just means the derived-from-sessions list until the next
- *  projects.changed resync. Maps the registry records to their roots — the only field
- *  the switcher/picker union consumes. */
-async function fetchRegisteredProjects(tok: string): Promise<{ projects: string[]; error: string }> {
+ *  projects.changed resync. The records — not just their roots — are kept: a
+ *  registration's id + path_exists are what the rebind affordance needs. */
+async function fetchRegisteredProjects(tok: string): Promise<{ projects: RegisteredProject[]; error: string }> {
   try {
-    const projects = (await listProjects(tok)).map((p) => p.root);
-    return { projects, error: "" };
+    return { projects: await listProjects(tok), error: "" };
   } catch (e) {
     return { projects: [], error: errorText(e) };
   }
@@ -487,6 +535,9 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
   store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
   connectionGeneration++;
+  // An in-flight rebind belongs to the connection just torn down; its
+  // completions are fenced off, so its guard goes with it.
+  rebindInFlight = null;
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
@@ -863,7 +914,8 @@ function doOpenConfigAssistant(): void {
  *  removes it. A failure surfaces through the shared operation toast because the
  *  form is deliberately no longer held open by the RPC. */
 function newSession(): void {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const invoker = captureModalInvoker();
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       // The backend catalog is per-repo and read at choose time (#1933), so the
@@ -942,7 +994,11 @@ function newSession(): void {
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal && token === tok) openModal(m);
+            if (!modal && token === tok) {
+              openModal(m, true, invoker);
+              m.el.querySelector<HTMLElement>(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")
+                ?.focus({ preventScroll: true });
+            }
             else surfaceMutationError(e);
           });
       },
@@ -1193,6 +1249,195 @@ function openAddProject(): void {
   );
 }
 
+/** The label of the rebind the daemon is deciding right now, or null. It lives
+ *  outside the modal on purpose: Escape disposes the modal while the RPC runs, so a
+ *  guard kept on the modal would let a reopened Rebind submit a second, racing
+ *  registry mutation. */
+let rebindInFlight: string | null = null;
+
+/** The connection generation rebindInFlight was set under. A guard left by a
+ *  previous connection must not block this one: its attempt's completions are
+ *  fenced off (see openRebindProject), so nothing would ever clear it. */
+let rebindInFlightGeneration = 0;
+
+/** How long a rebind may go unanswered before the UI stops waiting on it. The
+ *  mutation is not aborted — the daemon may still commit it — so hitting this
+ *  releases the in-flight guard, reports the outcome as unknown, and re-reads the
+ *  registry rather than claiming success or failure. */
+const REBIND_ANSWER_MS = 30_000;
+
+/** The one notice for a rebind whose outcome is not known — unanswered within
+ *  REBIND_ANSWER_MS, or failed in transport. The selection is left alone; the
+ *  refreshed project list is where the user sees what actually happened. */
+function rebindOutcomeUnknown(label: string): Error {
+  return new Error(`Rebind of ${label} · outcome unknown · check the project list`);
+}
+
+/** Follows a CONFIRMED rebind to where the registry binds the project now: one
+ *  registry read issued after the daemon answered — never the RPC's echo, which a
+ *  newer rebind or delete from another client may already have superseded. The
+ *  read is fenced by the connection and credential it was issued under, a record
+ *  that is gone is not followed, and a fenced refetch afterwards settles anything
+ *  that raced this read. */
+function followConfirmedRebind(projectId: string, tok: string, connection: number): void {
+  void listProjects(tok)
+    .then((projects) => {
+      if (connection !== connectionGeneration || token !== tok) return;
+      const root = projects.find((p) => p.id === projectId)?.root;
+      if (root !== undefined) {
+        store.set({ registeredProjects: projects });
+        switchProject(root);
+      }
+      refreshRegisteredProjects();
+    })
+    .catch(() => {
+      if (connection === connectionGeneration && token === tok) refreshRegisteredProjects();
+    });
+}
+
+/** Opens the rebind-project modal (`af projects rebind`, made reachable from the
+ *  switcher): the repair when the checkout a registration names was moved or
+ *  recloned — the stable project id survives, only where it points changes. Same
+ *  host-path field + directory browser as add-project; the daemon's rejection
+ *  (unknown id, not a git repo, a root another project owns) is shown inline and
+ *  the modal stays open to correct.
+ *
+ *  Outcomes:
+ *  - a confirmed, in-time success follows the project to where the registry now
+ *    binds it (followConfirmedRebind), provided the user is still in this rebind:
+ *    the modal that submitted is still open, or the selection is still the old root;
+ *  - an outcome that is not known — unanswered within REBIND_ANSWER_MS, failed in
+ *    transport — never follows: the registry is re-read, the selection is left
+ *    alone, and one notice says so. A reply that arrives after the wait only
+ *    re-reads the registry;
+ *  - a definitive refusal is shown inline and re-arms the form. */
+function openRebindProject(projectId: string, label: string): void {
+  if (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
+    // Escape dismissed the modal while the daemon was still deciding. A second
+    // submission now would race the first registry mutation, and whichever
+    // landed last would win regardless of which modal appeared to finish.
+    showTransientNotice(`Rebind of ${rebindInFlight} is still running — try again when it finishes.`);
+    return;
+  }
+  // The root the registration points at NOW: a selection still on it is the user
+  // still in this rebind, which a confirmed success may follow.
+  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  openModal(
+    rebindProjectModal({
+      projectLabel: label,
+      // Same per-call token + daemon read as add-project's browser.
+      loadDirectory: (path: string) => {
+        const tok = token;
+        if (tok === null) {
+          return Promise.reject(new Error("not connected"));
+        }
+        return listDirectory(path, tok);
+      },
+      errorText,
+      onSubmit: (path: string) => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal || (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration)) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        rebindInFlight = label;
+        const connection = connectionGeneration;
+        rebindInFlightGeneration = connection;
+        // Every completion below is fenced by the connection that submitted it:
+        // after a disconnect or reconnect, this attempt's timer and reply must
+        // not show notices or refetch with the new token.
+        const current = (): boolean => connection === connectionGeneration;
+        // Every outcome goes through settle() exactly once: the reply, or the
+        // bounded wait below, whichever comes first. The guard lives only as long
+        // as this attempt is undecided; a reply after the wait gave up only
+        // re-reads the registry — the notice already said the outcome is unknown.
+        let settled = false;
+        const settle = (): boolean => {
+          if (settled) {
+            return false;
+          }
+          settled = true;
+          window.clearTimeout(unanswered);
+          if (rebindInFlightGeneration === connection) {
+            rebindInFlight = null;
+          }
+          return true;
+        };
+        // The user is still in this rebind: its modal is open, or the selection
+        // has not left the old root. Decided at reply time — nothing is carried
+        // forward to a later read.
+        const stillHere = (): boolean => modal === m || (oldRoot !== null && store.get().selectedProject === oldRoot);
+        const unknownOutcome = (): void => {
+          if (modal === m) closeModal();
+          refreshRegisteredProjects();
+          surfaceMutationError(rebindOutcomeUnknown(label), "uncertain");
+        };
+        // No client-side timeout on the mutation itself: aborting it cannot undo
+        // a rebind the daemon already committed. Instead the UI stops waiting and
+        // reports the outcome as unknown.
+        const unanswered = window.setTimeout(() => {
+          if (!current() || !settle()) return;
+          unknownOutcome();
+        }, REBIND_ANSWER_MS);
+        void rebindProject(projectId, path, tok)
+          .then(() => {
+            if (!current()) return;
+            if (!settle()) {
+              refreshRegisteredProjects();
+              return;
+            }
+            const follow = stillHere();
+            if (modal === m) closeModal();
+            if (follow) {
+              followConfirmedRebind(projectId, tok, connection);
+            } else {
+              refreshRegisteredProjects();
+            }
+          })
+          .catch((e) => {
+            if (!current()) return;
+            if (!settle()) {
+              refreshRegisteredProjects();
+              return;
+            }
+            if (isMutationCommittedError(e)) {
+              // The daemon committed the rebind and then a follow-up step failed:
+              // the move is confirmed, so it is followed like a success, and the
+              // follow-up failure is reported.
+              const follow = stillHere();
+              if (modal === m) closeModal();
+              if (follow) {
+                followConfirmedRebind(projectId, tok, connection);
+              } else {
+                refreshRegisteredProjects();
+              }
+              surfaceMutationError(e, "confirmed");
+              return;
+            }
+            if (isMutationOutcomeUncertain(e)) {
+              // The rebind may have landed (a lost reply, an unverified error from
+              // an intermediary). Re-arming the form would invite a second move of
+              // the durable identity. Only a definitive daemon refusal re-arms.
+              unknownOutcome();
+              return;
+            }
+            if (modal !== m) {
+              // The modal was dismissed mid-flight, so its inline error has
+              // nowhere to show — and must not land in whatever modal is open now.
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
 // --- tab management (#1592 Phase 5 PR7) ------------------------------------
 
 /** The full projection of the selected session, or null — the source of its tab
@@ -1218,6 +1463,20 @@ function openTab(index: number): void {
   splitView.setFocusedTab(index);
   focusTerminal();
 }
+
+// Issue order among awaited tab rebinds — see rebindTargetAfterAwait. The layout
+// generation alone cannot order overlapping awaited gestures: their applies land
+// through setFocusedTabAwaited, which moves no generation because a gesture's own
+// landing write is not newer user intent (#5061). tabRebindSeq is taken when the
+// RPC is issued; newestAppliedRebindBySession records the newest gesture whose
+// rebind actually landed PER SESSION, so a completion arriving after a newer
+// same-session gesture's apply refuses to clobber it while an older gesture's
+// landing vetoes nothing newer. The per-session keying is load-bearing: an apply
+// writes the focused pane of the session it targeted and each session's layout
+// tree is kept apart, so a newer gesture's landing on ANOTHER session neither
+// vetoes this one nor may overwrite this session's record (#5061 Codex).
+let tabRebindSeq = 0;
+const newestAppliedRebindBySession = new Map<string, number>();
 
 /** Runs a tab mutation whose post-await step re-points the FOCUSED pane, applying the
  *  two guards every such rebind needs so a new async gesture can't forget them
@@ -1246,9 +1505,20 @@ function guardedTabRebind(
 ): void {
   // Pinned BEFORE the RPC is issued, exactly where closeSessionTab captured `gen`.
   const gen = splitView.layoutGeneration();
+  const seq = ++tabRebindSeq;
   void run()
-    .then((snapshot) => {
+    .then(async (snapshot) => {
       if (snapshot === null) return;
+      // A selftest seam: parks this gesture's whole post-await step until released,
+      // so web-driver.spec.ts can force the order two overlapping gestures land in
+      // rather than racing RPC round trips (#5061). Unset in production; a non-
+      // promise return means "no hold".
+      const hold = (globalThis as {
+        __afTabRebindHold?: (verb: TabRebindVerb) => Promise<void> | void;
+      }).__afTabRebindHold?.(verb);
+      if (hold) {
+        await hold;
+      }
       const {
         sessions, authoritative, generation,
         operationLockTimeoutMs, operationClockMs, daemonBootId,
@@ -1284,9 +1554,15 @@ function guardedTabRebind(
         currentSelId: store.get().selectedId,
         pinnedSessionAlive,
         targetIdx,
+        rebindSeq: seq,
+        newestAppliedSeqs: newestAppliedRebindBySession,
       });
       if (outcome.kind === "rebind") {
-        splitView.setFocusedTab(outcome.idx);
+        // Recorded before the apply: this gesture's landing is the newest intent on
+        // record, and awaited applies land without counting as layout intent — the
+        // ordering above is what keeps a stale completion from clobbering it.
+        newestAppliedRebindBySession.set(selId, seq);
+        splitView.setFocusedTabAwaited(outcome.idx);
         if (verb === "create") {
           focusTerminal();
         }
@@ -1623,6 +1899,13 @@ function clearTabError(): void {
 
 // --- task actions (#1592 Phase 5 PR8) --------------------------------------
 
+/** Counts config reads that committed through the fence — the landing witness
+ *  for the connect-time read's background reconcile below: only a response
+ *  that passed the generation AND token checks moves it, so a request disowned
+ *  mid-flight still lets the retry continue (the newer read owns that outcome)
+ *  while a transport failure leaves it free to try again. */
+let configReadCommits = 0;
+
 /** Re-reads the config manifest and the user's live values.
  *
  *  Always from the daemon, never from a cached copy: config.toml is hand-editable
@@ -1642,6 +1925,11 @@ const configRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: getConfig,
   commit: (resp) => {
+    configReadCommits++;
+    // Every config read is also the font sizes' update path (#5500): a value
+    // stepped from another client lands here on the next read, and our own
+    // save's echo refetch is a no-op through the set() change guard.
+    setTerminalFontSizes(terminalFontSizesFromConfig(resp.entries));
     store.set({ config: resp.entries, configPath: resp.path });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
@@ -1653,8 +1941,43 @@ const configRefetcher = createFencedRefetcher({
   },
 });
 
-function refreshConfig(): void {
-  configRefetcher.refresh();
+function refreshConfig(): Promise<void> {
+  return configRefetcher.refresh();
+}
+
+/** Backoff for the background reconcile behind a failed connect-time config
+ *  read: enough attempts to absorb a brief unavailability window without
+ *  turning a dead daemon into an endless poller. */
+const CONNECT_CONFIG_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
+
+/** Retries the config read after the connect-time fetch fell back to
+ *  defaults (#5500). The commit counter is the landing witness — only a read
+ *  that passed the fence counts, so a refresh disowned by a newer one does
+ *  not end the loop (that newer read owns the outcome) and a transport
+ *  failure retries. The connect attempt's freshness is re-checked before
+ *  every request: a disconnect or a newer connect ends the loop rather than
+ *  fetching for a session that is gone.
+ *
+ *  The loop is SILENT: a per-retry toast would keep reporting a failure the
+ *  loop recovered from — or is about to — so the in-flight reads suppress
+ *  the fenced onError. Only a fully spent budget surfaces, and then through
+ *  one ordinary loud read whose onError carries the daemon's real message
+ *  (and which still lands the sizes if that last request happens to
+ *  succeed). */
+async function reconcileConfigRead(candidate: string, attempt: LatestRequest): Promise<void> {
+  const landed = await retryWithBackoff(
+    async () => {
+      const before = configReadCommits;
+      await configRefetcher.refresh({ silent: true });
+      return configReadCommits > before;
+    },
+    () => connectionAttemptMayCommit(attempt, token, candidate),
+    CONNECT_CONFIG_RETRY_DELAYS_MS,
+    ms => new Promise<void>(resolve => window.setTimeout(resolve, ms)),
+  );
+  if (!landed && connectionAttemptMayCommit(attempt, token, candidate)) {
+    await refreshConfig();
+  }
 }
 
 /** The accounts read (#3385), fenced like the config read and for the same
@@ -1795,12 +2118,15 @@ function doOpenAccountLogin(agent: string, name: string): void {
  *  the only side that can keep the user's order. */
 const queueConfigSave = createKeyedQueue();
 
-function applyConfigValue(key: string, value: string): void {
+/** Returns the queue item's settle promise — the write AND the refetch it
+ *  triggers — so the font controls' stale-read guard can cover the whole round
+ *  trip rather than lapsing when the POST alone lands. */
+function applyConfigValue(key: string, value: string): Promise<void> {
   const tok = token;
   if (tok === null) {
-    return;
+    return Promise.resolve();
   }
-  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+  return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 
 function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {
@@ -1812,8 +2138,7 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
         // current session's config view — the write committed and the daemon
         // holds the new value; an open config view would otherwise display the
         // pre-write state until the user leaves and re-enters.
-        refreshConfig();
-        return;
+        return refreshConfig();
       }
       store.set({
         configStatus: {
@@ -1824,13 +2149,28 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
           error: "",
         },
       });
-      refreshConfig();
+      // Awaited, not fired: the queue item — and with it the font module's
+      // pending-save guard — is not done until the post-write read has landed.
+      return refreshConfig();
     })
     .catch((err: unknown) => {
       if (requestGeneration !== connectionGeneration || token !== tok) return;
       store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
+      // A font-size save has no manifest row to hang this error on — the pane
+      // renders only the `web` table row — so it must reach the shared toast or
+      // the stepped size would keep displaying as though it had saved.
+      if (terminalFontClassForKey(key) !== null) {
+        surfaceTabError(new Error(`the terminal text size was not saved: ${errorText(err)}`));
+      }
     });
 }
+
+// The font-size controls' saves ride the same path (#5500): the per-key queue
+// serializes a phone-size write against a desktop-size write, the returned
+// promise carries the write's whole round trip back to the font module's
+// stale-read guard, and a failed write leaves the applied size on screen while
+// the error surfaces on the toast — the size is display state first.
+bindTerminalFontPersist(applyConfigValue);
 
 // How often an OPEN tasks view refetches, for the verdicts that change with the
 // clock rather than with an event (#3626).
@@ -1882,7 +2222,7 @@ const tasksRefetcher = createFencedRefetcher({
       tasks,
       loadProjectChoice(),
       store.get().selectedProject,
-      store.get().registeredProjects,
+      projectRoots(store.get().registeredProjects),
     );
     store.set({ tasks, selectedProject, tasksError: "" });
   },
@@ -1925,19 +2265,21 @@ function requestTaskResync(): void {
 const projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
-  commit: (projects) => {
-    const registeredProjects = projects.map((p) => p.root);
-    const selectedProject = reconcileProject(
-      store.get().sessions,
-      store.get().tasks,
-      loadProjectChoice(),
-      store.get().selectedProject,
-      registeredProjects,
-    );
-    store.set({ registeredProjects, selectedProject, projectsError: "" });
-  },
+  commit: commitRegisteredProjects,
   onError: (e: unknown) => store.set({ projectsError: errorText(e) }),
 });
+
+/** Commits a fenced registry read, reconciling the selected project against it. */
+function commitRegisteredProjects(projects: RegisteredProject[]): void {
+  const selectedProject = reconcileProject(
+    store.get().sessions,
+    store.get().tasks,
+    loadProjectChoice(),
+    store.get().selectedProject,
+    projectRoots(projects),
+  );
+  store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
+}
 
 function refreshRegisteredProjects(): void {
   projectsRefetcher.refresh();
@@ -1964,7 +2306,7 @@ function openAddTask(): void {
   // follow-on Fix 1), so a TASK-ONLY project is selectable and the default lands on
   // the currently-scoped project — adding a task targets ITS repo, and is never
   // blocked by the absence of a session.
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
@@ -2012,7 +2354,7 @@ function openAddTask(): void {
  *  must appear at this exact call site. The unused trigger is cleared to "" — safe on
  *  the HTTP/JSON path, which (unlike the CLI's gob socket) never elides "" to nil. */
 function openEditTask(task: TaskData): void {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
@@ -2130,6 +2472,57 @@ function doRetryLimit(): void {
 }
 
 /**
+ * Retires the selected session's pending handoff mission WITHOUT resending it
+ * (#4429) — the web's "Mark delivered", the no-resend half of the TUI's `c`
+ * resolve picker.
+ *
+ * Unlike Retry this DOES confirm: the attestation is the operator's — "the pane
+ * already shows the incoming agent acting on its mission" — and it retires a
+ * durable obligation on that word, so the click must be deliberate. The daemon
+ * probes the runtime, settles the leftover fence, and persists; the resulting
+ * session.updated event drops the row's pending-delivery state. No optimistic
+ * clear, same as doRetryLimit: the web is the daemon's projection.
+ *
+ * Uses the FULL projection (selectedSessionData, not the id/title-only
+ * selectedSession): the re-check on the freshest snapshot keeps a stale button
+ * from attesting against a row whose verdict already settled.
+ */
+function doMarkDelivered(): void {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id) {
+    return;
+  }
+  const target = { id: sel.id, title: sel.title };
+  openModal(
+    markDeliveredModal(
+      target.title,
+      () => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void confirmHandoffDelivery(target.id, target.title, tok)
+          .then(closeModal)
+          .catch((e) => {
+            if (isMutationCommittedError(e)) {
+              if (modal === m) closeModal();
+              requestResync();
+              surfaceMutationError(e, "confirmed");
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
+      },
+      closeModal,
+    ),
+  );
+}
+
+/**
  * Hands the selected session off to a different agent (#2013) — the web's analogue
  * of the TUI's `F`. Opens the agent picker (excluding the running agent); on confirm
  * it swaps the agent in place via HandoffSession, keeping the worktree and branch,
@@ -2192,7 +2585,16 @@ function doRemoveTask(task: TaskData): void {
     const handle = modal;
     handle.setBusy(true);
     void removeTask(task, tok).then(() => { if (modal === handle) closeModal(); return refreshTasks(); })
-      .catch((error) => { handle.setBusy(false); handle.setError(errorText(error)); });
+      .catch((error) => {
+        if (isMutationCommittedError(error)) {
+          if (modal === handle) closeModal();
+          refreshTasks();
+          surfaceTabError(error);
+          return;
+        }
+        handle.setBusy(false);
+        handle.setError(errorText(error));
+      });
   }, closeModal));
 }
 
@@ -2253,6 +2655,7 @@ const actions = {
   archive: (session: ActionableSession) => openConfirm("archive", session),
   restore: (session: ActionableSession) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),
@@ -2274,6 +2677,7 @@ const actions = {
   dropTabOnPaneAt: (x: number, y: number, drag: DragPayload) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  stepTerminalFontSize: (delta: number) => stepTerminalFontSize(delta),
   openConfigAssistant: doOpenConfigAssistant,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,
@@ -2287,6 +2691,7 @@ const actions = {
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
   addProject: openAddProject,
+  rebindProject: openRebindProject,
   setTheme,
 };
 
@@ -2365,6 +2770,16 @@ function startStream(tok: string): void {
       requestResync();
     },
     onStatus: (s: EventStreamStatus) => store.set({ live: s }),
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    },
   });
   stream.start();
 }
@@ -2387,6 +2802,7 @@ function stopStream(): void {
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
+  accountsRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
@@ -2462,7 +2878,7 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
     store.get().tasks,
     loadProjectChoice(),
     store.get().selectedProject,
-    store.get().registeredProjects,
+    projectRoots(store.get().registeredProjects),
   );
   let selectedId = pickSelection(sessions, prevSel);
   // Drop a selection that no longer belongs to the scoped project, so the terminal

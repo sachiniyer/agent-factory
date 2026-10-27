@@ -43,9 +43,9 @@ func TestCloseTab_PublishesCommittedRosterBeforeTmuxTeardownCompletes(t *testing
 	_, events := manager.events.subscribe()
 	done := make(chan error, 1)
 	go func() {
-		_, closeErr := manager.CloseTab(CloseTabRequest{
+		_, closeErr := manager.closeTabRequestedBy(CloseTabRequest{
 			Title: title, RepoID: repo.ID, TabID: created.ID,
-		})
+		}, "internal daemon caller")
 		done <- closeErr
 	}()
 

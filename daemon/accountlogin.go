@@ -157,10 +157,12 @@ func (m *Manager) RegisterAccount(req RegisterAccountRequest) (RegisterAccountRe
 	if err != nil {
 		return RegisterAccountResponse{}, err
 	}
-	notices, err := agentaccount.CheckLoginPreconditions(req.Agent, dir)
-	if err != nil {
-		return RegisterAccountResponse{}, err
-	}
+	// Notice-only, like the CLI `af accounts add` path: this route creates the
+	// directory WITHOUT logging in, so it must not enforce login-time
+	// preconditions (CheckLoginPreconditions refuses a keyring-backed codex
+	// account whose login the agent would ignore). The login route keeps that
+	// refusal; see TestRegisterAccountKeyringAccountSucceeds.
+	notices := agentaccount.RegistrationNotices(req.Agent, dir)
 	entry, err := accountEntryFor(home, req.Agent, req.Name, sessionenv.AccountRegistrationOnly(req.Agent))
 	if err != nil {
 		return RegisterAccountResponse{}, err

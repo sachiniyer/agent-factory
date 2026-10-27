@@ -7,11 +7,6 @@ export type ThemeMode = "light" | "dark";
 export const THEME_CHOICES: readonly ThemeChoice[] = ["light", "dark", "system"];
 const STORAGE_KEY = "af-theme";
 
-/** Empty string is the authorized tokenless sentinel; only null is disconnected. */
-export function hasConnectedToken(token: string | null): token is string {
-  return token !== null;
-}
-
 /** An async login may commit only while both its generation and credential remain installed. */
 export function connectionAttemptMayCommit(
   request: LatestRequest,

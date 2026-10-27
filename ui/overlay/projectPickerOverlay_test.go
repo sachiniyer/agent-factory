@@ -214,6 +214,100 @@ func TestProjectPickerRenderShowsCountsAndNavHint(t *testing.T) {
 	}
 }
 
+func TestProjectPickerRebindFlow(t *testing.T) {
+	// A registry-backed row (RegistryID set) is what `b` rebinds; a session-
+	// derived row has no registration to move.
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "moved", Root: "/old/moved", RegistryID: "prj_aaa", MissingPath: true},
+		{Name: "derived", Root: "/repos/derived"},
+	}, "")
+	if p.selectedIdx != 0 {
+		t.Fatalf("cursor should start on the first row, got %d", p.selectedIdx)
+	}
+
+	// b on the registry row enters rebind mode; the hint names the project.
+	if closed := p.HandleKeyPress(keyRune('b')); closed {
+		t.Fatalf("entering rebind mode must not close the overlay")
+	}
+	if !p.rebinding {
+		t.Fatalf("b on a registry-backed row should enter rebind mode")
+	}
+	p.SetMaxSize(80, 24)
+	if out := renderedText(p.Render()); !strings.Contains(out, "moved") {
+		t.Fatalf("rebind mode should name the target project; got:\n%s", out)
+	}
+
+	// Type a replacement path; Enter submits it for the caller once.
+	typeRunes(p, "/new/moved")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	req, ok := p.TakeRebindRequest()
+	if !ok || req.Path != "/new/moved" || req.Project.RegistryID != "prj_aaa" {
+		t.Fatalf("TakeRebindRequest = (%+v, %v), want the registry row + typed path", req, ok)
+	}
+	if _, ok := p.TakeRebindRequest(); ok {
+		t.Fatalf("TakeRebindRequest should only fire once")
+	}
+}
+
+func TestProjectPickerRebindOnlyOnRegistryRows(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "derived", Root: "/repos/derived"}, // no RegistryID: session-derived
+		{Name: "registered", Root: "/repos/registered", RegistryID: "prj_bbb"},
+	}, "")
+	p.HandleKeyPress(keyRune('b'))
+	if p.rebinding {
+		t.Fatalf("b on a session-derived row must not enter rebind mode — there is no registration to move")
+	}
+	p.HandleKeyPress(keyRune('j'))
+	p.HandleKeyPress(keyRune('b'))
+	if !p.rebinding {
+		t.Fatalf("b on the registry-backed row should enter rebind mode")
+	}
+	// Esc returns to the list without submitting, like add mode.
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	if p.rebinding {
+		t.Fatalf("Esc should leave rebind mode")
+	}
+}
+
+func TestProjectPickerRebindErrorKeepsOpen(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "gone", Root: "/old/gone", RegistryID: "prj_ccc", MissingPath: true},
+	}, "")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/bad")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	p.TakeRebindRequest()
+	p.SetRebindError("path is already bound to another project")
+	p.SetMaxSize(80, 24)
+	if out := renderedText(p.Render()); !strings.Contains(out, "already bound") {
+		t.Fatalf("rebind error should render inline; got:\n%s", out)
+	}
+	// While rebinding, the highlighted row is withheld so a destructive
+	// shortcut (D) cannot fire against it mid-edit.
+	if _, ok := p.HighlightedProject(); ok {
+		t.Fatalf("HighlightedProject must be empty while the rebind input is active")
+	}
+}
+
+func TestProjectPickerMissingPathMarker(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "here", Root: "/repos/here", RegistryID: "prj_ddd"},
+		{Name: "gone", Root: "/old/gone", RegistryID: "prj_eee", MissingPath: true},
+	}, "")
+	p.SetMaxSize(80, 24)
+	out := renderedText(p.Render())
+	if !strings.Contains(out, "missing") {
+		t.Fatalf("a registry row whose checkout is gone must say so; got:\n%s", out)
+	}
+	// The rebind verb is advertised on the registry row's hint.
+	p.HandleKeyPress(keyRune('j'))
+	out = renderedText(p.Render())
+	if !strings.Contains(out, "rebind") {
+		t.Fatalf("the hint should advertise b rebind on a registry-backed row; got:\n%s", out)
+	}
+}
+
 // selectedProjectForTest returns the row under the cursor as a Project without
 // requiring submission, for assertions on the initial highlight.
 func (p *ProjectPickerOverlay) selectedProjectForTest() (Project, bool) {
@@ -263,6 +357,237 @@ func TestProjectPickerStaysWithinMaxHeight(t *testing.T) {
 					p.HandleKeyPress(keyRune('j'))
 				}
 			}
+		}
+	}
+}
+
+// TestProjectPickerRebindPendingIsInert pins the single-flight property Codex
+// flagged on #4789: after Enter hands a request to the caller, the daemon may
+// be slow to answer — the form must not let a second Enter (or edits that
+// change what the on-screen path appears to be) race a second mutation. While
+// pending, every key is inert; a rejection (SetRebindError) re-arms the form,
+// and the path the user corrects is the one that was actually submitted.
+func TestProjectPickerRebindPendingIsInert(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "gone", Root: "/old/gone", RegistryID: "prj_p1", MissingPath: true},
+	}, "")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/first/path")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	req, ok := p.TakeRebindRequest()
+	if !ok || req.Path != "/first/path" || req.Project.RegistryID != "prj_p1" {
+		t.Fatalf("TakeRebindRequest = (%+v, %v), want the registry row + typed path", req, ok)
+	}
+
+	// The daemon is still deciding: a second Enter must NOT submit again, and
+	// edits must not change the input the pending answer refers to.
+	typeRunes(p, "/second/path")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); ok {
+		t.Fatalf("a second rebind submitted while the first was still in flight")
+	}
+	if p.rebindInput != "/first/path" {
+		t.Fatalf("pending edits must be inert: input drifted to %q", p.rebindInput)
+	}
+	// Esc is inert while pending too — leaving the mode mid-flight could
+	// re-arm `b` and admit a second request.
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	if !p.rebinding {
+		t.Fatalf("Esc must not leave rebind mode while a request is pending")
+	}
+	// The pending hint replaces "enter rebind" so nothing invites the second
+	// submission.
+	p.SetMaxSize(80, 24)
+	if out := renderedText(p.Render()); !strings.Contains(out, "rebinding") {
+		t.Fatalf("a pending rebind should say it is in flight; got:\n%s", out)
+	}
+
+	// A rejection re-arms the form on the submitted path — the user corrects
+	// what was actually sent.
+	p.SetRebindError("path is already bound to another project")
+	typeRunes(p, "-fixed")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	req, ok = p.TakeRebindRequest()
+	if !ok || req.Path != "/first/path-fixed" {
+		t.Fatalf("after a rejection the corrected path should resubmit; got (%q, %v)", req.Path, ok)
+	}
+}
+
+// TestProjectPickerRebindDeniedRefuses pins the remote-target refusal Codex
+// flagged on #4789: when the caller marks rebind unavailable (a remote
+// daemon — the picker's prj_ ids and the path both resolve on the CLIENT but
+// the mutation would land on the remote's registry), `b` still enters the
+// mode so the refusal is visible, and Enter never produces a request.
+func TestProjectPickerRebindDeniedRefuses(t *testing.T) {
+	const deny = "local registry — `af projects rebind` on daemon host"
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "gone", Root: "/old/gone", RegistryID: "prj_p2", MissingPath: true},
+	}, "")
+	p.SetRebindDenied(deny)
+
+	p.HandleKeyPress(keyRune('b'))
+	if !p.rebinding {
+		t.Fatalf("b should still enter rebind mode so the refusal is visible")
+	}
+	p.SetMaxSize(80, 24)
+	if out := renderedText(p.Render()); !strings.Contains(out, "af projects rebind") {
+		t.Fatalf("the refusal should render on entry; got:\n%s", out)
+	}
+
+	typeRunes(p, "/any/path")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); ok {
+		t.Fatalf("a denied rebind must never produce a request")
+	}
+	if p.rebindErr != deny {
+		t.Fatalf("Enter should re-show the refusal, got %q", p.rebindErr)
+	}
+}
+
+// submitRebind drives a picker over one registry row through b, a typed path
+// and Enter, and returns the request the caller would send.
+func submitRebind(t *testing.T, p *ProjectPickerOverlay, path string) RebindRequest {
+	t.Helper()
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, path)
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	req, ok := p.TakeRebindRequest()
+	if !ok {
+		t.Fatalf("Enter in rebind mode should produce a request")
+	}
+	return req
+}
+
+// TestProjectPickerRebindReplyOwnership pins the Breken finding on #4789: a
+// rebind reply is async and can outlive the picker that asked. It must be
+// accepted only by the picker instance waiting on that exact request — never
+// by a freshly opened picker, never by the same picker for an older request it
+// already settled, and never by a picker with nothing in flight.
+func TestProjectPickerRebindReplyOwnership(t *testing.T) {
+	rows := []Project{{Name: "gone", Root: "/old/gone", RegistryID: "prj_own", MissingPath: true}}
+
+	a := NewProjectPickerOverlay(rows, "")
+	reqA := submitRebind(t, a, "/new/a")
+	if !a.OwnsRebindReply(reqA.Token) {
+		t.Fatalf("picker A must own the reply to the request it submitted")
+	}
+
+	// A closes; B opens on the same row. A's reply is not B's, whether B is
+	// idle or has its own request in flight.
+	b := NewProjectPickerOverlay(rows, "")
+	if b.OwnsRebindReply(reqA.Token) {
+		t.Fatalf("an idle, freshly opened picker must not own an older picker's reply")
+	}
+	reqB := submitRebind(t, b, "/new/b")
+	if reqB.Token == reqA.Token {
+		t.Fatalf("two pickers issued the same request token %d", reqA.Token)
+	}
+	if b.OwnsRebindReply(reqA.Token) {
+		t.Fatalf("picker B must not own picker A's reply while waiting on its own")
+	}
+	if !b.OwnsRebindReply(reqB.Token) {
+		t.Fatalf("picker B must own its own reply")
+	}
+
+	// Once B's request is answered (a rejection), neither it nor a later
+	// duplicate delivery of the same reply belongs to B any more.
+	b.SetRebindError("not a git repository")
+	if b.OwnsRebindReply(reqB.Token) {
+		t.Fatalf("a settled request's reply must not be owned a second time")
+	}
+	if b.OwnsRebindReply(0) {
+		t.Fatalf("the zero token must never be owned")
+	}
+}
+
+// TestProjectPickerRebindPendingReportsForCtrlC pins the Codex hard-exit
+// finding on #4789: the pending form consumes every key, so the picker must
+// report that it is pending — the app routes Ctrl+C past it to quit — and the
+// pending hint must say Ctrl+C still works.
+func TestProjectPickerRebindPendingReportsForCtrlC(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{{Name: "gone", Root: "/old/gone", RegistryID: "prj_cc"}}, "")
+	if p.RebindPending() {
+		t.Fatalf("an idle picker must not report a pending rebind")
+	}
+	submitRebind(t, p, "/new/path")
+	if !p.RebindPending() {
+		t.Fatalf("a submitted rebind must report pending so Ctrl+C can bypass the inert form")
+	}
+	p.SetMaxSize(80, 24)
+	if out := renderedText(p.Render()); !strings.Contains(out, "ctrl+c") {
+		t.Fatalf("the pending hint should say ctrl+c still quits; got:\n%s", out)
+	}
+	p.SetRebindError("refused")
+	if p.RebindPending() {
+		t.Fatalf("a rejection must clear pending")
+	}
+}
+
+// TestProjectPickerFormsStayWithinMaxHeight pins the Codex height finding on
+// #4789: TestProjectPickerStaysWithinMaxHeight sweeps only list mode, but the
+// add and rebind forms — with an inline error, a degraded registry, a pending
+// hint or the remote refusal pre-shown — must fit the same frame, down to the
+// 10-row terminal where the dialog leaves six text rows.
+func TestProjectPickerFormsStayWithinMaxHeight(t *testing.T) {
+	longErr := strings.Repeat("path is already bound to another project ", 3)
+	for _, maxH := range []int{8, 9, 10, 11, 14, 24} {
+		for _, degraded := range []bool{false, true} {
+			for _, mode := range []string{"add", "add-err", "rebind", "rebind-err", "rebind-pending", "rebind-denied"} {
+				p := NewProjectPickerOverlay([]Project{{Name: "gone", Root: "/old/gone", RegistryID: "prj_h", MissingPath: true}}, "")
+				p.SetMaxSize(60, maxH)
+				p.SetDegraded(degraded)
+				switch mode {
+				case "add", "add-err":
+					p.HandleKeyPress(keyRune('j'))
+					p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+					typeRunes(p, "/some/path")
+					if mode == "add-err" {
+						p.SetAddError(longErr)
+					}
+				case "rebind-denied":
+					p.SetRebindDenied("local registry — `af projects rebind` on daemon host")
+					p.HandleKeyPress(keyRune('b'))
+				default:
+					p.HandleKeyPress(keyRune('b'))
+					typeRunes(p, "/some/path")
+					if mode != "rebind" {
+						p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+						p.TakeRebindRequest()
+					}
+					if mode == "rebind-err" {
+						p.SetRebindError(longErr)
+					}
+				}
+				out := p.Render()
+				if got := lipgloss.Height(out); got > maxH {
+					t.Fatalf("%s form rendered %d rows with maxHeight=%d (degraded=%v):\n%s", mode, got, maxH, degraded, renderedText(out))
+				}
+				// The input line survives every budget: it is what the user acts on.
+				if !strings.Contains(renderedText(out), "/some/path") && mode != "rebind-denied" {
+					t.Fatalf("%s form at maxHeight=%d dropped the input line:\n%s", mode, maxH, renderedText(out))
+				}
+			}
+		}
+	}
+}
+
+// TestProjectPickerRegistryHintKeepsRebindAtNarrowWidths pins Codex on #4789:
+// the hint is the only on-screen discovery point for the picker-local `b`, so a
+// registry row must advertise it — and D — at every supported width, down to
+// the 40-column terminal minimum, where the old fallback dropped both.
+func TestProjectPickerRegistryHintKeepsRebindAtNarrowWidths(t *testing.T) {
+	for w := 40; w <= 100; w++ {
+		p := NewProjectPickerOverlay([]Project{
+			{Name: "gone", Root: "/old/gone", RegistryID: "prj_w", MissingPath: true},
+		}, "")
+		p.SetMaxSize(w, 24)
+		out := renderedText(p.Render())
+		if !strings.Contains(out, "b rebind") || !strings.Contains(out, "D delete") {
+			t.Fatalf("width %d: a registry row's hint must keep `b rebind` and `D delete`; got:\n%s", w, out)
+		}
+		if got := lipgloss.Width(p.Render()); got > w {
+			t.Fatalf("width %d: picker rendered %d columns", w, got)
 		}
 	}
 }

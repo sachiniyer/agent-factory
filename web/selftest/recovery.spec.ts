@@ -103,7 +103,8 @@ for (const theme of ["light", "dark"] as const) {
     test("Tokenless column", async ({ page }, info) => {
       await page.goto("/");
       await expect(page.locator(".af-app")).toBeVisible();
-      await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+      await page.locator('.af-viewtab[data-view="config"]').click();
+      await page.getByRole("button", { name: "Log out", exact: true }).click();
       await expect(page.locator(".af-login-form button")).toBeVisible();
       await centeredColumn(page, ".af-login-form button");
       await still(page, info, "tokenless");
@@ -114,8 +115,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(page.locator(".af-app")).toBeVisible();
       await page.getByRole("tab", { name: "Tasks", exact: true }).click();
       const task = page.locator(".af-task-row").first();
-      await task.locator(".af-term-more").click();
-      await task.getByRole("button", { name: "Disable", exact: true }).click();
+      await task.getByRole("switch").click();
       await expect(page.locator(".af-toast-show")).toBeVisible();
       await still(page, info, "notice");
       await page.getByRole("button", { name: "Dismiss", exact: true }).click();
@@ -142,6 +142,11 @@ for (const theme of ["light", "dark"] as const) {
           await page.locator(".af-modal-card button[type=submit]").click();
           await expect(page.locator(".af-modal-error")).toBeVisible();
           await expect(page.getByRole("textbox", { name: "Session title", exact: true })).toHaveValue("Retained draft");
+          // The reopened-after-refusal dialog must host focus inside itself: per
+          // components.ts, every modal that opens with a text field focuses that
+          // field, so the Tab trap engages and the keyboard never lands on the
+          // controls behind the overlay (the appbar and rail "New" button).
+          await expect(page.getByRole("textbox", { name: "Session title", exact: true })).toBeFocused();
         } else if (operation === "task save") {
           await page.route("**/v1/AddTask", route => route.fulfill(refusal));
           await page.getByRole("tab", { name: "Tasks", exact: true }).click();

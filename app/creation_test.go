@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -84,6 +85,9 @@ func newTestHome(t *testing.T) *home {
 	t.Cleanup(SetTabCloserForTest(func(daemon.CloseTabRequest) error {
 		return fmt.Errorf("closeTabThroughDaemon not stubbed in test")
 	}))
+	t.Cleanup(SetTabReordererForTest(func(daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
+		return daemon.ReorderTabResponse{}, fmt.Errorf("reorderTabThroughDaemon not stubbed in test")
+	}))
 	// The snapshot poll also asks the daemon which tasks are actually armed
 	// (#3626). It dials rather than spawns, so an unstubbed call would fail
 	// harmlessly — but it would still reach for a socket on every poll, and
@@ -105,7 +109,7 @@ func newTestHome(t *testing.T) *home {
 	// (mock-backed instances answer has-session) binds harmlessly instead of
 	// dialing the daemon. Tests exercising the live path swap in a recording fake.
 	origLiveTerm := newLiveTermPaneFn
-	newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int) liveTermAttachment {
+	newLiveTermPaneFn = func(apiclient.StreamSession, string, int, int, int) liveTermAttachment {
 		return newFakeLiveTerm()
 	}
 	t.Cleanup(func() { newLiveTermPaneFn = origLiveTerm })

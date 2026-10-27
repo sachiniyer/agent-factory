@@ -71,6 +71,12 @@ type HandoffSwap struct {
 	previousAccount      string
 	previousAccountAgent string
 	previousAuto         bool
+	// crossAgent is admission's verdict on whether this swap changed the agent,
+	// threaded to the mission brief so Render honors it instead of re-deriving
+	// sameness from From == To. A program_overrides redirect can make the two
+	// coincide for a cross-agent handoff, which would otherwise collapse the
+	// brief onto the same-agent branch (#4430 review).
+	crossAgent bool
 	// effectiveTo is the agent the target's resolved command actually launches,
 	// which program_overrides can set apart from the requested enum recorded in
 	// To. Mission briefs render sameness against it; the enum stays the ledger
@@ -201,8 +207,10 @@ func HandoffTargetIsCurrent(current, target, effective, recorded string) bool {
 // the empty answer authorized the destructive path rather than blocking it.
 //
 // Precedence runs from most to least direct evidence:
-//  1. the running command, when af can identify it — it beats any record,
-//     because an override pointing "claude" at codex really is running codex;
+//  1. the running command, when af can identify it — the live pane's program
+//     locally, or the launch-boundary runtime record for a remote session,
+//     which has no local pane (#5108) — it beats any record, because an
+//     override pointing "claude" at codex really is running codex;
 //  2. the conversation the agent actually opened, captured at runtime;
 //  3. the configured enum, which is what the user asked for and what a handoff
 //     rewrites — this is the one that rescues the wrapper-script case.
@@ -236,6 +244,12 @@ func (i *Instance) currentAgentNameLocked() string {
 		if agent := tmux.DetectAgentFromCommand(ts.Program()); agent != "" {
 			return agent
 		}
+	}
+	// A remote session has no local tmux binding; the command its runtime
+	// launched is still on record (#5108), and it is the same tier of "the
+	// running command" evidence — above the conversation record and enum.
+	if agent := tmux.DetectAgentFromCommand(i.runtimeProgram); agent != "" {
+		return agent
 	}
 	if len(i.Tabs) > 0 {
 		if recorded := strings.TrimSpace(i.Tabs[0].Conversation.Agent); tmux.IsSupportedProgram(recorded) {
@@ -436,6 +450,7 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossA
 		previousAccount:      i.Account,
 		previousAccountAgent: i.accountAgent,
 		previousAuto:         i.accountAutoSelected,
+		crossAgent:           crossAgent,
 		effectiveTo:          effectiveAgent,
 	}
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)

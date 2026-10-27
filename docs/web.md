@@ -31,8 +31,9 @@ after the tour. [Remote daemon access](remote-http-auth.md) is the full setup gu
 The app bar's **Sessions**, **Tasks**, and **Config** buttons switch views.
 The **project switcher** scopes Sessions and Tasks to one repository and remembers
 that choice across reloads. Its menu shows session and working counts per project.
-**Light · Dark · System** chooses the browser theme; System follows your operating system.
-**Disconnect** forgets the browser's saved daemon token and returns to the login
+Config's **This browser** section holds settings saved only in this browser.
+**Theme** chooses Light, Dark or System; System follows your operating system.
+**Log out** forgets the browser's saved daemon token and returns to the login
 screen. **Install app**, when offered by the browser, opens its installation
 prompt; its **×** dismisses the offer. See [Install it as an app](#install-it-as-an-app).
 
@@ -75,20 +76,30 @@ non-default filter. If it hides everything, the empty state reports hidden rows.
 
 On a phone, selecting a terminal gives it the screen: one compact row holds
 **Toggle sessions**, the truncating session title, static Keyboard state and **…**.
-The menu contains project choices, Sessions · Tasks · Config, Light · Dark ·
-System, Disconnect, session actions and tabs. Escape closes it and returns focus.
+The menu contains project choices, Sessions · Tasks · Config, session actions
+and tabs. Escape closes it and returns focus.
 **Toggle sessions** opens the rail drawer; selecting a session or tapping its
 backdrop closes it. Opening the drawer leaves the terminal in place at the same
 size. Tasks and Config keep their phone layouts.
 
 While the terminal owns the keyboard, one bottom row provides Ctrl, Alt, Esc,
-Tab, **^C** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
-keys and More keys. Tap Ctrl or Alt to modify the next key, including the bar’s own
+Tab, **^C**, **Paste** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
+keys, **A−**/**A+** and More keys. The A−/A+ pair steps the terminal's text
+size by half a pixel per press and is display state, not input — it sends no
+keys to the session. Tap Ctrl or Alt to modify the next key, including the bar’s own
 keys; double tap to lock (shown
 by ▸ and an outline), then tap again to release. IME composition is sent unchanged
 and leaves armed modifiers for the next key. Keys retain terminal focus and
 the terminal resizes above the soft keyboard. With that keyboard closed, the
 terminal occupies at least 85% of the visual viewport at the verified phone widths.
+
+**Terminal text size.** At desktop width the terminal header carries the same
+**A−**/**A+** pair (one-pixel steps); on a phone it lives in the keybar's arrow
+row. Each device class keeps its own size — stepping one never touches the
+other — and both persist in the daemon's `[web]` config table
+(`web.terminal_font_size_phone`, `web.terminal_font_size_desktop`, each a
+number in [4, 32]) so the size survives a reload and follows every browser
+attached to this daemon.
 
 ![Session-first phone terminal](assets/design/3981/after-phone-session-390.png)
 
@@ -155,10 +166,11 @@ for tab and view navigation.
 The pane header's **Retry limit** appears for a session waiting on a usage limit
 and requests another attempt. If an agent or account handoff could not confirm
 mission delivery, inspect the pane first; the same place shows **Retry handoff**
-as the explicit override while automatic redelivery stays suppressed. If that retry
-delivers the mission while its final disk settlement remains pending, the web
-keeps a confirmed-mutation warning on screen because the mission has already
-landed and must not be retried. Open the pane header’s **Actions** menu (shown as **…**
+as the explicit override while automatic redelivery stays suppressed, and
+**Mark delivered** to retire it without resending when the pane shows the mission
+already landed. If that retry delivers the mission while its final disk
+settlement remains pending, the web keeps a confirmed-mutation warning on screen
+because the mission has already landed and must not be retried. Open the pane header’s **Actions** menu (shown as **…**
 on a phone) for **Handoff**, which appears when the session supports swapping
 agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
 the current agent and continue with the replacement. A limit-blocked local
@@ -225,21 +237,23 @@ Choose **Tasks** in the app bar to manage automations for the selected project.
 <figure markdown>
 ![Tasks view with nightly-tests and weekly-dependency-sweep cron tasks and row actions](assets/web/tasks.png#only-light)
 ![Tasks view with nightly-tests and weekly-dependency-sweep cron tasks and row actions](assets/web/tasks-dark.png#only-dark)
-<figcaption>Read the next run and last outcome, choose Edit, or open Actions for other operations.</figcaption>
+<figcaption>Read the next run and last outcome, then use the row's icons and switch.</figcaption>
 </figure>
 
 Each row shows its name, cron schedule or watch command, optional target session,
-arming or next-run information, and last-run outcome. A checked square means
-enabled; an empty square means disabled. A health mark can replace the enabled
-tick, with explanatory text in the row.
+arming or next-run information, and last-run outcome. The switch on the right
+shows whether the task is enabled. A health mark at the start of the row flags a
+problem, with explanatory text in the row.
 
 | Control | Action |
 | --- | --- |
-| Actions → Enable · Disable | Turn the task on or off. |
-| Edit | Open the existing task's form to change it. |
-| Actions → Trigger | Run an enabled cron task now; absent for watch and disabled tasks. |
-| Actions → Remove | Delete the task after confirmation. |
+| Switch | Turn the task on or off. |
+| Edit (pencil) | Open the existing task's form to change it. |
+| Trigger (play) | Run an enabled cron task now; greyed out for watch and disabled tasks. |
+| Remove (trash can) | Delete the task after confirmation. |
 | + Add | Open a form to create a task. |
+
+On a phone, Edit, Trigger and Remove move into the row's **…** menu.
 
 In the form, enter **Name**, choose **Project**, and choose a **Trigger**. A
 **Cron schedule** uses a schedule picker with time, interval, or weekday controls
@@ -307,7 +321,9 @@ described in [Project accounts](usage-limits.md#scoping-an-account-to-a-project)
 The default `network.listen_addr` is `127.0.0.1:8443`: the browser client and JSON
 API share a plain-HTTP listener. An absent key inherits that default; explicitly
 setting `network.listen_addr = ""` disables the listener. Listener settings are
-global-only. Apply changes with `af daemon restart`.
+global-only. `af config set` — or a save in either config pane — applies them to
+the running daemon in place, no restart; a raw hand-edit still needs
+`af daemon restart`.
 
 For remote use, keep loopback and forward the port over SSH, or configure a
 network bind with authentication and transport protection. Follow
@@ -328,7 +344,7 @@ the token even for a loopback-origin connection.
 When required, the login screen asks for the daemon token. On the host, use
 `af token show`, then paste the value and click **Connect**. The browser stores
 it for that origin and reuses it on reload. A rejected token is forgotten;
-other connection errors keep it for a retry. **Disconnect** clears it.
+other connection errors keep it for a retry. **Log out** in Config clears it.
 
 ### Security notes
 
@@ -339,7 +355,7 @@ it has full control. The daemon warns about this combination but still serves it
 Use an SSH tunnel, private network, or TLS-terminating proxy for remote transport.
 The daemon itself serves plain HTTP.
 
-The token grants full access. Keep it private, use **Disconnect** on shared
+The token grants full access. Keep it private, use **Log out** on shared
 browsers, and use `af token rotate` if it is exposed. Read the
 [remote access security notes](remote-http-auth.md#security-notes) before exposing
 the listener or putting it behind a proxy.
@@ -394,7 +410,7 @@ address does not. Use a TLS-terminating proxy for remote installation; see
 #### What gets installed
 
 The app uses the same daemon and page, with its own icon and standalone window.
-Browser chrome follows **Light · Dark · System**. The service worker caches the
+Browser chrome follows the **Theme** setting. The service worker caches the
 static shell, using the network first, so an unreachable daemon can show the
 app's connection-error screen. It does not cache API requests, event streams,
 terminal streams, or previews. Installing is optional.
@@ -550,7 +566,9 @@ What to know before turning it on:
   hostname into a network-reachable capability, and one that leaks through a log, a
   screenshot, or browser history stops being usable only from this machine. Editor
   tabs are withheld entirely while the listener is network-bound, and the daemon
-  warns at start. Keep it on loopback unless you have a reason not to.
+  warns at start, `af config set` warns on every exposed save, and the TUI
+  and web config panes warn on a transition into exposure. Keep it on loopback
+  unless you have a reason not to.
 - **It is off by default.** No second port opens unless you set the key, and a bind
   conflict is logged and skipped, never fatal.
 

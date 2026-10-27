@@ -24,26 +24,31 @@ import (
 // daemon→disk read path (listSessions, getSessionByTitle, whoamiSession,
 // getSessionByTitleInScope) routes through so the "remote reads never fall back
 // to disk" contract cannot be silently reintroduced at a new read site (#1679,
-// #1681). On daemon success it returns (data, false, nil). On error it returns:
-//   - remote target: (nil, false, err) — surface the real error; a remote daemon
+// #1681). On daemon success it returns (data, skipped, false, nil), where
+// `skipped` carries repos the daemon dropped at startup due to a corrupted
+// instances.json (#603) — the wire-side incompleteness channel the caller uses
+// to refuse or caveat rather than silently serving a partial list as complete
+// (#730's principle extended to the wire surface #1029 PR 2 introduced). On
+// error it returns:
+//   - remote target: (nil, nil, false, err) — surface the real error; a remote daemon
 //     has no local disk to fall back to, and a bad token must not be masked by a
-//     same-machine disk read (docs/remote-tcp-auth.md, #1592 Phase 3 PR4).
-//   - local target:  (nil, true, err)  — the caller runs its own disk scan.
+//     same-machine disk read (docs/remote-http-auth.md, #1592 Phase 3 PR4).
+//   - local target:  (nil, nil, true, err)  — the caller runs its own disk scan.
 //
 // Callers switch on err == nil for the success path and, on error, consult the
 // fallBackToDisk flag before touching disk. This keeps each caller's exact local
 // disk-fallback behavior (diskListSessions / diskWhoami / findInstanceByTitle,
 // including their distinct not-found and corrupt-repo errors) while centralizing
 // the one decision that must never regress: whether disk may be read at all.
-func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, fallBackToDisk bool, err error) {
-	data, err = snapshotViaDaemon(req)
+func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, skipped []daemon.SkippedRepo, fallBackToDisk bool, err error) {
+	data, skipped, err = snapshotViaDaemon(req)
 	if err == nil {
-		return data, false, nil
+		return data, skipped, false, nil
 	}
 	if apiclient.IsRemoteTarget() {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	return nil, true, err
+	return nil, nil, true, err
 }
 
 // Shared flags
@@ -55,163 +60,6 @@ var (
 	// jsonOut/jsonError wrap output in the shared {data,error} Envelope (#1029).
 	envelopeOutput bool
 )
-
-// repoFromFlag resolves the --repo flag to a RepoContext. Its errors name the
-// offending path and distinguish "could not make the path absolute" from "the
-// path is not a git repository" so callers never mislabel a provided-but-invalid
-// --repo as missing (#892). Only call when repoFlag != "".
-func repoFromFlag() (*config.RepoContext, error) {
-	absPath, err := config.ResolveUserPath(repoFlag)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve --repo path %q: %w", repoFlag, err)
-	}
-	repo, err := config.RepoFromPath(absPath)
-	if err != nil {
-		if config.RepoProbeUnanswered(err) {
-			return nil, fmt.Errorf("%s — retry, or pass a different --repo: %w", config.RepoProbeUnansweredClaim("--repo", absPath), err)
-		}
-		return nil, fmt.Errorf("--repo %q is not a valid git repository: %w", absPath, err)
-	}
-	return repo, nil
-}
-
-// optionalCurrentRepo resolves the cwd's project when one exists. Only the
-// positively identified outside-Git condition means "no project context";
-// treating any other discovery failure as absence would silently widen scoped
-// reads and mutations to every project (#3134).
-func optionalCurrentRepo() (*config.RepoContext, error) {
-	repo, err := config.CurrentRepo()
-	if err == nil {
-		return repo, nil
-	}
-	if errors.Is(err, config.ErrNotGitRepository) {
-		return nil, nil
-	}
-	return nil, fmt.Errorf("resolve current repository: %w", err)
-}
-
-// resolveRepoID resolves a repo ID from flags, cwd, or returns "" for all-repo mode.
-//
-// This ALWAYS consults the cwd, including when --daemon-url is set. That looks
-// wrong for a remote target — the client's cwd names a repo on this machine —
-// but its callers are the write commands (kill/archive/restore/send-prompt, tab
-// mutations) whose transport does NOT honor --daemon-url: daemon.* goes over the
-// local control socket (callDaemon → DaemonSocketPath). Dropping the cwd scope
-// for them would send an UNSCOPED destructive request to the LOCAL daemon, which
-// could then resolve a same-titled session in a different local repo and kill or
-// archive it. Keeping the cwd scope keeps those commands pointed where they
-// already point.
-//
-// Reads that genuinely reach the targeted daemon (sessions list/get/watch/preview)
-// use resolveRepoIDForLookup instead. If a write command is ever migrated onto the
-// apiclient transport, move it across too.
-func resolveRepoID() (string, error) {
-	if repoFlag != "" {
-		repo, err := repoFromFlag()
-		if err != nil {
-			return "", err
-		}
-		return repo.ID, nil
-	}
-	// Try cwd
-	repo, err := optionalCurrentRepo()
-	if err != nil {
-		return "", err
-	}
-	if repo == nil {
-		return "", nil // all-repo mode
-	}
-	return repo.ID, nil
-}
-
-// resolveRepoIDForLookup resolves the repo scope for a READ that is actually
-// served by the targeted daemon: the snapshot-based reads (`sessions list`,
-// `get`, `watch`) and `preview`, all of which route through apiclient and so
-// follow --daemon-url/AF_DAEMON_URL to the remote.
-//
-// The dividing line is the TRANSPORT, not the command: a caller belongs here if
-// its request reaches the targeted daemon, and on resolveRepoID if it goes over
-// the local control socket regardless of the target.
-//
-// It differs from resolveRepoID in one way: against a REMOTE target the cwd is
-// ignored. The client's cwd names a repo that exists HERE, not on the daemon's
-// machine, so scoping by it asks the remote for a repo ID it has never seen —
-// and the remote read path has no disk fallback (snapshotRead), so a bare-title
-// lookup that used to succeed would report a spurious not-found. Against a
-// remote only an EXPLICIT --repo scopes; a bare title resolves across the
-// remote's repos, with the ambiguity guard refusing to pick between them.
-//
-// Deliberately NOT shared with the write commands: their transport is the local
-// control socket regardless of --daemon-url, so an unscoped request there is a
-// destructive mis-target rather than a remote lookup (see resolveRepoID).
-//
-// Known limitation: --repo becomes an ID by hashing the path on THIS machine
-// (config.RepoIDFromRoot), so against a remote it only disambiguates when the
-// daemon has that project checked out at the same absolute path. Scoping a
-// remote by a repo identity the daemon owns needs a daemon-side repo lookup — a
-// separate change; until then, prefer a bare title against a remote.
-func resolveRepoIDForLookup() (string, error) {
-	if repoFlag != "" {
-		repo, err := repoFromFlag()
-		if err != nil {
-			return "", err
-		}
-		return repo.ID, nil
-	}
-	if apiclient.IsRemoteTarget() {
-		return "", nil // the client's cwd says nothing about the remote's repos
-	}
-	repo, err := optionalCurrentRepo()
-	if err != nil {
-		return "", err
-	}
-	if repo == nil {
-		return "", nil // all-repo mode, guarded by the ambiguity check
-	}
-	return repo.ID, nil
-}
-
-// resolveRepo is the single binding resolver for commands that can create
-// persistent project state (sessions create, tasks add, and send-prompt
-// --create). Besides resolving the repo, it enforces the shared AF-home refusal;
-// putting that invariant here keeps a new caller from remembering resolution
-// while forgetting the destructive binding guard (#1891/#2205).
-//
-// Errors are fully formed for callers to surface directly: a provided `--repo`
-// that does not resolve names the path, while an absent `--repo` whose cwd is
-// also not a repo reports that `--repo is required` (#892). Wrapping every
-// failure as "--repo is required" would be wrong when the user did provide it.
-func resolveRepo() (*config.RepoContext, error) {
-	var (
-		repo *config.RepoContext
-		err  error
-	)
-	if repoFlag != "" {
-		repo, err = repoFromFlag()
-	} else {
-		repo, err = config.CurrentRepo()
-		if err != nil {
-			if config.RepoProbeUnanswered(err) {
-				// Name the directory the probe actually ran in: a user reading
-				// this may not be where they think they are, and the claim
-				// helper wants a path rather than a pronoun.
-				cwd, cwdErr := os.Getwd()
-				if cwdErr != nil {
-					cwd = "."
-				}
-				return nil, fmt.Errorf("--repo is required: %s — retry, or pass --repo <path> to target a project (%w)", config.RepoProbeUnansweredClaim("the current directory", cwd), err)
-			}
-			return nil, fmt.Errorf("--repo is required: the current directory is not a git repository — pass --repo <path> to target a project (%w)", err)
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := guardProjectBinding(repo, repoFlag != ""); err != nil {
-		return nil, err
-	}
-	return repo, nil
-}
 
 // warnWriter is where a command's own caveats go — the "this answer is
 // INCOMPLETE" notices that accompany a successful result rather than replace it.
@@ -344,21 +192,49 @@ func diskRepoPathsForTitle(title string, known []string) ([]string, []config.Rep
 	return session.DedupeSorted(paths), unreadable, nil
 }
 
+// corruptedRepoRepairHint is the one-line remedy appended to every corruption
+// refusal/caveat. af stores per-repo state only in instances.json and keeps no
+// backup of it, so the operator has to repair the file themselves (#4742).
+const corruptedRepoRepairHint = "Stop the af daemon, copy the corrupt file(s) aside, fix the JSON or restore it from a backup, then start the daemon; af keeps no backup of these files."
+
+// corruptedRepoPaths renders the full path of each corrupted repo's
+// instances.json, resolved through the same home resolver the store uses
+// (config.RepoInstancesPath honors AGENT_FACTORY_HOME rather than a hard-coded
+// ~/.agent-factory). A bare repo id is the fallback only when the id is too
+// malformed to resolve to a path, which the corrupted repos the daemon reports
+// never are — they passed ValidateRepoID when first registered (#4742).
+func corruptedRepoPaths(corrupted []string) string {
+	sort.Strings(corrupted)
+	paths := make([]string, 0, len(corrupted))
+	for _, rid := range corrupted {
+		if p, err := config.RepoInstancesPath(rid); err == nil && p != "" {
+			paths = append(paths, p)
+		} else {
+			paths = append(paths, rid)
+		}
+	}
+	return strings.Join(paths, ", ")
+}
+
 // corruptedReposSuffix builds a sorted, human-readable clause naming the repos
 // whose instances.json failed to parse. Callers use it to surface corruption
-// loudly instead of silently returning empty/partial results (#730).
+// loudly instead of silently returning empty/partial results (#730). Each repo
+// is named by its full instances.json path and the message carries the repair
+// step, so a miss caveats with something the operator can act on (#4742).
 func corruptedReposSuffix(corrupted []string) string {
-	sort.Strings(corrupted)
-	return fmt.Sprintf("%d repo(s) have a corrupted instances.json and may be hiding it: %s", len(corrupted), strings.Join(corrupted, ", "))
+	return fmt.Sprintf("%d repo(s) have a corrupted instances.json and may be hiding it: %s\n%s",
+		len(corrupted), corruptedRepoPaths(corrupted), corruptedRepoRepairHint)
 }
 
 // corruptedReposError builds a structured error for aggregate queries (e.g.
 // `sessions list`) that name the repos whose instances.json failed to parse.
 // Returning this instead of a silently-truncated result lets users tell "no
 // sessions exist" apart from "sessions exist but the file is corrupted" (#730).
+// Each repo is named by its full instances.json path and the message carries the
+// repair step, so a refusal is actionable rather than a dead end (#4742).
 func corruptedReposError(corrupted []string) error {
-	sort.Strings(corrupted)
-	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s", len(corrupted), strings.Join(corrupted, ", "))
+	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s\n%s",
+		len(corrupted), corruptedRepoPaths(corrupted), corruptedRepoRepairHint)
 }
 
 // diskListSessions is the disk-read fallback for `sessions list` when no daemon
@@ -625,7 +501,11 @@ func instanceTitleExistsInScope(repoID, title string) (bool, error) {
 
 // scopedInstance is a persisted session paired with the repo ID it belongs to,
 // which the broadcast delivery path needs to address the daemon SendPrompt RPC.
+// ID is the row's stable identity: the broadcast enumerates its targets before
+// dispatching, so the send must carry it or a killed-and-recreated row could
+// inherit a prompt meant for the session the user actually listed.
 type scopedInstance struct {
+	ID     string
 	RepoID string
 	Title  string
 	Status session.Status
@@ -642,7 +522,7 @@ func scopedInstancesForRepo(repoID string) ([]scopedInstance, error) {
 	}
 	out := make([]scopedInstance, 0, len(instances))
 	for i := range instances {
-		out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+		out = append(out, scopedInstance{ID: instances[i].ID, RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
 	}
 	return out, nil
 }
@@ -676,7 +556,7 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 			continue
 		}
 		for i := range instances {
-			out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+			out = append(out, scopedInstance{ID: instances[i].ID, RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
 		}
 	}
 	return out, corrupted, nil
@@ -734,6 +614,8 @@ func silenceCobraOutput() {
 	TasksCmd.SilenceErrors = true
 	ProjectsCmd.SilenceUsage = true
 	ProjectsCmd.SilenceErrors = true
+	ProposalCmd.SilenceUsage = true
+	ProposalCmd.SilenceErrors = true
 	if root := SessionsCmd.Root(); root != nil {
 		root.SilenceUsage = true
 		root.SilenceErrors = true
@@ -872,6 +754,12 @@ func init() {
 	sessionsRestoreCmd.Flags().Bool("force-reap", false,
 		"replace a reachable sandbox WITHOUT pushing its work first (discards anything it has not pushed)")
 	SessionsCmd.AddCommand(sessionsRestoreCmd)
+
+	sessionsPruneCmd.Flags().StringVar(&sessionsPruneOlderThanStr, "older-than", "",
+		"Report sessions archived longer than this duration ago (required, for example 720h for thirty days)")
+	sessionsPruneCmd.Flags().BoolVar(&sessionsPruneAllFlag, "all", false,
+		"Span every project instead of only the current/--repo one")
+	SessionsCmd.AddCommand(sessionsPruneCmd)
 	SessionsCmd.AddCommand(sessionsAttachCmd)
 	SessionsCmd.AddCommand(sessionsWhoamiCmd)
 

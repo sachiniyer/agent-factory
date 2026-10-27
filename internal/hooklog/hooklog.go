@@ -145,5 +145,11 @@ func readTail(file *os.File) (string, error) {
 	if !truncated {
 		return string(data), nil
 	}
-	return fmt.Sprintf("[output truncated to last %d bytes]\n%s", TailLimit, data), nil
+	return truncatedMarker() + string(data), nil
+}
+
+// truncatedMarker heads a tail that readTail cut short. Excerpt strips it: an
+// excerpt quotes lines, not bytes, so the marker is not one of them.
+func truncatedMarker() string {
+	return fmt.Sprintf("[output truncated to last %d bytes]\n", TailLimit)
 }

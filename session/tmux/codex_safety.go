@@ -540,7 +540,10 @@ func navigationKeys(selected, target int) []string {
 // codexStatusLineModel reads Codex's default `model-with-reasoning ·
 // current-dir` status line. Requiring the path-shaped second segment and
 // searching only the bottom few visible rows avoids learning a model from
-// ordinary transcript prose that happens to contain a middle dot.
+// ordinary transcript prose that happens to contain a middle dot. The model
+// segment itself must not carry a line-leading prompt marker — a composer
+// line is "glyph · typed text", and typed text ending in " · <path>" is the
+// one shape that could otherwise impersonate the footer (#5383).
 func codexStatusLineModel(content string) string {
 	lines := strings.Split(normalizeCodexPane(content), "\n")
 	seen := 0
@@ -559,7 +562,7 @@ func codexStatusLineModel(content string) string {
 			continue
 		}
 		model := strings.TrimSpace(parts[0])
-		if model != "" && !strings.ContainsAny(model, "›\r\n") {
+		if model != "" && !strings.ContainsAny(model, codexComposerGlyphs+"\r\n") {
 			return model
 		}
 	}

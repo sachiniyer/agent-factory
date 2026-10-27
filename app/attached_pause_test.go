@@ -339,9 +339,9 @@ func TestAttachOverlayCallback_AttachSucceedsWhenPauseErrors(t *testing.T) {
 	endDetachWatchdog()
 }
 
-// drainCmd runs cmd (and any nested tea.Cmd it produces via tea.Batch) up
-// to the given deadline and returns the messages it produced. Used by the
-// previewTickMsg pause test to inspect the batch contents.
+// drainCmd runs cmd (and any nested tea.Cmd it produces via tea.Batch, at any
+// depth — a key's action cmd arrives batched with its menu-highlight tick) up
+// to the given deadline and returns the messages it produced.
 func drainCmd(t *testing.T, cmd tea.Cmd, deadline time.Duration) []tea.Msg {
 	t.Helper()
 	if cmd == nil {
@@ -354,31 +354,38 @@ func drainCmd(t *testing.T, cmd tea.Cmd, deadline time.Duration) []tea.Msg {
 	select {
 	case msg := <-done:
 		// tea.Batch returns a msg of type tea.BatchMsg ([]tea.Cmd internally
-		// in bubbletea). We only care about whether any nested cmd
-		// produces a panesRefreshedMsg; recursing one level deep is enough
-		// for our purposes here.
+		// in bubbletea).
 		batch, ok := msg.(tea.BatchMsg)
 		if !ok {
 			return []tea.Msg{msg}
 		}
-		var got []tea.Msg
-		for _, inner := range batch {
-			if inner == nil {
-				continue
-			}
-			innerCh := make(chan tea.Msg, 1)
-			go func(c tea.Cmd) { innerCh <- c() }(inner)
-			select {
-			case innerMsg := <-innerCh:
-				got = append(got, innerMsg)
-			case <-time.After(deadline):
-				// Slow re-schedule sleep — that's the only cmd in the
-				// batch that takes longer than a few µs.
-			}
-		}
-		return got
+		return drainBatch(batch, deadline)
 	case <-time.After(deadline):
 		t.Fatalf("cmd did not return within %v", deadline)
 		return nil
 	}
+}
+
+// drainBatch runs each cmd of a tea.BatchMsg, recursing into nested batches, and
+// collects what they produce. A cmd still running at the deadline — a slow
+// re-schedule sleep or a notice's clear timer — is skipped, not fatal.
+func drainBatch(batch tea.BatchMsg, deadline time.Duration) []tea.Msg {
+	var got []tea.Msg
+	for _, inner := range batch {
+		if inner == nil {
+			continue
+		}
+		innerCh := make(chan tea.Msg, 1)
+		go func(c tea.Cmd) { innerCh <- c() }(inner)
+		select {
+		case innerMsg := <-innerCh:
+			if nested, ok := innerMsg.(tea.BatchMsg); ok {
+				got = append(got, drainBatch(nested, deadline)...)
+				continue
+			}
+			got = append(got, innerMsg)
+		case <-time.After(deadline):
+		}
+	}
+	return got
 }

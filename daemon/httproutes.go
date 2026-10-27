@@ -187,14 +187,17 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/KillSession",
 		Description: "Tear down a session: kill its tmux/agent and remove its worktree and record.",
 		requestType: reflect.TypeOf(KillSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.killSession) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.killSession) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/ArchiveSession",
 		Description: "Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it.",
 		requestType: reflect.TypeOf(ArchiveSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ArchiveSession) },
+		// rpcHandlerCtx so the unix-socket peer pid ConnContext stamped reaches
+		// the teardown-requester registry — the `archive --self` caller blocked
+		// on this response is exempted from its own pane reap (#5182).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.archiveSession) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -202,6 +205,13 @@ var httpRoutes = []HTTPRoute{
 		Description: "Restore an archived session: move its worktree back next to the repo and re-spawn the agent.",
 		requestType: reflect.TypeOf(RestoreArchivedRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RestoreArchived) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/PruneSessions",
+		Description: "Dry-run listing for `af sessions prune`: reports which old archived sessions a reclaim would remove and the allocated bytes each would free. Strictly read-only.",
+		requestType: reflect.TypeOf(PruneSessionsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PruneSessions) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -230,6 +240,18 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(ResumeFromLimitRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeFromLimit) },
 	},
+	// The "it already landed" half of the ambiguous-delivery exit (#4429): the
+	// operator inspected the pane and attests the mission arrived, so the
+	// daemon retires the obligation WITHOUT resending. A separate verb rather
+	// than a ResumeFromLimit flag so a pre-verb daemon refuses loudly instead
+	// of silently resending.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ConfirmHandoffDelivery",
+		Description: "Retire a pending handoff mission on the operator's attestation that it already landed — settles the replacement fence and startup-unknown flag without resending.",
+		requestType: reflect.TypeOf(ConfirmHandoffDeliveryRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ConfirmHandoffDelivery) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/HandoffSession",
@@ -250,6 +272,16 @@ var httpRoutes = []HTTPRoute{
 		Description: "Register a git checkout as a durable, sessionless project by path (expand ~, resolve the git root, validate, persist to the registry) — resolved on the daemon's filesystem, idempotent for a known checkout.",
 		requestType: reflect.TypeOf(RegisterProjectRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RegisterProject) },
+	},
+	// Not sandboxAllowed, like RegisterProject: it rewrites the daemon host's
+	// registry and resolves a caller-supplied path against the host's
+	// filesystem — both operator-authority operations, not capability discovery.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/RebindProject",
+		Description: "Move a registered project's stable identity (id, a prj_… registry id) to the checkout at path — the repair after that checkout was moved or recloned elsewhere. Path resolves on the daemon's filesystem; the rebind refuses a root another project already owns.",
+		requestType: reflect.TypeOf(RebindProjectRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProject) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -363,9 +395,108 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/UnsetConfigValue",
-		Description: "Clear one migrated global backend setting, exactly as `af config unset` does (both alias spellings, atomically).",
+		Description: "Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically).",
 		requestType: reflect.TypeOf(UnsetConfigValueRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UnsetConfigValue) },
+	},
+	// Proposals (docs/dev/proposals/proposal-mode/api.md).
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ListProposals",
+		Description: "List a project's proposals, newest edit first. Name the project with exactly one of session_id, repo_id or repo_path (a path on the daemon host).",
+		requestType: reflect.TypeOf(ListProposalsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListProposals) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/GetProposal",
+		Description: "Describe one proposal for the Docs tab: head commit, docs, unused templates, open question count, and attached sessions.",
+		requestType: reflect.TypeOf(GetProposalRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetProposal) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/StartProposal",
+		Description: "Create a proposal from templates, attach the session to it, open its Docs tab, and return the rules for the agent.",
+		requestType: reflect.TypeOf(StartProposalRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.StartProposal) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/AttachProposal",
+		Description: "Attach the session to a proposal (or, with no slug, report its current one), open its Docs tab, and return the rules.",
+		requestType: reflect.TypeOf(AttachProposalRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AttachProposal) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/DetachProposal",
+		Description: "Remove the session's proposal attachment and cursor, and close its Docs tab.",
+		requestType: reflect.TypeOf(DetachProposalRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DetachProposal) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/AddProposalDoc",
+		Description: "Add a doc to a proposal from a template, or blank, and commit it as the given author.",
+		requestType: reflect.TypeOf(AddProposalDocRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AddProposalDoc) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ReadProposalDoc",
+		Description: "Read a proposal doc and the commit it is at, after committing its uncommitted edits as external.",
+		requestType: reflect.TypeOf(ReadProposalDocRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ReadProposalDoc) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SaveProposalDoc",
+		Description: "Save a proposal doc as a human edit against a base commit; merges with git merge-file, and answers 409 proposal_conflict with ours/theirs/base when the edits conflict.",
+		requestType: reflect.TypeOf(SaveProposalDocRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SaveProposalDoc) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/WriteProposalDoc",
+		Description: "Replace a proposal doc and commit it as the given author, with no merge.",
+		requestType: reflect.TypeOf(WriteProposalDocRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.WriteProposalDoc) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/PullProposalChanges",
+		Description: "Return the edits to the session's proposal that it has not seen, then move its cursor.",
+		requestType: reflect.TypeOf(PullProposalChangesRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PullProposalChanges) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/CheckpointProposal",
+		Description: "Commit the session's edits to its proposal as its own and move its cursor past them.",
+		requestType: reflect.TypeOf(CheckpointProposalRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CheckpointProposal) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SetProposalPushMode",
+		Description: "Set the push mode (auto or manual) of the session's Docs tabs for its proposal, and return its push status.",
+		requestType: reflect.TypeOf(SetProposalPushModeRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetProposalPushMode) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/HoldProposalPush",
+		Description: "Hold the session's pending proposal push until the next human save, and return its push status.",
+		requestType: reflect.TypeOf(HoldProposalPushRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HoldProposalPush) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SendProposalChanges",
+		Description: "Send the session its unseen proposal edits as a prompt now when the agent is Ready, or on the next tick where it is, and return its push status.",
+		requestType: reflect.TypeOf(SendProposalChangesRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SendProposalChanges) },
 	},
 	// Tasks.
 	{

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
@@ -110,6 +109,14 @@ type InstanceData struct {
 	// LostRestoreFailure persists why automatic recovery stopped across daemon
 	// restarts until an explicit runtime replacement succeeds.
 	LostRestoreFailure *LostRestoreFailure `json:"lost_restore_failure,omitempty"`
+	// LostRestoreWait persists that automatic recovery is waiting on the
+	// environment — the last failure was a resource limit external to the
+	// session — across daemon restarts until a restore attempt succeeds, a
+	// structural failure retires the wait, or a replacement lands (#5295). A
+	// row that reloads INERT drops it on load instead: no automatic retry can
+	// reach that row, so the record would report an armed retry forever.
+	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
+
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
 	// pane churn. Callers capture it before sending so churn racing the delivery is
 	// still known to be later. Persisted across daemon restarts.
@@ -140,6 +147,40 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
+	// a handoff mission was still owed (#4429), so the next idle observation
+	// after the mission is retired ends the run.
+	// Persisted for the same reason as TaskRunActive: the held edge is already
+	// spent and nothing re-derives it. omitempty + additive: an older record
+	// decodes to false, which holds nothing.
+	//
+	// This key keeps ONLY its original meaning (#5221 review): a daemon rolled
+	// back to a release that knows just the mission hold reads it exactly as it
+	// wrote it. The turn-gate hold lives in TaskRunTurnGateHeld so the older
+	// binary drops — rather than releases — a marker it cannot evaluate.
+	TaskRunIdleEdgeHeld bool `json:"task_run_idle_edge_held,omitempty"`
+	// TaskRunTurnGateHeld records that the run's idle edge was held open because
+	// the prompt had been attempted without turn evidence (#5219). Stored under
+	// its own key for rollback safety: a previous release would misread a
+	// turn-gate hold written into task_run_idle_edge_held as a resolved mission
+	// hold and end the run on the next Ready → Ready tick. An old binary drops
+	// this field and keeps the run open instead — the safe direction.
+	TaskRunTurnGateHeld bool `json:"task_run_turn_gate_held,omitempty"`
+	// TaskRunPromptAttemptAt is the run's OWN prompt boundary (#5221 review),
+	// scoped apart from LastPromptAttemptAt so an interactive send cannot
+	// re-arm a delivery window the agent already satisfied. The boundary moves
+	// only while the window is unsatisfied. Persisted while the run is in
+	// flight for the same reason as TaskRunTurnObservedAt: a restart must not
+	// reopen — or wrongly satisfy — a window the daemon was still holding.
+	TaskRunPromptAttemptAt time.Time `json:"task_run_prompt_attempt_at,omitzero"`
+	// TaskRunTurnObservedAt is when the agent's own in-turn chrome was observed
+	// for the run in flight (#5219) — the one pane signal a still-booting agent
+	// cannot produce: its elapsed-timer status row had to tick, not just render.
+	// Pane churn stays a weaker fact and cannot release the held edge alone.
+	// Persisted for the same reason as TaskRunIdleEdgeHeld: a restart must not
+	// reopen the delivery window an observation already closed. omitempty +
+	// additive: an older record decodes to zero, which releases nothing.
+	TaskRunTurnObservedAt time.Time `json:"task_run_turn_observed_at,omitzero"`
 	// PendingOnComplete records an on_complete teardown owed to this session's
 	// finished task run (#4162). The daemon files it BEFORE waiting on
 	// post-worktree hooks, so a shutdown that drops the in-flight lifecycle
@@ -156,10 +197,14 @@ type InstanceData struct {
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and
-	// survive a restart, and so PR3's auto-resume scheduler can read it. omitempty
-	// drops it for every normal session; additive + rollforward, mirroring the
-	// Liveness precedent.
-	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
+	// survive a restart, and so PR3's auto-resume scheduler can read it. omitzero
+	// drops it for every normal session (and for a limit row whose banner carried
+	// no parseable reset time): omitempty never omits a struct, and a zero
+	// time.Time would otherwise serialize as "0001-01-01T00:00:00Z" on every row,
+	// inventing a reset date the web would render (#4506 review, mirroring the
+	// TabExitData.At precedent); additive + rollforward, mirroring the Liveness
+	// precedent.
+	LimitResetAt time.Time `json:"limit_reset_at,omitzero"`
 	// LimitAgent is the provider namespace for LimitAccount. It is always a
 	// tmux.SupportedPrograms enum or empty; account labels are agent-scoped, so a
 	// pending cross-agent replacement must retain both values.
@@ -177,7 +222,16 @@ type InstanceData struct {
 	CreatedAt                time.Time                     `json:"created_at"`
 	// UpdatedAt is the last session state mutation, preserved across saves and loads.
 	UpdatedAt time.Time `json:"updated_at"`
-	Prompt    string    `json:"prompt,omitempty"`
+	// ArchivedAt is when this session's archive committed — the durable anchor
+	// `af sessions prune --older-than` measures from (#5136). It is a separate
+	// field rather than UpdatedAt reused, because a record can keep mutating
+	// after it is shelved (prune itself is one such mutation). omitempty +
+	// additive: rows archived before this field existed carry no value and the
+	// prune cutoff falls back to UpdatedAt, which only ever moves FORWARD —
+	// never to a time before the real archive — so the fallback can only make a
+	// legacy row look younger and therefore under-delete, never over-delete.
+	ArchivedAt time.Time `json:"archived_at,omitzero"`
+	Prompt     string    `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
 	// Unlike Prompt, it is cleared only after the exact mission lands (or is
@@ -203,6 +257,15 @@ type InstanceData struct {
 	// this evidence existed; callers must treat absence as unknown, never infer it
 	// from Program's requested label.
 	RuntimeProgram string `json:"runtime_program,omitempty"`
+	// RuntimePID and RuntimeStartID are the pane-root process identity captured
+	// at the same boundary that recorded RuntimeProgram (#5066): the pair
+	// proctree.SameIdentity treats as one process instance (PID plus the
+	// kernel's start stamp, which defeats pid reuse). On reattach a matching
+	// pair proves the pane is still the launch af made, so the claim survives a
+	// daemon restart; a mismatch or an unanswerable probe retires it. Zero on
+	// records predating the evidence.
+	RuntimePID     int    `json:"runtime_pid,omitempty"`
+	RuntimeStartID uint64 `json:"runtime_start_id,omitempty"`
 	// Account is the credential account this session's provider panes use (#3051).
 	// Persisted because the identity a session runs as must survive a daemon
 	// restart and an archive/restore: a session that silently reverted to the
@@ -317,6 +380,30 @@ type InstanceData struct {
 	// retention boundary.
 	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
 	runtimeCleanup *RuntimeCleanupData
+	// KilledWithoutLiveRuntime is the inert-at-kill admission marker for a
+	// sandbox kill tombstone (docker/ssh/hook/remote) whose commit found no live
+	// off-box runtime to reap: the kill ran against an inert rebuild (nil
+	// runtimeTeardown), so the tombstone carries no RuntimeCleanup handle on
+	// purpose — "nothing on-box to reap", the sandbox analog of the local
+	// branch's worktreeReaped admission (#2691).
+	//
+	// A current-binary inert-at-kill tombstone and a legacy pre-#2265 tombstone
+	// are indistinguishable on disk without this marker: both persist a nil
+	// RuntimeCleanup, and the load path could not tell "the kill owed nothing"
+	// from "the binary could not store the handle it owed". The distinction is
+	// therefore WRITTEN at commit time — toInstanceDataLocked sets the private
+	// marker below when a sandbox backend owes no teardown — and READ at load
+	// time by FromInstanceData, which admits the marker the way worktreeReaped
+	// does and lets the pending record delete proceed instead of installing a
+	// permanent fail-closed teardown no retry, re-kill, or restart can clear.
+	//
+	// Additive + omitempty + rollforward on the same precedent as UserKilled: a
+	// record written before this field simply has no marker and fails closed,
+	// which is the safe legacy direction (a wedge an older binary already
+	// cannot unwedge). Published only for UserKilled tombstones by ForStorage,
+	// so it never reaches an ordinary snapshot or disk row.
+	KilledWithoutLiveRuntime bool `json:"killed_without_live_runtime,omitempty"`
+	killedWithoutLiveRuntime *bool
 	// archivePushCompleted is process-local evidence that the push belonging to
 	// the CURRENT OpArchiving generation returned successfully. Branch cannot be
 	// that evidence: restore deliberately preserves the previous archive branch.
@@ -380,8 +467,22 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // live daemon snapshot. Disk fallback callers must not expose the complete
 // report or the compatibility-only ownership flags merely because the daemon is
 // unavailable.
+//
+// It replays FromInstanceData's full fence-restoration order — archive, then
+// relocation recovery, then handoff and account-swap — so the rollback-safe
+// ownership projection ForStorage writes for any row carrying an unresolved
+// worktree relocation recovery cannot survive into the disk-fallback client
+// view. A recovery row whose safety metadata is missing or undecodable is
+// corrupt; ForClientRead cannot drop the row, so it leaves the ForStorage
+// projection in place and the row reads as the conservative unknown-ownership
+// verdict rather than fabricating confidence — the same fail-closed direction
+// every other reader takes (the loader refuses such a row outright).
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	restored, err := d.RestoreRelocationRecoveryOriginals()
+	if err == nil {
+		d = restored
+	}
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
@@ -405,208 +506,6 @@ func archiveWarningOperation(liveness Liveness) string {
 		return ""
 	default:
 		return "restore"
-	}
-}
-
-// ForStorage returns data suitable for instances.json. InstanceData is also the
-// daemon Snapshot payload, so it can carry transient in-flight operation state;
-// disk persistence must not.
-func (d InstanceData) ForStorage() InstanceData {
-	if d.snapshotTabsProjected {
-		d.Tabs = d.snapshotStorageTabs
-		d.snapshotTabsProjected = false
-		d.snapshotStorageTabs = nil
-	}
-	reportDetached := false
-	if d.archiveReportSource != nil {
-		path, recovery, hasRecovery, report := d.archiveReportSource.PersistenceSnapshot()
-		d.Worktree.WorktreePath = path
-		d.Worktree.RelocationRecovery = nil
-		if hasRecovery {
-			externalWorktree := d.Worktree.ExternalWorktree
-			branchCreatedByUs := cloneBoolPointer(d.Worktree.BranchCreatedByUs)
-			startupStateUnknown := d.StartupStateUnknown
-			d.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
-				State: recovery.State, AlternatePath: recovery.AlternatePath,
-				IdentityKnown: recovery.IdentityKnown, Device: recovery.Device,
-				Inode: recovery.Inode, FileType: recovery.FileType,
-				CleanupGeneration:           recovery.CleanupGeneration,
-				OriginalExternalWorktree:    &externalWorktree,
-				OriginalBranchCreatedByUs:   branchCreatedByUs,
-				OriginalStartupStateUnknown: &startupStateUnknown,
-			}
-		}
-		if report.Empty() {
-			d.ArchiveReport = nil
-		} else {
-			report.RollbackFence = archiveRollbackFence(d)
-			d.ArchiveReport = &report
-			reportDetached = true
-		}
-	}
-	lv := livenessFromData(d)
-	d.Status = composeStatus(lv, OpNone)
-	d.Liveness = lv
-	d.InFlightOp = OpNone
-	d.LifecycleAction = LifecycleActionNone
-	d.CanKill = false
-	d.CanHandoff = false
-	d.CurrentAgent = ""
-	d.IsRoot = false
-	d.ModelChange = nil
-	d.IdleReason = IdleReasonNone
-	// Derived from the backend on every snapshot, exactly like CanKill above, so
-	// persisting them stores a stale answer that a restart would recompute anyway —
-	// and these carry long, versioned refusal PROSE, which would sit in every
-	// instances.json row and be read back as fact by an older binary.
-	d.TabKinds = nil
-	d.TabRosterMutable = nil
-	d.ArchiveWarning = ""
-	d = d.restoreMissingHandoffMissionEvidence()
-	d = d.restoreMissingAccountSwapMissionEvidence()
-	d = d.projectPendingAccountSwapForPreviousRelease()
-	d = d.projectPendingHandoffForPreviousRelease()
-	// The compatibility projection must capture original values before either it
-	// or the relocation fence below overwrites them. Older binaries ignore
-	// ArchiveReport, but the previous release understands the inert/ownership
-	// fields and relocation recovery. Together they refuse restore and explicit
-	// kill instead of publishing an incomplete tree or deleting the report's row.
-	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
-		report := *d.ArchiveReport
-		if !reportDetached {
-			report = d.ArchiveReport.Clone()
-		}
-		if report.RollbackFence == nil {
-			report.RollbackFence = archiveRollbackFence(d)
-		}
-		d.ArchiveReport = &report
-		d.StartupStateUnknown = true
-		d.Worktree.ExternalWorktree = true
-		branchCreatedByUs := false
-		d.Worktree.BranchCreatedByUs = &branchCreatedByUs
-		// v1.0.235 already understands relocation recovery and refuses an
-		// explicit kill while one is unresolved. Project a read-only stall through
-		// that admission path so rollback cannot turn ExternalWorktree's cleanup
-		// no-op into permission to delete the row which owns the retained trees.
-		// Current readers remove this synthetic latch from RollbackFence before
-		// reconstructing the worktree.
-		d.Worktree.RelocationRecovery = archiveReportKillFence(report)
-	}
-	projectRelocationRecoveryForPreviousRelease(d.Worktree.RelocationRecovery)
-	if d.Worktree.RelocationRecovery != nil {
-		// v1.0.228 predates relocation_recovery and ignores unknown JSON fields.
-		// Project the unresolved row through safety fields that version already
-		// understands: it loads inert, treats the checkout as user-owned, and
-		// cannot delete its branch. The recovery record carries the original
-		// values so current readers remove this rollback fence on load.
-		d.StartupStateUnknown = true
-		d.Worktree.ExternalWorktree = true
-		branchCreatedByUs := false
-		d.Worktree.BranchCreatedByUs = &branchCreatedByUs
-	}
-	switch {
-	case lv == LiveArchived:
-		// Archived rows have already reaped their runtime, so retaining a teardown
-		// identity here would only preserve unused credentials until row deletion.
-		d.RuntimeCleanupStateUnknown = false
-		d.RuntimeCleanup = nil
-	case !d.UserKilled && !d.RuntimeCleanupStateUnknown:
-		// Cleanup credentials/identities have no reason to live in ordinary session
-		// records. Kill intent and an unknown teardown outcome are the two durable
-		// retention boundaries.
-		d.RuntimeCleanup = nil
-	case d.runtimeCleanup != nil:
-		d.RuntimeCleanup = d.runtimeCleanup.clone()
-	}
-	// Never let the private staging pointer escape a storage projection. Loaded
-	// tombstones have only RuntimeCleanup set and therefore preserve it above.
-	d.runtimeCleanup = nil
-	d.archiveReportSource = nil
-	d.archiveReportPending = false
-	return d
-}
-
-func cloneBoolPointer(value *bool) *bool {
-	if value == nil {
-		return nil
-	}
-	clone := *value
-	return &clone
-}
-
-func archiveRollbackFence(data InstanceData) *git.ArchiveRollbackFence {
-	fence := &git.ArchiveRollbackFence{
-		OriginalStartupStateUnknown: data.StartupStateUnknown,
-		OriginalExternalWorktree:    data.Worktree.ExternalWorktree,
-		OriginalBranchCreatedByUs:   cloneBoolPointer(data.Worktree.BranchCreatedByUs),
-		RelocationRecoveryProjected: true,
-	}
-	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
-		fence.OriginalRelocationRecovery = &git.ArchiveRollbackRelocationRecovery{
-			State:                              recovery.State,
-			CleanupLifecycle:                   recovery.CleanupLifecycle,
-			AlternatePath:                      recovery.AlternatePath,
-			IdentityKnown:                      recovery.IdentityKnown,
-			Device:                             recovery.Device,
-			Inode:                              recovery.Inode,
-			FileType:                           recovery.FileType,
-			CleanupGeneration:                  recovery.CleanupGeneration,
-			CleanupOriginalExternalWorktree:    cloneBoolPointer(recovery.CleanupOriginalExternalWorktree),
-			CleanupOriginalBranchCreatedByUs:   cloneBoolPointer(recovery.CleanupOriginalBranchCreatedByUs),
-			CleanupOriginalStartupStateUnknown: cloneBoolPointer(recovery.CleanupOriginalStartupStateUnknown),
-			OriginalExternalWorktree:           cloneBoolPointer(recovery.OriginalExternalWorktree),
-			OriginalBranchCreatedByUs:          cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
-			OriginalStartupStateUnknown:        cloneBoolPointer(recovery.OriginalStartupStateUnknown),
-		}
-	}
-	return fence
-}
-
-func archiveRollbackRelocationRecovery(recovery *git.ArchiveRollbackRelocationRecovery) *GitWorktreeRelocationRecoveryData {
-	if recovery == nil {
-		return nil
-	}
-	return &GitWorktreeRelocationRecoveryData{
-		State:                              recovery.State,
-		CleanupLifecycle:                   recovery.CleanupLifecycle,
-		AlternatePath:                      recovery.AlternatePath,
-		IdentityKnown:                      recovery.IdentityKnown,
-		Device:                             recovery.Device,
-		Inode:                              recovery.Inode,
-		FileType:                           recovery.FileType,
-		CleanupGeneration:                  recovery.CleanupGeneration,
-		CleanupOriginalExternalWorktree:    cloneBoolPointer(recovery.CleanupOriginalExternalWorktree),
-		CleanupOriginalBranchCreatedByUs:   cloneBoolPointer(recovery.CleanupOriginalBranchCreatedByUs),
-		CleanupOriginalStartupStateUnknown: cloneBoolPointer(recovery.CleanupOriginalStartupStateUnknown),
-		OriginalExternalWorktree:           cloneBoolPointer(recovery.OriginalExternalWorktree),
-		OriginalBranchCreatedByUs:          cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
-		OriginalStartupStateUnknown:        cloneBoolPointer(recovery.OriginalStartupStateUnknown),
-	}
-}
-
-func archiveReportKillFence(report git.ArchiveReport) *GitWorktreeRelocationRecoveryData {
-	tree := report.RetainedTrees[0]
-	fence := report.RollbackFence
-	originalExternal := fence.OriginalExternalWorktree
-	originalBranch := cloneBoolPointer(fence.OriginalBranchCreatedByUs)
-	originalStartup := fence.OriginalStartupStateUnknown
-	return &GitWorktreeRelocationRecoveryData{
-		// A previous reader refuses explicit kill while any recovery record is
-		// unresolved, but its restore path consumes an identity-qualified
-		// AlternatePath as a worktree candidate. Retained trees can be snapshots
-		// from an older archive cycle, so never publish their pathname here. A
-		// claim-stale record with no alternate and the retained source's identity
-		// cannot match the cross-filesystem published archive and therefore makes
-		// both kill and restore fail closed. Current readers remove this synthetic
-		// record through RollbackFence before reconstructing the worktree.
-		State:                       git.RelocationRecoveryClaimStale,
-		IdentityKnown:               true,
-		Device:                      tree.Device,
-		Inode:                       tree.Inode,
-		FileType:                    tree.FileType,
-		OriginalExternalWorktree:    &originalExternal,
-		OriginalBranchCreatedByUs:   originalBranch,
-		OriginalStartupStateUnknown: &originalStartup,
 	}
 }
 
@@ -645,6 +544,10 @@ type TabData struct {
 	// every other kind. Surfaced in the snapshot so the web UI can iframe it and
 	// so `af sessions get` shows the target.
 	URL string `json:"url,omitempty"`
+	// Proposal is the slug a docs tab edits; empty for every other kind.
+	Proposal string `json:"proposal,omitempty"`
+	// PushMode is a docs tab's push mode, "auto" or "manual"; empty means auto.
+	PushMode string `json:"push_mode,omitempty"`
 	// WebProxied is derived at JSON encoding with IsLoopbackWebTarget, the
 	// daemon proxy's predicate. A pointer preserves explicit false for web tabs;
 	// non-web tabs omit it. Stored/input values never override the derivation.
@@ -839,61 +742,6 @@ func (s *Storage) SaveInstancesForShutdown(instances []*Instance) error {
 		<-archiveSettled
 	}
 	return s.SaveInstances(instances)
-}
-
-// LoadInstances loads the list of instances from disk.
-func (s *Storage) LoadInstances() ([]*Instance, error) {
-	var allJSON map[string]json.RawMessage
-	if s.repoID != "" {
-		// TUI mode: load just this repo. Surface read errors so startup can
-		// report "couldn't read your sessions" instead of silently showing
-		// an empty list that looks like a fresh install (#766).
-		raw, err := s.state.GetInstances(s.repoID)
-		if err != nil {
-			return nil, err
-		}
-		allJSON = map[string]json.RawMessage{s.repoID: raw}
-	} else {
-		// Daemon mode: load all repos. Surface a directory-level read error so
-		// the daemon reports "couldn't read your sessions" instead of silently
-		// presenting an empty list that looks like a fresh install while live
-		// sessions sit unreadable on disk (#868).
-		all, err := s.state.GetAllInstances()
-		if err != nil {
-			return nil, err
-		}
-		allJSON = all
-	}
-
-	var instances []*Instance
-	for repoID, jsonData := range allJSON {
-		if jsonData == nil || string(jsonData) == "[]" || string(jsonData) == "null" {
-			continue
-		}
-		var instancesData []InstanceData
-		if err := json.Unmarshal(jsonData, &instancesData); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
-		}
-		// Collapse duplicate records written before the dedup-on-save fix
-		// (#808) so a dup-containing file yields one sidebar row per session
-		// immediately, not just after the next save rewrites the file.
-		instancesData = dedupeInstanceData(instancesData)
-		for _, data := range instancesData {
-			data = data.ForStorage()
-			instance, err := FromInstanceData(data)
-			if err != nil {
-				// Instance's tmux session or worktree may have been
-				// destroyed externally. Log and skip rather than
-				// failing the entire load.
-				log.WarningLog.Printf("skipping instance %q: %v", data.Title, err)
-				continue
-			}
-			instance.PinStorageRepoID(repoID)
-			instances = append(instances, instance)
-		}
-	}
-
-	return instances, nil
 }
 
 // InstanceDeleteLockTimeout bounds how long DeleteInstanceByStableID waits for

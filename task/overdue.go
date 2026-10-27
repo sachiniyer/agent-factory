@@ -467,6 +467,7 @@ func WithScheduleHealth(tasks []Task, now time.Time) []Task {
 		// review).
 		tasks[i].Arming = ArmingUnknown
 		tasks[i].NextRunAt = nil
+		tasks[i].NextRunFar = false
 		tasks[i].Overdue = health.Overdue
 		tasks[i].MissedOccurrences = health.MissedOccurrences
 		tasks[i].MissedOccurrencesCapped = health.Saturated
@@ -533,6 +534,7 @@ func (t *Task) stripDerived() {
 	t.UnschedulableReason = ""
 	t.Unassessable = false
 	t.NextRunAt = nil
+	t.NextRunFar = false
 	t.Arming = ""
 	// The row identity is derived by the READ that produced this record
 	// (stampRowIdentity), so it must not reach disk: the file's own row order

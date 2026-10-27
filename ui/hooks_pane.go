@@ -143,15 +143,8 @@ func (h *HooksPane) handleEditMode(msg tea.KeyMsg) bool {
 		h.adding = false
 		h.editing = false
 		h.editBuffer = ""
-	case tea.KeyBackspace:
-		if len(h.editBuffer) > 0 {
-			runes := []rune(h.editBuffer)
-			h.editBuffer = string(runes[:len(runes)-1])
-		}
-	case tea.KeySpace:
-		h.editBuffer += " "
-	case tea.KeyRunes:
-		h.editBuffer += string(msg.Runes)
+	default:
+		h.editBuffer, _ = EditLine(h.editBuffer, msg)
 	}
 	return true
 }

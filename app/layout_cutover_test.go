@@ -68,18 +68,20 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		requireViewSized(t, view, tc.w, tc.h)
 		assert.Contains(t, view, "Agent Factory", "%dx%d: tree title", tc.w, tc.h)
 		assert.Contains(t, view, "alpha · Agent", "%dx%d: pane header carries title · tab", tc.w, tc.h)
-		// The header ellipsizes at the narrowest rails, so assert the stable
-		// prefix plus the manage affordance FIX 2 guarantees is never cut.
-		//
-		// The prefix shortened from "Automation" to "Autom" in #3630: the header
-		// now keeps its task COUNT at every width, and at the 22-column rail that
-		// 80x24 produces, the count plus the guaranteed manage hint leave six
-		// cells for the noun. The old header fit "Automation…" there only by
-		// dropping the count, which made a section with two tasks byte-identical
-		// to one with none. "Autom" is the prefix that survives every rail width.
-		assert.Contains(t, view, "Autom", "%dx%d: automations section", tc.w, tc.h)
-		manageHint := helpKey(keys.KeyTaskList) + " manage"
-		assert.Contains(t, view, manageHint, "%dx%d: the manage affordance survives", tc.w, tc.h)
+		// The header's noun is the last fragment shed since #5372: at every
+		// rail width either composed here produces (22 and 30 cells) the strip
+		// still says what is being counted, and never ellipsizes into
+		// "Autom…". The affordance outranks the secondary count, so the rail
+		// keeps "· m manage" at 30 cells and "(0 on)" at the 22-cell floor
+		// where the affordance itself has shed.
+		assert.Contains(t, view, "Automations:", "%dx%d: the automations noun survives (#5372)", tc.w, tc.h)
+		if tc.w >= 120 {
+			assert.Contains(t, view, "Automations: 1 · "+helpKey(keys.KeyTaskList)+" manage",
+				"%dx%d: the 30-cell rail keeps the affordance beside noun and primary count", tc.w, tc.h)
+		} else {
+			assert.Contains(t, view, "Automations: 1 (0 on)",
+				"%dx%d: the 22-cell rail floor keeps noun and full counts", tc.w, tc.h)
+		}
 		// #1087: the automations section lives inside the left rail, under a
 		// full-rail-width horizontal rule.
 		assert.Contains(t, view, strings.Repeat("─", h.lastLayout.RailRule.W),
@@ -324,7 +326,7 @@ func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
 
 // TestE2E_LayoutCutover_FocusRingAndHooksOverlay drives the real tea.Program
 // through the new workspace: Tab cycles the focus ring end to end (through
-// handleMenuHighlighting's re-emit path), the automations strip expands while
+// handleMenuHighlighting), the automations strip expands while
 // focused, Esc returns to the tree, and e opens/closes the hooks overlay.
 func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	eh := newE2EHarness(t)

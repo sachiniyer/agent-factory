@@ -181,6 +181,38 @@ const (
 	// outside this modal form.
 	KeySetAccount
 	KeyEditAccount
+
+	// KeyRenameTab opens the rename prompt for the tab the user is looking at
+	// (the focused pane's tab, or the tree's active tab — the same target `w`
+	// closes). The daemon's RenameTab RPC does the relabel (#1813); only kinds
+	// that display their name are renameable (session.TabKindRenameable), so the
+	// agent tab and shell tabs are refused before the prompt opens.
+	//
+	// "R", not "r": lower-case r is restore, and capital defaults are the
+	// established pattern for verbs that mutate (D kill, S split, F handoff).
+	// Appended at the end of this iota block for the same reason KeyConfigAgent
+	// was — inserting mid-block renumbers every KeyName after it.
+	KeyRenameTab
+
+	// KeyMoveTabLeft and KeyMoveTabRight move the current tab one slot in the
+	// roster (session.tab.reorder): the daemon's ReorderTab RPC the web reaches
+	// by dragging the tab bar and the CLI reaches via `af sessions tab-reorder`.
+	//
+	// "<" and ">", not shift+left/shift+right: a terminal that cannot encode a
+	// shifted arrow silently delivers plain left/right (pane focus), so the
+	// binding would exist and never arrive — a shipped capability nobody can
+	// press. The bare runes reach every terminal, the angle bracket names the
+	// direction the tab moves, and neither is claimed by tmux's prefix or af's
+	// reserved keys.
+	KeyMoveTabLeft
+	KeyMoveTabRight
+
+	// KeyRebindProject rebinds a registered project's stable identity to a
+	// replacement checkout inside the project picker (b): the repair when the
+	// checkout a registration names was moved or recloned elsewhere
+	// (`af projects rebind`, made reachable without leaving the TUI). Fixed:
+	// it is a picker-internal verb like D, not a global binding.
+	KeyRebindProject
 )
 
 // spec is one action's canonical binding definition: its default keys, help
@@ -248,6 +280,7 @@ var specs = []spec{
 	{name: KeyShiftTab, keys: []string{"shift+tab"}, desc: "focus prev", dispatch: true},
 	{name: KeyNewTab, configKey: "new_tab", keys: []string{"t"}, desc: "new tab", dispatch: true},
 	{name: KeyCloseTab, configKey: "close_tab", keys: []string{"w"}, desc: "del tab", dispatch: true},
+	{name: KeyRenameTab, configKey: "rename_tab", keys: []string{"R"}, desc: "rename tab", dispatch: true},
 	// The chip names BOTH gestures — "1-9/g go" — rather than gaining a second chip
 	// (#3021). The old "1-9" read as "there are nine tabs", and the footer is exactly
 	// where that impression was formed; naming g beside the digits says the digits are
@@ -262,10 +295,15 @@ var specs = []spec{
 	// hint its place.
 	{name: KeyJumpTab, keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}, helpLabel: "1-9/g", desc: "go"},
 	{name: KeyJumpTabPrompt, keys: []string{"g"}, helpLabel: "g", desc: "jump to tab (number or name)", dispatch: true},
+	// The move pair shares one description so hintPairs can collapse them into
+	// a single "</> move tab" chip, the same trick the scroll pair uses.
+	{name: KeyMoveTabLeft, configKey: "move_tab_left", keys: []string{"<"}, desc: "move tab", dispatch: true},
+	{name: KeyMoveTabRight, configKey: "move_tab_right", keys: []string{">"}, desc: "move tab", dispatch: true},
 	{name: KeyTaskList, configKey: "tasks", keys: []string{"m"}, desc: "tasks", dispatch: true},
 	{name: KeyManageAutomations, keys: []string{"enter"}, desc: "manage"},
 	{name: KeySwitchProjectRow, keys: []string{"enter"}, desc: "switch"},
 	{name: KeyDeleteProject, keys: []string{"D"}, desc: "delete project"},
+	{name: KeyRebindProject, keys: []string{"b"}, desc: "rebind project"},
 	{name: KeyOpenPane, configKey: "open_pane", keys: []string{"s"}, desc: "open pane", dispatch: true},
 	{name: KeySplitPane, configKey: "split_pane", keys: []string{"S"}, desc: "split pane", dispatch: true},
 	{name: KeyHidePane, configKey: "hide_pane", keys: []string{"x"}, desc: "hide pane", dispatch: true},
@@ -707,6 +745,10 @@ func displayKeys(keyList []string, compact bool) []string {
 func helpLabelFor(keyList []string) string {
 	return strings.Join(displayKeys(keyList, true), "/")
 }
+
+// HelpLabel is the help and menu label for keyList, for a caller that narrows a
+// binding's keys and must relabel what is left.
+func HelpLabel(keyList []string) string { return helpLabelFor(keyList) }
 
 func normalizeKeySpec(s string) (string, bool) {
 	if s == "" || strings.ContainsAny(s, " \t\n") {

@@ -46,6 +46,7 @@ var wantTabKindNames = map[TabKind]string{
 	TabKindProcess: "process",
 	TabKindWeb:     "web",
 	TabKindVSCode:  "vscode",
+	TabKindDocs:    "docs",
 }
 
 // TestStateNamesPinTheWireVocabulary is the spelling half: every declared value

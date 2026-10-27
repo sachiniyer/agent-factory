@@ -1,5 +1,6 @@
 const { createHash, randomUUID } = require("node:crypto");
 const { goSourcesEquivalent, patchTouchesOnlyCommentLines } = require("./go-inert.js");
+const { isCleanTextMerge } = require("./text-merge.js");
 
 // GitHub renders one GitHub App actor under several logins depending on the
 // surface being read: the detail app has been observed as `app/detail-app` on a
@@ -45,6 +46,17 @@ const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 // comment-only (#4477). The proof costs two reads per file on every
 // evaluation, so past this the files simply stay gated.
 const COMMENT_ONLY_PROOF_FILE_LIMIT = 20;
+// Who writes the gate's own update merges (#4886): `PUT update-branch` called with
+// the workflow token commits as this author, with GitHub (`web-flow`) as the
+// committer and a signature GitHub verified. Only such a merge may have a path
+// that BOTH sides changed proven line by line; any other merge keeps the
+// path-level proof, where a both-changed path refuses carry.
+const GATE_UPDATE_MERGE_AUTHOR = "github-actions[bot]";
+const GATE_UPDATE_MERGE_COMMITTER = "web-flow";
+// Bounds on that line-level proof. It reads four blobs per path, so past the
+// path limit, or for a blob past the byte limit, the link is simply unproven.
+const TEXT_MERGE_PROOF_PATH_LIMIT = 20;
+const TEXT_MERGE_PROOF_BLOB_BYTES = 4 * 1024 * 1024;
 // The label a maintainer applies to stop this gate on one pull request (#4576).
 //
 // Before #4576 a maintainer's only stop lever was converting the PR to a draft,
@@ -69,6 +81,12 @@ const HOLD_LABEL_EVENT_WINDOW = 100;
 // only — if this spelling is ever wrong the summary names `github-actions` as
 // the applier and the decision is unchanged.
 const GATE_LABEL_ACTOR = "github-actions";
+// The triggering_actor a workflow_dispatch raised with the job's GITHUB_TOKEN
+// carries — github-actions[bot]. Ambiguous-dispatch reconciliation adopts a
+// dispatched run only under this identity: any OTHER actor — a hand-fired
+// probe, or a foreign GitHub App's dispatch — cannot be the run this POST was
+// charged with (Codex on #5010).
+const GATE_DISPATCH_ACTOR = "github-actions[bot]";
 // Who may lift a hold on a pull request THEY OPENED (#4576).
 //
 // The issue asks for ALLOWED_AUTHORS, and that alone does not close the case the
@@ -485,18 +503,24 @@ const MAX_RATE_LIMIT_DELAY_MS = 10000;
 // mutations are also non-idempotent; never route them through these helpers.
 // The merge path retries only a definite ruleset refusal, after proving no
 // winner and re-running its preflight (#3902).
-async function retryRead(label, operation, subject = null) {
+// A parked-run approve does go through the helper, but its operation settles
+// the parked list to convergence before believing any failure — a
+// committed-but-unanswered approve reads as already done and is never replayed
+// (#5004).
+async function retryRead(label, operation, subject = null, { sleep } = {}) {
   return retryTransient(label, operation, {
     failureName: "AutoGateReadError",
     readFailure: true,
     subject,
+    sleep,
   });
 }
 
-async function retryCheckUpdate(label, operation) {
+async function retryCheckUpdate(label, operation, { sleep } = {}) {
   return retryTransient(label, operation, {
     failureName: "AutoGateCheckWriteError",
     readFailure: false,
+    sleep,
   });
 }
 
@@ -608,7 +632,7 @@ async function reconcileAmbiguousCreate(label, findCreated) {
 async function retryTransient(
   label,
   operation,
-  { failureName, readFailure, subject = null, delays = RETRY_DELAYS_MS },
+  { failureName, readFailure, subject = null, delays = RETRY_DELAYS_MS, sleep = delay },
 ) {
   for (let attempt = 0; ; attempt += 1) {
     try {
@@ -621,13 +645,17 @@ async function retryTransient(
       if (selfContradictory && !(await subject.exists())) {
         throw subjectGone(subject, error);
       }
-      if (!selfContradictory && !isRetryableGitHubError(error)) {
+      if (
+        !selfContradictory &&
+        !isRetryableGitHubError(error) &&
+        !(readFailure && isUnreadableResponseBody(error))
+      ) {
         throw error;
       }
       if (attempt >= delays.length) {
         throw retryFailure(label, attempt + 1, error, failureName, readFailure);
       }
-      await delay(retryDelayMilliseconds(error, delays[attempt]));
+      await sleep(retryDelayMilliseconds(error, delays[attempt]));
     }
   }
 }
@@ -720,6 +748,22 @@ function retryFailure(label, attempts, error, failureName, readFailure) {
   return failure;
 }
 
+// A precondition that failed inside a retried write is the READ's outcome, not
+// the write's: marked so the write's retry classifier lets it out immediately
+// (isRetryableGitHubError answers false on autoGateGuardFailure), rather than
+// multiplying the read's own retries under the write's schedule or relabeling
+// it a write error. Its own classification — the read-failure marker a caller
+// publishes UNKNOWN on, the association-change flag — is preserved (#4461).
+function writeRetryGuardFailure(error) {
+  const failure = new Error(error?.message || String(error));
+  failure.name = "AutoGateGuardError";
+  failure.autoGateGuardFailure = true;
+  failure.autoGateReadFailure = isReadFailure(error);
+  failure.autoGateAssociationChanged = error?.autoGateAssociationChanged === true;
+  failure.cause = error;
+  return failure;
+}
+
 function isRetryableGitHubError(error) {
   // A publish precondition that failed is not a failed write. Retrying it under
   // the write's schedule multiplies its own retries and, worse, relabels it as a
@@ -737,6 +781,43 @@ function isRetryableGitHubError(error) {
   }
   const detail = `${error?.code || ""} ${error?.name || ""} ${error?.message || ""}`;
   return /fetch failed|network|socket|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(detail);
+}
+
+// A response whose body never made it intact to the parser — cut mid-payload
+// at the edge, it surfaces from octokit as a bare SyntaxError ("Unterminated
+// string in JSON", "Unexpected end of JSON input") carrying neither a status
+// nor a GraphQL errors array, so the classifiers above cannot see it for what
+// it is: a transport defect, not a verdict (#4975). The same defect's other
+// spelling is a body that arrives whole but is not JSON at all — the edge
+// answering an HTML error page for api.github.com, which octokit reports as
+// that document (run 37329001725 died on `<html>`). It is admitted only for
+// READS, via retryTransient's readFailure flag — a truncated write response
+// can mean the write committed, and replaying it is the ambiguity #4763 routes
+// through reconcileAmbiguousCreate instead.
+function isUnreadableResponseBody(error) {
+  if (error instanceof SyntaxError || error?.name === "SyntaxError") {
+    return true;
+  }
+  const detail = `${error?.name || ""} ${error?.message || ""}`;
+  if (
+    /Unterminated string|Unexpected end of JSON input|Unexpected token.*JSON|JSON\.parse|invalid json/i.test(
+      detail,
+    )
+  ) {
+    return true;
+  }
+  // Markup where a JSON envelope belonged is the edge answering, not the API.
+  // The body lands on the error as its message — or under response.data when
+  // octokit parsed far enough to attach one — and a document leads with `<`,
+  // which no verdict text from these endpoints does. A false positive here
+  // costs a read one bounded retry; a miss reclassifies an outage as a verdict.
+  const data = error?.response?.data;
+  const bodies = [error?.message, typeof data === "string" ? data : data?.message];
+  if (bodies.some((body) => /^\s*</.test(String(body || "")))) {
+    return true;
+  }
+  const contentType = error?.response?.headers?.["content-type"];
+  return /text\/html|application\/xhtml/i.test(String(contentType || ""));
 }
 
 function isRetryableGraphQLError(error) {
@@ -877,7 +958,7 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
+async function evaluate({ github, context, core, prNumber, setOutputs = true, sleep }) {
   // The resolved PR's node id is what reportDecision's NOT_FOUND
   // classification reads, so evaluatePullRequest publishes it here the moment
   // it is known — a mid-evaluation failure then still writes its scoped
@@ -885,7 +966,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
   // (#4484, Codex on #4486).
   const resolved = {};
   try {
-    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs, resolved });
+    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs, resolved, sleep });
   } catch (error) {
     // A PR that no longer exists is a conclusion, not an evaluation failure: it
     // cannot be evaluated and there is nothing to report on it. isOpen false
@@ -916,7 +997,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
   }
 }
 
-async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true, resolved }) {
+async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true, resolved, sleep }) {
   const number = prNumber || (await findPullRequestNumber({ github, context, core }));
 
   if (!number) {
@@ -939,6 +1020,9 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
   const reasons = [];
   const notes = [];
+  // Reasons only time clears (#4782): reportDecision marks a decision blocked by
+  // nothing else, and the reconciliation pass re-evaluates it once it has aged.
+  const transientReasons = [];
   // A merge-queue batch head carries no reviewable content of its own — the
   // approval and verdict it stands in for live on each constituent PR's own
   // head — so the author gate is replaced by the constituent evaluation below
@@ -981,7 +1065,13 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   if (pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY") {
     reasons.push(`mergeability is blocked (${pr.mergeable}/${pr.mergeStateStatus})`);
   } else if (pr.mergeable !== "MERGEABLE") {
-    reasons.push(`mergeability is still ${pr.mergeable}`);
+    const reason = `mergeability is still ${pr.mergeable}`;
+    reasons.push(reason);
+    // GitHub computes mergeability asynchronously and sends no event when it
+    // settles (#4782), so only UNKNOWN or an absent value is a transient block.
+    if (pr.mergeable == null || pr.mergeable === "UNKNOWN") {
+      transientReasons.push(reason);
+    }
   }
 
   // The maintainer hold, HERE — among the structural refusals, above every read
@@ -1052,9 +1142,11 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     core,
     subject,
     validationRef,
+    sleep,
   });
   if (!requiredChecks.ok) {
     reasons.push(...requiredChecks.reasons);
+    transientReasons.push(...(requiredChecks.transientReasons || []));
   }
   notes.push(...requiredChecks.notes);
 
@@ -1098,6 +1190,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
       workflowsChanged,
       requiredCheckObservations: requiredChecks.observations,
       reasons,
+      transientReasons,
       notes,
     });
   }
@@ -1162,7 +1255,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   } else if (touchesTui) {
     let playTest;
     try {
-      playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, subject });
+      playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, contentHead, subject });
     } catch (error) {
       // An attestation that cannot be verified fails closed as a BLOCKED
       // reason for EVERY author class — never an unhandled error. Re-throwing
@@ -1343,6 +1436,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     workflowsChanged,
     requiredCheckObservations: requiredChecks.observations,
     reasons,
+    transientReasons,
     notes,
   });
 }
@@ -1814,6 +1908,14 @@ async function evaluateMergeQueueBatch({ github, context, pr, constituents, subj
 // constant existed.
 const DECISION_STAMP_PREFIX = "evaluated: ";
 const REQUIRED_CHECK_SNAPSHOT_PREFIX = "<!-- auto-gate-required-check-snapshot:";
+// Written on a failing decision whose every reason is transient (#4782): GitHub
+// mergeability still UNKNOWN, a required check still settling, or a Build/Lint
+// run that has not reported yet. None of those sends an event when it clears, so
+// the reconciliation pass re-evaluates a marked decision once it has aged. The
+// marker is absent whenever any other reason is present — a hold, a failed
+// check, a finding, a missing verdict or approval — and an unmarked decision is
+// never selected, so an untagged new reason fails toward "wait for an event".
+const TRANSIENT_BLOCK_MARKER = "<!-- auto-gate-transient-block -->";
 
 // A decision summary with the evaluation stamp removed, for readers that want the
 // REASON. The stamp is metadata about the write, not part of the decision.
@@ -1829,6 +1931,35 @@ function decisionSummaryBody(summary) {
 function requiredCheckSnapshotText(observations) {
   const payload = JSON.stringify({ version: 2, checks: observations || [] });
   return `${REQUIRED_CHECK_SNAPSHOT_PREFIX}${payload} -->`;
+}
+
+// Whether this result fails ONLY on reasons its producers tagged transient. The
+// manual path is excluded outright: its conclusion comes from
+// manualMergeBlockers, which are all maintainer-answerable, never transient.
+function isTransientOnlyBlock(result) {
+  const reasons = result?.reasons || [];
+  if (result?.shouldMerge || result?.manualMergeRequired || reasons.length === 0) {
+    return false;
+  }
+  const transient = new Set(result.transientReasons || []);
+  return reasons.every((reason) => transient.has(reason));
+}
+
+function decisionIsTransientOnlyBlock(decision) {
+  return String(decision?.output?.text || "")
+    .split("\n")
+    .includes(TRANSIENT_BLOCK_MARKER);
+}
+
+// The time a decision was last evaluated, from the stamp reportDecision writes
+// into its summary. null when the stamp is absent or unreadable.
+function decisionEvaluatedAt(decision) {
+  const summary = String(decision?.output?.summary || decision?.summary || "");
+  if (!summary.startsWith(DECISION_STAMP_PREFIX)) {
+    return null;
+  }
+  const line = summary.slice(DECISION_STAMP_PREFIX.length).split("\n")[0];
+  return parseTimestamp(line.split(" ")[0]);
 }
 
 function decisionRequiredCheckSnapshot(decision) {
@@ -2033,7 +2164,10 @@ async function reportDecision({ github, context, core, result, manual = false })
       // not when this later write happened. The scheduled reconciler compares
       // this identity/state tuple with the current check run and never needs to
       // order clocks owned by different observations (#4242).
-      text: requiredCheckSnapshotText(result.requiredCheckObservations),
+      text: [
+        requiredCheckSnapshotText(result.requiredCheckObservations),
+        ...(isTransientOnlyBlock(result) ? [TRANSIENT_BLOCK_MARKER] : []),
+      ].join("\n"),
     },
   };
   try {
@@ -2082,7 +2216,6 @@ function resolveAggregateHeads({ context, targets = [] }) {
     payload.pull_request?.head?.sha,
     payload.after,
     ...targets.map((target) => target.headSha),
-    payload.check_suite?.head_sha,
     payload.workflow_run?.head_sha,
     payload.sha,
     payload.before,
@@ -2235,11 +2368,11 @@ async function blockAggregateEvaluation({
 // the ruleset sees it.
 //
 // - The newest generation is non-passing. This is the ordinary case: the
-//   pre-lane job published a WAITING marker for this same event before the lane
-//   began. The commit is unmergeable whether or not this create landed — one
-//   that did land is itself a WAITING generation — so the transaction ends as
-//   #4461's could-not-evaluate: UNKNOWN, concluded AGGREGATE_NOT_PASSING, never
-//   neutral.
+//   pre-lane invalidation step published a WAITING marker for this same event
+//   before the lane began. The commit is unmergeable whether or not this create
+//   landed — one that did land is itself a WAITING generation — so the
+//   transaction ends as #4461's could-not-evaluate: UNKNOWN, concluded
+//   AGGREGATE_NOT_PASSING, never neutral.
 // - The newest generation satisfies the ruleset, none is visible, or the read
 //   failed too. Nothing proves the head unmergeable: a stale PASS may be what the
 //   ruleset reads, and this transaction could not replace it. The original error
@@ -3153,15 +3286,7 @@ async function upsertAggregateCheck({
       try {
         await beforePublish({ attempt });
       } catch (error) {
-        // Re-thrown as a guard failure so the write's retry classifier lets it
-        // out immediately, with the read-failure marker preserved for the caller.
-        const guardFailure = new Error(error?.message || String(error));
-        guardFailure.name = "AutoGateGuardError";
-        guardFailure.autoGateGuardFailure = true;
-        guardFailure.autoGateReadFailure = isReadFailure(error);
-        guardFailure.autoGateAssociationChanged = error?.autoGateAssociationChanged === true;
-        guardFailure.cause = error;
-        throw guardFailure;
+        throw writeRetryGuardFailure(error);
       }
       attempt += 1;
     };
@@ -3407,6 +3532,10 @@ async function commitsBehindBase({ github, context, baseRefName, headSha }) {
 // "Approve and run". Shared, because two callers need the same answer: the one
 // that approves them after an update-branch, and the one that has to describe an
 // absent required check honestly.
+function parkedRunsIn(workflowRuns) {
+  return (workflowRuns || []).filter((run) => run?.conclusion === "action_required");
+}
+
 async function listParkedRuns({ github, context, headSha, subject = null }) {
   const { owner, repo } = context.repo;
   const listed = await retryRead(
@@ -3421,7 +3550,7 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
       }),
     subject,
   );
-  return (listed?.data?.workflow_runs || []).filter((run) => run?.conclusion === "action_required");
+  return parkedRunsIn(listed?.data?.workflow_runs);
 }
 
 // The workflow the gate dispatches when nothing validated a head it created.
@@ -3435,6 +3564,12 @@ const GATE_WORKFLOW = "auto-gate.yml";
 // evaluations.
 const REQUIRED_CHECK_REEVALUATION_LIMIT = 10;
 const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 100;
+// Decision outputs are hydrated off one nodes() call per this many runs, not
+// one REST checks.get per blocked PR: a sweep over a repository full of failed
+// decisions must stay inside the workflow token's hourly budget (Codex on the
+// #5073 revive). 25 × the ~128 KiB output ceiling is also a bounded page,
+// ~50× smaller than the rollup page #4975 shrank.
+const DECISION_OUTPUT_BATCH_SIZE = 25;
 // A pass runs on the schedule, or as the one repository_dispatch type
 // auto-gate.yml subscribes to. GitHub delivers the */5 schedule every two to
 // five hours (#4571), so ordinary runs request the dispatch, at most once per
@@ -3442,6 +3577,36 @@ const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 100;
 const REQUIRED_CHECK_RECONCILIATION_DISPATCH = "auto-gate-reconcile";
 const REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
 const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
+// Transient blocks (#4782). A decision marked TRANSIENT_BLOCK_MARKER, or a fixed
+// aggregate left at AGGREGATE_WAITING_TITLE by a transaction that never finished,
+// clears with time and sends no event when it does. A pass re-evaluates one once
+// it is this old. The age is the spacing: a re-evaluation that still meets the
+// transient state rewrites the stamp, so one PR costs at most one evaluation per
+// window however long the state lasts. The aggregate's bound is longer because a
+// live transaction legitimately holds WAITING while it evaluates.
+const TRANSIENT_BLOCK_RETRY_AFTER_MS = 10 * 60 * 1000;
+const STALE_AGGREGATE_WAITING_AFTER_MS = 15 * 60 * 1000;
+// Transient retries share the pass's REQUIRED_CHECK_REEVALUATION_LIMIT, take only
+// the slots a PR Validation blocker left free, and never more than this many. The
+// oldest go first, so a backlog drains instead of starving.
+const TRANSIENT_BLOCK_REEVALUATION_LIMIT = 5;
+// A pass cannot assume a later run lands where not-yet-eligible work becomes
+// eligible: the request that spawned it fired while every marker it is about to
+// see was fresh, a platform-cancelled lane leaves no dispatch at all (#5160),
+// and the schedule delivers hours late (#4571). Work the scan saw but could not
+// select — a transient block inside its retry window, or a WAITING aggregate a
+// live transaction may still own — is therefore retained: the pass re-scans
+// until each item matures or resolves. It probes once on this cadence — a live
+// lane usually resolves a marker within a minute, and noticing early is worth
+// one extra read — and after that sleeps straight to the next maturity point
+// instead of replaying the whole repository scan every minute.
+const REQUIRED_CHECK_RECONCILIATION_PENDING_POLL_MS = 60 * 1000;
+// The wait is bounded by the stale-aggregate window plus one poll: every marker
+// already written when the scan ran matures inside that bound. Anything still
+// unmet when it ends — younger churn, or work past the per-pass caps — is handed
+// to exactly one successor through the ordinary request's rate window.
+const REQUIRED_CHECK_RECONCILIATION_PENDING_WAIT_MS =
+  STALE_AGGREGATE_WAITING_AFTER_MS + REQUIRED_CHECK_RECONCILIATION_PENDING_POLL_MS;
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
 // it. Safe to repeat: the resolver re-reads the PR and approves only what is
@@ -3510,15 +3675,22 @@ async function ensureValidationRun({
         per_page: 1,
       }),
     );
-    if ((listed?.data?.workflow_runs || []).length > 0) {
+    const foundRun = (listed?.data?.workflow_runs || [])[0];
+    if (foundRun) {
       // Found, which is NOT the same as running. GitHub creates these a few
       // seconds after the push, so the approve pass before this wait routinely
       // ran too early and found nothing — and this poll then confirmed existence
       // and returned, leaving them parked. On #3811's `31720d97` they appeared 4
       // seconds late and sat for 33 minutes (#3814). So the approve pass runs
-      // again here, on what the wait actually found.
+      // again here, on what the wait actually found — and on the found run
+      // itself, since the repo-wide parked listing can still lag the scoped
+      // one that just surfaced it.
       if (!await canRecover()) return { cancelled: true };
-      const { parked, approved } = await approveParkedRuns({ github, context, headSha, core });
+      const { parked, approved, cancelled } = await approveParkedRuns({
+        github, context, headSha, core, canRecover, sleep,
+        adoptedRun: foundRun,
+      });
+      if (cancelled) return { cancelled: true };
       return { dispatched: false, found: true, approved: parked.length === approved.length };
     }
     if (attempt < attempts - 1) {
@@ -3533,25 +3705,85 @@ async function ensureValidationRun({
     );
     return { dispatched: false };
   }
-  try {
-    await github.rest.actions.createWorkflowDispatch({
-      owner,
-      repo,
-      workflow_id: VALIDATION_WORKFLOW,
-      ref: headRefName,
-    });
-    core.notice(
-      `No PR Validation pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
-    );
-    return { dispatched: true };
-  } catch (error) {
-    // Not fatal: nothing merges either way, and the next evaluation reports the
-    // checks as unreported rather than pretending they passed.
-    core.warning(
-      `Could not dispatch PR Validation on ${headRefName} for ${headSha}: ${formatError(error)}`,
-    );
+  // What the reconcile may adopt is defined twice over: the since window, and
+  // — because created_at is whole-second and cannot order two events inside
+  // it — the identity of every run already listed before the first POST. A
+  // probe dispatched seconds earlier predates the cutoff; one dispatched in
+  // the same second is caught by id instead. Either way it is not the work
+  // this POST was charged with and must not suppress the retry.
+  let preDispatchRunIds = new Set();
+  const dispatched = await dispatchWorkflowWithRetry({
+    label: `could not dispatch PR Validation on ${headRefName} for ${headSha}`,
+    dispatch: () =>
+      github.rest.actions.createWorkflowDispatch({
+        owner,
+        repo,
+        workflow_id: VALIDATION_WORKFLOW,
+        ref: headRefName,
+      }),
+    beforeDispatch: async () => {
+      const existing = await retryRead(
+        `could not list the PR Validation runs already on ${headSha}`,
+        () =>
+          github.rest.actions.listWorkflowRuns({
+            owner,
+            repo,
+            workflow_id: VALIDATION_WORKFLOW,
+            head_sha: headSha,
+            per_page: 10,
+          }),
+        null,
+        { sleep },
+      );
+      preDispatchRunIds = new Set((existing?.data?.workflow_runs || []).map((run) => run.id));
+    },
+    landed: (since) =>
+      validationRunVisible({ github, context, headSha, since, sleep, excludeIds: preDispatchRunIds }),
+    // The ref is mutable: between a transient answer and its replay the branch
+    // can point somewhere else, and a dispatch there would validate that commit.
+    // canRecover re-reads the head before every attempt.
+    guard: canRecover,
+    sleep,
+  }).then(
+    (outcome) => outcome,
+    (error) => {
+      // Not fatal: nothing merges either way, and the next evaluation reports
+      // the checks as unreported rather than pretending they passed.
+      core.warning(
+        `Could not dispatch PR Validation on ${headRefName} for ${headSha}: ${formatError(error)}`,
+      );
+      return null;
+    },
+  );
+  if (!dispatched) {
     return { dispatched: false };
   }
+  if (dispatched.cancelled) {
+    return { cancelled: true };
+  }
+  if (dispatched.reconciled) {
+    // The adopted run is a FOUND run, not only a dispatched one: give it the
+    // same parked-run approval the poll gives any run it lists.
+    if (!await canRecover()) {
+      return { cancelled: true };
+    }
+    const { parked, approved, cancelled } = await approveParkedRuns({
+      github, context, headSha, core, canRecover, sleep,
+      adoptedRun: dispatched.run,
+    });
+    if (cancelled) {
+      return { cancelled: true };
+    }
+    core.notice(
+      `The PR Validation dispatch for ${headSha} was answered ambiguously, but a run is ` +
+        "already listed — adopted it instead of dispatching again.",
+    );
+    return { dispatched: true, found: true, approved: parked.length === approved.length };
+  }
+  core.notice(
+    `No PR Validation pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
+  );
+  return { dispatched: true };
 }
 
 // The same gap for a head the gate did not create (#4581). #4430's b63f9752 was
@@ -3669,24 +3901,400 @@ async function dispatchMissingValidationRun({
   return { dispatched: true };
 }
 
-async function approveParkedRuns({ github, context, headSha, core }) {
-  const { owner, repo } = context.repo;
-  const parked = await listParkedRuns({ github, context, headSha });
+async function approveParkedRuns({
+  github, context, headSha, core,
+  canRecover = async () => true,
+  sleep = delay,
+  adoptedRun = null,
+}) {
+  const listed = await listParkedRuns({ github, context, headSha });
+  // A run a reconcile just adopted can still sit in action_required while the
+  // repository-wide listing lags the workflow-specific one that found it —
+  // the same index gap this file's parked-list read-back exists for. Fold it
+  // in so "parked" can never come back empty-and-vacuously-approved while the
+  // adopted run is in fact waiting on this pass.
+  const parked =
+    adoptedRun?.conclusion === "action_required" &&
+    !listed.some((run) => run.id === adoptedRun.id)
+      ? [adoptedRun, ...listed]
+      : listed;
   const approved = [];
   for (const run of parked) {
     try {
-      await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: run.id });
+      const outcome = await approveParkedRun({ github, context, headSha, run, canRecover, sleep });
+      if (outcome?.cancelled) {
+        return { parked, approved, cancelled: true };
+      }
       approved.push(run);
     } catch (error) {
-      // Not fatal on its own: the decision reports what is still waiting, and a
-      // run the gate could not approve becomes an explicit unmet item rather than
-      // the misleading "required check is missing".
+      // A guard that could not answer is not an approval refusal: a failed
+      // precondition read — eligibility or the settle read-back itself — is an
+      // unknown about the write's safety, and "unapproved" would misreport it
+      // as a run GitHub kept parked. It propagates with the read-failure
+      // classification writeRetryGuardFailure preserved; real approve failures
+      // keep the warning shape — an explicit unmet item, not a hidden cancel.
+      if (error?.autoGateGuardFailure) {
+        throw error;
+      }
       core.warning(
         `Could not approve workflow run ${run.id} (${run.name}) on ${headSha}: ${formatError(error)}`,
       );
     }
   }
   return { parked, approved };
+}
+
+// One parked run's approval, under the same write policy every other gate write
+// already goes through: transient failures retried by retryTransient, a
+// definitive refusal rethrown untouched (#5004). The bare call was the one
+// write in successor-head recovery without it — a lone 500 ("Unexpected end of
+// JSON input", run 36667620661) failed the whole recovery and reddened a master
+// run for a miss the next dispatch approved without incident.
+//
+// What makes retrying this POST safe is the read-back, not the response. A
+// failed approve says nothing about whether it committed, and a failed read-back
+// that ran ONCE would answer from a listing that can still lag the commit — the
+// same ambiguity reconcileAmbiguousCreate settles (#4763), so the parked list
+// is polled to convergence before the error is believed. A run that leaves
+// action_required IS the goal state, whether the "failed" call landed or a
+// concurrent approver beat this lane to it; only a run still parked through the
+// whole settle window earns a replay, or — on a definitive refusal — the report
+// the caller writes. Two exceptions stand outside that ambiguity: an explicit
+// rate-limit answer rejected the request outright (nothing committed, so it
+// goes straight back to the write retry, which honors Retry-After — routing it
+// through the read-back would let a rate-limited LISTING bury a refusal the
+// retry could have waited out), and a recovery precondition, which is
+// re-established before every attempt like every other retried write's guard —
+// the settle window can spend seconds, and a PR that closed or moved meanwhile
+// must not get a stale head's run approved.
+async function approveParkedRun({ github, context, headSha, run, canRecover, sleep }) {
+  const { owner, repo } = context.repo;
+  return retryCheckUpdate(
+    `could not approve workflow run ${run.id} (${run.name}) on ${headSha}`,
+    async () => {
+      let recoverable;
+      try {
+        recoverable = await canRecover();
+      } catch (error) {
+        throw writeRetryGuardFailure(error);
+      }
+      if (!recoverable) {
+        return { cancelled: true };
+      }
+      try {
+        await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: run.id });
+      } catch (error) {
+        if (isDefinitiveRateLimitResponse(error)) {
+          throw error;
+        }
+        if (await runLeftParkedList({ github, context, headSha, runId: run.id, sleep })) {
+          return {};
+        }
+        throw error;
+      }
+      return {};
+    },
+    { sleep },
+  );
+}
+
+// The approve guard for lanes that are not successor-head recovery — the
+// post-update merge pass and the evaluate pass: the PR the parked runs belong
+// to must still be open and still point at that head when the POST fires. The
+// settle window can spend seconds, and a hand merge, a close, or a push
+// meanwhile leaves a replay approving a stale head's run (#5004, Codex on
+// #5005). Deliberately REST while the lanes' other reads are GraphQL — the
+// same cross-path reasoning as resolvedPullRequest.exists — with only a
+// definite 404 answering "gone". The read rides the same read-retry policy as
+// every other GitHub read in the gate: a transient failure must not abort the
+// approval, and an exhausted one escapes as a READ-marked guard failure
+// rather than waving the write through unguarded.
+function liveHeadGuard({ github, context, prNumber, headSha, sleep }) {
+  const { owner, repo } = context.repo;
+  return async () => {
+    let live;
+    try {
+      live = await retryRead(
+        `could not re-read PR #${prNumber} before approving its parked runs`,
+        () => github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
+        null,
+        { sleep },
+      );
+    } catch (error) {
+      if (Number(error?.status ?? error?.response?.status) === 404) return false;
+      throw error;
+    }
+    return !pullRequestEnded(live?.data) && normalizeHeadSha(live?.data?.head?.sha) === headSha;
+  };
+}
+
+// The read-back of an approve whose POST did not report its outcome: whether
+// the run still reads as parked, asked over the same settle window the
+// ambiguous-create reconcile uses — a listing can answer "parked" for a run
+// the commit already un-parked, and believing one stale answer replays the POST
+// into a refusal for a write that already landed (#5004, #4763's shape).
+//
+// Read the run directly, never the repository-wide listing: that index lags in
+// BOTH directions — still showing a just-approved run parked, and omitting a
+// just-created parked run entirely — so "absent from the list" proves nothing
+// (Codex on #5005). The run's own GET carries its conclusion, which flips off
+// action_required only when approval actually committed. Nothing inside the
+// poll is retried twice: a transient failure or a vanished run (404 is a
+// stale read, not a verdict — a run listed parked seconds ago cannot be gone)
+// occupies the same settle slot a "still parked" answer would. Resolves true
+// once the run is out of action_required; false when it stayed parked through
+// the whole window, so the caller may retry or report the original failure. A
+// window that ends on unreadable answers escapes as a guard failure marked a
+// READ failure — that is what exhausted — never as "still parked".
+async function runLeftParkedList({ github, context, headSha, runId, sleep }) {
+  const { owner, repo } = context.repo;
+  try {
+    return await retryTransient(
+      `could not confirm whether run ${runId} left the parked list on ${headSha}`,
+      async () => {
+        let run;
+        try {
+          run = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: runId });
+        } catch (error) {
+          if (Number(error?.status ?? error?.response?.status) !== 404) {
+            throw error;
+          }
+        }
+        if (run && run.data?.conclusion !== "action_required") {
+          return true;
+        }
+        const stillParked = new Error(`run ${runId} still reads as parked on ${headSha}`);
+        stillParked.status = 503;
+        stillParked.autoGateRunStillParked = true;
+        throw stillParked;
+      },
+      {
+        failureName: "AutoGateReadError",
+        readFailure: true,
+        delays: CHECK_CREATE_SETTLE_DELAYS_MS,
+        sleep,
+      },
+    );
+  } catch (error) {
+    // The settle window ended on the sentinel itself — every read reported the
+    // run parked — rather than on an answer GitHub could not serve.
+    if (error.cause?.autoGateRunStillParked === true) {
+      return false;
+    }
+    throw writeRetryGuardFailure(error);
+  }
+}
+
+// A workflow_dispatch POST is a write GitHub can answer ambiguously: a 5xx or
+// a transport cut proves nothing about whether the run was created — the same
+// shape #4763 gave check creates and #5004 gave parked-run approvals. The
+// answer to an ambiguous failure is therefore neither a blind replay (the run
+// may already exist) nor an immediate failure. It is a settle-window read-back
+// first — `landed` — and a bounded retry only while nothing is visible. An
+// explicit rate-limit response skips the reconcile on purpose: it rejected the
+// request before any work, so the write replays directly, honoring Retry-After.
+// A definitive refusal or an exhausted retry propagates — those stay loud.
+async function dispatchWorkflowWithRetry({ label, dispatch, landed, guard = null, sleep, beforeDispatch = null }) {
+  // The cutoff the settle window adopts runs against opens at the first real
+  // attempt — after the guard, not before it: a run dispatched while the guard
+  // was still re-reading predates the POST it would be blamed on and must not
+  // be adopted. It is captured once so a replay's reconcile still sees a run
+  // an earlier attempt created. beforeDispatch runs in the same place, once:
+  // the caller snapshots what already exists there, because whole-second
+  // created_at cannot order two events inside one second but a run id can.
+  let firstAttemptAt = null;
+  return retryTransient(
+    label,
+    async () => {
+      // Same shape as the approve retry (#5005): the settle window can outlive
+      // the state the caller validated, so a dispatch aimed at a mutable branch
+      // ref re-establishes its guard before EVERY attempt — a replay that skips
+      // it can validate a commit this lane never observed. A guard that itself
+      // exhausted ITS retries carries a retryable-looking read error; wrapping
+      // it as the guard's outcome lets it out of the write's schedule instead
+      // of rerunning an already-exhausted read once per dispatch attempt.
+      const checkGuard = async () => {
+        if (!guard) {
+          return true;
+        }
+        let passed;
+        try {
+          passed = await guard();
+        } catch (error) {
+          throw writeRetryGuardFailure(error);
+        }
+        return passed;
+      };
+      if (!await checkGuard()) {
+        return { cancelled: true };
+      }
+      if (firstAttemptAt === null) {
+        try {
+          await beforeDispatch?.();
+        } catch (error) {
+          // The pre-dispatch snapshot is a precondition of the reconcile —
+          // a failed one cannot be told apart from a POST that committed, so
+          // it leaves marked as the read's outcome, like the guard's.
+          throw writeRetryGuardFailure(error);
+        }
+        // The snapshot's own retries can spend seconds — long enough for the
+        // ref the dispatch targets to move. The POST's guard is the last read
+        // before it fires, not the one that preceded the snapshot (Codex).
+        if (!await checkGuard()) {
+          return { cancelled: true };
+        }
+        firstAttemptAt = Date.now();
+      }
+      try {
+        await dispatch();
+        return { dispatched: true };
+      } catch (error) {
+        if (!isDefinitiveRateLimitResponse(error) && isRetryableGitHubError(error)) {
+          const found = await landed(firstAttemptAt);
+          if (found) {
+            return { dispatched: true, reconciled: true, run: found };
+          }
+        }
+        throw error;
+      }
+    },
+    { failureName: "AutoGateWriteError", readFailure: false, sleep },
+  );
+}
+
+// The settle-window read-back behind `landed` — runLeftParkedList's shape for a
+// different question. `find` lists the run the ambiguous POST may have created;
+// a not-found answer consumes a settle slot rather than ending the window,
+// because a listing can lag the commit it is asked about. A window that ends on
+// "not there" resolves null, so the caller may retry the write; a listing that
+// cannot be read at all escapes as a guard failure — what exhausted is the
+// read-back, and no replay of a possibly-committed write should rest on it.
+async function settledWorkflowRun({ label, find, sleep }) {
+  try {
+    return await retryTransient(
+      label,
+      async () => {
+        const found = await find();
+        if (found) {
+          return found;
+        }
+        const notYet = new Error("the dispatched run is not visible yet");
+        notYet.status = 503;
+        notYet.autoGateRunNotVisible = true;
+        throw notYet;
+      },
+      {
+        failureName: "AutoGateReadError",
+        readFailure: true,
+        delays: CHECK_CREATE_SETTLE_DELAYS_MS,
+        sleep,
+      },
+    );
+  } catch (error) {
+    if (error.cause?.autoGateRunNotVisible === true) {
+      return null;
+    }
+    throw writeRetryGuardFailure(error);
+  }
+}
+
+// Whether the post-update follow-up dispatch already produced its run. The runs
+// API cannot filter on workflow_dispatch inputs, so the window is the identity:
+// an auto-gate.yml dispatch run created at-or-after the first POST is the one
+// to adopt. A foreign dispatch inside the same seconds-wide window is
+// indistinguishable — and safe to adopt anyway, on two layers of backstop: the
+// recovery concurrency group dedupes same-(PR, initiating-head) dispatches into
+// one evaluation, and what the follow-up chases is re-evaluated by the
+// successor's own events and the stale-WAITING sweep regardless (#5064). This
+// run is excluded: it can itself be a workflow_dispatch inside the cutoff's
+// whole-second rounding, and it is certainly not its own follow-up.
+async function gateFollowUpRun({ github, context, since, sleep }) {
+  const { owner, repo } = context.repo;
+  const cutoff = Math.floor(since / 1000) * 1000;
+  const created = new Date(cutoff).toISOString().replace(/\.\d{3}Z$/, "Z");
+  return settledWorkflowRun({
+    label: "could not confirm whether the Auto Gate follow-up run exists",
+    find: async () => {
+      const listed = await github.rest.actions.listWorkflowRuns({
+        owner,
+        repo,
+        workflow_id: GATE_WORKFLOW,
+        event: "workflow_dispatch",
+        created: `>=${created}`,
+        per_page: 10,
+      });
+      const runs = listed?.data?.workflow_runs;
+      if (!Array.isArray(runs)) {
+        throw new Error("the workflow-run listing had no runs array");
+      }
+      return (
+        runs.find((run) => {
+          const created = Date.parse(run?.created_at);
+          return run?.id !== context.runId && Number.isFinite(created) && created >= cutoff;
+        }) || null
+      );
+    },
+    sleep,
+  });
+}
+
+// Any PR Validation run created at-or-after the first POST settles the
+// ambiguous dispatch — however it arrived: this POST, or the push's own
+// pull_request run landing late. The existence check repeats the poll above,
+// so no event filter: the run this dispatch creates is a workflow_dispatch
+// run, which a pull_request filter would never see. The since window matters:
+// a pr.yml run that PREDATES the first attempt — a hand-dispatched probe, for
+// instance, which never runs the required Build/Lint — cannot be the work this
+// POST was charged with, so it must not suppress the retry. And because the
+// timestamp cannot order events inside one second, "predates" is proven by the
+// pre-dispatch listing's run ids, with the window as the second guard.
+async function validationRunVisible({ github, context, headSha, since, sleep, excludeIds = null }) {
+  const { owner, repo } = context.repo;
+  // The API reports created_at at whole-second precision; a millisecond cutoff
+  // would reject the run this POST created inside the same second. The same
+  // rounding means the cutoff alone cannot exclude a run that predates the
+  // POST by less than a second — a probe dispatched just before it — so runs
+  // already listed before the first attempt are excluded by id instead.
+  const cutoff = Math.floor((since ?? 0) / 1000) * 1000;
+  return settledWorkflowRun({
+    label: `could not confirm whether a PR Validation run exists for ${headSha}`,
+    find: async () => {
+      const listed = await github.rest.actions.listWorkflowRuns({
+        owner,
+        repo,
+        workflow_id: VALIDATION_WORKFLOW,
+        head_sha: headSha,
+        per_page: 10,
+      });
+      const runs = listed?.data?.workflow_runs;
+      if (!Array.isArray(runs)) {
+        throw new Error("the workflow-run listing had no runs array");
+      }
+      return (
+        runs.find((run) => {
+          const created = Date.parse(run?.created_at);
+          if (!Number.isFinite(created) || created < cutoff || excludeIds?.has(run.id)) {
+            return false;
+          }
+          // A run the listing can prove predates the window is already
+          // excluded by id; one that ESCAPED the pre-dispatch snapshot — the
+          // index lagging it — passes the timestamp check anyway, so the last
+          // discriminator is who dispatched it. The push's own pull_request
+          // run is adoptable whoever pushed; a workflow_dispatch run is the
+          // POST's work only when the gate's own token raised it. Matching any
+          // bot would still adopt a foreign app's dispatch — a probe raised by
+          // other automation, which carries no required checks — so the match
+          // is the dispatcher identity itself, not the bot class (#5010, Codex).
+          if (run.event !== "workflow_dispatch") {
+            return true;
+          }
+          const actor = run?.triggering_actor || run?.actor;
+          return String(actor?.login || "") === GATE_DISPATCH_ACTOR;
+        }) || null
+      );
+    },
+    sleep,
+  });
 }
 
 // A PR the gate does not own can end while a transaction on it is in flight
@@ -3729,13 +4337,13 @@ async function updateBranchToBase({ github, context, prNumber, headSha }) {
 
 async function merge({
   github, context, core, prNumber, expectedHeadSha, aggregateCheckRunId,
-  ruleViolationRetries = 1,
+  ruleViolationRetries = 1, sleep = delay,
 }) {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     throw new Error(`Invalid PR number for merge: ${prNumber}`);
   }
 
-  const gate = await evaluate({ github, context, core, prNumber, setOutputs: false });
+  const gate = await evaluate({ github, context, core, prNumber, setOutputs: false, sleep });
   if (evaluationFailed(gate)) {
     throw evaluationFailure(
       `Auto Gate merge evaluation failed for PR #${prNumber}: ${gate.summary}`,
@@ -3839,7 +4447,10 @@ async function merge({
         const newHead = normalizeHeadSha(updated?.data?.head?.sha);
         if (newHead && newHead !== normalizeHeadSha(gate.headSha)) {
           observedUpdatedHead = newHead;
-          const { approved } = await approveParkedRuns({ github, context, headSha: newHead, core });
+          const stillOurs = liveHeadGuard({ github, context, prNumber, headSha: newHead, sleep });
+          const { approved } = await approveParkedRuns({
+            github, context, headSha: newHead, core, canRecover: stillOurs, sleep,
+          });
           if (approved.length > 0) {
             core.notice(
               `Approved ${approved.length} workflow run(s) parked on ${newHead} after update-branch: ` +
@@ -3852,6 +4463,8 @@ async function merge({
             core,
             headSha: newHead,
             headRefName: updated?.data?.head?.ref || gate.headRefName,
+            canRecover: stillOurs,
+            sleep,
           });
         }
       }
@@ -3889,19 +4502,38 @@ async function merge({
     // resolver carries the initiating SHA as an exclusion: it waits until a
     // different head is visible before publishing any target. A single read of
     // "current" can be stale in the successor just as it was in this run.
-    // Single-shot: a dispatch accepted before a transport error must not be
-    // replayed. If scheduling fails, report a concrete recovery command.
+    // Retried, not single-shot (#5010): a lone transient answer — 5xx, a
+    // transport cut, a rate limit — used to take the run red and print a
+    // recovery comment over a scheduling call that needed one more attempt.
+    // The helper reconciles a run the ambiguous POST may already have created
+    // instead of replaying blind; a definitive refusal or an exhausted retry
+    // still fails the run with a concrete recovery command.
     const recoveryCommand = gateRecoveryCommand({
       context, ref: gate.baseRefName, prNumber, previousHeadSha: gate.headSha,
     });
     try {
-      await github.rest.actions.createWorkflowDispatch({
-        owner,
-        repo,
-        workflow_id: GATE_WORKFLOW,
-        ref: gate.baseRefName,
-        inputs: { pr_number: String(prNumber), previous_head_sha: gate.headSha },
+      const scheduledRun = await dispatchWorkflowWithRetry({
+        label: `could not schedule the Auto Gate follow-up for PR #${prNumber}`,
+        dispatch: () =>
+          github.rest.actions.createWorkflowDispatch({
+            owner,
+            repo,
+            workflow_id: GATE_WORKFLOW,
+            ref: gate.baseRefName,
+            inputs: {
+              pr_number: String(prNumber),
+              previous_head_sha: gate.headSha,
+            },
+          }),
+        landed: (since) => gateFollowUpRun({ github, context, since, sleep }),
+        sleep,
       });
+      if (scheduledRun.reconciled) {
+        core.notice(
+          `The follow-up dispatch for PR #${prNumber} was answered ambiguously, but its run is ` +
+            "already listed — adopted it instead of dispatching again.",
+        );
+      }
     } catch (error) {
       const failure = new Error(
         `Auto Gate infrastructure failure for PR #${prNumber}: update was accepted but follow-up scheduling failed: ` +
@@ -4112,6 +4744,69 @@ async function readOrNull(operation) {
   }
 }
 
+// Events whose newer suites did NOT hide an older aggregate from the ruleset:
+// #3992 merged with its aggregate in an Auto Gate suite that already had newer
+// pull_request_review and pull_request_review_comment suites (#4802).
+const NON_SUPERSEDING_EVENTS = new Set(["pull_request_review", "pull_request_review_comment"]);
+
+// Why a PASS the rollup shows can still be "expected" to the ruleset (#4802).
+//
+// checks.create takes no suite: GitHub files every Actions-token check run in
+// the EARLIEST github-actions suite on the head, whichever run creates it. When
+// a newer suite of that same workflow arrives from a head event, the ruleset
+// stops counting the older suite's runs, and no rerun or republish moves the
+// aggregate out of it. Returns the explanation, or null when the placement is
+// not provably superseded — including when the aggregate's own check run or the
+// head's workflow runs cannot be read, so a missing fact never changes wording.
+async function describeSupersededPlacement({ github, owner, repo, headSha, ownedAggregateCheck }) {
+  let suiteId = Number(ownedAggregateCheck?.check_suite?.id);
+  if (!Number.isFinite(suiteId) || suiteId <= 0) {
+    const checkRunId = Number(ownedAggregateCheck?.id);
+    if (!Number.isFinite(checkRunId) || checkRunId <= 0) {
+      return null;
+    }
+    const checkRun = await github.rest.checks.get({ owner, repo, check_run_id: checkRunId });
+    suiteId = Number(checkRun?.data?.check_suite?.id);
+    if (!Number.isFinite(suiteId) || suiteId <= 0) {
+      return null;
+    }
+  }
+  // Every page: the listing is newest first and the placement is one of the
+  // head's EARLIEST runs, so a busy head (#4799 had ~40 Auto Gate runs) pushes
+  // it past page one, where a single read would miss it and say nothing.
+  const listed = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+    owner,
+    repo,
+    head_sha: headSha,
+    per_page: 100,
+  });
+  const runs = Array.isArray(listed) ? listed : listed?.workflow_runs || [];
+  const placement = runs.find((run) => Number(run?.check_suite_id) === suiteId);
+  if (!placement) {
+    return null;
+  }
+  const newer = runs
+    .filter(
+      (run) =>
+        run?.workflow_id === placement.workflow_id &&
+        Number(run?.check_suite_id) > suiteId &&
+        !NON_SUPERSEDING_EVENTS.has(run?.event),
+    )
+    .sort((a, b) => Number(a.check_suite_id) - Number(b.check_suite_id));
+  if (newer.length === 0) {
+    return null;
+  }
+  const workflow = placement.name || `workflow ${placement.workflow_id}`;
+  const newerSuites = newer.map((run) => `${run.check_suite_id} (${run.event})`).join(", ");
+  return (
+    `GitHub is not counting the passing ${AUTO_GATE_DECISION_CHECK}: it was placed in check suite ` +
+    `${suiteId} (${workflow} · ${placement.event}), and newer ${workflow} suite ${newerSuites} on ` +
+    `${headSha} supersedes it for the ruleset. The placement is permanent for this head — no rerun ` +
+    "or republish moves it. Push a new head (a commit with an identical tree re-rolls placement) " +
+    "and gate that head (#4802)"
+  );
+}
+
 async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck }) {
   const status = Number(
     error?.status ?? error?.response?.status ?? error?.response?.data?.status,
@@ -4278,9 +4973,15 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
   // standing. Unknown ownership is still not "no winner": keep that error loud
   // and do not overwrite a transaction this run could not read (#3551).
   if (refusal.unprovenReason && !error.autoGateOwnershipUnknown) {
+    // Same control flow either way; only the reason changes. A superseded
+    // placement is permanent for this head, and "propagation" was the wrong
+    // name for it through three incidents (#4802).
+    const superseded = await readOrNull(() =>
+      describeSupersededPlacement({ github, owner, repo, headSha: expectedHeadSha, ownedAggregateCheck }),
+    );
     return {
       reason: "unproven-wait",
-      message: `Refusing to merge PR #${prNumber}; ${refusal.unprovenReason}`,
+      message: `Refusing to merge PR #${prNumber}; ${superseded || refusal.unprovenReason}`,
     };
   }
 
@@ -4869,8 +5570,6 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
                         externalId
                         permalink
                         title
-                        summary
-                        text
                         checkSuite { app { databaseId slug } }
                       }
                       ... on StatusContext {
@@ -4886,6 +5585,23 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
             }
           }
         }
+      }
+    }
+  }
+`;
+
+// The same CheckRun output fields the reconciliation page stopped selecting,
+// read back for only the decision runs that need them — by node id, which the
+// mapped runs carry as node_id and REST check runs carry natively.
+const DECISION_OUTPUT_QUERY = `
+  query DecisionCheckRunOutputs($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      __typename
+      ... on CheckRun {
+        id
+        title
+        summary
+        text
       }
     }
   }
@@ -5086,33 +5802,336 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
     }
     after = connection.pageInfo.endCursor;
   }
+  // The decision run's output carries the stamped evaluation, the
+  // blocked-source summary, and the required-check snapshot every
+  // reevaluation consumer reads — up to ~128 KiB of summary+text. It is
+  // the ONLY run on the head those consumers open, so the GraphQL page no
+  // longer selects output fields for every context of every PR: one
+  // truncated page then cost the whole snapshot (#4975). A completed
+  // non-success decision is the one that needs them.
+  //
+  // Hydrate the array the map KEEPS, and only once pagination settles: open
+  // PRs can share a head, each pull's node carries the same rollup, and the
+  // last writer's array is the one stored — hydrating inside the pull loop
+  // would keep output for the last PR on a shared head and silently drop it
+  // for every earlier one (Codex on #5073). The reads are batched by node id
+  // for the same reason: one nodes() call per DECISION_OUTPUT_BATCH_SIZE
+  // decisions instead of one REST checks.get per blocked PR, which on a busy
+  // repository would outrun the workflow token's hourly budget.
+  const blockedDecisions = [];
+  for (const pull of pulls) {
+    const headSha = normalizeHeadSha(pull?.headRefOid);
+    const prNumber = Number(pull?.number);
+    const identity = Number.isSafeInteger(prNumber) && prNumber > 0 && headSha
+      ? decisionIdentity(prNumber, headSha)
+      : null;
+    const decision = identity && newestCheckGeneration(
+      (checkRunsByHead.get(headSha) || []).filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          run.app?.id === GITHUB_ACTIONS_APP_ID,
+      ),
+    );
+    if (
+      decision &&
+      decision.status === "completed" &&
+      decision.conclusion !== "success"
+    ) {
+      blockedDecisions.push(decision);
+    }
+  }
+  const nodeAddressable = blockedDecisions.filter(
+    (run) => typeof run.node_id === "string" && run.node_id !== "",
+  );
+  for (let at = 0; at < nodeAddressable.length; at += DECISION_OUTPUT_BATCH_SIZE) {
+    const batch = nodeAddressable.slice(at, at + DECISION_OUTPUT_BATCH_SIZE);
+    const response = await retryRead(
+      "could not read decision check-run outputs",
+      () =>
+        github.graphql(DECISION_OUTPUT_QUERY, {
+          ids: batch.map((run) => run.node_id),
+        }),
+    );
+    const hydrated = new Map(
+      (response?.nodes || [])
+        .filter((node) => node?.__typename === "CheckRun" && node.id)
+        .map((node) => [node.id, node]),
+    );
+    for (const run of batch) {
+      const node = hydrated.get(run.node_id);
+      if (node) {
+        run.output = {
+          title: node.title ?? run.output?.title,
+          summary: node.summary,
+          text: node.text,
+        };
+      }
+    }
+  }
+  // A run the page gave no node id cannot ride the batch — the REST check-run
+  // read stays as the per-run fallback for it.
+  const batched = new Set(nodeAddressable);
+  for (const run of blockedDecisions) {
+    if (batched.has(run) || !Number.isSafeInteger(run.id)) {
+      continue;
+    }
+    const detail = await retryRead(
+      `could not read the decision check run ${run.id}`,
+      () =>
+        github.rest.checks.get({
+          owner,
+          repo,
+          check_run_id: run.id,
+        }),
+    );
+    run.output = {
+      title: detail?.data?.output?.title ?? run.output?.title,
+      summary: detail?.data?.output?.summary,
+      text: detail?.data?.output?.text,
+    };
+  }
   return { pulls, checkRunsByHead, statusesByHead, pages };
 }
 
-async function listRequiredCheckReevaluationTargets({ github, context, core }) {
+// Decisions blocked only by transient state, and heads whose fixed aggregate was
+// left at "WAITING: refreshing", each old enough to retry (#4782). Everything it
+// reads is in the reconciliation snapshot already, so it costs no API call.
+// The candidates are eligible now; the pending entries are the same two shapes
+// observed inside their retry/stale window, carrying the moment each becomes
+// selectable. A stranded marker's lane may be dead (#5160), so pending work is
+// the pass's own responsibility to retain or hand off — see the caller.
+function transientBlockReevaluationCandidates({ pulls, checkRunsByHead, now }) {
+  const candidates = [];
+  const pending = [];
+  for (const pull of pulls || []) {
+    const headSha = normalizeHeadSha(pull?.head?.sha || pull?.headRefOid);
+    const baseRefName = pull?.base?.ref || pull?.baseRefName;
+    const state = String(pull?.state || "").toLowerCase();
+    const prNumber = Number(pull?.number);
+    if (
+      !headSha ||
+      !Number.isSafeInteger(prNumber) ||
+      prNumber <= 0 ||
+      state !== "open" ||
+      baseRefName !== "master"
+    ) {
+      continue;
+    }
+    const identity = decisionIdentity(prNumber, headSha);
+    const headChecks = checkRunsByHead.get(headSha) || [];
+    const ownedByActions = (run) => run.app?.id === GITHUB_ACTIONS_APP_ID;
+
+    // An unreadable time counts as old: a redundant evaluation is bounded by the
+    // per-pass limit, and a permanent freeze is the defect this exists to end.
+    const decision = newestCheckGeneration(
+      headChecks.filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          ownedByActions(run),
+      ),
+    );
+    if (
+      decision &&
+      decision.status === "completed" &&
+      decision.conclusion !== "success" &&
+      decisionIsTransientOnlyBlock(decision)
+    ) {
+      const evaluatedAt = decisionEvaluatedAt(decision) ?? 0;
+      const eligibleAt = evaluatedAt + TRANSIENT_BLOCK_RETRY_AFTER_MS;
+      if (now >= eligibleAt) {
+        candidates.push({ prNumber, headSha, decisionKey: identity.key, since: evaluatedAt });
+        continue;
+      }
+      pending.push({ prNumber, headSha, eligibleAt });
+    }
+
+    const aggregate = newestCheckGeneration(
+      headChecks.filter(
+        (run) =>
+          run.name === AUTO_GATE_DECISION_CHECK &&
+          run.external_id === `${AUTO_GATE_AGGREGATE_EXTERNAL_ID_PREFIX}${headSha}` &&
+          ownedByActions(run),
+      ),
+    );
+    if (
+      aggregate &&
+      aggregate.status === "completed" &&
+      String(aggregate.output?.title || aggregate.title || "").startsWith(AGGREGATE_WAITING_TITLE)
+    ) {
+      const writtenAt = parseTimestamp(aggregate.completed_at || aggregate.started_at) ?? 0;
+      const eligibleAt = writtenAt + STALE_AGGREGATE_WAITING_AFTER_MS;
+      if (now >= eligibleAt) {
+        candidates.push({ prNumber, headSha, decisionKey: identity.key, since: writtenAt });
+      } else {
+        pending.push({ prNumber, headSha, eligibleAt });
+      }
+    }
+  }
+  return {
+    candidates: candidates.sort(
+      (left, right) => left.since - right.since || left.prNumber - right.prNumber,
+    ),
+    pending,
+  };
+}
+
+async function listRequiredCheckReevaluationTargets({
+  github,
+  context,
+  core,
+  now = Date.now(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
   // One GraphQL page carries 100 PRs and each head's current check rollup. This
   // makes every open PR eligible on every sweep without one REST read per head,
   // wall-clock page assignment, or mutable cursor state. A truncated rollup is
   // skipped fail-closed rather than combined with incomplete evidence.
-  const snapshot = await requiredCheckReconciliationSnapshot({ github, context, core });
-  const stale = requiredCheckReevaluationCandidates({
-    pulls: snapshot.pulls,
-    checkRunsByHead: snapshot.checkRunsByHead,
-    statusesByHead: snapshot.statusesByHead,
-  });
-  const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
-  if (stale.length > targets.length) {
+  let snapshot;
+  try {
+    snapshot = await requiredCheckReconciliationSnapshot({ github, context, core });
+  } catch (error) {
+    // The pass exists to wake decisions nothing else revisits, and the schedule
+    // re-runs the whole scan whether or not this pass finished — so a
+    // retry-exhausted transient read is a skipped sweep, not a gate failure
+    // (#5064/#5065's rule; run 37329001725 reddened master on an edge's HTML
+    // error page). Anything that is NOT an exhausted read — a malformed page,
+    // a stuck cursor — is a defect in the scan itself and stays loud.
+    if (!isReadFailure(error)) {
+      throw error;
+    }
     core.warning(
-      `Required-check reconciliation deferred ${stale.length - targets.length} stale PR(s); ` +
+      `Skipped the required-check reconciliation pass: ${formatError(error)}. ` +
+        "A later pass re-runs the whole scan.",
+    );
+    return [];
+  }
+
+  // Selection always runs against the freshest scan the pass has. A scan that
+  // sees work which is not yet eligible — a transient block inside its retry
+  // window, or a WAITING aggregate a live transaction may still own — retains
+  // it instead of assuming a later pass exists: the request that spawned this
+  // one fired while the marker was fresh, and a platform-cancelled lane
+  // schedules nothing at all (#5160). The pass probes once on a short cadence —
+  // a live lane usually resolves its marker within a minute — then sleeps
+  // straight to each item's maturity point, until the youngest item matures
+  // (selected on that rescan) or resolves (the pending entry simply vanishes),
+  // bounded by REQUIRED_CHECK_RECONCILIATION_PENDING_WAIT_MS so one run cannot
+  // hold the reconciliation group forever. Whatever is still unmet when the
+  // wait ends — pending leftovers, or work past the per-pass caps — is handed
+  // to one successor through the ordinary rate window below.
+  const deadline = now + REQUIRED_CHECK_RECONCILIATION_PENDING_WAIT_MS;
+  let effectiveNow = now;
+  let result = [];
+  let unmet = 0;
+  let stale = [];
+  let transient = [];
+  let probed = false;
+  for (;;) {
+    stale = requiredCheckReevaluationCandidates({
+      pulls: snapshot.pulls,
+      checkRunsByHead: snapshot.checkRunsByHead,
+      statusesByHead: snapshot.statusesByHead,
+    });
+    const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
+    const selected = new Set(targets.map((target) => target.prNumber));
+    const { candidates, pending } = transientBlockReevaluationCandidates({
+      pulls: snapshot.pulls,
+      checkRunsByHead: snapshot.checkRunsByHead,
+      now: effectiveNow,
+    });
+    transient = candidates.filter((candidate) => !selected.has(candidate.prNumber));
+    const transientSlots = Math.max(
+      0,
+      Math.min(TRANSIENT_BLOCK_REEVALUATION_LIMIT, REQUIRED_CHECK_REEVALUATION_LIMIT - targets.length),
+    );
+    const transientTargets = transient
+      .slice(0, transientSlots)
+      .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
+    // A pending item on a head this pass already selected is this run's own
+    // work — the lane it spawns rewrites that marker — so only uncovered heads
+    // can keep the wait alive. And pending work that could never fit the
+    // selection even once mature — every slot is already taken — is unmet now:
+    // waiting would change nothing, so it goes to the successor without one.
+    const coveredHeads = new Set([...targets, ...transientTargets].map((target) => target.headSha));
+    const outstanding = pending.filter((item) => !coveredHeads.has(item.headSha));
+    unmet = stale.length - targets.length + (transient.length - transientTargets.length);
+    result = [...targets, ...transientTargets];
+    if (transientTargets.length >= transientSlots && outstanding.length > 0) {
+      unmet += outstanding.length;
+      break;
+    }
+    if (outstanding.length === 0) {
+      break;
+    }
+    const earliest = Math.min(...outstanding.map((item) => item.eligibleAt));
+    const waitMs = Math.min(
+      earliest - effectiveNow,
+      probed ? Infinity : REQUIRED_CHECK_RECONCILIATION_PENDING_POLL_MS,
+      deadline - effectiveNow,
+    );
+    if (waitMs <= 0) {
+      unmet += outstanding.length;
+      break;
+    }
+    core.notice(
+      `Required-check reconciliation is retaining ${outstanding.length} not-yet-eligible ` +
+        `item(s), the first maturing in ${Math.ceil((earliest - effectiveNow) / 60000)} minute(s); ` +
+        `re-scanning in ${Math.ceil(waitMs / 60000)} minute(s).`,
+    );
+    await sleep(waitMs);
+    effectiveNow += waitMs;
+    probed = true;
+    try {
+      snapshot = await requiredCheckReconciliationSnapshot({ github, context, core });
+    } catch (error) {
+      if (!isReadFailure(error)) {
+        throw error;
+      }
+      core.warning(
+        `Required-check reconciliation could not re-scan its pending work: ${formatError(error)}. ` +
+          "The last good selection still applies, and the work counts as unmet.",
+      );
+      unmet += outstanding.length;
+      break;
+    }
+  }
+  if (stale.length > Math.min(stale.length, REQUIRED_CHECK_REEVALUATION_LIMIT)) {
+    core.warning(
+      `Required-check reconciliation deferred ${stale.length - REQUIRED_CHECK_REEVALUATION_LIMIT} stale PR(s); ` +
         `each sweep wakes at most ${REQUIRED_CHECK_REEVALUATION_LIMIT}.`,
+    );
+  }
+  const selectedKeys = new Set(result.map((target) => target.decisionKey));
+  const deferredTransient = transient.filter((candidate) => !selectedKeys.has(candidate.decisionKey));
+  if (deferredTransient.length > 0) {
+    core.warning(
+      `Required-check reconciliation deferred ${deferredTransient.length} ` +
+        "transiently blocked PR(s) to a later sweep.",
     );
   }
   core.notice(
     `Required-check reconciliation read ${snapshot.pulls.length} PR(s) in ` +
-      `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s), and ` +
-      `selected ${targets.length}.`,
+      `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s) and ` +
+      `${transient.length} transient block(s), and selected ${result.length}.`,
   );
-  return targets;
+  // One successor, through the same five-minute window an ordinary run uses,
+  // whenever this pass saw work at all:
+  //
+  // - Unmet work — pending leftovers, or more than the caps — is owed a wakeup,
+  //   because nothing else, not the lane that died and not the schedule, is
+  //   certain to provide one.
+  // - Selected work is owed one too: applying it happens in apply-gate, a
+  //   queued job the platform can still cancel (#5160). The successor sees the
+  //   fresh WAITING markers while they are young, retains them through the wait
+  //   above, and either watches them resolve under a healthy apply lane or
+  //   re-applies them itself once the lease lapses. When nothing died it finds
+  //   an empty scan and asks for nothing — the handoff costs one pass.
+  if (unmet > 0 || result.length > 0) {
+    await requestRequiredCheckReconciliation({ github, context, core, now: effectiveNow, forPass: true });
+  }
+  return result;
 }
 
 function isRequiredCheckReconciliationDispatch(context) {
@@ -5124,29 +6143,40 @@ function isRequiredCheckReconciliationDispatch(context) {
 
 // Called by every Auto Gate run that is not itself a pass (#4571). The request
 // is one repository_dispatch; the run it starts is a full scheduled pass, with
-// the same ten-evaluation cap and the same PR Validation blocker filter, and it
-// serializes with scheduled passes in one concurrency group.
+// the same ten-evaluation cap and the same selection (PR Validation blockers and
+// aged transient blocks), and it serializes with scheduled passes in one
+// concurrency group.
 //
 // Two guards keep this from fanning out:
 //
-// - A pass never requests a pass. Schedule and repository_dispatch runs return
-//   before any read. The runs a pass causes can request one, but only through
-//   the rate window below, so the total stays bounded however many there are.
+// - A pass never requests a pass — with one exception. Schedule and
+//   repository_dispatch runs return before any read UNLESS the caller is the
+//   pass itself handing off work it could not finish (forPass): work a stranded
+//   transaction leaves behind is owed a wakeup, and only the pass knows it is
+//   owed (#5160). The window below still binds the handoff against a sibling
+//   pass that is queued or running, so a chain advances one link per completed
+//   pass — never a queue of them.
 // - The rate window. The marker is the creation time of this workflow's newest
-//   repository_dispatch run. Every requested pass is such a run, so a pass that
-//   selected nothing is recorded too, and GitHub stores the marker: there is no
-//   variable, ref, or check run to write or leave stale. It costs one REST read
-//   of one result, and filtering on the event keeps the dozens of ordinary runs
-//   an hour out of that result. Two runs that read before either dispatch is
-//   visible can both request. The shared group then holds one running pass and
-//   one pending pass, and a newer pending pass replaces the older one, so the
-//   race costs at most one extra scan.
+//   repository_dispatch run — the caller's own run excluded, since a pass
+//   triggered by a dispatch would otherwise always see itself inside the
+//   window and could never hand off. Completed predecessors are excluded for
+//   the handoff only: a finished pass already spent its coverage, which is why
+//   the next one is running at all. The listing is one short page rather
+//   than the single newest run so the exclusion cannot hide a sibling pass
+//   that is still holding the window. Every requested pass is such a run, so
+//   a pass that selected nothing is recorded too, and GitHub stores the
+//   marker: there is no variable, ref, or check run to write or leave stale.
+//   It costs one REST read, and filtering on the event keeps the dozens of
+//   ordinary runs an hour out of that result. Two runs that read before
+//   either dispatch is visible can both request. The shared group then holds
+//   one running pass and one pending pass, and a newer pending pass replaces
+//   the older one, so the race costs at most one extra scan.
 //
 // Every failure falls back to not dispatching, which leaves the schedule as the
 // backstop. That is the safe direction. A missed request delays a green PR, but
 // an unbounded one could load the queue the reconciliation is meant to drain.
-async function requestRequiredCheckReconciliation({ github, context, core, now = Date.now() }) {
-  if (context.eventName === "schedule" || context.eventName === "repository_dispatch") {
+async function requestRequiredCheckReconciliation({ github, context, core, now = Date.now(), forPass = false }) {
+  if (!forPass && (context.eventName === "schedule" || context.eventName === "repository_dispatch")) {
     core.info(`A ${context.eventName} run does not request required-check reconciliation.`);
     return { requested: false, reason: "pass" };
   }
@@ -5156,6 +6186,9 @@ async function requestRequiredCheckReconciliation({ github, context, core, now =
   const cutoff = Math.floor((now - REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS) / 1000) * 1000;
   let runs;
   try {
+    // Newest-first, one short page: the window can hold only as many dispatch
+    // runs as its length allows, and the caller's own run — excluded below —
+    // is usually the newest of them, so the page must reach past it (#5160).
     const listed = await retryRead("could not list recent required-check reconciliation runs", () =>
       github.rest.actions.listWorkflowRuns({
         owner,
@@ -5164,7 +6197,7 @@ async function requestRequiredCheckReconciliation({ github, context, core, now =
         event: "repository_dispatch",
         created: `>=${new Date(cutoff).toISOString().replace(/\.\d{3}Z$/, "Z")}`,
         exclude_pull_requests: true,
-        per_page: 1,
+        per_page: 10,
       }),
     );
     runs = listed?.data?.workflow_runs;
@@ -5181,7 +6214,21 @@ async function requestRequiredCheckReconciliation({ github, context, core, now =
   // The server applies the created filter, and the listing is newest first.
   // Checking the time again here keeps the window correct if the filter is ever
   // ignored. An unreadable time counts as recent, so it cannot cause a dispatch.
-  const recent = runs.find((run) => !(Date.parse(run?.created_at) < cutoff));
+  // The caller's own run is not a marker: for a dispatched pass it is always
+  // inside the window, and counting it would deadlock every follow-up request.
+  // For that same handoff a COMPLETED predecessor is not a marker either: pass
+  // A's run sits in successor B's window having already spent its coverage, and
+  // counting it would strand B's leftovers (#5160). Only a sibling still queued
+  // or running can cover them, so only those bind a pass. Ordinary requests
+  // keep counting completed passes — the window is their throttle, and a pass
+  // that already ran is exactly the reason not to ask for another one yet.
+  const self = String(context.runId || "");
+  const recent = runs.find(
+    (run) =>
+      String(run?.id) !== self &&
+      !(Date.parse(run?.created_at) < cutoff) &&
+      !(forPass && String(run?.status) === "completed"),
+  );
   if (recent) {
     core.info(
       `Required-check reconciliation run ${recent.id} was created at ${recent.created_at}; ` +
@@ -5216,9 +6263,10 @@ async function resolveTargets({
   headPollAttempts = 6,
   headPollDelayMs = 5000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  reconciliationNowMs = Date.now(),
 }) {
   if (context.eventName === "schedule") {
-    return listRequiredCheckReevaluationTargets({ github, context, core });
+    return listRequiredCheckReevaluationTargets({ github, context, core, now: reconciliationNowMs, sleep });
   }
   if (isRequiredCheckReconciliationDispatch(context)) {
     const source = context.payload?.client_payload || {};
@@ -5228,7 +6276,7 @@ async function resolveTargets({
     if (/^[1-9][0-9]*$/.test(String(source.source_run_id)) && /^[a-z_]+$/.test(String(source.source_event))) {
       core.info(`Required-check reconciliation requested by ${source.source_event} run ${source.source_run_id}.`);
     }
-    return listRequiredCheckReevaluationTargets({ github, context, core });
+    return listRequiredCheckReevaluationTargets({ github, context, core, now: reconciliationNowMs, sleep });
   }
   const numbers = [];
   const payload = context.payload;
@@ -5245,7 +6293,7 @@ async function resolveTargets({
   } else if (payload.issue?.pull_request && payload.issue.number) {
     numbers.push(payload.issue.number);
   } else {
-    const sha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
+    const sha = payload.workflow_run?.head_sha || payload.sha;
     if (sha) {
       const pulls = await listOpenMasterPullRequestsForHead({ github, context, headSha: sha });
       numbers.push(...pulls.map((pull) => pull.number));
@@ -5254,7 +6302,7 @@ async function resolveTargets({
     }
   }
 
-  const sourceSha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
+  const sourceSha = payload.workflow_run?.head_sha || payload.sha;
   const targets = [];
   for (const number of [...new Set(numbers.filter(Boolean))]) {
     const pr = previousHead
@@ -5286,17 +6334,31 @@ async function resolveTargets({
 // return the PR once that head is still current — or null once the PR is no
 // longer eligible, which is a successful no-op.
 //
-// Nothing else is guaranteed to revisit that head: its runs can sit parked until
-// this lane or a human approves them. And this lane runs under
-// workflow_dispatch, whose payload names no head its caller could turn red. So
-// every failure here — a retry-exhausted read, a refused one, or recovery that
-// could not be confirmed — leaves through the ONE catch below, which puts the
-// rerun command on the PR as well as in the error.
+// Nothing else is guaranteed to revisit a head this lane OBSERVED but could
+// not confirm: its runs can sit parked until this lane or a human approves
+// them. And this lane runs under workflow_dispatch, whose payload names no
+// head its caller could turn red. So every genuine failure here — a
+// retry-exhausted read, a refused one, a successor seen but never settled —
+// leaves through the ONE catch below, which puts the rerun command on the PR
+// as well as in the error.
+//
+// The exception is a poll that never observed a successor at all (#5064): the
+// update's push has simply not landed yet, every read still showed the
+// initiating SHA, and once the push does land its own events — its
+// synchronize through auto-gate-head.yml, PR Validation's terminal
+// workflow_run — evaluate the real head. That exit returns null like
+// ineligibility, with a notice, rather than reddening a dispatch that merely
+// outran the push.
 async function recoverSuccessorHead({
   github, context, core, number, previousHead, headPollAttempts, headPollDelayMs, sleep,
 }) {
   const eligible = (current) => current.state === "OPEN" && !current.merged && current.baseRefName === "master";
   let observedHead = null;
+  // The quiet exit below asserts every read still showed the initiating SHA —
+  // a read that could not resolve a head at all (an eligible PR answering with
+  // a blank or unparseable headRefOid) never established that, so it spoils
+  // the claim rather than counting toward it (Codex on #5064).
+  let headUnconfirmed = false;
   try {
     let pr = await getPullRequest({ github, context, number });
     // Head visibility and run visibility are separate transitions. Reuse the
@@ -5309,6 +6371,9 @@ async function recoverSuccessorHead({
         return null;
       }
       const observed = normalizeHeadSha(pr.headRefOid);
+      if (!observed) {
+        headUnconfirmed = true;
+      }
       if (observed && observed !== previousHead) {
         observedHead = observed;
         const validation = await ensureValidationRun({
@@ -5319,7 +6384,12 @@ async function recoverSuccessorHead({
             return eligible(pr) && normalizeHeadSha(pr.headRefOid) === observed;
           },
         });
-        if (!validation.cancelled && !validation.dispatched && (!validation.found || !validation.approved)) {
+        // The split is found-vs-not, not dispatched-vs-not: a run that EXISTS
+        // but stayed unapprovable fails the same way whether this lane
+        // dispatched it or adopted it — a reconciled dispatch reports
+        // found+approved state too, and a parked successor must never be
+        // published as recovered with no runnable validation on it.
+        if (!validation.cancelled && (validation.found ? !validation.approved : !validation.dispatched)) {
           throw new Error(validation.found
             ? `not every parked run on ${observed} could be approved`
             : `no PR Validation run appeared on ${observed} and none could be dispatched`);
@@ -5336,6 +6406,33 @@ async function recoverSuccessorHead({
         await sleep(headPollDelayMs);
         pr = await getPullRequest({ github, context, number });
       }
+    }
+    // Poll exhausted. The two shapes split on whether this lane ever observed a
+    // successor — see the comment above the function.
+    if (!observedHead && headUnconfirmed) {
+      // A read answered without a head is not the not-yet-arrived case: no
+      // successor push may exist to wake the PR, and the initiating SHA was
+      // never actually re-confirmed. That is an unknown, so it is loud.
+      throw new Error(
+        `PR #${number} answered a recovery poll without a resolvable head; ` +
+          "the successor's arrival is unconfirmed",
+      );
+    }
+    if (!observedHead) {
+      // Not-yet-arrived, not failed (#5064): the initiating head was visible on
+      // every read, so nothing this lane touched was dropped. The successor's
+      // own events re-evaluate it the moment its push lands — the red run the
+      // issue documents self-healed exactly that way. And if the push NEVER
+      // lands, the initiating head is left holding the WAITING aggregate the
+      // refusing lane wrote, which the scheduled reconciliation pass
+      // re-evaluates once it goes stale — a slower but still guaranteed wakeup.
+      // Returning null publishes no target and no failure comment; the notice
+      // is the audit trail.
+      core.notice(
+        `PR #${number} still exposes initiating head ${previousHead} after ${headPollAttempts} reads; ` +
+          "no successor was observed — the successor push's own events re-evaluate it when it lands.",
+      );
+      return null;
     }
     throw new Error(
       `PR #${number} still exposes initiating head ${previousHead} or has not settled; no stale target was published`,
@@ -5753,6 +6850,18 @@ function sameTreeEntry(left, right) {
 // the only caller turns null into "keep the gate", which is the safe way to be
 // wrong, and an unreadable blob must not take the whole evaluation down (#4484).
 async function readGoSource({ github, context, sha, subject }) {
+  const bytes = await readVerifiedBlob({ github, context, sha, subject });
+  if (!bytes) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+// A blob's raw bytes, or null — trusted only as far as they hash to the blob
+// that was asked for. Null on every failure, for the same reason as above.
+async function readVerifiedBlob({ github, context, sha, subject }) {
   const { owner, repo } = context.repo;
   try {
     const response = await retryRead(`could not read blob ${sha}`, () =>
@@ -5761,8 +6870,7 @@ async function readGoSource({ github, context, sha, subject }) {
     if (data?.encoding !== "base64" || typeof data.content !== "string") return null;
     const bytes = Buffer.from(data.content, "base64");
     const actual = createHash("sha1").update(`blob ${bytes.length}\x00`).update(bytes).digest("hex");
-    if (actual !== sha) return null;
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    return actual === sha ? bytes : null;
   } catch {
     return null;
   }
@@ -5864,7 +6972,14 @@ async function gatedTuiChanges({ github, context, pr, files, subject }) {
 
 // Like a prose review verdict, the attestation names its commit explicitly.
 // The latest recognized attestation wins; a label alone cannot identify tested code.
-async function evaluatePlayTest({ github, context, pr, comments, subject }) {
+//
+// `contentHead` is the update-branch proof's result for this head (#4886). A head
+// the proof walked back from carries nothing of its own past that chain: each
+// link is the previous one plus master, merged without a hand resolution. So an
+// attestation for any link carries to the head, and so does one whose gated
+// paths match the terminal content head. Gated changes that arrived through a
+// link's second parent are master's, already gated on master, not the PR's.
+async function evaluatePlayTest({ github, context, pr, comments, contentHead = null, subject }) {
   const attestations = comments
     .filter((comment) => isAllowedAuthor(comment.user?.login))
     .map((comment) => ({
@@ -5884,50 +6999,75 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
   if (!testedSha) {
     return { ok: false, message: `play-tested label has no SHA-bound attestation; ${remedy}` };
   }
-  if (testedSha !== pr.headRefOid.toLowerCase()) {
-    // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
-    // diverge and compare's file list can truncate. Tree equality covers adds,
-    // deletes, renames, modes and merge conflict resolutions as well as edits.
-    let tested;
-    try {
-      tested = await readGatedTuiTree({ github, context, sha: testedSha, role: "play-tested", subject });
-    } catch (error) {
-      // A well-formed SHA naming no commit is a bad attestation — user input
-      // with its own blocking reason, not a gate-read failure (#4484).
-      const status = Number(error?.status ?? error?.cause?.status);
-      if (status === 404 || status === 422) {
-        return {
-          ok: false,
-          message: `play-tested attestation names ${testedSha}, which GitHub cannot resolve as a commit (HTTP ${status}); ${remedy}`,
-        };
-      }
-      throw error;
+  if (testedSha === pr.headRefOid.toLowerCase()) {
+    return { ok: true, message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (gated paths unchanged)` };
+  }
+  const chain = contentHead ? evidenceHeadShasFor(pr.headRefOid, contentHead) : [];
+  const updateMerges = `${contentHead?.chainLength ?? 0} content-preserving update merge(s)`;
+  if (chain.includes(testedSha)) {
+    return {
+      ok: true,
+      message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} ` +
+        `through ${updateMerges}; gated changes since arrived from ${pr.baseRefName}`,
+    };
+  }
+  // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
+  // diverge and compare's file list can truncate. Tree equality covers adds,
+  // deletes, renames, modes and merge conflict resolutions as well as edits.
+  let tested;
+  try {
+    tested = await readGatedTuiTree({ github, context, sha: testedSha, role: "play-tested", subject });
+  } catch (error) {
+    // A well-formed SHA naming no commit is a bad attestation — user input
+    // with its own blocking reason, not a gate-read failure (#4484).
+    const status = Number(error?.status ?? error?.cause?.status);
+    if (status === 404 || status === 422) {
+      return {
+        ok: false,
+        message: `play-tested attestation names ${testedSha}, which GitHub cannot resolve as a commit (HTTP ${status}); ${remedy}`,
+      };
     }
-    const current = await readGatedTuiTree({ github, context, sha: pr.headRefOid, role: "play-tested", subject });
+    throw error;
+  }
+  // Whether the tested gated paths still describe `sha`: unchanged, or changed
+  // only in comments (#4477). Any path added, removed, or not provably
+  // comment-only makes the attestation stale for it.
+  const covers = async (sha) => {
+    const current = await readGatedTuiTree({ github, context, sha, role: "play-tested", subject });
     const changed = [...new Set([...tested.keys(), ...current.keys()])]
       .filter((path) => !sameTreeEntry(tested.get(path), current.get(path)))
       .sort();
-    if (changed.length > 0) {
-      // A follow-up that only rewords comments leaves the tested program intact,
-      // so it keeps the evidence (#4477). Any path that is added, removed, or
-      // not provably comment-only still makes the attestation stale.
-      const commentOnly = await everyGoChangeIsInert({
-        github,
-        context,
-        subject,
-        changes: changed.map((path) => ({ path, before: tested.get(path), after: current.get(path) })),
-      });
-      if (!commentOnly) {
-        return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
-      }
+    if (changed.length === 0) return { covered: true, changed };
+    const commentOnly = await everyGoChangeIsInert({
+      github,
+      context,
+      subject,
+      changes: changed.map((path) => ({ path, before: tested.get(path), after: current.get(path) })),
+    });
+    return { covered: commentOnly, changed };
+  };
+  const describe = (changed) => changed.length === 0
+    ? "gated paths unchanged"
+    : `gated paths changed only in comments: ${changed.join(", ")}`;
+  const atHead = await covers(pr.headRefOid);
+  if (atHead.covered) {
+    return {
+      ok: true,
+      message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (${describe(atHead.changed)})`,
+    };
+  }
+  if (contentHead) {
+    const atContent = await covers(contentHead.oid);
+    if (atContent.covered) {
       return {
         ok: true,
-        message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} ` +
-          `(gated paths changed only in comments: ${changed.join(", ")})`,
+        message: `TUI path gate passed: play-tested commit ${testedSha} covers content head ${contentHead.oid} ` +
+          `(${describe(atContent.changed)}), and head ${pr.headRefOid} adds only ${pr.baseRefName} ` +
+          `through ${updateMerges}`,
       };
     }
   }
-  return { ok: true, message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (gated paths unchanged)` };
+  return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
 }
 
 // The raw pulls.listFiles entries: the TUI path gate needs each file's status,
@@ -5969,7 +7109,7 @@ function isPRValidationSpec(spec) {
 }
 
 async function evaluateRequiredChecks({
-  github, context, branch, sha, core, subject = null, validationRef = null,
+  github, context, branch, sha, core, subject = null, validationRef = null, sleep,
 }) {
   const required = await getRequiredCheckSpecs({ github, context, branch, core, subject });
   const syntheticDecisionSpecs = required.specs.filter(
@@ -5984,6 +7124,10 @@ async function evaluateRequiredChecks({
   );
   const notes = [];
   const reasons = [...required.errors];
+  // The subset of `reasons` that only the passage of time clears (#4782). Tagged
+  // here, where the state that produced each reason is still in hand, never by
+  // re-reading the prose later.
+  const transientReasons = [];
   const observations = [];
 
   if (syntheticDecisionSpecs.length > 0) {
@@ -6033,11 +7177,17 @@ async function evaluateRequiredChecks({
   // for a later evaluation to narrate is how #3811 sat for 33 minutes with the
   // decision correctly saying "waiting for approval" and nobody approving.
   //
-  // Approving is idempotent enough for this: a run that has already started
-  // rejects the call, which is warned and ignored, and the reasons below still
-  // describe whatever is genuinely still parked.
+  // Approving is idempotent enough for this: a run that has already started no
+  // longer reads as parked, which the approve's read-back counts as done
+  // (#5004), and the reasons below still describe whatever is genuinely still
+  // parked.
   if (parkedRuns.length > 0) {
-    await approveParkedRuns({ github, context, headSha: sha, core });
+    await approveParkedRuns({
+      github, context, headSha: sha, core, sleep,
+      canRecover: subject?.number
+        ? liveHeadGuard({ github, context, prNumber: subject.number, headSha: sha, sleep })
+        : undefined,
+    });
   }
 
   const states = specs.map((spec) => latestRequiredState(spec, checkRuns, statuses));
@@ -6089,18 +7239,29 @@ async function evaluateRequiredChecks({
         validationDispatch?.dispatched && isPRValidationSpec(spec)
           ? ` — PR Validation had no run for this head, so Auto Gate dispatched it on ${validationRef}`
           : "";
-      reasons.push(`required check ${formatCheckSpec(spec)} is missing on ${sha}${dispatched}`);
+      const missing = `required check ${formatCheckSpec(spec)} is missing on ${sha}${dispatched}`;
+      reasons.push(missing);
+      // A missing Build or Lint is transient: every base-repository head gets a
+      // PR Validation run, and this evaluation dispatches one when none exists.
+      // Any other missing check may have no run coming, so it is not.
+      if (isPRValidationSpec(spec)) {
+        transientReasons.push(missing);
+      }
       continue;
     }
 
     notes.push(`${formatCheckSpec(spec)}: ${state.description}`);
     if (!state.ok) {
       const stateDescription = state.waiting ? "is still settling" : "did not succeed";
-      reasons.push(`required check ${formatCheckSpec(spec)} ${stateDescription} (${state.description})`);
+      const reason = `required check ${formatCheckSpec(spec)} ${stateDescription} (${state.description})`;
+      reasons.push(reason);
+      if (state.waiting) {
+        transientReasons.push(reason);
+      }
     }
   }
 
-  return { ok: reasons.length === 0, reasons, notes, observations };
+  return { ok: reasons.length === 0, reasons, transientReasons, notes, observations };
 }
 
 function isSyntheticDecisionContext(contextName) {
@@ -6506,8 +7667,11 @@ function markerApprovalCounts(approverLogin, prAuthor) {
 // authorization to carry review evidence, because a hand-written conflict
 // resolution has the same parents. For every accepted link, derive the only
 // unambiguous path-level three-way result from the parents and their merge base,
-// then require the merge commit's complete tree to equal it. A truncated tree,
-// same-path conflict, malformed entry or committed-tree mismatch returns null.
+// then require the merge commit's complete tree to equal it. A path BOTH sides
+// changed has no path-level result; on the gate's own update merge it is proven
+// line by line instead (#4886, bothChangedMergeEntries), and on any other merge
+// it refuses. A truncated tree, unproven both-changed path, malformed entry or
+// committed-tree mismatch returns null.
 //
 // The containment test is a compare against the base BRANCH rather than a
 // remembered sha, for the same reason #3752 reads the branch: the question is
@@ -6555,6 +7719,10 @@ async function updateBranchContentHead({
           committedDate: commit?.data?.commit?.committer?.date,
           parents: (commit?.data?.parents || []).map((parent) => ({ oid: parent.sha })),
           treeOid: normalizeHeadSha(commit?.data?.commit?.tree?.sha),
+          gateMade:
+            commit?.data?.author?.login === GATE_UPDATE_MERGE_AUTHOR &&
+            commit?.data?.committer?.login === GATE_UPDATE_MERGE_COMMITTER &&
+            commit?.data?.commit?.verification?.verified === true,
         };
       }, subject));
     }
@@ -6656,6 +7824,7 @@ async function updateBranchContentHead({
     }
 
     const expected = new Map();
+    const bothChanged = [];
     const paths = new Set([...baseTree.keys(), ...firstTree.keys(), ...secondTree.keys()]);
     for (const path of paths) {
       const base = baseTree.get(path);
@@ -6669,16 +7838,81 @@ async function updateBranchContentHead({
       } else if (secondValue === base) {
         merged = firstValue;
       } else {
-        // Both sides changed one leaf differently. Reconstructing a textual
-        // merge would require executing or trusting PR content, so this result
-        // is deliberately unknown and review evidence does not carry.
-        return false;
+        // Both sides changed one leaf differently: the path-level result is
+        // unknown, and only the line-level proof below can settle it.
+        bothChanged.push(path);
+        continue;
       }
       if (merged !== undefined) {
         expected.set(path, merged);
       }
     }
+    if (bothChanged.length > 0) {
+      const provenEntries = await bothChangedMergeEntries(mergeOid, bothChanged, {
+        baseTree, firstTree, secondTree, committedTree,
+      });
+      if (!provenEntries) {
+        return false;
+      }
+      for (const [path, entry] of provenEntries) {
+        expected.set(path, entry);
+      }
+    }
     return sameTree(expected, committedTree);
+  };
+
+  // The committed entries of paths BOTH sides changed, each proven to be the
+  // clean line merge of its two sides against the merge base — or null (#4886).
+  //
+  // Before #4886 any such path refused carry, and a hot file is exactly the one
+  // master and a PR both touch: #4789's `a7705950` and #4825's `52b78a17` each
+  // lost a maintainer approval to `app/home_update.go` alone, on merges that
+  // `git merge-tree --write-tree` reproduces exactly. text-merge.js holds the
+  // proof and says what it does and does not establish.
+  //
+  // Admitted only on the gate's own update merge, and only for a regular file on
+  // all four sides: an add/add, a delete on either side, a symlink, a submodule
+  // or a type change stays unproven. The mode takes the same three-way rule as a
+  // leaf. Every read is verified against the object id the tree named, and any
+  // failure, limit or byte difference refuses the whole link.
+  const bothChangedMergeEntries = async (mergeOid, bothChanged, trees) => {
+    const merge = await readCommit(mergeOid);
+    if (!merge?.gateMade || bothChanged.length > TEXT_MERGE_PROOF_PATH_LIMIT) {
+      return null;
+    }
+    const regularBlob = (entry) => {
+      const [mode, type, sha] = String(entry ?? "").split("\0");
+      return type === "blob" && (mode === "100644" || mode === "100755") ? { mode, sha } : null;
+    };
+    const proven = new Map();
+    for (const path of bothChanged) {
+      const [base, first, second, committed] = [
+        trees.baseTree, trees.firstTree, trees.secondTree, trees.committedTree,
+      ].map((tree) => regularBlob(tree.get(path)));
+      if (!base || !first || !second || !committed) {
+        return null;
+      }
+      const mode = first.mode === second.mode ? first.mode
+        : first.mode === base.mode ? second.mode
+          : second.mode === base.mode ? first.mode
+            : null;
+      if (mode !== committed.mode) {
+        return null;
+      }
+      const [baseBytes, firstBytes, secondBytes, committedBytes] = await Promise.all(
+        [base, first, second, committed].map(({ sha }) =>
+          readVerifiedBlob({ github, context, sha, subject })),
+      );
+      const blobs = { base: baseBytes, first: firstBytes, second: secondBytes, committed: committedBytes };
+      if (
+        Object.values(blobs).some((bytes) => !bytes || bytes.length > TEXT_MERGE_PROOF_BLOB_BYTES) ||
+        !isCleanTextMerge(blobs)
+      ) {
+        return null;
+      }
+      proven.set(path, trees.committedTree.get(path));
+    }
+    return proven;
   };
 
   // Whether these parents are the shape `PUT update-branch` produces: exactly
@@ -7919,6 +9153,8 @@ module.exports = {
     approveParkedRuns,
     listParkedRuns,
     ensureValidationRun,
+    dispatchWorkflowWithRetry,
+    validationRunVisible,
     VALIDATION_WORKFLOW,
     GATE_WORKFLOW,
     decisionSummaryBody,

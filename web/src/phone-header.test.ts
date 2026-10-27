@@ -93,7 +93,7 @@ test("phone overflow has native keyboard activation and Escape returns focus to 
 
 test("truncated session title retains the complete name for pointer and accessible text", () => {
   const title = "Review the focused-session header across all phone widths";
-  const chrome = components.terminalChrome({ title, copyLink() {}, handoff() {}, retry() {} });
+  const chrome = components.terminalChrome({ title, copyLink() {}, handoff() {}, retry() {}, markDelivered() {} });
   assert.equal(chrome.title.title, title, "ellipsis must have a full-name route");
   assert.equal(chrome.title.textContent, title);
   assert.equal(chrome.title.getAttribute("aria-label"), title);
@@ -170,4 +170,24 @@ test("phone panel actions can dismiss carried session state", () => {
   assert.equal(session.trigger.getAttribute("aria-expanded"), "false");
   outer.dispose();
   session.dispose();
+});
+
+test("hiding the last phone control moves focus out before the menu hides", () => {
+  const callbacks: (() => void)[] = [];
+  const saved = (globalThis as { MutationObserver?: unknown }).MutationObserver;
+  Object.assign(globalThis, { MutationObserver: class { constructor(cb: () => void) { callbacks.push(cb); } observe() {} disconnect() {} } });
+  try {
+    const install = new Element("button");
+    const switcher = new Element("button");
+    const menu = components.appbarControls([install] as unknown as HTMLElement[], media(360), () => {}, () => {}, () => switcher as unknown as HTMLElement);
+    menu.open();
+    install.focus();
+    install.hidden = true;
+    for (const cb of callbacks) cb();
+    assert.equal(menu.trigger.hidden, true);
+    assert.equal(doc.activeElement, switcher, "focus must land on a visible app-bar control");
+    menu.dispose();
+  } finally {
+    Object.assign(globalThis, { MutationObserver: saved });
+  }
 });

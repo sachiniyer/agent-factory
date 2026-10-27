@@ -1,12 +1,15 @@
 package task
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -460,4 +463,1026 @@ func TestAudit_ARealRebindIsTheUsersChange(t *testing.T) {
 	require.Len(t, trail, 2, "the create, and the user's move — not a third for the derived id")
 	assert.Equal(t, ActorCLI, trail[1].Actor)
 	assert.Equal(t, []string{"project_path"}, trail[1].Fields)
+}
+
+// handEditedStore plants a v1 envelope of exactly these tasks on a scratch path
+// and pins getTasksPath at it. It is how a non-canonical row reaches the audit
+// diff in the first place: every in-process writer canonicalizes on write
+// (AddTaskChecked, apply), so on_complete="Archive" or target_session="   " can
+// only land on disk through a hand-edit or a dotfiles import of tasks.json — the
+// reachable shape the existing canonical-only fixtures never exercised. The
+// returned rewriter overwrites the same path so a test can reset the disk
+// between independent probes.
+func handEditedStore(t *testing.T, tasks []Task) (path string, rewrite func([]Task)) {
+	t.Helper()
+	dir := t.TempDir()
+	path = filepath.Join(dir, tasksFileName)
+	write := func(tasks []Task) {
+		envelope := struct {
+			SchemaVersion int    `json:"schema_version"`
+			Tasks         []Task `json:"tasks"`
+		}{SchemaVersion: TasksSchemaVersion, Tasks: tasks}
+		data, err := json.Marshal(envelope)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, data, 0644))
+	}
+	write(tasks)
+	origGetPath := getTasksPathFn
+	getTasksPathFn = func() (string, error) { return path, nil }
+	t.Cleanup(func() { getTasksPathFn = origGetPath })
+	return path, write
+}
+
+// handEditedCronTask is a minimal enabled cron task with the requested
+// on_complete and target_session, in exactly the byte shape a hand-edit would
+// plant. The two are mutually exclusive in these fixtures: a non-keep lifecycle
+// with a target session is a shape ValidateTrigger rejects, so the two
+// canonicalization paths are seeded on separate rows.
+func handEditedCronTask(id, onComplete, targetSession string) Task {
+	return Task{
+		ID:            id,
+		Name:          "x",
+		Prompt:        "orig",
+		CronExpr:      "0 9 * * *",
+		ProjectPath:   "/tmp",
+		Program:       "claude",
+		Enabled:       true,
+		CreatedAt:     time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		OnComplete:    onComplete,
+		TargetSession: targetSession,
+	}
+}
+
+// TestAudit_CanonicalizationIsNotAttributedToTheCaller is the headline regression
+// for the misattribution: apply canonicalizes on_complete/target_session on every
+// write, and changedFields must not fold that store normalization into the
+// caller's entry. A hand-edited "Archive" row, patched through an empty
+// TaskUpdate{} or a prompt-only patch, must NOT record on_complete as a field the
+// caller moved. The byte-change is recorded separately as ActorDaemonUpgrade,
+// mirroring the repo_id backfill — the store wrote bytes the caller never asked
+// for, and the trail says so under the store's own actor.
+func TestAudit_CanonicalizationIsNotAttributedToTheCaller(t *testing.T) {
+	_, rewrite := handEditedStore(t, []Task{handEditedCronTask("hand0001", "Archive", "")})
+
+	// Empty patch — a write the caller did not request. apply canonicalizes
+	// "Archive"→"archive" and writeTasks persists it; the audit must attribute
+	// that byte-change to the store, not to the undeclared (ActorUnknown) caller.
+	_, err := UpdateTask("hand0001", TaskUpdate{}, ProjectExpectation{})
+	require.NoError(t, err)
+
+	trail := auditOf(t, "hand0001")
+	require.Len(t, trail, 1, "the empty patch changed only a store-normalized byte")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor,
+		"the canonicalization is the store's repair, not a field the caller moved")
+	assert.Equal(t, AuditUpdated, trail[0].Action)
+	assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+	stored, err := GetTask("hand0001")
+	require.NoError(t, err)
+	assert.Equal(t, OnCompleteArchive, stored.OnComplete,
+		"the canonicalization really did land on disk — a real byte-change was recorded")
+
+	// Prompt-only patch — the CLI moved prompt, not on_complete. Reset the disk to
+	// the non-canonical "Archive" so the canonicalization fires again, then prove
+	// the CLI's entry names prompt only, and on_complete is a separate
+	// daemon-upgrade line the CLI never asked for.
+	rewrite([]Task{handEditedCronTask("hand0001", "Archive", "")})
+	np := "changed"
+	_, err = UpdateTaskChecked("hand0001", TaskUpdate{Prompt: &np}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail = auditOf(t, "hand0001")
+	require.Len(t, trail, 2,
+		"the CLI's move, and the store's canonicalization — not one entry attributing both to the CLI")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor, "the store's canonicalization is recorded first, as repo_id is")
+	assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+	assert.Equal(t, ActorCLI, trail[1].Actor, "the CLI's entry is the prompt it moved")
+	assert.Equal(t, []string{"prompt"}, trail[1].Fields,
+		"on_complete is the store's canonicalization, not the CLI's change — an operator chasing an on_complete regression must not be sent to a CLI edit that never touched it")
+}
+
+// TestAudit_OnCompleteCanonicalizationVariants covers the normalizations
+// CanonicalOnComplete performs (lowercase, trim, and the keep-stored-as-empty
+// rule). Each is a canonical-equivalent byte-change on a hand-edited row, so
+// each must record exactly one ActorDaemonUpgrade entry and never attribute the
+// field to the caller.
+func TestAudit_OnCompleteCanonicalizationVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		raw      string
+		wantDisk string
+	}{
+		{"capitalized archive", "Archive", OnCompleteArchive},
+		{"capitalized kill", "Kill", OnCompleteKill},
+		{"padded archive", "  archive  ", OnCompleteArchive},
+		{"capitalized keep stored as empty", "Keep", ""},
+		{"whitespace keep stored as empty", "   ", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handEditedStore(t, []Task{handEditedCronTask("hand01", tc.raw, "")})
+
+			_, err := UpdateTask("hand01", TaskUpdate{}, ProjectExpectation{})
+			require.NoError(t, err)
+
+			trail := auditOf(t, "hand01")
+			require.Len(t, trail, 1, "a store canonicalization and nothing else")
+			assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor)
+			assert.Equal(t, AuditUpdated, trail[0].Action)
+			assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+
+			stored, err := GetTask("hand01")
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDisk, stored.OnComplete, "the canonicalization landed on disk")
+		})
+	}
+}
+
+// TestAudit_TargetSessionCanonicalizationIsNotAttributedToTheCaller: a
+// whitespace-only target_session canonicalizes to "" (no target session) on
+// every write. A hand-edited row holding "   " must record that byte-change as
+// ActorDaemonUpgrade, not as a field the caller moved — the same rule as
+// on_complete, for the other canonicalizing field.
+func TestAudit_TargetSessionCanonicalizationIsNotAttributedToTheCaller(t *testing.T) {
+	_, rewrite := handEditedStore(t, []Task{handEditedCronTask("hand0002", "", "   ")})
+
+	_, err := UpdateTask("hand0002", TaskUpdate{}, ProjectExpectation{})
+	require.NoError(t, err)
+
+	trail := auditOf(t, "hand0002")
+	require.Len(t, trail, 1, "the empty patch changed only a store-normalized byte")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor)
+	assert.Equal(t, []string{"target_session"}, trail[0].Fields)
+	stored, err := GetTask("hand0002")
+	require.NoError(t, err)
+	assert.Empty(t, stored.TargetSession, "the whitespace target was canonicalized to no target on disk")
+
+	// An unrelated patch on the same hand-edited row: the caller moved prompt, and
+	// the whitespace-target canonicalization is a separate daemon-upgrade line.
+	rewrite([]Task{handEditedCronTask("hand0002", "", "   ")})
+	np := "changed"
+	_, err = UpdateTaskChecked("hand0002", TaskUpdate{Prompt: &np}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+	trail = auditOf(t, "hand0002")
+	require.Len(t, trail, 2)
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor)
+	assert.Equal(t, []string{"target_session"}, trail[0].Fields)
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"prompt"}, trail[1].Fields,
+		"the CLI moved prompt; the target_session canonicalization is not its change")
+}
+
+// TestAudit_GenuineOnCompleteMoveIsAttributedToTheCaller guards the other half:
+// canonical-to-canonical diffing must not swallow a real policy change. A CLI
+// patch from keep to kill canonical-differs, so on_complete is in the CLI's
+// entry, and no daemon-upgrade line is written.
+func TestAudit_GenuineOnCompleteMoveIsAttributedToTheCaller(t *testing.T) {
+	id := seedAuditTask(t, ActorCLI)
+
+	kill := OnCompleteKill
+	_, err := UpdateTaskChecked(id, TaskUpdate{OnComplete: &kill}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, id)
+	require.Len(t, trail, 2, "the create, and the CLI's move — no daemon-upgrade line for a real policy change")
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"on_complete"}, trail[1].Fields,
+		"a keep→kill move is the caller's change, recorded as such")
+	for _, e := range trail {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor,
+			"a genuine policy move is not a store normalization")
+	}
+}
+
+// TestAudit_GenuineTargetSessionMoveIsAttributedToTheCaller: a real retarget
+// (no target → "real") canonical-differs, so target_session is the caller's
+// field and no daemon-upgrade line is written.
+func TestAudit_GenuineTargetSessionMoveIsAttributedToTheCaller(t *testing.T) {
+	id := seedAuditTask(t, ActorCLI)
+
+	target := "real"
+	_, err := UpdateTaskChecked(id, TaskUpdate{TargetSession: &target}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, id)
+	require.Len(t, trail, 2, "the create, and the CLI's retarget — no daemon-upgrade line")
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"target_session"}, trail[1].Fields)
+	for _, e := range trail {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor)
+	}
+}
+
+// TestAudit_CanonicalRowNoOpAddsNoDaemonUpgradeEntry: on a row that is already
+// canonical, the daemon-upgrade condition (canonical-equal AND raw-differ) does
+// not fire — there is no byte-change to record. A no-op patch leaves the trail
+// at the create, with neither a caller entry nor a daemon-upgrade line.
+func TestAudit_CanonicalRowNoOpAddsNoDaemonUpgradeEntry(t *testing.T) {
+	id := seedAuditTask(t, ActorCLI)
+
+	// An explicit patch to the same canonical keep the row already stores ("").
+	keep := ""
+	_, err := UpdateTaskChecked(id, TaskUpdate{OnComplete: &keep}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+	// And an empty patch, which apply canonicalizes to exactly the stored bytes.
+	_, err = UpdateTaskChecked(id, TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, id)
+	require.Len(t, trail, 1, "a canonical row with no-op patches gains no entry of any kind")
+	assert.Equal(t, AuditCreated, trail[0].Action)
+}
+
+// handEditedCronTaskWithCap is handEditedCronTask plus a stale positive cap — a
+// shape ValidateTrigger rejects (a cap on a cron task), reachable only via a
+// hand-edit of tasks.json. Seeded separately because the canonicalization
+// fixtures deliberately keep the two invalid shapes on different rows.
+func handEditedCronTaskWithCap(id string, cap int) Task {
+	t := handEditedCronTask(id, "", "")
+	t.MaxConcurrentRuns = cap
+	return t
+}
+
+// TestAudit_CapStoreRepairIsAttributedToTheStore is the headline regression for
+// the clear-repair misattribution: a hand-edited cron task carrying a stale
+// max_concurrent_runs, patched through an empty TaskUpdate{}, has its cap
+// repaired to 0 by clearInapplicableCap. The caller never touched the cap, so
+// the repair is recorded as ActorDaemonUpgrade — not folded into the caller's
+// entry the way a genuine retarget's cap-clear is.
+func TestAudit_CapStoreRepairIsAttributedToTheStore(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTaskWithCap("handcap01", 5)})
+
+	_, err := UpdateTaskChecked("handcap01", TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handcap01")
+	require.Len(t, trail, 1, "the empty patch changed only a store-repaired cap")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor,
+		"a store repair of a stale cap on a hand-edited row is the store's change")
+	assert.Equal(t, AuditUpdated, trail[0].Action)
+	assert.Equal(t, []string{"max_concurrent_runs"}, trail[0].Fields)
+	stored, err := GetTask("handcap01")
+	require.NoError(t, err)
+	assert.Equal(t, 0, stored.MaxConcurrentRuns, "the cap really was repaired on disk")
+}
+
+// TestAudit_OnCompleteStoreRepairIsAttributedToTheStore: a hand-edited cron task
+// carrying on_complete="kill" AND a target_session (a shape ValidateTrigger
+// rejects), patched through an empty TaskUpdate{}, has its on_complete repaired
+// to keep by clearInapplicableOnComplete. The caller never touched on_complete,
+// so the repair is recorded as ActorDaemonUpgrade, not the caller's move.
+func TestAudit_OnCompleteStoreRepairIsAttributedToTheStore(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTask("handoc01", "kill", "my-sess")})
+
+	_, err := UpdateTaskChecked("handoc01", TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handoc01")
+	require.Len(t, trail, 1, "the empty patch changed only a store-repaired on_complete")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor,
+		"a store repair of a contradictory on_complete is the store's change")
+	assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+	stored, err := GetTask("handoc01")
+	require.NoError(t, err)
+	assert.Equal(t, "", stored.OnComplete, "on_complete was repaired to keep on disk")
+	assert.Equal(t, "my-sess", stored.TargetSession, "target_session is untouched; only on_complete was repaired")
+}
+
+// TestAudit_CapStoreRepairAndCallerChangeCoexist: a hand-edited invalid cron
+// with a stale cap, patched with a prompt-only change. The store repairs the
+// cap (one daemon-upgrade line), and the caller's entry names ONLY the prompt —
+// the carve-out excluded the cap from the caller's diff the same way
+// canonical-to-canonical diffing excludes a byte-canonicalization. An operator
+// chasing a cap regression is not sent to a CLI edit that never touched it.
+func TestAudit_CapStoreRepairAndCallerChangeCoexist(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTaskWithCap("handcap02", 5)})
+
+	np := "changed"
+	_, err := UpdateTaskChecked("handcap02", TaskUpdate{Prompt: &np}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handcap02")
+	require.Len(t, trail, 2,
+		"the store's repair and the CLI's move — not one entry attributing both to the CLI")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor, "the store's repair is recorded first, as repo_id is")
+	assert.Equal(t, []string{"max_concurrent_runs"}, trail[0].Fields)
+	assert.Equal(t, ActorCLI, trail[1].Actor, "the CLI's entry is the prompt it moved")
+	assert.Equal(t, []string{"prompt"}, trail[1].Fields,
+		"the cap-clear is the store's repair, not the CLI's change")
+}
+
+// TestAudit_OnCompleteStoreRepairAndCallerChangeCoexist: the on_complete twin of
+// the cap test above — a prompt-only patch on a row holding a contradictory
+// on_complete plus a target session. The store's on_complete repair is a
+// daemon-upgrade line; the CLI's entry names only the prompt.
+func TestAudit_OnCompleteStoreRepairAndCallerChangeCoexist(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTask("handoc02", "kill", "my-sess")})
+
+	np := "changed"
+	_, err := UpdateTaskChecked("handoc02", TaskUpdate{Prompt: &np}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handoc02")
+	require.Len(t, trail, 2)
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor)
+	assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"prompt"}, trail[1].Fields)
+}
+
+// TestAudit_BothStoreRepairsFireOnOneRow: a single hand-edited row invalid for
+// BOTH fields — a cron task with a stale cap AND a target_session-bearing
+// on_complete=kill (cap + target_session is itself invalid, and so is kill +
+// target_session). An empty patch repairs both; each is its own daemon-upgrade
+// line, and no caller entry is written.
+func TestAudit_BothStoreRepairsFireOnOneRow(t *testing.T) {
+	row := handEditedCronTask("handboth", OnCompleteKill, "my-sess")
+	row.MaxConcurrentRuns = 5
+	handEditedStore(t, []Task{row})
+
+	_, err := UpdateTaskChecked("handboth", TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handboth")
+	require.Len(t, trail, 2, "one daemon-upgrade line per store-repaired field")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor)
+	assert.Equal(t, []string{"max_concurrent_runs"}, trail[0].Fields)
+	assert.Equal(t, ActorDaemonUpgrade, trail[1].Actor)
+	assert.Equal(t, []string{"on_complete"}, trail[1].Fields)
+	for _, e := range trail {
+		assert.NotEqual(t, ActorCLI, e.Actor, "the empty patch moved nothing on the caller's behalf")
+	}
+	stored, err := GetTask("handboth")
+	require.NoError(t, err)
+	assert.Equal(t, 0, stored.MaxConcurrentRuns, "cap repaired")
+	assert.Equal(t, "", stored.OnComplete, "on_complete repaired to keep")
+	assert.Equal(t, "my-sess", stored.TargetSession, "target_session untouched")
+}
+
+// TestAudit_ExplicitCapClearOnInvalidRowIsTheCallersChange guards the
+// update.MaxConcurrentRuns == nil gate on the carve-out. When the caller
+// EXPLICITLY clears a stale cap (MaxConcurrentRuns: &0) on a hand-edited invalid
+// row, the clear is the caller's change, not a store repair: the carve-out stays
+// out (the patch set the field), and the trail must NOT drop the write ("cannot
+// miss one that did"), so the cap appears in the caller's entry — never as a
+// daemon-upgrade line.
+func TestAudit_ExplicitCapClearOnInvalidRowIsTheCallersChange(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTaskWithCap("handcap03", 5)})
+
+	zero := 0
+	_, err := UpdateTaskChecked("handcap03", TaskUpdate{MaxConcurrentRuns: &zero}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handcap03")
+	require.Len(t, trail, 1, "the explicit clear is a single caller entry")
+	assert.Equal(t, ActorCLI, trail[0].Actor,
+		"an explicit cap clear is the caller's change, even on an already-invalid row")
+	assert.Equal(t, []string{"max_concurrent_runs"}, trail[0].Fields)
+	for _, e := range trail {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor, "the store did not repair what the caller cleared")
+	}
+}
+
+// TestAudit_ExplicitOnCompleteClearOnInvalidRowIsTheCallersChange: the on_complete
+// twin — the caller explicitly reverts a contradictory on_complete to keep on a
+// hand-edited invalid row. The carve-out stays out (the patch set the field), so
+// the move is the caller's, recorded as such, and not dropped or mis-attributed
+// to the store.
+func TestAudit_ExplicitOnCompleteClearOnInvalidRowIsTheCallersChange(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTask("handoc03", "kill", "my-sess")})
+
+	keep := OnCompleteKeep
+	_, err := UpdateTaskChecked("handoc03", TaskUpdate{OnComplete: &keep}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handoc03")
+	require.Len(t, trail, 1, "the explicit revert is a single caller entry")
+	assert.Equal(t, ActorCLI, trail[0].Actor)
+	assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+	for _, e := range trail {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor)
+	}
+}
+
+// TestAudit_CapStoreRepairFiresAtMostOnce guards the "fires at most once" property
+// the comment on the canonicalization carves claims: the triggering write
+// repairs the on-disk value, so a second empty patch on the now-valid row has
+// nothing left to repair and writes no daemon-upgrade line.
+func TestAudit_CapStoreRepairFiresAtMostOnce(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTaskWithCap("handcap04", 5)})
+
+	_, err := UpdateTaskChecked("handcap04", TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.Len(t, auditOf(t, "handcap04"), 1, "first write repaired and recorded")
+
+	_, err = UpdateTaskChecked("handcap04", TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+	assert.Len(t, auditOf(t, "handcap04"), 1, "a now-valid row has nothing left to repair")
+}
+
+// TestAudit_GenuineRetargetCapClearStaysAttributedToTheCaller is the case the
+// fix must NOT regress: a VALID watch task the caller retargets to cron has its
+// cap cleared as a consequence of the caller's own trigger change. The existing
+// row had capApplies()==true, so the carve-out does not fire, and the cap-clear
+// stays in the caller's entry alongside the trigger fields it moved.
+func TestAudit_GenuineRetargetCapClearStaysAttributedToTheCaller(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	seed := Task{ID: "retarget01", Name: "capped", WatchCmd: "tail -f x", MaxConcurrentRuns: 3, Enabled: true}
+	require.NoError(t, AddTask(seed))
+
+	edited := seed
+	edited.CronExpr = "0 9 * * *"
+	edited.WatchCmd = ""
+	edited.Prompt = "run it"
+	patch := DiffTask(seed, edited)
+	require.Nil(t, patch.MaxConcurrentRuns, "a TUI/API edit never patches the cap")
+
+	_, err := UpdateTaskChecked("retarget01", patch, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "retarget01")
+	require.Len(t, trail, 2, "the create, and the CLI's retarget — no daemon-upgrade line")
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"prompt", "cron_expr", "watch_cmd", "max_concurrent_runs"}, trail[1].Fields,
+		"the cap-clear is a consequence of the caller's retarget and stays attributed to the caller")
+	for _, e := range trail {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor, "a genuine retarget is not a store repair")
+	}
+}
+
+// These pin the destructive inverse of TestAudit_SamePathBackfillIsRecorded: a
+// same-path ProjectPath reassertion over a path that has SINCE stopped resolving
+// must not erase the retained RepoID. The recompute stays — it backs the legacy
+// backfill where the retained id is "" and the path resolves — but an empty
+// re-resolution over a retained, non-empty id strands the task from its own
+// project's scope, the exact harm Task.RepoID exists to prevent. See
+// Task.RepoID's PURPOSE and the contract contemplation of subdirectory and
+// linked-worktree bindings at task/task.go:103-108.
+
+// bindMainWithLinkedWorktree creates a main git repo and a linked worktree at a
+// SIBLING path, the contract-contemplated binding whose owning repo root is not
+// a directory-tree ancestor of the recorded path. Returns the symlink-resolved
+// main root and worktree path. A commit is made so `git worktree add` can branch.
+func bindMainWithLinkedWorktree(t *testing.T) (mainRoot, worktree string) {
+	t.Helper()
+	base := t.TempDir()
+	mainRoot = filepath.Join(base, "main")
+	require.NoError(t, os.MkdirAll(mainRoot, 0o755))
+	require.NoError(t, exec.Command("git", "init", mainRoot).Run())
+	for _, args := range [][]string{
+		{"-C", mainRoot, "config", "user.email", "test@example.com"},
+		{"-C", mainRoot, "config", "user.name", "Test User"},
+		{"-C", mainRoot, "commit", "--allow-empty", "-m", "init"},
+	} {
+		require.NoError(t, exec.Command("git", args...).Run(), "git %v", args)
+	}
+	wtRaw := filepath.Join(base, "linked")
+	out, err := exec.Command("git", "-C", mainRoot, "worktree", "add", "-b", "feature", wtRaw).CombinedOutput()
+	require.NoError(t, err, "git worktree add: %s", out)
+	worktree, err = filepath.EvalSymlinks(wtRaw)
+	require.NoError(t, err)
+	mainRoot, err = filepath.EvalSymlinks(mainRoot)
+	require.NoError(t, err)
+	return mainRoot, worktree
+}
+
+// bindMainWithSubdir creates a main git repo and a subdirectory inside it, the
+// other contract-contemplated binding: the TUI records the subdirectory the user
+// typed. Returns the symlink-resolved main root and the subdirectory path.
+func bindMainWithSubdir(t *testing.T) (mainRoot, sub string) {
+	t.Helper()
+	base := t.TempDir()
+	mainRoot = filepath.Join(base, "repo")
+	require.NoError(t, os.MkdirAll(mainRoot, 0o755))
+	require.NoError(t, exec.Command("git", "init", mainRoot).Run())
+	sub = filepath.Join(mainRoot, "services", "dlq")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	var err error
+	mainRoot, err = filepath.EvalSymlinks(mainRoot)
+	require.NoError(t, err)
+	sub, err = filepath.EvalSymlinks(sub)
+	require.NoError(t, err)
+	return mainRoot, sub
+}
+
+// TestAudit_SamePathDeadPatchRetainsRepoID is the simplest shape: a plain `git
+// init` whose recorded path IS its own root. This shape does NOT surface a scope
+// divergence (the retained id and the dead-path fallback hash the same cleaned
+// path), so this test pins only that the field is NOT erased and that NO
+// daemon-upgrade audit entry fires for the destructive direction — the inverse
+// of TestAudit_SamePathBackfillIsRecorded, where a same-path patch FILLS a
+// retained id and the daemon-upgrade entry correctly fires.
+func TestAudit_SamePathDeadPatchRetainsRepoID(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	require.NoError(t, exec.Command("git", "init", repo).Run())
+	resolved, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	repo = resolved
+
+	created, err := AddTaskChecked(Task{
+		ID: "own00001", Name: "Bound", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: repo, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	require.NoError(t, os.RemoveAll(filepath.Join(repo, ".git")))
+	require.Empty(t, repoIDForPath(repo), "precondition: the path no longer resolves to a repo")
+
+	same := repo
+	_, err = UpdateTaskChecked("own00001", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("own00001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a dead-path same-path re-patch must not erase the retained RepoID")
+	assert.Len(t, stored.Audit, 1, "no daemon-upgrade entry fires: the destructive clear is neither performed nor recorded")
+}
+
+// TestAudit_SamePathDeadPatchRetainsWorktreeBinding: the sibling-worktree shape
+// the Task.RepoID contract names directly. The recorded path is a worktree at a
+// sibling of the main repo, so once its .git dies an ancestor walk from the
+// recorded path never crosses the lateral main repo and re-derivation invents an
+// id that matches nothing. Erasing RepoID on a same-path re-patch strandts the
+// task from its own project's scoped list; the fix retains the id.
+func TestAudit_SamePathDeadPatchRetainsWorktreeBinding(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wtd00001", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "precondition: the worktree task is visible in its project's scoped list")
+
+	// Kill the worktree's .git: the recorded path no longer resolves, and the
+	// lateral main repo is unreachable by the ancestor walk (the stranding shape).
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+	require.Empty(t, repoIDForPath(worktree), "precondition: the worktree path no longer resolves to a repo")
+	dead := config.ResolveProjectPath(worktree)
+	require.Empty(t, dead.Root, "precondition: no surviving ancestor — the loader's known-gate cannot restore")
+	require.NotEqual(t, retained, dead.ID, "precondition: re-derivation diverges from the retained id (the stranding condition)")
+
+	same := worktree
+	_, err = UpdateTaskChecked("wtd00001", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("wtd00001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a dead-path same-path re-patch must not erase the retained RepoID")
+	assert.Len(t, stored.Audit, 1, "no daemon-upgrade entry fires for the un-resolving re-bind")
+
+	// The retained id short-circuits scope matching before the dead path is
+	// re-derived, so the task stays in its own project's scoped list.
+	vis, err = LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the retained binding keeps the task visible in its own project after a dead-path re-patch")
+}
+
+// TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling: the daemon does
+// not normalize project_path, so a remote caller can reassert the SAME dead path
+// with an equivalent spelling (a trailing separator or a "."/".." leaf) whose raw
+// string differs from the recorded one. Before the cleaned-path compare that raw
+// inequality read as a rebind and the empty re-resolution erased the retained
+// RepoID, stranding the worktree task from its own project's scoped list. The fix
+// recognizes the equivalent spellings as same-path and keeps the binding. Pairs
+// with TestAudit_SamePathDeadPatchRetainsWorktreeBinding, the exact-spelling twin.
+func TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wte00001", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "precondition: the worktree task is visible in its project's scoped list")
+
+	// Kill the worktree's .git: the recorded path no longer resolves, and the
+	// lateral main repo is unreachable by the ancestor walk (the stranding shape).
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+	require.Empty(t, repoIDForPath(worktree), "precondition: the worktree path no longer resolves to a repo")
+	dead := config.ResolveProjectPath(worktree)
+	require.Empty(t, dead.Root, "precondition: no surviving ancestor — the loader's known-gate cannot restore")
+	require.NotEqual(t, retained, dead.ID, "precondition: re-derivation diverges from the retained id (the stranding condition)")
+
+	// Built as raw strings rather than filepath.Join, which would Clean away the
+	// very difference this test exercises. Each differs from worktree as a raw
+	// string yet cleans back to it, so each is an equivalent dead-path reassertion.
+	sep := string(filepath.Separator)
+	spellings := []string{
+		worktree + sep,       // trailing separator
+		worktree + sep + ".", // trailing "." leaf
+		worktree + sep + ".." + sep + filepath.Base(worktree), // ".." then back to the leaf
+	}
+	for _, spelling := range spellings {
+		require.NotEqual(t, worktree, spelling, "precondition: the spelling differs as a raw string: %q", spelling)
+		require.Equal(t, filepath.Clean(worktree), filepath.Clean(spelling), "precondition: but is equivalent once cleaned: %q", spelling)
+		require.Empty(t, repoIDForPath(spelling), "precondition: the equivalent spelling is also a dead path: %q", spelling)
+
+		_, err := UpdateTaskChecked("wte00001", TaskUpdate{ProjectPath: &spelling}, ProjectExpectation{}, ActorCLI, nil)
+		require.NoError(t, err)
+
+		stored, err := GetTask("wte00001")
+		require.NoError(t, err)
+		assert.Equal(t, retained, stored.RepoID, "an equivalent spelling of a dead path must not erase the retained RepoID: %q", spelling)
+		for _, e := range stored.Audit {
+			assert.NotEqual(t, ActorDaemonUpgrade, e.Actor, "no daemon-upgrade entry fires for an equivalent dead-path reassertion: %q", spelling)
+		}
+
+		vis, err := LoadTasksForRepo(mainRoot)
+		require.NoError(t, err)
+		require.Len(t, vis, 1, "the retained binding keeps the task visible in its own project across an equivalent dead-path reassertion: %q", spelling)
+	}
+}
+
+// TestAudit_SamePathDeadPatchRetainsWorktreeBinding_DurableThroughLoaderPass:
+// the daemon's startup re-binding pass must not disturb the retained binding
+// either. It backfills only rows whose ProjectPath still resolves (Root != "");
+// the dead worktree path does not, so the loader skips the row and the retained
+// id stays authoritative on disk.
+func TestAudit_SamePathDeadPatchRetainsWorktreeBinding_DurableThroughLoaderPass(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wtd00003", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	retained := created.RepoID
+
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+	same := worktree
+	_, err = UpdateTaskChecked("wtd00003", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	// The daemon's loader pass: commits backfills for legacy rows whose path
+	// resolves and returns the authoritative list plus what it rewrote.
+	loaded, updated, err := LoadTasksForRepoIDWithBindingUpdates(retained)
+	require.NoError(t, err)
+	assert.Empty(t, updated, "the loader rewrites nothing: the retained id is already non-empty")
+	require.Len(t, loaded, 1, "the retained id keeps the task in its project's authoritative list")
+	assert.Equal(t, retained, loaded[0].RepoID)
+
+	stored, err := GetTask("wtd00003")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "the retained id survives the loader pass on disk")
+	assert.Len(t, stored.Audit, 1, "the loader adds no daemon-upgrade entry for an already-bound row")
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the task remains visible in its project's scoped list after the loader pass")
+}
+
+// TestAudit_SamePathDeadPatchRetainsSubdirOfDeadParentBinding: the subdirectory
+// shape. The TUI records the subdirectory the user typed; git resolves it back
+// to the main repo while it lives. Once the repo's .git dies the ancestor walk
+// from the subdir finds nothing, so re-derivation invents sha256(subdir), which
+// differs from the retained sha256(repo) — erasing RepoID strands the task.
+func TestAudit_SamePathDeadPatchRetainsSubdirOfDeadParentBinding(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, sub := bindMainWithSubdir(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "sub00001", Name: "subdir-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: sub, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID)
+	retained := created.RepoID
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "precondition: the subdir task is visible in its project while the repo lives")
+
+	require.NoError(t, os.RemoveAll(filepath.Join(mainRoot, ".git")))
+	require.Empty(t, repoIDForPath(sub), "precondition: the dead subdir no longer resolves to a repo")
+	dead := config.ResolveProjectPath(sub)
+	require.Empty(t, dead.Root, "precondition: no surviving ancestor — the loader's known-gate cannot restore")
+	require.NotEqual(t, retained, dead.ID, "precondition: re-derivation diverges from the retained id (the stranding condition)")
+
+	same := sub
+	_, err = UpdateTaskChecked("sub00001", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sub00001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a dead-path same-path re-patch must not erase the retained RepoID")
+	assert.Len(t, stored.Audit, 1, "no daemon-upgrade entry fires for the un-resolving re-bind")
+
+	vis, err = LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the retained binding keeps the task visible in its project after the owning repo dies")
+}
+
+// TestAudit_SamePathDeadPatchRetainsRepoIDWithUnchangedField: the realistic
+// trigger — an operator re-applies task config that includes --project-path
+// while editing another field, without knowing the path is already dead on the
+// daemon host. The other field's change is recorded as the user's; RepoID is
+// retained and no daemon-upgrade repo_id entry fires.
+func TestAudit_SamePathDeadPatchRetainsRepoIDWithUnchangedField(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wtd00004", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	retained := created.RepoID
+
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+
+	same := worktree
+	prompt := "sweep harder"
+	_, err = UpdateTaskChecked("wtd00004", TaskUpdate{ProjectPath: &same, Prompt: &prompt}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("wtd00004")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "the retained RepoID survives a same-path dead re-patch that also edits a field")
+	require.Len(t, stored.Audit, 2, "the create, and the user's prompt change — no daemon-upgrade repo_id entry")
+	assert.Equal(t, ActorCLI, stored.Audit[1].Actor)
+	assert.Equal(t, []string{"prompt"}, stored.Audit[1].Fields, "the trail records the user's prompt change, not a derived repo_id")
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the task stays visible in its project after the combined re-patch")
+}
+
+// TestAudit_SymlinkDivergentRebindIsDetectedNotRetained pins the filesystem
+// semantics sameProjectPathReassertion adds: two spellings that clean lexically
+// equal but resolve through a symlink to DIFFERENT directories are a real
+// rebind, not the same-path reassertion the dead-path protection retains. This
+// is the inverse of TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling,
+// whose equivalent spellings all resolve to the SAME directory and so retain.
+//
+// base/link -> other/child (a symlink), so base/link/../task resolves physically
+// to other/task while it cleans lexically to base/task; base/task is a different,
+// non-repo directory. Rebinding base/link/../task -> base/task with the new
+// target non-Git must clear the retained RepoID rather than preserve it and
+// leave the task scoped to its former project.
+func TestAudit_SymlinkDivergentRebindIsDetectedNotRetained(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	// other is a git repo; the recorded path resolves into it through the link.
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "child"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "task"), 0o755))
+	require.NoError(t, exec.Command("git", "init", other).Run())
+	// base/task is a plain non-Git dir — the rebind target.
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "task"), 0o755))
+	// base/link -> other/child, so base/link/../task resolves physically to
+	// other/task, not to base/task.
+	require.NoError(t, os.Symlink(filepath.Join(other, "child"), filepath.Join(base, "link")))
+
+	// Built as raw strings rather than via filepath.Join, which would Clean
+	// away the "link/.." that this test exercises.
+	sep := string(filepath.Separator)
+	recorded := base + sep + "link" + sep + ".." + sep + "task"
+	rebind := filepath.Join(base, "task")
+
+	// Precondition: the two spellings are lexically equal but physically
+	// distinct — the exact pair a cleaned-path compare misreads as same-path.
+	require.Equal(t, filepath.Clean(recorded), filepath.Clean(rebind))
+	resolvedRecorded, err := filepath.EvalSymlinks(recorded)
+	require.NoError(t, err)
+	resolvedRebind, err := filepath.EvalSymlinks(rebind)
+	require.NoError(t, err)
+	require.NotEqual(t, resolvedRecorded, resolvedRebind, "the two paths are physically distinct")
+
+	created, err := AddTaskChecked(Task{
+		ID: "sym00001", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "bind-time resolution stamped a RepoID from the repo behind the link")
+
+	// The rebind target is non-Git, so its re-resolution is empty.
+	require.Empty(t, repoIDForPath(rebind), "precondition: the rebind target is not a repo")
+
+	_, err = UpdateTaskChecked("sym00001", TaskUpdate{ProjectPath: &rebind}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sym00001")
+	require.NoError(t, err)
+	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind to a non-Git path is a real rebind, not a same-path reassertion: the binding clears")
+}
+
+// TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath is the dead-recorded
+// twin of TestAudit_SymlinkDivergentRebindIsDetectedNotRetained. There the two
+// spellings both resolved, so EvalSymlinks caught the divergence on the physical
+// branch; here the RECORDED path no longer exists (EvalSymlinks fails on it),
+// driving sameProjectPathReassertion into the lexical Clean fallback — the path
+// the ".." restriction now guards.
+//
+// base/link -> other/child, so base/link/../task resolves physically to
+// other/task (a non-Git directory) while it cleans lexically to base/task. The
+// recorded base/task is removed entirely, so EvalSymlinks cannot answer for it
+// and the fallback must decide. A ".." segment can cross a symlink Clean cannot
+// see, so the patch is read as a real rebind and re-resolved (to empty, the
+// non-Git target) rather than retained as a same-path reassertion — the inverse
+// of the dead-path retain cases, whose spellings resolve and so never reach
+// this branch.
+func TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	// other/task is the non-Git directory the patch resolves to through the
+	// link; other/child exists so the symlink target is reachable.
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "child"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "task"), 0o755))
+	// base/link -> other/child, so base/link/../task resolves physically to
+	// other/task, not to base/task.
+	require.NoError(t, os.Symlink(filepath.Join(other, "child"), filepath.Join(base, "link")))
+
+	// base/task starts as its own git repo so the task binds to it and retains a
+	// RepoID; it is then removed entirely so the recorded path no longer exists
+	// and EvalSymlinks fails on it — the dead-recorded-path shape this test
+	// exists for.
+	recorded := filepath.Join(base, "task")
+	require.NoError(t, os.MkdirAll(recorded, 0o755))
+	require.NoError(t, exec.Command("git", "init", recorded).Run())
+
+	created, err := AddTaskChecked(Task{
+		ID: "sym00002", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID from base/task's own repo")
+	retained := created.RepoID
+
+	require.NoError(t, os.RemoveAll(recorded))
+	_, err = filepath.EvalSymlinks(recorded)
+	require.Error(t, err, "precondition: the recorded path is gone, so the physical comparison is unavailable")
+	require.Empty(t, repoIDForPath(recorded), "precondition: the removed path no longer resolves to a repo")
+
+	// Built as a raw string rather than via filepath.Join, which would Clean
+	// away the "link/.." that this test exercises.
+	sep := string(filepath.Separator)
+	patch := base + sep + "link" + sep + ".." + sep + "task"
+	require.Equal(t, filepath.Clean(patch), filepath.Clean(recorded), "precondition: the two spellings clean lexically equal")
+	resolvedPatch, err := filepath.EvalSymlinks(patch)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(other, "task"), resolvedPatch, "precondition: but the patch resolves physically to other/task")
+	require.Empty(t, repoIDForPath(patch), "precondition: the patch resolves to a non-Git directory, so the re-resolution is empty")
+
+	_, err = UpdateTaskChecked("sym00002", TaskUpdate{ProjectPath: &patch}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sym00002")
+	require.NoError(t, err)
+	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind against a dead recorded path is a real rebind, not a same-path reassertion: the binding re-resolves (to empty) rather than retain")
+	assert.NotEqual(t, retained, stored.RepoID, "the stale binding for the removed base/task is not retained across a \"..\"-divergent rebind")
+}
+
+// TestAudit_SymlinkDivergentRebindWithDotDotInDeadRecordedPath is the inverse of
+// TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath: there the ".." lived
+// in the (live) patch and the recorded path was removed; here the RECORDED path
+// carries the ".." and is the one that dies, while the patch is a plain non-Git
+// directory with no "..". The recorded base/link/../task binds through the link
+// to other/task (inside other's repo) and retains other's id; once other/task is
+// removed EvalSymlinks cannot answer for the recorded spelling, so the decision
+// falls to the lexical Clean compare. Both spellings clean to base/task, so
+// before the guard covered the recorded spelling's ".." the cleaned compare
+// read a real rebind as a same-path reassertion and the retained id survived —
+// leaving the task scoped to a repository it no longer binds to. The guard now
+// checks both spellings, so the recorded ".." drives a rebind and the (non-Git)
+// patch re-resolves to empty, clearing the binding.
+func TestAudit_SymlinkDivergentRebindWithDotDotInDeadRecordedPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	// other is a git repo; the recorded path resolves into it through the link.
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "child"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "task"), 0o755))
+	require.NoError(t, exec.Command("git", "init", other).Run())
+	// base/task is a plain non-Git dir — the patch (rebind target).
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "task"), 0o755))
+	// base/link -> other/child, so base/link/../task resolves physically to
+	// other/task, not to base/task.
+	require.NoError(t, os.Symlink(filepath.Join(other, "child"), filepath.Join(base, "link")))
+
+	// Built as a raw string rather than via filepath.Join, which would Clean
+	// away the "link/.." that this test exercises.
+	sep := string(filepath.Separator)
+	recorded := base + sep + "link" + sep + ".." + sep + "task"
+	patch := filepath.Join(base, "task")
+
+	created, err := AddTaskChecked(Task{
+		ID: "sym00003", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "bind-time resolution stamped a RepoID from the repo behind the link")
+	retained := created.RepoID
+
+	// Kill the recorded path's resolution: other/task is removed, so
+	// EvalSymlinks(recorded) can no longer answer, and re-derivation from the raw
+	// recorded string also finds no repo.
+	require.NoError(t, os.RemoveAll(filepath.Join(other, "task")))
+	_, err = filepath.EvalSymlinks(recorded)
+	require.Error(t, err, "precondition: the recorded path is gone, so the physical comparison is unavailable")
+	require.Empty(t, repoIDForPath(recorded), "precondition: the dead recorded path no longer resolves to a repo")
+
+	// The patch is a live non-Git directory with no "..": before the guard
+	// covered the recorded spelling this was the pair that cleaned equal and
+	// retained a stale id.
+	require.Equal(t, filepath.Clean(recorded), filepath.Clean(patch), "precondition: the two spellings clean lexically equal")
+	resolvedPatch, err := filepath.EvalSymlinks(patch)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(base, "task"), resolvedPatch, "precondition: the patch resolves physically to base/task, a live non-Git dir")
+	require.Empty(t, repoIDForPath(patch), "precondition: the patch resolves to a non-Git directory, so the re-resolution is empty")
+
+	_, err = UpdateTaskChecked("sym00003", TaskUpdate{ProjectPath: &patch}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sym00003")
+	require.NoError(t, err)
+	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind whose \"..\" is in the dead recorded path is a real rebind, not a same-path reassertion: the binding re-resolves (to empty) rather than retain")
+	assert.NotEqual(t, retained, stored.RepoID, "the stale binding for the removed other/task is not retained across a \"..\"-divergent rebind whose \"..\" is in the recorded path")
+}
+
+// TestAudit_SamePathDeadPatchRetainsRepoIDForCaseVariantSpelling pins the
+// os.SameFile guard sameProjectPathReassertion adds for case-insensitive,
+// case-preserving volumes (the common macOS and Windows layout). The daemon
+// does not normalize project_path, so a remote caller can reassert the SAME
+// dead path with only a change in casing — recorded /Users/me/Repo versus
+// patched /Users/me/repo. Both filepath.EvalSymlinks calls succeed while
+// preserving the differing spelling, so before the identity compare the
+// resolved-string inequality read the reassertion as a rebind and the empty
+// re-resolution erased the retained RepoID, stranding the task from its own
+// project's scoped list. Comparing by filesystem identity (os.SameFile)
+// recognizes the case-variant spellings as one directory and retains. Pairs
+// with TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling, whose
+// equivalent spellings the lexical Clean fallback already covers.
+//
+// The case-variant shape only arises on a case-insensitive volume, so the test
+// short-circuits on a case-sensitive filesystem (the Linux CI layout), where
+// the case-variant spelling is a genuinely distinct, non-existent directory;
+// the macOS CI job exercises the retain assertion.
+func TestAudit_SamePathDeadPatchRetainsRepoIDForCaseVariantSpelling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	repo := filepath.Join(base, "MixedCase")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	require.NoError(t, exec.Command("git", "init", repo).Run())
+
+	created, err := AddTaskChecked(Task{
+		ID: "case0001", Name: "Bound", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: repo, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	// Kill the repo's .git so the recorded path no longer resolves; the
+	// directory itself still stands, so EvalSymlinks still answers for it and
+	// the case-variant reassertion is decided by the resolved-spelling branch
+	// (the os.SameFile guard), not the dead-path Clean fallback.
+	require.NoError(t, os.RemoveAll(filepath.Join(repo, ".git")))
+	require.Empty(t, repoIDForPath(repo), "precondition: the path no longer resolves to a repo")
+
+	// A case-variant spelling the caller reasserts. On a case-sensitive
+	// filesystem this is a distinct, non-existent directory and the
+	// case-variant reassertion this test pins (a case-insensitive-volume
+	// behavior) does not arise — skip there.
+	patched := filepath.Join(base, "mixedcase")
+	require.NotEqual(t, repo, patched, "precondition: the spellings differ only in case")
+	repoStat, err := os.Stat(repo)
+	require.NoError(t, err)
+	patchedStat, err := os.Stat(patched)
+	if err != nil || !os.SameFile(repoStat, patchedStat) {
+		t.Skip("case-sensitive filesystem: the case-variant reassertion is a case-insensitive-volume behavior")
+	}
+
+	_, err = UpdateTaskChecked("case0001", TaskUpdate{ProjectPath: &patched}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("case0001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a case-variant reassertion of the same dead directory on a case-insensitive volume must not erase the retained RepoID")
+	for _, e := range stored.Audit {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor, "no daemon-upgrade entry fires for a case-variant same-path reassertion")
+	}
 }

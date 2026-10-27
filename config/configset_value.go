@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"regexp"
 	"sort"
@@ -35,11 +36,14 @@ func canonicalizeStructuredValue(key, raw string) (canonical, encoded string, er
 	return canonicalizeStructuredValueAgainst(key, raw, nil, false)
 }
 
-// canonicalizeStructuredValueAgainst is the global writer's locked variant.
-// Whole program-overrides maps preserve an
-// omitted auto-detected default as an empty TOML tombstone so the loader cannot
-// seed that command back in after the user removed it.
-func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preserveBuiltInRemovals bool) (canonical, encoded string, err error) {
+// canonicalizeStructuredValueAgainst is the writers' locked variant. existing
+// is the program_overrides map already on the layer being written: a whole-map
+// write that omits an agent keeps that agent's "" tombstone, so replacing the
+// table cannot bring back the lower layer's override (#4699). reseedBuiltIns is
+// global-only: it also writes a tombstone for every omitted auto-detected
+// default so the loader cannot seed that command back in after the user
+// removed it. A personal project layer preserves only its own tombstones.
+func canonicalizeStructuredValueAgainst(key, raw string, existing map[string]string, reseedBuiltIns bool) (canonical, encoded string, err error) {
 	if strings.TrimSpace(raw) == "null" {
 		return "", "", fmt.Errorf("expected compact JSON for %s, got null", key)
 	}
@@ -64,6 +68,15 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 		return editorValue(value), encoded, nil
 	}
 
+	// A whole-table write may omit a leaf — the loader supplies the compiled
+	// default for an absent one, so the typed form must seed the same defaults
+	// before decoding: a zero value left by an omitted member would read as a
+	// range violation below. An explicitly-written member still decodes over
+	// its seed, so a present-but-invalid value fails as strictly as the leaf
+	// form does.
+	if key == "web" {
+		field.Set(reflect.ValueOf(DefaultConfig().Web))
+	}
 	target := field.Addr().Interface()
 	if err := decodeCompactJSON(key, raw, target); err != nil {
 		return "", "", err
@@ -77,7 +90,7 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 
 	canonical = editorValue(field)
 	encodedValue := field
-	if key == "program_overrides" && preserveBuiltInRemovals {
+	if key == "program_overrides" && (len(existing) > 0 || reseedBuiltIns) {
 		requested := field.Interface().(map[string]string)
 		onDisk := make(map[string]string, len(requested)+1)
 		for agent, command := range requested {
@@ -87,18 +100,18 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 		// them even if the corresponding executable is temporarily absent from
 		// PATH while another override is edited; otherwise the executable would
 		// silently reappear the next time detection succeeds.
-		if current != nil {
-			for agent, command := range current.ProgramOverrides {
-				if command == "" {
-					if _, present := requested[agent]; !present {
-						onDisk[agent] = ""
-					}
+		for agent, command := range existing {
+			if command == "" {
+				if _, present := requested[agent]; !present {
+					onDisk[agent] = ""
 				}
 			}
 		}
-		for agent := range DefaultConfig().ProgramOverrides {
-			if _, present := requested[agent]; !present {
-				onDisk[agent] = ""
+		if reseedBuiltIns {
+			for agent := range DefaultConfig().ProgramOverrides {
+				if _, present := requested[agent]; !present {
+					onDisk[agent] = ""
+				}
 			}
 		}
 		encodedValue = reflect.ValueOf(onDisk)
@@ -225,6 +238,19 @@ func validateStructuredConfigValue(key string, field reflect.Value) error {
 		}
 		if err := keys.ValidateOverrides(overrides); err != nil {
 			return err
+		}
+	case "web":
+		// The whole-table JSON form posts both leaves at once; each gets the
+		// same range check the leaf writer runs, under the leaf's own key name
+		// so a refusal names the field that was wrong.
+		web := field.Interface().(WebConfig)
+		for leaf, value := range map[string]float64{
+			"terminal_font_size_phone":   web.TerminalFontSizePhone,
+			"terminal_font_size_desktop": web.TerminalFontSizeDesktop,
+		} {
+			if err := validateWebTerminalFontSize(leaf, strconv.FormatFloat(value, 'g', -1, 64)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -406,6 +432,20 @@ func canonicalizeScalar(kind cfgValueKind, raw string) (canonical, encoded strin
 		// Canonical is the comma-joined trimmed elements — exactly the form the
 		// editor shows and `af config get` prints back, so a set→get round-trips.
 		return strings.Join(elems, ","), encoded, nil
+	case cfgFloat:
+		n, perr := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		if perr != nil {
+			return "", "", fmt.Errorf("expected a number, got %q", raw)
+		}
+		canonical = strconv.FormatFloat(n, 'g', -1, 64)
+		// The FILE spelling needs a fraction or exponent — a bare "8" would
+		// decode as a TOML integer, which a float64 field refuses at load.
+		// The canonical echo keeps the short "8" `config get` renders.
+		encoded = canonical
+		if !strings.ContainsAny(canonical, ".eE") && !math.IsNaN(n) && !math.IsInf(n, 0) {
+			encoded += ".0"
+		}
+		return canonical, encoded, nil
 	default:
 		return raw, encodeTOMLString(raw), nil
 	}
@@ -497,6 +537,16 @@ func projectStructuredCurrentValue(cfg *ProjectConfig, key string) (string, bool
 		return "", false
 	}
 	if key != "root_agent" {
+		if key == "program_overrides" {
+			visible := make(map[string]string, field.Len())
+			iter := field.MapRange()
+			for iter.Next() {
+				if command := iter.Value().String(); command != "" {
+					visible[iter.Key().String()] = command
+				}
+			}
+			return editorValue(reflect.ValueOf(visible)), true
+		}
 		return editorValue(field), true
 	}
 	shapeValue, _ := cfg.source.topLevel(key)
@@ -702,8 +752,13 @@ func removeTOMLTopLevelValue(content, key string) (string, error) {
 				end := leadingTableCommentStart(data, start, currentBlock.start)
 				ranges = append(ranges, byteRange{start: currentBlock.start, end: end})
 			}
+			isTarget := len(parts) > 0 && parts[0] == key
+			blockStart := start
+			if isTarget && currentBlock != nil {
+				blockStart = leadingTableCommentStart(data, start, currentBlock.start)
+			}
 			currentTable = parts
-			currentBlock = &tableBlock{start: start, target: len(parts) > 0 && parts[0] == key}
+			currentBlock = &tableBlock{start: blockStart, target: isTarget}
 		case unstable.KeyValue:
 			if len(currentTable) == 0 && len(parts) > 0 && parts[0] == key {
 				raw := expr.Raw

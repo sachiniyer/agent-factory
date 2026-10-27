@@ -100,7 +100,7 @@ func TestClientSnapshot_RoundTripsStructsByteIdentically(t *testing.T) {
 		CreatedAfter: time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC),
 		Limit:        &limit,
 	}
-	got, err := c.Snapshot(wantReq)
+	got, _, err := c.Snapshot(wantReq)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestSnapshotNoSpawn_NoDaemon_FallsBackSignal(t *testing.T) {
 	// path that no daemon is serving.
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	got, err := SnapshotNoSpawn(daemon.SnapshotRequest{})
+	got, _, err := SnapshotNoSpawn(daemon.SnapshotRequest{})
 	if !errors.Is(err, daemon.ErrDaemonUnavailable) {
 		t.Fatalf("want ErrDaemonUnavailable, got %v", err)
 	}
@@ -154,7 +154,7 @@ func TestSnapshot_FailureEnvelope_SurfacesMessage(t *testing.T) {
 		return apiproto.Failure("boom: repo not found")
 	})
 
-	_, err := c.Snapshot(daemon.SnapshotRequest{})
+	_, _, err := c.Snapshot(daemon.SnapshotRequest{})
 	if err == nil || err.Error() != "boom: repo not found" {
 		t.Fatalf("want verbatim daemon message, got %v", err)
 	}
@@ -170,7 +170,7 @@ func TestFailureEnvelope_PreservesMutationCommittedOutcome(t *testing.T) {
 		)
 	})
 
-	_, err := c.Snapshot(daemon.SnapshotRequest{})
+	_, _, err := c.Snapshot(daemon.SnapshotRequest{})
 	if err == nil {
 		t.Fatal("want the post-commit failure to remain visible")
 	}

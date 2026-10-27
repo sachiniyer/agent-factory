@@ -78,7 +78,7 @@ func TestPanePreviewSuppressionDoesNotTransferAcrossStableIDReuse(t *testing.T) 
 	h.suppressActivePanePreview()
 	h.cancelPanePreview(false)
 	require.NotNil(t, h.panePreviewSuppression)
-	require.NoError(t, alpha.CloseTab(2))
+	require.NoError(t, alpha.CloseTabByID(alpha.GetTabs()[2].ID))
 	alpha.AddTabForTest(targetName, session.TabKindShell)
 	replacement := len(alpha.GetTabs()) - 1
 	require.Empty(t, alpha.GetTabs()[replacement].ID,

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/proposal"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -55,6 +56,14 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	isShell := req.Shell || isExplicitShell
 	isWeb := explicitKind && kind == session.TabKindWeb
 	isVSCode := explicitKind && kind == session.TabKindVSCode
+	isDocs := explicitKind && kind == session.TabKindDocs
+	if isDocs {
+		if err := validateDocsTabRequest(req); err != nil {
+			return CreateTabResponse{}, err
+		}
+	} else if strings.TrimSpace(req.Proposal) != "" {
+		return CreateTabResponse{}, fmt.Errorf("--proposal is only valid for a docs tab (--kind docs)")
+	}
 	if !explicitKind && !isShell && strings.TrimSpace(req.Command) == "" {
 		return CreateTabResponse{}, fmt.Errorf("a process tab requires a non-empty command (--command)")
 	}
@@ -122,11 +131,18 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		effectiveKind = session.TabKindWeb
 	case isVSCode:
 		effectiveKind = session.TabKindVSCode
+	case isDocs:
+		effectiveKind = session.TabKindDocs
 	case isShell:
 		effectiveKind = session.TabKindShell
 	}
 	if err := instance.Capabilities().RefuseTabKind(effectiveKind, webURL); err != nil {
 		return CreateTabResponse{}, fmt.Errorf("cannot create a tab on session %q: %w", title, err)
+	}
+	if isDocs {
+		if err := requireProposal(repoID, req.Proposal); err != nil {
+			return CreateTabResponse{}, err
+		}
 	}
 
 	// Serialize the tab spawn against an archive/kill/restore teardown+move for
@@ -155,6 +171,8 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		tab, err = instance.AddWebTab(webURL, req.Name)
 	case isVSCode:
 		tab, err = instance.AddVSCodeTab(req.Name)
+	case isDocs:
+		tab, err = instance.AddDocsTab(req.Proposal, req.Name)
 	case isShell:
 		tab, err = instance.AddShellTab()
 	default:
@@ -234,36 +252,40 @@ func tabTmuxNameByID(tabs []session.TabData, id string) string {
 	return ""
 }
 
-// CloseTab closes a non-agent tab of the target session, kills its tmux
-// session, and persists the shrunk tab list (#960 PR 1). It is the close-side
-// counterpart of CreateTab. Session resolution, the remote/archived/stale-
-// instance guards and the op + repo start locks are tabMutationTarget's — the
-// sequence shared with RenameTab/ReorderTab; the persist goes through the
-// targeted per-repo writer (persistInstanceData) rather than a whole-list
-// SaveInstances, the clobber-safe single-writer direction of #960.
+// closeTabRequestedBy closes a non-agent tab of the target session, kills its
+// tmux session, and persists the shrunk tab list (#960 PR 1). It is the
+// close-side counterpart of CreateTab. Session resolution, the
+// remote/archived/stale-instance guards and the op + repo start locks are
+// tabMutationTarget's — the sequence shared with RenameTab/ReorderTab; the
+// persist goes through the targeted per-repo writer (persistInstanceData)
+// rather than a whole-list SaveInstances, the clobber-safe single-writer
+// direction of #960.
 //
 // Two of those shared steps carry weight specific to closing. The op-lock:
 // archive/kill/restore hold it while closing every tab's tmux session, so
-// without it CloseTab can call TmuxSession.Close on the same object concurrently
-// (#1434). The archived guard: archive preserves web tabs so a restore can
-// render them again, and a tab-delete against an archived session would strip
-// that URL out of the record BEFORE the restore meant to bring it back — the
-// very loss the preservation exists to prevent, just moved later (#1809).
+// without it closeTabRequestedBy can call TmuxSession.Close on the same object
+// concurrently (#1434). The archived guard: archive preserves web tabs so a
+// restore can render them again, and a tab-delete against an archived session
+// would strip that URL out of the record BEFORE the restore meant to bring it
+// back — the very loss the preservation exists to prevent, just moved later
+// (#1809).
 //
 // The tab is resolved by resolveTabTarget, the same precedence every tab verb
 // uses: the stable TabID first, then TabName, then TabIndex (#1971). Close is
 // where that id earns the most — it is the only DESTRUCTIVE tab verb, so a
 // resolve onto a reused name doesn't mislabel a tab, it kills the wrong tmux
 // session. The agent tab (index 0) is unclosable — KillSession tears down the
-// whole session instead — matching the TUI's `w` rule (handleCloseTab). Returns
-// the resolved name of the closed tab. The roster removal is committed to disk
-// before irreversible stream/tmux teardown. A persist failure restores the exact
-// live tab for retry; otherwise stale disk state could respawn a killed tab on a
-// daemon restart (#2669).
-func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
-	return m.closeTabRequestedBy(req, "internal daemon caller")
-}
-
+// whole session instead — matching the TUI's `w` rule (handleCloseTab).
+// Returns the resolved name of the closed tab. The roster removal is
+// committed to disk before irreversible stream/tmux teardown. A persist
+// failure restores the exact live tab for retry; otherwise stale disk state
+// could respawn a killed tab on a daemon restart (#2669).
+//
+// requester is the provenance string written to the audit log as who asked to
+// close the tab: an HTTP principal and peer for the HTTP surface, "control
+// socket" for the net/rpc control surface, or "internal daemon caller" for an
+// in-process call. Threaded here from the old CloseTab wrapper by #3337 so the
+// close verb stays attributable no matter which surface reaches it.
 func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (string, error) {
 	instance, repoID, title, release, err := m.tabMutationTarget(req.ID, req.Title, req.RepoID,
 		tabMutationLabels{action: "close a tab", op: "tab close"})
@@ -379,4 +401,30 @@ func instanceHasVSCodeTab(instance *session.Instance) bool {
 		}
 	}
 	return false
+}
+
+// validateDocsTabRequest refuses the fields a docs tab cannot use, before any
+// session lookup.
+func validateDocsTabRequest(req CreateTabRequest) error {
+	if strings.TrimSpace(req.Proposal) == "" {
+		return fmt.Errorf("a docs tab requires a proposal (--proposal <slug>)")
+	}
+	if err := proposal.ValidateSlug(req.Proposal); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.URL) != "" || req.Port != 0 {
+		return fmt.Errorf("--url/--port are not valid for a docs tab (--kind docs)")
+	}
+	if strings.TrimSpace(req.Command) != "" {
+		return fmt.Errorf("--command is not valid for a docs tab (--kind docs)")
+	}
+	return nil
+}
+
+func requireProposal(repoID, slug string) error {
+	store, err := proposal.Open(repoID)
+	if err != nil {
+		return err
+	}
+	return store.RequireSlug(slug)
 }
