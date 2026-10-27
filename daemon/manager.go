@@ -225,6 +225,7 @@ type Manager struct {
 	// reservedArchiveDestinations holds active archive moves by (repoID, path).
 	// The owning instance identifies both the refusal and the release authority.
 	reservedArchiveDestinations map[string]*session.Instance
+	worktreeMissingUndurable    map[string]struct{} // owed flag writes (#5102); guarded by mu — see worktree_missing_poll.go
 	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
 	// the BARE slug — deliberately global, unlike every other name a session owns.
 	//
@@ -582,13 +583,13 @@ type Manager struct {
 	// Immutable after construction; the hub is internally synchronized.
 	events *eventsHub
 
-	// vscode owns the daemon-spawned VS Code editors backing TabKindVSCode tabs
-	// (one code-server per session, see vscode_server.go). On the Manager because
-	// an editor's lifetime is a SESSION's lifetime — kill/archive/close-tab stop
-	// it, and the webtab proxy resolves a vscode tab's target through it.
-	// Immutable after construction; the supervisor carries its own mutex, so
-	// spawning (seconds) never touches m.mu.
+	// vscode owns the daemon-spawned VS Code editors behind TabKindVSCode tabs, one
+	// code-server per session (vscode_server.go): kill/archive/close-tab stop it and
+	// the webtab proxy resolves a vscode tab's target through it. Immutable after
+	// construction; its own mutex keeps spawning (seconds) off m.mu.
 	vscode *vscodeSupervisor
+	// proposals runs the proposal routes and the poll-time doc scan.
+	proposals proposalState
 	// configAgents owns the bare tmux sessions spawned for config agents. They
 	// have no Instance and so appear in no roster; this is the only thing that
 	// knows they exist, which is why its Stop() is wired into daemon teardown.
@@ -956,45 +957,4 @@ func (m *Manager) Ready() bool {
 func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 	instances, _ := m.SnapshotWithSkipped(repoID)
 	return instances
-}
-
-// startLockForRepo returns the per-repo lock serializing session/tab creation
-// against other mutations of that repo, lazily creating it.
-//
-// LOCK CONTRACT (#2106): it takes m.mu, so it must NEVER be called with m.mu
-// already held — sync.Mutex is not reentrant and the goroutine would deadlock on
-// the manager lock, stalling every other operation behind it. That rules out
-// calling it, m.persistInstance, or m.persistInstanceErr from any `...Locked`
-// helper or other code running under m.mu; persist from there with the lock-free
-// persistInstanceData instead, which takes only the instances.json file lock.
-//
-// Acquiring the returned lock while holding m.mu is likewise forbidden: the
-// established order is repoStartLock BEFORE m.mu (CreateSession holds the start
-// lock across its body and takes m.mu under it), so the reverse closes an ABBA
-// cycle — the #2006 lock-inversion class.
-func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.repoStartLocks[repoID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.repoStartLocks[repoID] = lock
-	}
-	return lock
-}
-
-// opLockFor returns the per-session operation lock serializing kill teardown
-// against Lost-recovery and prompt writes for one daemon instance key (#1108 PR
-// 2, #1473).
-func (m *Manager) opLockFor(key string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.instanceOpLocks[key]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.instanceOpLocks[key] = lock
-	}
-	return lock
 }
