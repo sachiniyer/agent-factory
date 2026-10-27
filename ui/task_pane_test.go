@@ -1338,7 +1338,13 @@ func TestTaskPaneListCompactFooterShowsRunNow(t *testing.T) {
 		"compact task-list footer must keep the documented run-now affordance discoverable")
 }
 
-func TestTaskPaneEditModeCompactActionFooterShowsQuitKey(t *testing.T) {
+// TestTaskPaneEditModeCompactActionFooterKeepsLiveKeys pins the compact edit
+// footer to the keys that actually fire there (#5538): a text stop names the
+// verb path behind "tab →" — the glyphs type into the field (#4838), so the
+// run-now path stays discoverable (#1288) without reading as a live key, and
+// the quit key is gated on !IsEditing (#1961) — while a selector stop
+// advertises the abbreviated verbs directly.
+func TestTaskPaneEditModeCompactActionFooterKeepsLiveKeys(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
 
@@ -1356,9 +1362,17 @@ func TestTaskPaneEditModeCompactActionFooterShowsQuitKey(t *testing.T) {
 	tp.SetFocus(true)
 	tp.EnterEditSelected()
 
-	lines := strings.Split(tp.String(), "\n")
-	assert.Contains(t, lines[len(lines)-1], "esc", "list escape remains visible")
-	assert.Contains(t, lines[len(lines)-1], "q quit", "quit key stays visible on the pinned edit action footer")
+	lastLine := func() string {
+		lines := strings.Split(stripANSI(tp.String()), "\n")
+		return lines[len(lines)-1]
+	}
+	assert.Equal(t, "tab → r/x/D · esc list", strings.TrimSpace(lastLine()),
+		"a text stop names the verb path behind tab, keeping esc's label")
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // Name -> Trigger selector
+	row := lastLine()
+	assert.Contains(t, row, "esc list", "list escape remains visible on the compact verb row")
+	assert.Contains(t, row, "x toggle", "live verbs stay advertised where they fire")
+	assert.NotContains(t, row, "quit", "the quit key never fires inside the form (#1961)")
 }
 
 // TestTaskPaneEditFormClampsToHeightWithFocusInView pins #1098 finding 1: at
