@@ -358,13 +358,32 @@ func uriStartForPath(s string, start int) (int, bool) {
 	// no-authority form has the scheme colon immediately before the path,
 	// with an empty hier-part. The authority ends at "?", "#", or the first
 	// "/" after "//"; a "?" or "#" before "//" means the slash at start lives
-	// in a query or fragment, not the URI path, so it is not a root boundary.
+	// in a query or fragment. A root that follows other fragment/query bytes
+	// (a "#prefix/root" suffix) is not a root boundary, but two forms still
+	// are: a direct no-authority "scheme:/path" whose colon sits at start-1
+	// (an earlier delimiter in a percent-decoded view does not change that),
+	// and a component-leading root where the delimiter is immediately before
+	// the slash ("#/root"), which begins the fragment/query rather than
+	// following text inside it.
 	i := start - 1
 	for i >= 0 && prefix[i] != '/' && prefix[i] != '?' && prefix[i] != '#' {
 		i--
 	}
 	if i >= 0 && (prefix[i] == '?' || prefix[i] == '#') {
-		return 0, false
+		if prefix[start-1] != ':' && i+1 != start {
+			return 0, false
+		}
+		if i+1 == start {
+			// Treat the delimiter as the authority end and keep walking back
+			// over the authority to find the "//" marker.
+			i--
+			for i >= 0 && prefix[i] != '/' && prefix[i] != '?' && prefix[i] != '#' {
+				i--
+			}
+			if i >= 0 && (prefix[i] == '?' || prefix[i] == '#') {
+				return 0, false
+			}
+		}
 	}
 	schemeEnd := -1
 	if i >= 1 && prefix[i] == '/' && prefix[i-1] == '/' {

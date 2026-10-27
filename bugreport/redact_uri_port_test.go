@@ -51,6 +51,19 @@ func TestURIStartForPathAcceptsPortBearingAuthorities(t *testing.T) {
 		{name: "root suffix in fragment empty host", in: "vscode://#prefix/srv/repo", want: false},
 		{name: "root suffix in query", in: "vscode://host:8080?prefix/srv/repo", want: false},
 		{name: "root suffix in query no port", in: "vscode://host?prefix/srv/repo", want: false},
+		// A component-leading root in a query/fragment (the delimiter is
+		// immediately before the matched slash) is a real root boundary, even
+		// when a malformed authority keeps url.Parse from producing a decoded
+		// view: the text-level fallback must still redact it.
+		{name: "component-leading root in fragment malformed authority", in: "vscode://[bad#/srv/repo", want: true},
+		{name: "component-leading root in fragment empty host", in: "vscode://#/srv/repo", want: true},
+		{name: "component-leading root in query malformed authority", in: "vscode://[bad?/srv/repo", want: true},
+		// A direct no-authority "scheme:/path" whose colon sits at start-1 is a
+		// root boundary even when an earlier "?" or "#" appears in a
+		// percent-decoded view (e.g. a query value decoding to
+		// "?scheme:/srv/repo"); the earlier delimiter must not disqualify it.
+		{name: "direct scheme path after earlier delimiter", in: "next=?scheme:/srv/repo", want: true},
+		{name: "direct scheme path after earlier fragment delimiter", in: "next=#scheme:/srv/repo", want: true},
 		// Text before the scheme must not be absorbed into the scheme run.
 		{name: "prose before port uri", in: "recovery failed: vscode://host:notaport/srv/repo", want: true},
 		// No scheme at all.
@@ -327,6 +340,53 @@ func TestScrubbersDoNotRedactRootSuffixInsideFragmentOrQuery(t *testing.T) {
 				got := tc.scrub(in)
 				if strings.Contains(got, "[repo:1]") {
 					t.Fatalf("scrubber redacted a fragment/query root suffix as a boundary:\n%s", got)
+				}
+			})
+		}
+	}
+}
+
+// TestScrubbersRedactComponentLeadingRootInsideFragmentOrQuery pins the Codex
+// review fix on #5277: when a malformed authority keeps url.Parse from producing
+// a decoded path view, a root that LEADS the fragment/query (the delimiter is
+// immediately before the root, with no text prefix) is still a root boundary
+// and the text-level fallback must redact it. A "#prefix/root" suffix is not a
+// boundary (covered above); a "#/root" component-leading root is.
+func TestScrubbersRedactComponentLeadingRootInsideFragmentOrQuery(t *testing.T) {
+	r := &redactor{}
+	r.noteRepoRoot(siblingLeakRepo)
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "malformed authority component-leading fragment",
+			in:   "open vscode://[bad#" + siblingLeakRepo + " failed",
+			want: "open vscode://[bad#[repo:1] failed",
+		},
+		{
+			name: "malformed authority component-leading query",
+			in:   "open vscode://[bad?" + siblingLeakRepo + " failed",
+			want: "open vscode://[bad?[repo:1] failed",
+		},
+	}
+	for _, c := range cases {
+		for _, tc := range []struct {
+			name  string
+			scrub func(string) string
+		}{
+			{name: "generic", scrub: r.scrub},
+			{name: "log", scrub: r.scrubLog},
+			{name: "diagnostic", scrub: r.scrubDiagnostic},
+		} {
+			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
+				got := tc.scrub(c.in)
+				if strings.Contains(got, "ConfidentialClient") {
+					t.Fatalf("scrubber leaked the component-leading root inside a malformed-authority URI:\n%s", got)
+				}
+				if got != c.want {
+					t.Errorf("scrubber output = %q, want %q", got, c.want)
 				}
 			})
 		}
