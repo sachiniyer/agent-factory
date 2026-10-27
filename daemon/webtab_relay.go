@@ -68,3 +68,11 @@ type relayTransportEntry struct {
 	instance  *session.Instance
 	transport *http.Transport
 }
+
+// evictRelayTransport drops a session's cached relay transport and closes its
+// idle relayed connections. A no-op for a session that never opened one.
+func (m *Manager) evictRelayTransport(key string) {
+	if old, ok := m.relayTransports.LoadAndDelete(key); ok {
+		old.(relayTransportEntry).transport.CloseIdleConnections()
+	}
+}

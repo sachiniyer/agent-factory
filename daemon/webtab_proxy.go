@@ -333,6 +333,10 @@ func (m *Manager) requireCurrentVSCodeInstance(instance *session.Instance, key, 
 }
 
 func (m *Manager) stopVSCodeForInstance(key, instanceID string) error {
+	// Kill, archive and account swap all pass through here under the session's
+	// daemonInstanceKey; drop the session's cached relay transport with the
+	// editor so removed sessions do not accumulate them. It is rebuilt on demand.
+	m.evictRelayTransport(key)
 	err := m.vscode.stopForInstance(key, instanceID)
 	if err != nil {
 		m.warn().Printf("vscode: could not determine or complete teardown for session id %q: %v", instanceID, err)
