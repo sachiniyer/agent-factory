@@ -59,7 +59,6 @@ import (
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
-	"golang.org/x/sys/unix"
 )
 
 // statfsFull is the test seam over the bounded filesystem fullness answer —
@@ -418,14 +417,17 @@ func listenerInodes(sockPath string) (map[string]struct{}, bool) {
 
 // daemonSharesDataRootFS is the mount-identity proof hostname equality
 // cannot give (#5382 review). SO_PEERCRED names the process answering af's
-// socket; its mount table then shows which device really backs the data
-// root in the DAEMON's view. When that device equals af's stat of the same
-// path, af's statfs verdict is the daemon's verdict — even when the daemon
-// lives in a different mount namespace, as every rootless engine does, or
-// sits under a tmpfs /run bind-visible mounts could never describe. A
-// socket bind-mounted into a container fails here: the answering daemon's
-// mountinfo shows a different device than af's container-rootfs stat. Any
-// step that cannot name the peer or read its view is not proven.
+// socket; mount tables then show which mounted filesystem really backs the
+// data root in each side's view. When both tables cover the reported path
+// with the same (device, fs-internal root) pair, af's statfs verdict is the
+// daemon's verdict — even when the daemon lives in a different mount
+// namespace, as every rootless engine does. The compare is table-vs-table,
+// never table-vs-stat: btrfs hands each subvolume its own anonymous st_dev,
+// so stat() never reports the dev field a mountinfo line shows there; only
+// two mount entries naming the same device AND the same subtree identify
+// the view. A socket bind-mounted into a container fails here: af's own
+// table covers the path with a different (dev, root) than the daemon's.
+// Any step that cannot name the peer or read its view is not proven.
 func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 	sockPath := strings.TrimPrefix(endpoint, "unix://")
 	if !strings.HasPrefix(sockPath, "/") || rootDir == "" {
@@ -440,8 +442,13 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 	if err != nil || peer <= 0 {
 		return false
 	}
-	dev, ok := statDev(rootDir)
-	if !ok {
+	if _, ok := statDev(rootDir); !ok {
+		return false // af cannot stat the reported path — unproven
+	}
+	// af's own mount table — always readable — is the comparison base for
+	// both the proven path and the denied-route fallback.
+	self, err := peerMountinfo(os.Getpid())
+	if err != nil {
 		return false
 	}
 	peerInfo, err := peerMountinfo(peer)
@@ -467,10 +474,7 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 				}
 			}
 			if info != nil {
-				// The device the daemon's own mount table shows under
-				// its data root is the device af's stat reports.
-				peerDev, ok := coveringMountDev(info, rootDir)
-				return ok && peerDev == dev
+				return sameCoveringMount(info, self, rootDir)
 			}
 		}
 		// serverDenied (and the unreadable serving table above) fall
@@ -484,50 +488,40 @@ func daemonSharesDataRootFS(endpoint, rootDir string) bool {
 	// That deployment is the common case, so fall back to weaker but
 	// cross-process evidence (#5382 review): the answering process must
 	// be privileged (uid 0 — the real dockerd, never the same-user proxy
-	// or ssh forwarder that is the foreign-socket vector), AND af's own
-	// mount table (always readable)
-	// must show the data root covered by a whole filesystem — the rootfs
-	// or a complete mount — never a partial bind. A partial bind could
-	// plant a foreign subtree under the reported path; a whole-fs mount
-	// cannot hide which filesystem backs it, and a host data root
-	// bind-mounted into a container is still the device the daemon
-	// writes to.
+	// or ssh forwarder that is the foreign-socket vector), AND the mount
+	// tables must agree on what backs the data root.
 	if peerUID != 0 {
 		return false
 	}
-	// A peer table that IS readable may veto even though it cannot prove:
-	// it names a real process's filesystem, and a device that differs
-	// from af's stat — or a data root it does not cover at all — is the
-	// foreign-filesystem shape af's own table would otherwise accept.
 	if peerInfo != nil {
-		peerDev, ok := coveringMountDev(peerInfo, rootDir)
-		if !ok || peerDev != dev {
-			return false
-		}
+		// A readable peer table may veto even though it cannot prove, and
+		// may corroborate even though it cannot identify: agreeing with
+		// af's own table on the same (dev, root) covering the data root —
+		// including a mounted subvolume whose fs-internal root is "/@" —
+		// is the positive witness; disagreement is the foreign shape.
+		return sameCoveringMount(peerInfo, self, rootDir)
 	}
-	self, err := peerMountinfo(os.Getpid())
-	if err != nil {
+	// With no peer table to cross-check, only a whole-filesystem covering
+	// mount in af's own table is proof enough: a non-"/" root could be a
+	// foreign partial bind and cannot be told from a legitimate subvolume.
+	root, ok := coveringMountRoot(self, rootDir)
+	return ok && root == "/"
+}
+
+// sameCoveringMount answers whether two mount tables cover path with the
+// same mounted filesystem view: identical major:minor device field AND
+// identical fs-internal root. The pair, not the device alone, carries the
+// compare — a subtree bind can share a device while describing a different
+// view, and on btrfs stat() reports the subvolume's own anonymous st_dev,
+// never the mountinfo dev field.
+func sameCoveringMount(a, b []byte, path string) bool {
+	fa, oka := coveringMountEntry(a, path)
+	fb, okb := coveringMountEntry(b, path)
+	if !oka || !okb {
 		return false
 	}
-	selfRoot, ok := coveringMountRoot(self, rootDir)
-	if !ok {
-		return false
-	}
-	if selfRoot == "/" {
-		return true
-	}
-	// A mounted subvolume legitimately reports a non-"/" root (Btrfs `/@`)
-	// while still being the whole local filesystem the daemon writes to —
-	// on af's table alone that is indistinguishable from a foreign partial
-	// bind, so the only positive witness left is agreement with the peer's
-	// table. Two independent mount tables naming the same subtree of the
-	// device af's stat reports is that witness; with no readable peer
-	// table a non-"/" root stays unproven.
-	if peerInfo == nil {
-		return false
-	}
-	peerRoot, ok := coveringMountRoot(peerInfo, rootDir)
-	return ok && peerRoot == selfRoot
+	return fa[2] == fb[2] &&
+		unescapeMountinfoPath(fa[3]) == unescapeMountinfoPath(fb[3])
 }
 
 // coveringMountEntry finds the mount entry covering path in a mountinfo
@@ -555,21 +549,6 @@ func coveringMountEntry(info []byte, path string) ([]string, bool) {
 		}
 	}
 	return best, best != nil
-}
-
-// coveringMountDev is the st_dev of the mount covering path — the device
-// the table's owner writes to there. Matching devices across namespaces
-// name the same filesystem object.
-func coveringMountDev(info []byte, path string) (uint64, bool) {
-	fields, ok := coveringMountEntry(info, path)
-	if !ok {
-		return 0, false
-	}
-	var maj, min uint64
-	if _, err := fmt.Sscanf(fields[2], "%d:%d", &maj, &min); err != nil {
-		return 0, false
-	}
-	return unix.Mkdev(uint32(maj), uint32(min)), true
 }
 
 // coveringMountRoot is the covering mount's root field — "/" for a whole

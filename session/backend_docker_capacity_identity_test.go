@@ -217,6 +217,51 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		assert.Greater(t, *calls, 0)
 	})
 
+	t.Run("a btrfs stat device that never matches mountinfo still proves", func(t *testing.T) {
+		// The real btrfs shape: stat() on a path inside subvol @ reports
+		// the SUBVOLUME's anonymous st_dev (0:65), which the covering
+		// mount's dev field (0:59) never equals. A table-vs-stat compare
+		// would veto a genuinely co-located engine; table-vs-table on
+		// (dev, root) does not.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		subvol := peerTableSubvol("0:59", "/@", "/var/lib/docker")
+		stubPeerDataRoot(t, 0, "0:65", subvol, subvol, nil)
+		old := peerExe
+		peerExe = func(int) (string, error) {
+			return "", &os.PathError{Op: "readlink", Path: "/proc/1/exe", Err: syscall.EACCES}
+		}
+		t.Cleanup(func() { peerExe = old })
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "btrfs-anon-dev"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"subvolume anon st_dev divergence must not defeat co-location proof: %v", err)
+		assert.Greater(t, *calls, 0)
+	})
+
+	t.Run("a proven daemon on a subvolume shares its filesystem view", func(t *testing.T) {
+		// Same shape through the STRONG path: peerExe names dockerd, both
+		// tables cover the data root on the same (dev, root) — the compare
+		// must not lean on af's stat device either.
+		t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+		t.Setenv("DOCKER_CONTEXT", "")
+		subvol := peerTableSubvol("0:59", "/@", "/var/lib/docker")
+		stubPeerDataRoot(t, 0, "0:65", subvol, subvol, nil)
+		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
+		calls := statfsCounter(t)
+
+		p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "proven-subvol"}}
+		_, err := p.provision()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, syscall.ENOSPC),
+			"two tables naming the same (dev, root) prove co-location for a proven dockerd: %v", err)
+		assert.Greater(t, *calls, 0)
+	})
+
 	t.Run("a denied route rejects when the tables disagree on the subtree", func(t *testing.T) {
 		// Same device, different covering root — af sees a subvolume mount
 		// the peer does not share (or vice versa): the views disagree, so
@@ -390,10 +435,14 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 			return h, true
 		}
 		peerMountinfo = func(pid int) ([]byte, error) {
-			if pid == 424243 {
-				return []byte(peerTableOn("8:1")), nil
+			if pid == 424242 {
+				// The creator (PID 1 shape) sees its own table, not the
+				// daemon's — nothing under the data root may match.
+				return []byte("1 0 0:0 / / rw - rootfs rootfs rw"), nil
 			}
-			return []byte("1 0 0:0 / / rw - rootfs rootfs rw"), nil
+			// The serving dockerd AND af's own table both cover the data
+			// root on the same (dev, root) — the proven compare.
+			return []byte(peerTableOn("8:1")), nil
 		}
 		t.Cleanup(func() { peerExe, listenerHolders, peerMountinfo = oldE, oldH, oldM })
 	}
@@ -458,7 +507,9 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		stacked := peerTableOn("8:1") +
 			"1415 1371 8:1 /volumes/v/_data /var/lib/docker rw - ext4 /dev/sda1 rw\n" +
 			"1160 1415 0:198 / /var/lib/docker rw - tmpfs tmpfs rw\n"
-		stubPeerDataRoot(t, 0, "0:198", stacked, peerTableOn("8:1"), nil)
+		// af's own table shows the same stack (the rig shares the mountns);
+		// the compare must take the top entry in BOTH tables.
+		stubPeerDataRoot(t, 0, "0:198", stacked, stacked, nil)
 		fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false), failRun)
 		calls := statfsCounter(t)
 
