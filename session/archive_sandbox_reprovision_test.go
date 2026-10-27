@@ -13,6 +13,7 @@ import (
 type orderedReprovisionRuntime struct {
 	events *[]string
 	res    ProvisionResult
+	err    error
 }
 
 type cleanupFailingStartBackend struct {
@@ -24,7 +25,12 @@ func (b *cleanupFailingStartBackend) Start(*Instance, bool) error {
 }
 
 func (r *orderedReprovisionRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {
-	*r.events = append(*r.events, "provision")
+	if r.events != nil {
+		*r.events = append(*r.events, "provision")
+	}
+	if r.err != nil {
+		return ProvisionResult{}, r.err
+	}
 	return r.res, nil
 }
 
@@ -316,7 +322,7 @@ func TestReprovisionRemote_RetryAfterRevalidationDegradationReapsFirst(t *testin
 // could not reach disk. This PR persists the handle on ordinary sandbox rows so
 // a restart can rebuild it — which means a confirmed reap that leaves the old
 // backend in place (a re-provision that fails before binding its replacement,
-// here the mint) would otherwise carry the discharged handle to the next
+// here the provision) would otherwise carry the discharged handle to the next
 // checkpoint, and a restart would rebuild a teardown for a runtime af already
 // reaped and act on a resource it no longer owns.
 //
@@ -349,22 +355,18 @@ func TestReprovisionRemote_ConfirmedReapDropsDischargedCleanupHandle(t *testing.
 			return nil // confirmed reap
 		},
 	}
-	// A credential whose Mint fails is the rebind failure: the old runtime is
-	// reaped (confirmed), then reprovisionRemote returns before binding a
-	// replacement, leaving the old (now-discharged) backend in place.
-	i.SetSandboxCredentials(&fakeCreds{mintErr: errors.New("the minter is offline")})
-	rt := &orderedReprovisionRuntime{
-		res: ProvisionResult{Backend: &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{
-			SSHCommand: "ssh -o User='ci' sandbox.example.test",
-			SessionDir: "/srv/af/fresh.1234",
-		}}},
-	}
+	// A provision failure is the pre-bind failure: the old runtime is reaped
+	// (confirmed), then reprovisionRemote returns before binding a replacement,
+	// leaving the old (now-discharged) backend in place. A mint refusal no longer
+	// reaches here — it degrades (#5571 W3.1) and the replacement binds.
+	i.SetSandboxCredentials(&fakeCreds{})
+	rt := &orderedReprovisionRuntime{err: errors.New("the runtime is offline")}
 	restoreRuntime := SetRuntimeForTest(BackendSandbox, func() Runtime { return rt })
 	defer restoreRuntime()
 
 	err := i.reprovisionRemote()
-	require.ErrorContains(t, err, "callback credential could not be re-issued")
-	assert.Equal(t, 1, teardowns, "the confirmed reap must run before the rebind fails")
+	require.ErrorContains(t, err, "the runtime is offline")
+	assert.Equal(t, 1, teardowns, "the confirmed reap must run before the provision fails")
 
 	i.mu.RLock()
 	backend := i.backend
