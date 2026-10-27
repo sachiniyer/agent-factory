@@ -153,7 +153,12 @@ func TestSandboxDaemonE2E(t *testing.T) {
 	workspace := func() string {
 		return host.exec(t, "dirname $(find /root/.af-sessions -maxdepth 4 -name .git | head -1)")
 	}
-	host.exec(t, "cd "+workspace()+" && echo e2e > e2e-work.txt && git add e2e-work.txt && git -c user.name=e2e -c user.email=e2e@example.com commit -q -m sbx-e2e-work")
+	ws := workspace()
+	committed := host.exec(t, "cd "+ws+" && echo e2e > e2e-work.txt && git add e2e-work.txt && git -c user.name=e2e -c user.email=e2e@example.com commit -q -m sbx-e2e-work 2>&1; git log --oneline -3 2>&1; git branch --show-current")
+	if !strings.Contains(committed, "sbx-e2e-work") {
+		t.Fatalf("could not commit in the sandbox workspace %q:\n%s", ws, committed)
+	}
+	t.Logf("sandbox workspace %s: %s", ws, committed)
 
 	// --- archive: the host is reaped, the work survives on origin ---------------
 	post("/v1/ArchiveSession", daemon.ArchiveSessionRequest{Title: title, RepoID: repoID}, &daemon.ArchiveSessionResponse{})
@@ -161,8 +166,9 @@ func TestSandboxDaemonE2E(t *testing.T) {
 		t.Fatalf("after ArchiveSession the session is %+v, want an archived row", a)
 	}
 	waitFor(t, "the archived session's agent-server to be reaped", 30*time.Second, func() bool { return agentServers() == 0 })
-	if log := host.exec(t, "git -C /repo.git log --all --format=%s"); !strings.Contains(log, "sbx-e2e-work") {
-		t.Fatalf("origin lacks the session's commit after archive; log:\n%s", log)
+	if log := host.exec(t, "git -c safe.directory='*' -C /repo.git log --all --format=%s 2>&1"); !strings.Contains(log, "sbx-e2e-work") {
+		t.Fatalf("origin lacks the session's commit after archive; log:\n%s\nbranches:\n%s", log,
+			host.exec(t, "git -c safe.directory='*' -C /repo.git branch -a 2>&1"))
 	}
 
 	// --- restore: a fresh sandbox, drivable ------------------------------------
