@@ -113,12 +113,37 @@ jobs:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
         VERSION: ${{ inputs.version }}
+        # CGO off → fully static binaries: the host a sandbox session lands on
+        # runs whatever its image ships (musl, an older glibc, none) and the
+        # dynamic loader must not be a runtime dependency — the daemon can push
+        # this same binary to that host (#5571 AR-14).
+        # Accepted side effect: os/user drops to the pure-Go /etc/passwd reader
+        # (no NSS/LDAP), and net uses the pure-Go resolver (no mDNS/NSS hosts).
+        # Every af call site already tolerates the os/user error — the branch
+        # prefix falls back to "session/", sshLoginUser to $USER, bugreport
+        # redaction to the home-dir name.
+        CGO_ENABLED: "0"
       run: |
         ARCHIVE_NAME=agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
         mkdir -p dist
         go build -v -ldflags "-X main.version=${VERSION}" -o dist/agent-factory
         cd dist
         tar czf ../${ARCHIVE_NAME}.tar.gz agent-factory
+
+    # install.sh untars this archive and runs `af version` — do exactly that
+    # against the just-built artifact so a binary that cannot execute on a
+    # bare host fails here, not on a user's machine. Both linux legs must be
+    # statically linked (CGO_ENABLED=0 is what lets a glibc-less sandbox host
+    # exec af); only the native amd64 leg can also exec it for `version`.
+    - name: Smoke-test the artifact install.sh ships
+      if: matrix.goos == 'linux'
+      run: |
+        tmp="$(mktemp -d)"
+        tar xzf "agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" -C "$tmp"
+        file "$tmp/agent-factory" | grep -q "statically linked"
+        if [ "${{ matrix.goarch }}" = amd64 ]; then
+          "$tmp/agent-factory" version
+        fi
 
     - name: Upload build artifact
       uses: actions/upload-artifact@v7
