@@ -210,6 +210,16 @@ func (l *daemonLifecycle) isUpgradeProbation() bool {
 	return l.inProbationLocked()
 }
 
+// isQuiescing reports whether the daemon has closed mutation admission and is
+// draining toward exit. Task delivery's shutdown classifier (#5503) reads it:
+// an in-flight create whose transport error arrives after this flips is the
+// shutdown interrupting the run, not a task failure.
+func (l *daemonLifecycle) isQuiescing() bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.quiescing
+}
+
 // mutationAdmissionError blocks every mutation for an upgrade candidate until its
 // previous-binary supervisor releases probation. Normal warm-up deliberately
 // remains allowed here: disk-backed task/config writes have always been safe

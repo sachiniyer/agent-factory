@@ -576,6 +576,7 @@ func TestAfUsageReference_CoversFullSurface(t *testing.T) {
 		"--cron", "--watch-cmd", "{{line}}", "--target-session",
 		"af daemon install", "--repo",
 		"af version", "af debug", "af upgrade", "af reset",
+		"af proposal start", "af proposal list", "af proposal attach",
 	}
 	for _, want := range required {
 		if !strings.Contains(afUsageReference, want) {
