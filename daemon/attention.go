@@ -119,12 +119,36 @@ func (m *Manager) clearAttentionOnInput(instance *session.Instance) {
 	if seen == nil {
 		return
 	}
-	// The map holds the newest request a keystroke saw. A key that lands while a
-	// clear is in flight updates it, and the worker loops until it has cleared
-	// the request it last read.
-	if _, busy := m.attentionClears.Swap(instance, seen.SetAt); busy {
+	m.clearAttentionSeen(instance, seen.SetAt)
+}
+
+// clearAttentionSeen schedules a keyed clear of the request a keystroke just
+// saw. A key that lands while a clear is in flight replaces it — the newest
+// keystroke answers the newest request — and the worker loops until it has
+// cleared the request it last read.
+func (m *Manager) clearAttentionSeen(instance *session.Instance, setAt time.Time) {
+	if _, busy := m.attentionClears.Swap(instance, setAt); busy {
 		return
 	}
+	m.runAttentionClearWorker(instance)
+}
+
+// clearAttentionRequest schedules a keyed clear of the request set at setAt,
+// for an answer learned before its transport finished (a delivered prompt).
+// The caller captured SetAt ahead of the send, so the key can already be stale:
+// seeding an empty slot is safe — the keyed clear no-ops on a newer request —
+// but overwriting a queued newer answer is not.
+func (m *Manager) clearAttentionRequest(instance *session.Instance, setAt time.Time) {
+	if _, busy := m.attentionClears.LoadOrStore(instance, setAt); busy {
+		return
+	}
+	m.runAttentionClearWorker(instance)
+}
+
+// runAttentionClearWorker drains the newest keyed clear for instance: load the
+// key, clear that request under the repo lock, and delete the key only if it is
+// still the same one — a Swap meanwhile means there is another request to do.
+func (m *Manager) runAttentionClearWorker(instance *session.Instance) {
 	runAttentionClear(func() {
 		for {
 			v, ok := m.attentionClears.Load(instance)
