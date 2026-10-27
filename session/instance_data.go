@@ -530,7 +530,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// unearned KilledWithoutLiveRuntime marker from the inert backend's nil
 		// runtimeTeardown alone and orphan the still-live runtime. Rebuild only
 		// that teardown handle — no endpoint, tunnel, or live sandbox client is
-		// dialled during load. Archived sandboxes were already reaped before
+		// dialled during load. The same handle now also carries the session's
+		// reattach identity (#5571 W1.1): remote_addr, agent_server_version and
+		// token_ref travel inside it, so the runtime-identity key in AF home can
+		// re-derive the bearer token a restart needs without the token itself
+		// ever touching the row. Archived sandboxes were already reaped before
 		// becoming Archived, so deleting their record needs no remote cleanup
 		// handle; the archived ForStorage branch scrubs RuntimeCleanup, so the
 		// handle here is naturally nil for those rows.

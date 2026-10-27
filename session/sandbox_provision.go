@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -52,16 +53,28 @@ type sandboxWorkspace struct {
 	SessionDir string
 	// RemotePID is the backgrounded agent-server PID captured for teardown.
 	RemotePID string
+
+	// tokenRef and agentServerToken are the launch's runtime identity (#5571
+	// W1.1): the opaque reference the row persists, and the derived bearer
+	// token writeRuntimeIdentity places in a 0600 file beside the remote
+	// binary for `af agent-server` to read. The token is held only in memory
+	// and in that file — never in argv, the launch script, or an environment
+	// variable.
+	tokenRef         string
+	agentServerToken string
 }
 
 // bannerJSON is the one JSON line `af agent-server` prints on startup — addr,
-// token, title. Shared by every transport (the wire contract is the JSON tags,
-// pinned by the round-trip test); duplicated from daemon.AgentServerInfo because
-// session cannot import daemon (a cycle).
+// token, title, and (since W1.1) the server's own version. Shared by every
+// transport (the wire contract is the JSON tags, pinned by the round-trip
+// test); duplicated from daemon.AgentServerInfo because session cannot import
+// daemon (a cycle). version is additive: a server that does not emit it simply
+// leaves AgentServerVersion empty, which reattach reads as "pre-W1.1 row".
 type bannerJSON struct {
-	Addr  string `json:"addr"`
-	Token string `json:"token"`
-	Title string `json:"title"`
+	Addr    string `json:"addr"`
+	Token   string `json:"token"`
+	Title   string `json:"title"`
+	Version string `json:"version,omitempty"`
 }
 
 // makeSessionDir creates a fresh per-session dir under the remote home with
@@ -140,6 +153,43 @@ func (w *sandboxWorkspace) copyAfBinary(timeout time.Duration, binary io.Reader)
 	return nil
 }
 
+// writeRuntimeIdentity places the session's reattach credential material on
+// the remote (#5571 W1.1):
+//
+//   - <sessionDir>/af-server-token — the bearer token this agent-server must
+//     expect, 0600, which `af agent-server` reads from beside its own streamed
+//     binary (internal/runtimetoken.SuppliedAgentServerToken). The token
+//     travels ONLY over this stdin and lives ONLY in that file on the remote:
+//     never in argv, the launch script, or any environment variable — so
+//     nothing the agent-server spawns can inherit it, and nothing that reads
+//     /proc/<pid>/environ on the host can extract it.
+//   - <sessionDir>/af-identity.env — AF_TOKEN_REF=<ref>, sourced into the
+//     launch shell so the reference lands in the agent-server's exec-time
+//     environment. The ref is a nonce, not a credential — it is the ONE name
+//     the host-side /proc/<pid>/environ probe may extract to bind the live
+//     process to this row's persisted identity.
+func (w *sandboxWorkspace) writeRuntimeIdentity(timeout time.Duration) error {
+	if w.tokenRef == "" || w.agentServerToken == "" {
+		return fmt.Errorf("provisioning has no runtime identity to write")
+	}
+	// Through STDIN and a file, never the launch command — the same rule
+	// writeCallbackEnv documents: a token in argv is visible to `ps` on the
+	// daemon side, and `umask 077` makes the file 0600 from the moment it
+	// exists. The error names the path, never the value.
+	tokenScript := "umask 077 && cat > " + shellQuote(w.ServerTokenPath())
+	out, err := w.shell.Run(timeout, tokenScript, strings.NewReader(w.agentServerToken+"\n"), false)
+	if err != nil {
+		return fmt.Errorf("writing the sandbox agent-server token failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	envBody := fmt.Sprintf("%s=%s\n", runtimetoken.RefEnvName, shellQuote(w.tokenRef))
+	envScript := "umask 077 && cat > " + shellQuote(w.IdentityEnvPath())
+	out, err = w.shell.Run(timeout, envScript, strings.NewReader(envBody), false)
+	if err != nil {
+		return fmt.Errorf("writing the sandbox runtime identity failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // startAgentServer launches `af agent-server` headless on the remote, detached
 // via nohup with its banner + log redirected to files, bound to 127.0.0.1:0, and
 // captures the background PID.
@@ -177,6 +227,12 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	}
 	launch := fmt.Sprintf("nohup %s >%s 2>%s </dev/null & echo $!",
 		filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
+	// The runtime-identity env is unconditional — every W1.1 provision writes
+	// af-identity.env before this point. AF_TOKEN_REF must land in the
+	// agent-server's exec-time environment so the persisted identity's host-side
+	// /proc/<pid>/environ probe can bind the live process to the row. Same
+	// `set -a`/`;`/`|| exit 1` contract the callback source below documents.
+	launch = "set -a && . " + shellQuote(w.IdentityEnvPath()) + " && set +a || exit 1; " + launch
 	if w.spec.CallbackToken != "" {
 		// Sourced into the shell that launches the agent-server, so the variables
 		// are in its ENVIRONMENT rather than its argv. AF_DAEMON_URL and
@@ -217,10 +273,17 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	for _, name := range w.spec.SessionEnvPassthrough {
 		args = append(args, "--session-env", name)
 	}
+	// AF_TOKEN_REF rides the handoff's per-invocation extras — the one channel
+	// that reaches THIS process's exec-time environment — rather than
+	// sessionenv's common allowlist, which is also the pane allowlist: joining
+	// that set would inherit the variable into every shell/process pane the
+	// agent-server spawns. The ref is a nonce, but the rule keeps the
+	// credential-class channel narrow on principle (#5571 W1.1 approval).
+	extras := append(append([]string{}, w.spec.SessionEnvPassthrough...), runtimetoken.RefEnvName)
 	// The marker re-execs the staged binary it is already running, so a symlinked
 	// session directory changes no identity comparison: there is none. Policy and
 	// the agent-server effect are derived from the same structured arguments.
-	filteredInner, err := sessionenv.WrapAgentServerCommand(w.AfPath(), w.spec.SessionEnvPassthrough, args)
+	filteredInner, err := sessionenv.WrapAgentServerCommand(w.AfPath(), extras, args)
 	if err != nil {
 		return "", fmt.Errorf("preparing filtered agent-server environment failed: %w", err)
 	}
@@ -271,5 +334,19 @@ func (w *sandboxWorkspace) BannerPath() string    { return w.SessionDir + "/" + 
 func (w *sandboxWorkspace) CallbackEnvPath() string { return w.SessionDir + "/" + sshCallbackEnvName }
 
 const sshCallbackEnvName = "af-callback.env"
+
+// IdentityEnvPath is the 0600 env file holding only AF_TOKEN_REF — the launch
+// sources it unconditionally so the token reference lands in the agent-server's
+// exec-time environment (#5571 W1.1).
+func (w *sandboxWorkspace) IdentityEnvPath() string { return w.SessionDir + "/" + sshIdentityEnvName }
+
+const sshIdentityEnvName = "af-identity.env"
+
+// ServerTokenPath is the 0600 file `af agent-server` reads its expected bearer
+// token from: it sits beside the streamed binary because the remote process
+// locates it as <dirname(os.Executable)>/<TokenFileName> (#5571 W1.1).
+func (w *sandboxWorkspace) ServerTokenPath() string {
+	return w.SessionDir + "/" + runtimetoken.TokenFileName
+}
 
 func (w *sandboxWorkspace) LogPath() string { return w.SessionDir + "/" + sshLogName }
