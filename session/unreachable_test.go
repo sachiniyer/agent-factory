@@ -112,6 +112,10 @@ func TestUnreachableProjectsAndRoundTrips(t *testing.T) {
 	inst, err := NewInstance(InstanceOptions{Title: "rides", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
 	inst.SetStartedForTest(true)
+	// A live-started row makes FromInstanceData attempt a real pane restore
+	// (tmux respawn) — environment-dependent. The flagged-Lost row is the
+	// headline unreachable shape anyway, and its restore path is inert here.
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveLost)))
 	inst.SetUnreachable(errors.New("tunnel down"))
 
 	data := inst.ToInstanceData()
