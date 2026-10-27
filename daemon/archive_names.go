@@ -80,8 +80,18 @@ func archiveRecordClaimNames(data session.InstanceData) [2]string {
 
 // archiveClaimName preserves the directory owned by an archived row even when
 // title reuse has renamed the row without moving its worktree.
+//
+// A row flagged worktree-missing owns no directory at its recorded path
+// (#5102). The no-move deletion route archives it with its vanished LIVE path
+// still recorded, so that basename — a sibling-mode "repo-foo", say — is not an
+// archive directory at all, and claiming it would refuse an unrelated session
+// titled "repo-foo" forever. A flagged row whose archive directory was deleted
+// later has nothing there either, and its restore rebuilds at a fresh
+// title-derived location rather than reusing that name. Its title-derived claim
+// (archiveRecordClaimNames' second slot) is kept, and a directory that does
+// exist under the name is still refused by the directory snapshot itself.
 func archiveClaimName(data session.InstanceData) string {
-	if session.RecordedLiveness(data) == session.LiveArchived && data.Worktree.WorktreePath != "" {
+	if session.RecordedLiveness(data) == session.LiveArchived && data.Worktree.WorktreePath != "" && !data.Worktree.Missing {
 		return filepath.Base(data.Worktree.WorktreePath)
 	}
 	return sanitizeArchiveTitle(data.Title)
@@ -147,24 +157,32 @@ func (m *Manager) checkArchiveDestination(repoID string, inst *session.Instance,
 	if dest == "" {
 		return "", fmt.Errorf("cannot archive session %q: archive destination is empty", inst.Title)
 	}
-	key := archiveDestinationKey(repoID, dest)
-	m.mu.Lock()
-	if owner := m.reservedArchiveDestinations[key]; owner != nil {
-		ownerTitle := owner.Title
-		m.mu.Unlock()
-		return "", fmt.Errorf("cannot archive session %q: destination %s is being claimed by session %q", inst.Title, dest, ownerTitle)
+	if err := m.reserveArchiveDestination(repoID, inst, dest); err != nil {
+		return "", err
 	}
-	if m.reservedArchiveDestinations == nil {
-		m.reservedArchiveDestinations = make(map[string]*session.Instance)
-	}
-	m.reservedArchiveDestinations[key] = inst
-	m.mu.Unlock()
 	defer func() {
 		if err != nil {
 			m.releaseArchiveDestination(repoID, inst, dest)
 		}
 	}()
 	return m.inspectArchiveDestination(repoID, inst, dest, source)
+}
+
+// reserveArchiveDestination takes dest for inst so no concurrent archive can
+// claim it, refusing when another session already holds it. The caller releases
+// it with releaseArchiveDestination.
+func (m *Manager) reserveArchiveDestination(repoID string, inst *session.Instance, dest string) error {
+	key := archiveDestinationKey(repoID, dest)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if owner := m.reservedArchiveDestinations[key]; owner != nil {
+		return fmt.Errorf("cannot archive session %q: destination %s is being claimed by session %q", inst.Title, dest, owner.Title)
+	}
+	if m.reservedArchiveDestinations == nil {
+		m.reservedArchiveDestinations = make(map[string]*session.Instance)
+	}
+	m.reservedArchiveDestinations[key] = inst
+	return nil
 }
 
 // inspectArchiveDestination runs before editors, hooks, or tabs are stopped.
