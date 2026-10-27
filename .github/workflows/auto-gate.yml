@@ -44,8 +44,12 @@ on:
   # and the ruleset stopped counting the PASS for good. auto-gate-head.yml gets
   # one suite per head, and the actions below all fire after the push-time
   # suites exist, so none of them is the placement or can supersede it.
+  # enqueued and dequeued are merge-queue membership transitions (#5585):
+  # enqueue confirms the queue picked the head up, and a dequeue on a still
+  # green head is what re-enqueues it — without a subscription an ejected
+  # PR waits for an unrelated event before the gate puts it back.
   pull_request_target:
-    types: [reopened, closed, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled]
+    types: [reopened, closed, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled, enqueued, dequeued]
   # auto-gate-head.yml's opened/synchronize runs. github.event_name and the
   # payload in a called workflow are the caller's, so every expression below
   # sees the same pull_request_target event it saw before the split.
@@ -489,6 +493,40 @@ jobs:
                 `Head-ref sweep failed: ${error && error.message ? error.message : error}`,
               );
             }
+
+      # Under merge-queue landing the queue performs the merge, so the
+      # master-verification dispatch cannot ride on merge() the way it does on
+      # the direct path. A queue or hand merge closes the pull request — which
+      # this workflow already hears — and the merge commit the payload names
+      # is what the dispatches verify. Unlike the sweep and the reconciliation
+      # request, a failure here IS allowed to red the run: a merge whose
+      # verification never gets re-raised leaves master carrying an
+      # unverified commit.
+      - name: Verify a queue-landed merge
+        if: >-
+          always() &&
+          vars.AUTO_GATE_MERGE_QUEUE == 'true' &&
+          github.event_name == 'pull_request_target' &&
+          github.event.action == 'closed' &&
+          github.event.pull_request.merged == true
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            if (!fs.existsSync(helperPath)) {
+              return;
+            }
+            const autoGate = require(helperPath);
+            // The workflow file takes effect before its default-branch helper on
+            // the landing run, exactly as the evaluate step above allows for.
+            if (typeof autoGate.verifyMergeQueueLanding !== "function") {
+              core.info("auto-gate helper on the default branch has no queue-landing verification yet.");
+              return;
+            }
+            await autoGate.verifyMergeQueueLanding({ github, context, core });
 
       # Liveness for frozen decisions (#4571). The helper sends one
       # repository_dispatch per five-minute window, and that run is a full

@@ -1,0 +1,68 @@
+name: Auto Gate merge group
+
+# Merge-queue landing (#5585). GitHub's merge queue asks for the required
+# checks on each synthetic group head through `merge_group`. Build and Lint
+# come from PR Validation's own merge_group trigger (#2031); the third,
+# `Auto Gate decision`, is published here by checking that every constituent
+# pull request is gate-green at the head the group actually contains.
+#
+# This is its own workflow on purpose: the Auto Gate queue backs up for hours
+# under load, and a group decision queued behind that backlog stalls the whole
+# merge queue with every other check green. One job, one script step, a
+# concurrency key per group head — a group waits only for a free runner,
+# never behind the serialized aggregate lanes.
+on:
+  merge_group:
+    types: [checks_requested]
+    branches: [master]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: auto-gate-mergegroup-${{ github.event.merge_group.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    name: Decide the merge group
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out gate logic
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Evaluate and publish the group decision
+        uses: actions/github-script@v8
+        env:
+          GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            if (!fs.existsSync(helperPath)) {
+              core.notice("auto-gate helper is not present on the default branch yet; nothing to decide.");
+              return;
+            }
+            const autoGate = require(helperPath);
+            // The workflow file takes effect before its default-branch helper on
+            // the landing run, exactly as auto-gate.yml's steps allow for.
+            if (typeof autoGate.evaluateMergeGroup !== "function") {
+              core.notice("auto-gate helper on the default branch has no merge-group evaluation yet.");
+              return;
+            }
+            await autoGate.evaluateMergeGroup({
+              github,
+              context,
+              core,
+              headSha: process.env.GROUP_HEAD_SHA,
+              baseRefName:
+                String(process.env.GROUP_BASE_REF || "").replace(/^refs\/heads\//, "") || "master",
+            });

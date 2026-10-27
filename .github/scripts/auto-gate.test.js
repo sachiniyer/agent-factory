@@ -834,7 +834,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /workflow_dispatch:\s+inputs:\s+pr_number:/);
   assert.match(
     workflow,
-    /pull_request_target:\s+types: \[reopened, closed, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled\]/,
+    /pull_request_target:[\s\S]*?types: \[reopened, closed, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled, enqueued, dequeued\]/,
   );
   // The push-time actions moved to their own workflow, which calls this one (#4802).
   assert.match(
@@ -920,6 +920,39 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.doesNotMatch(workflow, /^  pull_request:/m);
   assert.doesNotMatch(workflow, /AUTO_GATE_TOKEN/);
   assert.doesNotMatch(helper, /payload\.action|context\.payload\.action/);
+});
+
+test("merge-group decisions get their own lane, never the gate's backlog (#5585)", () => {
+  // The structural guarantee behind "a group never waits behind the gate":
+  // the merge_group trigger lives on its own workflow, keyed per group head,
+  // one job with one script step — a handful of API calls and one check
+  // write — so a group waits only for a free runner. Folding this into
+  // auto-gate.yml would queue every group decision behind the same backlog
+  // the queue exists to relieve.
+  const workflow = fs.readFileSync(
+    path.join(__dirname, "..", "workflows", "auto-gate-mergegroup.yml"),
+    "utf8",
+  );
+  assert.match(workflow, /on:\n  merge_group:\n    types: \[checks_requested\]\n    branches: \[master\]/);
+  assert.match(
+    workflow,
+    /concurrency:\n  group: auto-gate-mergegroup-\$\{\{ github\.event\.merge_group\.head_sha \}\}\n  cancel-in-progress: false/,
+  );
+  assert.match(workflow, /jobs:\n  decide:/);
+  assert.match(workflow, /checks: write/);
+  assert.match(workflow, /uses: actions\/github-script@v8[\s\S]*?await autoGate\.evaluateMergeGroup\(/);
+  // The queue-landing verification rides the gate workflow's closed event and
+  // stays behind the feature flag.
+  const gate = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  assert.match(
+    gate,
+    /vars\.AUTO_GATE_MERGE_QUEUE == 'true' &&\s+github\.event_name == 'pull_request_target' &&\s+github\.event\.action == 'closed' &&\s+github\.event\.pull_request\.merged == true/,
+  );
+  assert.match(gate, /await autoGate\.verifyMergeQueueLanding\(/);
+  // The aggregate lane reads the same flag for its enqueue/dequeue decision.
+  const aggregate = fs.readFileSync(AUTO_GATE_AGGREGATE_WORKFLOW, "utf8");
+  assert.match(aggregate, /MERGE_QUEUE_ENABLED: \$\{\{ vars\.AUTO_GATE_MERGE_QUEUE \}\}/);
+  assert.match(aggregate, /mergeQueueEnabled: process\.env\.MERGE_QUEUE_ENABLED === "true"/);
 });
 
 test("failed aggregate invalidations retry before entering the serialized lane", async () => {
@@ -1514,6 +1547,529 @@ test("a lookalike trunk-merge branch by a human author takes the ordinary path",
   });
   assert.equal(result.manualMergeRequired, false);
   assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+});
+
+// ---------------------------------------------------------------------------
+// #5585 — GitHub-native merge-queue landing
+//
+// With AUTO_GATE_MERGE_QUEUE the gate stops merging itself: a PASSing pull
+// request is enqueued, the queue builds each group head, and the merge-group
+// lane certifies that head by reading every constituent's OWN decision — the
+// same contract the batch evaluation above enforces, applied to a head with
+// no synthetic pull request to attach it to. The direct update-branch +
+// squash-merge path stays in place behind the flag.
+// ---------------------------------------------------------------------------
+
+const GROUP_HEAD = "9abcdef09abcdef09abcdef09abcdef09abcdef0";
+const GROUP_MID = "2222222222222222222222222222222222222222";
+const GROUP_BASE_PARENT = "1111111111111111111111111111111111111111";
+const CONSTITUENT_HEAD_2 = "3333333333333333333333333333333333333333";
+
+function constituentDecision(number, head, conclusion = "success", overrides = {}) {
+  return {
+    ...checkRun({
+      name: decisionName(number, head),
+      externalId: decisionExternalId(number, head),
+      conclusion,
+    }),
+    ...overrides,
+  };
+}
+
+// A single-constituent group head: the queue's merge of a base-history first
+// parent and the constituent's current head. Each negative fixture disturbs
+// exactly one of those — the merge shape, the base anchoring, the constituent
+// claim, or the constituent's own decision.
+function mergeGroupGithub(overrides = {}) {
+  return fakeGateGithub({
+    parentsByOid: {
+      [GROUP_HEAD]: [{ oid: GROUP_BASE_PARENT }, { oid: CONSTITUENT_HEAD }],
+    },
+    compareStatusByTarget: { [GROUP_BASE_PARENT]: "behind" },
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: CONSTITUENT_HEAD } },
+    ],
+    checkRuns: [...happyCheckRuns(), constituentDecision(1465, CONSTITUENT_HEAD)],
+    ...overrides,
+  });
+}
+
+async function evaluateGroup(github, headSha = GROUP_HEAD) {
+  return autoGate.evaluateMergeGroup({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha,
+  });
+}
+
+function groupDecision(github) {
+  return github.createdChecks.find(
+    (check) =>
+      check.name === "Auto Gate decision" &&
+      check.external_id === `auto-gate:merge-group:head:${GROUP_HEAD}`,
+  );
+}
+
+test("a merge-group head passes on its constituent's own decision", async () => {
+  const github = mergeGroupGithub();
+  const core = fakeCore();
+
+  const result = await autoGate.evaluateMergeGroup({
+    github,
+    context: fakeContext(),
+    core,
+    headSha: GROUP_HEAD,
+  });
+
+  assert.equal(result.state, "pass");
+  const decision = groupDecision(github);
+  assert.equal(decision.conclusion, "success");
+  assert.equal(decision.head_sha, GROUP_HEAD);
+  assert.match(decision.output.title, /merge-queue group/);
+  assert.match(
+    core.infos.join("\n"),
+    /constituent PR #1465 is gate-green at its head .* which this merge group contains/,
+  );
+});
+
+test("a multi-constituent group walks the queue's first-parent chain", async () => {
+  // GROUP_HEAD = merge(GROUP_MID, head2); GROUP_MID = merge(base, head1) — the
+  // shape a two-pull-request group build takes. Only first parents reach the
+  // older link, so a constituent's own update-merge can never be mistaken
+  // for a queue link.
+  const github = mergeGroupGithub({
+    parentsByOid: {
+      [GROUP_HEAD]: [{ oid: GROUP_MID }, { oid: CONSTITUENT_HEAD_2 }],
+      [GROUP_MID]: [{ oid: GROUP_BASE_PARENT }, { oid: CONSTITUENT_HEAD }],
+    },
+    compareStatusByTarget: { [GROUP_MID]: "ahead", [GROUP_BASE_PARENT]: "behind" },
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: CONSTITUENT_HEAD } },
+      { number: 1466, state: "open", base: { ref: "master" }, head: { sha: CONSTITUENT_HEAD_2 } },
+    ],
+    checkRuns: [
+      ...happyCheckRuns(),
+      constituentDecision(1465, CONSTITUENT_HEAD),
+      constituentDecision(1466, CONSTITUENT_HEAD_2),
+    ],
+  });
+
+  const result = await evaluateGroup(github);
+
+  assert.equal(result.state, "pass");
+  assert.equal(result.notes.filter((note) => /gate-green/.test(note)).length, 2);
+});
+
+test("a linear merge-group head fails closed, never green", async () => {
+  const github = mergeGroupGithub({
+    parentsByOid: { [GROUP_HEAD]: [{ oid: GROUP_BASE_PARENT }] },
+  });
+
+  const result = await evaluateGroup(github);
+
+  assert.equal(result.state, "blocked");
+  assert.match(result.blockers.map((blocker) => blocker.reason).join("\n"), /not a merge commit/);
+  const decision = groupDecision(github);
+  assert.equal(decision.conclusion, "failure");
+});
+
+test("a group containing a head no pull request claims fails closed", async () => {
+  // The constituent's head moved after the queue built the group: the sha the
+  // group contains is owned by nothing, and it is not base history either.
+  const github = mergeGroupGithub({
+    associatedPullRequests: [],
+    compareStatusByTarget: {
+      [GROUP_BASE_PARENT]: "behind",
+      [CONSTITUENT_HEAD]: "diverged",
+    },
+  });
+
+  const result = await evaluateGroup(github);
+
+  assert.equal(result.state, "blocked");
+  assert.match(
+    result.blockers.map((blocker) => blocker.reason).join("\n"),
+    /no open master pull request's current head/,
+  );
+});
+
+test("a group blocks on a constituent whose own decision is red", async () => {
+  const github = mergeGroupGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      constituentDecision(1465, CONSTITUENT_HEAD, "failure", {
+        output: { title: "WAITING: Codex has not reviewed this head" },
+      }),
+    ],
+  });
+
+  const result = await evaluateGroup(github);
+
+  assert.equal(result.state, "blocked");
+  assert.match(
+    result.blockers.map((blocker) => blocker.reason).join("\n"),
+    /constituent PR #1465 at its head .* is waiting: Codex has not reviewed this head/,
+  );
+});
+
+test("a merged constituent's stale head in a rebuilt group needs no decision", async () => {
+  // The queue rebuilt the group after the constituent merged: the head it
+  // still names as a second parent is now ordinary base history, which no
+  // decision needs to certify.
+  const github = mergeGroupGithub({
+    associatedPullRequests: [],
+    compareStatusByTarget: {
+      [GROUP_BASE_PARENT]: "behind",
+      [CONSTITUENT_HEAD]: "behind",
+    },
+  });
+
+  const result = await evaluateGroup(github);
+
+  assert.equal(result.state, "pass");
+  assert.match(result.notes.join("\n"), /already master history/);
+});
+
+test("a group carrying content the queue never assembled fails closed", async () => {
+  // A linear, non-base ancestor inside the first-parent chain: not a merge,
+  // not base history — appended content the tested tree holds while no
+  // constituent's gate evidence covers it.
+  const github = mergeGroupGithub({
+    parentsByOid: {
+      [GROUP_HEAD]: [{ oid: GROUP_MID }, { oid: CONSTITUENT_HEAD }],
+      [GROUP_MID]: [{ oid: GROUP_BASE_PARENT }],
+    },
+    compareStatusByTarget: { [GROUP_MID]: "ahead", [GROUP_BASE_PARENT]: "behind" },
+  });
+
+  const result = await evaluateGroup(github);
+
+  assert.equal(result.state, "blocked");
+  assert.match(
+    result.blockers.map((blocker) => blocker.reason).join("\n"),
+    /neither a constituent merge nor master history/,
+  );
+});
+
+test("an evaluation failure still leaves a failing decision on the group head", async () => {
+  // A group that never hears a decision stalls the queue for the full check
+  // timeout — the failure IS the decision, then the run can go red.
+  const error = new Error("Not Found");
+  error.status = 404;
+  const github = mergeGroupGithub({ compareError: error });
+
+  await assert.rejects(evaluateGroup(github));
+
+  const decision = groupDecision(github);
+  assert.equal(decision.conclusion, "failure");
+  assert.match(decision.output.title, /UNKNOWN/);
+});
+
+// A passing pull request is enqueued instead of merged — no update-branch, no
+// squash merge, just the queue write carrying the evaluated head.
+test("a passing pull request is enqueued, not merged, under merge-queue landing", async () => {
+  const github = fakeGateGithub();
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: true,
+  });
+
+  assert.equal(transaction.state, "enqueued");
+  assert.deepEqual(github.enqueuedPullRequests, [
+    { pullRequestId: "PR_node_1465", headOid: HEAD_SHA },
+  ]);
+  assert.equal(github.mergedWith, null);
+  assert.equal(github.mergeAttempts, 0);
+  assert.deepEqual(github.updateBranchCalls, []);
+});
+
+// The flag off is the whole rollback: the same transaction performs the direct
+// update-branch + squash-merge path it has always performed.
+test("the flag off keeps the direct merge path", async () => {
+  const github = fakeGateGithub();
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: false,
+  });
+
+  assert.equal(transaction.state, "merged");
+  assert.equal(github.mergeAttempts, 1);
+  assert.deepEqual(github.enqueuedPullRequests, []);
+});
+
+// The batching this mode exists for: a behind head enqueues as it stands —
+// the group head the queue builds is the composition the required checks run
+// on, so the update-branch cycle the direct path pays per merge is not owed.
+test("a behind head enqueues without an update-branch cycle", async () => {
+  const github = fakeGateGithub({ behindBy: 3 });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: true,
+  });
+
+  assert.equal(transaction.state, "enqueued");
+  assert.deepEqual(github.enqueuedPullRequests, [
+    { pullRequestId: "PR_node_1465", headOid: HEAD_SHA },
+  ]);
+  assert.deepEqual(github.updateBranchCalls, []);
+  assert.equal(github.mergeAttempts, 0);
+});
+
+test("an already-queued head is the converged outcome, not an error", async () => {
+  const error = new Error("Pull request is already in the merge queue");
+  const github = fakeGateGithub({ enqueueError: error });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: true,
+  });
+
+  assert.equal(transaction.state, "enqueued");
+  assert.equal(transaction.queueOutcomes[0].already, true);
+});
+
+// An enqueue failure degrades to ordinary waiting — the "Refusing to merge"
+// prefix the lane already treats as a retryable state — never a crashed lane
+// with the aggregate stuck mid-transaction.
+test("a refused enqueue is ordinary waiting, not a crashed lane", async () => {
+  const error = new Error("merge queue is not enabled for the base branch");
+  error.status = 422;
+  const github = fakeGateGithub({ enqueueError: error });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: true,
+  });
+
+  assert.equal(transaction.state, "waiting");
+  assert.equal(github.mergeAttempts, 0);
+});
+
+const ejection = (sha, createdAt = "2026-10-27T00:00:00Z") => ({
+  __typename: "RemovedFromMergeQueueEvent",
+  createdAt,
+  reason: "CHECKS_FAILED",
+  beforeCommit: { oid: sha },
+});
+
+test("a head ejected past the cap is held out, and the comment names the group run", async () => {
+  const github = fakeGateGithub({
+    ejectionEvents: [ejection(HEAD_SHA), ejection(HEAD_SHA)],
+    mergeGroupRuns: [
+      {
+        id: 4242,
+        name: "PR Validation",
+        event: "merge_group",
+        head_sha: GROUP_HEAD,
+        html_url: "https://example.invalid/run/4242",
+        conclusion: "failure",
+      },
+    ],
+    // The compare answers "the group head contains this PR's head" — what the
+    // comment's run lookup asks.
+    compareStatusByTarget: { [GROUP_HEAD]: "ahead" },
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: true,
+  });
+
+  assert.equal(transaction.state, "held-at-cap");
+  assert.deepEqual(github.enqueuedPullRequests, []);
+  assert.equal(github.recoveryComments.length, 1);
+  const comment = github.recoveryComments[0].body;
+  assert.match(comment, /removed from the queue 2 times/);
+  assert.match(comment, /https:\/\/example\.invalid\/run\/4242/);
+  assert.match(comment, new RegExp(`auto-gate:merge-queue-cap:${HEAD_SHA}`));
+});
+
+test("the at-cap comment is not reposted for a head it already names", async () => {
+  const github = fakeGateGithub({
+    ejectionEvents: [ejection(HEAD_SHA), ejection(HEAD_SHA)],
+    issueComments: [
+      codexVerdict(HEAD_SHA),
+      { body: `<!-- auto-gate:merge-queue-cap:${HEAD_SHA} -->\npreviously posted` },
+    ],
+  });
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: true,
+  });
+
+  assert.equal(github.recoveryComments.length, 0);
+  assert.deepEqual(github.enqueuedPullRequests, []);
+});
+
+// Ejections under an OLDER head do not charge the new one: the durable count
+// is per-head, so a fresh push starts at zero.
+test("ejections under an older head do not charge the new head", async () => {
+  const github = fakeGateGithub({
+    ejectionEvents: [ejection(CONSTITUENT_HEAD), ejection(CONSTITUENT_HEAD)],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: true,
+  });
+
+  assert.equal(transaction.state, "enqueued");
+  assert.deepEqual(github.enqueuedPullRequests, [
+    { pullRequestId: "PR_node_1465", headOid: HEAD_SHA },
+  ]);
+});
+
+// One ejection is under the cap: an ejected-but-green head re-enqueues on the
+// next transaction — group rebuilds eject entries that did nothing wrong.
+test("an ejected head under the cap re-enqueues", async () => {
+  const github = fakeGateGithub({ ejectionEvents: [ejection(HEAD_SHA)] });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: true,
+  });
+
+  assert.equal(transaction.state, "enqueued");
+  assert.deepEqual(github.enqueuedPullRequests, [
+    { pullRequestId: "PR_node_1465", headOid: HEAD_SHA },
+  ]);
+  assert.equal(github.recoveryComments.length, 0);
+});
+
+// Queue membership is an input to the decision: a head whose decision just
+// went red has no business staying queued.
+test("a decision that goes red ejects the pull request from the merge queue", async () => {
+  const github = fakeGateGithub({
+    // No Codex verdict at this head — the decision goes red.
+    issueComments: [],
+    mergeQueueEntry: { id: "MQE_1" },
+  });
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: true,
+  });
+
+  assert.deepEqual(github.dequeuedEntries, ["MQE_1"]);
+});
+
+test("a red decision on a pull request that is not queued writes no dequeue", async () => {
+  const github = fakeGateGithub({ issueComments: [] });
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    mergeQueueEnabled: true,
+  });
+
+  assert.equal(github.mergeQueueEntryReads, 1);
+  assert.deepEqual(github.dequeuedEntries, []);
+});
+
+// Under merge-queue landing the queue performs the merge, so the
+// master-verification dispatch moves to the closed event — the merge commit
+// the payload names is the commit being verified.
+test("a queue-landed merge re-raises master verification", async () => {
+  const MERGE_SHA = "4444444444444444444444444444444444444444";
+  const github = fakeGateGithub();
+  const context = fakeContext({
+    pull_request: {
+      number: 1465,
+      merged: true,
+      merge_commit_sha: MERGE_SHA,
+      head: {
+        sha: HEAD_SHA,
+        ref: "gate-queue-landed",
+        repo: { full_name: "sachiniyer/agent-factory" },
+      },
+    },
+  });
+
+  const result = await autoGate.verifyMergeQueueLanding({
+    github,
+    context,
+    core: fakeCore(),
+  });
+
+  assert.equal(result.verified, true);
+  assert.equal(github.dispatchedWorkflows.length, __test.MASTER_PUSH_WORKFLOWS.length);
+  const docs = github.dispatchedWorkflows.find((dispatch) => dispatch.workflow_id === "docs.yml");
+  assert.equal(docs.inputs.verify_sha, MERGE_SHA);
+  // The direct path prunes the head it merged; a queue-landed one owes the same.
+  assert.deepEqual(github.deletedRefs, ["heads/gate-queue-landed"]);
+});
+
+test("an unmerged closed event verifies nothing", async () => {
+  const github = fakeGateGithub();
+  const context = fakeContext({ pull_request: { number: 1465, merged: false } });
+
+  const result = await autoGate.verifyMergeQueueLanding({
+    github,
+    context,
+    core: fakeCore(),
+  });
+
+  assert.equal(result.verified, false);
+  assert.deepEqual(github.dispatchedWorkflows, []);
 });
 
 test("a native auto-merge cancellation failure leaves the manual-only aggregate red", async () => {
@@ -14828,8 +15384,9 @@ test("the push-time pull_request_target actions run in a workflow of their own (
   assert.deepEqual(
     [...types(head), ...gateTypes].sort(),
     [
-      "auto_merge_disabled", "auto_merge_enabled", "closed", "converted_to_draft", "edited",
-      "labeled", "opened", "ready_for_review", "reopened", "synchronize", "unlabeled",
+      "auto_merge_disabled", "auto_merge_enabled", "closed", "converted_to_draft", "dequeued",
+      "edited", "enqueued", "labeled", "opened", "ready_for_review", "reopened", "synchronize",
+      "unlabeled",
     ],
   );
   // The caller grants every permission the callee's jobs use.
@@ -16969,6 +17526,15 @@ function fakeGateGithub({
   readErrorsByFn = {},
   pullGetError = null,
   requestErrors = [],
+  // Merge-queue landing (#5585): the PR's queue entry, its removal timeline,
+  // enqueue/dequeue failures, and the merge-group PR Validation runs the
+  // at-cap comment looks up. `pullRequestsByNumber[n].mergeQueueEntry` sets an
+  // entry for one PR; the default is none queued.
+  mergeQueueEntry = null,
+  ejectionEvents = [],
+  enqueueError = null,
+  dequeueError = null,
+  mergeGroupRuns = [],
 } = {}) {
   const listFiles = function listFiles() {};
   const listOpenPullRequests = function listOpenPullRequests() {};
@@ -17088,6 +17654,10 @@ function fakeGateGithub({
     injectedCheckRuns: [],
     operations: [],
     mergedWith: null,
+    enqueuedPullRequests: [],
+    dequeuedEntries: [],
+    mergeQueueEntryReads: 0,
+    ejectionReads: 0,
     refReads: [],
     addedLabels: [],
     addLabelAttempts: 0,
@@ -17167,6 +17737,16 @@ function fakeGateGithub({
         },
         listWorkflowRunsForRepo: async (options) => {
           github.runListReads.push(options);
+          // Merge-group runs are their own listing: the at-cap comment asks
+          // for the recent runs built on merge_group heads, repo-wide.
+          if (options.event === "merge_group") {
+            return {
+              data: {
+                total_count: mergeGroupRuns.length,
+                workflow_runs: mergeGroupRuns.slice(0, options.per_page ?? mergeGroupRuns.length),
+              },
+            };
+          }
           // Per HEAD, not globally: evaluateRequiredChecks lists runs for the
           // ORIGINAL head before the update, and a global counter would be spent
           // by those reads — making the runs "appear" before the first approve
@@ -17531,6 +18111,40 @@ function fakeGateGithub({
           };
         }
         return { repository };
+      }
+      if (query.includes("mutation EnqueuePullRequest")) {
+        if (enqueueError) {
+          throw enqueueError;
+        }
+        github.operations.push("merge-queue:enqueue");
+        github.enqueuedPullRequests.push({ ...variables });
+        return { enqueuePullRequest: { mergeQueueEntry: { id: "MQE_enqueue_1" } } };
+      }
+      if (query.includes("mutation DequeuePullRequest")) {
+        if (dequeueError) {
+          throw dequeueError;
+        }
+        github.operations.push("merge-queue:dequeue");
+        github.dequeuedEntries.push(variables.entryId);
+        return { dequeuePullRequest: { clientMutationId: null } };
+      }
+      if (query.includes("query MergeQueueEntry")) {
+        github.mergeQueueEntryReads += 1;
+        const override = pullRequestsByNumber[variables.number] || {};
+        const entry =
+          Object.prototype.hasOwnProperty.call(override, "mergeQueueEntry")
+            ? override.mergeQueueEntry
+            : mergeQueueEntry;
+        return { repository: { pullRequest: { mergeQueueEntry: entry } } };
+      }
+      if (query.includes("query MergeQueueEjections")) {
+        github.ejectionReads += 1;
+        const override = pullRequestsByNumber[variables.number] || {};
+        const events =
+          Object.prototype.hasOwnProperty.call(override, "ejectionEvents")
+            ? override.ejectionEvents
+            : ejectionEvents;
+        return { repository: { pullRequest: { timelineItems: { nodes: events } } } };
       }
       github.graphqlReadsByNumber[variables.number] =
         (github.graphqlReadsByNumber[variables.number] || 0) + 1;

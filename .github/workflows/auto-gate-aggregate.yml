@@ -43,6 +43,7 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           TARGETS_JSON: ${{ inputs.targets_json }}
           MERGE_ENABLED: ${{ vars.AUTO_GATE_ENABLED }}
+          MERGE_QUEUE_ENABLED: ${{ vars.AUTO_GATE_MERGE_QUEUE }}
           READ_FAILURE: ${{ inputs.read_failure }}
         with:
           # The built-in Actions identity owns both decision layers and has no
@@ -118,6 +119,7 @@ jobs:
                     headSha: target.head_sha,
                   })),
                   mergeEnabled: process.env.MERGE_ENABLED === "true",
+                  mergeQueueEnabled: process.env.MERGE_QUEUE_ENABLED === "true",
                   manual: context.eventName === "workflow_dispatch",
                   readFailureReason: process.env.READ_FAILURE,
                 });
@@ -191,6 +193,7 @@ jobs:
                   core,
                   prNumber: Number(target.pr_number),
                   expectedHeadSha: process.env.HEAD_SHA,
+                  mergeQueueEnabled: process.env.MERGE_QUEUE_ENABLED === "true",
                 });
               } catch (error) {
                 if (error?.autoGateMergeConceded) return;

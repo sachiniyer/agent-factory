@@ -818,6 +818,139 @@ PR-number dispatch to refresh that observational state. The destructive merge pa
 the target PR, every other associated PR, and the association set immediately
 before its write.
 
+## Merge-queue landing (#5585)
+
+With the repository variable `AUTO_GATE_MERGE_QUEUE=true`, passing pull
+requests land through GitHub's native merge queue instead of the gate's own
+merge write. Every gate requirement is unchanged — same per-PR decisions, same
+fixed aggregate, same Codex/play-test/hold rules; only the landing mechanism
+differs. Unset or `false` is the entire rollback: the direct
+update-branch-plus-squash-merge path below stays in the code side by side and
+runs exactly as before.
+
+Under the flag, the serialized aggregate transaction performs the same
+preflight — fresh evaluation, live fixed aggregate PASS, observable published
+check — and then calls `enqueuePullRequest` with `expectedHeadOid` set to the
+evaluated head rather than `pulls.merge`. A branch that moved under the
+transaction is refused by the platform, not enqueued under an ungated head.
+There is deliberately no update-branch step in this mode: the queue merges
+base and head into a group head and the required checks run on that
+composition, so a behind head enqueues as it stands. That is the batching the
+mode exists for — the direct path pays an update-branch plus full CI cycle
+per merge that lands ahead of a candidate (~6.4 Build runs measured per
+landing), while a queue entry pays nothing until its group builds.
+
+### The merge-group lane
+
+When the queue builds a group it asks for the required checks on the group
+head through `merge_group: checks_requested`. `Lint` and `Build` come from PR
+Validation's own `merge_group` trigger (#2031); the third required check,
+`Auto Gate decision`, is published by `auto-gate-mergegroup.yml`, a dedicated
+workflow with one job and one script step. It carries its own concurrency key
+(`auto-gate-mergegroup-<group head>`), no fleet target resolution, and no
+re-evaluation fan-out — a group decision waits only for a free runner, never
+behind the saturated Auto Gate lanes whose backlog the queue exists to
+relieve.
+
+`evaluateMergeGroup` certifies a group head by reading its own commit shape:
+it walks the queue's first-parent chain, collects each merge's non-first
+parents as constituent candidates, and stops at the first ancestor contained
+in `master`. A candidate that is an open master pull request's current head
+must carry a completed, successful `Auto Gate decision` at that exact (PR,
+head) pair; one that is already base history — a merged constituent the queue
+rebuilt past — needs none. A linear head, a second parent no open master PR
+claims, or content the walk cannot explain fails closed: the decision reads
+BLOCKED on the group head and the queue must not merge it. The group check
+uses external id `auto-gate:merge-group:head:<sha>`, so a re-evaluation
+updates the same run and never collides with the commit-scoped aggregate. An
+evaluation error still publishes a failing `UNKNOWN` decision first — a group
+that never hears a verdict stalls the queue for the full check-response
+timeout.
+
+### Ejections, re-enqueue, and the cap
+
+`pull_request_target` subscribes to `enqueued` and `dequeued` so queue
+membership transitions reach the gate without waiting on an unrelated event.
+Two reconciliations ride on that:
+
+- A decision that goes non-passing dequeues the PR (`dequeuePullRequest` on
+  its current `mergeQueueEntry`); a red head in the queue would only burn a
+  group build that can fail.
+- A `dequeued` event on a still-green head re-enqueues it on the next
+  transaction — group rebuilds and single-constituent failures eject entries
+  that did nothing wrong.
+
+Re-enqueue is capped at **2** per head (`MERGE_QUEUE_REQUEUE_CAP`), counted
+from durable state only: the pull request's own
+`REMOVED_FROM_MERGE_QUEUE_EVENT` timeline items, charged to the head named in
+each event's `beforeCommit.oid` — and conservatively to the current head when
+the API attributes none. A pushed head therefore starts clean, while the same
+head cannot churn through the queue forever. At the cap the head is held out
+of the queue and the gate posts one marker-deduplicated comment per head
+naming the most recent merge-group run that contained it (found by comparing
+each recent `merge_group` run's head against the held head, preferring a
+failed run): the human evidence that a head green on its own fails in
+composition.
+
+### What the queue's merge owes
+
+The queue performs the merge itself, so the post-merge work cannot ride on
+`merge()`. A `closed` event whose payload reports `merged == true` — delivered
+for queue merges and hand merges alike — runs `verifyMergeQueueLanding` behind
+the same flag: it re-dispatches the `MASTER_PUSH_WORKFLOWS` verification set
+with `verify_sha` pinned to the payload's `merge_commit_sha`, and prunes the
+merged head ref through the same `headRefPruner` conditions the direct path
+uses. A dispatch or prune failure reds the run on purpose: a merge whose
+verification was never re-raised would leave master carrying an unverified
+commit.
+
+### Activation — owner steps only
+
+The code above is inert until the owner does all three:
+
+1. Add the `merge_queue` rule to ruleset 14851503 (`~DEFAULT_BRANCH`),
+   proposed parameters sized to Actions concurrency:
+   - `merge_method: SQUASH` — matches the gate's squash merges and satisfies
+     `required_linear_history`.
+   - `grouping_strategy: ALLGREEN` — every entry's merge commit must pass,
+     the same per-head guarantee the direct path gives today (`HEADGREEN`
+     tests only the group tail; faster, weaker).
+   - `max_entries_to_build: 5` — bounds how many group builds run at once.
+     Each group head runs a full PR Validation, the heaviest CI in the
+     repository; five concurrent group builds is the practical ceiling
+     before group CI starves the PR lanes it shares the runner pool with.
+   - `max_entries_to_merge: 5` — the largest group a single landing can
+     carry. Beyond ~5, one constituent's failure ejects a larger batch than
+     the CI saving justifies, and bisecting it costs more cycles than a
+     smaller group saves.
+   - `min_entries_to_merge: 1` and `min_entries_to_merge_wait_minutes: 10` —
+     a singleton group still lands; ten minutes is the window for batchmates
+     to join without holding single PRs hostage to queue traffic.
+   - `check_response_timeout_minutes: 120` — worst observed PR Validation is
+     ~50 minutes; doubled for runner-queue slack, short enough that a stuck
+     group ejects rather than parking the queue.
+
+   The sizing pays for itself against the measured baseline: today a landing
+   forces every other candidate through update-branch plus a full CI cycle —
+   ~6.4 Build runs per merge — while a K-PR group lands on one group build,
+   so the queue needs to average only `group size > 1` to cut total CI.
+
+2. Set the Actions variable `AUTO_GATE_MERGE_QUEUE=true`.
+3. Disable Trunk queue submission (dashboard, or uninstall) so a stray
+   `/trunk merge` cannot double-route a PR into both queues. Trunk's
+   "was merged" bookkeeping comments are harmless either way.
+
+`strict_required_status_checks_policy` stays `false` and the required check
+list is unchanged. Rollback is the variable alone: `false` (or unset) restores
+the direct merge path with no code change, and removing the ruleset rule is
+optional cleanup.
+
+A workflow-touching PR like this one lands the workflow before its
+default-branch helper in exactly one run; every new step checks
+`typeof autoGate.<fn> === "function"` and no-ops for that run. The gate also
+cannot update-branch a PR that changes workflow files — if this PR falls
+behind master, the maintainer refreshes it by hand.
+
 ## Head-branch pruning
 
 `delete_branch_on_merge` does not fire for a `GITHUB_TOKEN` merge, so the gate
