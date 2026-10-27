@@ -462,15 +462,18 @@ func TestManager_RefreshLocked_SelfHealsWhenRehydratedRowCountsTowardMaterialize
 // self-heal fix must PRESERVE: a row that is silently DROPPED (never enters
 // `next`) keeps the repo skipped, because its snapshot is genuinely incomplete.
 // Here persistLegacyInstanceID fails with no prior in-memory instance, so the
-// row is dropped via the ghost + continue branch (neither materialized++ nor
-// failedRows++); `materialized(0) < len(data)(1)` retracts reread and the repo
-// stays skipped — the partial-loss-as-complete lie the skip set exists to
-// prevent.
+// row is dropped via the ghost + continue branch (materialized stays 0); the
+// drop branch now counts it as a failed row (`failedRows++`, #4998), so
+// `materialized(0) < len(data)(1)` retracts reread and the fresh
+// rows-failed-to-load entry rewrites the stale startup reason — the partial
+// loss is no longer served as the complete answer the skip set exists to
+// prevent, and the destructive orphan sweep defers on the same incomplete-view
+// principle as a corrupted repo.
 //
-// This is the discriminator against a `failedRows > 0` retraction condition,
-// which would NOT retract here (failedRows==0) and would serve the partial list
-// as complete. The fix (count re-hydrated rows toward `materialized`, leave
-// dropped rows uncounted) preserves this retraction.
+// This pins the PR's intentional change to the drop branch: before #4998 the
+// row was dropped with failedRows==0, leaving the stale corrupted reason and
+// (at startup) an empty protected-slug set the orphan sweep could reap from.
+// Now the drop seeds the rows-failed-to-load skip entry so the sweep defers.
 func TestManager_RefreshLocked_DroppedLegacyIDRowStaysSkipped(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	stubFromInstanceForRefresh(t)
@@ -482,7 +485,8 @@ func TestManager_RefreshLocked_DroppedLegacyIDRowStaysSkipped(t *testing.T) {
 
 	// A legacy row (no stable ID) whose durable ID persist fails. No prior
 	// in-memory instance exists for a startup-skipped repo, so the row is
-	// dropped — not re-hydrated, not materialized, not failedRows.
+	// dropped — not re-hydrated, not materialized, and now counted as a
+	// failed row so the skip entry seeds and the sweep defers.
 	repairJSON, err := json.Marshal([]session.InstanceData{{Title: "legacy-row", ID: ""}})
 	require.NoError(t, err)
 	require.NoError(t, config.SaveRepoInstances("corrupt-r", repairJSON))
@@ -495,11 +499,11 @@ func TestManager_RefreshLocked_DroppedLegacyIDRowStaysSkipped(t *testing.T) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	require.NoError(t, m.refreshLocked())
-	// The row is dropped, so reread retracts and retainStillSkipped keeps the
-	// repo skipped on the stale startup reason: failedRows==0 means no fresh
-	// rows-failed-to-load entry is appended to rewrite it (the reason-rewrite
-	// is a separate concern from the retraction this test pins).
-	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonCorruptedInstancesJSON, FailedRows: 0}}, m.skippedRepos,
+	// The row is dropped, so reread retracts and the fresh
+	// rows-failed-to-load entry (failedRows==1) rewrites the stale
+	// corrupted-instances-json reason via retainStillSkipped, keeping the
+	// repo skipped with the accurate reason and count.
+	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}, m.skippedRepos,
 		"a dropped legacy-ID row keeps the repo skipped (incomplete snapshot)")
 	require.Nil(t, m.instances[daemonInstanceKey("corrupt-r", "legacy-row")], "the dropped row contributes no instance")
 }
