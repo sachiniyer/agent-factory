@@ -2302,6 +2302,20 @@ const projectsRefetcher = createFencedRefetcher({
 
 /** Commits a fenced registry read, reconciling the selected project against it. */
 function commitRegisteredProjects(projects: RegisteredProject[]): void {
+  // The authoritative list settles what a learned registration became: a settled
+  // id the registry no longer holds was deleted or rebound away, so a later write
+  // must re-register instead of failing on the stale id; an uncertain outcome the
+  // registry now names is determinate and takes the recorded id.
+  const byRoot = new Map(projects.map((p) => [p.root, p.id]));
+  const ids = new Set(projects.map((p) => p.id));
+  for (const [root, learned] of projectColorRegistrations) {
+    if ("uncertain" in learned) {
+      const id = byRoot.get(root);
+      if (id !== undefined) projectColorRegistrations.set(root, { id });
+    } else if (!ids.has(learned.id)) {
+      projectColorRegistrations.delete(root);
+    }
+  }
   const selectedProject = reconcileProject(
     store.get().sessions,
     store.get().tasks,

@@ -93,6 +93,9 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
     isMutationOutcomeUncertain: (e: StubError) => e.kind !== "refused",
     errorText: (e: Error) => e.message,
     listDirectory: () => Promise.resolve({}),
+    // The color writer's learned-registration map, empty for the rebind flows:
+    // commitRegisteredProjects reconciles it against each committed list.
+    projectColorRegistrations: new Map(),
   };
   const code = ts.transpileModule(`
     let token = "token", modal = null, rebindInFlight = null;
