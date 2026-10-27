@@ -46,6 +46,7 @@ merges before the next file begins.
    gofmt -w <changed-go-files>
    gofmt -l .
    go build ./...
+   go vet ./...
    golangci-lint run --timeout=3m --fast
    scripts/lint-file-length.sh
    go test ./<the package you split>/...   # skip if it is daemon/ or app/
