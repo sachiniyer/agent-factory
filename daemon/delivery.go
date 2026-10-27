@@ -354,7 +354,13 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 // retained task program can be invalid after an upgrade or hand edit; that
 // refusal still precedes any reservation or delivery and must keep its task
 // provenance across the RPC hop. Once CreateSession is called, its own boundary
-// owns classification through the reservation commit.
+// owns classification through the reservation commit. The program is
+// normalized here for the same reason as controlServer.createSession
+// (trimProgramEnumIfBare): ResolveProgram's program_overrides lookup is an exact
+// map key, so a stored " claude" would miss the "claude" override and launch the
+// bare command, and the recorded enum the opaque same-target guard compares
+// would carry the whitespace. Only a bare enum is trimmed; an arbitrary command
+// string is preserved verbatim so an intentional trailing space is not stripped.
 func (m *Manager) createMissingPromptTarget(req DeliverPromptRequest) (_ session.InstanceData, retErr error) {
 	managerDelegated := false
 	defer func() {
@@ -366,6 +372,7 @@ func (m *Manager) createMissingPromptTarget(req DeliverPromptRequest) (_ session
 	if err := validateCreateProgram(req.Program); err != nil {
 		return session.InstanceData{}, err
 	}
+	req.Program = trimProgramEnumIfBare(req.Program)
 	managerDelegated = true
 	return m.CreateSession(context.Background(), CreateSessionRequest{
 		Title:      req.Title,

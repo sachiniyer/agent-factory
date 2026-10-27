@@ -453,6 +453,79 @@ func TestPruneSessions_RefusesPresentWorktreeWithDeletedBranchRef(t *testing.T) 
 	assert.Contains(t, resp.Skipped[0].Reason, "recovery branch")
 }
 
+// bareCloneOriginWithBranch builds a bare clone (mirroring
+// setupBareCloneWorktree3358's bare layout) and adds a named branch to the bare
+// origin, returning the bare root. Prune's recovery-branch probe runs
+// LocalBranchExists against this root, which for a bare-clone project IS the
+// recorded Worktree.RepoPath (config.ResolveMainRepoRoot: a bare repository's
+// identity root is the bare directory itself — pinned by
+// TestResolveMainRepoRoot_BareCloneWorktree).
+func bareCloneOriginWithBranch(t *testing.T, branch string) string {
+	t.Helper()
+	_, bare, _ := setupBareCloneWorktree3358(t)
+	cmd := exec.Command("git", "-C", bare, "branch", branch)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git branch %s in bare origin: %s", branch, string(out))
+	return bare
+}
+
+// TestPruneFilesystemRefusal_BareCloneExistingBranchIsCandidate is the
+// daemon-side #5136 regression: an archived session whose origin is a bare
+// clone (so Worktree.RepoPath is the bare directory itself) records a recovery
+// branch that verifiably exists in the bare origin — `git -C <bare> show-ref
+// --verify` exits 0 — so the row must list as a reclaimable candidate, NOT
+// refuse as "recovery branch no longer exists". The only thing standing
+// between the row and a candidate slot was LocalBranchExists fabricating
+// (false, nil) from the bare root's missing .git; the fix makes that probe
+// bare-aware. This exercises the exact `boundedLocalBranchExists → !exists`
+// branch the bug report reproduced (the worktree-missing arm), wired through
+// prune's own refusal function.
+func TestPruneFilesystemRefusal_BareCloneExistingBranchIsCandidate(t *testing.T) {
+	bare := bareCloneOriginWithBranch(t, "af-bare-prune")
+	// Sanity: the bare layout has no .git child, and git confirms the branch.
+	_, statErr := os.Stat(filepath.Join(bare, ".git"))
+	require.ErrorIs(t, statErr, os.ErrNotExist,
+		"sanity: a bare clone has no .git child for Stat to find")
+	out, err := exec.Command("git", "-C", bare, "show-ref", "--verify", "--quiet",
+		"refs/heads/af-bare-prune").CombinedOutput()
+	require.NoError(t, err, "sanity: the branch verifiably exists in the bare origin: %s", string(out))
+
+	data := session.InstanceData{
+		Branch: "af-bare-prune",
+		Worktree: session.GitWorktreeData{
+			RepoPath:     bare,
+			WorktreePath: filepath.Join(t.TempDir(), "archived-worktree-gone-out-of-band"),
+		},
+	}
+	refusal := pruneFilesystemRefusal(data)
+	assert.Empty(t, refusal,
+		"a bare origin whose branch exists must list as reclaimable, not refuse as 'branch missing'")
+}
+
+// TestPruneFilesystemRefusal_BareCloneMissingBranchRefuses is the bare-clone
+// control for the recovery-branch gate: a branch git confirms GONE in a bare
+// origin must still refuse, so the bare-aware fall-through is not an
+// "always-exists" shortcut that would list a row whose kept-branch promise the
+// bare origin no longer honors. Without this, the bare-aware fix could
+// silently over-reclaim against bare origins.
+func TestPruneFilesystemRefusal_BareCloneMissingBranchRefuses(t *testing.T) {
+	bare := bareCloneOriginWithBranch(t, "af-bare-real")
+	out, err := exec.Command("git", "-C", bare, "branch", "-D", "af-bare-real").CombinedOutput()
+	require.NoError(t, err, "delete the recovery branch from the bare origin: %s", string(out))
+
+	data := session.InstanceData{
+		Branch: "af-bare-real",
+		Worktree: session.GitWorktreeData{
+			RepoPath:     bare,
+			WorktreePath: filepath.Join(t.TempDir(), "archived-worktree-gone-out-of-band"),
+		},
+	}
+	refusal := pruneFilesystemRefusal(data)
+	assert.Contains(t, refusal, "recovery branch",
+		"a bare origin whose branch is gone must still refuse, not list as reclaimable")
+}
+
 // TestPruneSessions_RevalidatesStateBeforePublishing: a lifecycle flip that
 // lands between the filesystem probes + size walk and the candidate append —
 // the exact window the publish-time recheck exists to close — must keep the
