@@ -46,8 +46,11 @@ import (
 var goSurfaces = map[string][]string{
 	// daemon/control_client.go is the CLI's gob control-socket path.
 	"cli": {"api", "daemon/control_client.go"},
-	// apiclient/ is the TUI's HTTP path to the daemon.
-	"tui": {"app", "apiclient"},
+	// apiclient/ is the TUI's HTTP path to the daemon, and ui/ is where the
+	// config editor's remote target builds its read/write/explain requests
+	// directly (#3708, #4803) — a surface scan that skipped it would let those
+	// request types grow a field the pane can never send.
+	"tui": {"app", "apiclient", "ui"},
 }
 
 // auditedRequests binds a daemon request type name to its reflect.Type so field
@@ -55,6 +58,20 @@ var goSurfaces = map[string][]string{
 // surface actually constructs; any type it finds that is missing here fails the
 // check, so this registry cannot silently fall behind the code.
 var auditedRequests = map[string]reflect.Type{
+	"StartProposalRequest":          reflect.TypeOf(daemon.StartProposalRequest{}),
+	"AttachProposalRequest":         reflect.TypeOf(daemon.AttachProposalRequest{}),
+	"DetachProposalRequest":         reflect.TypeOf(daemon.DetachProposalRequest{}),
+	"ListProposalsRequest":          reflect.TypeOf(daemon.ListProposalsRequest{}),
+	"GetProposalRequest":            reflect.TypeOf(daemon.GetProposalRequest{}),
+	"AddProposalDocRequest":         reflect.TypeOf(daemon.AddProposalDocRequest{}),
+	"PullProposalChangesRequest":    reflect.TypeOf(daemon.PullProposalChangesRequest{}),
+	"CheckpointProposalRequest":     reflect.TypeOf(daemon.CheckpointProposalRequest{}),
+	"ReadProposalDocRequest":        reflect.TypeOf(daemon.ReadProposalDocRequest{}),
+	"WriteProposalDocRequest":       reflect.TypeOf(daemon.WriteProposalDocRequest{}),
+	"SaveProposalDocRequest":        reflect.TypeOf(daemon.SaveProposalDocRequest{}),
+	"SetProposalPushModeRequest":    reflect.TypeOf(daemon.SetProposalPushModeRequest{}),
+	"HoldProposalPushRequest":       reflect.TypeOf(daemon.HoldProposalPushRequest{}),
+	"SendProposalChangesRequest":    reflect.TypeOf(daemon.SendProposalChangesRequest{}),
 	"AccountLoginRequest":           reflect.TypeOf(daemon.AccountLoginRequest{}),
 	"ListAccountsRequest":           reflect.TypeOf(daemon.ListAccountsRequest{}),
 	"RegisterAccountRequest":        reflect.TypeOf(daemon.RegisterAccountRequest{}),
@@ -67,6 +84,8 @@ var auditedRequests = map[string]reflect.Type{
 	"CreateTabRequest":              reflect.TypeOf(daemon.CreateTabRequest{}),
 	"DeleteProjectRequest":          reflect.TypeOf(daemon.DeleteProjectRequest{}),
 	"DeliverPromptRequest":          reflect.TypeOf(daemon.DeliverPromptRequest{}),
+	"ExplainConfigRequest":          reflect.TypeOf(daemon.ExplainConfigRequest{}),
+	"GetConfigRequest":              reflect.TypeOf(daemon.GetConfigRequest{}),
 	"HandoffSessionRequest":         reflect.TypeOf(daemon.HandoffSessionRequest{}),
 	"KillSessionRequest":            reflect.TypeOf(daemon.KillSessionRequest{}),
 	"ListBackendsRequest":           reflect.TypeOf(daemon.ListBackendsRequest{}),

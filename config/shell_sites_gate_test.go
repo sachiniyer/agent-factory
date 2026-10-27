@@ -123,9 +123,14 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		class: operatorConfig, keys: []string{"sandbox.ssh"},
 		note: "the operator's ssh command as a PREFIX: `sh -c '<sandbox.ssh> \"$@\"' af-sandbox <script>`",
 	}},
-	"session/backend_sandbox.go:(*sandboxProvisioner).startTunnel": {{
+	"session/sandbox_tunnel.go:(*sandboxProvisioner).spawnTunnel": {{
 		class: operatorConfig, keys: []string{"sandbox.ssh"},
-		note: "the same prefix, with -N -L appended for the port-forward child",
+		note: "the same prefix, with -N -L appended for the port-forward child — the direct-spawn shape (#5564)",
+	}},
+	"session/sandbox_tunnel.go:spawnTunnelViaLifeline": {{
+		class: operatorConfig, keys: []string{"sandbox.ssh"},
+		note: "the same tunnel prefix, handed to the watch lifeline which execs `sh -c <script>` inside the " +
+			"group it owns (#5564)",
 	}},
 
 	// ---- operator-authored, but not from a config file ----
@@ -169,6 +174,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "af's own `af agent-server …` line. The operator's program is embedded, but shell-QUOTED as a " +
 			"--program argument; it reaches a shell only later, in the container, through the pane path above.",
 	}},
+	"session/backend_docker.go:(*dockerProvisioner).readBanner": {{
+		class: afAuthored,
+		note: "the banner poll script — `cat <banner>; kill -0 $(cat <pidfile>)` — composed from af " +
+			"constants only; the operator's program name never reaches it",
+	}},
 	"session/backend_docker.go:(*dockerProvisioner).execSh": {{
 		class: afAuthored, note: "af's container setup scripts (chmod, mkdir), composed with shellQuote",
 	}},
@@ -179,6 +189,22 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		{class: notAShell, note: "`stat -c %u:%g` — stat's format flag"},
 		{class: afAuthored, note: "af's mkdir/chown script for the account-owned home"},
 	},
+	"internal/testguard/fixture_unix.go:StartGroupProcess": {{
+		class: afAuthored,
+		note: "groupPinScript, a const in the same file; the spawner pid and its start stamp " +
+			"arrive as $1/$2 positional parameters, never spliced into the script text",
+	}},
+
+	"session/host_program.go:(hostProgramProber).probe": {{
+		class: afAuthored,
+		note: "the login-shell program probes (`command -v -- \"$1\"`, `which -- \"$1\"`) — af-authored " +
+			"const scripts; the operator's program name arrives as a POSITIONAL argument, never in the " +
+			"script text, which is the #5571 W2.1 contract",
+	}},
+	"session/host_program.go:(hostProgramProber).probePath": {{
+		class: afAuthored,
+		note:  "the PATH-only variant of the same probe — the hostProbePathOnly const, no positional input at all",
+	}},
 
 	// ---- not a shell at all ----
 	"session/tmux/start.go:(*TmuxSession).Start": {{
@@ -212,6 +238,10 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		class: notAShell,
 		note: "the same -c/--config spellings, matched as text so resumeProgram can step past " +
 			"codex's global options to the subcommand slot (#5238)",
+	}},
+	"proposal/git.go:gitConfigArgs": {{
+		class: notAShell,
+		note:  "`git -c <key>=<value>` — git's config flag, paired with the fixed literals of gitFixedConfig",
 	}},
 }
 

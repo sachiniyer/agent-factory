@@ -205,9 +205,6 @@ func errSandboxCallbackNeedsRequireToken() error {
 // keep it true when a caller acquires an input is to let the caller open the
 // window.
 func (m *Manager) mintSandboxCallbackFenced(fence uint64, cfg *config.Config, sessionID string) (sandboxGrant, error) {
-	if cfg == nil {
-		return sandboxGrant{}, errSandboxCallbackNeedsRequireToken()
-	}
 	// The fence is sampled BEFORE the address is read, not merely before the mint
 	// (#3012 review): an invalidation landing between the read and the sample would
 	// complete its sweep and then be recorded as the STARTING value, so the final
@@ -220,19 +217,8 @@ func (m *Manager) mintSandboxCallbackFenced(fence uint64, cfg *config.Config, se
 	// revokes every credential without touching a socket, so the generation stayed
 	// put and a mint in flight across it survived the sweep — provisioning a sandbox
 	// against a daemon that had just stopped authenticating anyone.
-	active := m.activeWebConfigAddr(cfg.ListenAddr)
-	if strings.TrimSpace(active) == "" && strings.TrimSpace(cfg.ListenAddr) != "" {
-		return sandboxGrant{}, fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix network.listen_addr", cfg.ListenAddr)
-	}
-	// Dialability first, posture second. Both refuse before any secret exists, but
-	// the ORDER decides which message an operator reads, and a loopback network.listen_addr
-	// used to answer "enable network.require_loopback_token" — advice that would have led
-	// them to a well-enforced credential their sandbox still could not use.
-	url, err := sandboxCallbackURL(active)
+	url, err := m.callbackURLOrRefusal(cfg)
 	if err != nil {
-		return sandboxGrant{}, err
-	}
-	if err := sandboxCallbackPostureOK(cfg); err != nil {
 		return sandboxGrant{}, err
 	}
 	// Revalidate-and-refuse rather than lock, deliberately. Holding the listener
@@ -249,6 +235,49 @@ func (m *Manager) mintSandboxCallbackFenced(fence uint64, cfg *config.Config, se
 		return sandboxGrant{}, errSandboxCallbackInvalidated(url)
 	}
 	return sandboxGrant{URL: url, Token: token, fence: fence}, nil
+}
+
+// callbackURLOrRefusal runs the mint's configuration checks WITHOUT minting:
+// the callback URL a sandbox would dial, or the refusal the create path will
+// now degrade with (#5571 W3.1). Extracted rather than re-asked inside the mint
+// because the picker's callback_unavailable_reason and the create path's
+// degraded reason must be the SAME answer — two implementations of "will this
+// callback work" is how they drifted apart before.
+//
+// The mint's remaining checks — the invalidation fence and the registry insert
+// — are deliberately NOT here: they are about a live mint in flight, and a
+// read-only preview cannot and should not predict them.
+func (m *Manager) callbackURLOrRefusal(cfg *config.Config) (string, error) {
+	if cfg == nil {
+		return "", errSandboxCallbackNeedsRequireToken()
+	}
+	active := m.activeWebConfigAddr(cfg.ListenAddr)
+	if strings.TrimSpace(active) == "" && strings.TrimSpace(cfg.ListenAddr) != "" {
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix network.listen_addr", cfg.ListenAddr)
+	}
+	// Dialability first, posture second. Both refuse before any secret exists, but
+	// the ORDER decides which message an operator reads, and a loopback network.listen_addr
+	// used to answer "enable network.require_loopback_token" — advice that would have led
+	// them to a well-enforced credential their sandbox still could not use.
+	url, err := sandboxCallbackURL(active)
+	if err != nil {
+		return "", err
+	}
+	if err := sandboxCallbackPostureOK(cfg); err != nil {
+		return "", err
+	}
+	return url, nil
+}
+
+// callbackUnavailableReason answers "would a sandbox created right now get a
+// callback?" with the refusal text when it would not — "" when it would. The
+// backend picker renders it as callback_unavailable_reason so choose-time and
+// create-time give one answer (#5571 W3.1).
+func (m *Manager) callbackUnavailableReason(cfg *config.Config) string {
+	if _, err := m.callbackURLOrRefusal(cfg); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 // sandboxGrant is an issued callback credential plus the fence it was issued

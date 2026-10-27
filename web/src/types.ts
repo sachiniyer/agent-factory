@@ -39,6 +39,9 @@ export const TabKind = {
    *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
    *  lockstep with the Go enum. */
   VSCode: 4,
+  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
+   *  Mirrors session.TabKindDocs (session/tab.go). */
+  Docs: 5,
 } as const;
 
 /** session.InFlightOp (session/liveness.go): the transient client-op axis. */
@@ -173,6 +176,11 @@ export interface SessionData {
    *  It remains on restored rows so an automatic Lost recovery cannot make the
    *  omitted files disappear from subsequent snapshots. */
   archive_warning?: string;
+  /** Why this session has no af callback — the mint refusal recorded when its
+   *  sandbox provisioned without one (#5571 W3.1). Surfaces render it under the
+   *  "af callback unavailable:" prefix; absent means callback was delivered or
+   *  the backend never injects one. */
+  callback_unavailable?: string;
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
   idle_reason?: IdleReason;
@@ -253,6 +261,9 @@ export interface TabData {
    *  loopback URL is rendered through the same-origin daemon proxy, an external
    *  URL directly. Mirrors session.TabData.URL (session/storage.go). */
   url?: string;
+  /** The proposal slug of a docs tab (TabKind.Docs); absent for other kinds.
+   *  Mirrors session.TabData.Proposal (session/storage.go). */
+  proposal?: string;
   /** Daemon proxy decision; absent only on older daemon records. */
   web_proxied?: boolean;
 }
@@ -261,7 +272,7 @@ export interface TabData {
  *  repo root the session belongs to, used to group/pick projects. */
 /** One creatable tab kind and whether this session may gain one. */
 export interface TabKindAllowance {
-  /** The `--kind` spelling the CLI accepts: "shell", "process", "web", "vscode". */
+  /** The `--kind` spelling the CLI accepts: "shell", "process", "web", "vscode", "docs". */
   kind: string;
   allowed: boolean;
   /** The daemon's own refusal text, empty when allowed. Rendered verbatim: it
@@ -501,6 +512,11 @@ export interface ConfigSetResult {
   value: string;
   path: string;
   requires_restart: boolean;
+  /** Per-write warnings from the writer itself (e.g. an unregistered
+   *  default_accounts.<agent> name). A channel distinct from the response's
+   *  apply-time `warnings`: the daemon fills this even when the live apply
+   *  produced none (#5266). */
+  warnings?: string[];
 }
 
 /** SetConfigValueResponse (daemon/control_types.go). The restart notice rides
@@ -522,6 +538,56 @@ export interface ConfigSetResponse {
    *  without it the operator is told where they are NOT and left to guess where
    *  they are. Optional: an older daemon does not send it. */
   listener_addr?: string;
+}
+
+/** config.SourceRef (config/provenance.go) — the exact configuration location
+ *  that supplied an effective scalar or composite leaf. */
+export interface SourceRef {
+  layer: string;
+  path?: string;
+  format?: string;
+  key_path: string;
+}
+
+/** config.CandidateTrace (config/provenance.go) — one source considered while
+ *  resolving a key. `value` is the configured value at that source; absent and
+ *  disallowed candidates carry null. */
+export interface CandidateTrace {
+  layer: string;
+  path?: string;
+  format?: string;
+  key_path: string;
+  allowed: boolean;
+  present: boolean;
+  value: unknown;
+  result: string;
+  reason: string;
+}
+
+/** config.ResolvedValue (config/provenance.go) — an effective config value and
+ *  the complete trace that produced it. Replace/list keys name one `winner`;
+ *  composite keys instead carry a source per leaf in `origins`, so a composite
+ *  is never assigned a fake winner. */
+export interface ResolvedValue {
+  key: string;
+  value: unknown;
+  default?: string;
+  merge: string;
+  precedence: string[];
+  winner?: SourceRef;
+  origins?: Record<string, SourceRef>;
+  candidates: CandidateTrace[];
+}
+
+/** daemon.ExplainConfigResponse (daemon/control_types.go, #4803) — the shared
+ *  provenance explanation the CLI renders from `af config get --explain`,
+ *  served to clients that cannot resolve in-process. Global scope only; the
+ *  daemon deliberately does not consult its running config snapshot
+ *  (`running_value_checked`), so the trace describes on-disk sources. */
+export interface ExplainConfigResponse {
+  explanation: ResolvedValue;
+  scope: string;
+  running_value_checked: boolean;
 }
 
 /** daemon.AccountEntry — one registered agent account (#3384/#3385).

@@ -125,6 +125,7 @@ func (c *singleSocketChannel) dropUpstream() {
 
 func (c *singleSocketChannel) SendRaw([]byte) error        { return nil }
 func (c *singleSocketChannel) Resize(uint16, uint16) error { return nil }
+func (c *singleSocketChannel) PaneDead() bool              { return false }
 
 func (c *singleSocketChannel) Snapshot() (PaneSnapshot, error) {
 	c.mu.Lock()

@@ -515,6 +515,13 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	if taskRunWasActive && !instance.TaskRunActive() {
 		churnCheckpoint = true
 	}
+	// A run that ended failed — its initial delivery proven undelivered (#5278)
+	// — reports that on the task. Not gated on this tick's edge: the send that
+	// ended the run lands between polls, and whichever tick first observes the
+	// cleared marker stamps.
+	if instance.ConsumeTaskRunFailed() {
+		m.stampTaskRunFailed(instance)
+	}
 	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, churnCheckpoint)
 	// The run may have just ended here, on the one path that cannot act on it: the
 	// attach owns this session's tmux. Park the declared lifecycle so the first
@@ -552,6 +559,15 @@ func (m *Manager) RefreshStatuses() {
 	m.sweepRemoteLossStates()
 	m.sweepPausedPollState()
 	m.sweepTaskRunTurnWatches()
+
+	// Worktree presence first, on its own bounded fan-out (#5102): it is a
+	// filesystem probe, not a tmux one, and running it inline here would let one
+	// stalled mount cost a deadline per session on it, serially.
+	probes := make([]worktreeProbeTarget, 0, len(entries))
+	for _, e := range entries {
+		probes = append(probes, worktreeProbeTarget{repoID: e.repoID, instance: e.instance})
+	}
+	m.refreshWorktreesMissing(probes)
 
 	for _, e := range entries {
 		m.refreshInstanceStatus(e.repoID, e.instance)
@@ -938,6 +954,13 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// (#5221 review).
 	if taskRunWasActive && !instance.TaskRunActive() {
 		settlementCheckpoint = true
+	}
+	// A run that ended failed — its initial delivery proven undelivered (#5278)
+	// — reports that on the task. Not gated on this tick's edge: the send that
+	// ended the run lands between polls, and whichever tick first observes the
+	// cleared marker stamps.
+	if instance.ConsumeTaskRunFailed() {
+		m.stampTaskRunFailed(instance)
 	}
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
 	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, settlementCheckpoint)

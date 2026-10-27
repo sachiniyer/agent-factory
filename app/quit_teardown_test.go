@@ -54,10 +54,12 @@ func TestHandleQuitCleansTerminalBeforeQuit(t *testing.T) {
 	assert.Empty(t, h.View(), "final graceful render must not repaint stale TUI chrome")
 
 	cmds := requireTeaSequence(t, cmd)
-	require.Len(t, cmds, 4, "quit must clear alt, leave alt-screen, clear main, then quit")
+	// Clear runs only while still on the alt screen: a second clear after
+	// ExitAltScreen would erase the host screen — inside tmux, the shell pane
+	// (#4785).
+	require.Len(t, cmds, 3, "quit must clear alt, leave alt-screen, then quit")
 	assert.Equal(t, tea.ClearScreen(), cmds[0]())
 	assert.Equal(t, tea.ExitAltScreen(), cmds[1]())
-	assert.Equal(t, tea.ClearScreen(), cmds[2]())
-	_, isQuit := cmds[3]().(tea.QuitMsg)
+	_, isQuit := cmds[2]().(tea.QuitMsg)
 	assert.True(t, isQuit, "teardown sequence must still finish with tea.Quit")
 }

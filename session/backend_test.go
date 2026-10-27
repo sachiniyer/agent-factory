@@ -16,6 +16,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/watchlifeline"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -30,6 +31,11 @@ func TestMain(m *testing.M) {
 			Dir:   filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "accounts", agent, name),
 		}, nil
 	}
+	// Lets the test binary stand in for af as a watch lifeline, exactly as
+	// main.go does — and in main.go's order, before sessionenv: the
+	// sandbox-tunnel tests exec os.Args[0] with __watch-lifeline argv and this
+	// turns the child into the real lifeline.
+	watchlifeline.HandleExec()
 	sessionenv.HandleInternalExec()
 
 	// #837: fail the package loudly if any test touches the real config.json.
@@ -150,6 +156,21 @@ func TestBackendCapabilities(t *testing.T) {
 			b:    &sshBackend{},
 			want: sandboxCaps,
 		},
+		{
+			name: "sandbox_ssh runtime — remote parity, no tab management",
+			b:    &sandboxBackend{},
+			want: sandboxCaps,
+		},
+	}
+
+	// The table above is hand-written, so pin that it covers the whole
+	// off-box family derived from the registry (W10.2).
+	covered := map[string]bool{}
+	for _, tt := range tests {
+		covered[tt.b.Type()] = true
+	}
+	for _, kind := range offBoxKinds() {
+		assert.True(t, covered[offBoxBackendType[kind]], "off-box backend %q has no row in the capabilities table", kind)
 	}
 
 	for _, tt := range tests {

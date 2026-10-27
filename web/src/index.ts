@@ -31,6 +31,7 @@ import {
   rebindProject,
   type RegisteredProject,
   errorText,
+  explainConfig,
   fetchSessionSnapshot,
   killSession,
   getConfig,
@@ -61,7 +62,7 @@ import {
   triggerTask,
   updateTask,
 } from "./api.js";
-import { createKeyedQueue, saveNotice } from "./config.js";
+import { createKeyedQueue, type ExplainOutcome, saveNotice } from "./config.js";
 import {
   bindTerminalFontPersist,
   setTerminalFontSizes,
@@ -123,6 +124,7 @@ import {
   AppShell,
   isActionableSession,
   orderedSessions,
+  clearLoginDraft,
   renderLogin,
   sessionTabs,
   canManageTabs,
@@ -532,6 +534,7 @@ async function fetchRegisteredProjects(tok: string): Promise<{ projects: Registe
  *  now that the credential persists across visits: on a shared machine, or after a
  *  rotation, Disconnect is what makes the next load prompt again. */
 function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
+  if (loginError && root) clearLoginDraft(root);
   store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
   connectionGeneration++;
@@ -887,6 +890,13 @@ function openModal(m: ModalHandle, focusCard = false, explicitInvoker?: ModalInv
     }
     modal = m;
     mountHost.replaceChildren(m.el);
+    // Reinstall this handle's Tab trap. A fresh modal already installed it in
+    // modalChrome, so this reaps and re-adds the same listener (a no-op); a
+    // retained handle remounted after a refused RPC — openModal re-inserts the
+    // existing el without rebuilding it — had its trap reaped by any modalChrome
+    // that ran in between (an intervening modal opened and closed), so the
+    // reopened error dialog would otherwise have no Tab containment.
+    m.reactivate?.();
     if (focusCard) m.el.querySelector<HTMLElement>(".af-modal-card")?.focus({ preventScroll: true });
   });
 }
@@ -2129,6 +2139,22 @@ function applyConfigValue(key: string, value: string): Promise<void> {
   return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 
+/** ExplainConfig (#4803): the config view's Explain affordance. Returns the
+ *  daemon's own ResolvedValue — which on-disk layer won, which were shadowed,
+ *  absent, or disallowed — for the pane to FORMAT, never compute. A refusal
+ *  (unknown key, a daemon too old for the route) settles as `{ok:false}` with
+ *  the daemon's message already rendered, so the view never interprets errors. */
+function explainConfigValue(key: string): Promise<ExplainOutcome> {
+  const tok = token;
+  if (tok === null) {
+    return Promise.resolve({ ok: false, error: "not connected to the daemon" });
+  }
+  return explainConfig(key, tok).then(
+    (resp) => ({ ok: true, resp }) as ExplainOutcome,
+    (err: unknown) => ({ ok: false, error: errorText(err) }),
+  );
+}
+
 function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {
   const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok)
@@ -2679,6 +2705,7 @@ const actions = {
   setConfigValue: applyConfigValue,
   stepTerminalFontSize: (delta: number) => stepTerminalFontSize(delta),
   openConfigAssistant: doOpenConfigAssistant,
+  explainConfig: explainConfigValue,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,
   switchProject,
@@ -3056,14 +3083,17 @@ function onKeydown(e: KeyboardEvent): void {
   if (state.phase !== "app") {
     return;
   }
-  // Let native controls handle their own keys, EXCEPT the terminal (whose textarea
-  // lives in termHost and is driven by the nav state machine) and Escape (which must
-  // still close a modal even from a focused field). Without this a focused + New /
+  // Let native controls handle their own keys, EXCEPT the terminal (whose xterm helper
+  // textarea lives in termHost and is driven by the nav state machine) and Escape (which
+  // must still close a modal even from a focused field). Without this a focused + New /
   // Disconnect / pane-action button would have its Enter hijacked as an attach, and
-  // modal typing would move the rail.
+  // modal typing would move the rail. The split view's per-pane close <button> is also a
+  // native control inside termHost; only the xterm <textarea> must stay on the nav state
+  // machine, so the gate keys on the textarea tag rather than on "anything in termHost".
   const target = e.target as HTMLElement | null;
   const inTerminal = target ? termHost.contains(target) : false;
-  if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
+  const isTerminalTextarea = inTerminal && target?.tagName === "TEXTAREA";
+  if (!isTerminalTextarea && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
   // The mode is "terminal" only when a session is selected (so a pane exists to own

@@ -400,7 +400,7 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 		{
 			// A QUOTED `=` word is not an assignment — the shell runs a
 			// program literally named `FOO=bar` and `codex` is its
-			// argument. splitShellTokens strips the quotes, so the raw
+			// argument. SplitShellTokens strips the quotes, so the raw
 			// source decides (#5238 review).
 			"a quoted name=value word is the executable, not an assignment",
 			`"FOO=bar" codex`,
@@ -527,7 +527,7 @@ func TestEnsureCodexUpdateCheckDisabled(t *testing.T) {
 			// prompt text may legitimately spell the key without being the
 			// option being duplicated.
 			got := EnsureCodexUpdateCheckDisabled(tt.command)
-			gotTokens, _ := splitShellTokens(got)
+			gotTokens, _ := SplitShellTokens(got)
 			gotIdx, _ := findAgentToken(gotTokens)
 			seen := 0
 			for _, tok := range gotTokens[gotIdx+1:] {

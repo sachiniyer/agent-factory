@@ -33,6 +33,7 @@ import type {
   AccountsResponse,
   ConfigResponse,
   ConfigSetResponse,
+  ExplainConfigResponse,
   RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
@@ -543,11 +544,18 @@ export interface ResumeFromLimitResult {
 
 export async function resumeFromLimit(id: string, title: string, token: string): Promise<void> {
   const result = await af<ResumeFromLimitResult>("ResumeFromLimit", { id, title, repo_id: "" }, token);
-  if (!result.ok) {
-    throw new Error(result.reason || "resume was not performed");
-  }
+  // A committed-but-not-performed resume (daemon/limit.go's respawn-fail-after-
+  // rebuild path) returns ok:false alongside the committed warning: the rebuild
+  // mutated durable workspace state even though the resume did not complete. The
+  // ok:false branch below would otherwise swallow that warning and surface the
+  // generic "another operation owns its retry" reason, hiding an unsafe-to-repeat
+  // committed mutation. Check the committed warning first, the way the daemon's
+  // other committed outcomes already do (#3236).
   if (result.warning) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "resume was not performed");
   }
 }
 
@@ -1174,6 +1182,19 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
  *  form shows it verbatim rather than substituting its own wording. */
 export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
   return af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
+}
+
+/** ExplainConfig (#4803): the same `config.ResolvedValue` `af config get
+ *  --explain` renders — which on-disk layer supplied the effective value, and
+ *  which were shadowed, absent, or disallowed — served to clients that cannot
+ *  resolve in-process. Global scope; the daemon reports on-disk sources and
+ *  deliberately does not consult its running config snapshot.
+ *
+ *  Throws ApiError carrying the daemon's message on an unknown key or on a
+ *  daemon too old to know the route — the view shows it verbatim rather than
+ *  fabricating a trace. */
+export async function explainConfig(key: string, token: string): Promise<ExplainConfigResponse> {
+  return af<ExplainConfigResponse>("ExplainConfig", { key }, token);
 }
 
 // --- config assistant (#2467) ----------------------------------------------

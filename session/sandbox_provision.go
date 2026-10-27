@@ -62,6 +62,35 @@ type bannerJSON struct {
 	Addr  string `json:"addr"`
 	Token string `json:"token"`
 	Title string `json:"title"`
+	// Program is the command the host resolved and bound (#5571 W2.1). Older
+	// agent-servers omit it; callers fall back to the wire program.
+	Program string `json:"program,omitempty"`
+}
+
+// remoteProcAlive / remoteProcDead / remoteProcStarting are the liveness lines
+// a banner poll appends after the banner read, so one remote exec answers both
+// "has the banner arrived" and "is the process that writes it still alive"
+// (#5571 W2.1). "starting" covers the window before a pidfile exists.
+const (
+	remoteProcAlive    = "__af_proc_alive__"
+	remoteProcDead     = "__af_proc_dead__"
+	remoteProcStarting = "__af_proc_starting__"
+)
+
+// splitRemoteLiveness strips the trailing liveness marker a banner-poll script
+// appends, returning the banner text and the marker ("" when none arrived).
+// The marker is always the last line; anything above it is the cat output.
+func splitRemoteLiveness(out string) (body, liveness string) {
+	text := strings.TrimRight(out, "\n")
+	for _, marker := range []string{remoteProcAlive, remoteProcDead, remoteProcStarting} {
+		if idx := strings.LastIndex(text, "\n"+marker); idx >= 0 && idx+len(marker)+1 == len(text) {
+			return text[:idx], marker
+		}
+		if text == marker {
+			return "", marker
+		}
+	}
+	return text, ""
 }
 
 // makeSessionDir creates a fresh per-session dir under the remote home with
@@ -79,6 +108,41 @@ func (w *sandboxWorkspace) makeSessionDir(timeout time.Duration) error {
 	}
 	w.SessionDir = dir
 	return nil
+}
+
+// resolveSessionDirSymlinks resolves the remote session directory to its physical
+// (symlink-free) path, so the reaper's argv[0] identity check matches the running
+// agent-server's resolved path.
+//
+// The agent-server re-execs through os.Executable(), which on Linux reads
+// /proc/self/exe — the kernel-resolved physical path. When a session-directory
+// ancestor is a symlink (e.g. a symlinked $HOME, as the automounter symlink form
+// produces), the running process's /proc/<pid>/cmdline argv[0] carries the
+// resolved spelling, while the mktemp-printed session dir carries the unresolved
+// one. The reaper (remotePIDIdentityKillScript) compares its `expected` against
+// that argv[0], so an unresolved expected mismatches: the reaper skips the kill,
+// still rm -rf's the directory, and latches success for an orphaned agent-server.
+// Resolving here — at provision time, the same moment os.Executable() resolves
+// it for the re-exec — captures the identity token the reaper needs; persisting
+// the resolved path in the cleanup handle keeps that token stable across a daemon
+// restart (the process's argv[0] does not change). Re-resolving at reap time is
+// deliberately avoided: remote symlink topology can change between provision and
+// reap, which would introduce a new mismatch against the still-running process's
+// launch-time argv.
+//
+// BEST-EFFORT: a remote shell that cannot resolve the path leaves the session dir
+// as mktemp printed it. That preserves the existing behavior on hosts where
+// resolution is unavailable, rather than introducing a new provision failure mode.
+// The POSIX `pwd -P` builtin this relies on is available everywhere the reaper's
+// own POSIX shell features are.
+func (w *sandboxWorkspace) resolveSessionDirSymlinks(timeout time.Duration) {
+	out, err := w.shell.Run(timeout, "(cd "+shellQuote(w.SessionDir)+" && pwd -P)", nil, false)
+	if err != nil {
+		return
+	}
+	if resolved := strings.TrimSpace(string(out)); resolved != "" {
+		w.SessionDir = resolved
+	}
 }
 
 // configureGit sets a git identity and marks every directory safe on the remote
@@ -143,6 +207,29 @@ func (w *sandboxWorkspace) copyAfBinary(timeout time.Duration, binary io.Reader)
 // startAgentServer launches `af agent-server` headless on the remote, detached
 // via nohup with its banner + log redirected to files, bound to 127.0.0.1:0, and
 // captures the background PID.
+// revalidateCallbackBeforeEnv re-checks the minted credential at the LAST step
+// that can still keep a dead grant out of the launched agent-server's
+// environment (#5571 W3.1, PR #5577 review): once the env file is written and
+// the server inherits it, the server's own process env is fixed — a post-launch
+// revalidation could only mark the daemon-side record while the agent kept
+// being taught af verbs that all fail. The clone/binary window is where a
+// listener move or auth change lands, so the check runs after it and before
+// writeCallbackEnv. A loss degrades: the token pair is cleared (writeCallbackEnv
+// and the launch prefix both no-op on empty, so the inner server degrades
+// itself) and the reason is returned for the result's CallbackUnavailable —
+// outer and inner records agree. The caller's post-provision revalidation still
+// runs for the residual banner/tunnel window and revokes the dead grant.
+func (w *sandboxWorkspace) revalidateCallbackBeforeEnv() string {
+	if w.spec.CallbackToken == "" || w.spec.CallbackRevalidate == nil {
+		return ""
+	}
+	if err := w.spec.CallbackRevalidate(); err != nil {
+		w.spec.CallbackURL, w.spec.CallbackToken = "", ""
+		return err.Error()
+	}
+	return ""
+}
+
 // writeCallbackEnv puts the daemon URL and the per-session callback token on the
 // remote, in a file only the sandbox user can read (#2999).
 //
@@ -218,8 +305,13 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 		args = append(args, "--session-env", name)
 	}
 	// The marker re-execs the staged binary it is already running, so a symlinked
-	// session directory changes no identity comparison: there is none. Policy and
-	// the agent-server effect are derived from the same structured arguments.
+	// session directory changes no launch-side identity comparison: there is none
+	// here — policy and the agent-server effect are derived from the same
+	// structured arguments. The re-exec DOES resolve argv[0] through
+	// os.Executable, so the reap-side identity check (remotePIDIdentityKillScript)
+	// compares against a resolved path; resolveSessionDirSymlinks provisions that
+	// resolved path before the launch so the reaper's `expected` stays in
+	// agreement.
 	filteredInner, err := sessionenv.WrapAgentServerCommand(w.AfPath(), w.spec.SessionEnvPassthrough, args)
 	if err != nil {
 		return "", fmt.Errorf("preparing filtered agent-server environment failed: %w", err)
@@ -242,15 +334,34 @@ func (w *sandboxWorkspace) agentName() string {
 // listener and printed its {addr,token} JSON line, or times out — pulling the
 // agent-server's stderr log into the error on timeout so a start failure is
 // self-diagnosing.
+//
+// Each poll is ONE remote command that also probes the spawned process with
+// kill -0 (#5571 W2.1): an agent-server that exited — a program the host's
+// login PATH does not have, a crashed start — fails create in seconds instead
+// of outliving the banner timeout. The spawned process's parent exited at
+// spawn, so a dead agent-server is reaped by init and kill -0 answers ESRCH —
+// no zombie can masquerade as alive.
 func (w *sandboxWorkspace) readBanner(pollTimeout, pollInterval, stepTimeout time.Duration) (bannerJSON, error) {
 	deadline := time.Now().Add(pollTimeout)
+	poll := "cat " + shellQuote(w.BannerPath()) + " 2>/dev/null"
+	if w.RemotePID != "" {
+		// RemotePID is a positivePID-validated number — the only value ever
+		// interpolated into the script.
+		poll += fmt.Sprintf("; kill -0 %s 2>/dev/null && echo %s || echo %s", w.RemotePID, remoteProcAlive, remoteProcDead)
+	}
 	for {
-		out, err := w.shell.Run(stepTimeout, "cat "+shellQuote(w.BannerPath()), nil, false)
+		out, err := w.shell.Run(stepTimeout, poll, nil, false)
+		body, liveness := splitRemoteLiveness(string(out))
 		if err == nil {
 			var b bannerJSON
-			if jErr := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &b); jErr == nil && b.Addr != "" && b.Token != "" {
+			if jErr := json.Unmarshal([]byte(strings.TrimSpace(body)), &b); jErr == nil && b.Addr != "" && b.Token != "" {
 				return b, nil
 			}
+		}
+		if liveness == remoteProcDead {
+			logOut, _ := w.shell.Run(stepTimeout, "cat "+shellQuote(w.LogPath()), nil, true)
+			return bannerJSON{}, fmt.Errorf("af agent-server (pid %s) exited before reporting a startup banner; remote log:\n%s",
+				w.RemotePID, strings.TrimSpace(string(logOut)))
 		}
 		if time.Now().After(deadline) {
 			logOut, _ := w.shell.Run(stepTimeout, "cat "+shellQuote(w.LogPath()), nil, true)

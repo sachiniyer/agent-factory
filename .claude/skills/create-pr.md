@@ -14,6 +14,7 @@ Create a PR for the current branch against `master`.
    ```bash
    gofmt -l .                    # fix any output with: gofmt -w <file>
    go build ./...
+   go vet ./...
    golangci-lint run --timeout=3m --fast
    scripts/lint-file-length.sh
    go test ./<only the package you changed>/...   # skip if it is daemon/ or app/
@@ -64,6 +65,7 @@ Create a PR for the current branch against `master`.
    - [x] `golangci-lint run --timeout=3m --fast` passes
    - [x] `gofmt -l .` produces no output
    - [x] `go build ./...` passes
+   - [x] `go vet ./...` passes
    - [x] `go test` on the changed package passes (CI runs the full matrix)
    - [x] `scripts/lint-file-length.sh` passes
    - [x] `scripts/gen-docs.sh` run; generated paths clean — or no generator input touched

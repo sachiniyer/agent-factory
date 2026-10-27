@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -101,8 +103,10 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 		case "port":
 			return []byte("127.0.0.1:49152\n"), nil
 		case "exec":
-			if len(args) >= 4 && args[2] == "cat" && args[3] == dockerBannerPath {
-				return []byte(`{"addr":":8000","token":"test-only","title":"engine-bound"}`), nil
+			// readBanner polls via `sh -c 'cat <banner>; kill -0 <pid> && …'` —
+			// the banner JSON plus the alive marker is a live server's answer.
+			if joined := strings.Join(args, " "); strings.Contains(joined, "cat "+dockerBannerPath) {
+				return []byte(`{"addr":":8000","token":"test-only","title":"engine-bound"}` + "\n" + remoteProcAlive + "\n"), nil
 			}
 			return nil, nil
 		default:
@@ -143,14 +147,19 @@ func TestRunContainer_CapturesCreatedIDOnError(t *testing.T) {
 		"created-then-failed container id must be captured so the failed provision can reap it")
 }
 
-// TestRunContainer_JoinsDockerRootFSFullEvidence is the #5295-review
+// TestProvision_DockerRunJoinsDockerRootFSFullEvidence is the #5295-review
 // regression: `docker run`'s ExitError loses the engine-side ENOSPC as
-// output text the lost-restore classifier refuses to read. When the LOCAL
-// engine's data-root filesystem has zero free blocks, typed ENOSPC evidence
-// must ride the returned error chain.
-func TestRunContainer_JoinsDockerRootFSFullEvidence(t *testing.T) {
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+// output text the lost-restore classifier refuses to read. When the LOCAL,
+// co-located engine's data-root filesystem has zero free blocks, typed
+// ENOSPC evidence must ride the returned error chain. The join lives at the
+// provision() boundary since #5382 — the per-step table test pins every
+// other step; this pins the exact-once probe count on the original one.
+func TestProvision_DockerRunJoinsDockerRootFSFullEvidence(t *testing.T) {
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+	host, err := os.Hostname()
+	require.NoError(t, err)
 	statfsCalls := 0
 	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		switch args[0] {
@@ -159,7 +168,10 @@ func TestRunContainer_JoinsDockerRootFSFullEvidence(t *testing.T) {
 		case "context":
 			return []byte("unix:///var/run/docker.sock\n"), nil
 		case "info":
-			return []byte("/var/lib/docker\n"), nil
+			if len(args) > 2 && strings.Contains(args[2], "json") {
+				return dockerInfoAnswer(t, "/var/lib/docker", host, false), nil
+			}
+			return []byte("engine-id\n"), nil
 		}
 		return nil, fmt.Errorf("unexpected docker args %v", args)
 	})()
@@ -168,17 +180,21 @@ func TestRunContainer_JoinsDockerRootFSFullEvidence(t *testing.T) {
 	defer func() { statfsFull = old }()
 
 	p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "full-root"}}
-	err := p.runContainer()
+	_, err = p.provision()
 	require.Error(t, err)
 	require.True(t, errors.Is(err, syscall.ENOSPC),
 		"a full engine data root must carry typed ENOSPC evidence: %v", err)
 	require.Equal(t, 1, statfsCalls, "the data root is probed exactly once")
 }
 
-// TestRunContainer_DockerRootFSEvidenceSkipped pins the honest boundaries:
-// a remote engine's root is not statfs-able from here, and a local root
+// TestProvision_DockerRootFSEvidenceSkipped pins the honest boundaries:
+// a remote engine's root is not statfs-able from here, and a co-located root
 // with free blocks has no evidence to add — neither may invent an errno.
-func TestRunContainer_DockerRootFSEvidenceSkipped(t *testing.T) {
+func TestProvision_DockerRootFSEvidenceSkipped(t *testing.T) {
+	host, err := os.Hostname()
+	require.NoError(t, err)
+	sock := fakeUnixDockerSocket(t)
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
 	statfsCalls := 0
 	old := statfsFull
 	statfsFull = func(string) (bool, error) { statfsCalls++; return false, nil }
@@ -195,26 +211,29 @@ func TestRunContainer_DockerRootFSEvidenceSkipped(t *testing.T) {
 		case "context":
 			return []byte("ssh://engine.example\n"), nil
 		case "info":
-			return []byte("/var/lib/docker\n"), nil
+			if len(args) > 2 && strings.Contains(args[2], "json") {
+				return dockerInfoAnswer(t, "/var/lib/docker", host, false), nil
+			}
+			return []byte("engine-id\n"), nil
 		}
 		return nil, fmt.Errorf("unexpected docker args %v", args)
 	})()
 
 	p := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "remote"}}
-	err := p.runContainer()
+	_, err = p.provision()
 	require.Error(t, err)
 	require.False(t, errors.Is(err, syscall.ENOSPC),
 		"a remote engine's root cannot be probed — no errno may be invented: %v", err)
 	require.Equal(t, 0, statfsCalls, "remote engine must never reach statfs")
 
 	// Local engine, root has free blocks — the fullness answer is honest.
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_HOST", sock)
 	p2 := &dockerProvisioner{image: "img:latest", spec: ProvisionSpec{Title: "free-root"}}
-	err = p2.runContainer()
+	_, err = p2.provision()
 	require.Error(t, err)
 	require.False(t, errors.Is(err, syscall.ENOSPC),
 		"a root with free blocks adds no ENOSPC evidence: %v", err)
-	require.Equal(t, 1, statfsCalls, "a local root is still probed")
+	require.Equal(t, 1, statfsCalls, "a local co-located root is still probed")
 }
 
 // TestParseCreatedContainerID covers the extraction: a create-then-fail blob
