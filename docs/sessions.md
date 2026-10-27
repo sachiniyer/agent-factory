@@ -33,7 +33,7 @@ Because each session gets its own worktree:
 ## The lifecycle of a session
 
 1. **Create.** You give a session a name (and optionally a starting prompt).
-   `af` creates a branch (prefixed per your config, e.g. `af/`), adds a worktree
+   `af` creates a branch (prefixed per your config — `username/` by default), adds a worktree
    for it (next to your repo by default; see `worktree_root` in
    [configuration](configuration.md) for the subdirectory option), and starts
    your chosen agent in that directory. Any configured post-worktree setup commands

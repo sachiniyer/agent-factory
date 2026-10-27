@@ -116,6 +116,39 @@ func TestIsReadyContent(t *testing.T) {
 			content: "Do you trust the contents of this directory?\n› 1. Yes, continue\n2. No, quit\nPress enter to continue",
 			want:    true,
 		},
+		// #5383: Codex draws "»" (U+00BB) as the composer prompt while the Ultra
+		// reasoning tier is active — the ONLY place "»" is rendered upstream
+		// (codex-rs/tui effort_ignition.rs EffortTier::prompt_glyph at
+		// rust-v0.163.0). The real 0.163.0 capture from the issue:
+		{
+			name:  "codex Ultra-tier composer is ready (#5383)",
+			agent: "codex",
+			content: "\x1b[38;5;141m»\x1b[0m \x1b[2mAsk Codex to do anything\r\n" +
+				"  \x1b[1m←\x1b[0m for agents · \x1b[1m?\x1b[0m for shortcuts",
+			want: true,
+		},
+		{"codex bare Ultra-tier prompt glyph", "codex", "some output\n» ", true},
+		{
+			name:    "codex Ultra-tier composer with a hint row below it is ready (#5383)",
+			agent:   "codex",
+			content: "\x1b[2J\x1b[H» [Pasted Content]\r\n\r\n  esc to interrupt\r\n",
+			want:    true,
+		},
+		{"codex trust dialog with later Ultra-tier prompt is ready (#5383)", "codex", "Do you trust this folder?\n» ", true},
+		// The same positional strictness "›" carries: a "»" anywhere but the
+		// start of a line is prose, not the composer.
+		{
+			name:    "codex Ultra glyph mid-line in a path is NOT a composer (#5383)",
+			agent:   "codex",
+			content: "cloning into /src/a»b/repo\nchecking out main",
+			want:    false,
+		},
+		{
+			name:    "codex Ultra glyph inside prose is NOT a composer (#5383)",
+			agent:   "codex",
+			content: "the agent wrote «quoted » text» in its reply",
+			want:    false,
+		},
 		// Codex must NOT be considered ready on claude's "❯" alone, and the
 		// banner box border ("╰") is not a codex ready signal by itself.
 		{"codex not ready on claude glyph", "codex", "rendering\n❯ ", false},
@@ -166,6 +199,7 @@ func TestIsReadyContent(t *testing.T) {
 		{"opencode banner art is not a composer", "opencode", "█▀▀█ █▀▀█ █▀▀█\n▀▀▀▀ ▀▀▀▀ ▀▀▀▀", false},
 		{"opencode not ready on claude glyph", "opencode", "rendering\n❯ ", false},
 		{"opencode not ready on codex glyph", "opencode", "rendering\n› ", false},
+		{"opencode not ready on codex Ultra glyph (#5383)", "opencode", "rendering\n» ", false},
 
 		// shared doc-trust guard: both substrings required.
 		{"only open documentation url without confirm", "claude", "See Open documentation url for details.", false},
@@ -824,6 +858,27 @@ func TestSubmittedTurnContent(t *testing.T) {
 			name:    "codex idle composer has no hint",
 			agent:   "codex",
 			content: "some output\n› ",
+			want:    false,
+		},
+		{
+			name:  "codex Ultra-tier composer scopes the hint (#5383)",
+			agent: "codex",
+			// The same daemon/configagent_delivery_test.go pane shape drawn by a
+			// Codex in the Ultra reasoning tier: the composer glyph is "»", and
+			// the anchor must find it all the same.
+			content: "\x1b[2J\x1b[H» [Pasted Content]\r\n\r\n  esc to interrupt\r\n",
+			want:    true,
+		},
+		{
+			name:    "codex hint above an Ultra-tier composer is transcript prose (#5383)",
+			agent:   "codex",
+			content: "the agent wrote esc to interrupt in prose\n» ",
+			want:    false,
+		},
+		{
+			name:    "codex idle Ultra-tier composer has no hint (#5383)",
+			agent:   "codex",
+			content: "some output\n» ",
 			want:    false,
 		},
 		{

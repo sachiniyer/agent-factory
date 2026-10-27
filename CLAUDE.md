@@ -197,19 +197,32 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `commands/` — Cobra CLI commands (the `sessions`/`tasks`/`projects`/`api` trees live in `api/`)
 - `app/` — main TUI application (bubbletea)
 - `ui/` — terminal UI components (sidebar, overlays, panes)
+- `web/` — browser client source (TypeScript SPA, embedded in the daemon binary)
 - `keys/` — key binding definitions
 - `session/` — session management, backend, plugins
 - `session/git/` — git worktree operations, GitHub integration
 - `session/tmux/` — tmux PTY integration
+- `terminal/` — terminal modes shared by PTY producers and clients
 - `config/` — configuration and state management
+- `configagent/` — the spawned config-walkthrough agent (a daemon-owned bare tmux session, no worktree or session row)
 - `api/` — `af sessions`/`tasks`/`projects`/`api` command implementations (mixed transports: `apiclient` HTTP, the `daemon/` control client, and direct `config` access depending on the operation)
 - `apiproto/` — API envelope types and marker interfaces (leaf package, no daemon/client imports)
 - `apiclient/` — HTTP API client used by TUI/CLI to talk to daemon
 - `agentproto/` — WebSocket wire protocol for PTY stream and events
 - `task/` — task store, cron/watch validation/parsing, session-start helpers
+- `schedule/` — UI-agnostic schedule model behind the task pickers (preset shapes ↔ cron expressions)
+- `quota/` — usage-limit evidence and account selection for limited sessions
 - `daemon/` — always-on background daemon: task scheduler, watcher supervisor, session monitor, control-socket RPCs, autostart unit
+- `preflight/` — pre-launch checks (tmux presence, agent command executables)
+- `doctor/` — `af doctor` diagnostics and verified `--fix` remediations
+- `bugreport/` — `af bug-report` diagnostics bundle and its best-effort redactor
+- `parity/` — cross-surface (TUI/web/CLI) capability inventory and drift test
+- `integration/` — out-of-process integration suites (agent-server round-trip, backend capability matrix)
 - `cmd/` — `exec.Cmd` `Executor` seam (test injection; nothing to do with CLI commands)
 - `log/` — logging
+- `internal/` — implementation-only helper packages (af home, autoupdate, ssh relay, program privacy, redaction, test guards, …)
+- `design/` — design tokens and the style-guide template (generator inputs for web/ui/doc CSS)
+- `scripts/` — dev/CI scripts (gen-docs.sh, lint-file-length.sh, container harnesses, tmux scenario drivers)
 - `docs/` — documentation (remote hooks, etc.)
 - `examples/` — example configurations
 

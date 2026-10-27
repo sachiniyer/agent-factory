@@ -360,6 +360,9 @@ type CreateTabRequest struct {
 	// Port is a convenience for a web tab: when set (and URL is empty) the target
 	// becomes http://localhost:<port>.
 	Port int `json:"port,omitempty"`
+	// Proposal is the slug a docs tab (Kind=="docs") edits. It must exist in the
+	// session's project, and it is refused for every other kind.
+	Proposal string `json:"proposal,omitempty"`
 	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
 	// the daemon resolves the target session by id first, so web and retained TUI
 	// tab-create actions cannot hit a same-title replacement (#1592 Phase 5 PR7,

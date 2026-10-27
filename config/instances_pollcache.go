@@ -94,10 +94,11 @@ type repoInstancesPollEntry struct {
 
 // RepoInstancesFileCache is the per-repo file cache behind the daemon's
 // instance poll (#5169). It fuses what used to be two full passes over every
-// repo file — MigrateAllRepoInstancesForDaemonLoad's migration sweep and
-// LoadAllRepoInstancesReportingMissing's read+extract — into one stat-gated
-// load: a file whose signature still matches the cached entry is served from
-// the cache without being read, validated, normalized, or migrated at all.
+// repo file — the standalone in-place migration sweep (now this cache's
+// migrateAndExtract cold path) and LoadAllRepoInstancesReportingMissing's
+// read+extract — into one stat-gated load: a file whose signature still matches
+// the cached entry is served from the cache without being read, validated,
+// normalized, or migrated at all.
 //
 // The cached value is the extracted instances array, exactly what
 // loadRepoInstancesForAll returned: normalized array bytes for a loadable file,
