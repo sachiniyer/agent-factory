@@ -156,7 +156,16 @@ func DeleteLocalBranch(repoRoot, branch string) (bool, error) {
 	if !exists {
 		return false, nil
 	}
+	// Sanitize the delete's environment to match the probe above: an ambient
+	// GIT_DIR/GIT_COMMON_DIR inherited from a hook would override `-C` and
+	// redirect this destructive command at a foreign repository whose
+	// same-named branch the probe never inspected — silently deleting a branch
+	// AF never created while the intended branch survives and (true, nil) is
+	// still reported (cf. worktree_remove_bounded.go). The probe's
+	// sanitized-env verdict is only meaningful if the delete runs under the
+	// same environment that produced it.
 	del := exec.Command("git", "-C", repoRoot, "branch", "-D", branch)
+	del.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 	if out, err := del.CombinedOutput(); err != nil {
 		return false, fmt.Errorf("git branch -D %s in %s: %w: %s", branch, repoRoot, err, string(out))
 	}
