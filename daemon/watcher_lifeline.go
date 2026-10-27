@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -43,25 +42,12 @@ var errWatchStopped = errors.New("watch run stopped during the lifeline probe")
 const watchAnchorReadyTimeout = 5 * time.Second
 
 // resolveWatchLifelineExe names the binary the daemon execs as the watch
-// lifeline (#5329): its own.
-//
-// On Linux that is /proc/<pid>/exe, which execs the daemon's exact binary even
-// after `af upgrade` replaced the file at its path, so the two halves of the
-// protocol can never be different versions there. It names the daemon's pid
-// rather than "self" because a systemd-bound spawn execs it from inside
-// systemd-run, where "self" would be systemd-run.
-//
-// macOS has no such handle, so os.Executable's path can hold a newer or older
-// af than the running daemon. The ack makes that safe: a binary that does not
-// speak this protocol sends none, and the spawn falls back (startWatchProcess).
+// lifeline (#5329): its own, resolved through the shared watchlifeline.Exe so
+// the sandbox-tunnel consumer in session resolves it the same way. The ack
+// makes the macOS path-replacement case safe: a binary that does not speak
+// this protocol sends none, and the spawn falls back (startWatchProcess).
 func resolveWatchLifelineExe() string {
-	if runtime.GOOS == "linux" {
-		exe := fmt.Sprintf("/proc/%d/exe", os.Getpid())
-		if _, err := os.Stat(exe); err == nil {
-			return exe
-		}
-	}
-	exe, err := os.Executable()
+	exe, err := watchlifeline.Exe()
 	if err != nil {
 		log.WarningLog.Printf("watch tasks: cannot resolve the af binary (%v); watch commands will run without a lifeline, "+
 			"so an unclean daemon death can leave them running", err)

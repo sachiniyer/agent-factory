@@ -233,11 +233,20 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// a tmux session without a gitWorktree), pass empty string.
 		i.mu.RLock()
 		gw := i.gitWorktree
+		worktreeMissing := i.worktreeMissing
 		i.mu.RUnlock()
 		var workDir string
-		if gw != nil {
+		if gw != nil && !worktreeMissing {
 			workDir = gw.GetWorktreePath()
 		}
+		// A row flagged worktree-missing (#5102) has no directory to re-spawn
+		// into, so workDir stays empty: Restore may only REATTACH a session that
+		// is still alive, never re-spawn one. Re-spawning would either fail —
+		// and a failed load drops the row, taking with it the archive and kill
+		// that are its remedies — or quietly rebuild the worktree at load time,
+		// behind the user's back. A session that is gone is kept the way a
+		// recorded Lost one is below: bound, killable, archivable, re-confirmed
+		// by the poll.
 		// Re-inject the system prompt so a lazy re-spawn (tmux server died
 		// across a reboot, see #386/#444) starts the agent with the same
 		// program string as the original first-time launch — most
@@ -252,7 +261,24 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 		}
-		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
+		// And a flagged row's reattach is recovery-inert (ReattachInert): it only
+		// keeps a live pane bound. Through RestoreWithResult it also refreshed the
+		// pane's account environment, and a transient failure there is a retained
+		// error that loads the row startup-unknown — which archive refuses, so the
+		// row's one remedy was a tmux hiccup away from being stranded. Every
+		// failure of the inert reattach is therefore the plain one below: warn
+		// and keep the row listed.
+		var restoreResult tmux.RestoreResult
+		var err error
+		if worktreeMissing {
+			restoreResult, err = tmux.RestoreReattached, tmuxSession.ReattachInert()
+		} else {
+			restoreResult, err = tmuxSession.RestoreWithResult(workDir)
+		}
+		if err != nil && worktreeMissing {
+			log.WarningLog.Printf("session %q: tracked worktree is gone and its tmux session could not be reattached (%v); keeping the row listed so it can be archived (its branch is kept)", i.Title, err)
+			return nil
+		}
 		if err != nil {
 			// A spawn-dir refusal likewise keeps the handle: nothing was ever
 			// spawned under it, and FromInstanceData loads the row Lost so the
@@ -545,9 +571,19 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 	gw := i.gitWorktree
 	account := i.Account
 	tabs := append([]*Tab(nil), i.Tabs...)
+	worktreeMissing := i.worktreeMissing
 	i.mu.RUnlock()
 
-	if agentTmux == nil || gw == nil {
+	// A row flagged worktree-missing (#5102) has no directory for a sibling to
+	// re-spawn into — the same reason Start passes the agent an empty workDir.
+	// Handing the recorded path to the respawn machinery below would fail, and
+	// on an account-scoped row that failure refuses, finishLaunchTabFailure kills
+	// the agent pane that just reattached, and the load drops the row: a daemon
+	// restart would end the live conversation and take the archive that is the
+	// row's remedy with it. Siblings stay recorded but unreattached instead; they
+	// were shells cwd'd into the deleted tree. The account-scope refusals are not
+	// weakened — they are simply never reached without a worktree.
+	if agentTmux == nil || gw == nil || worktreeMissing {
 		return nil
 	}
 	worktreePath := gw.GetWorktreePath()
