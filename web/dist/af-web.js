@@ -19494,6 +19494,7 @@ function openDeleteProject(root2, label) {
             }
             projectColorRegistrations.delete(root2);
           }
+          if (!isCurrentConnection(connection, tok)) return;
           return deleteProject(root2, tok).then(() => {
             projectColorRegistrations.delete(root2);
             if (modal === m) closeModal();
@@ -20067,12 +20068,11 @@ var projectsRefetcher = createFencedRefetcher({
 });
 function commitRegisteredProjects(projects) {
   const byRoot = new Map(projects.map((p) => [p.root, p.id]));
-  const ids = new Set(projects.map((p) => p.id));
   for (const [root2, learned] of projectColorRegistrations) {
     if ("uncertain" in learned) {
       const id = byRoot.get(root2);
       if (id !== void 0) projectColorRegistrations.set(root2, { id });
-    } else if (!ids.has(learned.id)) {
+    } else if (byRoot.get(root2) !== learned.id) {
       projectColorRegistrations.delete(root2);
     }
   }
