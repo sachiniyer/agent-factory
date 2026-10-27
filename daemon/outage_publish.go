@@ -1,0 +1,42 @@
+package daemon
+
+import (
+	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/session"
+)
+
+// refreshInstanceStatusPublishingOutage runs one status refresh and publishes
+// session.updated when it moved the unreachable flag (#5571 W1.3). Browsers
+// follow the events plane, not periodic snapshots, and the flag can set, change
+// its error, or clear with liveness untouched — so persistPollChange's
+// liveness/projection gate would otherwise skip the publish and leave a
+// connected client showing a stale outage (or none). A duplicate publish with a
+// liveness change is harmless: the payload is a whole-row projection.
+func (m *Manager) refreshInstanceStatusPublishingOutage(repoID string, instance *session.Instance) {
+	if instance == nil {
+		return
+	}
+	before := instance.ToInstanceData().Unreachable
+	m.refreshInstanceStatus(repoID, instance)
+	after := instance.ToInstanceData().Unreachable
+	if unreachableDataEqual(before, after) || instance.GetInFlightOp() != session.OpNone {
+		return
+	}
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+	// Re-read under the lock, same ordering domain as the poll's own publish, so
+	// the last event on the wire is the newest state.
+	data := instance.ToInstanceData()
+	if data.InFlightOp != session.OpNone {
+		return
+	}
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+}
+
+func unreachableDataEqual(a, b *session.UnreachableData) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Since.Equal(b.Since) && a.Error == b.Error
+}
