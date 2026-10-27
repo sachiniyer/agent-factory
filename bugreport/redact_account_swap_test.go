@@ -31,6 +31,7 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 		PendingAccountSwap: &session.AccountSwapData{
 			From:                  "acme-prod",
 			To:                    "acme-staging",
+			AccountAgent:          "codex",
 			ConversationID:        "8f466d20-784b-4b02-a916-c80a0f6983e3",
 			CarriedConversationID: "5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
 			CarrySourceAccount:    "acme-legacy",
@@ -82,6 +83,10 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 		t.Errorf("limit agent enum redacted; it is bounded and identifies the quota provider: %q",
 			d.LimitAgent)
 	}
+	if d.PendingAccountSwap.AccountAgent != "codex" {
+		t.Errorf("pending swap namespace enum redacted; it is bounded and says which registry the redacted To lives in: %q",
+			d.PendingAccountSwap.AccountAgent)
+	}
 	if d.PendingAccountSwap.MissionDeliveryStatus != session.PromptCouldNotConfirm {
 		t.Errorf("mission delivery enum redacted; it is bounded and explains the retry fence: %q",
 			d.PendingAccountSwap.MissionDeliveryStatus)
@@ -103,12 +108,13 @@ func TestRedactInstancesFallbackRedactsAccountSwapLabels(t *testing.T) {
 		"id":"leg-1","status":"legacy-string-status","program":"claude",
 		"runtime_program":"/home/siyer/.local/bin/claude --dangerously-skip-permissions",
 		"limit_agent":"codex","limit_account":"acme-prod",
+		"account_agent":"acme-internal-agent",
 		"pending_account_swap":{"from":"acme-prod","to":"acme-staging","conversation_id":"8f466d20-784b"},
 		"account_limit_observations":[{"agent":"claude","account":"acme-prod"}]
 	}]`)
 	out := string(r.redactInstancesJSON(raw))
 	for _, leaked := range []string{
-		"acme-prod", "acme-staging", "8f466d20-784b",
+		"acme-prod", "acme-staging", "8f466d20-784b", "acme-internal-agent",
 		"/home/siyer/.local/bin/claude", "--dangerously-skip-permissions",
 	} {
 		if strings.Contains(out, leaked) {
@@ -130,5 +136,18 @@ func TestRedactInstancesFallbackRedactsAccountSwapLabels(t *testing.T) {
 	}
 	if !strings.Contains(out, `"limit_agent": "codex"`) {
 		t.Errorf("fallback path redacted the bounded limit agent enum:\n%s", out)
+	}
+}
+
+// PendingAccountSwap.AccountAgent (#4430) is published only as the bounded
+// agent enum af writes there. A value that is not one did not come from af —
+// a hand-edited or foreign record — and is marked like the labels beside it.
+func TestRedactInstanceDataMarksNonEnumAccountSwapNamespace(t *testing.T) {
+	d := session.InstanceData{PendingAccountSwap: &session.AccountSwapData{
+		To: "work", AccountAgent: "acme-internal-agent",
+	}}
+	redactOneInstanceData(&d)
+	if d.PendingAccountSwap.AccountAgent != redactedMarker {
+		t.Errorf("non-enum account namespace published verbatim: %q", d.PendingAccountSwap.AccountAgent)
 	}
 }

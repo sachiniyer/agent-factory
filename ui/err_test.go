@@ -282,3 +282,65 @@ func TestSanitizeErrorControls(t *testing.T) {
 		}
 	}
 }
+
+// TestErrBoxDetailsHintOverride: a modal text field swaps in the key that
+// opens the details from there (#4123); clearing the override restores the
+// error_details binding's hint.
+func TestErrBoxDetailsHintOverride(t *testing.T) {
+	e := NewErrBox()
+	e.SetSize(40, 1)
+	e.SetNotice(errors.New("a session titled \"todo-core\" conflicts with existing session \"todo-core\""))
+
+	e.SetDetailsHint("ctrl+e details")
+	if got := e.String(); !strings.Contains(got, "ctrl+e details") {
+		t.Errorf("the override hint must replace E details, got %q", got)
+	}
+
+	e.SetDetailsHint("")
+	if got := e.String(); !strings.Contains(got, "E details") || strings.Contains(got, "ctrl+e") {
+		t.Errorf("clearing the override must restore E details, got %q", got)
+	}
+
+	e.HideDetailsHint(true)
+	if got := e.String(); strings.Contains(got, "details") {
+		t.Errorf("a hidden hint must advertise no details key, got %q", got)
+	}
+	e.HideDetailsHint(false)
+	if got := e.String(); !strings.Contains(got, "E details") {
+		t.Errorf("unhiding must restore the hint, got %q", got)
+	}
+}
+
+// TestErrBoxHintPaintsWithoutRetaining pins SetHint's contract (#5356 review):
+// a hint answers a key on the same bar and fades on the same Expire timer, but
+// it is never retrievable — acknowledging an empty store must leave it empty,
+// or `E details` would reopen the hint itself as "Last notice".
+func TestErrBoxHintPaintsWithoutRetaining(t *testing.T) {
+	e := NewErrBox()
+
+	e.SetHint(errors.New("No recent error"))
+	if got := e.FullError(); got != "No recent error" {
+		t.Errorf("the hint must paint on the bar, got %q", got)
+	}
+	if text, _ := e.RetainedNotice(); text != "" {
+		t.Errorf("the hint must not enter the retained slot, got %q", text)
+	}
+
+	e.Expire()
+	if got := e.FullError(); got != "" {
+		t.Errorf("the hint must fade on the same timer, still shows %q", got)
+	}
+	if text, _ := e.RetainedNotice(); text != "" {
+		t.Errorf("expiry must not resurrect the hint into retained, got %q", text)
+	}
+
+	// The contrast the contract exists against: a real notice does retain.
+	e.SetNotice(errors.New("No preview to keep"))
+	if text, _ := e.RetainedNotice(); text != "No preview to keep" {
+		t.Errorf("a real notice must still retain for E details, got %q", text)
+	}
+	e.Expire()
+	if text, _ := e.RetainedNotice(); text != "No preview to keep" {
+		t.Errorf("a real notice must survive its fade, got %q", text)
+	}
+}

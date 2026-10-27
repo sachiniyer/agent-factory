@@ -91,6 +91,11 @@ var (
 	// line in the transcript forever, and "Build ·" also sits inside the live
 	// composer — keying on either would pin an idle session at Running permanently.
 	opencodeWorkingIndicator = regexp.MustCompile(`esc +interrupt`)
+	// escToInterruptHint matches the "esc to interrupt" chrome several supported
+	// agents draw only while a turn is in flight. It is matched on the
+	// ANSI-stripped pane and always scoped per agent in submittedTurnContent —
+	// never trusted whole-pane, where transcript prose could quote it.
+	escToInterruptHint = regexp.MustCompile(`esc +to +interrupt`)
 )
 
 // postWorktreeHooksDoneForWait resolves the instance's post-worktree hook
@@ -159,9 +164,11 @@ func defaultLimitDetectorForWait() LimitDetector {
 // full 60s timeout for anything that never prints "❯". This is the single
 // copy: the daemon reaches it via task.StartAndSendPromptWithConversationCapture
 // (daemon imports task since #782 inverted the old task→daemon dependency).
-// hasLineLeadingGlyph reports whether any line's first non-blank character is
-// needle — the composer is drawn at the START of its line, and a glyph anywhere
-// else on a line is something else (#3085).
+// hasCodexComposerLine reports whether any line's first non-blank character
+// is a Codex composer glyph — the composer is drawn at the START of its line,
+// and a glyph anywhere else on a line is something else (#3085). The glyph
+// set itself lives in tmux.IsCodexComposerLine ("›" at every effort, "»"
+// under the Ultra tier — #5383).
 //
 // Deliberately NOT "on the last non-empty line", which was the first attempt and
 // is false: real Codex draws a hint row BELOW the composer ("› [Pasted Content]"
@@ -174,7 +181,7 @@ func defaultLimitDetectorForWait() LimitDetector {
 // glyph left in scrollback, and claiming otherwise would be the same overreach in
 // a new place: position answers "is this drawn as a prompt", not "is this prompt
 // current".
-func hasLineLeadingGlyph(content, needle string) bool {
+func hasCodexComposerLine(content string) bool {
 	// Strip ANSI first, with the same regex amp and opencode match on. A raw
 	// capture carries escapes INSIDE the line — real Codex emits
 	// "\x1b[2J\x1b[H› [Pasted Content]" — so a positional check against the raw
@@ -182,7 +189,7 @@ func hasLineLeadingGlyph(content, needle string) bool {
 	// This was caught by running the real fixtures, not by reading them.
 	plain := paneAnsiEscape.ReplaceAllString(strings.ReplaceAll(content, "\r\n", "\n"), "")
 	for _, line := range strings.Split(plain, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), needle) {
+		if tmux.IsCodexComposerLine(line) {
 			return true
 		}
 	}
@@ -193,7 +200,10 @@ func isReadyContent(content, agent string) bool {
 	switch agent {
 	case tmux.ProgramCodex:
 		// codex renders "›" (U+203A — distinct from claude's "❯" U+276F) as
-		// its input-prompt glyph after the banner (#714).
+		// its input-prompt glyph after the banner (#714), and "»" (U+00BB)
+		// for the same prompt while the Ultra reasoning tier is active — the
+		// only place Codex draws "»" upstream, so it adds no new
+		// false-positive class (#5383).
 		//
 		// The older workspace-trust dialog ("Do you trust this folder") is
 		// deliberately NOT a ready signal (#729): af has no observed, anchored
@@ -217,13 +227,13 @@ func isReadyContent(content, agent string) bool {
 		// The composer is drawn at the START of a line, so its POSITION is the
 		// invariant, and position is load-independent in the way #3050's tick
 		// count was: a slow box changes WHEN the prompt is drawn, never WHETHER a
-		// matched line is drawn as one. See hasLineLeadingGlyph for what this
+		// matched line is drawn as one. See hasCodexComposerLine for what this
 		// deliberately does NOT claim.
 		//
 		// CodexTrustPromptPresent still runs FIRST and is unchanged: it positively
 		// identifies the handled modal, whose selected option is line-leading too,
 		// so the glyph alone must never be asked to distinguish the two.
-		return tmux.CodexTrustPromptPresent(content) || hasLineLeadingGlyph(content, "›")
+		return tmux.CodexTrustPromptPresent(content) || hasCodexComposerLine(content)
 	case tmux.ProgramAider:
 		// aider prints an "Aider v…" banner, then a line-start "> " prompt.
 		return strings.Contains(content, "\n> ") ||

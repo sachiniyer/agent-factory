@@ -76,9 +76,9 @@ func newWebTabProxyFixtureN(t *testing.T, targets ...string) (
 	}
 	closeWebTab = func(n int) {
 		t.Helper()
-		if _, err := manager.CloseTab(CloseTabRequest{
+		if _, err := manager.closeTabRequestedBy(CloseTabRequest{
 			Title: title, RepoID: repo.ID, TabName: fmt.Sprintf("web%d", n),
-		}); err != nil {
+		}, "internal daemon caller"); err != nil {
 			t.Fatalf("CloseTab(web%d): %v", n, err)
 		}
 	}

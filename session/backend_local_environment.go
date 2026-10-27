@@ -29,6 +29,14 @@ func sessionEnvPassthroughForInstance(i *Instance) []string {
 	return normalized
 }
 
+// refreshSessionEnvironment reapplies a session's environment declarations to
+// its agent pane. The account's namespace is the one the selection was made in,
+// never re-derived from the launch command: a program_overrides edit after the
+// pin can resolve the recorded Program to another agent's command, and a
+// namespace re-derived from that command would look the same account label up
+// in a different agent's registry (#4430 review round 4). When the declaration
+// and the launch disagree, prepareLaunchEnvironment's namespace check is what
+// refuses — so the pin must be the durable one.
 func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error {
 	if err := tmuxSession.SetEnvPassthrough(sessionEnvPassthroughForInstance(i)); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
@@ -38,11 +46,16 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	// quietly reverting to the ambient identity (#3051).
 	i.mu.RLock()
 	account := i.Account
+	accountAgent := i.accountNamespaceLocked()
 	i.mu.RUnlock()
-	tmuxSession.SetAccountForAgent(sessionenv.AgentForCommand(i.AgentProgram()), account)
+	tmuxSession.SetAccountForAgent(accountAgent, account)
 	return nil
 }
 
+// refreshTabSessionEnvironment is the sibling-tab half: a shell or process tab
+// carries the SESSION's account scope in the account's own selection namespace
+// — the sibling's own program (a shell, a dev server) is not the namespace the
+// account belongs to.
 func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
 	if tab == nil || tab.tmux == nil {
 		return nil
@@ -52,8 +65,8 @@ func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
 	}
 	i.mu.RLock()
 	account := i.Account
+	agent := i.accountNamespaceLocked()
 	i.mu.RUnlock()
-	agent := sessionenv.AgentForCommand(i.AgentProgram())
 	if tab.Kind == TabKindShell {
 		if err := tab.tmux.SetAccountShellEnvironmentForAgent(agent, account); err != nil {
 			return fmt.Errorf("prepare account-scoped shell: %w", err)

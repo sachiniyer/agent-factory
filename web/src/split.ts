@@ -31,6 +31,7 @@ import {
   closeLeaf,
   companionTab,
   type DragPayload,
+  type TabDropResult,
   type Edge,
   findLeaf,
   type LayoutNode,
@@ -43,6 +44,7 @@ import {
   sameLayout,
   sameTabs,
   setRatio,
+  siblingSubtreeOf,
   singleLeaf,
   type SplitNode,
   splitLeaf,
@@ -145,7 +147,7 @@ function webFallbackMs(): number {
  *  that posts back to its parent. Mirrors daemon/preview_origin.go
  *  previewProbeLabel/previewProbeMessage. */
 const PREVIEW_PROBE_HOST = "afprobe.localhost";
-const PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
+export const PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
 
 /** How long to wait for the probe frame to report. Overridable for tests. */
 function previewProbeMs(): number {
@@ -179,17 +181,38 @@ const previewReachable = new Map<string, Promise<boolean>>();
  *  the exact frame this created — so nothing else on the page can forge a yes.
  *
  *  Fails CLOSED: any timeout, error, or unexpected sender leaves the pane on the
- *  same-origin mirror, which is the behavior every release before this one had. */
-function previewOriginReachable(origin: string): Promise<boolean> {
+ *  same-origin mirror, which is the behavior every release before this one had.
+ *
+ *  `fresh` is the user-initiated ↻ / Retry path (threaded from `load(true)` the same
+ *  way it nulls `previewSrcOnce`): it bypasses the cache and re-probes this port. See
+ *  the cache note below for why a cached `true` cannot be trusted across that gesture. */
+export function previewOriginReachable(origin: string, fresh = false): Promise<boolean> {
   let port: string;
   try {
     port = new URL(origin).port;
   } catch {
     return Promise.resolve(false);
   }
-  const cached = previewReachable.get(port);
-  if (cached !== undefined) {
-    return cached;
+  // A user-initiated ↻ bypasses the cache. A success is pinned for the SPA's lifetime
+  // (see below) — the right thing between two ordinary loads of the same pane, but
+  // `fresh` is the explicit "give me the CURRENT page" gesture. A port that was
+  // reachable when first probed may have stopped being BROWSER-reachable since: the
+  // daemon's preview listener stays bound and keeps vending the same origin, but the
+  // browser's own path to the port can break — the preview-port ssh forward drops
+  // while the main forward stays up. A cached `true` would then navigate the frame to
+  // a dead origin with no fallback; re-probing on demand restores the "fails CLOSED"
+  // path the cache exists to preserve.
+  //
+  // Only the port THIS origin names is dropped — a port that moved is a different key
+  // and was never cached against the new one — so the dedup across panes that share a
+  // port (one probe answers for the whole page) is kept for every non-fresh load.
+  if (fresh) {
+    previewReachable.delete(port);
+  } else {
+    const cached = previewReachable.get(port);
+    if (cached !== undefined) {
+      return cached;
+    }
   }
   // Only a SUCCESS is cached; a failure is evicted below so the next ↻ re-probes.
   // A cached false is sticky in the worst way: the everyday causes are transient —
@@ -217,7 +240,7 @@ function previewOriginReachable(origin: string): Promise<boolean> {
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
-      if (!ok) {
+      if (!ok && previewReachable.get(port) === probe) {
         previewReachable.delete(port);
       }
       resolve(ok);
@@ -554,6 +577,24 @@ export class SplitView {
     this.commit();
   }
 
+  /** setFocusedTab for the post-await apply of an awaited tab mutation
+   *  (index.ts guardedTabRebind). The landing is identical — retain, reconcile,
+   *  report — but it does NOT count toward layoutGeneration: that counter answers
+   *  "did the user move the layout during my await?", and a gesture's own write
+   *  landing is not the user moving anything. Counting it made every awaited
+   *  mutation veto the next gesture pinned while it was in flight — a create
+   *  issued while an earlier close was still settling refused its own rebind and
+   *  left the pane on the old tab (#5061). The caller instead sequences
+   *  overlapping awaited gestures by issue order, so a stale apply still refuses
+   *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
+  setFocusedTabAwaited(tab: number): void {
+    if (!this.tree || !this.focusedId) {
+      return;
+    }
+    this.tree = replaceTab(this.tree, this.focusedId, tab);
+    this.land();
+  }
+
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
    *  a terminal actually took it. False means there was nothing to focus: a web or
    *  VS Code tab renders an iframe and carries no term (mountWebPane leaves
@@ -674,6 +715,13 @@ export class SplitView {
    *  wins — while the roster event that races the same close still passes the
    *  guard, because it bumps nothing.
    *
+   *  Deliberately NOT bumped either by an awaited mutation's own apply
+   *  (setFocusedTabAwaited): that landing IS the gesture's write, not newer intent
+   *  formed during its await. Counting it made every awaited rebind veto the next
+   *  one pinned while it was in flight — the close-then-create flake of #5061.
+   *  Overlapping awaited gestures order among themselves on the caller's issue
+   *  sequence instead (rebindTargetAfterAwait's rebindSeq/newestAppliedSeq).
+   *
    *  Pane focus counts because the guarded write (setFocusedTab) targets the
    *  FOCUSED pane: an index computed against the pane that issued the close is
    *  meaningless once a different pane holds focus, and applying it there would
@@ -689,6 +737,14 @@ export class SplitView {
    *  it the one place to count them (see layoutGeneration). */
   private commit(): void {
     this.layoutGen++;
+    this.land();
+  }
+
+  /** The landing write half of commit() — retain, reconcile, report — shared with
+   *  setFocusedTabAwaited, whose landings must not count toward the generation:
+   *  they are a gesture's own awaited write completing, not the user moving the
+   *  layout (#5061). */
+  private land(): void {
     if (this.sessionId && this.tree) {
       this.retain(this.sessionId, this.tree, this.tabIds);
     }
@@ -700,17 +756,41 @@ export class SplitView {
     if (!this.tree) {
       return;
     }
+    // The sibling subtree that closeLeaf will substitute into the freed space — read
+    // on the tree BEFORE the close, since closeLeaf preserves the sibling's reference
+    // as it collapses the parent. null only for a single-leaf tree, which closeLeaf
+    // rejects as the un-closable last pane. Computed here so the focus re-point below
+    // names the pane that GREW into the closed pane's region rather than the leftmost
+    // leaf of the WHOLE tree — which, for a nested close inside a non-leftmost branch,
+    // lives in an unrelated root branch and would intercept the keystrokes.
+    const siblingSubtree = siblingSubtreeOf(this.tree, leafId);
     const next = closeLeaf(this.tree, leafId);
     if (next === null) {
       return; // the last pane can't be closed
     }
     this.tree = next;
-    // Re-point focus if the closed pane held it.
-    if (this.focusedId === leafId) {
-      this.focusedId = leaves(this.tree)[0]?.id ?? null;
+    // Re-point focus if the closed pane held it: to the first leaf of the sibling
+    // subtree that expanded to fill the closed pane's space. Falls back to the new
+    // tree's first leaf only when no sibling exists (a single-leaf tree, which
+    // closeLeaf already rejected above, so the fallback is defensive). The previous
+    // leaves(this.tree)[0] formula picked the leftmost leaf of the whole tree; for a
+    // nested close in a non-leftmost branch that is an unrelated pane, and
+    // reconcile()'s validity guard (it only re-routes an INVALID focusedId) never
+    // corrected it — so refocus() handed the keyboard to the wrong terminal.
+    const heldFocus = this.focusedId === leafId;
+    if (heldFocus) {
+      const fallback = leaves(this.tree)[0]?.id ?? null;
+      this.focusedId = (siblingSubtree ? leaves(siblingSubtree)[0]?.id : null) ?? fallback;
     }
     this.commit();
     this.refocus();
+    if (heldFocus && this.termHoldsFocus) {
+      const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+      if (!focused?.term) {
+        this.cb.onFocusChange(false);
+        this.termHoldsFocus = false;
+      }
+    }
   }
 
   // --- internal: reconcile tree → DOM + terminals ---------------------------
@@ -1347,7 +1427,7 @@ export class SplitView {
                 // and Safari does not resolve *.localhost at all. Both look identical
                 // from the daemon, and getting either wrong would abandon a working
                 // mirror for a frame that loads nothing.
-                return (await previewOriginReachable(origin)) ? previewOriginSrc(origin, target) : "";
+                return (await previewOriginReachable(origin, fresh)) ? previewOriginSrc(origin, target) : "";
               })
             : Promise.resolve("");
       }
@@ -1395,6 +1475,9 @@ export class SplitView {
       if (previewSrc !== "") {
         open.href = previewSrc;
         fbLink.href = previewSrc;
+      } else {
+        open.href = openHref;
+        fbLink.href = openHref;
       }
       showFrame();
       // A user-initiated reload of a PROXIED target is cache-busted (#1900): without
@@ -1584,26 +1667,35 @@ export class SplitView {
    * rather than two: every rule below (id resolution, the #1901 self-split dedupe, the
    * focus choice) is a rule a second implementation would drift away from.
    */
-  private applyTabDrop(pane: Pane, drag: DragPayload, clientX: number, clientY: number): void {
+  private applyTabDrop(pane: Pane, drag: DragPayload, clientX: number, clientY: number): boolean {
     if (!this.tree) {
-      return;
+      return false;
     }
     // Resolve the dragged tab to the ordinal it should bind — by its STABLE id when
     // it has one, else the guarded legacy index. See resolveDragTab; null cancels.
     const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
     if (tab === null) {
-      return;
+      return false;
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
+    const shown = findLeaf(this.tree, pane.leafId)?.tab;
+    // A center drop on the FOCUSED pane already showing the tab is a third no-op:
+    // replaceTab would hand back this same tree and focus would not move, so
+    // committing it would report a change that never happened — and dismiss a
+    // disclosure the drop left untouched (#4434 review). On an unfocused pane the
+    // tree still holds, but the drop moves focus there, so it falls through.
+    if (zone === "center" && shown === tab && this.focusedId === pane.leafId) {
+      return false;
+    }
     // Dragging the pane's OWN tab onto its edge still splits — but the new half must
     // open a DIFFERENT tab (#1901). Binding the dragged tab on both sides is what the
     // one-tab-one-pane dedupe undoes, collapsing the split back to where it started.
-    const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+    const onItsOwnPane = zone !== "center" && shown === tab;
     const opened = onItsOwnPane
       ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs())
       : tab;
     if (opened === null) {
-      return; // no other tab to fill the new half — leave the layout as it stands
+      return false; // no other tab to fill the new half — leave the layout as it stands
     }
     this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
     // Focus the pane holding the tab that just landed — the NEW half (VS Code focuses
@@ -1616,6 +1708,7 @@ export class SplitView {
     }
     this.commit();
     this.refocus();
+    return true;
   }
 
   /** The pane whose box contains a viewport point, or null. Used by the touch path,
@@ -1653,17 +1746,18 @@ export class SplitView {
     }
   }
 
-  /** Lands a touch-dragged tab at a viewport point. Returns whether a pane took it —
-   *  false means the release was not over any pane, so the caller can treat it as a
-   *  bar drop (reorder) instead. */
-  dropTabAt(clientX: number, clientY: number, drag: DragPayload): boolean {
+  /** Lands a touch-dragged tab at a viewport point. `landed` reports whether a
+   *  pane took it — false means the release was not over any pane, so the caller
+   *  can treat it as a bar drop (reorder) instead. `changed` reports whether the
+   *  layout actually committed; a landed drop can still be rejected inside
+   *  applyTabDrop, and the caller keys any user-visible side effects off that. */
+  dropTabAt(clientX: number, clientY: number, drag: DragPayload): TabDropResult {
     const pane = this.paneAtPoint(clientX, clientY);
     if (!pane) {
-      return false;
+      return { landed: false, changed: false };
     }
     this.hideZone(pane);
-    this.applyTabDrop(pane, drag, clientX, clientY);
-    return true;
+    return { landed: true, changed: this.applyTabDrop(pane, drag, clientX, clientY) };
   }
 
   /** The drop zone for a pointer position over a pane: an edge (outer band) or the

@@ -68,5 +68,24 @@ func emptyWorkspaceContent(r layout.Rect, lines []string) string {
 
 // NoRegisteredProjectWorkspace offers registration rather than an empty picker.
 func NoRegisteredProjectWorkspace(r layout.Rect) string {
-	return RecoveryScreen(r, "No project registered", "", "Run af projects register <path> to register a checkout.", false)
+	return RecoveryScreen(r, "No project registered", "", "Run af projects add <path> to register a checkout.", false)
+}
+
+// PaneGap renders the 1-col divider column between adjacent workspace panes
+// (§2.6, #1088) as a blank gap. Every pane already frames itself, so drawing a
+// │ here stacked a third bar between the two pane borders and every seam read
+// "│││" (#5279). The gap leaves "│ │" — the two pane frames still mark the
+// boundary, and the focused pane's frame stays the only line down the seam.
+// The column itself is unchanged: same rect, same cell count, so pane width
+// math and click targets do not move.
+func PaneGap(r layout.Rect) string {
+	if r.Empty() {
+		return ""
+	}
+	lines := make([]string, r.H)
+	blank := strings.Repeat(" ", r.W)
+	for i := range lines {
+		lines[i] = blank
+	}
+	return strings.Join(lines, "\n")
 }

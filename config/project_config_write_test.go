@@ -89,22 +89,23 @@ func TestSetProjectConfigValueUnregisteredSelector(t *testing.T) {
 	loose := initProjectRegistryRepo(t, filepath.Join(base, "loose"))
 	_, err := SetProjectConfigValue(loose, "default_program", "codex")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "af projects register", "an unregistered target never silently writes")
+	require.Contains(t, err.Error(), "af projects add", "an unregistered target never silently writes")
 }
 
 // TestSetProjectConfigValueEqualToGlobalIsStillOverride pins the distinction
 // unset exists for: a personal value equal to the lower layer is a present,
-// winning override, not the same as clearing it.
+// winning override, not the same as clearing it. (branch_prefix is the one
+// personal key this does not hold for — its stored value never wins, #4539.)
 func TestSetProjectConfigValueEqualToGlobalIsStillOverride(t *testing.T) {
 	home, repoRoot, project := registeredTestProject(t)
-	writeGlobalTOML(t, home, "branch_prefix = \"same/\"\n")
+	writeGlobalTOML(t, home, "on_archive_command = \"same\"\n")
 
-	_, err := SetProjectConfigValue(project.ID, "branch_prefix", "same/")
+	_, err := SetProjectConfigValue(project.ID, "on_archive_command", "same")
 	require.NoError(t, err)
 
 	resolved, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)
-	value, ok := resolved.ResolvedValue("branch_prefix")
+	value, ok := resolved.ResolvedValue("on_archive_command")
 	require.True(t, ok)
 	require.NotNil(t, value.Winner)
 	assert.Equal(t, SourceProjectPersonal.String(), value.Winner.Layer)

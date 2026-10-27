@@ -60,7 +60,16 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if err != nil {
 		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}
-	if program == "" {
+
+	// An empty program field is "Use config default". When the launch itself
+	// committed to a program — an explicit --program (programFollowsConfig is
+	// false) — THAT is the default the label refers to, so the task stores it
+	// and later runs keep launching it regardless of config drift (#4889
+	// review). Only a config-following launch leaves the stored program empty,
+	// so task/task.go's runner resolves the live default_program against the
+	// task's own repo at RUN time; folding m.defaultProgram() into that case
+	// would bake a possibly-stale cache in permanently.
+	if program == "" && !m.programFollowsConfig {
 		program = m.program
 	}
 	id, err := task.GenerateID()
@@ -90,7 +99,11 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// is the durable commit; a later refresh failure is classified so this caller
 	// can accept the saved task without presenting a retryable create form.
 	addErr := addTaskThroughDaemon(t)
-	if addErr != nil && !apiclient.IsMutationCommitted(addErr) {
+	// Only a definitive refusal re-arms the form. A task that may have been
+	// saved — committed, or a reply lost after the daemon received it (#4820) —
+	// closes the form like a success, so the user cannot submit a duplicate, and
+	// the list below is re-read from disk to show whether it landed.
+	if addErr != nil && !mutationMayHaveLanded(addErr) {
 		return m.showRecovery("Cannot save task", "Your input is retained. "+addErr.Error(), "Press any key to return to the form.", fmt.Errorf("failed to save task: %v", addErr))
 	}
 	committed = true
@@ -112,10 +125,18 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		m.relayout()
 	} else {
 		reloadErr = fmt.Errorf("the task was saved, but this list could not be reloaded, so it is showing the tasks from before — do not create it again: %w", err)
+		if addErr != nil && !apiclient.IsMutationCommitted(addErr) {
+			reloadErr = fmt.Errorf("this list could not be reloaded, so it is showing the tasks from before — wait for it to refresh before creating the task again: %w", err)
+		}
+	}
+	if addErr != nil && apiclient.IsMutationCommitted(addErr) {
+		return m.handleError(errors.Join(
+			fmt.Errorf("task was saved, but the daemon could not refresh its schedules: %w", addErr),
+			reloadErr))
 	}
 	if addErr != nil {
 		return m.handleError(errors.Join(
-			fmt.Errorf("task was saved, but the daemon could not refresh its schedules: %w", addErr),
+			mutationOutcomeError(fmt.Sprintf("saving task %q", name), "the task list", addErr),
 			reloadErr))
 	}
 	if reloadErr != nil {

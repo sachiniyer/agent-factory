@@ -177,6 +177,84 @@ func TestClassifyDir_ForeignBootIsDeadWithoutLookup(t *testing.T) {
 	}
 }
 
+// TestClassifyDir_MixedBootFallback_LiveOwnerIsNotDead covers the mixed
+// procfs regime the boot-differ gate must NOT short-circuit on: the stamp
+// and the sweeper share a PID namespace (so the nsID gate passes) but one
+// read a pidns: fallback boot id and the other read the real kernel UUID.
+// A reboot did not happen; the owner may well be alive, so the gate must
+// fall through to the live-process lookup, which here proves the owner
+// alive. Both directions of the mix are exercised because the gate is a
+// bare != and the bug is symmetric.
+func TestClassifyDir_MixedBootFallback_LiveOwnerIsNotDead(t *testing.T) {
+	const pid = 424251
+	const startID = 100
+	const pidns = "pidns:1:2" // faithful to proctree_linux.go's "pidns:%x:%x"
+	const realBoot = "host-real-uuid-1234"
+	live := map[int]proctree.Process{pid: {PID: pid, StartID: startID}}
+	for _, tc := range []struct {
+		name      string
+		stampBoot string
+		envBoot   string
+	}{
+		{"fallbackStamp_realEnv", pidns, realBoot},
+		{"realStamp_fallbackEnv", realBoot, pidns},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStamp(t, dir, ownerStamp{pid: pid, startID: startID, bootID: tc.stampBoot, nsID: pidns})
+			env := fakeEnv(tc.envBoot, pidns, live, nil)
+			verdict, stamped, reason := env.classifyDir(dir)
+			if !stamped || verdict != ownerAlive {
+				t.Fatalf("mixed boot fallback, live owner: verdict=%v stamped=%v reason=%q, want ownerAlive — a live owner must not be reaped on a fallback-vs-real boot mismatch", verdict, stamped, reason)
+			}
+		})
+	}
+}
+
+// TestClassifyDir_MixedBootFallback_LiveSelfIsNotDead is the bug report's
+// reproducer: it stamps the dir with THIS test process's real pid + StartID
+// (proven alive by construction) and a pidns fallback boot, then sweeps with
+// a real boot id and the same pidns — the mixed regime. Before the fix the
+// boot gate fired without consulting the live process and classified a
+// provably-alive owner as ownerDead; after the fix the lookup exonerates it.
+func TestClassifyDir_MixedBootFallback_LiveSelfIsNotDead(t *testing.T) {
+	dir := t.TempDir()
+	livePID := os.Getpid()
+	self, err := proctree.Lookup(livePID)
+	if err != nil {
+		t.Skipf("proctree cannot identify this process: %v", err)
+	}
+	const pidns = "pidns:1:2"
+	const realBoot = "host-real-uuid-1234"
+	writeStamp(t, dir, ownerStamp{pid: livePID, startID: self.StartID, bootID: pidns, nsID: pidns})
+	env := fakeEnv(realBoot, pidns,
+		map[int]proctree.Process{livePID: {PID: livePID, StartID: self.StartID}}, nil)
+	verdict, stamped, reason := env.classifyDir(dir)
+	if verdict == ownerDead {
+		t.Fatalf("BUG: owner pid %d is THIS live process and StartID matches, yet verdict=ownerDead (%s); a live test dir would be reaped", livePID, reason)
+	}
+	if !stamped || verdict != ownerAlive {
+		t.Fatalf("mixed boot fallback, live self: verdict=%v stamped=%v reason=%q, want ownerAlive", verdict, stamped, reason)
+	}
+}
+
+// TestClassifyDir_MixedBootFallback_DeadOwnerIsStillDead confirms the fix
+// does not over-correct: when the boot ids mismatch across the fallback
+// boundary AND the live-process lookup proves the owner gone, the dir is
+// still reaped. The lookup is the authority the gate deferred to.
+func TestClassifyDir_MixedBootFallback_DeadOwnerIsStillDead(t *testing.T) {
+	const pid = 424252
+	dir := t.TempDir()
+	const pidns = "pidns:1:2"
+	const realBoot = "host-real-uuid-1234"
+	writeStamp(t, dir, ownerStamp{pid: pid, startID: 100, bootID: pidns, nsID: pidns})
+	env := fakeEnv(realBoot, pidns, nil, nil) // pid absent -> os.ErrNotExist (definitely gone)
+	verdict, stamped, reason := env.classifyDir(dir)
+	if !stamped || verdict != ownerDead {
+		t.Fatalf("mixed boot fallback, dead owner: verdict=%v stamped=%v reason=%q, want ownerDead — the live-process lookup must still reap a proven-dead owner", verdict, stamped, reason)
+	}
+}
+
 func TestClassifyDir_ForeignNamespaceIsUnproven(t *testing.T) {
 	dir := t.TempDir()
 	// A different PID namespace means the stamped pid lives in a number

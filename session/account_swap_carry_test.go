@@ -188,10 +188,10 @@ func TestValidateAccountSwapCarriesCodexConversationFromRegisteredAccount(t *tes
 	require.Equal(t, source, plan.carry.srcHome)
 	require.Equal(t, "old", plan.carry.sourceAccount)
 	require.Equal(t, rel, plan.carry.transcript, "the rollout keeps its dated layout in the new home")
-	require.Equal(t, "codex resume "+carryTestID, plan.program)
+	require.Equal(t, "codex -c check_for_update_on_startup=false resume "+carryTestID, plan.program)
 	generated, ok := sessionenv.GeneratedArgsBetween(plan.base, plan.program)
 	require.True(t, ok)
-	require.Equal(t, []string{"resume", carryTestID}, generated)
+	require.Equal(t, []string{"-c", "check_for_update_on_startup=false", "resume", carryTestID}, generated)
 	require.Equal(t, generated, plan.proof.GeneratedArgs)
 
 	require.NoError(t, inst.CarryAccountSwapConversation())
@@ -243,7 +243,7 @@ func TestValidateAccountSwapStatesWhyItCannotCarry(t *testing.T) {
 		require.NoError(t, inst.ValidateAccountSwap("work"))
 		require.Nil(t, inst.accountSwapLaunch.carry)
 		require.Equal(t, "its rollout is missing from the previous account's home", inst.accountSwapLaunch.carryFallback)
-		require.Equal(t, "codex", inst.accountSwapLaunch.program)
+		require.Equal(t, "codex -c check_for_update_on_startup=false", inst.accountSwapLaunch.program)
 	})
 	t.Run("codex conversation filed twice in the new account", func(t *testing.T) {
 		inst, target := carrySwapInstance(t, tmux.ProgramCodex)
@@ -280,7 +280,7 @@ func TestValidateManualCrossAgentAccountSwapNeverCarries(t *testing.T) {
 	recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
 	writeCarryFile(t, filepath.Join(home, ".claude"), claudeTranscriptRel(inst.GetWorktreePath(), carryTestID), "{}\n")
 
-	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramCodex))
+	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramCodex, true))
 	require.Nil(t, inst.accountSwapLaunch.carry, "providers cannot read each other's transcripts")
 	require.Empty(t, inst.accountSwapLaunch.carryFallback, "a cross-agent brief keeps its own wording")
 	require.Equal(t, HandoffConversation{}, inst.PreparedAccountSwapConversation())
@@ -449,12 +449,12 @@ func TestRespawnForAccountSwapDemotesACarryThatCanNoLongerLand(t *testing.T) {
 			restored.SetLimitReached(time.Time{})
 			require.NoError(t, restored.BeginLimitResume())
 			if manual {
-				require.NoError(t, restored.ValidateManualAccountSwap("work", tmux.ProgramClaude))
+				require.NoError(t, restored.ValidateManualAccountSwap("work", tmux.ProgramClaude, false))
 				require.True(t, restored.PreparedAccountSwapConversation().Carried)
 				brief := MissionBrief{From: tmux.ProgramClaude, To: tmux.ProgramClaude, Goal: "finish it",
 					Conversation: restored.PreparedAccountSwapConversation()}
-				_, err := restored.SelectAccountForHandoff("", "work", tmux.ProgramClaude,
-					HandoffReasonUsageLimit, "", brief.Render())
+				_, err := restored.SelectAccountForHandoff("", "work", tmux.ProgramClaude, tmux.ProgramClaude,
+					false, HandoffReasonUsageLimit, "", brief.Render())
 				require.NoError(t, err)
 			} else {
 				require.NoError(t, restored.ValidateAccountSwap("work"))
@@ -547,7 +547,7 @@ func TestPendingCarryFollowsACodexForkForRestartRecovery(t *testing.T) {
 	require.NotNil(t, plan.carry)
 	require.Equal(t, forkID, plan.carry.id)
 	require.Equal(t, forkRel, plan.carry.transcript, "the fork exists only in the new account, which a committed carry accepts")
-	require.Equal(t, "codex resume "+forkID, plan.program)
+	require.Equal(t, "codex -c check_for_update_on_startup=false resume "+forkID, plan.program)
 
 	stale := AgentRuntimeToken{agent: tmux.ProgramCodex, generation: inst.AgentRuntimeToken().generation + 1}
 	require.False(t, inst.RecordAccountSwapConversationForRuntime(stale,

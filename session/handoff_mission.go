@@ -24,6 +24,13 @@ type MissionBrief struct {
 	// From and To are the outgoing and incoming agent names.
 	From string
 	To   string
+	// CrossAgent is admission's verdict on whether the swap changed the agent,
+	// threaded from the launch plan so Render's same-agent branch does not
+	// re-derive it from From == To. A program_overrides redirect can make the
+	// RESOLVED running identity (From) equal the target enum (To) for a handoff
+	// admission classified as cross-agent, so the string compare alone can
+	// route a cross-agent brief onto the same-agent branch (#4430 review).
+	CrossAgent bool
 	// Reason is why the handoff happened, rendered into the brief so the new
 	// agent knows its predecessor stopped for an external reason and did not
 	// simply fail.
@@ -81,7 +88,7 @@ func (i *Instance) BuildMissionBrief(to, override, reason string) MissionBrief {
 // a goal is worse than one that admits it has none: the agent would pursue the
 // invention.
 func (m MissionBrief) Render() string {
-	sameAgent := m.From != "" && m.From == m.To
+	sameAgent := m.From != "" && m.From == m.To && !m.CrossAgent
 	carryFailure := strings.TrimSpace(m.Conversation.CarryFailure)
 	if sameAgent && m.Conversation.Carried {
 		return m.renderCarried()

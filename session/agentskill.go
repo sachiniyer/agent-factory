@@ -470,7 +470,7 @@ func resolveSkillTarget(i *Instance, program string) skillTarget {
 	if i == nil {
 		return skillTarget{}
 	}
-	return resolveSkillTargetForAccount(program, i.AgentProgram(), strings.TrimSpace(i.Account), i.GetWorktreePath())
+	return resolveSkillTargetForAccount(program, i.AccountAgent(), strings.TrimSpace(i.Account), i.GetWorktreePath())
 }
 
 // resolveSkillTargetForAccount is resolveSkillTarget for an account this session
@@ -481,14 +481,15 @@ func resolveSkillTarget(i *Instance, program string) skillTarget {
 // i.Account still names the identity being replaced. Resolving the skill root
 // from it would write the af skill into the OLD account's directory and declare
 // a --plugin-dir the replacement pane will never read. The candidate name and
-// requested launch identity are the only correct inputs there, and both are
-// passed rather than read for exactly the reason the fields cannot be written
-// early: validation must not mutate the instance before teardown has succeeded.
+// the namespace its account was selected in are the only correct inputs there,
+// and both are passed rather than read for exactly the reason the fields cannot
+// be written early: validation must not mutate the instance before teardown has
+// succeeded.
 //
 // workDir is the directory program launches from. An unscoped launch needs it to
 // resolve a relative root or an `env -C`, exactly as capture does; without one af
 // cannot say where the launch reads, and places nothing.
-func resolveSkillTargetForAccount(program, requestedProgram, name, workDir string) skillTarget {
+func resolveSkillTargetForAccount(program, accountNamespace, name, workDir string) skillTarget {
 	agent := tmux.DetectAgentFromCommand(program)
 	if agent == "" {
 		// An opaque command names no agent, so there is no per-agent skills base to
@@ -545,16 +546,16 @@ func resolveSkillTargetForAccount(program, requestedProgram, name, workDir strin
 		// guess a directory.
 		return unresolvedSkillTarget(fmt.Errorf("%s does not support accounts", agent))
 	}
-	// The account name was validated in the requested launch identity's namespace,
-	// and account namespaces are separate — the same name means a DIFFERENT
-	// identity for a different agent (#3082/#3108). So a resolved command that is
-	// another agent must not resolve this name against that agent's registry: a
-	// cross-agent program_override would otherwise write into an account the
-	// operator never selected, moments before the launch refuses for exactly that
-	// reason (#3645 review). requestedProgram is explicit because handoff validation
-	// runs before the instance is rewritten to the incoming identity.
-	if requested := sessionenv.AgentForCommand(requestedProgram); requested != agent {
-		return unresolvedSkillTarget(fmt.Errorf("account %q was selected for %q, not for %s", name, requested, agent))
+	// The account name was validated in ONE agent's namespace, and account
+	// namespaces are separate — the same name means a DIFFERENT identity for a
+	// different agent (#3082/#3108). The namespace the selection used — the
+	// resolved command's agent for a fresh swap, the durable account_agent pin
+	// for an established scope — is the only honest comparand: a launch whose
+	// detected agent differs must not resolve this name against the selected
+	// registry, while a redirect whose selection namespace already IS the
+	// detected agent must still write the skill (#4430 review round 5).
+	if accountNamespace != agent {
+		return unresolvedSkillTarget(fmt.Errorf("account %q was selected for %q, not for %s", name, accountNamespace, agent))
 	}
 	home, err := config.GetConfigDir()
 	if err != nil {

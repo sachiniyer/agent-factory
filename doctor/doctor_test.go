@@ -103,6 +103,9 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 		// hermetic (no git shell-out, no reading the real repo's in-repo
 		// config). The remote tests below inject their own resolver.
 		remoteConfig: func() (*config.RemoteHooks, string, error) { return nil, "", nil },
+		// Likewise no in-repo config: the unknown-leaf check (#4599) would
+		// otherwise load the real repo's .agent-factory config.
+		inRepoUnknownLeaves: func() []config.InRepoUnknownLeaf { return nil },
 		// The skew checks (#1044) all reach for real machine state, so they
 		// are defaulted here to inert fakes: "nothing answered, no unit
 		// installed, no af binaries to compare". Without this the suite would

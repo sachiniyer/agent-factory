@@ -4,8 +4,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/stretchr/testify/require"
 )
 
 // handoffTestInstance builds a started instance running `program`, with an agent
@@ -78,7 +80,7 @@ func TestSwapAgentProgram_RewritesProgramAndRecordsLedger(t *testing.T) {
 		t.Fatalf("Tab.Conversation = %+v, want cleared so the incoming agent starts its own", conv)
 	}
 
-	ledger := inst.Handoffs()
+	ledger := inst.Tabs[0].Handoffs
 	if len(ledger) != 1 {
 		t.Fatalf("ledger has %d entries, want 1", len(ledger))
 	}
@@ -97,7 +99,7 @@ func TestSwapAgentProgram_AppendsRatherThanReplaces(t *testing.T) {
 		t.Fatalf("second swap: %v", err)
 	}
 
-	ledger := inst.Handoffs()
+	ledger := inst.Tabs[0].Handoffs
 	if len(ledger) != 2 {
 		t.Fatalf("ledger has %d entries, want 2 — the ledger is append-only history, not a single slot", len(ledger))
 	}
@@ -140,7 +142,7 @@ func TestSwapAgentProgram_RejectsArchivedSessionWithoutMutatingRecord(t *testing
 	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
 		t.Fatalf("Program = %q after refusal, want %q", got, tmux.ProgramClaude)
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 0 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 0 {
 		t.Fatalf("archived refusal wrote %d handoff records, want 0", len(ledger))
 	}
 }
@@ -162,7 +164,7 @@ func TestRevertHandoff_RestoresProgramAndConversation(t *testing.T) {
 	if conv := inst.AgentConversation(); conv.ID != "conv-outgoing-42" {
 		t.Fatalf("Conversation = %+v after revert, want the outgoing conversation restored", conv)
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 0 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 0 {
 		t.Fatalf("ledger has %d entries after revert, want 0 — a swap that never happened must not be recorded", len(ledger))
 	}
 }
@@ -203,7 +205,7 @@ func TestRevertHandoff_RefusesWhenNotTheLastEntry(t *testing.T) {
 	if err := inst.RevertHandoff(stale); err == nil {
 		t.Fatal("reverting a non-trailing entry succeeded; that would truncate a later swap's record")
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 2 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 2 {
 		t.Fatalf("ledger has %d entries, want both retained after a refused revert", len(ledger))
 	}
 }
@@ -415,6 +417,60 @@ func TestSwapAgentProgramRecordsResolvedOutgoingAgent(t *testing.T) {
 	if entry.From.Agent != tmux.ProgramClaude {
 		t.Fatalf("ledger recorded outgoing agent %q, want %q", entry.From.Agent, tmux.ProgramClaude)
 	}
+}
+
+// The same-target guard must compare RESOLVED identities, not enums (#4430
+// review): with aider's command overridden to codex and codex's to aider, a
+// session whose pane runs codex may hand off to the "codex" enum (it launches
+// aider) but not to the "aider" enum (it launches the codex already running).
+// An enum compare gets both directions backwards.
+func TestValidateHandoffTarget_ComparesResolvedIdentities(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{
+		tmux.ProgramAider: tmux.ProgramCodex,
+		tmux.ProgramCodex: tmux.ProgramAider,
+	}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	inst := handoffTestInstance(t, tmux.ProgramAider)
+	inst.Tabs[0].Conversation.Agent = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		"af_handoff_resolved", tmux.ProgramCodex, nil, nil))
+
+	err := inst.ValidateHandoffTarget(tmux.ProgramAider)
+	require.ErrorContains(t, err, "already running codex",
+		"the aider enum resolves to the running codex — a self-handoff by identity, not by name")
+	require.NoError(t, inst.ValidateHandoffTarget(tmux.ProgramCodex),
+		"the codex enum resolves to aider — a real cross-agent target despite the matching name")
+}
+
+// The record transaction applies the same resolved-identity judgment to the
+// Program rewrite: an enum resolving to the running agent is a same-agent
+// swap that keeps Program (its override still produces the running command),
+// while an enum resolving elsewhere must rewrite Program so the respawn
+// launches the target's command. Comparing the enum keeps the stale program.
+func TestSwapAgentProgram_ResolvedIdentityDrivesProgramRewrite(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{
+		tmux.ProgramAider: tmux.ProgramCodex,
+		tmux.ProgramCodex: tmux.ProgramAider,
+	}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	inst := handoffTestInstance(t, tmux.ProgramAider)
+	inst.Tabs[0].Conversation.Agent = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		"af_handoff_rewrite", tmux.ProgramCodex, nil, nil))
+
+	_, err := inst.SwapAgentProgram(tmux.ProgramCodex, HandoffReasonManual, "abc123", false)
+	require.NoError(t, err)
+	require.Equal(t, tmux.ProgramCodex, inst.AgentProgram(),
+		"a target whose resolved command is a different agent must rewrite Program — "+
+			"keeping 'aider' would respawn codex, the agent just replaced")
 }
 
 // TestMissionBrief_ReadsAsEnglishForEveryReason covers a copy defect found by

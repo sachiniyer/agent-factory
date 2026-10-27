@@ -6654,6 +6654,24 @@ async function resumeFromLimit(id, title, token2) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
   }
 }
+var CONFIRM_HANDOFF_UNSUPPORTED = "daemon does not serve ConfirmHandoffDelivery (likely an older daemon \u2014 upgrade it); the pending mission was left untouched";
+async function confirmHandoffDelivery(id, title, token2) {
+  let result;
+  try {
+    result = await af("ConfirmHandoffDelivery", { id, title, repo_id: "" }, token2);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
+      throw new ApiError(404, CONFIRM_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "delivery was not confirmed");
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+}
 var ACCOUNT_AWARE_HANDOFF_METHOD = "HandoffSessionV2";
 var ACCOUNT_AWARE_HANDOFF_UNSUPPORTED = "daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon \u2014 upgrade it); the handoff was not sent";
 async function handoffSession(id, title, to, token2, account = "") {
@@ -6686,6 +6704,10 @@ async function deleteProject(root2, token2) {
 }
 async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
+  return resp.project;
+}
+async function rebindProject(id, path, token2) {
+  const resp = await af("RebindProject", { id, path }, token2);
   return resp.project;
 }
 async function listProjects(token2) {
@@ -6859,7 +6881,7 @@ async function reapConfigAssistant(token2) {
 async function listAccounts(token2, repoPath = "") {
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af("ListAccounts", body, token2);
-  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
+  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
@@ -7305,6 +7327,9 @@ function terminalChrome(opts) {
   actions2.hidden = true;
   const retry = action("Retry limit", "", opts.retry);
   retry.title = "Retry after the usage limit";
+  const deliver = action("Mark delivered", "", opts.markDelivered);
+  deliver.title = "Retire the pending handoff mission without resending \u2014 the pane already shows it landed";
+  deliver.hidden = true;
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
   const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
@@ -7314,12 +7339,18 @@ function terminalChrome(opts) {
   desktopCopy.append(icon("link"));
   desktopCopy.title = "Copy link";
   desktopCopy.setAttribute("aria-label", "Copy link");
+  const fontDecrease = action("A\u2212", "af-term-zoom", () => opts.fontSizeStep?.(-1));
+  fontDecrease.title = "Decrease terminal text size";
+  fontDecrease.setAttribute("aria-label", "Decrease terminal text size");
+  const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
+  fontIncrease.title = "Increase terminal text size";
+  fontIncrease.setAttribute("aria-label", "Increase terminal text size");
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(newTabSlot, copy, handoff, actions2, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  menu.panel.append(newTabSlot, copy, handoff, deliver, actions2, closePane);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, fontDecrease, fontIncrease, keyboard, retry, menu.el);
+  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -7739,6 +7770,7 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && active.type === "checkbox") ? active.getAttribute("aria-label") : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -7750,6 +7782,10 @@ var ConfigPane = class {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (focusedConfigControlKey !== null) {
+      this.el.querySelector(
+        `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`
+      )?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -7864,7 +7900,7 @@ var ConfigPane = class {
     row.append(label);
     row.append(this.renderControl(e));
     const status = this.status;
-    if (status && status.key === e.key) {
+    if (status && (status.key === e.key || status.key.startsWith(`${e.key}.`))) {
       if (status.error !== "") {
         row.append(h("div", { class: "af-config-error", role: "alert" }, status.error));
       } else {
@@ -7943,6 +7979,134 @@ var ConfigPane = class {
     return h("div", { class: "af-config-control" }, input, dirty, save);
   }
 };
+
+// src/terminal-font.ts
+var WEB_ENTRY = "web";
+var CONFIG_KEY_PHONE = "web.terminal_font_size_phone";
+var CONFIG_KEY_DESKTOP = "web.terminal_font_size_desktop";
+var TERMINAL_FONT_SIZE_MIN = 4;
+var TERMINAL_FONT_SIZE_MAX = 32;
+var TERMINAL_FONT_STEP_PHONE = 0.5;
+var TERMINAL_FONT_STEP_DESKTOP = 1;
+var TERMINAL_FONT_SIZE_PHONE_DEFAULT = 6.5;
+var TERMINAL_FONT_SIZE_DESKTOP_DEFAULT = 13;
+var PHONE_MEDIA_QUERY = "(max-width: 768px)";
+var PERSIST_DEBOUNCE_MS = 400;
+var sizes = {
+  phone: TERMINAL_FONT_SIZE_PHONE_DEFAULT,
+  desktop: TERMINAL_FONT_SIZE_DESKTOP_DEFAULT
+};
+var listeners = /* @__PURE__ */ new Set();
+var persist = null;
+var persistTimers = /* @__PURE__ */ new Map();
+var pendingSaves = /* @__PURE__ */ new Map();
+function terminalFontSizeFor(phone) {
+  return phone ? sizes.phone : sizes.desktop;
+}
+function subscribeTerminalFontSizes(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+function bindTerminalFontPersist(save) {
+  persist = save;
+}
+function terminalFontClassForKey(key) {
+  if (key === CONFIG_KEY_PHONE) return "phone";
+  if (key === CONFIG_KEY_DESKTOP) return "desktop";
+  return null;
+}
+function terminalFontSizesFromConfig(entries) {
+  const next = { phone: TERMINAL_FONT_SIZE_PHONE_DEFAULT, desktop: TERMINAL_FONT_SIZE_DESKTOP_DEFAULT };
+  const entry = entries.find((e) => e.key === WEB_ENTRY);
+  if (entry === void 0) {
+    return next;
+  }
+  let table;
+  try {
+    const parsed = JSON.parse(entry.value);
+    if (typeof parsed !== "object" || parsed === null) {
+      return next;
+    }
+    table = parsed;
+  } catch {
+    return next;
+  }
+  const leaf = (name, fallback) => {
+    const value = table[name];
+    return typeof value === "number" && Number.isFinite(value) && value >= TERMINAL_FONT_SIZE_MIN && value <= TERMINAL_FONT_SIZE_MAX ? value : fallback;
+  };
+  return {
+    phone: leaf("terminal_font_size_phone", next.phone),
+    desktop: leaf("terminal_font_size_desktop", next.desktop)
+  };
+}
+function setTerminalFontSizes(next) {
+  let changed = false;
+  for (const cls of ["phone", "desktop"]) {
+    if (persistTimers.has(cls) || pendingSaves.has(cls) || next[cls] === sizes[cls]) {
+      continue;
+    }
+    sizes[cls] = next[cls];
+    changed = true;
+  }
+  if (changed) {
+    for (const listener of listeners) {
+      listener();
+    }
+  }
+}
+function stepTerminalFontSize(direction, phone = currentDeviceIsPhone()) {
+  const cls = phone ? "phone" : "desktop";
+  const step = phone ? TERMINAL_FONT_STEP_PHONE : TERMINAL_FONT_STEP_DESKTOP;
+  const next = clampTerminalFontSize(sizes[cls] + Math.sign(direction) * step);
+  if (next === sizes[cls]) {
+    return;
+  }
+  sizes[cls] = next;
+  for (const listener of listeners) {
+    listener();
+  }
+  schedulePersist(cls);
+}
+function currentDeviceIsPhone() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia(PHONE_MEDIA_QUERY).matches;
+}
+function clampTerminalFontSize(size) {
+  return Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(size * 100) / 100));
+}
+function schedulePersist(cls) {
+  const prior = persistTimers.get(cls);
+  if (prior !== void 0) {
+    clearTimeout(prior);
+  }
+  persistTimers.set(cls, setTimeout(() => {
+    persistTimers.delete(cls);
+    const save = persist;
+    if (save === null) {
+      return;
+    }
+    pendingSaves.set(cls, (pendingSaves.get(cls) ?? 0) + 1);
+    const settle = () => {
+      const left = (pendingSaves.get(cls) ?? 1) - 1;
+      if (left > 0) {
+        pendingSaves.set(cls, left);
+      } else {
+        pendingSaves.delete(cls);
+      }
+    };
+    try {
+      void Promise.resolve(save(configKeyFor(cls), formatTerminalFontSize(sizes[cls]))).then(settle, settle);
+    } catch {
+      settle();
+    }
+  }, PERSIST_DEBOUNCE_MS));
+}
+function configKeyFor(cls) {
+  return cls === "phone" ? CONFIG_KEY_PHONE : CONFIG_KEY_DESKTOP;
+}
+function formatTerminalFontSize(size) {
+  return String(size);
+}
 
 // src/account_scope.ts
 var AMBIENT_ACCOUNT = "";
@@ -8489,7 +8653,6 @@ var TerminalSoftInput = class {
 // src/terminal-keybar.ts
 var ARROW_SUFFIXES = { "\u2190": "D", "\u2191": "A", "\u2193": "B", "\u2192": "C" };
 var SPECIAL_BYTES = { Esc: "\x1B", Tab: "	", "^C": "" };
-var KEY_BYTES_NAMED_KEYS = Object.freeze([...Object.keys(ARROW_SUFFIXES), ...Object.keys(SPECIAL_BYTES)]);
 function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
   const sequence = userSequence(key);
   if (sequence) return encodeSequence(sequence, (alt ? 2 : 0) | (ctrl ? 4 : 0), key);
@@ -8502,7 +8665,11 @@ function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
   const text = ctrl && key.length === 1 && key.charCodeAt(0) <= 127 ? ctrlModifiedEmission(key) ?? key : key;
   return (alt ? "\x1B" : "") + text;
 }
-var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
+var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192", "A\u2212", "A+"]];
+var FONT_ZOOM_LABELS = {
+  "A\u2212": { delta: -1, name: "Decrease terminal text size" },
+  "A+": { delta: 1, name: "Increase terminal text size" }
+};
 var SIGNAL_BYTES = /* @__PURE__ */ new Set(["", "", ""]);
 function userSequence(text) {
   if (text.length < 3 || text.charCodeAt(0) !== 27) return void 0;
@@ -8564,6 +8731,7 @@ function ctrlModifiedEmission(text) {
   }
   if (code >= 51 && code <= 55) return String.fromCharCode(code - 24);
   if (code === 56) return "\x7F";
+  if (text === "/") return "";
   return void 0;
 }
 function xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt) {
@@ -8650,14 +8818,22 @@ var StickyModifiers = class {
 };
 function keybarPointerDown(event, act) {
   event.preventDefault();
-  act();
+  act?.();
+}
+function keybarClickIsPointerless(event) {
+  return event.detail === 0 && !event.pointerType;
+}
+function keybarSheetClickIsOpeningGesture(event, opening) {
+  return opening !== void 0;
 }
 var TerminalKeybar = class {
-  constructor(host, input, refit, applicationCursor) {
+  constructor(host, input, paste, refit, applicationCursor, fontSizeStep) {
     this.host = host;
     this.input = input;
+    this.paste = paste;
     this.refit = refit;
     this.applicationCursor = applicationCursor;
+    this.fontSizeStep = fontSizeStep;
     this.originalMaxHeight = host.style.maxHeight;
     this.textarea = host.querySelector(".xterm-helper-textarea");
     this.bar.className = "af-terminal-keybar";
@@ -8671,17 +8847,41 @@ var TerminalKeybar = class {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = key;
-        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : key);
-        const act = () => {
+        const zoom = FONT_ZOOM_LABELS[key];
+        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : zoom?.name ?? key);
+        const act = (event) => {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
+          else if (zoom) this.fontSizeStep(zoom.delta);
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
+          else if (key === "Paste") void this.requestPaste(
+            event?.pointerType ? { pointerId: event.pointerId, pointerType: event.pointerType } : void 0
+          );
           else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
           this.paint();
         };
-        button.addEventListener("pointerdown", (event) => keybarPointerDown(event, act));
+        const onRelease = key === "Paste";
+        let pressedId;
+        button.addEventListener("pointerdown", (event) => {
+          if (onRelease) pressedId = event.pointerId;
+          keybarPointerDown(event, onRelease ? void 0 : act);
+        });
+        if (onRelease) {
+          button.addEventListener("pointerup", (event) => {
+            if (event.pointerId !== pressedId) return;
+            pressedId = void 0;
+            const rect = button.getBoundingClientRect();
+            if (event.clientX >= rect.left && event.clientX < rect.right && event.clientY >= rect.top && event.clientY < rect.bottom) act(event);
+          });
+          button.addEventListener("pointercancel", (event) => {
+            if (event.pointerId === pressedId) pressedId = void 0;
+          });
+          button.addEventListener("pointerleave", () => {
+            pressedId = void 0;
+          });
+        }
         button.addEventListener("click", (event) => {
-          if (event.detail === 0) act();
+          if (keybarClickIsPointerless(event)) act();
         });
         if (key === "Ctrl" || key === "Alt") this.buttons.set(key, button);
         row.append(button);
@@ -8733,10 +8933,19 @@ var TerminalKeybar = class {
   deferred229;
   deferred229Generation = 0;
   suppressedKeydowns = /* @__PURE__ */ new WeakSet();
+  pasteSheet;
+  pasteSheetArea;
+  pasteSheetGesture;
+  // A pointerdown anywhere starts a NEW gesture — by definition later than the
+  // one whose trailing click the armed swallow exists for (#5428).
+  disarmPasteSheetGesture = () => {
+    this.pasteSheetGesture = void 0;
+  };
+  disposed = false;
   setFocused(focused) {
     this.focused = focused;
     if (!focused) {
-      this.modifiers.reset();
+      if (!this.pasteSheet) this.modifiers.reset();
       this.softInput.reset();
       this.physicalInput = false;
       this.arrows = false;
@@ -8815,6 +9024,152 @@ var TerminalKeybar = class {
     this.markUserInput(options.physical, options.keybar);
     this.input(data);
   }
+  /**
+   * The Paste bar key (#5380). `navigator.clipboard.readText` is invoked on the
+   * synchronous stack of the tap's activation-bearing event — pointerup, not
+   * pointerdown, which carries transient user activation for a mouse alone
+   * (#5426) — so the request lands inside the browser's user-activation window.
+   * iOS Safari answers with its own paste bubble and Android Chrome may ask
+   * for clipboard permission once; both are fine.
+   *
+   * Three failure shapes collapse into the one never-silent fallback: no
+   * readText at all (Firefox, an insecure context), a rejection (permission
+   * denied), and an empty read each open the paste sheet — the textarea route
+   * is how paste works on browsers that block readText.
+   */
+  async requestPaste(gesture) {
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.readText) {
+      this.openPasteSheet(gesture);
+      return;
+    }
+    try {
+      const text = await clipboard.readText();
+      if (this.disposed || !this.focused) return;
+      if (text) {
+        this.sendPaste(text);
+        return;
+      }
+    } catch {
+    }
+    if (!this.disposed && this.focused) this.openPasteSheet(gesture);
+  }
+  /**
+   * Sends text through xterm's paste path: term.paste wraps the block in
+   * ESC[200~ … ESC[201~ when the application enabled bracketed paste, exactly
+   * as a desktop Ctrl+V does, and the delivery hold reads the wrapper as a
+   * draft. The emission is marked keybar-sourced so transform passes it
+   * through untouched — a paste is not a keystroke, so an armed sticky
+   * Ctrl/Alt neither rewrites the pasted text nor is consumed by it. And like
+   * other positional input it keeps its place behind a just-committed IME
+   * composition (#4151).
+   */
+  sendPaste(text) {
+    if (this.disposed) return;
+    if (this.softInput.deferAfterPendingComposition(() => this.emitPaste(text))) return;
+    this.emitPaste(text);
+  }
+  emitPaste(text) {
+    this.markUserInput(void 0, true);
+    this.paste(text);
+  }
+  /**
+   * The never-silent fallback for requestPaste: a small sheet with a focused
+   * textarea. A long press inside opens the OS paste menu (or the user types),
+   * and Send routes the text through the same sendPaste path a direct
+   * clipboard read would. The card reuses the app's modal chrome classes;
+   * Escape, Cancel, and a backdrop tap all dismiss.
+   *
+   * `gesture` is the pointer that invoked Paste, when there was one: the sheet
+   * is appended while that gesture is still in flight, and the tap's own
+   * trailing click would otherwise hit-test the fresh backdrop and dismiss it
+   * inside the same gesture (#5428).
+   */
+  openPasteSheet(gesture) {
+    if (this.pasteSheet) {
+      this.pasteSheetArea?.focus();
+      return;
+    }
+    if (this.disposed || !this.focused) return;
+    if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet(gesture))) return;
+    const title = document.createElement("h2");
+    title.className = "af-modal-title";
+    title.textContent = "Paste";
+    const hint = document.createElement("p");
+    hint.className = "af-modal-hint";
+    hint.textContent = "Couldn't read the clipboard \u2014 paste or type the text, then tap Send.";
+    const area = document.createElement("textarea");
+    area.className = "af-input af-textarea";
+    area.setAttribute("aria-label", "Text to paste");
+    area.placeholder = "Paste or type here";
+    area.setAttribute("autocapitalize", "none");
+    area.setAttribute("autocorrect", "off");
+    area.spellcheck = false;
+    const body = document.createElement("div");
+    body.className = "af-modal-body";
+    body.append(hint, area);
+    const send = document.createElement("button");
+    send.type = "button";
+    send.className = "af-primary";
+    send.textContent = "Send";
+    send.disabled = true;
+    area.addEventListener("input", () => {
+      send.disabled = !area.value;
+    });
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "af-ghost";
+    cancel.textContent = "Cancel";
+    const foot = document.createElement("div");
+    foot.className = "af-modal-foot";
+    foot.append(cancel, send);
+    const card = document.createElement("div");
+    card.className = "af-modal-card";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+    card.setAttribute("aria-label", "Paste");
+    card.tabIndex = -1;
+    card.append(title, body, foot);
+    card.addEventListener("click", (event) => event.stopPropagation());
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") this.closePasteSheet(false);
+      if (event.key === "Tab") {
+        const ring = [area, cancel, send].filter((el2) => !el2.disabled);
+        const at = ring.indexOf(document.activeElement);
+        event.preventDefault();
+        ring[(at + (event.shiftKey ? -1 : 1) + ring.length) % ring.length]?.focus();
+      }
+    });
+    const backdrop = document.createElement("div");
+    backdrop.className = "af-modal-backdrop";
+    backdrop.append(card);
+    backdrop.addEventListener("click", (event) => {
+      const opening = this.pasteSheetGesture;
+      if (keybarSheetClickIsOpeningGesture(event, opening)) {
+        this.pasteSheetGesture = void 0;
+        return;
+      }
+      this.closePasteSheet(false);
+    });
+    cancel.addEventListener("click", () => this.closePasteSheet(false));
+    send.addEventListener("click", () => this.closePasteSheet(true));
+    this.pasteSheet = backdrop;
+    this.pasteSheetArea = area;
+    this.pasteSheetGesture = gesture;
+    document.addEventListener("pointerdown", this.disarmPasteSheetGesture, true);
+    document.body.append(backdrop);
+    area.focus();
+  }
+  closePasteSheet(send) {
+    const area = this.pasteSheetArea;
+    this.pasteSheet?.remove();
+    this.pasteSheet = void 0;
+    this.pasteSheetArea = void 0;
+    this.pasteSheetGesture = void 0;
+    document.removeEventListener("pointerdown", this.disarmPasteSheetGesture, true);
+    if (send && area?.value) this.sendPaste(area.value);
+    this.textarea?.focus?.();
+  }
   paint() {
     this.rows.forEach((row, index) => {
       row.hidden = index !== (this.arrows ? 1 : 0);
@@ -8840,7 +9195,9 @@ var TerminalKeybar = class {
       if (!this.bar.isConnected) document.body.append(this.bar);
       const bottom = this.viewport ? this.viewport.offsetTop + this.viewport.height : window.innerHeight;
       this.bar.style.left = `${this.viewport?.offsetLeft ?? 0}px`;
-      this.bar.style.width = `${this.viewport?.width ?? window.innerWidth}px`;
+      const width = this.viewport?.width ?? window.innerWidth;
+      this.bar.style.width = `${width}px`;
+      this.bar.classList.toggle("af-keybar-narrow", width < 348);
       this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
       const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
       this.host.style.maxHeight = `${height}px`;
@@ -8848,6 +9205,12 @@ var TerminalKeybar = class {
     this.refit();
   };
   dispose() {
+    this.disposed = true;
+    this.pasteSheet?.remove();
+    this.pasteSheet = void 0;
+    this.pasteSheetArea = void 0;
+    this.pasteSheetGesture = void 0;
+    document.removeEventListener("pointerdown", this.disarmPasteSheetGesture, true);
     this.host.removeEventListener("keydown", this.onKeyDown, true);
     this.host.removeEventListener("keyup", this.onKeyUp, true);
     this.softInput.dispose();
@@ -8977,6 +9340,9 @@ function hasPrintable(data) {
   }
   return false;
 }
+function isEditingControl(data) {
+  return /[\x7f\x04\x15\b\x17\x01\x05\t\x02\x06\x10\x0e\v\f\x19\x14\x12\x1f\x16\x0f\x18\x11\x13\x1d\0\x07\x1a\x1c\x1e]/.test(data);
+}
 var MidLineHold = class {
   /**
    * @param renewIntervalMs how often to re-send the pause while the line stays
@@ -8997,6 +9363,17 @@ var MidLineHold = class {
   lastInputMs = 0;
   lastPauseMs = 0;
   queuedEndsLine = false;
+  /**
+   * Set when the idle bound released a hold whose draft is still in the PTY, and
+   * cleared by every client-observable genuine commit/abandon (the lastCommit
+   * branch, a flushed queued commit) and by teardown (release). While it is true,
+   * a plain editing control byte re-acquires the lease instead of returning
+   * "none" — matching the ESC branch's post-idle re-acquisition. The daemon
+   * delivering into the pane is not observable here, so the flag can stay stale
+   * after a daemon-side clear/submit; that is the same bounded spurious-hold
+   * staleness the ESC branch already accepts.
+   */
+  releasedByIdleBound = false;
   /** True while the user is considered to have a partially typed line. */
   get holding() {
     return this.uncommitted;
@@ -9033,6 +9410,7 @@ var MidLineHold = class {
     this.lastInputMs = nowMs;
     const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
     if (lastCommit >= 0) {
+      this.releasedByIdleBound = false;
       const tail = data.slice(lastCommit + 1);
       if (!startsADraft(tail)) {
         this.uncommitted = false;
@@ -9041,6 +9419,9 @@ var MidLineHold = class {
       return this.beginOrRenew(nowMs);
     }
     if (!this.uncommitted && !startsADraft(data)) {
+      if (this.releasedByIdleBound && isEditingControl(data)) {
+        return this.beginOrRenew(nowMs);
+      }
       return "none";
     }
     return this.beginOrRenew(nowMs);
@@ -9059,6 +9440,7 @@ var MidLineHold = class {
     }
     if (nowMs - this.lastInputMs >= this.idleReleaseMs) {
       this.uncommitted = false;
+      this.releasedByIdleBound = true;
       return "none";
     }
     if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
@@ -9085,6 +9467,8 @@ var MidLineHold = class {
       const payload = data.startsWith(PASTE_START) ? "" : data;
       const lastCommit = Math.max(payload.lastIndexOf(COMMIT), payload.lastIndexOf(ABANDON));
       this.queuedEndsLine = lastCommit >= 0 && !startsADraft(payload.slice(lastCommit + 1));
+    } else {
+      this.queuedEndsLine = false;
     }
     return this.beginOrRenew(nowMs);
   }
@@ -9104,6 +9488,7 @@ var MidLineHold = class {
     if (this.queuedEndsLine) {
       this.uncommitted = false;
       this.queuedEndsLine = false;
+      this.releasedByIdleBound = false;
     }
   }
   /** Drops the hold for a teardown that makes the question moot — the pane
@@ -9112,6 +9497,7 @@ var MidLineHold = class {
    *  may not be the only holder of. */
   release() {
     this.uncommitted = false;
+    this.releasedByIdleBound = false;
   }
   beginOrRenew(nowMs) {
     if (!this.uncommitted) {
@@ -9243,9 +9629,6 @@ var TOUCH_SCROLL_SLOP_PX = 8;
 function touchScrollClaimsGesture(originY, y) {
   return Math.abs(y - originY) >= TOUCH_SCROLL_SLOP_PX;
 }
-function touchHistoryScrollPlan(lastY, y, rows, rowHeight, remainder) {
-  return historyWheelPlan({ deltaMode: 0, deltaY: lastY - y }, rows, rowHeight, remainder);
-}
 var TOUCH_LONG_PRESS_MS = 500;
 function touchPressStillHeld(originX, originY, x, y) {
   return Math.abs(x - originX) < TOUCH_SCROLL_SLOP_PX && Math.abs(y - originY) < TOUCH_SCROLL_SLOP_PX;
@@ -9307,6 +9690,63 @@ function textFromCells(cells, range) {
   return cells.slice(range.start, range.start + range.length).join("");
 }
 
+// src/touch-scroll.ts
+var SCROLL_GAIN = 3;
+var FLING_WINDOW_MS = 100;
+var FLING_MIN_V = 0.5;
+var FLING_MAX_V = 6;
+var FLING_VEL_GAIN = 4.5;
+var FLING_DECAY_MS = 650;
+var FLING_STOP_V = 0.04;
+var FLING_MAX_DT = 50;
+var TouchScroll = (now) => {
+  let samples = [];
+  let v = 0;
+  let lastTick = 0;
+  return {
+    get active() {
+      return samples.length !== 0;
+    },
+    // Momentum live: set by a nonzero release(), cleared by decay or stop().
+    // Distinct from active, which tracks the held gesture (samples) instead.
+    get coasting() {
+      return v !== 0;
+    },
+    push(y) {
+      const last = samples.at(-1);
+      samples.push({ y, t: now() });
+      return last ? (last.y - y) * SCROLL_GAIN : 0;
+    },
+    release() {
+      const t = now();
+      const s = samples.splice(0), last = s.at(-1);
+      v = 0;
+      if (!last) return 0;
+      let i = s.length - 1;
+      for (; i > 0 && s[i].t >= t - FLING_WINDOW_MS; --i) ;
+      const dt = t - s[i].t;
+      const w = dt > 0 ? (s[i].y - last.y) / dt : 0;
+      if (Math.abs(w) < FLING_MIN_V) return 0;
+      v = Math.max(-FLING_MAX_V, Math.min(FLING_MAX_V, w)) * FLING_VEL_GAIN;
+      lastTick = t;
+      return v;
+    },
+    tick() {
+      if (v === 0) return null;
+      const t = now(), dt = t - lastTick;
+      lastTick = t;
+      const px = v * Math.min(dt, FLING_MAX_DT);
+      v *= Math.exp(-dt / FLING_DECAY_MS);
+      if (Math.abs(v) < FLING_STOP_V) v = 0;
+      return px;
+    },
+    stop() {
+      v = 0;
+      samples = [];
+    }
+  };
+};
+
 // src/terminal.ts
 function holdClockMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -9314,7 +9754,12 @@ function holdClockMs() {
 var BACKOFF_BASE_MS = 500;
 var BACKOFF_MAX_MS = 1e4;
 var RESIZE_DEBOUNCE_MS = 120;
+var VISIBLE_FIT_TIMER_MS = 250;
+var VISIBLE_FIT_MAX_ATTEMPTS = 60;
 var TOUCH_PRESS_MAX_ROWS = 32;
+function terminalFontSize(phone) {
+  return terminalFontSizeFor(phone);
+}
 var AttachTerminal = class {
   constructor(container, token2, endpoint, cb) {
     this.container = container;
@@ -9326,7 +9771,9 @@ var AttachTerminal = class {
       allowProposedApi: true,
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-      fontSize: 13,
+      // Half the desktop pitch at phone width (#5492); the "change" listener
+      // below re-picks it if the viewport crosses the breakpoint.
+      fontSize: terminalFontSize(this.phone.matches),
       // Born in the active theme (theme.ts derives the xterm palette from the same
       // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
       theme: terminalSurface(container, currentXtermTheme()),
@@ -9344,10 +9791,19 @@ var AttachTerminal = class {
     this.term.open(container);
     this.keybar = new TerminalKeybar(
       container,
-      (data) => this.term.input(data, true),
+      (data) => (this.stopCoast(), this.term.input(data, true)),
+      // The Paste keybar key (#5380): term.paste, not a bare input write, so an
+      // app that enabled bracketed paste sees the same ESC[200~ … ESC[201~
+      // block a desktop Ctrl+V produces — and the delivery hold reads the
+      // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
+      (data) => (this.stopCoast(), this.term.paste(data)),
       () => this.scheduleVisibleFit(),
-      () => this.term.modes.applicationCursorKeysMode
+      () => this.term.modes.applicationCursorKeysMode,
+      // The keybar's A−/A+ keys step the device class's shared size (#5500) —
+      // this terminal is one subscriber among the panes that pick it up.
+      stepTerminalFontSize
     );
+    this.unsubscribeFontSizes = subscribeTerminalFontSizes(() => this.applyDeviceFontSize());
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
     this.mouseCaptureHint.setAttribute("role", "status");
@@ -9372,10 +9828,16 @@ var AttachTerminal = class {
           this.cb.onFocusChange(false);
         }
       });
+      textarea.addEventListener("beforeinput", () => this.stopCoast());
     }
     this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
+    this.term.onBinary((data) => this.sendBinary(data));
+    this.term.buffer.onBufferChange(() => this.stopCoast());
     this.term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type === "keydown") {
+        this.stopCoast();
+      }
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
@@ -9395,10 +9857,14 @@ var AttachTerminal = class {
       if (!accepted) this.keybar.markKeydownSuppressed(ev);
       return accepted;
     });
-    this.ro = new ResizeObserver(() => this.scheduleFit());
+    this.ro = new ResizeObserver(() => {
+      this.parked = false;
+      this.scheduleFit();
+    });
     this.ro.observe(container);
     this.io = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.parked = false;
         this.scheduleVisibleFit();
       }
     });
@@ -9406,6 +9872,7 @@ var AttachTerminal = class {
     window.addEventListener("focus", this.onWindowFocus);
     window.addEventListener("blur", this.onWindowBlur);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
+    this.phone.addEventListener("change", this.onPhoneChange);
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
     container.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
@@ -9433,6 +9900,10 @@ var AttachTerminal = class {
   midLineTimer = null;
   ro;
   io;
+  // The app's one phone breakpoint — ui.ts, terminal-keybar.ts, and
+  // appbarControls() hold the same query. It picks the halved default pitch
+  // (#5492) at construction, and its "change" listener re-fits across it.
+  phone = window.matchMedia("(max-width: 768px)");
   ws = null;
   stopped = false;
   everOpened = false;
@@ -9441,6 +9912,26 @@ var AttachTerminal = class {
   reconnectTimer = null;
   resizeTimer = null;
   visibleFitFrame = null;
+  visibleFitTimer = null;
+  visibleFitAttempts = 0;
+  /** Whether this page is currently unpaintable, detected the only way the
+   *  platform exposes it: a scheduled fit whose armed rAF never ran and whose
+   *  250ms timer had to deliver instead. An occluded page keeps
+   *  visibilityState='visible' while its frames starve — document.hidden is
+   *  not a sufficient probe — so the starved frame IS the parked signal. A
+   *  parked page must never write the shared PTY grid: with no user present its
+   *  resizes cannot be activations, and a parked client stealing the grid is
+   *  the multi-window hazard the reclaim semantics exist to prevent. Cleared by
+   *  any genuinely page-coupled signal — a delivered frame, an observer
+   *  callback, window focus, or a TRUSTED input event.
+   *
+   *  Null until the first probe delivery classifies the page — UNKNOWN, not
+   *  "not parked": a socket that opens inside the probe window (the onopen
+   *  force-resize included) must not let a write through on the default, or a
+   *  terminal constructed on an occluded page would stamp its grid onto the
+   *  shared PTY before its frames had a chance to starve. Every signal that
+   *  writes a boolean here IS itself a classification. */
+  parked = null;
   viewportRestoreFrame = null;
   mouseOverride;
   mouseCaptureHint;
@@ -9450,18 +9941,25 @@ var AttachTerminal = class {
   mouseOverrideKeyHeld = false;
   handedOffDrag = false;
   historyWheelRemainder = 0;
-  // The screen position the current one-finger drag last scrolled from, plus its
-  // sub-row carry. Null whenever no gesture is af's to scroll: none is down, or a
-  // second finger arrived and the browser owns the pinch.
-  touchScrollY = null;
-  touchScrollRemainder = 0;
+  scrollRem = 0;
+  fling = TouchScroll(holdClockMs);
+  // Coast ticks that applied scroll px, mirrored onto the host as
+  // data-af-coast-applied, with the count at the last stop beside it as
+  // data-af-coast-stop-count. The selftest's mid-coast press asserts the stop
+  // against these rather than scrollTop: xterm flushes scrollLines to the DOM a
+  // painted frame after the buffer moves, so a press-time DOM read sits a whole
+  // coast tick stale — the master sighting measured 68px, exactly one tick that
+  // was applied BEFORE the stop landed (#5020).
+  coastApplied = 0;
+  coastStopCount = 0;
+  coastLiveStops = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
   // point the finger went down on, by the same threshold.
   touchOriginX = 0;
   touchOriginY = 0;
-  touchScrollClaimed = false;
+  scrollClaimed = false;
   // The pending long press, and whether it has already acted on this gesture — a copy
   // has to swallow the compatibility click the same touch would otherwise fire.
   touchLongPressTimer = null;
@@ -9510,53 +10008,66 @@ var AttachTerminal = class {
   // client is inactive. Null means no peer-owned grid is pending reconciliation.
   pendingViewport = null;
   exited = false;
+  unsubscribeFontSizes = null;
   // A peer is allowed to resize the one shared PTY and every client obeys that
   // authoritative echo. When this window becomes active again, its visible host
   // becomes the local writer: refit once instead of leaving a peer-sized emulator in
   // an unchanged container until the user physically resizes the window (#2347).
-  onWindowFocus = () => this.scheduleVisibleFit();
+  onWindowFocus = () => {
+    this.parked = false;
+    this.scheduleVisibleFit();
+  };
   onWindowBlur = () => {
     this.mouseOverrideKeyHeld = false;
     this.endHandedOffDrag();
   };
   onVisibilityChange = () => {
     if (document.visibilityState === "visible") {
+      this.parked = false;
       this.scheduleVisibleFit();
     } else {
       this.mouseOverrideKeyHeld = false;
     }
   };
+  // A crossing of the phone boundary re-picks the default pitch (#5492) —
+  // rotation past 768px, or a desktop window dragged narrow and back.
+  onPhoneChange = () => {
+    this.parked = false;
+    this.applyDeviceFontSize();
+  };
   // Entering a pane is the earliest reliable activation signal for side-by-side
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
-  onPointerEnter = () => this.fitVisibleHost();
+  onPointerEnter = (event) => {
+    if (event.isTrusted) {
+      this.parked = false;
+    }
+    this.fitVisibleHost();
+  };
   // A scroll can target an already-focused window after another client resized the
   // PTY without the pointer ever leaving this pane. Capture repairs that less-common
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
   // gate makes every ordinary input a no-op before even measuring layout.
   onWheel = (event) => {
+    if (!event.isTrusted) {
+      return;
+    }
+    this.parked = false;
+    this.stopCoast();
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
       this.showMouseCaptureHint(this.wheelHint);
     }
   };
-  // Application mouse mode switches xterm's OWN touch scrolling off — both of its
-  // touch listeners return early while mouse events are active — and nothing takes
-  // over: the finger is on the screen, and the .xterm-viewport holding the scrollback
-  // is that screen's SIBLING, so the browser has no ancestor to pan. A phone
-  // therefore loses scrollback entirely the moment an agent enables mouse tracking,
-  // and unlike the wheel (#2681) it has no modifier to escape with. So af scrolls
-  // history itself here (#2682): the DRAG is terminal-owned, the TAP still reaches
-  // the application — which is why only the move is ever cancelled, never the
-  // touchstart that a tap's compatibility mouse events depend on.
   onTouchStart = (event) => {
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
-    this.touchScrollY = press?.clientY ?? null;
+    this.stopCoast();
     this.touchOriginX = press?.clientX ?? 0;
     this.touchOriginY = press?.clientY ?? 0;
-    this.touchScrollRemainder = 0;
-    this.touchScrollClaimed = false;
+    this.scrollRem = 0;
+    this.scrollClaimed = false;
+    if (press) this.fling.push(press.clientY);
     this.cancelTouchLongPress();
     this.discardPendingTouchCopy();
     this.disposeTouchPressMarker();
@@ -9571,6 +10082,7 @@ var AttachTerminal = class {
     this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
     this.flushTouchCopy();
+    if (this.scrollClaimed && this.fling.release()) window.requestAnimationFrame(this.onCoastFrame);
   };
   /**
    * The browser taking the gesture away — and the ONLY signal it gives when it does.
@@ -9582,6 +10094,8 @@ var AttachTerminal = class {
    * a takeover drops both the copy and the selection that promised it.
    */
   onTouchCancel = () => {
+    this.stopCoast();
+    this.scrollClaimed = false;
     this.cancelTouchLongPress();
     this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
@@ -9608,37 +10122,37 @@ var AttachTerminal = class {
     event.preventDefault();
   };
   onTouchMove = (event) => {
+    if (event.isTrusted) {
+      this.parked = false;
+    }
     this.handleUserScroll("touch");
-    const moved = event.touches.length !== 1 || !touchPressStillHeld(this.touchOriginX, this.touchOriginY, event.touches[0].clientX, event.touches[0].clientY);
+    const touch = event.touches[0];
+    const moved = event.touches.length !== 1 || !touchPressStillHeld(this.touchOriginX, this.touchOriginY, touch?.clientX, touch?.clientY);
     if (moved) {
       this.cancelTouchLongPress();
       this.discardPendingTouchCopy();
     }
-    if (this.touchScrollY === null) {
+    if (!this.fling.active) {
       return;
     }
     if (event.touches.length !== 1) {
-      this.touchScrollY = null;
+      this.stopCoast();
+      this.scrollClaimed = false;
       return;
     }
-    const last = this.touchScrollY;
-    const y = event.touches[0].clientY;
-    this.touchScrollY = y;
-    if (!this.applicationOwnsMouse()) {
-      return;
-    }
-    if (!this.touchScrollClaimed) {
+    const y = touch.clientY;
+    const px = this.fling.push(y);
+    if (!this.scrollClaimed) {
       if (!touchScrollClaimsGesture(this.touchOriginY, y)) {
         return;
       }
-      this.touchScrollClaimed = true;
+      this.scrollClaimed = true;
     }
-    const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
-    this.touchScrollRemainder = plan.remainder;
-    if (plan.lines !== 0) {
-      this.term.scrollLines(plan.lines);
-    }
+    this.touchOriginX = touch.clientX;
+    this.touchOriginY = y;
+    this.applyTouchScrollPx(px);
     event.preventDefault();
+    event.stopPropagation();
   };
   /** Every browser-initiated copy over the terminal (#2831) — the chord, macOS
    *  Edit → Copy, right-click → Copy, assistive tech. The decision is in
@@ -9652,8 +10166,12 @@ var AttachTerminal = class {
   };
   onPointerDown = (event) => {
     this.lastPointerWasTouch = event.pointerType === "touch";
+    this.stopCoast();
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
+      if (event.isTrusted) {
+        this.parked = false;
+      }
       this.handleUserScroll("scrollbar");
       return;
     }
@@ -9664,23 +10182,7 @@ var AttachTerminal = class {
       this.showMouseCaptureHint(this.pointerHint);
     }
   };
-  // The inversion itself (#2787). It runs in the CAPTURE phase on the pane host, so
-  // it lands before both of xterm's mousedown listeners — they sit on xterm's own
-  // element, a descendant — and therefore before either reads the modifier.
-  //
-  // mousedown ONLY. mouseup carries xterm's alt-click-moves-cursor gesture, which
-  // reads the same altKey: a synthetic Option there would fire cursor-movement
-  // sequences into the PTY on every plain click. It is also unnecessary — xterm only
-  // registers its PTY mouseup/mousedrag forwarders inside the mousedown branch this
-  // inversion already diverts, and the selection drag that replaces it is driven by
-  // document listeners that read no modifier at all.
-  //
-  // Mouse pointers ONLY. The inversion trades a plain click for a selection and hands
-  // the click back behind a modifier — a trade a touch device cannot take, because it
-  // has no modifier to hold, so inverting a tap would leave a phone with NO way to
-  // click a mouse-driven TUI at all. Touch does not need the trade either: its two
-  // gestures already separate without one, the drag scrolling history (#2682) and the
-  // tap staying the click.
+  // Click/selection modifier inversion (#2787) — the module note above the class.
   onMouseDownCapture = (event) => {
     if (this.lastPointerWasTouch && this.touchCopyFired) {
       event.preventDefault();
@@ -9698,17 +10200,7 @@ var AttachTerminal = class {
       this.beginHandedOffDrag();
     }
   };
-  // The rest of a handed-off drag. xterm forwards move/release from DOCUMENT-level
-  // listeners and encodes each event's OWN modifiers into the report, so stripping
-  // only the mousedown would hand a mouse-aware TUI an incoherent sequence: an
-  // unmodified press followed by a Shift/Alt-flagged drag and release. The modifier
-  // is af's escape hatch, not input the user aimed at the application, so it must
-  // not arrive as a modified-click binding.
-  //
-  // STRIPS only, and only while a handed-off drag is in flight. With the modifier
-  // NOT held the drag is a selection, and mouseup must keep its true altKey there:
-  // xterm's alt-click-moves-cursor reads exactly that flag and would otherwise fire
-  // cursor-movement sequences into the PTY on every plain click.
+  // Strips the escape modifier from a handed-off drag (#2787) — module note above.
   onHandedOffDragModifier = (event) => {
     if (terminalMouseOverrideHeld(event, this.mouseOverride)) {
       invertTerminalMouseOverride(event, this.mouseOverride);
@@ -9721,7 +10213,10 @@ var AttachTerminal = class {
     if (this.pendingViewport === null) {
       return;
     }
-    const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
+    const plan = terminalUserScrollPlan(
+      source,
+      this.visibleFitFrame !== null || this.visibleFitTimer !== null
+    );
     if (plan.cancelScheduledVisibleFit) {
       this.cancelTouchLongPress();
       this.disposeTouchPressMarker();
@@ -9751,11 +10246,13 @@ var AttachTerminal = class {
     }
     this.cancelVisibleFitFrame();
     this.clearPendingViewport();
+    this.stopCoast();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
     window.removeEventListener("blur", this.onWindowBlur);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.phone.removeEventListener("change", this.onPhoneChange);
     this.container.removeEventListener("pointerenter", this.onPointerEnter);
     this.container.removeEventListener("wheel", this.onWheel, true);
     this.container.removeEventListener("touchstart", this.onTouchStart, true);
@@ -9768,6 +10265,8 @@ var AttachTerminal = class {
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.container.removeEventListener("copy", this.onCopy);
     this.endHandedOffDrag();
+    this.unsubscribeFontSizes?.();
+    this.unsubscribeFontSizes = null;
     this.closeSocket();
     this.term.dispose();
   }
@@ -9778,6 +10277,60 @@ var AttachTerminal = class {
     const mode = this.term.modes.mouseTrackingMode;
     return mode !== "none" && mode !== "x10";
   }
+  applyTouchScrollPx(px) {
+    const plan = historyWheelPlan(
+      { deltaMode: 0, deltaY: px },
+      this.term.rows,
+      this.rowHeight(),
+      this.scrollRem
+    );
+    this.scrollRem = plan.remainder;
+    if (plan.lines === 0) return;
+    if (this.term.buffer.active.type !== "alternate" || !this.applicationOwnsWheel()) {
+      this.term.scrollLines(plan.lines);
+      return;
+    }
+    const element = this.term.element;
+    if (!element) {
+      return;
+    }
+    const deltaY = Math.sign(plan.lines);
+    for (let i = Math.abs(plan.lines); i > 0; i -= 1) {
+      element.dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: this.touchOriginX,
+          clientY: this.touchOriginY,
+          deltaMode: WheelEvent.DOM_DELTA_LINE,
+          deltaY
+        })
+      );
+    }
+  }
+  /** Every way a coast dies — a fresh wheel or key, a press, a second finger,
+   *  output on a followed tail, a buffer switch, dispose — funnels through here
+   *  so the stop records how many coast ticks had applied when it landed. The
+   *  frame the coast already queued still fires, but tick() reads the cleared
+   *  velocity and returns null: nothing applies past the recorded count. */
+  stopCoast() {
+    const live = this.fling.coasting;
+    this.fling.stop();
+    if (live) {
+      this.coastLiveStops += 1;
+      this.container.dataset.afCoastLiveStops = String(this.coastLiveStops);
+    }
+    if (this.coastStopCount === this.coastApplied) return;
+    this.coastStopCount = this.coastApplied;
+    this.container.dataset.afCoastStopCount = String(this.coastStopCount);
+  }
+  onCoastFrame = () => {
+    const px = this.fling.tick();
+    if (px === null) return;
+    this.applyTouchScrollPx(px);
+    this.container.dataset.afCoastApplied = String(++this.coastApplied);
+    window.requestAnimationFrame(this.onCoastFrame);
+  };
   /** Tracks the modifier strip on the document for exactly the life of one
    *  handed-off drag — xterm registers its own forwarders the same way, and events
    *  can leave this pane mid-drag, so the pane host is not a wide enough net. */
@@ -10022,7 +10575,7 @@ var AttachTerminal = class {
    *  into rows. Falls back to a font-size estimate before the first row exists. */
   rowHeight() {
     const renderedRow = this.container.querySelector(".xterm-rows > div");
-    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? 13) * 1.2;
+    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? terminalFontSizeFor(this.phone.matches)) * 1.2;
   }
   handleHistoryWheel(event) {
     if (!this.applicationOwnsWheel() || !terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld) {
@@ -10120,10 +10673,15 @@ var AttachTerminal = class {
         this.cursor = frame.seq;
         this.seeded = true;
         break;
-      case 0 /* PTYOut */:
+      case 0 /* PTYOut */: {
+        const buf = this.term.buffer.active;
+        if (!this.fling.active && buf.type === "normal" && buf.viewportY >= buf.baseY) {
+          this.stopCoast();
+        }
         this.term.write(frame.data);
         this.cursor += BigInt(frame.data.length);
         break;
+      }
       case 3 /* Repaint */:
         this.term.write(frame.data);
         break;
@@ -10182,22 +10740,119 @@ var AttachTerminal = class {
     this.ws = null;
   }
   // --- resize ----------------------------------------------------------------
-  /** Fits on the next painted frame, after visibility/layout changes have settled.
-   *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
-   *  this is not a time guess and never repeats on its own. */
-  scheduleVisibleFit() {
-    if (this.stopped || this.visibleFitFrame !== null) {
+  /** Re-derives the default pitch from the phone breakpoint (#5492). A real
+   *  crossing re-assigns xterm's fontSize — its option setter re-measures cell
+   *  metrics synchronously — then refits on the next painted frame, where the
+   *  changed grid goes out as an ordinary OpResize. The size guard keeps a
+   *  repeated call from scheduling a no-op fit. */
+  applyDeviceFontSize() {
+    const size = terminalFontSize(this.phone.matches);
+    if (this.term.options.fontSize === size) {
       return;
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => {
+    this.term.options.fontSize = size;
+    this.scheduleVisibleFit();
+  }
+  /** Fits on the next painted frame, after visibility/layout changes have settled.
+   *  Repeated activation signals coalesce into one scheduled attempt; unlike the
+   *  resize debounce, this is not a time guess and never repeats on its own.
+   *
+   *  The attempt is delivered two ways: the frame, and a timer armed beside it.
+   *  A page the compositor has parked — exactly what a stranded multi-client pane
+   *  looks like, with a peer's tab holding the screen — starves rAF outright, and
+   *  a frame that never fires would leave visibleFitFrame set forever, coalescing
+   *  every later activation into a no-op. The timer still fires on that page, so
+   *  the reclaim cannot be lost with the frame. */
+  scheduleVisibleFit() {
+    if (this.stopped) {
+      return;
+    }
+    this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
+    this.queueVisibleFit();
+  }
+  /** Arms the delivery pair. The frame side is RE-armed, not trusted: an armed
+   *  handle is only a promise — the callback can already have been eaten by a
+   *  parked epoch, leaving a latched handle that would suppress every later
+   *  trigger — the strand. cancelAnimationFrame on a dead handle is a no-op,
+   *  and re-requesting a live one just moves the fit to the next frame. The
+   *  timer side coalesces: one live timer is enough to verify the frame. */
+  queueVisibleFit() {
+    if (this.stopped) {
+      return;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    if (this.visibleFitTimer === null) {
+      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
+    }
+  }
+  /** Arms ONLY the frame probe — the wake detector for a resize this page is
+   *  not allowed to write yet. A parked or hidden page defers rAF until it
+   *  paints again, so a queued frame costs nothing while withheld and its
+   *  delivery IS the reactivation. The timer twin is never armed here: on a
+   *  withheld write its delivery can change nothing — it would fit, suppress,
+   *  and re-arm forever, a perpetual 250ms poll on a dormant page.
+   *
+   *  The probe carries a fit budget too: a transient measurement bail on the
+   *  wake frame must retry through the delivery pair like any scheduled fit.
+   *  Seeding here covers the arms that happen outside a fit — a suppressed
+   *  force-send on a parked page — where no budget is running; a fit that
+   *  withholds mid-flight instead preserves its own, because onVisibleFit no
+   *  longer zeroes the attempts while a probe is armed. Without either, the
+   *  first wake bail decremented below zero and stranded the owed write until
+   *  an unrelated activation signal. A live budget is left alone: the probe
+   *  borrows it rather than extending it. */
+  armWakeProbe() {
+    if (this.stopped) {
+      return;
+    }
+    if (this.visibleFitAttempts <= 0) {
+      this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+  }
+  /** Whichever of the twin triggers delivers first runs the fit and drops the
+   *  other. The channel the delivery arrived on is the parked detector: the
+   *  timer only wins when the frame armed beside it starved, so a timer
+   *  delivery marks the page parked and this fit writes nothing. A fit that
+   *  still cannot measure the host retries within the attempt budget — a
+   *  transient bail used to be FINAL, which is how one bad instant could strand
+   *  the pane on a peer's grid permanently. */
+  onVisibleFit(deliveredByFrame) {
+    this.parked = !deliveredByFrame;
+    if (this.visibleFitTimer !== null) {
+      window.clearTimeout(this.visibleFitTimer);
+      this.visibleFitTimer = null;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
       this.visibleFitFrame = null;
-      this.fitVisibleHost();
-    });
+    }
+    if (this.stopped) {
+      return;
+    }
+    if (this.fitVisibleHost() || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
+      if (this.visibleFitFrame === null) {
+        this.visibleFitAttempts = 0;
+      }
+      return;
+    }
+    this.queueVisibleFit();
   }
   /** Drops activation work queued before a direct user scroll. Leaving that frame
    * alive lets it run after the input fit and rebase the restore onto the new user
    * revision, which makes the first gesture appear inert. */
   cancelVisibleFitFrame() {
+    this.visibleFitAttempts = 0;
+    if (this.visibleFitTimer !== null) {
+      window.clearTimeout(this.visibleFitTimer);
+      this.visibleFitTimer = null;
+    }
     if (this.visibleFitFrame === null) {
       return;
     }
@@ -10207,32 +10862,44 @@ var AttachTerminal = class {
   /** Reconciles xterm's grid with this host only when the host is measurable and the
    *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
    *  while this client is inactive; activation/wheel makes this client the newest
-   *  writer once, without a resize-echo ping-pong between visible clients. */
+   *  writer once, without a resize-echo ping-pong between visible clients.
+   *
+   *  Returns whether the pane reached a settled answer — measured the host and
+   *  either fit or decided no fit was due. False means the measurement itself
+   *  failed (xterm metrics mid-invalidation, the element mid-move, a detach
+   *  between proposal and fit): a transient the scheduled path retries within
+   *  its attempt budget. A zero-size pane reports settled — it is genuinely
+   *  hidden, and the intersection observer already owns refitting it when it
+   *  comes back. */
   fitVisibleHost() {
     if (this.stopped) {
-      return;
+      return true;
+    }
+    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    if (host.width <= 0 || host.height <= 0) {
+      return true;
     }
     let proposed;
     try {
       proposed = this.fit.proposeDimensions();
     } catch {
-      return;
+      return false;
     }
-    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
-    if (!hasVisibleTerminalGeometry(host, proposed)) {
-      return;
+    if (proposed === void 0) {
+      return false;
     }
     const needsFit = shouldRefitVisibleTerminal(host, { rows: this.term.rows, cols: this.term.cols }, proposed);
     if (needsFit) {
       try {
         this.fit.fit();
       } catch {
-        return;
+        return false;
       }
-      this.sendResize(this.term.rows, this.term.cols, false);
     }
+    this.sendResize(this.term.rows, this.term.cols, false);
     this.scheduleViewportRestore(this.term.rows, this.term.cols);
     this.connectAfterInitialFit();
+    return true;
   }
   /** Restores the pre-peer reading position after xterm has rendered its new grid.
    *  resize() schedules the buffer reflow: reading baseY synchronously after fit can
@@ -10298,17 +10965,51 @@ var AttachTerminal = class {
     }, RESIZE_DEBOUNCE_MS);
   }
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
-   *  even an unchanged size (used on connect to (re)assert our size to the server). */
+   *  even an unchanged size (used on connect to (re)assert our size to the server).
+   *  A parked page never writes the shared grid: its fit still runs so xterm's
+   *  DOM stays honest, but no OpResize may leave — an unpainted page's resize
+   *  cannot be an activation, and it must not steal a live visible peer's grid.
+   *  document.visibilityState covers hidden pages; `parked` covers occluded
+   *  pages that still report 'visible' while their frames starve.
+   *
+   *  An owed write re-arms only a channel that can change its outcome.
+   *  Withheld on a parked/hidden page, that is the frame probe alone — its
+   *  delivery IS the reactivation, and it costs nothing while queued. The
+   *  timer twin is never armed for a withheld write (each tick would just
+   *  fit-and-withhold again — a perpetual poll), and a dead socket arms
+   *  nothing at all: the connect path force-sends the current size on open.
+   *  lastRows/lastCols are only credited once send() reports the frame
+   *  actually left — crediting a dropped write would erase the divergence
+   *  marker and silence every later attempt (the phantom-sent strand). */
   sendResize(rows, cols, force) {
     if (rows <= 0 || cols <= 0) {
+      return;
+    }
+    if (this.parked === null) {
+      return;
+    }
+    if (this.parked || typeof document !== "undefined" && document.visibilityState !== "visible") {
+      this.retryOwedResize(rows, cols);
       return;
     }
     if (!force && rows === this.lastRows && cols === this.lastCols) {
       return;
     }
-    this.lastRows = rows;
-    this.lastCols = cols;
-    this.send(encode(resizeFrame(rows, cols)));
+    if (this.send(encode(resizeFrame(rows, cols)))) {
+      this.lastRows = rows;
+      this.lastCols = cols;
+      return;
+    }
+  }
+  /** Keeps the wake probe armed while a resize is owed — withheld by a
+   *  parked/hidden page. Self-limiting: the check re-reads the divergence,
+   *  so a converged grid stops re-arming. Re-arms ONLY the frame probe —
+   *  the channel whose delivery can change the outcome; arming the timer
+   *  would just fit-and-withhold again on every tick. */
+  retryOwedResize(rows, cols) {
+    if (rows !== this.lastRows || cols !== this.lastCols) {
+      this.armWakeProbe();
+    }
   }
   /** Applies the server's authoritative size to xterm without echoing it back out
    *  as an OpResize (which would ping-pong). Records it as our last-known size so a
@@ -10378,6 +11079,23 @@ var AttachTerminal = class {
       return;
     }
     this.noteQueuedInput(text);
+  }
+  // The byte twin of sendInput for xterm's onBinary channel: the report string
+  // carries one char per byte (DEFAULT mouse encoding), so it encodes latin-1 —
+  // a UTF-8 pass would split every byte ≥ 0x80. Same held-not-dropped contract,
+  // minus the draft bookkeeping, which reads text.
+  sendBinary(data) {
+    const bytes = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i += 1) {
+      bytes[i] = data.charCodeAt(i);
+    }
+    const frame = encode(inputFrame(bytes));
+    if (this.send(frame) || this.stopped || this.exited) {
+      return;
+    }
+    if (!this.pendingInput.push(frame)) {
+      this.flashNotice("Terminal disconnected \u2014 typing was not delivered");
+    }
   }
   /** Hands the PTY everything typed while the socket was down, in order, then
    *  empties the queue. Called from onopen, so it covers the first connect and
@@ -10733,6 +11451,7 @@ function openConfigAssistant(opts) {
 // src/events.ts
 var BACKOFF_BASE_MS2 = 500;
 var BACKOFF_MAX_MS2 = 1e4;
+var AUTH_FAILURE_THRESHOLD = 3;
 function wsScheme2() {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }
@@ -10746,6 +11465,10 @@ var EventStream = class {
   everOpened = false;
   retry = 0;
   reconnectTimer = null;
+  // Streak of attempts closed before onopen, and the streak length at which
+  // onAuthFailure next fires (see AUTH_FAILURE_THRESHOLD).
+  consecutiveCloseBeforeOpen = 0;
+  nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
   /** Opens the socket and begins delivering events. Idempotent-ish: call once. */
   start() {
     this.stopped = false;
@@ -10774,13 +11497,17 @@ var EventStream = class {
     try {
       ws = new WebSocket(url);
     } catch {
-      this.scheduleReconnect();
+      this.handleClose(false);
       return;
     }
     this.ws = ws;
+    let opened = false;
     ws.onopen = () => {
+      opened = true;
       this.retry = 0;
       this.everOpened = true;
+      this.consecutiveCloseBeforeOpen = 0;
+      this.nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
       this.cb.onStatus("open");
       this.cb.onResync();
     };
@@ -10798,13 +11525,21 @@ var EventStream = class {
         this.cb.onEvent(ev);
       }
     };
-    ws.onclose = () => this.scheduleReconnect();
+    ws.onclose = () => this.handleClose(opened);
     ws.onerror = () => {
       try {
         ws.close();
       } catch {
       }
     };
+  }
+  /** Single funnel for every socket end; only a close-before-open extends
+   *  the streak. */
+  handleClose(opened) {
+    if (!opened) {
+      this.consecutiveCloseBeforeOpen += 1;
+    }
+    this.scheduleReconnect();
   }
   scheduleReconnect() {
     if (this.stopped || this.reconnectTimer !== null) {
@@ -10820,6 +11555,10 @@ var EventStream = class {
         this.open();
       }
     }, delay2);
+    if (this.consecutiveCloseBeforeOpen >= this.nextAuthEscalationAt) {
+      this.nextAuthEscalationAt = this.consecutiveCloseBeforeOpen + AUTH_FAILURE_THRESHOLD;
+      this.cb.onAuthFailure();
+    }
   }
 };
 
@@ -11348,7 +12087,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   queueMicrotask(() => titleInput.focus());
   return handle;
 }
-function handoffModal(sessionTitle, currentAgent, callbacks) {
+function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
   const { handle, body, confirmBtn } = modalChrome({
     title: `Hand off ${sessionTitle}`,
     confirmLabel: "Hand off",
@@ -11358,24 +12097,33 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   let accounts = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount;
+  const resolvedAgent = (agent) => accounts.resolved_agents?.[agent] ?? agent;
+  const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
+  const isCurrentAgent = (agent) => handoffTargetIsCurrent(currentAgent, agent, resolvedAgent(agent), recordedProgram);
+  const requiresAccount = (agent) => isCurrentAgent(agent) || !!callbacks.currentAccount && scopableTarget(agent);
   let accountRows = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "New account");
   const syncAccountSelection = () => {
-    accountHint.textContent = accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    const target = agentSelect.value;
+    const resolved = resolvedAgent(target);
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target) ? resolved !== target ? `${target} launches ${resolved}, which cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : `${target} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : (resolved !== "" && resolved !== target ? `${target} launches ${resolved} \u2014 the account must be a ${resolved} account. ` : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
     confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
   };
   const refreshAccounts2 = () => {
     const agent = agentSelect.value;
-    const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
+    const choices = handoffAccountChoices(
+      accounts,
+      resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : ""
+    );
     accountRows = choices;
     accountSelect.replaceChildren();
     if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
     else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
     for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
-    const fallback = accounts.defaults?.[agent];
+    const fallback = accounts.defaults?.[resolvedAgent(agent)];
     const selected = choices.find((choice) => choice.value === fallback && choice.logged_in) ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : void 0);
     accountSelect.value = selected?.value ?? "";
     accountSelect.disabled = choices.length === 0;
@@ -11396,12 +12144,18 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     if (catalogChoices === null || !accountsLoaded) return;
     const hasAccount = (agent) => handoffAccountChoices(
       accounts,
-      agent,
-      agent === currentAgent ? callbacks.currentAccount : ""
+      resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : ""
     ).length > 0;
-    const choices = catalogChoices.filter((choice) => !callbacks.currentAccount || hasAccount(choice.value));
-    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
-      choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
+    const currentTarget = handoffSameAgentTarget(
+      catalogChoices.map((choice) => choice.value),
+      currentAgent,
+      recordedProgram,
+      accounts.resolved_agents
+    );
+    const choices = catalogChoices.filter((choice) => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value)));
+    if (accountsLoaded && !accountsFailed && currentTarget && hasAccount(currentTarget)) {
+      choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
     }
     const previous = agentSelect.value;
     renderChoices(choices);
@@ -11420,7 +12174,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     )
   );
   void callbacks.loadPrograms().then((catalog) => {
-    catalogChoices = handoffAgentChoices(catalog, currentAgent);
+    catalogChoices = handoffAgentChoices(catalog, "");
     refreshAgentChoices();
   }).catch(() => {
     renderChoices([]);
@@ -11456,6 +12210,17 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   });
   queueMicrotask(() => agentSelect.focus());
   return handle;
+}
+function handoffTargetIsCurrent(currentAgent, target, resolved, recordedProgram) {
+  if (resolved !== "") {
+    return currentAgent !== "" && resolved === currentAgent;
+  }
+  return recordedProgram !== "" && recordedProgram === target;
+}
+function handoffSameAgentTarget(catalogValues, currentAgent, recordedProgram, resolvedAgents) {
+  const matched = catalogValues.find((value) => handoffTargetIsCurrent(currentAgent, value, resolvedAgents?.[value] ?? value, recordedProgram));
+  if (matched !== void 0) return matched;
+  return resolvedAgents === void 0 ? currentAgent : void 0;
 }
 function deletionConfirmationBody(opts) {
   if (opts.archived && opts.offBox) {
@@ -11586,11 +12351,28 @@ function confirmDeleteProjectModal(opts) {
   return handle;
 }
 function addProjectModal(callbacks) {
-  const { handle, body, confirmBtn } = modalChrome({
+  return checkoutPathModal({
     title: "Add project",
     confirmLabel: "Add project",
+    hint: "Enter an absolute repo path on the daemon host (~ works).",
+    ...callbacks
+  });
+}
+function rebindProjectModal(opts) {
+  const { projectLabel: projectLabel2, ...shared } = opts;
+  return checkoutPathModal({
+    title: `Rebind project ${projectLabel2}`,
+    confirmLabel: "Rebind",
+    hint: "Enter the checkout this project should track now \u2014 an absolute repo path on the daemon host (~ works).",
+    ...shared
+  });
+}
+function checkoutPathModal(opts) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.title,
+    confirmLabel: opts.confirmLabel,
     confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
+    onCancel: opts.onCancel
   });
   const pathInput = h("input", {
     type: "text",
@@ -11599,7 +12381,7 @@ function addProjectModal(callbacks) {
     autocomplete: "off"
   });
   pathInput.setAttribute("aria-label", "Repository path");
-  const { loadDirectory, errorText: errorText2 } = callbacks;
+  const { loadDirectory, errorText: errorText2 } = opts;
   let picker = null;
   if (loadDirectory && errorText2) {
     picker = directoryPicker({
@@ -11625,7 +12407,7 @@ function addProjectModal(callbacks) {
     h(
       "p",
       { class: "af-modal-hint" },
-      "Enter an absolute repo path on the daemon host (~ works)."
+      opts.hint
     )
   );
   pathInput.addEventListener("input", () => handle.setError(null));
@@ -11637,7 +12419,7 @@ function addProjectModal(callbacks) {
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit(path);
+    opts.onSubmit(path);
   });
   queueMicrotask(() => {
     if (picker) {
@@ -11658,6 +12440,23 @@ function projectLabel(root2) {
 function removeTaskModal(name, onConfirm, onCancel) {
   const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
   body.append(h("p", { class: "af-modal-text af-modal-danger" }, "Delete the task and stop future runs. Keep existing sessions."));
+  asForm(handle.el.firstElementChild, onConfirm);
+  return handle;
+}
+function markDeliveredModal(sessionTitle, onConfirm, onCancel) {
+  const { handle, body } = modalChrome({
+    title: `Mark ${sessionTitle} delivered?`,
+    confirmLabel: "Mark delivered",
+    confirmClass: "af-primary",
+    onCancel
+  });
+  body.append(
+    h(
+      "p",
+      { class: "af-modal-text" },
+      "Confirm only if the pane already shows the incoming agent acting on its handoff mission. This retires the pending delivery and clears the leftover operation state WITHOUT sending the mission again. If the pane does not show it, cancel and use Retry instead \u2014 that submits the mission a second time."
+    )
+  );
   asForm(handle.el.firstElementChild, onConfirm);
   return handle;
 }
@@ -11859,6 +12658,7 @@ var IDLE_REASON_LABELS = {
   "usage-limit": "usage limit",
   "process-exited": "process exited",
   "restore-gave-up": "restore gave up",
+  "restore-waiting-on-environment": "restore waiting on environment",
   "recreate-pending": "recreate notice pending",
   "prompt-not-delivered": "prompt not delivered",
   "delivery-unconfirmed": "delivery unknown",
@@ -11876,6 +12676,13 @@ function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
     if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
       const noun = attempts === 1 ? "attempt" : "attempts";
       detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+    }
+  }
+  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
+    const { attempts, error } = s.lost_restore_wait;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
+      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
     }
   }
   if (s.last_pane_churn_at) {
@@ -11981,11 +12788,33 @@ function isPendingManualHandoffDeliveryUnconfirmed(s) {
   const liveness = livenessOf(s);
   return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
 }
+function ambiguousHandoffDelivery(status) {
+  return status === "sent-unverified" || status === "could-not-confirm";
+}
+function confirmableHandoffDelivery(status) {
+  return ambiguousHandoffDelivery(status) || status === "delivered";
+}
 function isPendingAgentHandoffDeliveryUnconfirmed(s) {
   const liveness = livenessOf(s);
   const status = s.pending_handoff_delivery_status;
   const op = s.in_flight_op ?? InFlightOp.None;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && (status === "sent-unverified" || status === "could-not-confirm") && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+}
+function isPendingAgentHandoffDeliveryConfirmable(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function isPendingManualSwapDeliveryConfirmable(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
 }
 function canHandoff(s) {
   return s.can_handoff === true;
@@ -12383,7 +13212,7 @@ function rebindTargetAfterAwait(inputs) {
   if (inputs.currentSelId !== inputs.pinnedSelId) {
     return { kind: "refused", reason: "selection-moved" };
   }
-  if (inputs.currentGen !== inputs.pinnedGen) {
+  if (inputs.currentGen !== inputs.pinnedGen || (inputs.newestAppliedSeqs.get(inputs.pinnedSelId) ?? 0) > inputs.rebindSeq) {
     return { kind: "refused", reason: "layout-moved" };
   }
   if (inputs.targetIdx < 0) {
@@ -12466,6 +13295,21 @@ function closeLeaf(root2, leafId) {
     return { ...node, a, b };
   };
   return remove(root2);
+}
+function siblingSubtreeOf(root2, leafId) {
+  if (root2.kind === "leaf") {
+    return null;
+  }
+  if (root2.a.kind === "leaf" && root2.a.id === leafId) {
+    return root2.b;
+  }
+  if (root2.b.kind === "leaf" && root2.b.id === leafId) {
+    return root2.a;
+  }
+  if (findLeaf(root2.a, leafId)) {
+    return siblingSubtreeOf(root2.a, leafId);
+  }
+  return siblingSubtreeOf(root2.b, leafId);
 }
 function dedupeExcept(root2, tab, keepId) {
   const dupes = leaves(root2).filter((l) => l.tab === tab && l.id !== keepId);
@@ -12774,16 +13618,20 @@ function previewProbeMs() {
   return typeof override === "number" ? override : 2500;
 }
 var previewReachable = /* @__PURE__ */ new Map();
-function previewOriginReachable(origin) {
+function previewOriginReachable(origin, fresh = false) {
   let port;
   try {
     port = new URL(origin).port;
   } catch {
     return Promise.resolve(false);
   }
-  const cached = previewReachable.get(port);
-  if (cached !== void 0) {
-    return cached;
+  if (fresh) {
+    previewReachable.delete(port);
+  } else {
+    const cached = previewReachable.get(port);
+    if (cached !== void 0) {
+      return cached;
+    }
   }
   const probe = new Promise((resolve) => {
     const frame = document.createElement("iframe");
@@ -12800,7 +13648,7 @@ function previewOriginReachable(origin) {
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
-      if (!ok) {
+      if (!ok && previewReachable.get(port) === probe) {
         previewReachable.delete(port);
       }
       resolve(ok);
@@ -13022,6 +13870,23 @@ var SplitView = class {
     this.tree = replaceTab(this.tree, this.focusedId, tab);
     this.commit();
   }
+  /** setFocusedTab for the post-await apply of an awaited tab mutation
+   *  (index.ts guardedTabRebind). The landing is identical — retain, reconcile,
+   *  report — but it does NOT count toward layoutGeneration: that counter answers
+   *  "did the user move the layout during my await?", and a gesture's own write
+   *  landing is not the user moving anything. Counting it made every awaited
+   *  mutation veto the next gesture pinned while it was in flight — a create
+   *  issued while an earlier close was still settling refused its own rebind and
+   *  left the pane on the old tab (#5061). The caller instead sequences
+   *  overlapping awaited gestures by issue order, so a stale apply still refuses
+   *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
+  setFocusedTabAwaited(tab) {
+    if (!this.tree || !this.focusedId) {
+      return;
+    }
+    this.tree = replaceTab(this.tree, this.focusedId, tab);
+    this.land();
+  }
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
    *  a terminal actually took it. False means there was nothing to focus: a web or
    *  VS Code tab renders an iframe and carries no term (mountWebPane leaves
@@ -13131,6 +13996,13 @@ var SplitView = class {
    *  wins — while the roster event that races the same close still passes the
    *  guard, because it bumps nothing.
    *
+   *  Deliberately NOT bumped either by an awaited mutation's own apply
+   *  (setFocusedTabAwaited): that landing IS the gesture's write, not newer intent
+   *  formed during its await. Counting it made every awaited rebind veto the next
+   *  one pinned while it was in flight — the close-then-create flake of #5061.
+   *  Overlapping awaited gestures order among themselves on the caller's issue
+   *  sequence instead (rebindTargetAfterAwait's rebindSeq/newestAppliedSeq).
+   *
    *  Pane focus counts because the guarded write (setFocusedTab) targets the
    *  FOCUSED pane: an index computed against the pane that issued the close is
    *  meaningless once a different pane holds focus, and applying it there would
@@ -13144,6 +14016,13 @@ var SplitView = class {
    *  it the one place to count them (see layoutGeneration). */
   commit() {
     this.layoutGen++;
+    this.land();
+  }
+  /** The landing write half of commit() — retain, reconcile, report — shared with
+   *  setFocusedTabAwaited, whose landings must not count toward the generation:
+   *  they are a gesture's own awaited write completing, not the user moving the
+   *  layout (#5061). */
+  land() {
     if (this.sessionId && this.tree) {
       this.retain(this.sessionId, this.tree, this.tabIds);
     }
@@ -13154,16 +14033,26 @@ var SplitView = class {
     if (!this.tree) {
       return;
     }
+    const siblingSubtree = siblingSubtreeOf(this.tree, leafId);
     const next = closeLeaf(this.tree, leafId);
     if (next === null) {
       return;
     }
     this.tree = next;
-    if (this.focusedId === leafId) {
-      this.focusedId = leaves(this.tree)[0]?.id ?? null;
+    const heldFocus = this.focusedId === leafId;
+    if (heldFocus) {
+      const fallback = leaves(this.tree)[0]?.id ?? null;
+      this.focusedId = (siblingSubtree ? leaves(siblingSubtree)[0]?.id : null) ?? fallback;
     }
     this.commit();
     this.refocus();
+    if (heldFocus && this.termHoldsFocus) {
+      const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+      if (!focused?.term) {
+        this.cb.onFocusChange(false);
+        this.termHoldsFocus = false;
+      }
+    }
   }
   // --- internal: reconcile tree → DOM + terminals ---------------------------
   teardown() {
@@ -13498,7 +14387,7 @@ var SplitView = class {
           if (origin === "") {
             return "";
           }
-          return await previewOriginReachable(origin) ? previewOriginSrc(origin, target) : "";
+          return await previewOriginReachable(origin, fresh) ? previewOriginSrc(origin, target) : "";
         }) : Promise.resolve("");
       }
       return previewSrcOnce;
@@ -13528,6 +14417,9 @@ var SplitView = class {
       if (previewSrc !== "") {
         open.href = previewSrc;
         fbLink.href = previewSrc;
+      } else {
+        open.href = openHref;
+        fbLink.href = openHref;
       }
       showFrame();
       const next = bust && webProxied ? cacheBustedWebSrc(base, nextReloadNonce()) : base;
@@ -13661,17 +14553,21 @@ var SplitView = class {
    */
   applyTabDrop(pane, drag, clientX, clientY) {
     if (!this.tree) {
-      return;
+      return false;
     }
     const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
     if (tab === null) {
-      return;
+      return false;
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
-    const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+    const shown = findLeaf(this.tree, pane.leafId)?.tab;
+    if (zone === "center" && shown === tab && this.focusedId === pane.leafId) {
+      return false;
+    }
+    const onItsOwnPane = zone !== "center" && shown === tab;
     const opened = onItsOwnPane ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs()) : tab;
     if (opened === null) {
-      return;
+      return false;
     }
     this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
     const landed = leaves(this.tree).find((l) => l.tab === opened);
@@ -13680,6 +14576,7 @@ var SplitView = class {
     }
     this.commit();
     this.refocus();
+    return true;
   }
   /** The pane whose box contains a viewport point, or null. Used by the touch path,
    *  which has no browser hit-testing to route a drop for it. */
@@ -13713,17 +14610,18 @@ var SplitView = class {
       this.hideZone(pane);
     }
   }
-  /** Lands a touch-dragged tab at a viewport point. Returns whether a pane took it —
-   *  false means the release was not over any pane, so the caller can treat it as a
-   *  bar drop (reorder) instead. */
+  /** Lands a touch-dragged tab at a viewport point. `landed` reports whether a
+   *  pane took it — false means the release was not over any pane, so the caller
+   *  can treat it as a bar drop (reorder) instead. `changed` reports whether the
+   *  layout actually committed; a landed drop can still be rejected inside
+   *  applyTabDrop, and the caller keys any user-visible side effects off that. */
   dropTabAt(clientX, clientY, drag) {
     const pane = this.paneAtPoint(clientX, clientY);
     if (!pane) {
-      return false;
+      return { landed: false, changed: false };
     }
     this.hideZone(pane);
-    this.applyTabDrop(pane, drag, clientX, clientY);
-    return true;
+    return { landed: true, changed: this.applyTabDrop(pane, drag, clientX, clientY) };
   }
   /** The drop zone for a pointer position over a pane: an edge (outer band) or the
    *  center. */
@@ -14364,22 +15262,34 @@ function createLatestRequestGate() {
     }
   };
 }
+async function retryWithBackoff(attempt, alive, delays, sleep) {
+  for (const delay2 of delays) {
+    await sleep(delay2);
+    if (!alive()) {
+      return false;
+    }
+    if (await attempt()) {
+      return true;
+    }
+  }
+  return false;
+}
 function createFencedRefetcher(spec) {
   const gate = createLatestRequestGate();
   return {
-    refresh() {
+    refresh(options) {
       const tok = spec.readToken();
       if (tok === null) {
-        return;
+        return Promise.resolve();
       }
       const request = gate.begin();
       const isNewest = () => request.isCurrent() && spec.readToken() === tok;
-      void spec.fetch(tok).then((value) => {
+      return spec.fetch(tok).then((value) => {
         if (isNewest()) {
           spec.commit(value);
         }
       }).catch((error) => {
-        if (isNewest()) {
+        if (isNewest() && !options?.silent) {
           spec.onError?.(error);
         }
       });
@@ -14668,8 +15578,20 @@ function taskHealthSummary(t) {
   }
   return t.unassessable ? "Health unknown" : "";
 }
+function farOutNote(nextRunAt, now = /* @__PURE__ */ new Date()) {
+  const next = new Date(nextRunAt);
+  if (Number.isNaN(next.getTime())) return "";
+  let months = (next.getFullYear() - now.getFullYear()) * 12 + next.getMonth() - now.getMonth();
+  const nextClock = next.getHours() * 36e5 + next.getMinutes() * 6e4 + next.getSeconds() * 1e3 + next.getMilliseconds();
+  const nowClock = now.getHours() * 36e5 + now.getMinutes() * 6e4 + now.getSeconds() * 1e3 + now.getMilliseconds();
+  if (next.getDate() < now.getDate() || next.getDate() === now.getDate() && nextClock < nowClock) months--;
+  const date = `${next.getFullYear()}-${pad22(next.getMonth() + 1)}-${pad22(next.getDate())}`;
+  return `${date} (in ${months} ${months === 1 ? "month" : "months"})`;
+}
 function taskArmingSummary(t, now = /* @__PURE__ */ new Date()) {
   if (t.next_run_at) {
+    const far = t.next_run_far ? farOutNote(t.next_run_at, now) : "";
+    if (far) return `Next run ${far}`;
     return `Next run ${formatTime(t.next_run_at, now)}`;
   }
   return "";
@@ -15329,7 +16251,7 @@ function replaceProjectMenuChildren(menu, children, fallback) {
   const key = active && menu.contains(active) ? active.dataset.projectFocus : void 0;
   menu.replaceChildren(...children);
   if (key === void 0) return;
-  if (menu.hidden) {
+  if (menu.getClientRects().length === 0) {
     fallback.focus({ preventScroll: true });
     return;
   }
@@ -15436,6 +16358,16 @@ function patchRetryButton(button, action) {
     button.textContent = action.label;
     button.title = action.title;
   }
+}
+function markDeliveredActionForSession(s) {
+  if (isPendingAgentHandoffDeliveryConfirmable(s) || isPendingManualSwapDeliveryConfirmable(s)) {
+    return {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed \u2014 retire it without resending"
+    };
+  }
+  return null;
 }
 function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
@@ -15626,6 +16558,9 @@ function connectingView() {
   ));
 }
 function noAuthLoginView(state, actions2) {
+  if (state.loginCondition === "expired") {
+    return expiredTokenlessView(state, actions2);
+  }
   const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
@@ -15642,6 +16577,50 @@ function noAuthLoginView(state, actions2) {
       "p",
       { class: "af-subtitle" },
       "No token needed."
+    ),
+    form
+  ];
+  if (state.loginError) {
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
+}
+function expiredTokenlessView(state, actions2) {
+  const input = h("input", {
+    type: "password",
+    id: "af-token",
+    placeholder: "Paste your daemon token",
+    autocomplete: "off",
+    disabled: state.connecting
+  });
+  input.setAttribute("aria-label", "Daemon bearer token");
+  const button = h(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting\u2026" : "Connect"
+  );
+  const form = h(
+    "form",
+    { class: "af-login-form" },
+    h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
+    input,
+    button
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const token2 = input.value.trim();
+    if (token2 !== "") {
+      actions2.connect(token2);
+    }
+  });
+  const children = [
+    h("h1", { class: "af-recovery-title af-recovery-failed" }, "Login expired"),
+    h(
+      "p",
+      { class: "af-subtitle" },
+      "Paste the daemon token from ",
+      h("code", {}, "af token show"),
+      " on the host."
     ),
     form
   ];
@@ -15937,6 +16916,11 @@ var AppShell = class {
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   retryBtn = null;
   retryKind = null;
+  // The "Mark delivered" button and whether it is currently shown (#4429). Same
+  // in-place treatment as retryBtn: a verdict becomes confirmable — or settles —
+  // on a session.updated event with no selection change to rebuild the header.
+  deliverBtn = null;
+  deliverVisible = false;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
@@ -16465,7 +17449,7 @@ var AppShell = class {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   renderProjectSwitch(state) {
-    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects);
+    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects.map((p) => p.root));
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
     this.projectSwitchBtn.disabled = false;
@@ -16474,7 +17458,8 @@ var AppShell = class {
       children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet \u2014 add one below."));
     }
     for (const p of summaries) {
-      children.push(this.projectItem(p, p.root === current));
+      const record = state.registeredProjects.find((r) => r.root === p.root);
+      children.push(this.projectItem(p, p.root === current, record));
     }
     const footChildren = [];
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
@@ -16489,9 +17474,25 @@ var AppShell = class {
     footChildren.push(add);
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
+      if (currentRecord) {
+        const rebind = h("button", { type: "button", class: "af-ghost af-project-rebind" }, "Rebind\u2026");
+        rebind.dataset.projectFocus = "rebind";
+        rebind.setAttribute(
+          "title",
+          `Point ${currentSummary.name} at a different checkout \u2014 the repair after it was moved or recloned`
+        );
+        rebind.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.closeProjectMenu();
+          this.appControls.dismiss();
+          this.actions.rebindProject(currentRecord.id, currentSummary.name);
+        });
+        footChildren.push(rebind);
+      }
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
       del.dataset.projectFocus = "delete";
-      const isRegistered = state.registeredProjects.includes(currentSummary.root);
+      const isRegistered = currentRecord !== void 0;
       if (currentSummary.liveCount === 0 && !isRegistered) {
         del.disabled = true;
         del.setAttribute(
@@ -16518,8 +17519,11 @@ var AppShell = class {
   }
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
-   *  switches the active project and closes the menu. */
-  projectItem(p, current) {
+   *  switches the active project and closes the menu. `record` is the registry
+   *  registration behind the row, when there is one — a registration whose
+   *  recorded root is gone (path_exists=false) is marked missing, the state the
+   *  footer Rebind action repairs. */
+  projectItem(p, current, record) {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
@@ -16529,7 +17533,11 @@ var AppShell = class {
       h("span", { class: "af-project-item-name" }, p.name),
       h("span", { class: "af-project-item-path" }, p.path)
     );
-    const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
+    const meta = h(
+      "span",
+      { class: "af-project-item-meta" },
+      ...record && !record.path_exists ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` \xB7 ${projectMeta(p)}`] : [projectMeta(p)]
+    );
     const item = h("button", { type: "button", class: cls }, check, label, meta);
     item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
@@ -16578,8 +17586,11 @@ var AppShell = class {
   /** A touch pane drop is a user-owned tab transition, but only if a pane accepts it. */
   dropTabOnPaneAt(clientX, clientY, drag) {
     if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
-    this.dismissCarriedActions();
-    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    const drop = this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    if (drop.changed) {
+      this.dismissCarriedActions();
+    }
+    return drop.landed;
   }
   /** Keyboard twin of the New tab button, including its per-kind availability. */
   openNewTabPicker(shortcutReturn) {
@@ -16793,6 +17804,8 @@ var AppShell = class {
       this.headActionSig = "";
       this.retryBtn = null;
       this.retryKind = null;
+      this.deliverBtn = null;
+      this.deliverVisible = false;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.afTheme;
@@ -16825,7 +17838,9 @@ var AppShell = class {
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
-      closePane: () => this.actions.closePane?.()
+      markDelivered: () => this.actions.markDelivered(),
+      closePane: () => this.actions.closePane?.(),
+      fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta)
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
@@ -16833,6 +17848,9 @@ var AppShell = class {
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
     patchRetryButton(chrome.retry, retryAction);
+    this.deliverBtn = chrome.deliver;
+    this.deliverVisible = markDeliveredActionForSession(selected) !== null;
+    chrome.deliver.hidden = !this.deliverVisible;
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
@@ -17287,6 +18305,11 @@ var AppShell = class {
       this.retryKind = retryKind;
       patchRetryButton(this.retryBtn, retryAction);
     }
+    const nowDeliver = markDeliveredActionForSession(selected) !== null;
+    if (this.deliverBtn && nowDeliver !== this.deliverVisible) {
+      this.deliverVisible = nowDeliver;
+      this.deliverBtn.hidden = !nowDeliver;
+    }
     const nowHandoff = canHandoff(selected);
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
@@ -17706,21 +18729,35 @@ async function connect(candidate) {
     if (!attempt.isCurrent()) return;
     if (shouldForgetToken(e)) {
       clearToken();
+      store.set({ phase: "login", connecting: false, authRequired: true, loginError: describeError(e), loginCondition: "expired" });
+      return;
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
     return;
   }
   if (!attempt.isCurrent()) return;
   token = candidate;
   storeToken(candidate);
-  const [taskResult, projectResult] = await Promise.all([
+  const [taskResult, projectResult, configResult] = await Promise.all([
     listTasks(candidate).then((tasks2) => ({ tasks: tasks2, error: "" })).catch((error) => ({ tasks: [], error: errorText(error) })),
-    fetchRegisteredProjects(candidate)
+    fetchRegisteredProjects(candidate),
+    // The terminal font sizes MUST be resolved before the first attach — #5500:
+    // an attach that opened at the compiled-in defaults and jumped when the
+    // config landed would size its first OpResize on the wrong pitch. A failed
+    // read degrades to those defaults, same as the tasks fetch degrades to
+    // none; the terminals still come up correctly formed, just unpersisted-
+    // sized until the next config read lands.
+    getConfig(candidate).catch(() => null)
   ]);
   const { tasks, error: tasksError } = taskResult;
   const { projects: registeredProjects, error: projectsError } = projectResult;
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
-  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  if (configResult) {
+    setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
+  } else {
+    void reconcileConfigRead(candidate, attempt);
+  }
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
   connectionGeneration++;
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
@@ -17759,10 +18796,12 @@ async function connect(candidate) {
     requestResync();
   }
 }
+function projectRoots(projects) {
+  return projects.map((p) => p.root);
+}
 async function fetchRegisteredProjects(tok) {
   try {
-    const projects = (await listProjects(tok)).map((p) => p.root);
-    return { projects, error: "" };
+    return { projects: await listProjects(tok), error: "" };
   } catch (e) {
     return { projects: [], error: errorText(e) };
   }
@@ -17771,6 +18810,7 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
   store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
   connectionGeneration++;
+  rebindInFlight = null;
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
@@ -18013,7 +19053,8 @@ function doOpenConfigAssistant() {
   }));
 }
 function newSession() {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const invoker = captureModalInvoker();
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       // The backend catalog is per-repo and read at choose time (#1933), so the
@@ -18068,8 +19109,10 @@ function newSession() {
           }
           m.setBusy(false);
           m.setError(errorText(e));
-          if (!modal && token === tok) openModal(m);
-          else surfaceMutationError(e);
+          if (!modal && token === tok) {
+            openModal(m, true, invoker);
+            m.el.querySelector(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")?.focus({ preventScroll: true });
+          } else surfaceMutationError(e);
         });
       },
       onCancel: closeModal
@@ -18268,6 +19311,122 @@ function openAddProject() {
     })
   );
 }
+var rebindInFlight = null;
+var rebindInFlightGeneration = 0;
+var REBIND_ANSWER_MS = 3e4;
+function rebindOutcomeUnknown(label) {
+  return new Error(`Rebind of ${label} \xB7 outcome unknown \xB7 check the project list`);
+}
+function followConfirmedRebind(projectId, tok, connection) {
+  void listProjects(tok).then((projects) => {
+    if (connection !== connectionGeneration || token !== tok) return;
+    const root2 = projects.find((p) => p.id === projectId)?.root;
+    if (root2 !== void 0) {
+      store.set({ registeredProjects: projects });
+      switchProject(root2);
+    }
+    refreshRegisteredProjects();
+  }).catch(() => {
+    if (connection === connectionGeneration && token === tok) refreshRegisteredProjects();
+  });
+}
+function openRebindProject(projectId, label) {
+  if (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
+    showTransientNotice(`Rebind of ${rebindInFlight} is still running \u2014 try again when it finishes.`);
+    return;
+  }
+  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  openModal(
+    rebindProjectModal({
+      projectLabel: label,
+      // Same per-call token + daemon read as add-project's browser.
+      loadDirectory: (path) => {
+        const tok = token;
+        if (tok === null) {
+          return Promise.reject(new Error("not connected"));
+        }
+        return listDirectory(path, tok);
+      },
+      errorText,
+      onSubmit: (path) => {
+        const tok = token;
+        if (tok === null || !modal || rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        rebindInFlight = label;
+        const connection = connectionGeneration;
+        rebindInFlightGeneration = connection;
+        const current = () => connection === connectionGeneration;
+        let settled = false;
+        const settle = () => {
+          if (settled) {
+            return false;
+          }
+          settled = true;
+          window.clearTimeout(unanswered);
+          if (rebindInFlightGeneration === connection) {
+            rebindInFlight = null;
+          }
+          return true;
+        };
+        const stillHere = () => modal === m || oldRoot !== null && store.get().selectedProject === oldRoot;
+        const unknownOutcome = () => {
+          if (modal === m) closeModal();
+          refreshRegisteredProjects();
+          surfaceMutationError(rebindOutcomeUnknown(label), "uncertain");
+        };
+        const unanswered = window.setTimeout(() => {
+          if (!current() || !settle()) return;
+          unknownOutcome();
+        }, REBIND_ANSWER_MS);
+        void rebindProject(projectId, path, tok).then(() => {
+          if (!current()) return;
+          if (!settle()) {
+            refreshRegisteredProjects();
+            return;
+          }
+          const follow = stillHere();
+          if (modal === m) closeModal();
+          if (follow) {
+            followConfirmedRebind(projectId, tok, connection);
+          } else {
+            refreshRegisteredProjects();
+          }
+        }).catch((e) => {
+          if (!current()) return;
+          if (!settle()) {
+            refreshRegisteredProjects();
+            return;
+          }
+          if (isMutationCommittedError(e)) {
+            const follow = stillHere();
+            if (modal === m) closeModal();
+            if (follow) {
+              followConfirmedRebind(projectId, tok, connection);
+            } else {
+              refreshRegisteredProjects();
+            }
+            surfaceMutationError(e, "confirmed");
+            return;
+          }
+          if (isMutationOutcomeUncertain(e)) {
+            unknownOutcome();
+            return;
+          }
+          if (modal !== m) {
+            surfaceTabError(e);
+            return;
+          }
+          m.setBusy(false);
+          m.setError(errorText(e));
+        });
+      },
+      onCancel: closeModal
+    })
+  );
+}
 function selectedSessionData() {
   const { sessions, selectedId } = store.get();
   return sessions.find((s) => s.id === selectedId) ?? null;
@@ -18280,10 +19439,17 @@ function openTab(index) {
   splitView.setFocusedTab(index);
   focusTerminal();
 }
+var tabRebindSeq = 0;
+var newestAppliedRebindBySession = /* @__PURE__ */ new Map();
 function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
-  void run().then((snapshot) => {
+  const seq = ++tabRebindSeq;
+  void run().then(async (snapshot) => {
     if (snapshot === null) return;
+    const hold = globalThis.__afTabRebindHold?.(verb);
+    if (hold) {
+      await hold;
+    }
     const {
       sessions,
       authoritative,
@@ -18308,10 +19474,13 @@ function guardedTabRebind(selId, run, resolve, verb) {
       currentGen,
       currentSelId: store.get().selectedId,
       pinnedSessionAlive,
-      targetIdx
+      targetIdx,
+      rebindSeq: seq,
+      newestAppliedSeqs: newestAppliedRebindBySession
     });
     if (outcome.kind === "rebind") {
-      splitView.setFocusedTab(outcome.idx);
+      newestAppliedRebindBySession.set(selId, seq);
+      splitView.setFocusedTabAwaited(outcome.idx);
       if (verb === "create") {
         focusTerminal();
       }
@@ -18482,10 +19651,13 @@ function clearTabError() {
     store.set({ tabError: null });
   }
 }
+var configReadCommits = 0;
 var configRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: getConfig,
   commit: (resp) => {
+    configReadCommits++;
+    setTerminalFontSizes(terminalFontSizesFromConfig(resp.entries));
     store.set({ config: resp.entries, configPath: resp.path });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
@@ -18497,7 +19669,23 @@ var configRefetcher = createFencedRefetcher({
   }
 });
 function refreshConfig() {
-  configRefetcher.refresh();
+  return configRefetcher.refresh();
+}
+var CONNECT_CONFIG_RETRY_DELAYS_MS = [1e3, 2e3, 4e3, 8e3, 16e3];
+async function reconcileConfigRead(candidate, attempt) {
+  const landed = await retryWithBackoff(
+    async () => {
+      const before = configReadCommits;
+      await configRefetcher.refresh({ silent: true });
+      return configReadCommits > before;
+    },
+    () => connectionAttemptMayCommit(attempt, token, candidate),
+    CONNECT_CONFIG_RETRY_DELAYS_MS,
+    (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
+  );
+  if (!landed && connectionAttemptMayCommit(attempt, token, candidate)) {
+    await refreshConfig();
+  }
 }
 var accountsRefetcher = createFencedRefetcher({
   readToken: () => token,
@@ -18571,16 +19759,15 @@ var queueConfigSave = createKeyedQueue();
 function applyConfigValue(key, value) {
   const tok = token;
   if (tok === null) {
-    return;
+    return Promise.resolve();
   }
-  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+  return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 function applyConfigValueNow(key, value, tok) {
   const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok).then((resp) => {
     if (requestGeneration !== connectionGeneration || token !== tok) {
-      refreshConfig();
-      return;
+      return refreshConfig();
     }
     store.set({
       configStatus: {
@@ -18591,12 +19778,16 @@ function applyConfigValueNow(key, value, tok) {
         error: ""
       }
     });
-    refreshConfig();
+    return refreshConfig();
   }).catch((err) => {
     if (requestGeneration !== connectionGeneration || token !== tok) return;
     store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
+    if (terminalFontClassForKey(key) !== null) {
+      surfaceTabError(new Error(`the terminal text size was not saved: ${errorText(err)}`));
+    }
   });
 }
+bindTerminalFontPersist(applyConfigValue);
 var TASK_HEALTH_POLL_MS = 6e4;
 window.setInterval(() => {
   const state = store.get();
@@ -18613,7 +19804,7 @@ var tasksRefetcher = createFencedRefetcher({
       tasks,
       loadProjectChoice(),
       store.get().selectedProject,
-      store.get().registeredProjects
+      projectRoots(store.get().registeredProjects)
     );
     store.set({ tasks, selectedProject, tasksError: "" });
   },
@@ -18634,19 +19825,19 @@ function requestTaskResync() {
 var projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
-  commit: (projects) => {
-    const registeredProjects = projects.map((p) => p.root);
-    const selectedProject = reconcileProject(
-      store.get().sessions,
-      store.get().tasks,
-      loadProjectChoice(),
-      store.get().selectedProject,
-      registeredProjects
-    );
-    store.set({ registeredProjects, selectedProject, projectsError: "" });
-  },
+  commit: commitRegisteredProjects,
   onError: (e) => store.set({ projectsError: errorText(e) })
 });
+function commitRegisteredProjects(projects) {
+  const selectedProject = reconcileProject(
+    store.get().sessions,
+    store.get().tasks,
+    loadProjectChoice(),
+    store.get().selectedProject,
+    projectRoots(projects)
+  );
+  store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
+}
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
 }
@@ -18660,7 +19851,7 @@ function requestProjectsResync() {
   }, 150);
 }
 function openAddTask() {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
@@ -18691,7 +19882,7 @@ function openAddTask() {
   );
 }
 function openEditTask(task) {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
@@ -18768,6 +19959,37 @@ function doRetryLimit() {
     surfaceTabError(e);
   });
 }
+function doMarkDelivered() {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id) {
+    return;
+  }
+  const target = { id: sel.id, title: sel.title };
+  openModal(
+    markDeliveredModal(
+      target.title,
+      () => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void confirmHandoffDelivery(target.id, target.title, tok).then(closeModal).catch((e) => {
+          if (isMutationCommittedError(e)) {
+            if (modal === m) closeModal();
+            requestResync();
+            surfaceMutationError(e, "confirmed");
+            return;
+          }
+          m.setBusy(false);
+          m.setError(errorText(e));
+        });
+      },
+      closeModal
+    )
+  );
+}
 function doHandoff() {
   const sel = selectedSessionData();
   if (!sel || !sel.id || !canHandoff(sel)) {
@@ -18775,7 +19997,7 @@ function doHandoff() {
   }
   const target = { id: sel.id, title: sel.title };
   openModal(
-    handoffModal(sel.title, sel.current_agent ?? "", {
+    handoffModal(sel.title, sel.current_agent ?? "", sel.program ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
       loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
@@ -18817,6 +20039,12 @@ function doRemoveTask(task) {
       if (modal === handle) closeModal();
       return refreshTasks();
     }).catch((error) => {
+      if (isMutationCommittedError(error)) {
+        if (modal === handle) closeModal();
+        refreshTasks();
+        surfaceTabError(error);
+        return;
+      }
       handle.setBusy(false);
       handle.setError(errorText(error));
     });
@@ -18866,6 +20094,7 @@ var actions = {
   archive: (session) => openConfirm("archive", session),
   restore: (session) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),
@@ -18889,6 +20118,7 @@ var actions = {
   dropTabOnPaneAt: (x, y, drag) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  stepTerminalFontSize: (delta) => stepTerminalFontSize(delta),
   openConfigAssistant: doOpenConfigAssistant,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,
@@ -18902,6 +20132,7 @@ var actions = {
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
   addProject: openAddProject,
+  rebindProject: openRebindProject,
   setTheme
 };
 function syncSplit(state) {
@@ -18941,7 +20172,17 @@ function startStream(tok) {
     onResync: () => {
       requestResync();
     },
-    onStatus: (s) => store.set({ live: s })
+    onStatus: (s) => store.set({ live: s }),
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    }
   });
   stream.start();
 }
@@ -18950,6 +20191,7 @@ function stopStream() {
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
+  accountsRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
@@ -18992,7 +20234,7 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
     store.get().tasks,
     loadProjectChoice(),
     store.get().selectedProject,
-    store.get().registeredProjects
+    projectRoots(store.get().registeredProjects)
   );
   let selectedId = pickSelection(sessions, prevSel);
   if (selectedId) {

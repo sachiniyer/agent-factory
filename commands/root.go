@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -55,6 +56,9 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 		// subcommand, since cobra checks the root command's SilenceUsage (#1749).
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			cmd.Root().SilenceUsage = true
+			if configWarningsToStderr(cmd) {
+				config.SetInteractiveWarningWriter(os.Stderr)
+			}
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -141,21 +145,30 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 
 			// Program flag overrides config. Both are restricted to bare
 			// agent names from tmux.SupportedPrograms; per-invocation path
-			// or flag overrides belong in program_overrides.
-			program := cfg.DefaultProgram
+			// or flag overrides belong in program_overrides. The TUI is handed
+			// the flag AND the just-resolved default_program: with no flag it
+			// re-reads default_program each time a session is created, so a
+			// live `af config set default_program` reaches it without a
+			// restart (#4889), while the resolved value seeds the fallback a
+			// failed re-read keeps — repo-scoped here, so a transient
+			// project-config failure cannot swap the bare global default in
+			// for the project's own.
 			if programFlag != "" {
 				if err := config.ValidateProgramEnum("--program flag", "--program flag", programFlag, ""); err != nil {
 					return err
 				}
-				program = programFlag
 			}
 			// The daemon hosts the task scheduler (#782), so make sure
 			// it is up whenever an enabled task exists. In the background:
 			// daemon launch can take a few seconds and must not delay the TUI.
 			go launchEnsureDaemonForTasks()
 
+			// From here bubbletea owns the terminal; a stderr write would
+			// tear the screen, so later config warnings are log-only.
+			config.SetInteractiveWarningWriter(nil)
+
 			app.Version = version
-			return runLaunchApp(ctx, program, repo)
+			return runLaunchApp(ctx, programFlag, cfg.DefaultProgram, repo)
 		},
 	}
 
@@ -412,4 +425,20 @@ func removedAutoYesFlagError(_ *cobra.Command, err error) error {
 		return config.RemovedAutoYesError()
 	}
 	return err
+}
+
+// configWarningsToStderr reports whether config warnings a person must act on
+// (an unknown in-repo [docker]/[ssh] key, #4599) should reach stderr as well as
+// the log for this invocation. Not for the daemon — its stderr is not a person —
+// and not under --json, whose contract is that stderr carries only the
+// {data,error} envelope (#3169). The TUI turns the writer off again before it
+// takes the terminal (see rootCmd's RunE).
+func configWarningsToStderr(cmd *cobra.Command) bool {
+	if daemonFlag {
+		return false
+	}
+	if f := cmd.Flags().Lookup("json"); f != nil && f.Value.String() == "true" {
+		return false
+	}
+	return true
 }

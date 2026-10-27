@@ -18,6 +18,9 @@ func TestHandoffOutputOmitsAmbientAccounts(t *testing.T) {
 		{name: "agent-only"},
 		{name: "ambient-to-pinned", toAccount: "personal"},
 		{name: "pinned-to-pinned", fromAccount: "work", toAccount: "personal"},
+		// #4428: a scoped session handed to a target with no account support
+		// drops the scope — the drop is reported on from_account alone.
+		{name: "scoped-dropped", fromAccount: "work"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())

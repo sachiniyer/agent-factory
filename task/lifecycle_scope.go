@@ -7,21 +7,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-// LoadTasksForRepoID returns tasks belonging to an already-resolved repo ID.
-// It is the path-independent counterpart to LoadTasksForRepo for daemon
-// lifecycle checks, including remote sessions with no local git worktree. Legacy
-// rows without a retained RepoID are resolved freshly and every proven binding
-// is committed before scope exclusion: a later symlink/worktree rebind therefore
-// cannot move an excluded task into the project after its target is archived.
-// An enabled targeted legacy row whose nonempty path cannot currently resolve
-// is an unknown relationship and returns an error rather than silently excluding
-// a possible blocker; disabled and untargeted rows cannot create that retry
-// state and remain non-blocking.
-func LoadTasksForRepoID(repoID string) ([]Task, error) {
-	filtered, _, err := LoadTasksForRepoIDWithBindingUpdates(repoID)
-	return filtered, err
-}
-
 // LoadTasksForRepoIDWithBindingUpdates also returns the authoritative task
 // projections whose legacy ProjectPath bindings this load durably backfilled.
 // Daemon callers publish those commits so push-only clients cannot retain a

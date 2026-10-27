@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 )
 
@@ -27,7 +28,12 @@ import (
 //     into a `json:"schema_version"` field would read {"SCHEMA_VERSION":1} as
 //     version 1 while DetectJSONSchemaVersion — a plain map lookup — reads it as
 //     legacy v0. That is why this walks the object's keys and compares their
-//     bytes rather than unmarshalling into a struct.
+//     bytes rather than unmarshalling into a struct — and why a key that is not
+//     byte-equal but case-folds to the target name refuses to prove at all: the
+//     decoder takes the LAST fold-match for the field, and a scan that recorded
+//     only the exact spelling could silently pick the wrong member
+//     ({"schema_version":1,"SCHEMA_VERSION":99} decodes as 99 — the version-guard
+//     fail-open Codex caught on #5170).
 //   - Duplicates. A decoder assigns each member in order, so the LAST
 //     schema_version wins. So does this scan.
 //   - Well-formedness. DetectJSONSchemaVersion rejects malformed JSON and
@@ -73,6 +79,7 @@ func lastTopLevelJSONMember(raw []byte, name string) ([]byte, bool) {
 		return nil, false
 	}
 	i++
+	nameBytes := []byte(name)
 	var value []byte
 	found := false
 	for {
@@ -110,6 +117,12 @@ func lastTopLevelJSONMember(raw []byte, name string) ([]byte, bool) {
 		if string(key) == name {
 			value = raw[start:end]
 			found = true
+		} else if bytes.EqualFold(key, nameBytes) {
+			// A differently-cased spelling of the same name: encoding/json
+			// fold-matches it onto the same field and the LAST fold-match
+			// wins, so which member the decoder sees depends on ordering this
+			// scan just threw away. Refuse to prove and let the decode decide.
+			return nil, false
 		}
 		i = skipJSONSpace(raw, end)
 		if i >= len(raw) {

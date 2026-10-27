@@ -1,0 +1,361 @@
+package app
+
+import (
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// The tests in this file pin #4798 through the app: a held draft of a task
+// another writer deleted used to fail its save with "not found" on every
+// overlay close, forever. Only a positive not-found from the update drops the
+// draft; every other failure keeps it and reports it exactly as before.
+
+const orphanDraftNotice = `Discarded unsaved edits to "demo" — the task was deleted`
+
+// homeWithHeldDraft returns a home whose task pane holds an unsaved edit
+// (Enabled toggled off) to a task named "demo". When onDisk is false the task
+// was never in the store, as if another writer had already removed it.
+func homeWithHeldDraft(t *testing.T, onDisk bool) (*home, *ui.TaskPane, task.Task) {
+	t.Helper()
+	h := newTestHome(t)
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	demo := task.Task{
+		ID: "demo-4798", Name: "demo", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	loaded := []task.Task{demo}
+	if onDisk {
+		require.NoError(t, task.AddTask(demo))
+		loaded, err = task.LoadTasksForCurrentRepo()
+		require.NoError(t, err)
+	}
+	sp := h.automations.TaskPane()
+	sp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+	sp.SetFocus(true)
+	require.True(t, sp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}))
+	sp.SetFocus(false)
+	require.True(t, sp.IsDirty(), "precondition: an edit is held")
+	return h, sp, demo
+}
+
+// The daemon's answer arrives as text over the RPC; the in-process writer's is
+// a *task.NotFoundError. Both are a positive not-found: the save drops the
+// draft, reports nothing, shows no "changes are retained" screen, and the next
+// close sends no update.
+func TestSaveContentPaneStateDiscardsDraftOnPositiveNotFound(t *testing.T) {
+	type taskUpdater = func(string, task.TaskUpdate, task.ProjectExpectation) error
+	for name, deleteAndFail := range map[string]func(*testing.T, task.Task) taskUpdater{
+		"daemon message": func(t *testing.T, demo task.Task) taskUpdater {
+			require.NoError(t, task.RemoveTask(demo.ID, task.ProjectExpectation{}))
+			return func(id string, _ task.TaskUpdate, _ task.ProjectExpectation) error {
+				return fmt.Errorf("task with id %q not found", id)
+			}
+		},
+		"store error": func(t *testing.T, demo task.Task) taskUpdater {
+			require.NoError(t, task.RemoveTask(demo.ID, task.ProjectExpectation{}))
+			return func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
+				_, err := task.UpdateTask(id, update, expect)
+				return err
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, sp, demo := homeWithHeldDraft(t, true)
+			updater := deleteAndFail(t, demo)
+			var updates []string
+			t.Cleanup(SetTaskUpdaterForTest(func(id string, u task.TaskUpdate, e task.ProjectExpectation) error {
+				updates = append(updates, id)
+				return updater(id, u, e)
+			}))
+
+			require.NoError(t, h.saveContentPaneState(),
+				"a draft proved deleted must not also be reported as a failed save")
+			assert.Nil(t, h.recovery, "the draft is gone, so no recovery screen may claim it is retained")
+			assert.Equal(t, []string{demo.ID}, updates)
+			assert.NotContains(t, taskIDs(sp.GetTasks()), demo.ID)
+			assert.False(t, sp.IsDirty())
+			assert.Equal(t, orphanDraftNotice, sp.TakeDiscardedDraftNotice())
+
+			require.NoError(t, h.saveContentPaneState())
+			assert.Len(t, updates, 1, "a later close must not retry the save")
+		})
+	}
+}
+
+// A generic failure is not a not-found, even when the task is absent from the
+// store — the recovery scene's shape. The draft stays, the error surfaces, and
+// the recovery screen says the changes are retained, exactly as before #4798.
+func TestSaveContentPaneStateKeepsDraftOnGenericFailure(t *testing.T) {
+	h, sp, demo := homeWithHeldDraft(t, false)
+	t.Cleanup(SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
+		return errors.New("The daemon refused this save.")
+	}))
+
+	err := h.saveContentPaneState()
+	require.ErrorContains(t, err, "The daemon refused this save.")
+	assert.True(t, sp.IsDirty(), "the draft must stay retryable")
+	require.Equal(t, []string{demo.ID}, taskIDs(sp.GetTasks()), "absence from the reload must not drop the draft")
+	assert.False(t, sp.GetTasks()[0].Enabled)
+	require.NotNil(t, h.recovery)
+	assert.Equal(t, "Cannot save task", h.recovery.condition)
+	assert.Empty(t, sp.TakeDiscardedDraftNotice())
+}
+
+// Anything short of the daemon's own not-found for this task keeps the draft:
+// a not-found naming another task, and a not-found carried by a response the
+// client could not confirm came from the daemon.
+func TestSaveContentPaneStateKeepsDraftWithoutPositiveNotFound(t *testing.T) {
+	for name, failure := range map[string]error{
+		"other task": fmt.Errorf("task with id %q not found", "someone-else"),
+		"unconfirmed response": fmt.Errorf("%w: task with id %q not found",
+			&apiclient.UnconfirmedHTTPResponseError{Route: "/rpc/UpdateTask", Status: 404}, "demo-4798"),
+		"transport": &apiclient.TransportError{Err: fmt.Errorf("task with id %q not found", "demo-4798")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, sp, demo := homeWithHeldDraft(t, false)
+			t.Cleanup(SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
+				return failure
+			}))
+
+			require.Error(t, h.saveContentPaneState())
+			assert.True(t, sp.IsDirty())
+			assert.Equal(t, []string{demo.ID}, taskIDs(sp.GetTasks()))
+			assert.Empty(t, sp.TakeDiscardedDraftNotice())
+		})
+	}
+}
+
+// Quitting right after the save drops a draft would exit before the snapshot
+// poll raises the notice, so quit shows it and stays; the next quit goes.
+func TestHandleQuitShowsDiscardedDraftNoticeBeforeExiting(t *testing.T) {
+	h, sp, demo := homeWithHeldDraft(t, true)
+	require.NoError(t, task.RemoveTask(demo.ID, task.ProjectExpectation{}))
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, _ task.TaskUpdate, _ task.ProjectExpectation) error {
+		return fmt.Errorf("task with id %q not found", id)
+	}))
+
+	_, _ = h.handleQuit()
+	require.False(t, h.quitting, "the first quit must stop to show the notice")
+	text, failure := h.errBox.RetainedNotice()
+	assert.Contains(t, text, `Discarded unsaved edits to "demo"`)
+	assert.False(t, failure, "a dropped draft is a notice, not a failure")
+	assert.Empty(t, sp.TakeDiscardedDraftNotice(), "the notice is raised once")
+
+	_, _ = h.handleQuit()
+	assert.True(t, h.quitting, "the next quit goes through")
+}
+
+// homeWithTwoHeldDrafts returns a home whose task pane holds unsaved edits
+// (Enabled toggled off) to two on-disk tasks, "alpha" and "bravo". The combined
+// discard+recovery interaction the per-branch fixtures cannot reach needs two
+// dirty edits in a single save: one whose update proves its task was deleted
+// (the discard path queues the notice) and one whose update fails generically
+// (the recovery path shadows the notice bar). The caller removes alpha from
+// disk and installs a per-ID updater before driving the save.
+func homeWithTwoHeldDrafts(t *testing.T) (*home, *ui.TaskPane, task.Task, task.Task) {
+	t.Helper()
+	h := newTestHome(t)
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	alpha := task.Task{
+		ID: "alpha-4798", Name: "alpha", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	bravo := task.Task{
+		ID: "bravo-4798", Name: "bravo", Prompt: "p", CronExpr: "0 4 * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(alpha))
+	require.NoError(t, task.AddTask(bravo))
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+
+	sp := h.automations.TaskPane()
+	sp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+	sp.SetFocus(true)
+	require.True(t, sp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}))
+	sp.SelectTask(1)
+	require.True(t, sp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}))
+	sp.SetFocus(false)
+	require.True(t, sp.IsDirty(), "precondition: both edits are held")
+	return h, sp, alpha, bravo
+}
+
+// discardFailUpdater makes alpha's update prove its task was deleted (positive
+// not-found → the draft is discarded and the notice queued) and bravo's fail
+// generically (→ the draft is retained and the recovery screen raised), so a
+// single saveContentPaneState run hits both the discard and recovery paths.
+func discardFailUpdater(t *testing.T, alpha task.Task) {
+	t.Helper()
+	require.NoError(t, task.RemoveTask(alpha.ID, task.ProjectExpectation{}))
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, _ task.TaskUpdate, _ task.ProjectExpectation) error {
+		switch id {
+		case alpha.ID:
+			return fmt.Errorf("task with id %q not found", id)
+		default:
+			return errors.New("The daemon refused this save.")
+		}
+	}))
+}
+
+// settleFailUpdater makes alpha's update land on disk while its reply is lost
+// (an uncertain outcome → the draft is held unconfirmed), so the save's reload
+// carries the edit and the pane settles it, queuing the settled-draft notice;
+// bravo's update fails generically (→ the draft is retained and the recovery
+// screen raised). A single saveContentPaneState run thus parks the #4824
+// settled-draft notice behind the recovery screen — the sibling of the #4798
+// discard notice discardFailUpdater sets up.
+func settleFailUpdater(t *testing.T, alpha task.Task) {
+	t.Helper()
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
+		switch id {
+		case alpha.ID:
+			// The mutation landed; only the reply was lost (#4824). The save's
+			// reload re-reads Enabled=false, so the held unconfirmed edit settles
+			// and names itself for TakeSettledDraftNotice.
+			_, err := task.UpdateTask(id, update, expect)
+			require.NoError(t, err)
+			return replyLost()
+		default:
+			return errors.New("The daemon refused this save.")
+		}
+	}))
+}
+
+// A single save that both discards one task's draft (its task was deleted, so the
+// notice is queued) and generically fails a sibling edit (raising the recovery
+// screen) leaves the notice sitting in the pane. The snapshot poll is the
+// documented fallback delivery path for that notice (#4798), but the recovery
+// screen fully replaces the view, so the notice bar the poll paints on is
+// invisible. Take clears the only durable copy, so an unguarded poll would
+// silently swallow the notice behind the modal — the very draft #4798 exists to
+// surface. The poll must hold the notice until a frame whose bar is painted.
+func TestPollHoldsDiscardedDraftNoticeWhileRecoveryShadowsBar(t *testing.T) {
+	h, sp, alpha, _ := homeWithTwoHeldDrafts(t)
+	discardFailUpdater(t, alpha)
+
+	// Quit: discards alpha (notice queued) and fails bravo (recovery raised).
+	// handleQuit's own Take sits after the save-error early return, so the
+	// notice stays queued in the pane.
+	_, _ = h.handleQuit()
+	require.False(t, h.quitting, "the failed sibling edit aborts the quit")
+	require.NotNil(t, h.recovery, "bravo's generic failure raises the recovery screen")
+	assert.Equal(t, "Cannot save task", h.recovery.condition)
+	require.True(t, sp.IsDirty(), "bravo's draft stays retryable")
+
+	// A snapshot poll fires while the recovery screen shadows the notice bar.
+	h.Update(snapshotFetchedMsg{repoID: h.repoID})
+	require.NotNil(t, h.recovery, "the recovery screen is still up")
+	assert.Equal(t, `Discarded unsaved edits to "alpha" — the task was deleted`,
+		sp.TakeDiscardedDraftNotice(),
+		"the notice must survive a poll that fires while the recovery screen shadows the bar")
+}
+
+// The notice the poll held during recovery must reach the user the first frame
+// the bar is actually visible: dismiss the recovery screen, resolve the failed
+// sibling edit, and the next quit's own Take shows the notice (stopping to
+// display it); the quit after that goes through. That is the #4798 contract — a
+// draft is never dropped silently — restored across the discard+recovery
+// interaction a single save can raise.
+func TestDiscardedDraftNoticeSurfacesAfterRecoveryResolved(t *testing.T) {
+	h, sp, alpha, _ := homeWithTwoHeldDrafts(t)
+	discardFailUpdater(t, alpha)
+
+	// Quit: alpha discarded (notice queued), bravo failed (recovery raised).
+	_, _ = h.handleQuit()
+	require.False(t, h.quitting)
+	require.NotNil(t, h.recovery)
+
+	// A poll fires while recovery shadows the bar — must not consume the notice.
+	h.Update(snapshotFetchedMsg{repoID: h.repoID})
+
+	// The user dismisses recovery (any key) and the daemon recovers for bravo.
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeySpace})
+	require.Nil(t, h.recovery)
+	t.Cleanup(SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
+		return nil
+	}))
+
+	// Retry quit: bravo saves, no recovery; handleQuit reaches its own Take and
+	// shows alpha's discard notice, stopping to display it.
+	_, _ = h.handleQuit()
+	require.False(t, h.quitting, "the discard notice stops the quit to display itself")
+	text, failure := h.errBox.RetainedNotice()
+	assert.Contains(t, text, `Discarded unsaved edits to "alpha"`)
+	assert.False(t, failure, "a dropped draft is a notice, not a failure")
+	assert.Empty(t, sp.TakeDiscardedDraftNotice(), "the notice was raised once")
+
+	// The next quit goes through.
+	_, _ = h.handleQuit()
+	assert.True(t, h.quitting, "the next quit exits")
+}
+
+// The #4824 settled-draft notice is the #4798 discard notice's sibling: it reads
+// the same notice bar, and its Take clears the durable settledDrafts copy just as
+// lossily, so a snapshot poll that fires while the recovery screen shadows the
+// bar would swallow it just as silently. Unlike the discard notice, the poll is
+// the notice's only delivery path — handleQuit has no TakeSettledDraftNotice of
+// its own — so an unguarded poll during recovery would lose it for good.
+func TestPollHoldsSettledDraftNoticeUntilBarIsVisibleAgain(t *testing.T) {
+	h, sp, alpha, _ := homeWithTwoHeldDrafts(t)
+	settleFailUpdater(t, alpha)
+
+	// Save: alpha's edit landed but its reply was lost (held unconfirmed; the
+	// reload carries it so the pane settles alpha and queues the settled-draft
+	// notice), and bravo fails generically (raising the recovery screen that
+	// shadows the notice bar).
+	require.Error(t, h.saveContentPaneState())
+	require.NotNil(t, h.recovery, "bravo's generic failure raises the recovery screen")
+	assert.Equal(t, "Cannot save task", h.recovery.condition)
+	require.True(t, sp.IsDirty(), "bravo's draft stays retryable")
+
+	// A snapshot poll fires while the recovery screen shadows the notice bar.
+	// The poll must not Take the settled-draft notice: that would clear the
+	// only durable copy and paint it onto a bar the recovery screen covers,
+	// where it expires unseen — and (unlike the discard) nothing re-raises it.
+	h.Update(snapshotFetchedMsg{repoID: h.repoID})
+	require.NotNil(t, h.recovery, "the recovery screen is still up")
+	// The guard held the notice: the poll neither Took it nor surfaced it onto
+	// a bar the recovery screen covers. An unguarded poll would have Taken it
+	// and raised it here, clearing the durable copy behind a hidden bar.
+	shadowedText, _ := h.errBox.RetainedNotice()
+	assert.Empty(t, shadowedText,
+		"the notice must not surface onto a bar the recovery screen covers")
+
+	// The user dismisses recovery (any key), so the bar the notice paints on is
+	// visible again.
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeySpace})
+	require.Nil(t, h.recovery, "the recovery screen is dismissed")
+
+	// The next snapshot poll, with the bar visible, takes the settled-draft
+	// notice and paints it onto the bar — the frame the held notice waited for.
+	// If the recovery-shadowing poll above had taken it, there would be nothing
+	// left to surface here.
+	h.Update(snapshotFetchedMsg{repoID: h.repoID})
+	text, failure := h.errBox.RetainedNotice()
+	assert.Contains(t, text, `Saved edits to "alpha"`,
+		"the settled-draft notice surfaces once the bar is visible again")
+	assert.False(t, failure, "a settled draft is a notice, not a failure")
+	assert.Empty(t, sp.TakeSettledDraftNotice(), "the notice was raised once")
+}

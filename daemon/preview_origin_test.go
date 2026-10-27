@@ -650,7 +650,7 @@ func TestPreviewOrigin_ClosedTabStopsResolving(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, previewHostStatus(t, client, previewAddr, hostA, "/"))
 
-	_, err := m.CloseTab(CloseTabRequest{Title: "previeworigin", RepoID: previewFixtureRepoID(t, m, sessionID), TabName: "web0"})
+	_, err := m.closeTabRequestedBy(CloseTabRequest{Title: "previeworigin", RepoID: previewFixtureRepoID(t, m, sessionID), TabName: "web0"}, "internal daemon caller")
 	require.NoError(t, err)
 
 	resp := previewHostGet(t, client, previewAddr, hostA, "/")

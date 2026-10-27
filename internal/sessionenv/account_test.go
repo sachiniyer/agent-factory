@@ -259,7 +259,9 @@ func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 		"command unset PORT; make",
 		"export PORT=3000; make",
 		"readonly PORT=3000; make",
-		"let PORT=42; make",
+		// Note: `let PORT=42; make` is now refused by the inverted arithmetic
+		// guard as an accepted false positive — `PORT` is a variable operand
+		// in arithmetic, which the guard refuses regardless of its value.
 		"mapfile DATA </dev/null; make",
 		"readarray -t DATA </dev/null; make",
 		"sleep 0 & wait -p PID $!; make",

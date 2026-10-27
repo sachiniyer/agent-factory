@@ -94,6 +94,16 @@ test("listAccounts: an older daemon that omits the lists yields empty ones, not 
   assert.deepEqual(resp.agents, []);
 });
 
+test("listAccounts: resolved_agents survives response normalization", async () => {
+  // The handoff pickers classify targets by the agent the resolved command
+  // launches; a normalization that dropped this map would silently return the
+  // web flow to enum semantics and the daemon would then reject the submitted
+  // account choice (#4430 review round 5).
+  stubFetch({ entries: [], agents: ["aider", "codex"], resolved_agents: { aider: "codex", codex: "aider" } });
+  const resp = await listAccounts("T");
+  assert.deepEqual(resp.resolved_agents, { aider: "codex", codex: "aider" });
+});
+
 test("registerAccount: sends only the agent and the name", async () => {
   const cap = stubFetch({ entry: { agent: "codex", name: "work", dir: "/d", registration_only: false, logged_in: false } });
   await registerAccount("codex", "work", "T");
@@ -167,4 +177,45 @@ test("emptyAccountsState: the shell's starting point renders as 'nothing yet', n
   assert.deepEqual(state.agents, []);
   assert.equal(state.error, "");
   assert.equal(state.status, null);
+});
+
+// The handoff modal's same-agent predicate mirrors the daemon's
+// HandoffTargetIsCurrent (#4430 review round 6): a provable resolution
+// decides, and an opaque one falls back to the RECORDED enum — a wrapper's
+// arguments can token-scan to a different agent than the enum that launches it.
+test("handoffTargetIsCurrent: a provable resolution decides sameness", async () => {
+  const { handoffTargetIsCurrent } = (await import("./modals.js")) as typeof import("./modals.js");
+  assert.equal(handoffTargetIsCurrent("codex", "aider", "codex", "claude"), true);
+  assert.equal(handoffTargetIsCurrent("codex", "codex", "aider", "codex"), false);
+  assert.equal(handoffTargetIsCurrent("", "claude", "claude", "claude"), false);
+});
+
+test("handoffTargetIsCurrent: an opaque wrapper falls back to the recorded enum", async () => {
+  const { handoffTargetIsCurrent } = (await import("./modals.js")) as typeof import("./modals.js");
+  // ./collect codex under aider's enum scans as codex — but --to aider
+  // relaunches that exact wrapper, so it is the self-handoff.
+  assert.equal(handoffTargetIsCurrent("codex", "aider", "", "aider"), true);
+  assert.equal(handoffTargetIsCurrent("codex", "aider", "", "claude"), false);
+  assert.equal(handoffTargetIsCurrent("claude", "claude", "", ""), false);
+});
+
+// The account-only row is only honest when a catalog enum still resolves to
+// the running agent (#4430 review round 7): a live codex pane whose
+// program_overrides.codex was repointed at gemini has no same-agent spelling
+// — sending to=codex there is a cross-agent gemini handoff, not the promised
+// account-only swap. The bare-name fallback survives only for older daemons
+// that never sent resolved_agents.
+test("handoffSameAgentTarget: no row when no enum resolves to the runtime", async () => {
+  const { handoffSameAgentTarget } = (await import("./modals.js")) as typeof import("./modals.js");
+  const catalog = ["claude", "codex", "aider", "gemini"];
+  // codex pane live, but codex's enum now resolves to gemini: no match.
+  assert.equal(
+    handoffSameAgentTarget(catalog, "codex", "codex", { claude: "claude", codex: "gemini", aider: "aider", gemini: "gemini" }),
+    undefined);
+  // A different enum CAN spell the same-agent target when it resolves to it.
+  assert.equal(
+    handoffSameAgentTarget(catalog, "codex", "codex", { claude: "claude", codex: "gemini", aider: "codex", gemini: "gemini" }),
+    "aider");
+  // No resolved_agents on the wire (older daemon): the enum-name fallback.
+  assert.equal(handoffSameAgentTarget(catalog, "codex", "codex", undefined), "codex");
 });

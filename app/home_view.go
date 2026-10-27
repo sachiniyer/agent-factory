@@ -56,6 +56,17 @@ func (m *home) setTransientFailure(err error) uint64 {
 	return m.transientNoticeID
 }
 
+// setTransientHint paints an ephemeral acknowledgment that must not become a
+// retrievable notice. Same bar, same generation token, same delayed clear —
+// but it never lands in the retained slot `E` reads, so answering "the store
+// is empty" does not fill it (#5351 review: a second `E` after the hint faded
+// used to open "Last notice" on the hint's own text).
+func (m *home) setTransientHint(err error) uint64 {
+	m.transientNoticeID++
+	m.errBox.SetHint(err)
+	return m.transientNoticeID
+}
+
 func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -69,11 +80,16 @@ func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 // showErrorDetails opens the last notice in full. It reads the RETAINED notice,
 // not the one currently painted: the bar drops a notice after 3 seconds, and
 // binding `E` to what is still on screen made the key silently dead in exactly
-// the case it exists for — a message the bar had to clip (#2618).
+// the case it exists for — a message the bar had to clip (#2618). With nothing
+// retained it still answers the key — a transient hint on the same bar — so the
+// user can tell "nothing to show" apart from "the key did nothing" (#5351).
 func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 	full, failure := m.errBox.RetainedNotice()
 	if full == "" {
-		return m, nil
+		// A hint, not a notice: acknowledging an empty store must leave it
+		// empty, or a second `E` after the fade would reopen the hint itself.
+		return m, m.clearTransientMessageAfterDelay(
+			m.setTransientHint(errors.New("No recent error")))
 	}
 	// af hiding a pane and saying how to get it back is designed behavior. Filing
 	// it under "Last error" would report af working as intended as a fault, which
@@ -97,9 +113,10 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 }
 
 // confirmActionWithDetail is confirmAction for a dialog whose copy splits into
-// consequences (message) and elaboration (detail). The overlay then guarantees
-// the consequences render or refuses the confirm outright, rather than clipping
-// the tail and collecting a 'y' for something it never showed (#1973).
+// consequences (message) and elaboration (detail). The overlay then keeps every
+// line reachable by scrolling — and refuses the confirm only when the window
+// cannot show even one body row — rather than clipping the tail and collecting
+// a 'y' for something it never showed (#1973, #5171).
 // The callback may return a follow-up tea.Cmd as its result; handleStateConfirm
 // schedules that command on the event loop instead of executing it inline.
 func (m *home) confirmActionWithDetail(message, detail string, action tea.Cmd) tea.Cmd {
@@ -238,6 +255,9 @@ func (m *home) View() string {
 		viewParts = append(viewParts, banner)
 	}
 	m.menu.SetStatusText(m.dragStatusText())
+	hint, hideHint := m.noticeDetailsHint()
+	m.errBox.SetDetailsHint(hint)
+	m.errBox.HideDetailsHint(hideHint)
 	viewParts = append(viewParts, top, m.statusBar.View())
 	mainView := layout.JoinVertical(viewParts...)
 
@@ -266,7 +286,8 @@ func (m *home) View() string {
 		}
 		return placeOverlay(m.projectPickerOverlay.Render(), mainView)
 	} else if m.state == stateSelectProgram || m.state == stateSelectHandoffAgent ||
-		m.state == stateSelectBackend || m.state == stateSelectAccount {
+		m.state == stateSelectBackend || m.state == stateSelectAccount ||
+		m.state == stateSelectHandoffResolve {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
@@ -281,10 +302,10 @@ func (m *home) View() string {
 		fg := m.selectionOverlay.Render()
 		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
 		return placeOverlay(fg, mainView)
-	} else if m.state == statePromptInput || m.state == stateJumpTab {
-		// Both states drive the same promptOverlay — the naming form's initial-prompt
-		// field and the jump-to-tab prompt (#3021). They differ in who owns the answer,
-		// not in how a single line of text is drawn.
+	} else if m.state == statePromptInput || m.state == stateJumpTab || m.state == stateRenameTab {
+		// These states drive the same promptOverlay — the naming form's initial-prompt
+		// field, the jump-to-tab prompt (#3021), and the rename-tab prompt. They differ
+		// in who owns the answer, not in how a single line of text is drawn.
 		if m.promptOverlay == nil {
 			log.ErrorLog.Printf("prompt overlay is nil")
 			return mainView

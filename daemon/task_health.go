@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -130,7 +131,7 @@ func (s *controlServer) withLiveArming(tasks []task.Task) []task.Task {
 			tasks[i].NextRunAt = &at
 		}
 	}
-	return tasks
+	return task.StampNextRunFar(tasks, time.Now())
 }
 
 // taskActor resolves which surface a task mutation came from, for the audit

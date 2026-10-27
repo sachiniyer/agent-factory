@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The lifecycle transition chokepoint (#1195 Phase 2c).
@@ -624,6 +626,8 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		switch spec.run {
 		case runEnds:
 			i.taskRunActive = false
+			i.taskRunIdleEdgeHeld = false
+			i.taskRunTurnGateHeld = false
 			i.touchLocked()
 			// The completion transition IS the capture point for the adoption
 			// baseline (#3865): taken here, inside the same i.mu section that ends
@@ -636,10 +640,85 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// calls an in-flight archive "pending", which would miss an agent going
 			// idle mid-teardown. Not the resulting state alone — a session is born
 			// LiveReady before its agent ever runs, so that would end the run at birth.
-			if to.liveness == LiveReady && from.liveness != LiveReady {
-				i.taskRunActive = false
-				i.touchLocked()
-				i.captureAdoptionBaselineLocked()
+			//
+			// An idle pane is not a finished run while a handoff mission is still
+			// owed (#4429). The incoming agent may be idle precisely BECAUSE its
+			// takeover brief never landed, and this edge is what hands a task
+			// session to its on_complete policy — so ending the run here is what
+			// would archive or kill a session whose mission is still waiting for
+			// the operator. The replacement fence used to hide the row from the
+			// poll and carry this; the fence now settles on the incoming runtime's
+			// liveness, so the obligation itself has to say so.
+			//
+			// A held edge is recorded rather than dropped. A resend makes the
+			// agent work, and Mark delivered now likewise leaves the ROW working
+			// — the confirm publishes LiveRunning, or keeps a LiveLimitReached
+			// wall (#5023) — so the next idle observation lands as a real edge
+			// into Ready and ends the run itself. The held marker still closes
+			// the gap for an obligation retired while the row was already
+			// recorded Ready — records written before #5023 carry exactly that —
+			// whose later polls would otherwise see only Ready → Ready and hold
+			// the run open forever.
+			//
+			// ANY idle observation while the mission is owed holds, not only a
+			// transition into Ready. A row that reloads already Ready — every row
+			// a pre-#4429 daemon fenced, on the upgrade that settles it — sees
+			// only Ready → Ready, and would otherwise hold nothing and keep its
+			// run open forever after the confirm. The edge rule exists so a
+			// session born Ready does not end its run at birth; a row owing a
+			// takeover mission is past birth by construction.
+			//
+			// An idle edge is likewise not a finished run while the run's own
+			// prompt has been attempted but never demonstrably picked up (#5219).
+			// ConfirmLive publishes LiveRunning the moment the prompt send
+			// returns, so the FIRST quiet tick afterwards — long before an agent
+			// that boots behind a still pane (devin's ACP startup takes seconds,
+			// and no IsWorkingContent matcher covers it) has visibly reacted —
+			// used to end the run and hand on_complete a session whose turn never
+			// began. Pane churn alone is not the turn evidence: the same async
+			// pipeline that hides boot also makes the prompt's own echo, ACP
+			// init, and skill discovery land as ordinary Updated captures seconds
+			// after Enter. What releases the gate is the agent's own in-turn
+			// chrome — devin/claude's elapsed-timer row must tick, which boot
+			// cannot fake — or a post-attempt burst followed by sustained quiet
+			// past the completion grace (the arm that covers signature-less
+			// agents and turns too fast for two captures). The edge holds rather
+			// than drops: evidence landing while the row is already Ready (the
+			// paused poll path folds churn into lastPaneChurnAt without a
+			// liveness move) releases it through the flag exactly as the mission
+			// hold does. A run that never produces it stays open — reported
+			// in-flight, never a completion.
+			if to.liveness == LiveReady {
+				switch {
+				case i.owesMissionDeliveryLocked():
+					if !i.taskRunIdleEdgeHeld {
+						i.taskRunIdleEdgeHeld = true
+						i.touchLocked()
+					}
+				case i.taskRunAwaitingTurnLocked():
+					if !i.taskRunTurnGateHeld {
+						i.taskRunTurnGateHeld = true
+						i.touchLocked()
+					}
+				case from.liveness != LiveReady || i.taskRunIdleEdgeHeld || i.taskRunTurnGateHeld:
+					// The gate just opened. If no in-turn chrome was observed,
+					// the quiet-fallback arm — churn plus sustained silence — is
+					// what let this edge end the run: the weaker signal, so name
+					// it in the log with the agent and the attempt's age (#5219).
+					if !i.taskRunPromptAttemptAt.IsZero() &&
+						!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) &&
+						(i.taskRunQuietReleaseLocked() || i.taskRunSilentReleaseLocked()) {
+						log.InfoLog.Printf(
+							"task run for session %q completed on the quiet fallback (no in-turn chrome observed): agent=%s elapsed_since_attempt=%s",
+							i.Title, i.currentAgentNameLocked(),
+							time.Since(i.taskRunPromptAttemptAt).Round(time.Second))
+					}
+					i.taskRunActive = false
+					i.taskRunIdleEdgeHeld = false
+					i.taskRunTurnGateHeld = false
+					i.touchLocked()
+					i.captureAdoptionBaselineLocked()
+				}
 			}
 		}
 	}
@@ -657,14 +736,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// Publish its identity and durable negative quota evidence in the same
 		// critical section as LiveLimitReached so account-swap admission cannot
 		// observe a limit without its provider/account attribution.
-		if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
-			i.limitAgent = agent
-			i.touchLocked()
-		}
-		if i.limitAccount != i.Account {
-			i.limitAccount = i.Account
-			i.touchLocked()
-		}
+		i.attributeLimitIdentityLocked()
 		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt)
 	}
 	// Every real change to the lifecycle state advances the epoch, so an observer
@@ -688,6 +760,24 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	switch ev.kind {
 	case tkCommitArchive, tkBeginRestore:
 		i.clearAgentModelChangeLocked()
+	}
+	// tkCommitArchive is the single commit edge every archive route converges
+	// on — local worktree relocation and remote branch-push alike — so it is the
+	// one place the durable archive timestamp can be stamped without a second
+	// per-route agreement (#5136). A re-archive overwrites it with the NEW
+	// commit, which is correct: the age prune measures belongs to the shelf the
+	// record currently sits on.
+	if ev.kind == tkCommitArchive {
+		i.archivedAt = time.Now()
+	}
+	// The mirror rule (#5136 review): a row that LEAVES the archive no longer
+	// sits on the shelf its timestamp measures — restore moves LiveArchived to
+	// Lost at the begin edge (both tkBeginRestore entries), so keying the
+	// clear on the liveness boundary rather than one event kind also covers
+	// any future un-archive edge. A later re-archive stamps the new shelf's
+	// own commit above.
+	if from.liveness == LiveArchived && to.liveness != LiveArchived {
+		i.archivedAt = time.Time{}
 	}
 	if from.op == OpArchiving && to.op != OpArchiving && i.archiveSettled != nil {
 		close(i.archiveSettled)

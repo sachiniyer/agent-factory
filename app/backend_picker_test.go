@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -65,7 +64,7 @@ func openBackendField(t *testing.T, h *home) []tea.Msg {
 // submits it.
 //
 // The submit goes through handleKeyPress but its cmd is discarded rather than
-// drained: a modal state takes no highlight re-emit hop, and a REFUSED choice
+// drained: a modal state takes no menu highlight, and a REFUSED choice
 // answers with a transient notice whose cmd is the clear TIMER — draining that
 // would just wait out a deadline.
 func pickBackend(t *testing.T, h *home, label string) {
@@ -84,16 +83,11 @@ func pickBackend(t *testing.T, h *home, label string) {
 }
 
 // pressExpectingNotice presses a naming-form key that answers with a transient
-// notice. It replays the highlight re-emit hop like pressFormKey — the hop is
-// where a swallowed key would hide — but never waits on the notice's own cmd.
+// notice. Unlike pressFormKey it never waits on the notice's own cmd, whose
+// clear timer would only run out a deadline.
 func pressExpectingNotice(t *testing.T, h *home, msg tea.KeyMsg) {
 	t.Helper()
-	_, cmd := h.handleKeyPress(msg)
-	for _, produced := range drainCmd(t, cmd, time.Second) {
-		if km, ok := produced.(tea.KeyMsg); ok {
-			_, _ = h.handleKeyPress(km)
-		}
-	}
+	_, _ = h.handleKeyPress(msg)
 }
 
 // TestNamingFormBackendReachesSessionStartRequest is the #1933 regression guard

@@ -69,7 +69,7 @@ func hookPinnedProvisionSession(t *testing.T, deleteBody string) (inst *Instance
 
 // restoreHookTombstone puts the record through the daemon's real retention path:
 // staged on the instance, published by ForStorage, written and read back as
-// JSON, normalized again the way Storage.LoadInstances does, and rebuilt.
+// JSON, normalized again through ForStorage, and rebuilt.
 func restoreHookTombstone(t *testing.T, inst *Instance) *Instance {
 	t.Helper()
 	raw, err := json.Marshal(inst.ToInstanceData().ForStorage())

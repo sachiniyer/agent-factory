@@ -418,10 +418,10 @@ it comes from an **allowed author** and carries a whole-word `RESOLVED` or
 `ACCEPTED` — note `UNRESOLVED` contains `RESOLVED` as a substring, so match on
 word boundaries.
 
-**The `$allowed` list in both jq snippets below must match `ALLOWED_AUTHORS` in
+**Every `$allowed` list in this skill must match `ALLOWED_AUTHORS` in
 `.github/scripts/auto-gate.js` exactly.** There is no mechanical derivation —
-the two copies are maintained by hand. Whenever `ALLOWED_AUTHORS` changes in the
-script, update both occurrences here in lockstep; a copy that disagrees with the
+they are kept in sync by hand. Whenever `ALLOWED_AUTHORS` changes in the
+script, update every occurrence here in lockstep; a copy that disagrees with the
 real predicate produces confident wrong answers and is worse than no copy.
 
 **A thread's location is not part of the test (#3689).** GitHub nulls `line`
@@ -832,7 +832,10 @@ Two things the gate insists on, and both matter:
   update-branch` produces — but a cheap pre-filter only, since a hand-written
   conflict resolution has the same parents. The full gate also reads the merge
   base and both parent trees and requires the merge commit's tree to equal the
-  path-level three-way result, or carry is refused. When the proof passes, the
+  path-level three-way result, or carry is refused. A path both sides
+  changed has no path-level result. On the gate's own update merge the gate
+  proves it line by line instead (`.github/auto-gate.md`); on any other
+  merge such a path refuses. When the proof passes, the
   anchors — the approval and every Codex artifact — bind to the merge's FIRST
   parent, the content head, because nothing about the reviewed change moved.
   Without that the gate's own update-branch voided the approval it had just

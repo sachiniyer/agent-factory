@@ -10,28 +10,6 @@ import "fmt"
 // until its 15s keepalive gave up, with nothing on the wire to say the tab went
 // away).
 
-// CloseTab kills the tab at idx, ends its PTY stream, and removes it from Tabs.
-// The agent tab (idx 0) is unclosable; CloseTab errors on idx 0 or any
-// out-of-range index. The tab is removed from Tabs regardless of whether the tmux
-// teardown succeeds (best-effort, matching LocalBackend.Kill) so a broken session
-// can't wedge the tab list. Unlike Kill this does not wait for the pane to exit:
-// the worktree is not being removed, so there is no #802 delete race to guard
-// against.
-func (i *Instance) CloseTab(idx int) error {
-	i.mu.Lock()
-	if idx < 0 || idx >= len(i.Tabs) {
-		i.mu.Unlock()
-		return fmt.Errorf("session %q has no tab at index %d", i.Title, idx)
-	}
-	if idx == 0 {
-		i.mu.Unlock()
-		return fmt.Errorf("the agent tab of session %q can't be closed: it is the session's own agent, pinned to the first slot — archive or kill the session instead", i.Title)
-	}
-	tab := i.removeTabLocked(idx)
-	i.mu.Unlock()
-	return i.closeRemovedTabRetainingCleanup(tab)
-}
-
 // CloseTabByID removes the tab with stable id, selecting and removing it in the
 // same critical section. An ordinal resolved from an earlier snapshot is never
 // applied to the live roster (#2200).

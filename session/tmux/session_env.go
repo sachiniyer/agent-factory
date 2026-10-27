@@ -26,11 +26,18 @@ func (t *TmuxSession) SetRemainOnExit() {
 
 // ApplyRemainOnExit sets the window option on a session that already exists,
 // healing a process tab spawned before #4479 so its eventual exit still records
-// a dead pane rather than vanishing into an ambiguous absence. Best-effort: a
-// wedged server just loses the heal, never the tab.
+// a dead pane rather than vanishing into an ambiguous absence. It also stamps
+// the pane's @af_pane_pid while the root is still alive to answer: tmux ≥3.8
+// stops reporting pane_pid at death (#5319), and a pane launched by a
+// pre-stamp af has no shim-recorded value. `-o` never overwrites — a pane
+// already dead is exactly when re-expanding #{pane_pid} would come back
+// empty and clobber a good stamp. Best-effort: a wedged server just loses
+// the heal, never the tab.
 func (t *TmuxSession) ApplyRemainOnExit() {
 	ctx, cancel := tmuxTimeoutContext()
-	_ = t.runTmuxBounded(ctx, "set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on")
+	args := []string{"set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on"}
+	args = append(append(args, ";"), panePidStampArgs(exactTarget(t.sanitizedName))...)
+	_ = t.runTmuxBounded(ctx, args...)
 	cancel()
 }
 
@@ -85,6 +92,15 @@ func (t *TmuxSession) SetAccountForAgent(agent, name string) {
 		return
 	}
 	t.accountAgent = agent
+}
+
+// AccountAgentForTest reports the namespace the declared account is pinned to,
+// so session-package tests can assert which command the environment refresh
+// derived it from (#4430 review round 3).
+func (t *TmuxSession) AccountAgentForTest() string {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	return t.accountAgent
 }
 
 // SetAccountEnvironmentForAgent scopes a shell/process sibling to the selected
@@ -189,13 +205,25 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 // another, so a rewrite landing between them wrapped an old command with a new
 // declaration (#3083 review).
 func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
-	wrapped, launchEnv, importNames, _, _, err := t.prepareLaunchEnvironment()
+	wrapped, launchEnv, importNames, _, _, err := t.prepareLaunchEnvironment("")
 	return wrapped, launchEnv, importNames, err
 }
 
-func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []string, string, error) {
+// workDir is the pane's working directory — the tree the shared grant
+// predicate checks an absolute program executable for containment in. The
+// "" form leaves that check open for callers that only need the launch
+// pieces an absolute-inside-tree answer cannot change (account session env,
+// the scoped default command).
+func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (string, []string, []string, []string, string, error) {
 	program, proof, extra, account, accountAgent, accountEnvironmentOnly, loginEnv := t.launchSnapshot()
-	agent := sessionenv.AgentForCommand(program)
+	source := os.Environ()
+	// Two different questions, two classifiers: the credential GRANT is bound
+	// to the shared predicate (only an operator-attributable executable may
+	// carry it, #5265), while the account-namespace check below asks the
+	// identity question — which agent this command RUNS — so a named account
+	// does not newly depend on the agent being installed on the daemon's PATH.
+	agent := sessionenv.GrantAgentForCommand(program, source, workDir)
+	identityAgent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
 		return "", nil, nil, nil, "", err
@@ -213,8 +241,8 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 	}
 	var wrapped string
 	if account != "" {
-		if agent != accountAgent && !accountEnvironmentOnly {
-			resolved := agent
+		if identityAgent != accountAgent && !accountEnvironmentOnly {
+			resolved := identityAgent
 			if resolved == "" {
 				resolved = "an unrecognized command"
 			}
@@ -222,6 +250,18 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 				"account %q was selected for %s, but the launch program resolves to %s; refusing rather than "+
 					"looking up the same account name in another agent's namespace",
 				account, accountAgent, resolved)
+		}
+		// The account's material may only ride an executable af can attribute
+		// to the operator — the same credential-grant question the ambient
+		// filter answers. A scoped program whose grant fails (a relative
+		// spelling, a repository-controlled PATH hit) would otherwise still
+		// receive the selected account's environment via the account shim
+		// (#5265 review).
+		if agent != accountAgent && !accountEnvironmentOnly {
+			return "", nil, nil, nil, "", fmt.Errorf(
+				"account %q was selected for %s, but af cannot attribute the launch executable to the "+
+					"operator; refusing rather than letting account credentials reach repository content",
+				account, accountAgent)
 		}
 		// tmux < 3.2 REFUSES rather than falling back. A fallback would launch on
 		// the ambient account while every visible signal reported the selected one,
@@ -246,7 +286,6 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 	if accountEnvironmentOnly {
 		filterAgent = accountAgent
 	}
-	source := os.Environ()
 	launchEnv := sessionenv.FilterForCommand(source, filterAgent, program, extra)
 	importNames := sessionenv.ImportNamesForCommand(source, filterAgent, program, extra)
 	if !SessionEnvSupported() {
@@ -316,7 +355,7 @@ func (t *TmuxSession) refreshRestoredAccountEnvironment() error {
 	if account == "" {
 		return nil
 	}
-	_, _, _, sessionEnv, defaultCommand, err := t.prepareLaunchEnvironment()
+	_, _, _, sessionEnv, defaultCommand, err := t.prepareLaunchEnvironment("")
 	if err != nil {
 		return err
 	}

@@ -47,9 +47,9 @@ func TestCreateTabResponseCarriesStableIDIntoReusedNameRefusal(t *testing.T) {
 		t.Fatal("CreateTab response omitted the daemon-minted stable tab ID")
 	}
 
-	if _, err := manager.CloseTab(CloseTabRequest{
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{
 		Title: title, RepoID: repo.ID, TabName: created.Name,
-	}); err != nil {
+	}, "internal daemon caller"); err != nil {
 		t.Fatalf("stage concurrent close: %v", err)
 	}
 	var replacement CreateTabResponse
@@ -93,7 +93,7 @@ func TestCloseTab_RefusesUnresolvableTabID(t *testing.T) {
 
 	// The concurrent close, wound forward deterministically rather than raced: it
 	// frees the name "preview"…
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "preview"}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "preview"}, "internal daemon caller"); err != nil {
 		t.Fatalf("staging concurrent close: %v", err)
 	}
 	// …and uniqueTabName hands that exact name to the next tab that asks. If this

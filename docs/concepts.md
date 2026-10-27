@@ -57,8 +57,12 @@ closing any of them does not stop the work.
 
 It also keeps sessions alive across process death and reboots, runs the
 scheduler, handles usage-limit parking and resume, and serves the web client. It
-starts on demand when there is work to host; install its autostart unit once to
-keep tasks firing across logouts:
+starts on demand — on the default local target a bare `af` launch starts it
+(the TUI on its first control call, plus a background ensure when an enabled
+task exists), and commands that need a live daemon ensure a local one is
+running (read-only listings like `af sessions list` fall back to disk instead
+of spawning); install its autostart unit once to keep tasks firing across
+logouts:
 
 ```bash
 af daemon install   # systemd user service on Linux, launchd agent on macOS

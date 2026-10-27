@@ -174,6 +174,17 @@ type Sidebar struct {
 	// minimally so the selected row stays visible.
 	scrollOffset int
 
+	// renderedStart/renderedEnd bracket the visibleItems indices the fitted
+	// window last put on screen — the only rows whose ▾ marker is visible.
+	// RowVerbTarget's resting-binding fallback consults them rather than the
+	// full item list: a bound row scrolled outside the window carries no ▾
+	// marker on screen, so no row verb may resolve to it (#4755 review).
+	// rebuildVisibleItems drops hasRendered because the bounds describe the
+	// OLD list; RowVerbTarget refits on demand (ensureRenderedWindow) so the
+	// check always answers against the rows the next frame will paint.
+	renderedStart, renderedEnd int
+	hasRendered                bool
+
 	// Rendering
 	renderer *tree.InstanceRenderer
 	height   int
@@ -218,6 +229,10 @@ func (s *Sidebar) SetSize(width, height int) {
 	s.width = width
 	s.height = height
 	s.renderer.SetWidth(s.contentWidth())
+	// The fitted window assumes the old allocation — a resize can move the
+	// bound row across the fold without any rebuild. Mark it stale so the
+	// next RowVerbTarget refits before answering (#4755 review).
+	s.hasRendered = false
 }
 
 // SetNamingPlaceholder threads the autocreate-name shadow text (#2470) from the
@@ -268,6 +283,12 @@ func (s *Sidebar) Blur() { s.focused = false }
 // SetProjectName sets the active project's display name shown in the title chip
 // (#1461). Empty restores the default "Agent Factory" label.
 func (s *Sidebar) SetProjectName(name string) { s.projectName = name }
+
+// ProjectName returns the active project's display name set by SetProjectName
+// (empty in registry mode, where the title chip falls back to "Agent Factory").
+// Read-only accessor for tests that assert the sidebar chip follows a project
+// switch or, symmetrically, a delete-of-active-project re-scope that clears it.
+func (s *Sidebar) ProjectName() string { return s.projectName }
 
 // HandleKey implements layout.Pane. Tree navigation stays routed through the
 // root model's global bindings in PR 4 (the keys also work when the workspace

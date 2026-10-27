@@ -17,7 +17,7 @@ func TestHandoffCapturedBoundaryStillRollsBackOnLaunchFailure(t *testing.T) {
 	inst.SetGitWorktreeForTest(gw)
 	original := inst.ToInstanceData()
 	require.NoError(t, inst.Transition(BeginHandoff()))
-	entry, err := inst.RecordHandoffSwap(tmux.ProgramGemini, HandoffReasonManual, "", false)
+	entry, err := inst.RecordHandoffSwap(tmux.ProgramGemini, tmux.ProgramGemini, HandoffReasonManual, "", false)
 	require.NoError(t, err)
 	brief, err := inst.CaptureHandoffBrief(&entry, "finish the work")
 	require.NoError(t, err)

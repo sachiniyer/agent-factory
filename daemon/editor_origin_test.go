@@ -242,7 +242,7 @@ func TestEditorOrigin_SurvivesTheRegisteringTabClosing(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, nameOf)
-	_, err = m.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: nameOf})
+	_, err = m.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: nameOf}, "internal daemon caller")
 	require.NoError(t, err)
 
 	// The first editor tab is still open, so the shared origin must still resolve.

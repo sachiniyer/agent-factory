@@ -79,10 +79,17 @@ when timestamps share a second.
 Existing labeled PRs need a comment identifying their actual tested commit.
 Do not substitute the current head unless that is the code you exercised.
 
-An attestation for the current head passes directly. For an older commit, the
-gate compares complete Git tree snapshots of the tested commit and current
-head, restricted to the same gated paths and excluding `_test.go` files.
-Evidence survives a master merge or rebase when those files are unchanged.
+An attestation for the current head passes directly. So does one for any
+commit on the head's proven update-merge chain (the content head and every
+update merge the proof walked; see the approval section below): each link is its
+first parent plus master, merged with no hand resolution, so gated changes that
+arrived through a link's second parent are master's, already gated on master,
+not the PR's (#4886). For any other commit, the gate compares complete Git tree
+snapshots of the tested commit and current head, restricted to the same gated
+paths and excluding `_test.go` files, and, when the head is such a chain, also
+the tested commit and the content head: the attestation carries if either
+matches. Evidence survives a master merge or rebase when those files are
+unchanged.
 Content, path, or file-mode changes require another play-test and a new comment,
 except a comment-only change to a `.go` file (below);
 merge shape alone cannot exempt a conflict resolution. A gated file edited and
@@ -207,7 +214,25 @@ The carry check is the complete-tree proof itself: it reads the merge base and
 both parent trees, derives the only path-level three-way result from each
 path's leaf entry (mode, type and object id — the only place blob identity
 enters the decision), and requires the merge commit's tree to match it exactly —
-a truncated, malformed, same-path-conflicting or mismatched tree refuses carry.
+a truncated, malformed or mismatched tree refuses carry.
+
+A path BOTH sides changed has no path-level result (#4886). On the gate's own
+update merge (author `github-actions[bot]`, committer `web-flow`, a signature
+GitHub verified) the gate proves it line by line instead: it reads the four blobs
+(merge base, both parents, the committed file), checks each against the object
+id its tree named, and requires the committed file to be exactly the merge base
+with every hunk of each side applied, the two sides' hunks neither overlapping
+nor adjacent (`.github/scripts/text-merge.js`). That is what `git merge-tree
+--write-tree p1 p2` equality stands for: nothing in the merged file is a line
+neither side wrote. A binary file, an add/add, a delete on either side, a
+symlink or submodule, a mode conflict, more than 20 such paths, a blob over
+4 MiB, a failed read or any byte difference refuses carry. A merge the gate did
+not write keeps the path-level rule, where such a path refuses. Before #4886
+this refusal was the whole reason a maintainer approval failed to carry across
+some update merges and not others: #4789's `a7705950` and #4825's `52b78a17`
+each had one file (`app/home_update.go`) that master and the PR had both
+touched, on merges `merge-tree` reproduces exactly.
+
 When the proof passes, the approval and every Codex artifact bind
 to the merge's FIRST parent — the content head — because the reviewed change did
 not move. Otherwise the gate's own update-branch would void the approval it had
@@ -234,6 +259,29 @@ require: it was never only PR Validation. A queued or running job is left alone.
 Because that loop brings a behind head up to date itself, the ruleset's strict
 required-status-checks policy can stay on: a hand merge no longer has to win a
 race against the fleet's merge rate.
+
+**A PR that ends during its own update-branch is a lost race, not an evaluation
+failure (#4462).** The gate does not own this PR, and the open read its
+evaluation was acting on is minutes old by the time the PUT writes — leaving a
+window where a hand or queue merge plus GitHub's delete-on-merge can land
+before the write completes. A fresh pre-write `pulls.get` narrows it to a round
+trip; a confirming re-read after a rejection or an accepted PUT closes the
+rest. When a read proves the PR merged or closed, the lane refuses as ordinary
+waiting — `Refusing to merge PR #N; the PR was merged while its update-branch
+was pending` for the pre-write read, or the same refusal with `was in flight`
+after a rejection or an accepted PUT — so `processAggregateHead` invalidates
+the fixed aggregate and returns the ordinary `waiting` state: the workflow run
+does not fail, but the fixed aggregate stays red as that invalidation's
+enforcement record (the required `Auto Gate decision` check remains red). An
+accepted PUT whose post-update re-read proves the PR ended approves no parked
+runs and schedules no successor: nothing remains for this run to merge. The
+proof is the read, never the update's error shape alone (a 422 is also a real
+tree conflict, a 404 could be a fork PR still owed an answer); a read that
+fails or shows the PR still open stays the update failure it always was only
+on a rejected PUT — an accepted PUT whose confirming re-read fails or still
+shows the old open head instead sets `recoveryError` or observes no new SHA,
+and dispatches the successor Auto Gate run anyway, returning the ordinary
+waiting above rather than an update failure (#3551).
 
 **Every accepted update-branch schedules another Auto Gate evaluation (#4209).**
 The update endpoint can acknowledge before a PR read exposes its new head. The
@@ -311,7 +359,11 @@ winner keeps the existing concession behavior (#3324). With no winner, it leaves
 the aggregate PASS, waits one second, and retries the merge once, re-running the
 full merge preflight first. If the second attempt gets the same refusal, the
 run reports the wait and leaves PASS green for propagation and the next run.
-If that preflight no longer passes, the aggregate is invalidated as before.
+When the gate can prove the aggregate's check-suite placement was superseded
+by a newer suite of the same workflow on the head, the report instead names a
+permanent placement whose remedy is to push a new head — an identical-tree
+commit re-rolls placement (#4802). If that preflight no longer passes,
+the aggregate is invalidated as before.
 An unreadable ownership check is not proof of no winner: it stays loud and does
 not overwrite an unknown owner. A successful merge still invalidates the old
 shared-head authorization because master has advanced.
@@ -467,10 +519,9 @@ bypass because that non-session path updates the release commit directly.
 Every run follows this dependency graph:
 
 ```text
-auto-gate (resolve event heads)
-  -> invalidate-gate (ungrouped, including retries)
-    -> apply-gate (one reusable-workflow call per invalidated head)
-      -> aggregate transaction (head-serialized evaluation/report/merge)
+auto-gate (resolve event heads, then invalidate each selected aggregate)
+  -> apply-gate (one reusable-workflow call per invalidated head)
+    -> aggregate transaction (head-serialized evaluation/report/merge)
 ```
 
 A concurrency group keeps at most one running and one pending run; a newer
@@ -480,13 +531,30 @@ covered — a run discarded while pending never reaches invalidation, and an
 uncovered head keeps its stale verdict. The workflow-level group is keyed so
 that guarantee holds: scheduled and dispatched reconciliation passes share one
 fungible group; comment and
-review events coalesce per PR; check-suite, status, and workflow-run events
+review events coalesce per PR; status and workflow-run events
 coalesce per named commit; the remaining pull_request_target actions coalesce
 per (PR, payload head); synchronize stays keyed to its exact (before, after)
 transition and workflow_dispatch to its (PR, previous head), because those two
-carry coverage no later run reproduces. `cancel-in-progress` is `false`
-everywhere, so an active resolve, invalidation, or transaction always finishes
-uninterrupted.
+carry coverage no later run reproduces.
+
+`cancel-in-progress` is `false` everywhere, so a queued run can never interrupt
+an active transaction — but it governs only pending-run replacement. The
+platform itself can cancel jobs inside an ACTIVE run: during GitHub's
+2026-10-05 hosted-runner incident, jobs queued inside running transactions for
+~15 minutes were cancelled without executing a step, and runs that had already
+resolved their coverage died before invalidating it (#5160). Selection and
+invalidation therefore share one job: a run whose evaluate step committed has
+no queued job boundary left between its selected heads and the WAITING
+aggregate marker that makes them recoverable. A head left at that marker is
+re-evaluated once it outlives a live transaction's 15-minute lease — and a pass
+that sees the marker while it is still young retains it, re-scanning inside its
+own run until it matures or resolves. A pass that saw work at all requests one
+rate-windowed successor — leftovers are owed the wakeup, and selected work is
+applied by apply-gate, a queued job the platform can still cancel after the
+pass ends. Healing needs no human action and never waits on the schedule's real
+delivery cadence. Heads a mid-job cancellation never reached
+stand where an undelivered event leaves them; the pass's stale-decision
+coverage is the backstop for both.
 
 Inside each surviving run nothing changed: neither the resolver nor
 invalidation waits on a grouped job, every event still invalidates before any
@@ -496,9 +564,22 @@ This preserves generation ownership checks immediately before PASS and merge,
 including write retries. Runner availability and API failures still apply;
 concurrency adds no wait here.
 
+One exception: an invalidation GitHub's API could not complete — a rate limit
+(#4461), or a create answered with a 5xx whose marker never became listable
+(#4763) — is retried once and then deferred into the lane, which retries the
+invalidation itself. A check-run create is never replayed on an ambiguous
+failure; it is reconciled by its marker over a seven-second window. If the
+lane's own create is still unconfirmed after that, the lane reads the newest
+published generation of the fixed aggregate. When that generation is already
+non-passing, the transaction stops without evaluating, retitles it `UNKNOWN`
+(concluded `failure`, never `neutral`, which the ruleset counts as satisfied),
+and the run does not fail. When it satisfies the ruleset, is absent, or cannot
+be read, the run fails: a stale PASS may still be what the ruleset enforces, and
+nothing replaced it.
+
 The calling evaluation job holds `auto-gate-target-<target>-head-<head SHA>`
 for the entire reusable aggregate transaction. The target is the issue or PR
-number, dispatch PR number, workflow-run head SHA, check-suite head SHA, or
+number, dispatch PR number, workflow-run head SHA, or
 status SHA (in that order), falling back to the unique run ID. With
 `cancel-in-progress: false`, newer pending evaluation jobs replace older pending
 jobs for that target/head; active transactions are never cancelled. Every
@@ -529,33 +610,73 @@ synchronization reevaluates both the new head and the previous head because the
 set of associated PRs changed for both commits. After a successful merge, the
 same transaction explicitly makes the old-head aggregate non-green; it does not
 depend on a `closed` event that GitHub may suppress for token-authenticated
-writes.
+writes. A transaction that dies between invalidation and application — a
+platform cancellation, not a decision — leaves the head at that non-green
+marker; the reconciliation pass below re-evaluates it once it outlives a live
+transaction's lease.
 
-GitHub suppresses `check_suite` recursion for suites created by Actions. The
-required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
-also subscribes to that workflow's terminal `workflow_run` event. GitHub has
-intermittently omitted that event, so a reconciliation pass backs it up: it
-wakes only an absent exact decision, or a failed decision that names
-`Build` or `Lint` as a blocker and recorded a different state for the now-complete
-check. Runs are coalesced per PR/head. The decision records the check-run ID,
+Auto Gate does not subscribe to `check_suite` (#5177). GitHub does not
+suppress `check_suite` recursion for suites created by Actions — it only
+suppresses new workflow runs for events written with `GITHUB_TOKEN`, and a
+suite completing is a platform lifecycle transition, not a token write. So
+every run's own github-actions suite completing re-fired the workflow on the
+same head: ~200 self-triggered runs/hour measured on master for days. No
+payload predicate can run before the run exists (`on.check_suite` filters
+only on `types`), and a job skipped by `if` still completes its suite
+(skipped jobs land in it as completed check runs), so a filter inside the
+run would only trade working runs for skipped ones while the chain kept
+growing. The subscription itself is the only filter. Nothing needed is lost:
+every required check is Actions-owned, the required `Lint` and `Build` jobs
+both belong to **PR Validation** and Auto Gate still subscribes to that
+workflow's terminal `workflow_run` event, commit statuses arrive through
+`status`, and a suite completing on the master head never resolved a
+pull-request target anyway — no open PR owns that commit — so
+merge-triggered verification suites re-evaluated nothing the fleet needed;
+master-advance staleness belongs to the reconciliation pass. If the ruleset
+ever gains a required check owned by a non-Actions app, its pending state is
+a transient block the pass already re-evaluates; re-adding `check_suite`
+needs a trigger-level app filter that does not exist today.
+
+GitHub has intermittently omitted that `workflow_run` event, so a
+reconciliation pass backs it up: it wakes only an absent exact decision, or
+a failed decision that names `Build` or `Lint` as a blocker and recorded a
+different state for the now-complete check. Runs are coalesced per PR/head. The decision records the check-run ID,
 status and conclusion that its
 required-check read actually observed; the reconciler compares that tuple with
 the current completed run rather than ordering check and publication clocks.
 Missing or malformed legacy evidence is reconciled conservatively once.
 
 **A pass does not depend on the schedule (#4571).** The `*/5` schedule still
-starts passes, but GitHub has delivered it every two to five hours. Every other
+starts passes, but GitHub has delivered it every two to five hours — measured
+at 30 fires in 6.6 days against ~288 expected per day (#5179). Every other
 Auto Gate run therefore ends by requesting a pass: it sends one
 `repository_dispatch` of type `auto-gate-reconcile`, and the run that starts is
-the same pass the schedule runs. Two guards bound this:
+the same pass the schedule runs. A PR Validation run ends the same way
+(#5179): its last job POSTs the dispatch itself — a synchronous API write
+inside the run whose completion is at risk, so a dropped `workflow_run`
+delivery cannot strand the decision that completion should have refreshed —
+and its POST is a warning on failure, never a silent skip. Fork and Dependabot
+`pull_request` runs carry read-only tokens and cannot POST, so the job skips
+them outright and `workflow_run` remains their wakeup. Two guards bound this:
 
-- **No recursion.** A pass never requests a pass. The request step skips
-  `schedule` and `repository_dispatch` runs, and the helper refuses them before
-  any read. Runs that a pass causes, such as update-branch recovery dispatches,
-  can request one, but only through the rate window.
+- **No open-ended recursion.** A pass requests a pass only as a handoff: when
+  it saw work at all — leftovers its bounded wait could not finish or the caps
+  deferred, and the work it did select, whose application in apply-gate is a
+  queued job the platform can still cancel — it sends one dispatch through the
+  rate window. Two shapes in that window cannot cover the leftover work and so
+  cannot hold it: the pass's own run (a dispatched pass would otherwise always
+  count itself) and completed predecessor passes (a finished A is why B is
+  running at all — its coverage was already spent). A sibling still queued or
+  running does bind. A pass that scans an empty repository asks for nothing, so
+  every chain ends. The request step skips `schedule` and `repository_dispatch`
+  runs, and the helper refuses those events on the ordinary path, so no pass
+  ever starts the chain on the public lane. Runs that a pass causes, such as
+  update-branch recovery dispatches, can request one, but only through the
+  rate window.
 - **At most one request per five minutes.** The marker is the creation time of
   Auto Gate's newest `repository_dispatch` run, read with one REST request
-  (`event=repository_dispatch`, `created>=` the window start, `per_page=1`).
+  (`event=repository_dispatch`, `created>=` the window start, one short page so
+  the caller's own run — excluded client-side — cannot hide a sibling).
   Every requested pass is such a run, so a pass that selected nothing still
   counts. GitHub stores the marker, so the gate writes no variable, ref, or
   check run. A failed or unreadable read sends nothing, and the schedule
@@ -577,7 +698,10 @@ drain in at most `ceil(S / 10)` passes. A truncated per-head rollup is
 skipped fail-closed rather than treated as complete.
 
 The scan costs `ceil(N / 100)` GraphQL requests per pass. The rate window holds
-dispatched passes to about 12 an hour, and scheduled passes add a few more.
+ordinary-request dispatches to about 12 an hour; a handoff chain paces itself
+by pass completion instead — one running pass plus one pending successor in the
+shared group, each link capped at ten evaluations — and a scheduled pass adds a
+few more.
 That is one request per pass (about 12/hour) through the 83-head REST-quota
 threshold, or two (about 24/hour) for 120 PRs, before bounded retries. The scan
 does no per-head REST reads except when a queued check run faces a dated
@@ -586,6 +710,52 @@ rival; it then re-reads just that head via `listForRef` to order the run
 plus at most one dispatch per window. Passes skip unrelated branch-sweep
 housekeeping. This avoids both the frozen-decision failure and one gate
 evaluation per completed matrix job (#4242).
+
+**A pass also retries transient blocks (#4782).** Some blocks clear with time
+and send no event when they do, so a decision taken on them used to sit BLOCKED
+until someone ran a manual `workflow_dispatch`. A pass re-evaluates two shapes
+once they have aged, using the same snapshot, so they cost no extra read:
+
+- **A decision blocked only by transient state**, evaluated at least ten minutes
+  ago. There are three transient reasons, tagged where each is produced:
+  mergeability still `UNKNOWN` or absent (GitHub computes it asynchronously), a
+  required check still settling (queued, in progress, a pending status, or
+  CodeQL's interim neutral), and a `Build` or `Lint` check that has not reported
+  yet (every base-repository head gets a PR Validation run, and evaluation
+  dispatches one when none exists). `reportDecision` writes
+  `<!-- auto-gate-transient-block -->` into the decision's output text only when
+  every reason is one of those. Any other reason keeps the marker off,
+  including a hold, a failed check, a conflict, a finding, a missing verdict,
+  a missing approval, an unapproved parked run, or any reason added later
+  without a tag. Manual-merge decisions never carry it. An unmarked decision is
+  never selected.
+- **A fixed aggregate left at `WAITING: refreshing every PR/head decision at
+  this commit`** for at least fifteen minutes. That title belongs to an
+  aggregate transaction in progress, so one this old means the transaction died.
+  Re-evaluating any PR at the head re-applies the aggregate.
+
+The age is the spacing. A retry that still sees the transient state rewrites
+the decision stamp, so one PR costs at most one evaluation per ten minutes,
+however long the state lasts. Transient retries take only the slots that
+PR Validation wakes leave under the pass's ten-evaluation cap, and at most five.
+The oldest go first, so a backlog drains instead of starving.
+
+A pass does not leave either shape to luck when it sees them too young. The
+request that spawned the pass fired while the marker or decision was fresh, and
+a platform-cancelled lane schedules nothing at all, so the pass retains the
+pending work itself (#5160): it re-scans inside its own run — one early probe a
+minute in, then straight to each item's maturity point instead of a scan a
+minute — until each item matures and is selected, or resolves because its live
+lane finished first. The wait is bounded at sixteen minutes. A pass then hands
+exactly one successor dispatch through the same five-minute window whenever it
+saw work at all: unmet leftovers — still-pending items, or work the caps
+deferred — are owed the wakeup, and *selected* work is owed one too, because
+applying it is apply-gate's job and the platform can cancel that queued job
+after the pass ends. The successor sees the fresh markers young, retains them
+through the same wait, and re-applies them if the lane died; when nothing died
+it scans an empty repository and asks for nothing, so the handoff costs one
+quiet pass. A stranded head is therefore re-evaluated at its fifteen-minute
+boundary plus one probe, not at the schedule's real delivery cadence.
 
 **A head with no PR Validation run at all gets one dispatched (#4581).**
 Reconciliation wakes a decision when Build or Lint completes, so it cannot help
@@ -642,8 +812,9 @@ the post-merge warning names the gap, the maintainer dispatches that first run,
 and every later merge uses the updated list automatically.
 
 Repository-ruleset changes and mergeability changes caused only by `master`
-advancing have no GitHub event here. Use the same manual PR-number dispatch to
-refresh that observational state. The destructive merge path still reevaluates
+advancing have no GitHub event here. A mergeability still `UNKNOWN` is retried
+by the reconciliation pass (#4782). For anything else, use the same manual
+PR-number dispatch to refresh that observational state. The destructive merge path still reevaluates
 the target PR, every other associated PR, and the association set immediately
 before its write.
 
@@ -746,5 +917,9 @@ and maintainer approval are still required exactly as before.
 
 The live task prompt must run the helper before its no-findings early exit.
 Until this helper lands on master, it skips that command when the file is absent.
-The watch is the only writer; do not run overlapping write sweeps. A failed API
-read aborts before updating the record, preserving the previous successful sweep.
+The watch is the only writer; do not run overlapping write sweeps. Transient
+`gh api` failures — transport errors, empty or truncated bodies, 5xx, and
+rate-limit (including secondary) 403s — retry on a bounded backoff; real 4xx
+answers are not retried. A scan that still cannot finish writes a record
+marked incomplete, carrying the last complete episodes, rather than aborting
+or posing as a clean read (#4629).

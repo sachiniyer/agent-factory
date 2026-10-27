@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -62,8 +63,7 @@ func TestNamingPreflightFollowsTheRepoDeclaredBackend(t *testing.T) {
 			startNaming(t, h, "repo-declared-backend")
 
 			// A refusal ends in a transient notice whose cmd is a timer, so the
-			// refused leg drains one hop (pressExpectingNotice) rather than
-			// following the re-emitted key's cmd to completion.
+			// refused leg does not wait on the press's cmd (pressExpectingNotice).
 			if tc.wantRefused {
 				pressExpectingNotice(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 			} else {
@@ -109,4 +109,37 @@ func TestNamingPreflightDoesNotRefuseABackendItCannotResolve(t *testing.T) {
 		"a backend only the daemon knows about must still submit")
 	assert.Equal(t, "moonbase", got.Backend,
 		"and reach the daemon verbatim")
+}
+
+// TestRemotePreflightReturnsBeforeClientLocalResolution is the ordering half of
+// the remote preflight skip (#4889 review): a remote create must leave
+// preflight BEFORE session.LocalPrereqsRequired resolves the client's repo
+// config — a wedged or slow filesystem under this host's repoRoot would block
+// the event loop on a resolution whose answer the remote daemon never needs.
+func TestRemotePreflightReturnsBeforeClientLocalResolution(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(200, 1)
+	recordStartRequest(t)
+
+	prevRemote := isRemoteTarget
+	isRemoteTarget = func() bool { return true }
+	t.Cleanup(func() { isRemoteTarget = prevRemote })
+
+	prevRequired := localPrereqsRequired
+	localPrereqsRequired = func(session.InstanceOptions, string) (bool, error) {
+		t.Error("remote creates must return before resolving the client's repo config")
+		return false, nil
+	}
+	t.Cleanup(func() { localPrereqsRequired = prevRequired })
+
+	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error {
+		t.Error("remote creates never reach the client-local prereq gate")
+		return nil
+	}))
+
+	startNaming(t, h, "remote-early-return")
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, stateDefault, h.state,
+		"a remote create leaves preflight without touching client-local resolution")
+	assert.Empty(t, h.errBox.FullError())
 }
