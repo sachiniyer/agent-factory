@@ -1,6 +1,8 @@
 package session
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -8,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// #1874: the sandbox runtimes (docker/ssh/hook) declare WorkspaceRemote — their
+// #1874: the sandbox runtimes (docker/ssh/sandbox/hook) declare WorkspaceRemote — their
 // workspace is off-box, so the daemon-side instance has no local git worktree
 // (gitWorktree is assigned only in LocalBackend.Provision and the LOCAL restore
 // branch of FromInstanceData). The tab paths that RUN A PROCESS require that
@@ -27,14 +29,44 @@ import (
 // is routed through the agent-server (issue #1874 option 1), the assertions flip
 // to "the tab is created" rather than being deleted.
 
-// sandboxBackends is the set of runtimes whose workspace is off-box. Kept as one
-// table so a NEW sandbox runtime is forced through the same contract.
-func sandboxBackends() map[string]Backend {
-	return map[string]Backend{
-		"docker": &dockerBackend{},
-		"ssh":    &sshBackend{},
-		"hook":   &HookBackend{},
+// offBoxBackendType is a kind's persisted Backend.Type() discriminator, the
+// key backendKindForType and newInertSandboxBackend route on. Hook persists as
+// "remote". A kind missing here fails offBoxKinds, so a NEW off-box runtime
+// cannot be registered without joining every test that enumerates the family.
+var offBoxBackendType = map[BackendKind]string{
+	BackendDocker:  "docker",
+	BackendSSH:     "ssh",
+	BackendSandbox: "sandbox",
+	BackendHook:    "remote",
+}
+
+// offBoxKinds derives the off-box family from the runtime registry and its
+// ProvisionsOffBox declaration rather than a hand-written list (W10.2). Four
+// tests once enumerated docker/ssh/hook by hand and silently omitted sandbox.
+func offBoxKinds() []BackendKind {
+	var kinds []BackendKind
+	for kind := range runtimeRegistry {
+		if !kind.ProvisionsOffBox() {
+			continue
+		}
+		if _, ok := offBoxBackendType[kind]; !ok {
+			panic(fmt.Sprintf("off-box backend %q is registered but has no entry in offBoxBackendType; add it so the capability tests cover it", kind))
+		}
+		kinds = append(kinds, kind)
 	}
+	sort.Slice(kinds, func(i, j int) bool { return kinds[i] < kinds[j] })
+	return kinds
+}
+
+// sandboxBackends is the set of runtimes whose workspace is off-box, derived
+// from the registry. Kept as one table so a NEW sandbox runtime is forced
+// through the same contract.
+func sandboxBackends() map[string]Backend {
+	out := map[string]Backend{}
+	for _, kind := range offBoxKinds() {
+		out[string(kind)] = newInertSandboxBackend(offBoxBackendType[kind])
+	}
+	return out
 }
 
 // TestSandboxBackendsDoNotAdvertiseTabManagement is the contract: a backend
