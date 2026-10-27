@@ -16287,7 +16287,9 @@ function markInk(color) {
     return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
   };
   const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
-  return luminance > 0.45 ? "#1f1f1f" : "#ffffff";
+  const darkInkContrast = (luminance + 0.05) / (0.014 + 0.05);
+  const whiteInkContrast = 1.05 / (luminance + 0.05);
+  return darkInkContrast >= whiteInkContrast ? "#1f1f1f" : "#ffffff";
 }
 function projectFaviconSvg(color) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${color}"/><path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`;
@@ -19443,12 +19445,29 @@ function openDeleteProject(root2, label) {
         const m = modal;
         m.setBusy(true);
         const connection = connectionGeneration;
-        void projectColorWriter.cancel(root2).then(() => {
+        void projectColorWriter.cancel(root2).then(async () => {
           if (!isCurrentConnection(connection, tok)) return;
+          const learned = projectColorRegistrations.get(root2);
+          if (learned && "uncertain" in learned) {
+            try {
+              await registerProject(root2, tok);
+            } catch (e) {
+              if (!isMutationCommittedError(e) && isMutationOutcomeUncertain(e)) {
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(new Error(`The project registration outcome could not be confirmed. ${errorText(e)}`));
+                return;
+              }
+            }
+            projectColorRegistrations.delete(root2);
+          }
           return deleteProject(root2, tok).then(() => {
+            projectColorRegistrations.delete(root2);
             if (modal === m) closeModal();
           }).catch((e) => {
             if (isMutationCommittedError(e)) {
+              projectColorRegistrations.delete(root2);
               if (modal === m) closeModal();
               requestResync();
               refreshRegisteredProjects();
@@ -20027,11 +20046,22 @@ function commitRegisteredProjects(projects) {
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
 }
+var projectColorRegistrations = /* @__PURE__ */ new Map();
 var projectColorWriter = createLatestWriter(
   async (root2, { color, tok, connection, projectId: known }) => {
     const current = () => isCurrentConnection(connection, tok);
     if (!current()) return;
-    const projectId = known ?? (await registerProject(root2, tok)).id;
+    const learned = projectColorRegistrations.get(root2);
+    const projectId = known ?? (learned && "id" in learned ? learned.id : null) ?? await (async () => {
+      try {
+        const project = await registerProject(root2, tok);
+        projectColorRegistrations.set(root2, { id: project.id });
+        return project.id;
+      } catch (e) {
+        if (isMutationOutcomeUncertain(e)) projectColorRegistrations.set(root2, { uncertain: true });
+        throw e;
+      }
+    })();
     if (!current()) return;
     await setProjectColor(projectId, color, tok);
     if (current()) refreshRegisteredProjects();

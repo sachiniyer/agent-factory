@@ -1184,12 +1184,37 @@ function openDeleteProject(root: string, label: string): void {
         const m = modal;
         m.setBusy(true);
         const connection = connectionGeneration;
-        void projectColorWriter.cancel(root).then(() => {
+        void projectColorWriter.cancel(root).then(async () => {
           if (!isCurrentConnection(connection, tok)) return;
+          // A registration whose outcome never reached us can still commit
+          // daemon-side: a delete sent now would run first as a no-op and the
+          // registration would land after it. Re-drive the idempotent call so
+          // the registration is determinate before the delete.
+          const learned = projectColorRegistrations.get(root);
+          if (learned && "uncertain" in learned) {
+            try {
+              await registerProject(root, tok);
+            } catch (e) {
+              if (!isMutationCommittedError(e) && isMutationOutcomeUncertain(e)) {
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(new Error(`The project registration outcome could not be confirmed. ${errorText(e)}`));
+                return;
+              }
+              // Committed or determinately refused: either way the record's
+              // fate is settled, so the delete is safe to send.
+            }
+            projectColorRegistrations.delete(root);
+          }
           return deleteProject(root, tok)
-            .then(() => { if (modal === m) closeModal(); })
+            .then(() => {
+              projectColorRegistrations.delete(root);
+              if (modal === m) closeModal();
+            })
             .catch((e) => {
               if (isMutationCommittedError(e)) {
+                projectColorRegistrations.delete(root);
                 if (modal === m) closeModal();
                 requestResync();
                 refreshRegisteredProjects();
@@ -2291,6 +2316,13 @@ function refreshRegisteredProjects(): void {
   projectsRefetcher.refresh();
 }
 
+/** What the writer learned about a root's durable registration. A settled id
+ *  feeds later queued writes — a choice captured before the first write
+ *  registered the project must not call registerProject again, or a rebind in
+ *  between would register the old root as a second project. An uncertain one
+ *  gates a following delete until registerProject makes it determinate. */
+const projectColorRegistrations = new Map<string, { id: string } | { uncertain: true }>();
+
 /** Sets a project's color. A project known only from its sessions has no registry
  *  record to hold a color, so it is registered first (idempotent on the daemon).
  *  Each choice is fenced to the connection and credential it was made under, and
@@ -2300,7 +2332,17 @@ const projectColorWriter = createLatestWriter<{ color: string; tok: string; conn
   async (root, { color, tok, connection, projectId: known }) => {
     const current = (): boolean => isCurrentConnection(connection, tok);
     if (!current()) return;
-    const projectId = known ?? (await registerProject(root, tok)).id;
+    const learned = projectColorRegistrations.get(root);
+    const projectId = known ?? (learned && "id" in learned ? learned.id : null) ?? await (async () => {
+      try {
+        const project = await registerProject(root, tok);
+        projectColorRegistrations.set(root, { id: project.id });
+        return project.id;
+      } catch (e) {
+        if (isMutationOutcomeUncertain(e)) projectColorRegistrations.set(root, { uncertain: true });
+        throw e;
+      }
+    })();
     if (!current()) return;
     await setProjectColor(projectId, color, tok);
     if (current()) refreshRegisteredProjects();

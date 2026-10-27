@@ -31,14 +31,19 @@ export function projectColor(projects: readonly RegisteredProject[], root: strin
   return HEX.test(color) ? color : null;
 }
 
-/** White on a dark tile, near-black on a light one, so the mark stays legible. */
+/** White on a dark tile, near-black on a light one — whichever reads better. */
 export function markInk(color: string): string {
   const channel = (i: number): number => {
     const v = parseInt(color.slice(i, i + 2), 16) / 255;
     return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
   };
   const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
-  return luminance > 0.45 ? "#1f1f1f" : "#ffffff";
+  // WCAG contrast of each candidate ink against the tile; #1f1f1f's own
+  // luminance is ~0.014, white's 1.0. Mid-light colors can favour the dark ink
+  // where a fixed luminance threshold would pick white (#ca8a04: ~5.6 vs ~2.9).
+  const darkInkContrast = (luminance + 0.05) / (0.014 + 0.05);
+  const whiteInkContrast = 1.05 / (luminance + 0.05);
+  return darkInkContrast >= whiteInkContrast ? "#1f1f1f" : "#ffffff";
 }
 
 /** The favicon SVG with its tile painted in color. */

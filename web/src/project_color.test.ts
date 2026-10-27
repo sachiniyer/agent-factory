@@ -43,6 +43,9 @@ test("markInk keeps the mark legible on light and dark tiles", () => {
   assert.equal(markInk("#000000"), "#ffffff");
   assert.equal(markInk("#ffffff"), "#1f1f1f");
   assert.equal(markInk("#fde047"), "#1f1f1f");
+  // Mid-light tiles can favour the dark ink where a fixed luminance threshold
+  // picks white: on #ca8a04 dark reads ~5.6:1 against white's ~2.9:1.
+  assert.equal(markInk("#ca8a04"), "#1f1f1f");
 });
 
 test("the favicon SVG paints the tile in the project color", () => {
