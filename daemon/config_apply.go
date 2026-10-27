@@ -64,6 +64,24 @@ func (m *Manager) tokenFloorArmed() bool {
 	return floored
 }
 
+// servedPosture is the posture the control gate is enforcing right now: the
+// live config with the probation floor overlaid — what livePosture.current
+// reads for an unfrozen generation. retireWebBeforePostureSwap captures THIS
+// as postureBeforeSwap, not the raw config: under the floor the raw config
+// reads tokenless, so an apply that will disarm it (a tokenless → tokenless
+// write whose socket left the network) would not register as a relaxation,
+// and a floored network generation still draining from an earlier rebind
+// would fall to the unfloored live read the moment reconcile disarms (#5183
+// review). Judged against the served posture the disarm is the relaxation it
+// is, and the kind freeze pins those generations onto the floored config.
+func (m *Manager) servedPosture() *config.Config {
+	cfg, floored := m.authPosturePair()
+	if floored {
+		return withProbationTokenFloor(cfg)
+	}
+	return cfg
+}
+
 // storeLivePosture publishes a new applied-live config, carrying the floor
 // forward unchanged. Writers are serialized — the apply path under
 // configApplyMu, startup before serving — so the Load→Store carry cannot lose

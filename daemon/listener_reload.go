@@ -300,11 +300,11 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) int {
 	wl.mu.Lock()
 	defer wl.mu.Unlock()
-	// The live config has not swapped yet, so this is the config every bound
-	// socket is still serving under — the value a refusal-driven retire freezes
-	// each gate onto, so drain-window requests keep the posture they were
-	// admitted with rather than the refused one about to publish.
-	wl.postureBeforeSwap = wl.manager.Config()
+	// The live config has not swapped yet, so this (#5183 floor included) is
+	// what every bound socket is still serving — the value a freeze pins each
+	// gate onto, so drain-window requests keep the posture they were admitted
+	// with rather than the weaker one about to publish.
+	wl.postureBeforeSwap = wl.manager.servedPosture()
 	wl.sandboxRevokedPreSwap = 0
 	// A relaxation apply is a drain-window hazard even when NOTHING is refused:
 	// generations already retired by a rebind or opt-out are invisible to the

@@ -562,6 +562,62 @@ func TestProbationFloorOverlaysFrozenGeneration(t *testing.T) {
 		"a config that already demands the token passes through without an allocation")
 }
 
+// TestProbationFloorDisarmKeepsDrainingNetworkGenerationTokened pins the Codex
+// finding on the floor's disarm: a floored, tokenless network socket moves to
+// loopback, and a SECOND apply lands while the retired network generation is
+// still draining. That apply sees nothing left serving the network and disarms
+// the floor — and because both raw configs read tokenless, the pre-swap
+// relaxation check used to see no relaxation and pin nothing, so a request
+// already dispatched on the draining network listener fell through to the
+// unfloored live read and reached the control API unauthenticated. The
+// freeze judges the SERVED posture (servedPosture), so the move that retired
+// the network generation pins it onto the floored config it was admitted
+// under.
+func TestProbationFloorDisarmKeepsDrainingNetworkGenerationTokened(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.RequireToken = false // refused on the file — the deferral floors the gate
+	m, wl := upgradeCandidateListeners(t, cfg, "txn-5183")
+	stubUpgradeJournal(t, journalExpectingBound("txn-5183", true), nil)
+	failed, err := wl.reconcile(m.Config())
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	require.True(t, m.tokenFloorArmed(), "precondition: the deferred network socket is floored")
+	networkSeq := wl.boundSeq
+	require.NotZero(t, networkSeq)
+
+	// Apply 1 moves the socket to loopback, still tokenless. The network
+	// generation retires into its drain; the floor stays armed through the
+	// apply because reconcile judged it while the network socket was bound.
+	moved := *m.Config()
+	moved.ListenAddr = "127.0.0.1:0"
+	wl.retireWebBeforePostureSwap(&moved)
+	m.storeLivePosture(&moved)
+	failed, err = wl.reconcile(&moved)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	require.Greater(t, wl.boundSeq, networkSeq, "precondition: a loopback successor adopted")
+
+	// Apply 2 — any write before the drain finishes — disarms the floor.
+	again := moved
+	wl.retireWebBeforePostureSwap(&again)
+	m.storeLivePosture(&again)
+	failed, err = wl.reconcile(&again)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	require.False(t, m.tokenFloorArmed(),
+		"anti-vacuous: nothing serves the network any more, so this apply disarmed the floor")
+
+	// The gate exactly as webBind wires it, one per generation.
+	gate := func(seq uint64) *livePosture {
+		return &livePosture{posturePair: m.authPosturePair, freeze: &wl.webFreeze, seq: seq}
+	}
+	require.True(t, gate(networkSeq).current().RequireToken,
+		"a request still draining on the retired network generation must keep demanding the token after the disarm")
+	require.False(t, gate(wl.boundSeq).current().RequireToken,
+		"control: the loopback socket in service keeps the live read — its tokenless posture is allowed")
+}
+
 // TestLivePosturePublicationNeverPairsTokenlessConfigWithAClearedFloor is the
 // regression for the Codex finding on the upgrade-probation gate. The apply
 // sequence is three ordered writes — arm the floor, publish the new config,
