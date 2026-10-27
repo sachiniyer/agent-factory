@@ -13458,8 +13458,9 @@ function remapByIdentity(root2, prevIds, ids) {
     }
   }
   const max = ids.length - 1;
+  const maxHeld = leaves(cur).some((l) => l.tab === max);
   for (const leaf of leaves(cur)) {
-    if (!moved.has(leaf.id) && leaf.tab >= ids.length && claimed.has(max)) {
+    if (!moved.has(leaf.id) && leaf.tab >= ids.length && maxHeld) {
       cur = closeLeaf(cur, leaf.id) ?? cur;
     }
   }

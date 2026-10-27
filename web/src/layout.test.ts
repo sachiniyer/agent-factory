@@ -597,3 +597,53 @@ test("a backfilled survivor (synthesized id → real id) is NOT closed by the sh
     "the shell is clamped to its tab's new ordinal (validate's rebind, not a close)",
   );
 });
+
+test("a backfilled survivor at the clamp ordinal is preserved when a different dead leaf is out of range", () => {
+  // The backfill case the `claimed.has(max)` guard missed: a snapshot replaces a
+  // tab's synthesized `kind:name` with its real id (the SAME tab to ui.ts, #1779)
+  // AND removes a different highest-ordinal tab, so the backfilled survivor sits AT
+  // the clamp target `max` (in range, so validate() keeps it there) while a
+  // different dead leaf is out of range. `moved` matches by identity string, so the
+  // backfilled survivor falls out of `moved`/`claimed` and `claimed.has(max)` is
+  // false even though a real pane occupies `max`; the dead leaf was therefore left
+  // for validate(), which clamped it onto `max` and — keeping the FIRST in visual
+  // order — evicted the backfilled survivor when the dead leaf was visually earlier.
+  // The shrink loop now detects the holder structurally (any leaf at `max`) and
+  // closes the out-of-range dead leaf, so the survivor keeps its pane.
+  //   prevIds: [id-agent, 1:shell, id-x]  →  ids: [id-agent, id-shell]
+  //   panes:  dead X at ordinal 2 (visually FIRST), agent at 0, shell at 1 (max)
+  //   X is out of range (2 >= 2); shell is the backfilled survivor at the clamp target.
+  resetIds();
+  const tree: LayoutNode = {
+    kind: "split",
+    id: "S1",
+    dir: "row",
+    ratio: 0.5,
+    a: { kind: "leaf", id: "Ldead", tab: 2 }, // shows "id-x" — visually FIRST, out of range
+    b: {
+      kind: "split",
+      id: "S2",
+      dir: "row",
+      ratio: 0.5,
+      a: { kind: "leaf", id: "Lagent", tab: 0 }, // shows "id-agent"
+      b: { kind: "leaf", id: "Lshell", tab: 1 }, // shows "1:shell", backfilled to id-shell at max
+    },
+  };
+  const out = setSessionSequence(tree, ["id-agent", "1:shell", "id-x"], ["id-agent", "id-shell"]);
+  const ls = leaves(out);
+  assert.deepEqual(
+    ls.map((l) => l.id).sort(),
+    ["Lagent", "Lshell"],
+    "the dead X pane closes; the agent and the backfilled shell both keep their panes",
+  );
+  assert.notEqual(
+    ls.find((l) => l.id === "Lshell"),
+    undefined,
+    "the backfilled shell (the survivor at max) is preserved, not the dead X",
+  );
+  assert.equal(
+    ls.find((l) => l.id === "Lshell")!.tab,
+    1,
+    "the shell stays at its tab's new ordinal (max), clamped nowhere",
+  );
+});

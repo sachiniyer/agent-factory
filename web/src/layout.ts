@@ -457,24 +457,33 @@ export function remapByIdentity(root: LayoutNode, prevIds: string[], ids: string
   }
   // Drop a dead-identity leaf whose ordinal no longer has a slot after a pure
   // shrink (the closed tab was the highest-ordinal one, nothing replaced it) — but
-  // ONLY when the slot it would clamp down onto is already claimed by a survivor.
-  // validate() clamps every out-of-range leaf to the last ordinal (`ids.length - 1`)
-  // and then drops duplicates keeping the FIRST in visual order; that evicts a
-  // SURVIVOR at that ordinal only when a dead leaf is also clamped onto it (and
-  // happens to come first). Closing the dead leaf here pre-empts that eviction.
-  // When the clamp target is NOT claimed, validate() rebinds the leaf to the
-  // unclaimed slot with no duplicate to drop — closing it would collapse a
-  // multi-pane layout that the new tab count still admits. That includes a leaf
-  // whose identity was backfilled (#1779): a synthesized `kind:name` that a later
-  // snapshot replaces with a real id is the SAME tab to ui.ts, but `moved` matches
-  // by identity string, so the backfill reads as "identity gone" and the leaf falls
-  // out of `moved`/`claimed` — leaving it lets reconcile rebind it to the new id at
-  // its clamped ordinal instead of closing a pane the user still has open.
+  // ONLY when the slot it would clamp down onto is already held by a leaf validate()
+  // will KEEP there. validate() clamps every out-of-range leaf to the last ordinal
+  // (`ids.length - 1`) and then drops duplicates keeping the FIRST in visual order;
+  // that evicts a SURVIVOR at that ordinal only when a dead leaf is also clamped onto
+  // it (and happens to come first). Closing the dead leaf here pre-empts that
+  // eviction.
+  //
+  // The holder at `max` may be a survivor `moved` tracked — in which case
+  // `claimed.has(max)` already covers it — OR a backfilled survivor whose identity
+  // string changed (#1779): a synthesized `kind:name` that a later snapshot
+  // replaces with a real id is the SAME tab to ui.ts, but `moved` matches by
+  // identity string, so the backfill reads as "identity gone" and the leaf falls out
+  // of `moved`/`claimed` while staying at its (in-range) ordinal. `claimed` alone
+  // misses that case, so detect the holder structurally instead: any leaf at ordinal
+  // `max` is in range (`max < ids.length`), so validate() keeps it there, and
+  // clamping the dead leaf onto it would create a duplicate validate() resolves by
+  // visual order — evicting the holder when the dead leaf is visually earlier (e.g. a
+  // split-LEFT). When `max` is empty (no leaf there), validate() rebinds the dead
+  // leaf to the unclaimed slot with no duplicate to drop — closing it would collapse
+  // a multi-pane layout the new tab count still admits, so this loop leaves it alone
+  // (the [A,_,C]→[A,B] case keeps C's pane, clamped to the unshown B).
   // `closeLeaf` returns null for the last pane, so `?? cur` leaves a sole dead leaf
   // in place to degrade as before (validate clamps it to max).
   const max = ids.length - 1;
+  const maxHeld = leaves(cur).some((l) => l.tab === max);
   for (const leaf of leaves(cur)) {
-    if (!moved.has(leaf.id) && leaf.tab >= ids.length && claimed.has(max)) {
+    if (!moved.has(leaf.id) && leaf.tab >= ids.length && maxHeld) {
       cur = closeLeaf(cur, leaf.id) ?? cur;
     }
   }
