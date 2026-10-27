@@ -244,7 +244,9 @@ func AutostartSupervision() SupervisionInfo {
 			info.Detail += fmt.Sprintf(" main-pid=%d", info.MainPID)
 		}
 	case "darwin":
-		info.Domain = launchdDomainTarget()
+		// The service target, so doctor reports the same gui/<uid>/<label>
+		// the restart path actually kickstarts.
+		info.Domain = launchdServiceTarget()
 		info.Enabled = launchdEnabled()
 
 		print := autostartProbeCommand("launchctl", "print", info.Domain)
@@ -313,13 +315,13 @@ func AutostartSupervision() SupervisionInfo {
 // whether af's own restarts and logins reach the agent. Asking a third domain
 // would answer about nothing.
 func launchdEnabled() ProbeAnswer {
-	res := autostartProbeCommand("launchctl", "print-disabled", launchdUserDomain())
+	res := autostartProbeCommand("launchctl", "print-disabled", launchdGUIDomain())
 	out, ok := res.Output()
 	if !ok {
-		return Undetermined(launchdProbeErr("print-disabled "+launchdUserDomain(), res))
+		return Undetermined(launchdProbeErr("print-disabled "+launchdGUIDomain(), res))
 	}
 	if !res.Succeeded() {
-		return Undetermined(launchdProbeErr("print-disabled "+launchdUserDomain(), res))
+		return Undetermined(launchdProbeErr("print-disabled "+launchdGUIDomain(), res))
 	}
 	disabled, listed := launchdDisabledFor(out, autostartLaunchdLabel)
 	switch {
@@ -361,12 +363,6 @@ func launchdDisabledFor(out, label string) (disabled, listed bool) {
 	return false, false
 }
 
-// launchdUserDomain is the gui/<uid> domain target — the same domain
-// launchdDomainTarget's service target lives in, and the one af's restarts use.
-func launchdUserDomain() string {
-	return fmt.Sprintf("gui/%d", os.Getuid())
-}
-
 // launchdListElsewhere asks the domain-agnostic `launchctl list` whether the job
 // is loaded in some OTHER domain, and reports (active, loadedElsewhere, detail).
 func launchdListElsewhere(domain string) (active, elsewhere ProbeAnswer, detail string) {
@@ -405,7 +401,7 @@ func systemdAsk(verb string) (ProbeAnswer, string) {
 		return Undetermined(fmt.Errorf("could not query systemd (%s): %w: %w",
 			verb, errSystemdUnreachable, res.Cause())), "unknown"
 	}
-	word := firstLine(strings.TrimSpace(out))
+	word := firstLineTrimmed(strings.TrimSpace(out))
 
 	// systemd's exit code is a TRANSPORT fact — "the command ran, and roughly
 	// how it feels about it". The ANSWER is the word. Trusting exit 0 to mean
@@ -448,7 +444,7 @@ func systemdMainPID() (int, ProbeAnswer) {
 	if !res.Succeeded() {
 		return 0, Undetermined(systemdProbeErr("show MainPID", out))
 	}
-	word := strings.TrimSpace(firstLine(out))
+	word := firstLineTrimmed(out)
 	word = strings.TrimSpace(strings.TrimPrefix(word, "MainPID="))
 	pid, err := strconv.Atoi(word)
 	if err != nil || pid < 0 {
@@ -529,12 +525,15 @@ var systemdActiveAnswers = map[string]ProbeAnswer{
 
 func systemdProbeErr(verb, out string) error {
 	if text := strings.TrimSpace(out); text != "" {
-		return fmt.Errorf("could not query systemd (%s): %s", verb, firstLine(text))
+		return fmt.Errorf("could not query systemd (%s): %s", verb, firstLineTrimmed(text))
 	}
 	return fmt.Errorf("could not query systemd (%s): it exited non-zero without a state", verb)
 }
 
-func firstLine(s string) string {
+// firstLineTrimmed returns s's first line with its surrounding whitespace
+// removed. Callers trim the input first when leading blank lines must be
+// skipped rather than answered as an empty first line.
+func firstLineTrimmed(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
 	return strings.TrimSpace(line)
 }
@@ -585,7 +584,7 @@ func launchdProbeErr(what string, res probeResult) error {
 		return fmt.Errorf("could not query launchd (%s): %w", what, cause)
 	}
 	if text, _ := res.Output(); strings.TrimSpace(text) != "" {
-		return fmt.Errorf("could not query launchd (%s): %s", what, firstLine(strings.TrimSpace(text)))
+		return fmt.Errorf("could not query launchd (%s): %s", what, firstLineTrimmed(strings.TrimSpace(text)))
 	}
 	return fmt.Errorf("could not query launchd (%s): it exited %d without an answer", what, res.ExitCode())
 }
@@ -685,12 +684,6 @@ func runAutostartProbeCommand(name string, args ...string) probeResult {
 		return probeResult{cause: fmt.Errorf("could not run %s %s: %w",
 			name, strings.Join(args, " "), err)}
 	}
-}
-
-// launchdDomainTarget is the gui/<uid>/<label> target the restart path uses.
-// Kept here so doctor reports the same domain the restart actually kickstarts.
-func launchdDomainTarget() string {
-	return fmt.Sprintf("gui/%d/%s", os.Getuid(), autostartLaunchdLabel)
 }
 
 // launchdJobRunning reports whether a `launchctl print` block describes a job

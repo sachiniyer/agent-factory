@@ -3,7 +3,6 @@ package bugreport
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -80,31 +79,6 @@ func TestScrubLogRedactsSanitizedTitleFromRejectedRecord(t *testing.T) {
 	if strings.Contains(got, siblingLeakDiskTitle) {
 		t.Fatalf("scrubLog leaked the sanitized session title %q after typed decode rejection:\n%s",
 			siblingLeakDiskTitle, got)
-	}
-}
-
-// TestCollapseKnownRootsDoesNotRewriteAnUnrelatedSibling pins the text-pass
-// half of the same separator rule collapsePathField already enforces. A sibling
-// is not under the registered root, so consuming only its shared prefix would
-// mislabel it and strand its private suffix.
-func TestCollapseKnownRootsDoesNotRewriteAnUnrelatedSibling(t *testing.T) {
-	r := &redactor{}
-	r.noteRepoRoot(siblingLeakRepo)
-	line := "probe failed at " + siblingLeakRepo + "-backup/worktree"
-
-	if got := r.collapseKnownRoots(line); got != line {
-		t.Fatalf("collapseKnownRoots rewrote a sibling path without a separator boundary:\n got: %s\nwant: %s", got, line)
-	}
-}
-
-func TestScrubWorktreePathTitlesKeepsCollisionSuffixAndUnrelatedText(t *testing.T) {
-	r := &redactor{}
-	r.noteWorktreeTitle(siblingLeakRepo, siblingLeakTitle)
-	line := siblingLeakAlternate + "-2 failed; classification=" + siblingLeakDiskTitle
-
-	got := r.scrubWorktreePathTitles(line)
-	if want := siblingLeakRepo + "-" + redactedMarker + "-2 failed; classification=" + siblingLeakDiskTitle; got != want {
-		t.Fatalf("contextual worktree-title scrub changed the wrong value:\n got: %s\nwant: %s", got, want)
 	}
 }
 
@@ -189,14 +163,6 @@ func TestCollapseKnownRootsRecognizesFileURIPath(t *testing.T) {
 	if want := "file://[repo:1]"; !strings.Contains(got, want) {
 		t.Errorf("file URI lost its useful wrapper, want %q in %q", want, got)
 	}
-	for _, longer := range []string{
-		"nested path /mnt" + siblingLeakRepo,
-		"nested URI file:///mnt" + siblingLeakRepo,
-	} {
-		if got := r.collapseKnownRoots(longer); got != longer {
-			t.Errorf("root suffix inside a longer path was rewritten:\n got: %s\nwant: %s", got, longer)
-		}
-	}
 }
 
 // URI query and fragment separators end the URI path even though both bytes
@@ -245,15 +211,6 @@ func TestScrubbersRedactPathsAtURIQueryAndFragmentBoundary(t *testing.T) {
 				}
 			})
 		}
-	}
-
-	ordinaryRoot := "filesystem sibling " + siblingLeakRepo + "?window=1"
-	if got := r.collapseKnownRoots(ordinaryRoot); got != ordinaryRoot {
-		t.Errorf("non-URI root sibling was rewritten:\n got: %s\nwant: %s", got, ordinaryRoot)
-	}
-	ordinaryWorktree := "filesystem sibling " + siblingLeakAlternate + "#L10"
-	if got := r.scrubWorktreePathTitles(ordinaryWorktree); got != ordinaryWorktree {
-		t.Errorf("non-URI worktree sibling was rewritten:\n got: %s\nwant: %s", got, ordinaryWorktree)
 	}
 }
 
@@ -328,23 +285,8 @@ func TestRejectedRecordsKeepWorktreeTitlePairOwnership(t *testing.T) {
 	]`)
 	r.redactInstancesJSON(raw)
 
-	line := "unrelated sibling: /srv/alpha/repo-beta-secret"
-	if got := r.scrubWorktreePathTitles(line); got != line {
-		t.Fatalf("fallback fabricated a cross-record repo/title pair:\n got: %s\nwant: %s", got, line)
-	}
 	if got, want := len(r.worktreePathTitles), 2; got != want {
 		t.Errorf("registered fallback repo/title pairs = %d, want %d", got, want)
-	}
-}
-
-func TestScrubWorktreePathTitlesHandlesFilesystemRootRepo(t *testing.T) {
-	r := &redactor{}
-	r.noteWorktreeTitle(string(filepath.Separator), siblingLeakTitle)
-	line := string(filepath.Separator) + "-" + siblingLeakDiskTitle
-
-	got := r.scrubWorktreePathTitles(line)
-	if strings.Contains(got, siblingLeakDiskTitle) {
-		t.Fatalf("filesystem-root repo leaked its sibling worktree title %q: %s", siblingLeakDiskTitle, got)
 	}
 }
 

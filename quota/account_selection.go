@@ -61,12 +61,3 @@ func SelectAccountCandidates(selection AccountSelection) []string {
 	}
 	return selected
 }
-
-// SelectAccountCandidate chooses the first eligible account.
-func SelectAccountCandidate(selection AccountSelection) (string, bool) {
-	candidates := SelectAccountCandidates(selection)
-	if len(candidates) == 0 {
-		return "", false
-	}
-	return candidates[0], true
-}

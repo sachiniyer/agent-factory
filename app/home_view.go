@@ -56,6 +56,17 @@ func (m *home) setTransientFailure(err error) uint64 {
 	return m.transientNoticeID
 }
 
+// setTransientHint paints an ephemeral acknowledgment that must not become a
+// retrievable notice. Same bar, same generation token, same delayed clear —
+// but it never lands in the retained slot `E` reads, so answering "the store
+// is empty" does not fill it (#5351 review: a second `E` after the hint faded
+// used to open "Last notice" on the hint's own text).
+func (m *home) setTransientHint(err error) uint64 {
+	m.transientNoticeID++
+	m.errBox.SetHint(err)
+	return m.transientNoticeID
+}
+
 func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -69,11 +80,16 @@ func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 // showErrorDetails opens the last notice in full. It reads the RETAINED notice,
 // not the one currently painted: the bar drops a notice after 3 seconds, and
 // binding `E` to what is still on screen made the key silently dead in exactly
-// the case it exists for — a message the bar had to clip (#2618).
+// the case it exists for — a message the bar had to clip (#2618). With nothing
+// retained it still answers the key — a transient hint on the same bar — so the
+// user can tell "nothing to show" apart from "the key did nothing" (#5351).
 func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 	full, failure := m.errBox.RetainedNotice()
 	if full == "" {
-		return m, nil
+		// A hint, not a notice: acknowledging an empty store must leave it
+		// empty, or a second `E` after the fade would reopen the hint itself.
+		return m, m.clearTransientMessageAfterDelay(
+			m.setTransientHint(errors.New("No recent error")))
 	}
 	// af hiding a pane and saying how to get it back is designed behavior. Filing
 	// it under "Last error" would report af working as intended as a fault, which
@@ -97,9 +113,10 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 }
 
 // confirmActionWithDetail is confirmAction for a dialog whose copy splits into
-// consequences (message) and elaboration (detail). The overlay then guarantees
-// the consequences render or refuses the confirm outright, rather than clipping
-// the tail and collecting a 'y' for something it never showed (#1973).
+// consequences (message) and elaboration (detail). The overlay then keeps every
+// line reachable by scrolling — and refuses the confirm only when the window
+// cannot show even one body row — rather than clipping the tail and collecting
+// a 'y' for something it never showed (#1973, #5171).
 // The callback may return a follow-up tea.Cmd as its result; handleStateConfirm
 // schedules that command on the event loop instead of executing it inline.
 func (m *home) confirmActionWithDetail(message, detail string, action tea.Cmd) tea.Cmd {
