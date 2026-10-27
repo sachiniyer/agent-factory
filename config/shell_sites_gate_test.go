@@ -123,9 +123,14 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		class: operatorConfig, keys: []string{"sandbox.ssh"},
 		note: "the operator's ssh command as a PREFIX: `sh -c '<sandbox.ssh> \"$@\"' af-sandbox <script>`",
 	}},
-	"session/backend_sandbox.go:(*sandboxProvisioner).startTunnel": {{
+	"session/sandbox_tunnel.go:(*sandboxProvisioner).spawnTunnel": {{
 		class: operatorConfig, keys: []string{"sandbox.ssh"},
-		note: "the same prefix, with -N -L appended for the port-forward child",
+		note: "the same prefix, with -N -L appended for the port-forward child — the direct-spawn shape (#5564)",
+	}},
+	"session/sandbox_tunnel.go:spawnTunnelViaLifeline": {{
+		class: operatorConfig, keys: []string{"sandbox.ssh"},
+		note: "the same tunnel prefix, handed to the watch lifeline which execs `sh -c <script>` inside the " +
+			"group it owns (#5564)",
 	}},
 
 	// ---- operator-authored, but not from a config file ----
@@ -198,6 +203,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	"session/tmux/resume.go:codexExecOptionHasAttachedValue": {{
 		class: notAShell, note: "the same, in `codex exec`'s own option grammar",
 	}},
+	"session/git/worktree_prune_guard.go:WorktreeDirtyFiles": {{
+		class: notAShell,
+		note: "`git -c core.fsmonitor= status …` — git's per-invocation config override, which UNSETS the " +
+			"fsmonitor hook/daemon so a read-only probe cannot spawn it (#5136)",
+	}},
 	"session/tmux/session.go:codexCommandConfigValue": {{
 		class: notAShell,
 		note: "strings.HasPrefix(tok, \"-c\") — codex's --config short flag, matched as text to read the " +
@@ -207,6 +217,10 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		class: notAShell,
 		note: "the same -c/--config spellings, matched as text so resumeProgram can step past " +
 			"codex's global options to the subcommand slot (#5238)",
+	}},
+	"proposal/git.go:gitConfigArgs": {{
+		class: notAShell,
+		note:  "`git -c <key>=<value>` — git's config flag, paired with the fixed literals of gitFixedConfig",
 	}},
 }
 

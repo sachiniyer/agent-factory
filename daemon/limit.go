@@ -70,8 +70,9 @@ func createdTaskStatus(data session.InstanceData) string {
 // "Did not change" is NOT the same as "is idle", which is the whole reason the
 // working check sits here. The caller reaches this branch on pane STILLNESS, and
 // stillness is only evidence of idleness for agents that repaint while they work
-// (claude/codex animate a spinner + elapsed timer; amp does not — it holds a
-// static frame through every quiet gap in a turn). So before settling Ready, ask
+// (codex animates a spinner + elapsed timer; amp holds a static frame through
+// every quiet gap in a turn; claude animates one but was still seen holding a
+// still pane mid-turn). So before settling Ready, ask
 // the agent: a pane that says it is working IS working, and stays Running. See
 // task.IsWorkingContent for why a debounce cannot stand in for this.
 //
@@ -98,7 +99,7 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	if task.IsWorkingContent(content, agent) {
 		// Still mid-turn behind a still pane: hold Running so the #1766 status dot
 		// stays dark. Settling Ready here is the green flash (#1766 says green ==
-		// waiting for you), and it is not merely cosmetic — a Ready amp is what
+		// waiting for you), and it is not merely cosmetic — a Ready session is what
 		// `af sessions watch` unblocks on and what tells a user their turn is done.
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
 		return

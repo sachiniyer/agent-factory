@@ -32,7 +32,7 @@ for (const outcome of ["refused", "success", "warning", "failed-snapshot"]) {
     await page.keyboard.press("Escape");
     if (outcome !== "failed-snapshot") {
       // Reconnect with the SAME tokenless credential: token equality is insufficient.
-      await page.locator(".af-appbar button", { hasText: "Disconnect" }).evaluate((button: HTMLButtonElement) => button.click());
+      await page.locator(".af-config-disconnect").evaluate((button: HTMLButtonElement) => button.click());
       await expect(page.locator(".af-login")).toBeVisible();
       await page.locator(".af-login button.af-primary").click();
       await expect(page.locator(".af-app")).toBeVisible();

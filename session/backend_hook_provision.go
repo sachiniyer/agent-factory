@@ -221,7 +221,15 @@ func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord)
 // provisionHost can stop doing it while the test stays green — which is exactly
 // the gap this closes. Production leaves it alone.
 var newHookSandboxProvisioner = func(spec ProvisionSpec, sshCmd, afBin, program string) *sandboxProvisioner {
-	return &sandboxProvisioner{spec: spec, sshCmd: sshCmd, afBin: afBin, program: program}
+	return &sandboxProvisioner{
+		spec:    spec,
+		sshCmd:  sshCmd,
+		afBin:   afBin,
+		program: program,
+		// Errors from the shared transport must name THIS backend. An operator whose
+		// provision_cmd clone failed should not be sent to look up sandbox_ssh.
+		backendLabel: string(BackendHook),
+	}
 }
 
 // hookProvisionPinnedRecord normalizes a record for pinning: the port is split
