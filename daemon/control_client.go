@@ -584,6 +584,17 @@ func ListBackends(req ListBackendsRequest) (ListBackendsResponse, error) {
 	return resp, nil
 }
 
+// CheckHost asks the daemon to probe a listed host (empty: every listed host)
+// and record its readiness. It dials the host, so unlike ListBackends it is not
+// free; the daemon refuses a name outside the global host list.
+func CheckHost(req CheckHostRequest) (CheckHostResponse, error) {
+	var resp CheckHostResponse
+	if err := callDaemon("CheckHost", req, &resp); err != nil {
+		return CheckHostResponse{}, err
+	}
+	return resp, nil
+}
+
 // CreateTab asks the daemon to spawn, persist, and report a new tab on an
 // existing session. Returning the response object keeps the daemon-minted ID
 // together with its resolved and tmux names across the gob transport.

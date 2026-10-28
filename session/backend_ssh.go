@@ -129,6 +129,11 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, err
 	}
+	// The licence to send an account's credentials (W7.3): a host-list entry and
+	// nothing else. A repository-chosen [ssh] target never earns it.
+	if listed != nil {
+		spec.AccountSyncHost = hostName
+	}
 	var sshCfg config.SSHConfig
 	posture := cfg.SSHHostKeyVerification
 	if listed != nil {

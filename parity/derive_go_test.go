@@ -82,6 +82,7 @@ var auditedRequests = map[string]reflect.Type{
 	"ConfirmHandoffDeliveryRequest": reflect.TypeOf(daemon.ConfirmHandoffDeliveryRequest{}),
 	"CreateSessionRequest":          reflect.TypeOf(daemon.CreateSessionRequest{}),
 	"CreateTabRequest":              reflect.TypeOf(daemon.CreateTabRequest{}),
+	"CheckHostRequest":              reflect.TypeOf(daemon.CheckHostRequest{}),
 	"DeleteProjectRequest":          reflect.TypeOf(daemon.DeleteProjectRequest{}),
 	"DeliverPromptRequest":          reflect.TypeOf(daemon.DeliverPromptRequest{}),
 	"ExplainConfigRequest":          reflect.TypeOf(daemon.ExplainConfigRequest{}),

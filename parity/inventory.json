@@ -382,6 +382,44 @@
       "notes": "Collects host-side logs and redacted state; must work when af is too broken to render a UI."
     },
     {
+      "id": "host.manage",
+      "title": "Add, list, check and remove sandbox hosts in one command",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/hostscmd.go af hosts add|list|check|remove: add writes the W6.1 entry through the admission-gated `config set hosts` path, then runs daemon.CheckHost and prints each missing tool with its fix"
+      },
+      "verdict": "real-gap",
+      "issue": "#5571",
+      "notes": "W10.5 of the sandbox-parity epic. The CLI half landed first. The web and TUI equivalents (an add-host form that writes the same entry and shows the same CheckHost result) are the remaining half, tracked on #5571's W10.5 plan comment; when they land, flip those cells to yes. Connectivity stays the operator's: af opens no tunnel and edits no ssh config."
+    },
+    {
+      "id": "host.check",
+      "title": "Probe a listed host for the tools a sandbox session needs and record its readiness",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "doctor/hosts.go checkListedHosts -> daemon/control_client.go CheckHost (POST /v1/CheckHost); the daemon's supervisor also refreshes every listed host on a timer (daemon/checkhost.go)"
+      },
+      "verdict": "deliberate",
+      "issue": "#5571",
+      "notes": "W2.3 of the sandbox-parity epic. A diagnostic, like install.doctor: the TUI and web pickers do not run it, they READ its result (HostOption.readiness/note on ListBackends), which the daemon refreshes on a ~10 minute jittered timer and on `af doctor`. The RPC refuses a name outside the global host list before anything is dialed, and stays out of the sandbox credential scope (sandboxAllowed is false): a probe dials the operator's hosts."
+    },
+    {
       "id": "install.doctor",
       "title": "Diagnose setup and leaked resources",
       "tui": {
@@ -1803,6 +1841,10 @@
       "af tasks show": "task.health",
       "af tasks trigger": "task.trigger",
       "af tasks update": "task.edit",
+      "af hosts add": "host.manage",
+      "af hosts check": "host.manage",
+      "af hosts list": "host.manage",
+      "af hosts remove": "host.manage",
       "af target clear": "daemon.client-target",
       "af target set": "daemon.client-target",
       "af target show": "daemon.client-target",
@@ -1841,6 +1883,7 @@
       "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListAccounts": "session.accounts",
+      "POST /v1/CheckHost": "host.check",
       "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListDirectory": "project.browse",
       "POST /v1/ListProjects": "project.list",
@@ -2086,6 +2129,7 @@
       "af sessions --json": "cli.json-envelope",
       "af sessions --repo": "project.switch",
       "af sessions archive --help": "meta.discovery",
+      "af sessions archive --push": "session.archive",
       "af sessions archive --self": "session.archive",
       "af sessions attach --help": "meta.discovery",
       "af sessions backends --help": "meta.discovery",
@@ -2207,6 +2251,18 @@
       "af target clear --help": "meta.discovery",
       "af target set --help": "meta.discovery",
       "af target set --token-stdin": "daemon.client-target",
+      "af hosts --help": "meta.discovery",
+      "af hosts --json": "cli.json-envelope",
+      "af hosts add --default": "host.manage",
+      "af hosts add --host-key-verification": "host.manage",
+      "af hosts add --identity-file": "host.manage",
+      "af hosts add --no-check": "host.manage",
+      "af hosts add --workspace-root": "host.manage",
+      "af hosts add --help": "meta.discovery",
+      "af hosts check --help": "meta.discovery",
+      "af hosts list --help": "meta.discovery",
+      "af hosts remove --clear-default": "host.manage",
+      "af hosts remove --help": "meta.discovery",
       "af target show --help": "meta.discovery",
       "af token --help": "meta.discovery",
       "af token rotate --help": "meta.discovery",
@@ -2303,6 +2359,13 @@
           },
           "host": {
             "gap": "session.create.opt.host"
+          }
+        }
+      },
+      "ArchiveSessionRequest": {
+        "tui": {
+          "push": {
+            "ok": "Opt-in: the default archive preserves the workspace and publishes nothing (W8.5); publishing the branch before the sandbox is reaped is an explicit CLI choice (`sessions archive --push`). The TUI and web archive actions take the default until the restore half (W8.6) makes the pushed path a pickable choice."
           }
         }
       },
@@ -2705,6 +2768,11 @@
         },
         "validate_first": {
           "ok": "Opt-in used by the remote CLI, which cannot run the host-owned account and preflight checks itself; the web's pickers offer only accounts and backends the daemon already reported, so it does not need the daemon to repeat them (#5744)."
+        }
+      },
+      "ArchiveSession": {
+        "push": {
+          "ok": "Opt-in: the default archive preserves the workspace and publishes nothing (W8.5); publishing the branch before the sandbox is reaped is an explicit CLI choice (`sessions archive --push`). The TUI and web archive actions take the default until the restore half (W8.6) makes the pushed path a pickable choice."
         }
       },
       "CreateTab": {

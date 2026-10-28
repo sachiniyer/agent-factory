@@ -205,7 +205,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	data := instance.ToInstanceData()
 	livenessChanged := data.Liveness != before
 	resetChanged := !data.LimitResetAt.Equal(beforeReset)
-	durableChanged := livenessChanged || resetChanged || settlementCheckpoint
+	durableChanged := livenessChanged || resetChanged || settlementCheckpoint || conversationNeedsWrite(instance)
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return
@@ -243,6 +243,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	var err error
 	if durableChanged {
 		err = persistInstanceData(repoID, data)
+		noteConversationWritten(instance, data, err)
 	}
 	key := daemonInstanceKey(repoID, instance.Title)
 	testHookPollBeforeSettlementRecord()

@@ -155,6 +155,12 @@ type ProvisionSpec struct {
 	// container's `af` would look up an account that does not exist in it — so an
 	// off-box backend has to carry the resolved DIRECTORY and place it itself.
 	Account sessionenv.Account
+	// AccountSyncHost is the name of the LISTED host (global host list, W6.1) this
+	// provision may send Account's credentials to (#5571 W7.3). It is the only
+	// licence: set by the ssh runtime when the host resolved to a host-list entry,
+	// never from a repository's own config. Empty with a non-empty Account means
+	// the target is not licensed and the provision refuses rather than send.
+	AccountSyncHost string
 	// SessionEnvPassthrough contains exact global-only variable names approved
 	// for the agent. Sandboxed runtimes pass names, never values, to their
 	// version-matched agent-server.

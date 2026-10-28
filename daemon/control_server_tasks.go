@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -77,6 +78,10 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		return err
 	}
 	defer unlock()
+	// A remote client sends the project path as typed (W9.7); ~ is the DAEMON
+	// host's home, and every later reader (the repo-id binding, the runner's
+	// git check) needs the expanded form.
+	req.Task.ProjectPath = config.ExpandTilde(req.Task.ProjectPath)
 	var validate func(task.Task) error
 	targetLocked := false
 	if s.manager != nil {
@@ -132,6 +137,10 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 		return err
 	}
 	defer unlock()
+	if req.Update.ProjectPath != nil {
+		expanded := config.ExpandTilde(*req.Update.ProjectPath)
+		req.Update.ProjectPath = &expanded
+	}
 	var validate func(task.Task) (string, error)
 	targetLocked := false
 	if s.manager != nil {

@@ -82,3 +82,17 @@ func TestSyncLiveTermPaneBindsSandboxPaneByTabID(t *testing.T) {
 	require.NotNil(t, p)
 	assert.True(t, h.paneWindows[p.ID()].HasLive())
 }
+
+// Metadata-only tabs own no PTY: a live attach would blank the pane that
+// otherwise shows the tab's placeholder, and Enter keeps its local behavior
+// (liveSessionName is also the Enter eligibility predicate) (#5825).
+func TestLiveSessionNameRefusesSandboxTabsWithoutPTY(t *testing.T) {
+	inst := sandboxInstance(t, "sbx-meta")
+	inst.AddTabWithIDForTest("tab-web-id", "web", session.TabKindWeb)
+	inst.AddTabWithIDForTest("tab-docs-id", "docs", session.TabKindDocs)
+	inst.AddTabWithIDForTest("tab-proc-id", "proc", session.TabKindProcess)
+	assert.Empty(t, liveSessionName(inst, 2), "web tab")
+	assert.Empty(t, liveSessionName(inst, 3), "docs tab")
+	assert.Equal(t, "tab-proc-id", liveSessionName(inst, 4), "process tab still streams")
+	assert.Equal(t, "tab-shell-id", liveSessionName(inst, 1))
+}
