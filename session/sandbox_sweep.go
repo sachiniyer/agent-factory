@@ -81,6 +81,20 @@ func SweepRowsOf(instances []*Instance) []SweepRow {
 	return rows
 }
 
+// Identity returns the session dir and token ref this row's runtime persisted.
+func (r SweepRow) Identity() (dir, ref string) {
+	if r.Cleanup == nil {
+		return "", ""
+	}
+	switch {
+	case r.Cleanup.Sandbox != nil:
+		return r.Cleanup.Sandbox.SessionDir, r.Cleanup.Sandbox.TokenRef
+	case r.Cleanup.SSH != nil:
+		return r.Cleanup.SSH.SessionDir, r.Cleanup.SSH.TokenRef
+	}
+	return "", ""
+}
+
 // sweepHostState is everything the persisted rows say about one host.
 type sweepHostState struct {
 	label string
@@ -111,13 +125,13 @@ func SweepSandboxOrphans(rows []SweepRow, minAge time.Duration, stillOwned func(
 func sweepHostsOf(rows []SweepRow) []*sweepHostState {
 	hosts := map[string]*sweepHostState{}
 	for _, row := range rows {
-		_, p, err := restoreRuntimeCleanup(row.Title, row.BackendType, row.Cleanup)
-		_ = p
+		// No I/O: rebuilds only the cleanup-capable backend from the stored handle.
+		backend, _, err := restoreRuntimeCleanup(row.Title, row.BackendType, row.Cleanup)
 		if err != nil {
 			continue
 		}
 		var prov *sandboxProvisioner
-		switch b := restoredBackend(row).(type) {
+		switch b := backend.(type) {
 		case *sandboxBackend:
 			prov = b.provisioner
 		case *sshBackend:
@@ -128,13 +142,12 @@ func sweepHostsOf(rows []SweepRow) []*sweepHostState {
 		}
 		h := hosts[prov.sshCmd]
 		if h == nil {
-			label := prov.label()
+			cmd, label := prov.sshCmd, prov.backendLabel
 			h = &sweepHostState{
-				label: label, shell: prov, roots: map[string]bool{}, dirs: map[string]bool{}, refs: map[string]bool{},
+				label: prov.label(), shell: prov, roots: map[string]bool{}, dirs: map[string]bool{}, refs: map[string]bool{},
 			}
-			cmd, backend := prov.sshCmd, prov.backendLabel
 			h.reaper = func(dir, pid, ref string) *sandboxProvisioner {
-				return &sandboxProvisioner{sshCmd: cmd, backendLabel: backend, sessionDir: dir, remotePID: pid, tokenRef: ref}
+				return &sandboxProvisioner{sshCmd: cmd, backendLabel: label, sessionDir: dir, remotePID: pid, tokenRef: ref}
 			}
 			hosts[prov.sshCmd] = h
 		}
@@ -149,15 +162,6 @@ func sweepHostsOf(rows []SweepRow) []*sweepHostState {
 		out = append(out, h)
 	}
 	return out
-}
-
-// restoredBackend rebuilds the row's cleanup-capable backend (no I/O).
-func restoredBackend(row SweepRow) Backend {
-	b, _, err := restoreRuntimeCleanup(row.Title, row.BackendType, row.Cleanup)
-	if err != nil {
-		return nil
-	}
-	return b
 }
 
 type sweepCandidate struct {
