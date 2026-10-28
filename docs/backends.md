@@ -710,8 +710,9 @@ recipe in
 
 > **Status:** the building blocks (worktree snapshot, move-script contract,
 > all-or-nothing orchestration) live in the `move` package. The
-> `af sessions move <title> --to <host>` command and the global `move_cmd`
-> setting are not wired yet, so nothing here is user-invokable today; this
+> `af sessions move <title> --to <host>` command is not wired yet. The global-only
+> `move_cmd` setting exists (a checked-in value is a load error) but nothing reads
+> it yet, so nothing here is user-invokable today; this
 > section is the contract the script will run under.
 
 A move seeds the sandbox workspace from a snapshot of the local worktree — the

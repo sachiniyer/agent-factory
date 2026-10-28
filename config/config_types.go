@@ -266,6 +266,14 @@ type Config struct {
 	// operator's ssh_config / known_hosts / ProxyCommand are the authority (unlike
 	// the x/crypto `ssh` backend, which af enforces via ssh_host_key_verification).
 	SandboxSSH string `json:"sandbox_ssh,omitempty" toml:"sandbox_ssh,omitempty"`
+	// MoveCmd is the operator-written script af runs on the daemon box when it
+	// moves a live local session to a sandbox (`af sessions move`, W7.9): JSON spec
+	// on stdin, AF_SSH / AF_SSH_DEST / AF_SSH_FULL in the environment. It is
+	// deliberately global-only: af EXECUTES it with the session's environment and
+	// the operator's credentials in reach, so a repository must never choose it —
+	// a checked-in value is a load error, not a warning. The user writes the
+	// script; the repo only ever has a session worth moving.
+	MoveCmd string `json:"move_cmd,omitempty" toml:"move_cmd,omitempty"`
 	// AutoUpdate controls the startup self-update check. It defaults to true:
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.

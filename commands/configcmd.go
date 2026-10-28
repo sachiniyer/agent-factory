@@ -135,6 +135,7 @@ var globalConfigReadOrder = []string{
 	"log_max_backups",
 	"branch_prefix",
 	"on_archive_command",
+	"move_cmd",
 	"worktree_root",
 	"detach_keys",
 	"update_channel",
