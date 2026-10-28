@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -303,6 +305,26 @@ func requireReaped(t *testing.T, cmd *exec.Cmd, timeout time.Duration) {
 	}
 }
 
+// sweepReportedPIDs returns the PIDs the sweep's unmarked-candidate warning
+// names (the comma list after "-p "). The sweep scans the runner's WHOLE process
+// table, so a test may only assert about the PIDs of fixtures it spawned: the
+// warning text and counts also carry whatever else on the host looks like a
+// transport (a sibling test's dying sleeper, another package's test binary).
+func sweepReportedPIDs(out string) map[int]bool {
+	reported := map[int]bool{}
+	_, rest, ok := strings.Cut(out, "ps -o pid,ppid,command -p ")
+	if !ok {
+		return reported
+	}
+	list, _, _ := strings.Cut(rest, "`")
+	for _, f := range strings.Split(list, ",") {
+		if n, err := strconv.Atoi(strings.TrimSpace(f)); err == nil {
+			reported[n] = true
+		}
+	}
+	return reported
+}
+
 // TestSweepOrphanSandboxTunnels is the startup-sweep contract: kill exactly
 // the processes PROVEN to be this home's leftovers — same uid AND the
 // AF_SANDBOX_TUNNEL_HOME marker — and only warn about unmarked af-sandbox
@@ -337,11 +359,16 @@ func TestSweepOrphanSandboxTunnels(t *testing.T) {
 		"an unmarked ssh-argv leftover must only be reported, never killed")
 	assert.True(t, alive(t, unrelated.Process.Pid))
 
-	out := warnings.String()
-	assert.Contains(t, out, "AF_SANDBOX_TUNNEL_HOME")
-	assert.Contains(t, out, "no "+sandboxTunnelHomeEnv+" ownership stamp",
-		"the report must say why af did not act")
-	assert.Contains(t, out, "kill",
+	// Assert only about the fixtures this test spawned, by PID.
+	reported := sweepReportedPIDs(warnings.String())
+	assert.True(t, reported[unmarkedTunnelShape.Process.Pid],
+		"an unmarked af-sandbox argv must be reported so the operator can inspect it")
+	assert.True(t, reported[unmarkedSshShape.Process.Pid],
+		"an unmarked ssh-argv leftover must be reported so the operator can inspect it")
+	assert.False(t, reported[ours.Process.Pid], "a proven leftover is killed, not reported")
+	assert.False(t, reported[foreign.Process.Pid], "a foreign-stamped tunnel is not ours to classify")
+	assert.False(t, reported[unrelated.Process.Pid], "an unrelated process is not a candidate")
+	assert.Contains(t, warnings.String(), "stop them by hand with `kill ",
 		"the report must tell the operator how to stop proven-stale leftovers by hand")
 }
 
@@ -350,12 +377,15 @@ func TestSweepOrphanSandboxTunnels(t *testing.T) {
 func TestSweepOrphanSandboxTunnelsForeignOnly(t *testing.T) {
 	home, err := sandboxTunnelHome()
 	require.NoError(t, err)
-	spawnSweepSleeper(t, "/nonexistent/foreign-af-home", "sh", "-c", "sleep 60", "af-sandbox")
+	foreign := spawnSweepSleeper(t, "/nonexistent/foreign-af-home", "sh", "-c", "sleep 60", "af-sandbox")
 
 	warnings := captureWarningLog(t)
 	SweepOrphanSandboxTunnels(home)
-	assert.NotContains(t, warnings.String(), "ownership stamp",
+	// By PID, not by the global warning text: the sweep scans the whole process
+	// table, so another process may legitimately be reported.
+	assert.False(t, sweepReportedPIDs(warnings.String())[foreign.Process.Pid],
 		"a foreign-marked process must not even be reported — it is not ours to classify")
+	assert.True(t, alive(t, foreign.Process.Pid), "a foreign-marked process is never killed")
 }
 
 // --- supervised connection (#5571 W1.2) ---
