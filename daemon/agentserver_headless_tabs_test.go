@@ -314,6 +314,7 @@ func TestHeadlessHealth_AdvertisesVersionAndFeatures(t *testing.T) {
 	assert.Equal(t, "9.9.9-w43", health.Version, "health reports the build version the banner carries")
 	assert.Contains(t, health.Features, "tab-api", "health advertises the tab routes it serves")
 	assert.Contains(t, health.Features, "tab-id-addressing", "health advertises the id-addressed data plane")
+	assert.Contains(t, health.Features, "relaunch", "health advertises POST /v1/agent/relaunch (W7.1)")
 }
 
 // TestAgentServerBannerCarriesVersion pins the banner arm of the advertisement:

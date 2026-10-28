@@ -158,7 +158,8 @@ func (b *remoteAgentBackend) CheckAndHandleTrustPrompt(*Instance) bool { return 
 // daemon-side backend would recurse through that same server.
 func (b *remoteAgentBackend) AgentModelChange(*Instance) *AgentModelChange { return nil }
 
-// Recover and Respawn both re-provision a disposable remote workspace from the
-// session branch, then launch it again.
-func (b *remoteAgentBackend) Recover(i *Instance) error { return recoverSandbox(i) }
-func (b *remoteAgentBackend) Respawn(i *Instance) error { return recoverSandbox(i) }
+// Recover and Respawn relaunch the agent in its existing sandbox workspace when
+// the agent-server can (W7.1), and otherwise re-provision a disposable remote
+// workspace from the session branch, then launch it again.
+func (b *remoteAgentBackend) Recover(i *Instance) error { return relaunchOrRecoverSandbox(i) }
+func (b *remoteAgentBackend) Respawn(i *Instance) error { return relaunchOrRecoverSandbox(i) }
