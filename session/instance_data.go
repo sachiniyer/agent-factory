@@ -1,7 +1,6 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -862,7 +861,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			instance.MarkStartupStateUnknown()
 			return inertReturn(), nil
 		}
-		if errors.Is(err, tmux.ErrSpawnDirMissing) {
+		if restoreDeferred(err) {
 			// The tmux session is gone and its persisted worktree is missing:
 			// the spawn-dir seam refused a respawn that tmux would have
 			// silently placed in the server's cwd (#5172). Load the row Lost

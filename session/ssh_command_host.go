@@ -116,6 +116,15 @@ func chooseListedHost(pick string, cfg *config.ResolvedConfig) (string, *config.
 		return "", nil, fmt.Errorf("backend=ssh: host %q is not in the host list %v; add it under [hosts.%s] in the global config or pick a listed host",
 			name, sortedHostNames(cfg.Hosts), name)
 	}
+	// The same validation `af config set` and the loader run, so an entry that
+	// reached cfg some other way (a test, a stale in-memory copy) cannot be
+	// created against, and the catalog cannot call it usable.
+	if err := config.ValidateHostEntry(name, entry); err != nil {
+		return "", nil, fmt.Errorf("backend=ssh: %w", err)
+	}
+	if _, _, err := resolveSSHHostPort(entry.Host, entry.Port); err != nil {
+		return "", nil, fmt.Errorf("backend=ssh: host %q: %w", name, err)
+	}
 	if entry.UseSSHConfig {
 		return "", nil, fmt.Errorf("backend=ssh: host %q sets use_ssh_config, which sessions cannot use yet (this path composes ssh itself); remove use_ssh_config for this host", name)
 	}

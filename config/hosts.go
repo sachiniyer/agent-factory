@@ -2,10 +2,13 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -59,8 +62,11 @@ const maxHostNameLen = 62 // after the first character
 
 var (
 	hostNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-	// Hostnames, tailnet names, IPv4 and bracket-free IPv6 literals.
-	hostAddrRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
+	// Hostnames, tailnet names and IPv4 literals. A bracket-free IPv6 literal is
+	// checked separately (validHostAddress): its leading "::" cannot satisfy a
+	// hostname's alphanumeric first character, and a colon-bearing value must be a
+	// real IP, never "host:port".
+	hostnameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*$`)
 	sshUserRE  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
 )
 
@@ -75,6 +81,20 @@ func ValidateHostName(name string) error {
 	return nil
 }
 
+// validHostAddress reports whether addr is a hostname, an IPv4 literal or a
+// bare IPv6 literal (including "::1" and "::ffff:192.0.2.1"). A value with a
+// colon must parse as an IP address: that is what keeps an embedded ":port"
+// ("box:2222") out of the host field — it would conflict with the port field at
+// create — while still admitting every IPv6 form the ssh runtime supports. A
+// zone ("fe80::1%eth0") is refused: "%" is not a character af hands to ssh here.
+func validHostAddress(addr string) bool {
+	if strings.Contains(addr, ":") {
+		ip, err := netip.ParseAddr(addr)
+		return err == nil && ip.Zone() == ""
+	}
+	return hostnameRE.MatchString(addr)
+}
+
 // ValidateHostEntry reports why entry cannot be the host named name. Every
 // string that later reaches an ssh argv is checked here so a value can never be
 // parsed as an ssh option or smuggle whitespace.
@@ -85,8 +105,8 @@ func ValidateHostEntry(name string, entry HostConfig) error {
 	if entry.Host == "" {
 		return fmt.Errorf("hosts.%s.host is required (the ssh destination, e.g. \"box1.tailnet.ts.net\")", name)
 	}
-	if !hostAddrRE.MatchString(entry.Host) {
-		return fmt.Errorf("hosts.%s.host %q must be a hostname or IP address (letters, digits, '.', '-', ':'; no user@, no port, not starting with '-'); use the user and port fields", name, entry.Host)
+	if !validHostAddress(entry.Host) {
+		return fmt.Errorf("hosts.%s.host %q must be a hostname or IP address (letters, digits, '.', '-', or a bare IPv6 literal; no user@, no :port, not starting with '-'); use the user and port fields", name, entry.Host)
 	}
 	if entry.User != "" && !sshUserRE.MatchString(entry.User) {
 		return fmt.Errorf("hosts.%s.user %q must be a plain login name (letters, digits, '.', '_', '-'; not starting with '-')", name, entry.User)
@@ -170,4 +190,20 @@ func sanitizeHosts(config *Config) {
 func (c *Config) HostByName(name string) (HostConfig, bool) {
 	h, ok := c.Hosts[name]
 	return h, ok
+}
+
+// ValidateHostsInTOML runs the strict ValidateHosts over the host list and
+// default_host exactly as the bytes spell them, BEFORE the loader's sanitizeHosts
+// can silently drop a dangling default. The writer calls it so `af config set`
+// refuses what a load would discard: success from set must mean the setting
+// takes effect.
+func ValidateHostsInTOML(data []byte) error {
+	var raw struct {
+		Hosts       map[string]HostConfig `toml:"hosts"`
+		DefaultHost string                `toml:"default_host"`
+	}
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return nil // a parse error is the final gate's to report, with its own wording
+	}
+	return ValidateHosts(raw.Hosts, raw.DefaultHost)
 }
