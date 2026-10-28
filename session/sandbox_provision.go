@@ -334,7 +334,7 @@ func (w *sandboxWorkspace) revalidateCallbackBeforeEnv() string {
 		return ""
 	}
 	if err := w.spec.CallbackRevalidate(); err != nil {
-		w.spec.CallbackURL, w.spec.CallbackToken, w.spec.CallbackSocket = "", "", ""
+		w.spec.CallbackURL, w.spec.CallbackToken, w.spec.CallbackSocket, w.spec.CallbackRef = "", "", "", ""
 		return err.Error()
 	}
 	return ""
@@ -378,7 +378,7 @@ func (w *sandboxWorkspace) callbackReverseForward() (string, string) {
 		return "", ""
 	}
 	fail := func(why string) (string, string) {
-		w.spec.CallbackURL, w.spec.CallbackToken, w.spec.CallbackSocket = "", "", ""
+		w.spec.CallbackURL, w.spec.CallbackToken, w.spec.CallbackSocket, w.spec.CallbackRef = "", "", "", ""
 		return "", "the callback forward could not be built: " + why
 	}
 	remote := w.CallbackSocketPath()

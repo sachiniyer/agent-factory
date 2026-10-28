@@ -178,6 +178,11 @@ type sandboxProvisioner struct {
 	forward     string
 	localAddr   string
 	reverseFwds []string
+	// callbackRef is the reference the granted callback credential derives from
+	// (W3.6). It persists with the runtime identity, together with the -R spec in
+	// reverseFwds, so a reattach after a daemon restart re-registers the credential
+	// and re-establishes the same forward. Empty when no callback was granted.
+	callbackRef string
 	// callbackSocket is the sandbox-side socket the -R slot creates, removed
 	// before a re-dial so a socket file a killed sshd left behind cannot make the
 	// bind fail forever (the client would otherwise retry a dead path).
@@ -285,10 +290,11 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		callbackLost = carrierLost
 	}
 	p.reapMu.Lock()
-	p.reverseFwds = nil
+	p.reverseFwds, p.callbackRef = nil, ""
 	p.callbackSocket = ""
 	if reverse != "" {
 		p.reverseFwds = []string{reverse}
+		p.callbackRef = w.spec.CallbackRef
 		p.callbackSocket = w.CallbackSocketPath()
 	}
 	p.reapMu.Unlock()
@@ -366,6 +372,8 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 				RemoteAddr:         p.remoteAddr,
 				AgentServerVersion: p.agentServerVersion,
 				TokenRef:           p.tokenRef,
+				CallbackRef:        p.callbackRef,
+				CallbackReverse:    p.callbackReverse(),
 			},
 		},
 		Endpoint: endpoint,

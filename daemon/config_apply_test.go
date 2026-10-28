@@ -169,15 +169,12 @@ func TestApplyBucketsAgreeWithEffectClasses(t *testing.T) {
 	}
 }
 
-// Turning require_token OFF must not leave sandbox callback credentials behind
-// (#2999, #3012 review).
-//
-// mintSandboxCallbackFenced refuses to ISSUE one while require_token is false, because a
-// scoped credential against a listener that authenticates nobody enforces nothing.
-// That check runs once, at provision time, and auth keys apply live with no rebind
-// — so without this, relaxing the key silently converts every already-issued
-// credential into exactly what the refusal exists to prevent.
-func TestApplyConfig_DisablingRequireTokenRevokesSandboxCredentials(t *testing.T) {
+// Turning require_token OFF no longer revokes sandbox callback credentials
+// (#5571 W3.6). A sandbox's callback rides the dedicated endpoint (W3.4), which
+// admits only sandbox-scoped credentials whatever the client listener's auth
+// posture is, so the key that gated the old listener-borne callback decides
+// nothing about it. Revoking would only cut a working callback.
+func TestApplyConfig_DisablingRequireTokenKeepsSandboxCredentials(t *testing.T) {
 	m := applyConfigTestManager(t)
 
 	_, err := config.SetGlobalConfigValue("require_token", "true")
@@ -196,19 +193,11 @@ func TestApplyConfig_DisablingRequireTokenRevokesSandboxCredentials(t *testing.T
 	result, err := m.ApplyConfig()
 	require.NoError(t, err)
 
-	_, ok = m.sandboxTokens.sessionFor(secret)
-	assert.False(t, ok, "a credential issued under require_token=true must not outlive it: the gate short-circuits on the tokenless posture before consulting the registry, so its scope stops being enforced")
-
-	// And the operator must be TOLD. This test manager binds no TCP listener,
-	// so the warning takes the no-endpoint variant (#5137 review): it must not
-	// claim the control plane "answers unauthenticated callers" when nothing
-	// is serving on the network.
-	joined := strings.Join(result.Warnings, "\n")
-	assert.Contains(t, joined, "network.require_token is now false")
-	assert.Contains(t, joined, "no TCP control listener is serving")
-	assert.NotContains(t, joined, "answers unauthenticated callers",
-		"no TCP endpoint is serving — the warning must not claim a live unauthenticated exposure")
-	assert.NotContains(t, joined, "NOTE:", "warning prose must not use a shouted emphasis prefix")
+	owner, ok := m.sandboxTokens.sessionFor(secret)
+	assert.True(t, ok, "require_token=false must not revoke a sandbox callback credential: it rides the sandbox-only endpoint")
+	assert.Equal(t, "sess-a", owner)
+	assert.NotContains(t, strings.Join(result.Warnings, "\n"), "sandbox callback credential",
+		"nothing was revoked, so there is nothing to warn about")
 }
 
 // The converse: an unrelated config change must leave credentials alone, or every
