@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,6 +35,73 @@ func recordingExec(alive map[string]bool, newSessions *int, spawns *[]string) cm
 			return inner.Run(cmd)
 		},
 		OutputFunc: inner.Output,
+	}
+}
+
+// deadPaneAwareExec teaches an executor to answer the pane-row reads the
+// waiting teardown path (CloseAndWaitForPaneExit) makes — list-panes and
+// display-message — instead of countingExec's blanket "content", which parses
+// as an invalid pane pid and turns every teardown confirmation into a
+// refusal. Sessions in `existing` (kept in step with kill/new-session) answer
+// with a held dead-pane row; absent ones answer with tmux's exit-1
+// "can't find session" diagnostic so absence classifies as determinate empty.
+func deadPaneAwareExec(existing map[string]bool, inner cmd_test.MockCmdExec) cmd_test.MockCmdExec {
+	state := map[string]bool{}
+	for k, v := range existing {
+		state[k] = v
+	}
+	var missing *exec.ExitError
+	if err := exec.Command("sh", "-c", "exit 1").Run(); err != nil {
+		missing, _ = err.(*exec.ExitError)
+	}
+	nameOf := func(cmd *exec.Cmd) string {
+		// `-t` names the target for list-panes/display-message/kill-session;
+		// `-s` names it only for new-session — for list-panes `-s` is a
+		// flagless "session format" switch that must not eat the next arg.
+		takeValue := !strings.Contains(cmd.String(), "list-panes")
+		for i, a := range cmd.Args {
+			switch {
+			case a == "-t" && i+1 < len(cmd.Args):
+				return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
+			case a == "-s" && takeValue && i+1 < len(cmd.Args):
+				return strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
+			case strings.HasPrefix(a, "-t="):
+				return strings.TrimSuffix(strings.TrimPrefix(a, "-t="), ":")
+			case strings.HasPrefix(a, "-s=") && takeValue:
+				return strings.TrimSuffix(strings.TrimPrefix(a, "-s="), ":")
+			}
+		}
+		return ""
+	}
+	return cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if err := inner.Run(cmd); err != nil {
+				return err
+			}
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "new-session"):
+				state[nameOf(cmd)] = true
+			case strings.Contains(s, "kill-session"):
+				delete(state, nameOf(cmd))
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			if !strings.Contains(s, "list-panes") && !strings.Contains(s, "display-message") {
+				return inner.Output(cmd)
+			}
+			name := nameOf(cmd)
+			if state[name] {
+				return []byte("999999|1|\n"), nil
+			}
+			if missing == nil {
+				return nil, errors.New("can't find session: " + name)
+			}
+			missing.Stderr = []byte("can't find session: " + name)
+			return nil, missing
+		},
 	}
 }
 
@@ -483,6 +551,8 @@ func TestRecover_FailsWithoutWorktree(t *testing.T) {
 	require.NoError(t, os.RemoveAll(data.Worktree.WorktreePath))
 	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
+	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 
 	err = restored.Recover()
 	require.Error(t, err)
@@ -577,7 +647,8 @@ func TestRecover_RebuildsMissingWorktreeFromExistingBranchAndResumesRecordedConv
 
 	var newSessions int
 	var spawns []string
-	exec := recordingExec(map[string]bool{}, &newSessions, &spawns)
+	exec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 	prev := restoreTmuxSession
 	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
@@ -588,6 +659,8 @@ func TestRecover_RebuildsMissingWorktreeFromExistingBranchAndResumesRecordedConv
 	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 	require.Equal(t, Lost, restored.GetStatus())
+	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 	_, statErr := os.Stat(worktreePath)
 	require.True(t, os.IsNotExist(statErr), "test setup should start with a missing worktree")
 
@@ -669,7 +742,8 @@ func TestRecover_RebuildsBranchGoneWorktreeFromRecordedBaseAndResumesRecordedCon
 
 	var newSessions int
 	var spawns []string
-	exec := recordingExec(map[string]bool{}, &newSessions, &spawns)
+	exec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 	prev := restoreTmuxSession
 	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
@@ -680,6 +754,8 @@ func TestRecover_RebuildsBranchGoneWorktreeFromRecordedBaseAndResumesRecordedCon
 	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 	require.Equal(t, Lost, restored.GetStatus())
+	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 
 	require.NoError(t, restored.Recover())
 
@@ -745,7 +821,10 @@ func TestRecover_BranchGoneWithoutRecordedConversationDoesNotFreshDispatch(t *te
 	}
 
 	var newSessions int
-	tmuxExec := countingExec(map[string]bool{}, &newSessions)
+	// deadPaneAwareExec so the stale-pane teardown — which now runs BEFORE the
+	// rebuild — can confirm the absent sessions dead (blind) instead of
+	// choking on countingExec's unparseable list-panes reply (#5371 review).
+	tmuxExec := deadPaneAwareExec(map[string]bool{}, countingExec(map[string]bool{}, &newSessions))
 	pty := persistPtyFactory{t: t, cmdExec: tmuxExec}
 	prev := restoreTmuxSession
 	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
@@ -755,6 +834,8 @@ func TestRecover_BranchGoneWithoutRecordedConversationDoesNotFreshDispatch(t *te
 
 	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
+	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 
 	err = restored.Recover()
 	require.Error(t, err)
@@ -794,4 +875,565 @@ func TestRecover_RefusesNonLostAndTombstoned(t *testing.T) {
 		countingExec(map[string]bool{}, &newSessions))
 	tombstoned.MarkUserKilled()
 	require.Error(t, tombstoned.Recover(), "a tombstoned session must be refused")
+}
+
+// A committed rebuild whose stale-pane teardown is undischarged must keep the
+// row Lost against ANY positive observation: a live answer can still be the
+// pane bound to the deleted inode, which a status poll cannot tell apart from
+// a fresh one. Lifting the row to Running/Ready would drop it out of the
+// restore loop and strand the teardown (#5371 review: P1 live-status gate).
+func TestTransition_RebuildTeardownPendingHoldsObservedLivenessLost(t *testing.T) {
+	i := &Instance{Title: "pending", liveness: LiveLost}
+	i.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	require.NoError(t, i.SetRebuildTeardownPending(true))
+
+	for _, observed := range []Liveness{LiveRunning, LiveReady, LiveLimitReached, LiveDead, LiveArchived} {
+		require.NoError(t, i.Transition(ObserveLiveness(observed)))
+		assert.Equal(t, LiveLost, i.GetLiveness(),
+			"observed %v must not lift a pending-teardown row out of Lost", observed)
+	}
+	// A Lost observation is the poll's own mark — it still applies.
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost)))
+	assert.Equal(t, LiveLost, i.GetLiveness())
+
+	// Even a liveness that slipped to Running before the flag was set is
+	// pulled back: pending means the live answer is unverifiable.
+	running := &Instance{Title: "pending-running", liveness: LiveRunning}
+	running.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	require.NoError(t, running.SetRebuildTeardownPending(true))
+	require.NoError(t, running.Transition(ObserveLiveness(LiveReady)))
+	assert.Equal(t, LiveLost, running.GetLiveness(),
+		"a pending row must not keep a positive liveness it cannot verify")
+
+	// Once the obligation is discharged, observations apply again.
+	require.NoError(t, i.SetRebuildTeardownPending(false))
+	require.NoError(t, i.Transition(ObserveLiveness(LiveRunning)))
+	assert.Equal(t, LiveRunning, i.GetLiveness())
+}
+
+// The durable contract behind the flag: every transition must land on disk
+// through the installed notify before the dependent step runs, and a refused
+// write leaves the flag SET — the obligation may exist either way (unrecorded
+// commit or unrecorded discharge), so "set" is the only honest post-error
+// state (#5371 review: P2 durable discharge).
+func TestSetRebuildTeardownPending_CheckpointContract(t *testing.T) {
+	var transitions []bool
+	i := &Instance{Title: "ckpt"}
+	i.SetRebuildTeardownNotify(func(inst *Instance) error {
+		transitions = append(transitions, inst.RebuildTeardownPending())
+		return nil
+	})
+	require.NoError(t, i.SetRebuildTeardownPending(true))
+	require.NoError(t, i.SetRebuildTeardownPending(false))
+	assert.Equal(t, []bool{true, false}, transitions,
+		"the notify must observe the flag already in its new state")
+
+	failure := errors.New("disk wedged")
+	i.SetRebuildTeardownNotify(func(*Instance) error { return failure })
+	require.ErrorIs(t, i.SetRebuildTeardownPending(true), failure)
+	assert.True(t, i.RebuildTeardownPending(),
+		"a failed set-checkpoint keeps the flag: the rebuild committed either way")
+	require.ErrorIs(t, i.SetRebuildTeardownPending(false), failure)
+	assert.True(t, i.RebuildTeardownPending(),
+		"a failed clear-checkpoint restores the flag: the discharge never landed")
+}
+
+// The clear-checkpoint must precede the first replacement spawn, or a daemon
+// exit in the window between them reloads `true` and kills the fresh panes
+// (#5371 review). The notify sees zero new-session calls at clear time, and a
+// refused clear leaves the row Lost with nothing spawned.
+func TestRecover_RebuildTeardownClearPrecedesRespawn(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-clear"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_clearckpt"
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-clear")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-clear",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-clear",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	var newSessions int
+	var spawns []string
+	exec := deadPaneAwareExec(map[string]bool{agentName: true},
+		recordingExec(map[string]bool{agentName: true}, &newSessions, &spawns))
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+
+	clearSpawnCount := -1
+	var notifyCalls int
+	restored.SetRebuildTeardownNotify(func(inst *Instance) error {
+		notifyCalls++
+		if !inst.RebuildTeardownPending() {
+			clearSpawnCount = newSessions
+		}
+		return nil
+	})
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
+	require.NoError(t, restored.Recover())
+	require.Equal(t, 2, notifyCalls, "set at rebuild-commit + clear after confirmed teardown")
+	assert.Equal(t, 0, clearSpawnCount,
+		"the cleared obligation must be durable before any replacement launches")
+	assert.Equal(t, Running, restored.GetStatus())
+	assert.Equal(t, 1, newSessions, "the agent respawned after the checkpointed clear")
+}
+
+// The teardown obligation must be durable BEFORE the rebuilt directory is:
+// armed after the rebuild commits, a daemon exit in the gap reloads a present
+// worktree beside a false pending flag — `rebuilt` re-derives false from
+// os.Stat, the teardown gate skips, and a surviving stale pane reattaches to
+// the deleted inode. The notify observes the arm; the worktree must not yet
+// exist when it fires (#5371 review).
+func TestRecover_RebuildTeardownArmsBeforeRebuildCommits(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-arm"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_arm"
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-arm")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-arm",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-arm",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	var newSessions int
+	var spawns []string
+	exec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+
+	var dirExistedAtArm bool
+	restored.SetRebuildTeardownNotify(func(inst *Instance) error {
+		if inst.RebuildTeardownPending() {
+			_, statErr := os.Stat(worktreePath)
+			dirExistedAtArm = statErr == nil
+		}
+		return nil
+	})
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
+	require.NoError(t, restored.Recover())
+
+	assert.False(t, dirExistedAtArm,
+		"the teardown obligation must be armed while the worktree is still missing — "+
+			"armed after the commit, a daemon exit in the gap reloads pending=false beside a present directory")
+	assert.Equal(t, Running, restored.GetStatus())
+	require.DirExists(t, worktreePath)
+}
+
+// A pending tab-cleanup handle owns a tmux session that is no longer on the
+// roster — the rebuild teardown must retire it through the WAITING close
+// (pane process tree observed exited) before any replacement spawns, because
+// Close's asynchronous reaper can still be running in the deleted worktree
+// when the new panes launch (#5371 review).
+func TestRecover_RebuiltTeardownWaitsOnPendingTabCleanup(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-handle"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_handle"
+	const staleHandleName = "af_recover_handle__oldtab"
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-handle")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-handle",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-handle",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	var newSessions int
+	var spawns, commands []string
+	inner := deadPaneAwareExec(map[string]bool{agentName: true, staleHandleName: true},
+		recordingExec(map[string]bool{agentName: true, staleHandleName: true}, &newSessions, &spawns))
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			commands = append(commands, cmd.String())
+			return inner.Run(cmd)
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			commands = append(commands, cmd.String())
+			return inner.Output(cmd)
+		},
+	}
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
+	restored.SetPendingTabCleanupForTest([]TabCleanupData{{TabID: "oldtab", TmuxName: staleHandleName}})
+
+	require.NoError(t, restored.Recover())
+
+	// panePID's display-message runs only on the CloseAndWaitForPaneExit path:
+	// it is the observable difference between "kill-session fired, reaper left
+	// running" and "the leftover's process tree was observed gone". The handle
+	// then retires only after that confirmed teardown.
+	assert.True(t, commandIncludesSession(commands, "display-message", staleHandleName),
+		"the pending cleanup handle must be torn down through the pane-exit wait path, not Close's async reaper")
+	assert.Empty(t, restored.PendingTabCleanup(),
+		"the handle retires once its session is confirmed gone")
+	assert.Equal(t, Running, restored.GetStatus())
+}
+
+// Every respawn entry point that can reach the rebuild teardown must install
+// the durable checkpoint the transitions fire. With none installed, a
+// transition that skipped persistence would be invisible to a restart — so
+// the obligation itself is refused rather than allowed to go unrecorded
+// (#5371 review).
+func TestRecover_RebuildTeardownRefusesWithoutPersistCallback(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-nonotify"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_nonotify"
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-nonotify")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-nonotify",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-nonotify",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	var newSessions int
+	var spawns []string
+	exec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+
+	err = restored.Recover()
+	require.Error(t, err,
+		"without the durable checkpoint the rebuild must not arm a silently-unrecorded obligation")
+	assert.Contains(t, err.Error(), "durable checkpoint")
+	assert.Equal(t, Lost, restored.GetStatus())
+	assert.Equal(t, 0, newSessions)
+	assert.True(t, restored.RebuildTeardownPending(),
+		"the obligation stays armed — a restart must find it set, matching the unrecorded reality")
+}
+
+// A row that still owes the post-rebuild teardown must not rebind its tmux
+// sessions on load: every bound name answers inside the deleted inode, and
+// Start(false) would reattach the stale pane before the teardown owner
+// retries — regardless of the persisted liveness (#5371 review). The row
+// loads materialized (started) so its owner stays eligible, with the
+// obligation and liveness intact.
+func TestFromInstanceData_RebuildTeardownPendingLoadsWithoutRestoringTmux(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/pending-load"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_pending_load"
+	worktreePath := filepath.Join(t.TempDir(), "repo-pending-load")
+	require.NoError(t, os.MkdirAll(worktreePath, 0755))
+	branchCreatedByUs := true
+
+	for _, tc := range []struct {
+		name     string
+		status   Status
+		liveness Liveness
+		want     Liveness
+	}{
+		{name: "lost", status: Lost, want: LiveLost},
+		{name: "limit", liveness: LiveLimitReached, want: LiveLimitReached},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var newSessions int
+			var spawns, commands []string
+			inner := deadPaneAwareExec(map[string]bool{agentName: true},
+				recordingExec(map[string]bool{agentName: true}, &newSessions, &spawns))
+			exec := cmd_test.MockCmdExec{
+				RunFunc: func(cmd *exec.Cmd) error {
+					commands = append(commands, cmd.String())
+					return inner.Run(cmd)
+				},
+				OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+					commands = append(commands, cmd.String())
+					return inner.Output(cmd)
+				},
+			}
+			pty := persistPtyFactory{t: t, cmdExec: exec}
+			prev := restoreTmuxSession
+			restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+				return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+			}
+			t.Cleanup(func() { restoreTmuxSession = prev })
+
+			data := InstanceData{
+				Title:                  "pending-load-" + tc.name,
+				Path:                   repoRoot,
+				Branch:                 branch,
+				Program:                tmux.ProgramCodex,
+				Status:                 tc.status,
+				Liveness:               tc.liveness,
+				TmuxName:               agentName,
+				RebuildTeardownPending: true,
+				Tabs: []TabData{
+					{Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
+				},
+				Worktree: GitWorktreeData{
+					RepoPath:          repoRoot,
+					WorktreePath:      worktreePath,
+					SessionName:       "pending-load-" + tc.name,
+					BranchName:        branch,
+					BranchCreatedByUs: &branchCreatedByUs,
+				},
+			}
+
+			restored, err := FromInstanceData(data)
+			require.NoError(t, err)
+			assert.True(t, restored.Started(),
+				"the pending row must stay materialized so its owner loop remains eligible")
+			assert.Equal(t, tc.want, restored.GetLiveness(),
+				"the persisted liveness is preserved for the loop that owns the retry")
+			assert.True(t, restored.RebuildTeardownPending())
+			assert.Empty(t, commands,
+				"a pending-teardown row must not touch tmux on load — its names answer inside the deleted inode")
+		})
+	}
+}
+
+// A process tab whose tmux session already vanished is not "stopped by the
+// rebuild": nothing was observed and nothing was terminated, so the tab must
+// stay inert rather than claim a stopped outcome this recovery did not
+// produce (#5371 review).
+func TestRecover_RebuiltTeardownAbsentProcessTabStaysInert(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/lost-recover-proctab"
+	gitOut(t, repoRoot, "branch", branch)
+
+	const agentName = "af_recover_proctab"
+	const procName = "af_recover_proctab__process"
+	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-proctab")
+	branchCreatedByUs := true
+	data := InstanceData{
+		Title:    "lost-recover-proctab",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  tmux.ProgramCodex,
+		Status:   Lost,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{
+				Name:     agentTabName,
+				Kind:     TabKindAgent,
+				TmuxName: agentName,
+				Conversation: &AgentConversationData{
+					Agent:       tmux.ProgramCodex,
+					ID:          conversationID,
+					CaptureKind: ConversationCaptureCodexRollout,
+				},
+			},
+			{Name: processTabName, Kind: TabKindProcess, TmuxName: procName},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "lost-recover-proctab",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	// The agent's session is the stale survivor; the process tab's session is
+	// already gone — absent from the alive map.
+	var newSessions int
+	var spawns []string
+	exec := deadPaneAwareExec(map[string]bool{agentName: true},
+		recordingExec(map[string]bool{agentName: true}, &newSessions, &spawns))
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Equal(t, Lost, restored.GetStatus())
+	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	restored.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
+
+	require.NoError(t, restored.Recover())
+	assert.Equal(t, Running, restored.GetStatus())
+
+	var procTab *Tab
+	for _, tab := range restored.Tabs {
+		if tab.Kind == TabKindProcess {
+			procTab = tab
+		}
+	}
+	require.NotNil(t, procTab)
+	assert.Nil(t, procTab.Exit,
+		"an already-absent process session invents no outcome — absence is not evidence of how the command ended")
 }

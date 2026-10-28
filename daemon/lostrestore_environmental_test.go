@@ -641,3 +641,14 @@ func TestRestoreLostSessions_EnvironmentalWaitPersistFailureStaysOffSettleOwed(t
 		t.Fatalf("FlushOwedSettlements retried %d writes for the row — the dropped wait persist must not be owed", persistAttempts-before)
 	}
 }
+
+// A restore refused because the tmux socket is unverified under a possibly-live
+// server (#4135) waits on the environment without charging the structural
+// budget: giving up would durably mark a session whose agent is still running.
+func TestLostRestoreEnvironmentalClassWaitsOnAnUnverifiedSocket(t *testing.T) {
+	err := fmt.Errorf("recover: failed to re-spawn session %q: %w", "x",
+		fmt.Errorf("restore deferred: %w — kept as it was", sessiontmux.ErrSessionSocketUnverified))
+	if got := lostRestoreEnvironmentalClass(err); got != lostRestoreEnvErrno {
+		t.Fatalf("an unverified-socket refusal must wait unbounded on the environment, got class %v", got)
+	}
+}

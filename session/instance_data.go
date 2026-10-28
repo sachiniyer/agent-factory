@@ -1,7 +1,6 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -31,7 +30,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Status:                   i.statusLocked(),
 		Liveness:                 i.liveness,
 		InFlightOp:               i.inFlightOp,
-		LifecycleAction:          lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil),
+		LifecycleAction:          lifecycleActionFor(i.ID, i.Title, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil),
 		CanKill:                  canKillFor(i.ID, i.inFlightOp),
 		CanHandoff:               i.canHandoffLocked(),
 		CurrentAgent:             i.currentAgentNameLocked(),
@@ -41,6 +40,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		CallbackUnavailable:      i.callbackUnavailable,
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
 		LostRestoreWait:          cloneLostRestoreWait(i.lostRestoreWait),
+		RebuildTeardownPending:   i.rebuildTeardownPending,
 		Unreachable:              i.unreachableDataLocked(),
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
 		LastPromptDeliveryStatus: i.lastPromptDeliveryStatus,
@@ -55,6 +55,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		RuntimePID:               i.runtimePID,
 		RuntimeStartID:           i.runtimeStartID,
 		Account:                  i.Account,
+		Host:                     i.Host,
 		AccountAgent:             i.accountAgent,
 		AccountAutoSelected:      i.accountAutoSelected,
 		AccountLimitObservations: append([]AccountLimitObservationData(nil), i.accountLimitObservations...),
@@ -172,6 +173,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// on this row inherit a boundary it never crossed.
 		data.TaskRunTurnObservedAt = i.taskRunTurnObservedAt
 		data.TaskRunPromptAttemptAt = i.taskRunPromptAttemptAt
+		data.TaskRunPromptBound = i.taskRunPromptBound
 	}
 
 	// An archived row cannot owe its own teardown — reaching Archived IS the
@@ -213,7 +215,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// them visible only in the snapshot projection, behind an implicit agent row.
 	// ForStorage restores snapshotStorageTabs before writing instances.json, so
 	// durability keeps using PendingTabs and never reintroduces the index-0 bug.
-	if i.liveness == LiveArchived && len(i.pendingMetadataTabs) > 0 {
+	if len(i.pendingMetadataTabs) > 0 {
 		data.snapshotTabsProjected = true
 		data.snapshotStorageTabs = data.Tabs
 		data.Tabs = append([]TabData(nil), data.Tabs...)
@@ -394,6 +396,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 	}
+	// Rollback fences unwind in REVERSE projection order — each restore writes
+	// back the original its projector captured, so the LAST projector's restore
+	// must run first or it would overwrite the real value with a projected one.
+	// ForStorage projects account-swap, then handoff, then rebuild-teardown.
+	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()
@@ -477,6 +484,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// next run's delivery window.
 		taskRunTurnObservedAt:    taskRunTurnObservedAtFromData(data),
 		taskRunPromptAttemptAt:   taskRunAttemptAt,
+		taskRunPromptBound:       data.TaskRunActive && data.TaskRunPromptBound,
 		limitResetAt:             data.LimitResetAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
@@ -486,6 +494,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		callbackUnavailable:      data.CallbackUnavailable,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
 		lostRestoreWait:          lostRestoreWaitFromData(data.LostRestoreWait),
+		rebuildTeardownPending:   data.RebuildTeardownPending,
 		unreachableSince:         unreachableSinceFromData(data.Unreachable),
 		unreachableErr:           unreachableErrFromData(data.Unreachable),
 		lastPromptAttemptAt:      data.LastPromptAttemptAt,
@@ -501,6 +510,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		runtimePID:               data.RuntimePID,
 		runtimeStartID:           data.RuntimeStartID,
 		Account:                  data.Account,
+		Host:                     data.Host,
 		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
@@ -524,6 +534,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// archived, or startup-unknown row keeps its own outcome instead.
 	if instance.taskRunActive && taskRunAttemptAt.IsZero() &&
 		data.LastPromptDeliveryStatus == PromptNotDelivered &&
+		!data.TaskRunPromptBound &&
 		!instance.userKilled && !instance.startupStateUnknown && liveness != LiveArchived {
 		instance.taskRunActive = false
 		instance.taskRunIdleEdgeHeld = false
@@ -821,11 +832,28 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if isSandboxBackendType(data.BackendType) {
 		instance.mu.Lock()
 		if instance.liveness != LiveLost {
-			instance.liveness = LiveLost
+			instance.assignLivenessLocked(LiveLost)
 			instance.touchLocked()
 		}
 		instance.mu.Unlock()
 		return inertReturn(), nil
+	}
+
+	// A rebuild-teardown obligation means every tmux name this row binds was
+	// last observed inside the deleted inode: Start(false) would reattach
+	// them before the teardown owner retries, which is the stale-pane bind
+	// the flag exists to prevent (#5371 review). Load the row materialized
+	// but unrestored — started, so storage keeps it and whichever loop owns
+	// its liveness stays eligible: the lost-restore loop for a Lost row, the
+	// limit-resume scheduler for a limit-parked one (each requires Started),
+	// and the status poll for anything else — a positive observation is held
+	// at Lost by the pending gate until the teardown discharges.
+	if data.RebuildTeardownPending {
+		instance.mu.Lock()
+		instance.started = true
+		instance.touchLocked()
+		instance.mu.Unlock()
+		return instance, nil
 	}
 
 	if err := instance.Start(false); err != nil {
@@ -836,7 +864,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			instance.MarkStartupStateUnknown()
 			return inertReturn(), nil
 		}
-		if errors.Is(err, tmux.ErrSpawnDirMissing) {
+		if restoreDeferred(err) {
 			// The tmux session is gone and its persisted worktree is missing:
 			// the spawn-dir seam refused a respawn that tmux would have
 			// silently placed in the server's cwd (#5172). Load the row Lost
@@ -845,7 +873,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			// daemon's lost-restore loop owns the rebuild-then-respawn path,
 			// and it can only reach a row that materialized.
 			instance.mu.Lock()
-			instance.liveness = LiveLost
+			instance.assignLivenessLocked(LiveLost)
 			instance.started = true
 			instance.touchLocked()
 			instance.mu.Unlock()

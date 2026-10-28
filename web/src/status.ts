@@ -484,6 +484,24 @@ export function compareSessionsForRail(a: SessionData, b: SessionData): number {
   return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
 }
 
+/** The backend types whose workspace lives off-box (session/archive_sandbox.go
+ *  backendKindForType: docker, ssh, "sandbox", and "remote" — the hook runtime).
+ *  None of them can service tab management: every Add*Tab path needs a
+ *  daemon-side git worktree they do not have, so the daemon's
+ *  Capabilities().TabManagement is false for all four (#1874).
+ *
+ *  This list is the ONE place the web names backend types. It exists only because
+ *  the session envelope carries `backend_type` but not the daemon's capability
+ *  bits — the honest fix is to serialize the capability so no client re-derives
+ *  it (see #1874). Until then, a NEW off-box runtime must be added here, which is
+ *  what ui.test.ts pins. */
+const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
+
+/** The existing backend-type fallback for off-box workspace ownership. */
+export function isOffBoxWorkspace(s: Pick<SessionData, "backend_type">): boolean {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
+
 /**
  * Builds the row title with the same prefixes the TUI prepends (render.go:400-465),
  * in the same precedence for ordinary status prefixes, with the orthogonal model
@@ -495,7 +513,7 @@ export function rowTitle(s: SessionData): string {
   const lv = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
   let title = s.title;
-  if (s.backend_type === "remote") {
+  if (isOffBoxWorkspace(s)) {
     title = "[remote] " + title;
   }
   if (lv === Liveness.Lost) {
