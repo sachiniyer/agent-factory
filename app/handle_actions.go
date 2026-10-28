@@ -244,6 +244,14 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 			return m, m.openPendingKillConfirm(selectedTitle, reserved, cleanupImpact, loss, killAction)
 		}
 	}
+	// An off-box workspace is measured where it lives: the daemon asks the
+	// session's agent-server, the dialog stays pending meanwhile, and what comes
+	// back is stated the way a local worktree's loss is (#5571 W8.2). An
+	// unreachable row skips the measurement: its host cannot answer, and the
+	// notice above already says the loss cannot be known.
+	if selected.Capabilities().Workspace == session.WorkspaceRemote && !selected.IsArchived() && selected.UnreachableSnapshot() == nil {
+		return m, m.openPendingRemoteKillConfirm(selectedTitle, reserved, target, loss, killAction)
+	}
 	return m, m.openKillConfirm(selectedTitle, reserved, cleanupImpact, loss, killAction)
 }
 

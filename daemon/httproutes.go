@@ -663,6 +663,13 @@ var internalHTTPRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/WorkspaceFacts",
+		Description: "Measure an off-box session's workspace (dirty files, unpushed commits, extra branches, stashes, whether it exists) so a kill confirmation can state what it destroys. Unmeasurable workspaces answer measured=false with a reason.",
+		requestType: reflect.TypeOf(WorkspaceFactsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.WorkspaceFacts) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/PauseStatusPoll",
 		Description: "Pause the daemon's liveness poll for one attached session (best-effort attach coordination).",
 		requestType: reflect.TypeOf(PauseStatusPollRequest{}),

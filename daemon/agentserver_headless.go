@@ -488,6 +488,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
 	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
+	mux.HandleFunc("/v1/agent/workspace-facts", rpcHandler(hs.WorkspaceFacts))
 	mux.HandleFunc("/v1/agent/stop", rpcHandler(hs.StopPreserving))
 	// W7.1: stop the agent and start it again in this workspace, resuming the
 	// provider's conversation. Advertised as the "relaunch" feature.
@@ -966,4 +967,26 @@ func (hs *headlessServer) eventsHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	serveEvents(hs.events, conn)
+}
+
+// WorkspaceFacts measures this server's workspace for the daemon's kill
+// confirmation (#5571 W8.2). Read-only: git status/rev-list/for-each-ref/reflog.
+func (hs *headlessServer) WorkspaceFacts(_ struct{}, resp *session.WorkspaceFacts) error {
+	if hs.inst == nil {
+		return fmt.Errorf("this agent-server has no workspace")
+	}
+	*resp = session.MeasureWorkspace(headlessWorkspaceDir(hs.inst))
+	return nil
+}
+
+// headlessWorkspaceDir is the directory the session's work lives in: the agent's
+// own linked worktree, which is what a kill destroys. inst.Path is the clone root
+// the worktree hangs off, and measuring it misses the checkout's uncommitted
+// changes and reports a deleted worktree as present. The root is the fallback for
+// an instance that has no worktree recorded.
+func headlessWorkspaceDir(inst *session.Instance) string {
+	if wt := inst.GetWorktreePath(); wt != "" {
+		return wt
+	}
+	return inst.Path
 }
