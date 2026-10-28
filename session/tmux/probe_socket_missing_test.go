@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -112,4 +113,32 @@ func TestPreSpawnProbeTreatsSocketMissingAsAbsentRegardlessOfServerCheck(t *test
 			require.True(t, known)
 		})
 	}
+}
+
+// #5766: the pre-spawn probe must end in a determinate answer without ever
+// consulting the process table or waiting on a socket — a probe that can keep
+// answering unknown makes its retrying caller loop (TestDeleteTabConsentEvidence
+// hung on every OS). It reaches its answer from tmux's reply alone.
+func TestPreSpawnProbeNeverConsultsTheServerCheck(t *testing.T) {
+	prev := tmuxServerProcessPIDs
+	tmuxServerProcessPIDs = func() []int {
+		t.Error("the pre-spawn probe consulted the live-server check; it must answer from tmux's reply alone")
+		return []int{0}
+	}
+	t.Cleanup(func() { tmuxServerProcessPIDs = prev })
+
+	_, known := probeSession(socketMissingExecutor(t), "af_new_agent")
+	require.True(t, known)
+}
+
+// The liveness probe's one corroboration is a single, bounded read: it returns a
+// determinate (exists, known) pair promptly rather than waiting out a retry.
+func TestLivenessProbeAnswersWithinABoundEvenWhenUnknown(t *testing.T) {
+	pinSocketClaimProof(t, true)
+	t.Cleanup(PinServerProbeForTest(os.Getpid()))
+
+	start := time.Now()
+	_, known := probeLiveness(t, "af_live_agent")
+	require.False(t, known)
+	require.Less(t, time.Since(start), 2*time.Second)
 }
