@@ -125,9 +125,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// The preview origin's bind address (#1856). Same address grammar as
 	// listen_addr, so the identical validator — an empty value disables the
 	// second listener, any host:port binds it.
-	"network.preview_listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error {
-		return validateListenAddrValue(v)
-	}},
+	"network.preview_listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error { return validateListenAddrValue(v) }},
 	"network.editor_origin_ports": {kind: cfgString, section: "network", validate: validateEditorOriginPorts},
 	// A []string written as a single-line TOML array, comma-separated on the CLI
 	// (empty clears it). Each element must be a well-formed browser origin
