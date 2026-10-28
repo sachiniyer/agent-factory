@@ -193,6 +193,18 @@ func sessionLaunchDir(exe, launch string) string {
 	return filepath.Dir(exe)
 }
 
+// SessionDir is this agent-server's own session directory on the sandbox host —
+// the directory beside the binary a provision staged, where the per-session
+// token already lives. State that must survive an agent-server restart but belongs
+// to this one session (and must not touch the host's shared af home) goes here.
+func SessionDir() (string, error) {
+	exe, err := executable()
+	if err != nil {
+		return "", fmt.Errorf("agent-server cannot resolve its own binary path: %w", err)
+	}
+	return sessionLaunchDir(exe, argv0()), nil
+}
+
 // SuppliedAgentServerToken reads the token a W1.1 provision placed beside THIS
 // binary's session-specific launch path — <dirname(argv[0])>/af-server-token — when one exists. It returns
 // "" when the file is absent: an agent-server provisioned before W1.1, or run
