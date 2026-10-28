@@ -60,10 +60,18 @@ type HTTPRoute struct {
 	//
 	// Denied by this rule, with the reason each is tempting:
 	//
-	//   - CreateSession — no session named; starts one on the host anyway.
-	//   - SendPrompt, CreateTab, AddTask (via Task.TargetSession) — reach an
-	//     existing agent, reproducing DeliverPrompt one at a time.
-	//   - Snapshot — the enumeration that makes the above aimable.
+	//   - DeliverPrompt (and every route not admitted below) — runs instructions
+	//     through any agent on the machine.
+	//
+	// W3.5 (#5571) ADMITS the verbs a local agent's af has, each bounded to the
+	// caller's own project by its handler (sandbox_scope.go): Snapshot,
+	// SendPrompt, ArchiveSession, CreateSession (listed host, no account choice),
+	// CreateTab/CloseTab/RenameTab/ReorderTab (own session), and ListTasks,
+	// AddTask, RemoveTask (cron tasks that deliver a prompt to an off-box session
+	// of the project). What stays denied from that group, and why: watch tasks
+	// (their script runs on the daemon host), UpdateTask/TriggerTask/RestartTask
+	// (a patch can turn a delivery task into one that spawns locally), and any
+	// session or task of another project.
 	//   - ListProjects, ListDirectory — read-only, and still hand a compromised
 	//     sandbox the operator's absolute host paths and an arbitrary directory
 	//     walk of the daemon's filesystem. Reconnaissance is authority's
@@ -145,11 +153,12 @@ var httpRoutes = []HTTPRoute{
 
 	// Sessions.
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/CreateSession",
-		Description: "Create a new session (git worktree + agent) in a repo.",
-		requestType: reflect.TypeOf(CreateSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.createSession) },
+		Method:         http.MethodPost,
+		sandboxAllowed: true,
+		Path:           "/v1/CreateSession",
+		Description:    "Create a new session (git worktree + agent) in a repo.",
+		requestType:    reflect.TypeOf(CreateSessionRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.createSessionScoped) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -157,6 +166,13 @@ var httpRoutes = []HTTPRoute{
 		Description: "List the runtimes a session in this repo can be created on, whether the repo's config supports each, and the backend an unspecified create defaults to.",
 		requestType: reflect.TypeOf(ListBackendsRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListBackends) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/CheckHost",
+		Description: "Probe a listed host (or every listed host) for the tools a sandbox session needs and record its readiness. Refuses a name outside the global host list.",
+		requestType: reflect.TypeOf(CheckHostRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CheckHost) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -190,14 +206,15 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.killSession) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/ArchiveSession",
-		Description: "Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it.",
-		requestType: reflect.TypeOf(ArchiveSessionRequest{}),
+		Method:         http.MethodPost,
+		sandboxAllowed: true,
+		Path:           "/v1/ArchiveSession",
+		Description:    "Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it.",
+		requestType:    reflect.TypeOf(ArchiveSessionRequest{}),
 		// rpcHandlerCtx so the unix-socket peer pid ConnContext stamped reaches
 		// the teardown-requester registry — the `archive --self` caller blocked
 		// on this response is exempted from its own pane reap (#5182).
-		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.archiveSession) },
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.archiveSessionScoped) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -221,11 +238,12 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RestoreSession) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/SendPrompt",
-		Description: "Send a prompt to an existing session's agent.",
-		requestType: reflect.TypeOf(SendPromptRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SendPrompt) },
+		Method:         http.MethodPost,
+		sandboxAllowed: true,
+		Path:           "/v1/SendPrompt",
+		Description:    "Send a prompt to an existing session's agent.",
+		requestType:    reflect.TypeOf(SendPromptRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.sendPromptScoped) },
 	},
 	// Promoted out of internalHTTPRoutes in #1934 — the follow-up promised in
 	// #1592 Phase 2 PR3, which then sat unwritten while the state it exits stayed
@@ -324,32 +342,36 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DeliverPrompt) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/CreateTab",
-		Description: "Spawn a tab in a session: a process tab (command) or shell tab in the worktree, a web tab (kind=web) that iframes a url/port (localhost is daemon-proxied, external is direct), or a VS Code tab (kind=vscode) serving the session's worktree in a daemon-managed code-server (no url/port: the worktree is the target).",
-		requestType: reflect.TypeOf(CreateTabRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CreateTab) },
+		Method:         http.MethodPost,
+		sandboxAllowed: true,
+		Path:           "/v1/CreateTab",
+		Description:    "Spawn a tab in a session: a process tab (command) or shell tab in the worktree, a web tab (kind=web) that iframes a url/port (localhost is daemon-proxied, external is direct), or a VS Code tab (kind=vscode) serving the session's worktree in a daemon-managed code-server (no url/port: the worktree is the target).",
+		requestType:    reflect.TypeOf(CreateTabRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.createTabScoped) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/CloseTab",
-		Description: "Close a non-agent tab of a session (the agent tab cannot be closed). Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back — closing is destructive, so a misroute kills the wrong tab's session.",
-		requestType: reflect.TypeOf(CloseTabRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.closeTab) },
+		Method:         http.MethodPost,
+		sandboxAllowed: true,
+		Path:           "/v1/CloseTab",
+		Description:    "Close a non-agent tab of a session (the agent tab cannot be closed). Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back — closing is destructive, so a misroute kills the wrong tab's session.",
+		requestType:    reflect.TypeOf(CloseTabRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.closeTabScoped) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/RenameTab",
-		Description: "Rename a tab of a session. Only web, process and VS Code tabs can be renamed — agent and shell tabs render fixed labels. The name is sanitized and made unique, so the resolved name is returned. Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back.",
-		requestType: reflect.TypeOf(RenameTabRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RenameTab) },
+		Method:         http.MethodPost,
+		sandboxAllowed: true,
+		Path:           "/v1/RenameTab",
+		Description:    "Rename a tab of a session. Only web, process and VS Code tabs can be renamed — agent and shell tabs render fixed labels. The name is sanitized and made unique, so the resolved name is returned. Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back.",
+		requestType:    reflect.TypeOf(RenameTabRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.renameTabScoped) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/ReorderTab",
-		Description: "Move a tab within a session's roster. Index 0 is reserved for the agent tab, so only slots 1..n-1 can be moved or targeted. Address the tab by tab_id (its stable id) when you have one — see RenameTab; it matters most here, since a reorder is what invalidates every other client's tab_index.",
-		requestType: reflect.TypeOf(ReorderTabRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ReorderTab) },
+		Method:         http.MethodPost,
+		sandboxAllowed: true,
+		Path:           "/v1/ReorderTab",
+		Description:    "Move a tab within a session's roster. Index 0 is reserved for the agent tab, so only slots 1..n-1 can be moved or targeted. Address the tab by tab_id (its stable id) when you have one — see RenameTab; it matters most here, since a reorder is what invalidates every other client's tab_index.",
+		requestType:    reflect.TypeOf(ReorderTabRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.reorderTabScoped) },
 	},
 
 	// Accounts (#3384). The login verb the CLI, the TUI config tab and the web all
@@ -551,18 +573,20 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListOnComplete) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/ListTasks",
-		Description: "List every task across all repos.",
-		requestType: reflect.TypeOf(ListTasksRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListTasks) },
+		Method:         http.MethodPost,
+		sandboxAllowed: true,
+		Path:           "/v1/ListTasks",
+		Description:    "List every task across all repos.",
+		requestType:    reflect.TypeOf(ListTasksRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.listTasksScoped) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/AddTask",
-		Description: "Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit.",
-		requestType: reflect.TypeOf(AddTaskRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.addTask) },
+		Method:         http.MethodPost,
+		sandboxAllowed: true,
+		Path:           "/v1/AddTask",
+		Description:    "Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit.",
+		requestType:    reflect.TypeOf(AddTaskRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.addTaskScoped) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -572,11 +596,12 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.updateTask) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/RemoveTask",
-		Description: "Remove a task by ID.",
-		requestType: reflect.TypeOf(RemoveTaskRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RemoveTask) },
+		Method:         http.MethodPost,
+		sandboxAllowed: true,
+		Path:           "/v1/RemoveTask",
+		Description:    "Remove a task by ID.",
+		requestType:    reflect.TypeOf(RemoveTaskRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.removeTaskScoped) },
 	},
 	{
 		Method:      http.MethodPost,

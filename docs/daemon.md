@@ -66,9 +66,10 @@ exists so cron schedules are evaluated promptly, and the TUI ensures it on
 its first control call. `af` commands that need a live daemon ensure one when
 they execute, while read-only listings like `af sessions list` deliberately
 do not spawn one — they fall back to disk. With `--daemon-url`/`AF_DAEMON_URL`,
-the read verbs (`list`, `get`, `watch`, `preview`, `attach`), `tasks`, and
-global `config` writes dial the remote daemon, which must already be running;
-most other verbs still reach the local daemon (see
+nearly every verb dials the remote daemon, which must already be running:
+`af sessions` (with a few per-verb exceptions), `af tasks`,
+`af projects add`/`rebind`/`delete`/`list`, `af quota`, and global `config`
+writes all follow the target and never fall back to the local socket (see
 [remote daemons](cli.md#remote-daemons)).
 For interactive use you usually don't have to think about it at all.
 

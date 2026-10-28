@@ -56,6 +56,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		RuntimeStartID:           i.runtimeStartID,
 		Account:                  i.Account,
 		Host:                     i.Host,
+		ArchivedWorkspace:        cloneArchivedWorkspace(i.archivedWorkspace),
 		AccountAgent:             i.accountAgent,
 		AccountAutoSelected:      i.accountAutoSelected,
 		AccountLimitObservations: append([]AccountLimitObservationData(nil), i.accountLimitObservations...),
@@ -232,6 +233,11 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	}
 	if len(i.Tabs) > 0 {
 		data.AgentConversation = conversationDataPtr(i.Tabs[0].Conversation)
+	} else if i.reportedConversation.HasID() {
+		// A reloaded off-box row has no agent tab until Launch seeds one, but it
+		// still holds the conversation its agent-server reported (#5826): writing
+		// the row back must not drop the resume handle.
+		data.AgentConversation = conversationDataPtr(i.reportedConversation)
 	}
 
 	// Only include worktree data if gitWorktree is initialized
@@ -501,6 +507,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		runtimeStartID:           data.RuntimeStartID,
 		Account:                  data.Account,
 		Host:                     data.Host,
+		archivedWorkspace:        cloneArchivedWorkspace(data.ArchivedWorkspace),
 		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
@@ -580,6 +587,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// From both sources: rows that were on the roster when the record was written,
 		// and rows a previous recovery staged but never drained.
 		instance.pendingMetadataTabs = append(metadataTabsFrom(data), data.PendingTabs...)
+		// The recorded conversation survives the reload (#5826): the agent tab is
+		// seeded by the next Launch, so the handle waits in reportedConversation,
+		// is sent on that launch, and is written back by every checkpoint meanwhile.
+		instance.reportedConversation = persistedConversationOf(data)
 		// A kill tombstone is a durable promise to FINISH teardown after a restart;
 		// an unknown cleanup outcome is the same obligation without terminal kill
 		// intent. An ordinary sandbox row carries a persisted RuntimeCleanup handle

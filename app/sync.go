@@ -43,6 +43,8 @@ type snapshotFetchedMsg struct {
 	// disk task read still succeeds.
 	tasks    []task.Task
 	tasksErr error
+	// remote is the target's registry and tasks read on this poll, nil locally.
+	remote *remoteReads
 	// alarms carries any persistent watch-task delivery-failure alarms projected
 	// on the same daemon snapshot (#1238). It rides the session snapshot because
 	// it is a field of the one authoritative Snapshot response, not a separate
@@ -92,6 +94,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	repoID := m.repoID
 	repoRoot := m.repoRoot
 	fetch := m.snapshotFetcher
+	lifetime := m.ctx
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
 	return func() tea.Msg {
@@ -102,7 +105,17 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// reads the switched-to project's tasks — not the launch repo's. Its own
 		// error is carried separately so a warming-daemon RPC failure never
 		// suppresses a successful disk task read.
-		tasks, tasksErr := task.LoadTasksForKnownRepo(repoRoot, repoID)
+		var remote *remoteReads
+		var tasks []task.Task
+		var tasksErr error
+		if isRemoteTarget() {
+			remote = fetchRemoteReads(lifetime)
+			if repoID != "" {
+				tasks, tasksErr = filterTasksToProject(remote.tasks, repoRoot, repoID), remote.tasksErr
+			}
+		} else {
+			tasks, tasksErr = task.LoadTasksForKnownRepo(repoRoot, repoID)
+		}
 		// The disk read is the DEFINITION and stays authoritative; what it cannot
 		// see is whether the running scheduler is holding each task, which is
 		// observable only inside the daemon. Fetched here, beside the snapshot,
@@ -123,7 +136,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		allReposData, allReposErr := allRepos(context.Background())
 		return snapshotFetchedMsg{
 			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
-			tasks: tasks, tasksErr: tasksErr, repoID: repoID,
+			tasks: tasks, tasksErr: tasksErr, repoID: repoID, remote: remote,
 			allRepos: allReposData, allReposErr: allReposErr,
 		}
 	}

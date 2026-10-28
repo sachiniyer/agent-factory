@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -126,4 +127,68 @@ func TestSetResumeConversationPlansAResume(t *testing.T) {
 	rewritten, conv := planCreateConversation(inst, "claude")
 	assert.Contains(t, rewritten, "--resume "+claudeConv.ID)
 	assert.Equal(t, claudeConv, conv)
+}
+
+// A conversation reported LATE (a Codex rollout, found after launch) is a
+// durable change of its own (#5826): it is flagged for the daemon's poll
+// persistence, survives the row's storage round trip, and a restored row sends
+// it back on its next launch so the agent resumes exactly that conversation.
+func TestLateReportedConversationSurvivesRestartAndResumes(t *testing.T) {
+	late := AgentConversationData{Agent: tmux.ProgramCodex, ID: "019a2222-aaaa-bbbb-cccc-ddddeeeeffff", CaptureKind: ConversationCaptureCodexRollout}
+	srv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true}).
+		route("/v1/agent/snapshot", map[string]any{"updated": true, "content": "x", "conversation": late}).
+		route("/v1/agent/launch", map[string]any{"ok": true})
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	inst := &Instance{Title: "sb", Path: t.TempDir(), Program: "codex", Tabs: []*Tab{newRemoteAgentTab()}}
+	s := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: inst}
+	assert.False(t, inst.ConversationUnpersisted())
+
+	_, err := s.Snapshot()
+	require.NoError(t, err)
+	require.True(t, inst.ConversationUnpersisted(), "a reported identity is memory-only until the daemon writes it")
+
+	// The daemon's write: the row's storage projection carries the identity.
+	data := inst.ToInstanceData()
+	require.NotNil(t, data.AgentConversation)
+	assert.Equal(t, late, *data.AgentConversation)
+	require.NotEmpty(t, data.Tabs)
+	require.NotNil(t, data.Tabs[0].Conversation)
+	written := *data.Tabs[0].Conversation
+
+	// A failed write leaves it pending; the successful one clears it, and only for
+	// the identity that was actually written.
+	inst.MarkConversationPersisted(AgentConversationData{Agent: tmux.ProgramCodex, ID: "something-else"})
+	assert.True(t, inst.ConversationUnpersisted(), "a different identity's write must not clear the flag")
+	inst.MarkConversationPersisted(written)
+	assert.False(t, inst.ConversationUnpersisted())
+
+	// Restart: the stored row is rebuilt and still holds the handle.
+	raw, err := json.Marshal(data)
+	require.NoError(t, err)
+	var stored InstanceData
+	require.NoError(t, json.Unmarshal(raw, &stored))
+	// The row the daemon wrote is a sandbox session: it reloads inert, and its
+	// recorded conversation is what a Lost restore sends back.
+	stored.ID, stored.Branch, stored.BackendType, stored.Liveness = "id-late", "root/s", "sandbox", LiveRunning
+	restored, err := FromInstanceData(stored)
+	require.NoError(t, err)
+	assert.Equal(t, late, restored.AgentConversation(), "the resume handle survives the restart")
+	// And the reloaded row, which has no agent tab until Launch seeds one, writes
+	// it back on every checkpoint instead of dropping it.
+	rewritten := restored.ToInstanceData()
+	require.NotNil(t, rewritten.AgentConversation, "a checkpoint of the reloaded row must keep the handle")
+	assert.Equal(t, late.ID, rewritten.AgentConversation.ID)
+
+	// And the restored row resumes with it.
+	s2 := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: restored}
+	require.NoError(t, s2.Launch(true))
+	srv.mu.Lock()
+	body := srv.bodies["/v1/agent/launch"]
+	srv.mu.Unlock()
+	conv, ok := body["conversation"].(map[string]any)
+	require.True(t, ok, "the restored row must send its conversation on launch: %v", body)
+	assert.Equal(t, late.ID, conv["id"])
 }

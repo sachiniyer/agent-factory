@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
@@ -306,6 +307,46 @@ func routedDeleteProject(req daemon.DeleteProjectRequest) (daemon.DeleteProjectR
 	defer c.CloseIdleConnections()
 	resp, err := c.DeleteProject(req)
 	return resp, remoteMutationError("projects delete", err)
+}
+
+func routedSetProjectColor(req daemon.SetProjectColorRequest) (config.Project, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.SetProjectColor(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return config.Project{}, err
+	}
+	defer c.CloseIdleConnections()
+	p, err := c.SetProjectColor(req)
+	return p, remoteMutationError("projects color", err)
+}
+
+// resolveRemoteProjectSelector names a project in the TARGET daemon's registry.
+// A prj_ id goes verbatim (the daemon reads only that record). Anything else is
+// a checkout path on the daemon's host, matched against the daemon's own
+// project list: this machine's registry and filesystem are never consulted.
+func resolveRemoteProjectSelector(selector string) (string, error) {
+	if config.ValidateProjectID(selector) == nil {
+		return selector, nil
+	}
+	root, err := remoteProjectPath(selector)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(root, "~") {
+		return "", fmt.Errorf("against the daemon at %s: a ~ path cannot name a project here; use its prj_ id (see `af projects list`)", apiclient.RemoteTargetURL())
+	}
+	projects, err := routedListProjects()
+	if err != nil {
+		return "", err
+	}
+	for _, p := range projects {
+		if filepath.Clean(p.Root) == filepath.Clean(root) {
+			return p.ID, nil
+		}
+	}
+	return "", fmt.Errorf("%s is not a project registered on the daemon at %s; run `af projects list` to see its projects", root, apiclient.RemoteTargetURL())
 }
 
 // routedListProjects reads the registry of whichever daemon is targeted. A

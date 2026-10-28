@@ -50,9 +50,15 @@ func (s *TaskPane) validateForm() (string, int) {
 	if rawPath == "" {
 		return "project path is required", taskFocusPath
 	}
-	absPath, err := config.ResolveUserPath(rawPath)
+	absPath, err := ResolveTaskProjectPath(rawPath)
 	if err != nil {
 		return fmt.Sprintf("invalid path: %v", err), taskFocusPath
+	}
+	if isRemoteTaskTarget() {
+		// The path is on the daemon's host: this machine's git cannot vouch for
+		// it, and the daemon refuses a non-repository when it takes the task.
+		s.editPath.SetValue(absPath)
+		return "", -1
 	}
 	if err := git.CheckGitRepo(absPath); err != nil {
 		if config.RepoProbeUnanswered(err) {
@@ -186,7 +192,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			// relative value behaves the same when the scheduler fires
 			// as it does in the TUI trigger (#641, #924). validateForm
 			// already normalized editPath, so this is idempotent.
-			absPath, err := config.ResolveUserPath(s.editPath.Value())
+			absPath, err := ResolveTaskProjectPath(s.editPath.Value())
 			if err != nil {
 				s.editError = fmt.Sprintf("invalid path: %v", err)
 				s.editErrorField = taskFocusPath

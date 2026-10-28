@@ -90,6 +90,13 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, session.I
 // one body avoids a second title lookup between those sibling paths.
 func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, title string) (string, error) {
 	req := RestoreArchivedRequest{ID: instance.ID, Title: title, RepoID: repoID}
+	// The one choke point for every archived restore (RestoreArchived, RestoreSession,
+	// and so TUI, web, CLI and task-driven restores): a row archived without a push
+	// keeps its work on its host, and restoring it re-provisions over that directory
+	// (#5571 W8.5). Refused before any fence is raised; W8.6 lifts it.
+	if err := instance.RestoreRefusedForPreservedWorkspace(); err != nil {
+		return "", err
+	}
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}

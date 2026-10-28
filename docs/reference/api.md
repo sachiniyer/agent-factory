@@ -21,11 +21,12 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `GET` | `/v1/health` | — | Lifecycle health probe (alias for Ping): version, boot/transaction identity, phase, and bound listeners; answers before readiness. |
 | `POST` | `/v1/CreateSession` | `title`, `title_base`, `repo_path`, `program`, `account`, `prompt`, `in_place`, `force_remote`, `validate_first`, `backend`, `host` | Create a new session (git worktree + agent) in a repo. |
 | `POST` | `/v1/ListBackends` | `repo_path` | List the runtimes a session in this repo can be created on, whether the repo's config supports each, and the backend an unspecified create defaults to. |
+| `POST` | `/v1/CheckHost` | `host` | Probe a listed host (or every listed host) for the tools a sandbox session needs and record its readiness. Refuses a name outside the global host list. |
 | `POST` | `/v1/ListPrograms` | `repo_path` | List the agent programs a session can be created with, and the program an unspecified create defaults to. |
 | `POST` | `/v1/SuggestSessionName` | — | Suggest a random, readable session name (adjective-noun) not used by any live session, for the create form's autocreate placeholder. |
 | `POST` | `/v1/Snapshot` | `repo_id`, `live`, `statuses`, `created_after`, `limit` | List sessions from the daemon's authoritative in-memory state, with optional live/status, created-after, and limit filters applied before transfer (empty repo_id = all repos). |
 | `POST` | `/v1/KillSession` | `title`, `repo_id`, `id` | Tear down a session: kill its tmux/agent and remove its worktree and record. |
-| `POST` | `/v1/ArchiveSession` | `title`, `repo_id`, `id` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it. |
+| `POST` | `/v1/ArchiveSession` | `title`, `repo_id`, `id`, `push` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it. |
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id`, `id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
 | `POST` | `/v1/PruneSessions` | `repo_id`, `all`, `older_than` | Dry-run listing for `af sessions prune`: reports which old archived sessions a reclaim would remove and the allocated bytes each would free. Strictly read-only. |
 | `POST` | `/v1/RestoreSession` | `title`, `repo_id`, `id`, `expected_daemon_boot_id`, `force_reap` | Restore an archived, Lost, or Dead session; an optional expected daemon boot ID refuses before admission if the process changed. |
@@ -81,7 +82,7 @@ The `Request fields` column above lists each body's TOP-LEVEL keys. Where one of
 
 | Path | Nested fields |
 |------|---------------|
-| `/v1/AddTask` | `task.id`, `task.name`, `task.prompt`, `task.cron_expr`, `task.watch_cmd`, `task.target_session`, `task.max_concurrent_runs`, `task.on_complete`, `task.host`, `task.project_path`, `task.repo_id`, `task.program`, `task.enabled`, `task.created_at`, `task.last_run_at`, `task.last_run_status`, `task.last_run_id`, `task.last_run_started_at`, `task.dropped_events`, `task.audit`, `task.overdue`, `task.missed_occurrences`, `task.missed_occurrences_capped`, `task.unschedulable`, `task.unschedulable_reason`, `task.unassessable`, `task.next_run_at`, `task.next_run_far`, `task.arming`, `task.ordinal`, `task.store_generation` |
+| `/v1/AddTask` | `task.id`, `task.name`, `task.prompt`, `task.cron_expr`, `task.watch_cmd`, `task.target_session`, `task.max_concurrent_runs`, `task.on_complete`, `task.host`, `task.project_path`, `task.repo_id`, `task.sandbox_owner`, `task.program`, `task.enabled`, `task.created_at`, `task.last_run_at`, `task.last_run_status`, `task.last_run_id`, `task.last_run_started_at`, `task.dropped_events`, `task.audit`, `task.overdue`, `task.missed_occurrences`, `task.missed_occurrences_capped`, `task.unschedulable`, `task.unschedulable_reason`, `task.unassessable`, `task.next_run_at`, `task.next_run_far`, `task.arming`, `task.ordinal`, `task.store_generation` |
 | `/v1/UpdateTask` | `update.name`, `update.prompt`, `update.cron_expr`, `update.watch_cmd`, `update.target_session`, `update.max_concurrent_runs`, `update.on_complete`, `update.host`, `update.project_path`, `update.program`, `update.enabled`, `expect.enforce`, `expect.project_path` |
 | `/v1/RemoveTask` | `expect.enforce`, `expect.project_path` |
 | `/v1/RestartTask` | `expect.enforce`, `expect.project_path` |

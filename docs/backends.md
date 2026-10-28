@@ -647,6 +647,24 @@ inherit it. A local token is never copied to the SSH host implicitly.
 - The repo must have an `origin` remote the **remote host** can clone from
   (GitHub for a real repo; a `file://` path for a self-contained test).
 
+### Adding and checking a listed host
+
+`af hosts add <name> [user@]host[:port]` saves the host (the same entry
+`af config set hosts` writes) and probes it in one step; `af hosts list`,
+`af hosts check [name]` and `af hosts remove <name>` complete the group. You own
+connectivity (a tailnet, a VPN, your ssh key): af opens no tunnel and edits no
+ssh config, and a host that is unreachable or missing a tool is still saved, with
+the fix printed and a non-zero exit so a script notices. These verbs act on this
+machine's host list and daemon, so they refuse a remote `--daemon-url`.
+
+A host in the global `hosts` list is probed for `git`, `tmux` (3.2 or newer) and
+`gh` without creating a session on it. `af doctor` shows one row per listed host
+(ready, blocked with the missing tool, or unreachable), and the daemon repeats
+the probe about every ten minutes, so the host pickers show a recent verdict
+instead of "not probed yet". An unreachable host or an unreadable reply records
+nothing: it can neither mark a host ready nor clear an earlier blocked verdict.
+A create always re-checks the host live.
+
 ### Operations
 
 - **Find a session's remote files:** they live under `~/.af-sessions/<title>.XXXXXX`
@@ -813,6 +831,39 @@ them. The script runs on the daemon box, never from repository config.
   half-built sandbox workspace.
 
 See `examples/move-script/move.sh` for a documented example.
+
+## Session-scoped account sync (listed hosts)
+
+> **Status:** the sync mechanism exists in the ssh runtime but is not reachable
+> yet — `--account` on an ssh or sandbox session is still refused (see the
+> account notes above) until W7.4 admits it. This section is the contract.
+
+On a host in the global host list (`[hosts.<name>]`), af copies the session's
+selected account into **that session's own scope** — `<session dir>/account` on the
+host — and points the agent at it with the agent's own variable (`CLAUDE_CONFIG_DIR`,
+`CODEX_HOME` or `GEMINI_CLI_HOME`). It never writes the remote user's global agent
+config, so the host's own login is neither read nor replaced.
+
+- **Only credential files travel** (claude `.credentials.json`, codex `auth.json`,
+  gemini's OAuth files) — not history, settings or skills. They are sent over the
+  ssh session's stdin as an archive, so no secret appears in a command line, a
+  script or a log.
+- **Only to a listed host.** The licence to send credentials is the host-list
+  entry, which only the operator writes. A target a repository named (its `[ssh]`
+  section) or a free-form `sandbox.ssh` command is refused before anything is sent.
+- **Refreshes are written back.** Credential files the agent rewrote on the host
+  replace the registry copy (atomically, mode 0600, only when the content changed),
+  and the archive the host returns is untrusted: any entry that is not exactly an
+  expected credential file refuses the whole write-back. Teardown writes back one
+  last time, then removes the scope.
+- **Sessions on one host share its ssh user**, so they can read each other's
+  workspaces and synced credentials, exactly as local worktrees share one user
+  today. A Unix user per session is a later hardening, not part of this contract.
+
+Not yet built: fanning a refresh out to every live session on the same account
+(providers that rotate refresh tokens log the others out), write-back on a timer or
+after a daemon restart, and admitting `--account` and `default_accounts` off-box
+(W7.4).
 
 ## Archive & restore
 

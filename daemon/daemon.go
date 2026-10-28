@@ -561,6 +561,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// daemon in "starting" (#5815).
 	startupStep("arm orphan container sweep", func() { sweepStartupOrphanContainers(manager) })
 	startupStep("tab cleanup sweep", func() { sweepStartupTabCleanup(manager) })
+	// Background and read-only until it proves an orphan; see sandbox_dir_sweep.go.
+	startupStep("sandbox orphan dir sweep", manager.sweepStartupOrphanSandboxDirs)
 	manager.finishInstanceRestore()
 
 	// Start task automation only after the control server is up and restore has
@@ -590,6 +592,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	wg := &sync.WaitGroup{}
 	stopCh := make(chan struct{})
 	startInstancePollLoop(manager, time.Duration(cfg.DaemonPollInterval)*time.Millisecond, stopCh, wg)
+	startHostReadinessRefresh(manager, stopCh, wg)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an

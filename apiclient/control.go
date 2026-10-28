@@ -434,6 +434,16 @@ func (c *Client) RegisterProject(path string) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// SetProjectColor sets or clears (empty color) a registered project's display
+// color through the daemon — the single writer. HTTP twin of SetProjectColor.
+func (c *Client) SetProjectColor(req daemon.SetProjectColorRequest) (config.Project, error) {
+	var resp daemon.SetProjectColorResponse
+	if err := c.call("SetProjectColor", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
 // RebindProject moves a registered project's stable identity to the checkout at
 // path through the daemon — the single writer (#960) — which resolves the path
 // on its own filesystem, refuses a root another project owns, and publishes
@@ -504,8 +514,14 @@ func (c *Client) SendPrompt(req daemon.SendPromptRequest) (session.PromptDeliver
 // config.ListProjects run on the daemon's host), so a remote `af projects list`
 // describes the targeted machine rather than this one.
 func (c *Client) ListProjects() ([]config.Project, error) {
+	return c.ListProjectsContext(context.Background())
+}
+
+// ListProjectsContext is ListProjects bound to ctx, for a caller (the TUI's
+// poll) that must be able to abandon the read.
+func (c *Client) ListProjectsContext(ctx context.Context) ([]config.Project, error) {
 	var resp daemon.ListProjectsResponse
-	if err := c.call("ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
+	if err := c.callCtx(ctx, "ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Projects, nil

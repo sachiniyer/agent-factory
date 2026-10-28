@@ -78,8 +78,9 @@ func (b *remoteAgentBackend) Launch(i *Instance, firstTimeSetup bool) error {
 	i.appendPendingMetadataTabsLocked()
 	// The launch RPC reported the conversation it came up on, before the agent tab
 	// existed to hold it (W7.2).
-	if i.reportedConversation.HasID() {
-		i.setAgentConversationLocked(i.reportedConversation)
+	if i.reportedConversation.HasID() && i.setAgentConversationLocked(i.reportedConversation) {
+		// Reported before the tab existed to hold it: still owes a durable write.
+		i.conversationUnpersisted = true
 	}
 	i.mu.Unlock()
 	return nil

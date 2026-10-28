@@ -91,6 +91,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (#1461): applying its old-repo sessions/tasks would bleed the previous
 		// project into the new view. Still re-arm the pacing tick so polling of
 		// the now-active repo continues.
+		// The target's registry is not repo-scoped, so it is applied even when the
+		// rest of the message is dropped below.
+		m.remote.apply(msg.remote)
 		if msg.repoID != m.repoID {
 			return m, tickRefreshExternalCmd
 		}

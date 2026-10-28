@@ -36,6 +36,11 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af daemon uninstall`](#af-daemon-uninstall) — Remove the daemon autostart unit
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
+- [`af hosts`](#af-hosts) — Add, list, check and remove sandbox hosts
+- [`af hosts add`](#af-hosts-add) — Save a host and check that it can run a session
+- [`af hosts check`](#af-hosts-check) — Probe a host (or every saved host) for what a session needs
+- [`af hosts list`](#af-hosts-list) — Show the saved hosts
+- [`af hosts remove`](#af-hosts-remove) — Drop a host from the list
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
 - [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
@@ -130,6 +135,7 @@ af [flags]
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
+- [`af hosts`](#af-hosts) — Add, list, check and remove sandbox hosts
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
 - [`af proposal`](#af-proposal) — Write proposals together with agents
@@ -1216,6 +1222,10 @@ af daemon restart [flags]
 
 Report daemon liveness, config freshness, and supervision
 
+With --daemon-url (or AF_DAEMON_URL, or a saved target) this reads the TARGET's
+health route and reports whether it responds, its version, phase and boot
+identity — never this machine's sockets or autostart unit.
+
 Print a read-only snapshot of the background daemon: whether it is responding
 on the control socket, the control and HTTP socket paths (and whether their
 files are present), the recorded and responding pids, whether the installed
@@ -1401,6 +1411,141 @@ af doctor [flags]
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af hosts
+
+Add, list, check and remove sandbox hosts
+
+Manage the global host list that sandbox sessions run on.
+
+  af hosts add box1 ubuntu@box1.tailnet.ts.net   save the host, then check it
+  af hosts check [box1]                          probe git, tmux and gh on the host
+  af hosts list                                  show the saved hosts
+  af hosts remove box1                           drop the host from the list
+
+You own connectivity (a tailnet, a VPN, a key in your agent): af opens no tunnel
+and edits no ssh config. If the host cannot be reached or is missing a tool, the
+entry is still saved and the command says what to fix; rerun 'af hosts check'.
+
+```
+af hosts
+```
+
+**Subcommands**
+
+- [`af hosts add`](#af-hosts-add) — Save a host and check that it can run a session
+- [`af hosts check`](#af-hosts-check) — Probe a host (or every saved host) for what a session needs
+- [`af hosts list`](#af-hosts-list) — Show the saved hosts
+- [`af hosts remove`](#af-hosts-remove) — Drop a host from the list
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Print the result as a JSON envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts add
+
+Save a host and check that it can run a session
+
+Save <name> as a sandbox host and probe it.
+
+<ssh-destination> is [user@]host[:port], for example ubuntu@box1.tailnet.ts.net.
+The name is what 'af sessions create --host <name>' takes. The host is probed
+for git, tmux (3.2 or newer) and gh, and every missing tool is reported with
+its fix. The entry is kept either way; use --no-check to skip the probe.
+
+```
+af hosts add <name> <ssh-destination> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--default` |  | Make this the default host |
+| `--host-key-verification` | `string` | strict \| accept-new \| insecure (default: the global ssh.host_key_verification) |
+| `--identity-file` | `string` | Absolute path of the ssh key for this host |
+| `--no-check` |  | Save the host without probing it |
+| `--workspace-root` | `string` | Absolute directory on the host under which each session's dir is created (default ~/.af-sessions) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts check
+
+Probe a host (or every saved host) for what a session needs
+
+Ask the daemon to probe a saved host for git, tmux (3.2 or newer) and gh, and
+record the answer so the host pickers show it. With no name every saved host is
+probed. Exits non-zero when a host is not ready or could not be reached.
+
+```
+af hosts check [name]
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts list
+
+Show the saved hosts
+
+```
+af hosts list
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts remove
+
+Drop a host from the list
+
+Remove <name> from the saved hosts. Sessions already running on it keep
+running: each one carries its own connection settings, so a tunnel re-dial or a
+daemon restart does not need the entry; only new sessions can no longer pick it. A host that is the default is
+refused unless you pass --clear-default.
+
+```
+af hosts remove <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--clear-default` |  | Also clear default_host when it names this host |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af keys
 
 Show the effective TUI key bindings (defaults plus [keys] rebinds)
@@ -1517,6 +1662,9 @@ color such as '#2f5fd8' or '2f5fd8'. Pass "" to clear the color.
 
 The web client paints the frame around the session and the browser tab's
 favicon with this color, so you can find the project's tab or window quickly.
+
+Against a remote daemon (--daemon-url) <project> is a prj_ id or an absolute
+checkout path on the daemon's host, resolved by that daemon's registry.
 
 ```
 af projects color <project> <color>
@@ -2079,8 +2227,11 @@ With --self, archive the current session (resolved via whoami) instead of a
 named one — use it from inside a session when your work is done. --self and a
 <title> argument are mutually exclusive.
 
-Sandboxes publish work before removal; restore recreates them from the published
-branch. In-place (--here) sessions cannot be archived because af does not own
+An ssh or sandbox session publishes nothing by default: the agent stops and the
+workspace stays on its host, owned by the archived row, and the output names where
+(archived_workspace). Pass --push to push the branch to origin first; docker and
+hook sessions always push. Restoring a session archived without a push is not
+available yet (#5571 W8.6) — the work is untouched on the host. In-place (--here) sessions cannot be archived because af does not own
 their worktree. Local archives print the relocated worktree path on success.
 
 ```
@@ -2091,6 +2242,7 @@ af sessions archive [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--push` |  | Push an ssh/sandbox session's branch to origin before archiving. Without it nothing is published: the agent stops and the workspace stays on its host (docker and hook sessions always push) |
 | `--self` |  | Archive the current session (resolved via whoami); use from inside a session when your work is done |
 
 **Global flags**
