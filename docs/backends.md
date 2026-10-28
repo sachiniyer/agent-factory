@@ -819,9 +819,9 @@ See `examples/move-script/move.sh` for a documented example.
 
 ## Session-scoped account sync (listed hosts)
 
-> **Status:** the sync mechanism exists in the ssh runtime but is not reachable
-> yet — `--account` on an ssh or sandbox session is still refused (see the
-> account notes above) until W7.4 admits it. This section is the contract.
+> **Status:** `--account` and `default_accounts` are admitted on an ssh session
+> placed on a listed host (W7.4). On any other target an explicit `--account` is
+> refused at admission with the remedy, and a default account is not applied.
 
 On a host in the global host list (`[hosts.<name>]`), af copies the session's
 selected account into **that session's own scope** — `<session dir>/account` on the
@@ -847,8 +847,7 @@ config, so the host's own login is neither read nor replaced.
 
 Not yet built: fanning a refresh out to every live session on the same account
 (providers that rotate refresh tokens log the others out), write-back on a timer or
-after a daemon restart, and admitting `--account` and `default_accounts` off-box
-(W7.4).
+after a daemon restart.
 
 ## Archive & restore
 

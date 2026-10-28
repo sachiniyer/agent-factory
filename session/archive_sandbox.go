@@ -312,7 +312,7 @@ func (i *Instance) reprovisionRemote() error {
 	// would refuse a handoff-scoped pin whose registry is not the recorded
 	// enum's (#4430 review round 4), and restore cannot drift onto ambient
 	// credentials.
-	if kind.CarriesAccount() && strings.TrimSpace(accountName) != "" {
+	if accountCarried(kind, i.Path, i.Host) && strings.TrimSpace(accountName) != "" {
 		account, accountErr := selectAccountInNamespace(scopedAgent, accountName)
 		if accountErr != nil {
 			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
