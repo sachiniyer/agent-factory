@@ -22,7 +22,7 @@ function core() {
   return c;
 }
 // `later` maps PR number -> list of mergeable values returned by successive re-reads.
-function world(prs, { later = {}, runs } = {}) {
+function world(prs, { later = {}, runs, jobs = {} } = {}) {
   const w = { merged: [], dispatched: [], rereads: [], cursor: {} };
   const verdictRuns = runs || { 'build.yml': [{ status: 'completed', conclusion: 'success' }], 'lint.yml': [{ status: 'completed', conclusion: 'success' }] };
   w.graphql = async (q) => {
@@ -46,6 +46,7 @@ function world(prs, { later = {}, runs } = {}) {
     repos: { getBranch: async ({ branch }) => (branch === 'master' ? { data: { commit: { sha: HEAD } } } : { data: { protected: true } }) },
     actions: {
       listWorkflowRuns: async ({ workflow_id }) => ({ data: { workflow_runs: (verdictRuns[workflow_id] || []).map((r) => ({ ...r, head_sha: HEAD })) } }),
+      listJobsForWorkflowRun: async ({ run_id }) => ({ data: { jobs: jobs[run_id] || [] } }),
       createWorkflowDispatch: async ({ workflow_id }) => { w.dispatched.push(workflow_id); },
     },
     pulls: { merge: async ({ pull_number }) => { w.merged.push(pull_number); return { data: { sha: 'f'.repeat(40) } }; }, list: async () => ({ data: [] }) },
@@ -148,3 +149,43 @@ for (const [file, job] of [['build.yml', 'build'], ['lint.yml', 'golangci']]) {
     assert.match(body, /gh workflow run auto-merge\.yml --ref master/);
   });
 }
+
+// ---- The kick job runs inside the run it announces ------------------------------
+const job = (name, status, conclusion = null) => ({ name, status, conclusion });
+const lintOk = { 'lint.yml': [{ id: 2, status: 'completed', conclusion: 'success' }] };
+
+test('only the kick job is incomplete: verdict is ok, not wait, and the merger proceeds', async () => {
+  const w = world([open(1)], {
+    runs: { ...lintOk, 'build.yml': [{ id: 1, status: 'in_progress', conclusion: null }] },
+    jobs: { 1: [job('Build Binary and Test (linux, amd64)', 'completed', 'success'), job('Kick auto-merge', 'in_progress')] },
+  });
+  await go(w);
+  assert.deepEqual(w.merged, [1]);
+});
+
+test('only the kick job is incomplete but a real job failed: verdict is red, not wait', async () => {
+  const w = world([open(1)], {
+    runs: { ...lintOk, 'build.yml': [{ id: 1, status: 'in_progress', conclusion: null }] },
+    jobs: { 1: [job('Build Binary and Test (linux, amd64)', 'completed', 'failure'), job('Kick auto-merge', 'queued')] },
+  });
+  await go(w);
+  assert.deepEqual(w.merged, []); // red: non-fix-master PRs held
+  assert.deepEqual(w.dispatched, []);
+});
+
+test('a real job still running keeps the verdict at wait: nothing merged, nothing dispatched', async () => {
+  const w = world([open(1)], {
+    runs: { ...lintOk, 'build.yml': [{ id: 1, status: 'in_progress', conclusion: null }] },
+    jobs: { 1: [job('Build Binary and Test (linux, amd64)', 'completed', 'success'), job('Build Binary and Test (darwin, arm64)', 'in_progress'), job('Kick auto-merge', 'queued')] },
+  });
+  await go(w);
+  assert.deepEqual(w.merged, []);
+  assert.deepEqual(w.dispatched, []);
+});
+
+test('an unreadable jobs list stays at wait (conservative)', async () => {
+  const w = world([open(1)], { runs: { ...lintOk, 'build.yml': [{ id: 1, status: 'in_progress', conclusion: null }] } });
+  w.rest.actions.listJobsForWorkflowRun = async () => { throw new Error('boom'); };
+  await go(w);
+  assert.deepEqual(w.merged, []);
+});

@@ -140,6 +140,33 @@ function combineVerification(states) {
 
 // Returns {status: ok|red|wait, head, states, runs: {workflow: failing/blocking run}}.
 // Dispatches workflows that have no live run. A failed read throws: no merge.
+// build.yml / lint.yml end with a `Kick auto-merge` job that dispatches the merger
+// from INSIDE the run it announces, so that run cannot be `completed` yet when the
+// kicked merger looks. Classify an incomplete run by its other jobs: once every
+// non-kick job has concluded, the run's verdict is theirs, however fast the
+// merger started. Any real job still running keeps the run incomplete (wait).
+const KICK_JOB_NAME = "Kick auto-merge";
+
+async function effectiveRun(github, core, owner, repo, run) {
+  if (run.status === "completed") return run;
+  try {
+    const res = await github.rest.actions.listJobsForWorkflowRun({
+      owner, repo, run_id: run.id, filter: "latest", per_page: 100,
+    });
+    const real = res.data.jobs.filter((j) => j.name !== KICK_JOB_NAME);
+    if (!real.length || real.some((j) => j.status !== "completed")) return run;
+    const conclusions = real.map((j) => j.conclusion);
+    const conclusion = conclusions.some((c) => RED_CONCLUSIONS.has(c))
+      ? "failure"
+      : conclusions.includes("cancelled") ? "cancelled" : "success";
+    return { ...run, status: "completed", conclusion };
+  } catch (error) {
+    // Unreadable jobs: stay conservative (the run reads as still incomplete).
+    core.warning(`Could not read jobs of run ${run.id}: ${error.message}`);
+    return run;
+  }
+}
+
 async function verifyMasterHead(github, core, owner, repo) {
   const branch = await github.rest.repos.getBranch({ owner, repo, branch: BASE });
   const head = branch.data.commit.sha;
@@ -149,7 +176,11 @@ async function verifyMasterHead(github, core, owner, repo) {
     const res = await github.rest.actions.listWorkflowRuns({
       owner, repo, workflow_id, head_sha: head, per_page: 20,
     });
-    const rows = res.data.workflow_runs.filter((r) => !r.head_sha || r.head_sha === head);
+    let rows = res.data.workflow_runs.filter((r) => !r.head_sha || r.head_sha === head);
+    // Only worth a jobs read when a success is not already in hand.
+    if (workflowState(rows) === "wait") {
+      rows = await Promise.all(rows.map((r) => effectiveRun(github, core, owner, repo, r)));
+    }
     states[workflow_id] = workflowState(rows);
     runs[workflow_id] = rows.find((r) => r.status !== "completed" || RED_CONCLUSIONS.has(r.conclusion)) || null;
   }
