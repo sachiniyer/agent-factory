@@ -311,6 +311,9 @@ func (w *sandboxWorkspace) writeRuntimeIdentity(timeout time.Duration) error {
 		return fmt.Errorf("writing the sandbox agent-server token failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	envBody := fmt.Sprintf("%s=%s\n", runtimetoken.RefEnvName, shellQuote(w.tokenRef))
+	if name, value, ok := w.accountEnv(); ok {
+		envBody += fmt.Sprintf("%s=%s\n", name, shellQuote(value))
+	}
 	envScript := "umask 077 && cat > " + shellQuote(w.IdentityEnvPath())
 	out, err = w.shell.Run(timeout, envScript, strings.NewReader(envBody), false)
 	if err != nil {
@@ -443,6 +446,13 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	// agent-server spawns. The ref is a nonce, but the rule keeps the
 	// credential-class channel narrow on principle (#5571 W1.1 approval).
 	extras := append(append([]string{}, w.spec.SessionEnvPassthrough...), runtimetoken.RefEnvName)
+	// W7.3: the account's own variable reaches the agent-server and, through
+	// --session-env, the agent — pointing it at the session-scoped account dir.
+	// The VALUE lives in the 0600 identity env file, never in argv.
+	if name, _, ok := w.accountEnv(); ok {
+		args = append(args, "--session-env", name)
+		extras = append(extras, name)
+	}
 	// The marker re-execs the staged binary it is already running, so a symlinked
 	// session directory changes no launch-side identity comparison: there is none
 	// here — policy and the agent-server effect are derived from the same

@@ -164,6 +164,10 @@ type sandboxProvisioner struct {
 	localAddr   string
 	reverseFwds []string
 
+	// account is the workspace that carries this provision's synced account, for
+	// the teardown's write-back and removal (W7.3). nil without an account.
+	account *sandboxWorkspace
+
 	reapMu  sync.Mutex
 	reaped  bool
 	reapErr error
@@ -250,6 +254,12 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
+	// W7.3: the session-scoped account, before the agent-server can launch the
+	// agent. Refuses (sending nothing) when the target is not a listed host.
+	if err := w.syncAccountIn(sshProvisionStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
+	p.account = w
 	// Reached only past the pre-launch steps (clone, binary copy, callback env),
 	// so a startAgentServer failure here is not the pre-launch empty-PID case: a
 	// nohup'd agent-server may have started even when the captured PID is empty or
@@ -641,6 +651,16 @@ func (p *sandboxProvisioner) reap() error {
 			ErrWorkspaceStateUnknown, p.label(), p.sessionDir)
 		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
 		return reapErr
+	}
+
+	// W7.3: write the account back and remove it BEFORE the session dir goes, while
+	// the agent-server is still reachable. Best-effort — the session-dir removal
+	// below is the backstop — so a failure is logged, never a reason to leave the
+	// sandbox in place.
+	if p.account != nil {
+		if aerr := p.account.teardownAccount(sshShortStepTimeout); aerr != nil {
+			log.WarningLog.Printf("sandbox runtime: account teardown for %q: %v", p.sessionDir, aerr)
+		}
 	}
 
 	nonce, nonceErr := sandboxReapNonce()
