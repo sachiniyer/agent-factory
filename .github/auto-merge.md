@@ -7,7 +7,7 @@
 - has `Build` and `Lint` check runs concluded `success` on its **current** head;
 - has no unanswered **P1** Codex inline finding — a review thread whose first comment is by the Codex bot and contains `P1 Badge`, with no reply containing `RESOLVED`, `ACCEPTED` or `[gate-ack]`. P2/P3 are advisory.
 
-API economy is a hard requirement (the Actions `GITHUB_TOKEN` quota starved the old gate). Each run is two-phase GraphQL: a cheap query for all open master PRs (head, mergeable, labels, `Build`/`Lint` rollup), then one aliased query fetching review threads **only** for PRs that passed phase 1. Both log `rateLimit` cost and remaining as notices. REST is used for merges, workflow dispatches, the broken-master issue, and one `listWorkflowRuns` call to debounce. `workflow_run` triggers are debounced: a run is skipped if another auto-merge run started within the last 3 minutes (the 10-minute schedule and manual dispatch always run).
+API economy is a hard requirement (the Actions `GITHUB_TOKEN` quota starved the old gate). Each run is two-phase GraphQL: a cheap query for all open master PRs (head, mergeable, labels, `Build`/`Lint` rollup), then one aliased query fetching review threads **only** for PRs that passed phase 1. Both log `rateLimit` cost and remaining as notices. REST is used for merges, workflow dispatches, the broken-master issue, and one `listWorkflowRuns` call to debounce. `workflow_run` triggers are debounced only when safe: a trigger is skipped only if another merger run STARTED AFTER the triggering run completed, or one is already queued — either reads state at least as new as the event. A merely "recent" run is not enough (it read older state and would discard the signal). The schedule and manual dispatch always run.
 
 ## After a merge
 
