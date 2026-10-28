@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -101,7 +102,7 @@ func (w *sandboxWorkspace) syncAccountIn(timeout time.Duration) error {
 	if err != nil || !apply {
 		return err
 	}
-	archive, n, err := buildAccountArchive(w.spec.Account.Dir, accountCredentialRel[w.spec.Account.Agent])
+	archive, n, err := buildAccountArchive(w.spec.Account.Dir, accountCredentialRel[w.spec.Account.Agent], accountScopeSeed(w.spec.Account.Agent))
 	if err != nil {
 		return err
 	}
@@ -191,7 +192,7 @@ func (w *sandboxWorkspace) teardownAccount(timeout time.Duration) error {
 	}
 }
 
-func buildAccountArchive(dir string, rels []string) ([]byte, int, error) {
+func buildAccountArchive(dir string, rels []string, seed map[string][]byte) ([]byte, int, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	n := 0
@@ -213,6 +214,22 @@ func buildAccountArchive(dir string, rels []string) ([]byte, int, error) {
 			return nil, 0, err
 		}
 		n++
+	}
+	// Minimal per-agent scope seed — never a credential, and never read from the
+	// account's own settings.
+	seedNames := make([]string, 0, len(seed))
+	for name := range seed {
+		seedNames = append(seedNames, name)
+	}
+	sort.Strings(seedNames)
+	for _, name := range seedNames {
+		data := seed[name]
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
+			return nil, 0, err
+		}
+		if _, err := tw.Write(data); err != nil {
+			return nil, 0, err
+		}
 	}
 	if err := tw.Close(); err != nil {
 		return nil, 0, err
@@ -275,4 +292,184 @@ func writeFileAtomic0600(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// accountScrubEnv is the environment-file text that defines every identity
+// variable of the session's agent EMPTY on the host (#5571 W7.4). The host's
+// launch environment is the host user's: an ambient ANTHROPIC_API_KEY or
+// OPENAI_API_KEY outranks the synced OAuth credentials, so without this the
+// session would report one account while spending another. The daemon cannot
+// subtract from an environment it never sees, so the names are defined empty in
+// the 0600 identity file the launch shell sources — the docker backend's shape.
+func (w *sandboxWorkspace) accountScrubEnv() string {
+	var b strings.Builder
+	for _, name := range w.accountPinnedNames() {
+		b.WriteString(name + "=\n")
+	}
+	return b.String()
+}
+
+// accountPinnedNames are the variables an account-scoped remote launch defines
+// EMPTY: every identity name (credentials plus late-environment names) AND every
+// cloud-authentication selector of the agent, never the config variable itself.
+// Both come from sessionenv's per-agent tables — the same source the local path and
+// docker use — so the paths cannot drift.
+//
+// The selectors matter as much as the keys. A cloud mode (Bedrock, Vertex, Foundry)
+// on the HOST would route the agent to that provider's credentials and billing
+// while the session reports the selected account. The local path REFUSES an active
+// selector (ApplyAccount); the daemon cannot see the host's environment to refuse,
+// so the remote path NEUTRALIZES it — an empty selector is disabled, which also
+// stops the filters from admitting the provider credentials it gates.
+func (w *sandboxWorkspace) accountPinnedNames() []string {
+	configVar, _, ok := w.accountEnv()
+	if !ok {
+		return nil
+	}
+	agent := w.spec.Account.Agent
+	seen := map[string]bool{configVar: true}
+	var names []string
+	add := func(list []string) {
+		for _, name := range list {
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	add(sessionenv.AccountIdentityNames(agent))
+	add(sessionenv.AgentAuthSelectors(agent))
+	sort.Strings(names)
+	return names
+}
+
+// accountLaunchGuard is the shell fragment that makes the agent-server launch FAIL
+// CLOSED unless the session's own synced scope is in place: the agent's config
+// variable must equal this session's scope exactly — never the host user's global
+// agent home, never another session's scope — and the scope must hold at least one
+// of the account's credential files. It runs after the identity file is sourced,
+// so it judges the environment the agent-server will actually inherit. Empty when
+// the session carries no account.
+func (w *sandboxWorkspace) accountLaunchGuard() string {
+	name, scope, ok := w.accountEnv()
+	if !ok {
+		return ""
+	}
+	var has []string
+	for _, rel := range accountCredentialRel[w.spec.Account.Agent] {
+		has = append(has, "[ -f "+shellQuote(scope+"/"+rel)+" ]")
+	}
+	// Every cloud selector must be empty in the environment the agent-server will
+	// inherit, whatever the host's own environment said (accountPinnedNames).
+	selectorsEmpty := ""
+	for _, selector := range sessionenv.AgentAuthSelectors(w.spec.Account.Agent) {
+		selectorsEmpty += fmt.Sprintf(" && [ -z \"${%s:-}\" ]", selector)
+	}
+	return fmt.Sprintf("{ [ \"$%s\" = %s ] && { %s; }%s; } || { echo %s >&2; exit 1; }; ",
+		name, shellQuote(scope), strings.Join(has, " || "), selectorsEmpty,
+		shellQuote("af: the session's account scope is not in place; refusing to start the agent under any other identity"))
+}
+
+// validateRemoteAccountProgram applies the account boundary's command-shape half to
+// the program a sandbox will run, with the daemon's own resolution — the program the
+// agent-server is told to launch. It is the docker path's check, for the same
+// reason: af must never hand an account's credentials to a program it did not
+// choose, and a command that sets an identity variable itself, or that af cannot
+// prove is a direct invocation of the agent, does not qualify.
+//
+// The executable resolves on the HOST, a filesystem the daemon cannot inspect, so
+// af's own built-in executable identity is NOT granted across that boundary (a bare
+// agent name is independently provable; a daemon-qualified path fails closed). The
+// ambient environment is empty here by design: the host's own is scrubbed at launch
+// (accountScrubEnv), and the daemon's says nothing about it.
+func validateRemoteAccountProgram(cfg *config.ResolvedConfig, spec *ProvisionSpec) error {
+	// What the sandbox is told to launch: the daemon's configured program with af's
+	// own auto-detected executable path rewritten to the bare agent name (W2.1) —
+	// the daemon's path means nothing on another filesystem. Whether the ORIGINAL
+	// command is af's built-in detected override is what vouches for the one
+	// argument af appended to it.
+	original := config.ResolveProgram(&cfg.Config, spec.Program)
+	resolved := remoteProgramForHost(cfg, spec.Program)
+	if err := refuseAccountAgentDrift(spec.Account.Name, spec.Account.Agent, resolved); err != nil {
+		return fmt.Errorf("backend=ssh: %w", err)
+	}
+	proof := accountLaunchProof(resolved, resolved, builtInProgramOverride(cfg, spec.Program, original), nil, "")
+	hostExecutable := proof.TrustedExecutable
+	spec.Account.TrustedExecutable = ""
+	spec.Account.GeneratedArgs = proof.GeneratedArgs
+	if _, err := sessionenv.ApplyAccount([]string{}, resolved, spec.Account); err != nil {
+		if hostExecutable != "" && sessionenv.IsAccountCommandValidationError(err) {
+			return fmt.Errorf("backend=ssh: resolved program names host executable %q, whose identity cannot be established on the sandbox host: %w", hostExecutable, err)
+		}
+		return fmt.Errorf("backend=ssh: %w", err)
+	}
+	return nil
+}
+
+// accountPassthroughNames are the variables an account-scoped remote launch must
+// carry through the environment filters: the scoped config variable and every
+// identity name accountScrubEnv defines empty, derived from sessionenv's per-agent
+// tables rather than listed here. Empty for a session with no account.
+func (w *sandboxWorkspace) accountPassthroughNames() []string {
+	configVar, _, ok := w.accountEnv()
+	if !ok {
+		return nil
+	}
+	return append([]string{configVar}, w.accountPinnedNames()...)
+}
+
+// accountScopeSeed is the minimal, non-credential configuration a fresh account
+// scope needs to start without asking for input. Gemini shows its authentication
+// picker unless security.auth.selectedType is set, and af sets it when it registers
+// an account locally (agentaccount's selectGeminiGoogleLogin); a scope seeded with
+// only credential files would wait for a manual choice on every provision. Only the
+// Google-login selection is written — an API-key or Vertex selection is an ambient
+// identity af never chooses — and nothing else from the account's settings.
+func accountScopeSeed(agent string) map[string][]byte {
+	if agent != tmux.ProgramGemini {
+		return nil
+	}
+	return map[string][]byte{
+		".gemini/settings.json": []byte(`{"security":{"auth":{"selectedType":"oauth-personal"}}}` + "\n"),
+	}
+}
+
+// AccountScopeAgentEnv names the variable the launch's identity file sets for an
+// account-scoped sandbox: the agent whose account the synced scope belongs to. The
+// in-sandbox agent-server reads it to know it must prove executable attribution
+// before it starts anything. It is carried to the agent-server only — never named
+// to the pane filter — so no agent ever sees it.
+const AccountScopeAgentEnv = "AF_ACCOUNT_SCOPE_AGENT"
+
+// RequireAttributedAccountProgram is the host-side half of "af never hands an
+// account to a program it did not choose" (#5571 W7.4). Proving the command's
+// SHAPE is not enough when the binary that runs is a different one: a bare name is
+// resolved on the host, and a relative PATH entry (a repository's own bin/) makes
+// that lookup undecidable until the pane's working directory is known — so the
+// resolver leaves the name bare and the pane's shell would pick whatever the
+// workspace contains.
+//
+// An account-scoped agent-server therefore starts only when the resolved command's
+// executable is an ABSOLUTE path to an executable file named for the agent — the
+// exact path the pane will exec — and otherwise refuses, before any pane exists
+// and before the scope can reach one. The host user's own absolute PATH entries are
+// their choice (sessions on one host share its user, settled decision 3); a
+// workspace-relative entry is not.
+func RequireAttributedAccountProgram(command, agent string) error {
+	exe, err := sessionenv.LocateProgramExecutable(command)
+	if err != nil || exe.Opaque || exe.PATHDynamic {
+		return fmt.Errorf("account-scoped %s: af cannot attribute the executable of %q, so the account is not passed to it", agent, command)
+	}
+	name := exe.Name
+	if !strings.HasPrefix(name, "/") {
+		return fmt.Errorf("account-scoped %s: %q did not resolve to an absolute path on this host (a relative or empty PATH entry, such as a repository's bin/, is searched first), so af cannot attribute the executable and does not pass the account to it; "+
+			"put an absolute directory first on the login PATH or remove the relative entry", agent, name)
+	}
+	if filepath.Base(name) != agent {
+		return fmt.Errorf("account-scoped %s: the resolved executable %q is not named %q, so af cannot attribute it", agent, name, agent)
+	}
+	if !canExecuteFile(name) {
+		return fmt.Errorf("account-scoped %s: the resolved executable %q is not an executable file for this user", agent, name)
+	}
+	return nil
 }

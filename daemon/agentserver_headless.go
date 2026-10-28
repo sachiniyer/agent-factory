@@ -328,6 +328,15 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		}
 	}
 
+	// An account-scoped sandbox proves executable attribution BEFORE any pane can
+	// receive the scope: the resolved command must name an absolute executable, not
+	// a bare name a workspace-relative PATH entry could answer (#5571 W7.4).
+	if agent := os.Getenv(session.AccountScopeAgentEnv); agent != "" {
+		if err := session.RequireAttributedAccountProgram(resolvedProgram, agent); err != nil {
+			return fmt.Errorf("af agent-server: %w", err)
+		}
+	}
+
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:   opts.Title,
 		Path:    opts.RepoPath,
