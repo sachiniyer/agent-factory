@@ -52,3 +52,27 @@ func TestWrapperChildTailBuriedSuffixMatchesIonice(t *testing.T) {
 		require.True(t, commandMutatesAccountEnvironment(command, names), "command %q", command)
 	}
 }
+
+// The exec boundary is decided at COMMAND POSITION (#5034): a dynamic word
+// there refuses, but once the command word is literal its arguments are opaque,
+// and only a recognized wrapper in that position is recursed into.
+func TestWrapperCommandPositionBoundary(t *testing.T) {
+	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
+	for _, wrapper := range []string{"nice", "nice -n 5", "nohup", "timeout 5", "setsid", "stdbuf -o0"} {
+		for _, test := range []struct {
+			tail string
+			want bool
+		}{
+			{`$CMD codex`, true},
+			{`"$X" codex`, true},
+			{`$(z) codex`, true},
+			{"nice $CMD", true},
+			{`codex "$PROMPT"`, false},
+			{`echo a "$P"`, false},
+			{`nice codex "$PROMPT"`, false},
+		} {
+			command := wrapper + " " + test.tail
+			require.Equal(t, test.want, commandMutatesAccountEnvironment(command, names), "command %q", command)
+		}
+	}
+}
