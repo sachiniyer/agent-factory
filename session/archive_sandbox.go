@@ -318,6 +318,20 @@ func (i *Instance) reprovisionRemote() error {
 			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
 		}
 		spec.Account = account
+		// The agent command is proven against the account BEFORE anything is
+		// reaped, like the persisted-account checks around it: a program override
+		// that changed since the session was created must leave the recoverable
+		// runtime intact, not delete it and then refuse the replacement.
+		if kind == BackendSSH {
+			rc, rcErr := resolveRepoConfig(i.Path)
+			if rcErr != nil {
+				return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, rcErr)
+			}
+			check := spec
+			if verr := validateRemoteAccountProgram(rc, &check); verr != nil {
+				return fmt.Errorf("cannot re-provision session %q: %w", i.Title, verr)
+			}
+		}
 	} else if strings.TrimSpace(accountName) != "" {
 		// A session recorded under an account is relaunched under THAT account or
 		// not at all (#5571 W7.4). The target can no longer carry it — its host is

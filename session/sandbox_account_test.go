@@ -3,6 +3,7 @@ package session
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -336,4 +337,67 @@ func TestGeminiScopeIsSeededWithTheGoogleLoginSelectionOnly(t *testing.T) {
 	n, err := w.pullAccountBack(time.Minute)
 	require.NoError(t, err)
 	assert.Zero(t, n)
+}
+
+// Executable attribution (#5571 W7.4). Proving the command's shape is not enough if
+// a different binary runs: a relative PATH entry — a repository's own bin/ — is
+// searched first, the resolver cannot decide it without the pane's working
+// directory, and the pane's shell would pick whatever the workspace contains. An
+// account-scoped agent-server starts only for an ABSOLUTE resolved executable.
+func TestAccountScopeIsNeverPassedToAnUnattributedExecutable(t *testing.T) {
+	dir := t.TempDir()
+	good := executableFile(t, filepath.Join(dir, "login"), "claude")
+	// The repository's decoy, which a relative PATH entry would find first.
+	_ = executableFile(t, filepath.Join(dir, "repo", "bin"), "claude")
+
+	resolve := func(loginPATH string) string {
+		prober := loginPATHProber("", loginPATH)
+		cmd, _, err := resolveProgramOnHost(context.Background(), "claude --dangerously-skip-permissions", prober)
+		require.NoError(t, err)
+		return cmd
+	}
+
+	// A relative entry first: the resolver leaves the name bare — the decoy's
+	// territory — and the account-scoped server REFUSES before any pane exists.
+	bare := resolve("bin:" + filepath.Join(dir, "login"))
+	require.Equal(t, "claude --dangerously-skip-permissions", bare, "premise: the lookup is left to the pane's shell")
+	err := RequireAttributedAccountProgram(bare, "claude")
+	require.Error(t, err, "the decoy claude must never receive the account scope")
+	assert.Contains(t, err.Error(), "relative or empty PATH entry")
+
+	// An empty entry is the working directory too.
+	require.Error(t, RequireAttributedAccountProgram(resolve(":"+filepath.Join(dir, "login")), "claude"))
+
+	// Absolute entries only: resolved to the exact path the pane will exec.
+	attributed := resolve(filepath.Join(dir, "login"))
+	require.Equal(t, good+" --dangerously-skip-permissions", attributed)
+	require.NoError(t, RequireAttributedAccountProgram(attributed, "claude"))
+
+	// A resolved path that is not the agent's name, or not executable, is not attributed.
+	other := executableFile(t, filepath.Join(dir, "login"), "tool")
+	require.Error(t, RequireAttributedAccountProgram(other, "claude"))
+	noexec := filepath.Join(dir, "login", "codex")
+	require.NoError(t, os.WriteFile(noexec, []byte("x"), 0o644))
+	require.Error(t, RequireAttributedAccountProgram(noexec, "codex"))
+}
+
+// The scope marker reaches the agent-server only: named as an extra of the re-exec
+// filter, never as a --session-env name, so no pane inherits it.
+func TestAccountScopeMarkerReachesTheAgentServerOnly(t *testing.T) {
+	acct := writeAccount(t, "claude", testSecretA)
+	sh := &recordingShell{}
+	w := &sandboxWorkspace{shell: sh, SessionDir: t.TempDir(), tokenRef: "ref", agentServerToken: "tok", program: "claude",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+	require.NoError(t, w.writeRuntimeIdentity(time.Second))
+	assert.Contains(t, sh.stdin[1], AccountScopeAgentEnv+"='claude'", "the identity file marks the launch account-scoped")
+
+	cmd, err := w.agentServerCommand()
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(cmd, AccountScopeAgentEnv), "named once, as an extra")
+	assert.NotContains(t, cmd, "--session-env "+AccountScopeAgentEnv)
+
+	plain := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "claude", spec: ProvisionSpec{Title: "t"}}
+	pcmd, err := plain.agentServerCommand()
+	require.NoError(t, err)
+	assert.NotContains(t, pcmd, AccountScopeAgentEnv)
 }

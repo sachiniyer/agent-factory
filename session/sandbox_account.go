@@ -408,3 +408,43 @@ func accountScopeSeed(agent string) map[string][]byte {
 		".gemini/settings.json": []byte(`{"security":{"auth":{"selectedType":"oauth-personal"}}}` + "\n"),
 	}
 }
+
+// AccountScopeAgentEnv names the variable the launch's identity file sets for an
+// account-scoped sandbox: the agent whose account the synced scope belongs to. The
+// in-sandbox agent-server reads it to know it must prove executable attribution
+// before it starts anything. It is carried to the agent-server only — never named
+// to the pane filter — so no agent ever sees it.
+const AccountScopeAgentEnv = "AF_ACCOUNT_SCOPE_AGENT"
+
+// RequireAttributedAccountProgram is the host-side half of "af never hands an
+// account to a program it did not choose" (#5571 W7.4). Proving the command's
+// SHAPE is not enough when the binary that runs is a different one: a bare name is
+// resolved on the host, and a relative PATH entry (a repository's own bin/) makes
+// that lookup undecidable until the pane's working directory is known — so the
+// resolver leaves the name bare and the pane's shell would pick whatever the
+// workspace contains.
+//
+// An account-scoped agent-server therefore starts only when the resolved command's
+// executable is an ABSOLUTE path to an executable file named for the agent — the
+// exact path the pane will exec — and otherwise refuses, before any pane exists
+// and before the scope can reach one. The host user's own absolute PATH entries are
+// their choice (sessions on one host share its user, settled decision 3); a
+// workspace-relative entry is not.
+func RequireAttributedAccountProgram(command, agent string) error {
+	exe, err := sessionenv.LocateProgramExecutable(command)
+	if err != nil || exe.Opaque || exe.PATHDynamic {
+		return fmt.Errorf("account-scoped %s: af cannot attribute the executable of %q, so the account is not passed to it", agent, command)
+	}
+	name := exe.Name
+	if !strings.HasPrefix(name, "/") {
+		return fmt.Errorf("account-scoped %s: %q did not resolve to an absolute path on this host (a relative or empty PATH entry, such as a repository's bin/, is searched first), so af cannot attribute the executable and does not pass the account to it; "+
+			"put an absolute directory first on the login PATH or remove the relative entry", agent, name)
+	}
+	if filepath.Base(name) != agent {
+		return fmt.Errorf("account-scoped %s: the resolved executable %q is not named %q, so af cannot attribute it", agent, name, agent)
+	}
+	if !canExecuteFile(name) {
+		return fmt.Errorf("account-scoped %s: the resolved executable %q is not an executable file for this user", agent, name)
+	}
+	return nil
+}

@@ -305,6 +305,9 @@ func (w *sandboxWorkspace) writeRuntimeIdentity(timeout time.Duration) error {
 		// And every identity variable EMPTY, so the host's own keys cannot outrank
 		// the account (W7.4).
 		envBody += w.accountScrubEnv()
+		// Tells the in-sandbox agent-server it is account-scoped, so it proves
+		// executable attribution before starting (RequireAttributedAccountProgram).
+		envBody += AccountScopeAgentEnv + "=" + shellQuote(w.spec.Account.Agent) + "\n"
 	}
 	envScript := "umask 077 && cat > " + shellQuote(w.IdentityEnvPath())
 	out, err = w.shell.Run(timeout, envScript, strings.NewReader(envBody), false)
@@ -528,6 +531,11 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	for _, name := range w.accountPassthroughNames() {
 		args = append(args, "--session-env", name)
 		extras = append(extras, name)
+	}
+	if _, _, ok := w.accountEnv(); ok {
+		// To the agent-server's own environment only — not --session-env, so the
+		// pane never inherits it.
+		extras = append(extras, AccountScopeAgentEnv)
 	}
 	// The marker re-execs the staged binary it is already running, so a symlinked
 	// session directory changes no launch-side identity comparison: there is none

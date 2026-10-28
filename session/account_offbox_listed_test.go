@@ -273,3 +273,26 @@ func mustResolve(t *testing.T, repo string) *config.ResolvedConfig {
 	require.NoError(t, err)
 	return cfg
 }
+
+// A program override that changed since the session was created is refused in the
+// reprovision PREFLIGHT, alongside the persisted-account checks: the recoverable
+// runtime must be left intact, not reaped and then refused.
+func TestRestoreRefusesAChangedUnprovenCommandBeforeReaping(t *testing.T) {
+	f := newListedFixture(t, oneListedHost)
+	cfg := config.DefaultConfig()
+	cfg.Hosts = oneListedHost
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "CLAUDE_CONFIG_DIR=/other claude"}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	reaped := false
+	i := &Instance{
+		Title: "s", Path: f.repo, Branch: "root/s", Host: "box1", Program: tmux.ProgramClaude,
+		Account: "work", backend: newInertSandboxBackend("ssh"),
+		runtimeTeardown: func() error { reaped = true; return nil },
+	}
+	err := i.reprovisionRemote()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"work"`)
+	assert.False(t, reaped, "the existing runtime and workspace must survive a deterministic refusal")
+	assert.Empty(t, f.spec.RepoRoot, "and nothing was provisioned")
+}
