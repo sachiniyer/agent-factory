@@ -83,6 +83,10 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
 - [`af sessions watch`](#af-sessions-watch) — Wait for idle, or a fleet stop-state change or disappearance
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
+- [`af target`](#af-target) — Point this client at a remote daemon once
+- [`af target clear`](#af-target-clear) — Forget the saved target
+- [`af target set`](#af-target-set) — Save a remote daemon target
+- [`af target show`](#af-target-show) — Show which daemon this invocation targets, and why
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af tasks add`](#af-tasks-add) — Add a new task bound to the current project
 - [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID or name
@@ -132,6 +136,7 @@ af [flags]
 - [`af quota`](#af-quota) — Show usage-limit status for each agent CLI
 - [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
+- [`af target`](#af-target) — Point this client at a remote daemon once
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
 - [`af upgrade`](#af-upgrade) — Upgrade agent-factory to the latest release on the configured channel
@@ -3047,6 +3052,98 @@ af sessions whoami
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af target
+
+Point this client at a remote daemon once
+
+Save, show or clear the remote daemon this machine's af talks to.
+
+A saved target is the lowest-precedence source: --daemon-url / --token win, then
+AF_DAEMON_URL / AF_DAEMON_TOKEN, then the saved target. It is stored in this
+machine's af home with 0600 permissions. The saved token is sent only to the
+saved URL, never to a host named by a flag or environment variable.
+
+Run 'af target show' to see which target an invocation will use and why.
+
+```
+af target
+```
+
+**Subcommands**
+
+- [`af target clear`](#af-target-clear) — Forget the saved target
+- [`af target set`](#af-target-set) — Save a remote daemon target
+- [`af target show`](#af-target-show) — Show which daemon this invocation targets, and why
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af target clear
+
+Forget the saved target
+
+```
+af target clear
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af target set
+
+Save a remote daemon target
+
+Save <url> (http://, ws://, https:// or wss://) as this client's target.
+
+Pass the bearer token on stdin with --token-stdin so it never appears in argv or
+shell history:
+
+    af token show | ssh box ...      # on the daemon host
+    printf '%s' "$TOKEN" | af target set https://box.tailnet.ts.net --token-stdin
+
+Without --token-stdin no token is saved (the daemon may be unauthenticated, or
+you can still pass --token / AF_DAEMON_TOKEN per invocation).
+
+```
+af target set <url> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--token-stdin` |  | Read the bearer token from stdin (first line) and save it with the target |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af target show
+
+Show which daemon this invocation targets, and why
+
+```
+af target show
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks
