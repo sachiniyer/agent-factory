@@ -70,7 +70,7 @@ text-greppable selection signal the driver asserts on:
 
 ```
   ▾ alpha          ●      ← selected (expanded); ● = ready
-       └ 1 ◆ Agent *
+       └ 1 Agent · open
   ▸ beta           ●      ← not selected (collapsed)
 ```
 
@@ -103,7 +103,7 @@ actually on it.
 | `Tab` | cycle focus ring | | `1`–`9` | jump to tab |
 | `j`/`k`,`↓`/`↑` | move tree cursor | | `m` | tasks overlay |
 | `←`/`→` | switch focused pane | | `[`/`]` | previous/next section |
-| `D` | kill instance | | `/` | search |
+| `D` | delete session | | `/` | search |
 | `a` | archive | | `r` | restore |
 | `q` | quit |
 | `e` | hooks editor |
