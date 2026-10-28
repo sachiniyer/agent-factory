@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/afhome"
 )
 
 // cloneTimeout bounds one clone. A large repository over a slow link needs
@@ -175,7 +177,7 @@ func Clone(ctx context.Context, root, rawURL string) (string, error) {
 	if !filepath.IsAbs(root) {
 		return "", fmt.Errorf("projects root %q must be absolute", root)
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := afhome.MkdirAll(root, 0o755); err != nil {
 		return "", fmt.Errorf("create projects root %s: %w", root, err)
 	}
 	dest := filepath.Join(root, name)
