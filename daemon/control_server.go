@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,6 +62,7 @@ const (
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.AccountHandoff = true
+	resp.HostPick = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
@@ -446,6 +448,9 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	if err := validateCreateProgram(req.Program); err != nil {
 		return err
 	}
+	// A remote client sends the project path as typed; expand ~ against this
+	// daemon's home before anything resolves it.
+	req.RepoPath = config.ExpandTilde(strings.TrimSpace(req.RepoPath))
 	req.Program = trimProgramEnumIfBare(req.Program)
 	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)

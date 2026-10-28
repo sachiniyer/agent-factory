@@ -75,6 +75,9 @@ type CreateSessionRequest struct {
 	// flag): one of local|docker|ssh|hook. Empty resolves from the repo's
 	// `backend` config key, defaulting to local.
 	Backend string `json:"backend,omitempty"`
+	// Host picks a listed host (the global `hosts` table) for the session — the
+	// `--host` create flag. It selects the ssh runtime; empty means no pick.
+	Host string `json:"host,omitempty"`
 
 	// allowReserved lets the daemon's own root-agent ensure loop (#1106)
 	// create the reserved "root" title that reserveCreate rejects for
@@ -611,6 +614,18 @@ type PingResponse struct {
 	// safe account-aware admission rules. Older daemons omit the field, decode
 	// as false, and therefore never receive the destructive mutation.
 	AccountHandoff bool `json:"account_handoff,omitempty"`
+	// HostPick is an affirmative capability: this daemon honors
+	// CreateSessionRequest.Host (#5571 W6.3). A daemon that predates the field
+	// decodes the request without it and silently creates the session on the repo's
+	// default backend, so a client sending a host pick must see true here first.
+	// Older daemons omit the field and decode as false.
+	HostPick bool `json:"host_pick,omitempty"`
+	// (The guarded-rebind capability is its wire method instead of a Ping bit —
+	// #4888 review: RebindProjectGuarded exists only on daemons that enforce
+	// the expected_root/expected_checkout_id pair, so a guarded send is refused
+	// by a pre-guard daemon rather than applied unconditionally, and no probe
+	// is consulted since a Ping answered by one daemon can never vouch for
+	// the one a proxy might route the mutation to.)
 	// Version is the af build version the responding daemon is running, so a
 	// client can compare it against its own and detect skew (#1044). It rides
 	// Ping because Ping is the one RPC that answers throughout the daemon's
