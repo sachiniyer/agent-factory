@@ -106,6 +106,12 @@ var shellSiteRegistry = map[string][]classifiedSite{
 			"#3566 is about: an unscoped session never reaches the account boundary, so an `exec --` prefix " +
 			"here dies with exit 127 and no explanation.",
 	}},
+	"move/script.go:RunScript": {{
+		class: operatorOther,
+		note: "the operator's session-move script (W7.9), run as `sh -c <command>` on the daemon box. " +
+			"It has no config key yet, so the config-load warning cannot reach it; the follow-up slice " +
+			"that adds the global-only move_cmd key must reclassify this site as operatorConfig.",
+	}},
 	"session/git/hooks.go:runPostWorktreeHooks": {{
 		class: operatorConfig, keys: []string{"post_worktree_commands"}, note: "the plain child",
 	}},
