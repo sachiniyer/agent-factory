@@ -195,15 +195,9 @@ var shellSiteRegistry = map[string][]classifiedSite{
 			"arrive as $1/$2 positional parameters, never spliced into the script text",
 	}},
 
-	"session/host_program.go:(hostProgramProber).probe": {{
-		class: afAuthored,
-		note: "the login-shell program probe (`command -v -- \"$1\"`, fenced by a nonce) — af-authored " +
-			"const scripts; the operator's program name arrives as a POSITIONAL argument, never in the " +
-			"script text, which is the #5571 W2.1 contract",
-	}},
 	"session/host_program.go:(hostProgramProber).probePath": {{
 		class: afAuthored,
-		note:  "the PATH-only variant of the same probe — the hostProbePathOnly const, no positional input at all",
+		note:  "the login-shell PATH probe — the hostProbePathOnly const; the program name never reaches a shell (#5571 W2.1, #5768), only the nonce is a positional argument",
 	}},
 
 	// ---- not a shell at all ----
