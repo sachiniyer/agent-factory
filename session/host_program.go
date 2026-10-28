@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -290,6 +291,34 @@ func mergeHostPATH(login, inherited string) string {
 		}
 	}
 	return strings.Join(merged, ":")
+}
+
+// PinPATHDir returns path with dir as its first entry, removing any later
+// copy. Login-PATH adoption rebuilds PATH from the login profile, which would
+// otherwise put an older `af` installed on that PATH ahead of the session
+// directory holding the staged, version-checked one (#5877). An empty dir
+// leaves path alone.
+func PinPATHDir(path, dir string) string {
+	if dir == "" {
+		return path
+	}
+	parts := []string{dir}
+	for _, entry := range strings.Split(path, ":") {
+		if entry != dir {
+			parts = append(parts, entry)
+		}
+	}
+	return strings.Join(parts, ":")
+}
+
+// SessionBinDir is the directory the agent-server was launched from when it
+// was started as <sessionDir>/af — the one place the provisioner puts the
+// staged binary — or "" for any other argv[0] (a bare name, another binary).
+func SessionBinDir(argv0 string) string {
+	if !filepath.IsAbs(argv0) || filepath.Base(argv0) != "af" {
+		return ""
+	}
+	return filepath.Dir(argv0)
 }
 
 // loginShellName picks the shell the probes run under: $SHELL when the

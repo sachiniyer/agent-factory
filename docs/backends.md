@@ -413,8 +413,13 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 3. It probes the remote's platform (`uname -s`/`uname -m`), picks an `af` binary
    the host can run — `sandbox.binary` if set, else the daemon's own binary on a
    matching platform, else the sha256-verified release artifact for the remote's
-   platform — and installs it under `~/.af-bin/` (a per-host cache the
-   next sessions reuse when the cached file's sha256 still matches). It then runs
+   platform — and installs it under `~/.af-bin/` (a per-host cache named by the
+   binary's sha256, so installing one build never rewrites another that a
+   running session links to; the next sessions reuse a matching file). An
+   explicit `sandbox.binary` is used even on a platform af publishes no build
+   for. The session directory stays first on the agent's `PATH`, so `af` in the
+   pane is the staged one even when the login profile puts an older install
+   ahead of it. It then runs
    `af version` **on the remote** and refuses to launch unless the staged binary
    reports the daemon's own version. Only then does it start an
    **`af agent-server`** bound to `127.0.0.1:0` (a random loopback port — never
