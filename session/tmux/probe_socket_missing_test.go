@@ -225,3 +225,33 @@ func TestNewNameAndReadOnlyKindsTreatSocketGoneAsAbsent(t *testing.T) {
 		require.False(t, a.exists)
 	}
 }
+
+// A refused restore changes nothing about the session object: once the socket
+// is verifiable the SAME session restores — the refusal is a deferral, not a
+// verdict — and its message says so and what to do.
+func TestRestoreRefusalIsADeferralTheSameSessionRecoversFrom(t *testing.T) {
+	pinSocketClaimProof(t, true)
+	t.Cleanup(PinServerProbeForTest(os.Getpid()))
+
+	reachable := false
+	base := socketMissingExecutor(t)
+	missing := base.RunFunc
+	base.RunFunc = func(c *exec.Cmd) error {
+		if reachable {
+			return nil
+		}
+		return missing(c)
+	}
+	s := newTmuxSession(toTmuxName("restore-deferred", ""), "claude", NewMockPtyFactory(t), base)
+
+	_, _, err := s.restoreExistence()
+	require.ErrorIs(t, err, ErrSessionSocketUnverified)
+	require.Contains(t, err.Error(), "restore deferred: tmux socket unverified")
+	require.Contains(t, err.Error(), "kept as it was")
+
+	reachable = true
+	exists, answered, err := s.restoreExistence()
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.True(t, answered, "once the socket is verifiable the same session restores")
+}

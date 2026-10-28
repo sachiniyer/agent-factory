@@ -284,7 +284,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// spawned under it, and FromInstanceData loads the row Lost so the
 			// lost-restore loop can Recover it — which needs this exact
 			// persisted binding to respawn the same name (#5172).
-			preserveAgentHandle = retainsInertInstance(err) || errors.Is(err, tmux.ErrSpawnDirMissing)
+			preserveAgentHandle = retainsInertInstance(err) || restoreDeferred(err)
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
 		}
@@ -416,7 +416,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// names it: nilling the ref here would orphan the pane. See the predicate.
 		// A sibling spawn-dir refusal keeps it too — the binding (live or
 		// never-spawned) is what Recover reattaches or re-spawns (#5172).
-		preserveAgentHandle = retainsInertInstance(err) || errors.Is(err, tmux.ErrSpawnDirMissing)
+		preserveAgentHandle = retainsInertInstance(err) || restoreDeferred(err)
 		setupErr = finishLaunchTabFailure(firstTimeSetup, tmuxSession, err)
 		return setupErr
 	}

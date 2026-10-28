@@ -42,7 +42,7 @@ func (k probeKind) keepsSocketGoneUncertain() bool { return k == probeLiveness |
 
 // ErrSessionSocketUnverified marks a restore refused because the session's tmux
 // socket is gone but a live server may still be running its agent.
-var ErrSessionSocketUnverified = errors.New("tmux socket for the session is missing but a tmux server may still be running it")
+var ErrSessionSocketUnverified = errors.New("tmux socket unverified")
 
 // socketClaimProofAvailable reports whether this platform can tell "a live
 // server still holds the unlinked socket" from "none does". NoServerRunning's
@@ -111,8 +111,9 @@ func (t *TmuxSession) restoreExistence() (existsOrUnknown, answered bool, err er
 	defer cancel()
 	a := probeSessionAs(ctx, t.cmdExec, t.sanitizedName, probeRestore)
 	if a.socketGone {
-		return true, false, fmt.Errorf("%w: refusing to respawn session %q beside a possibly-running agent; "+
-			"find the server (tmux ls, or af doctor) and retry once it is reachable or stopped",
+		return true, false, fmt.Errorf("restore deferred: %w — not respawning session %q beside a possibly-running agent; "+
+			"the session is kept as it was. Find the tmux server (tmux ls, or af doctor) and retry "+
+			"once its socket is reachable or the server is stopped",
 			ErrSessionSocketUnverified, t.sanitizedName)
 	}
 	if !a.known {
