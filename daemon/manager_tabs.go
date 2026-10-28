@@ -21,10 +21,12 @@ import (
 // the same repo can't race the tab list or derive a duplicate name. The new tab
 // is persisted immediately (ToInstanceData serializes its command + tmux name,
 // and restoreLocalTabs reconnects it by exact name on reload) so it survives a
-// daemon/af restart — Sachin's hard #930 requirement. Rejected for off-box
-// instances, which have no daemon-side worktree from which to spawn a
-// user-managed tab; also rejected for an empty command or an instance already at
-// no tab-count cap since #3023.
+// daemon/af restart — Sachin's hard #930 requirement. Off-box
+// instances have no daemon-side worktree from which to spawn a process, shell
+// or vscode tab, so RefuseTabKind refuses those kinds there; the kinds it
+// admits there are web tabs on an external target (#3062) and docs tabs,
+// which spawn nothing. Also
+// rejected for an empty command; there has been no tab-count cap since #3023.
 func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	// An empty kind is the default (shell-or-process, per req.Shell), not a kind;
 	// every explicit kind resolves through session.ParseTabKindName, the shared

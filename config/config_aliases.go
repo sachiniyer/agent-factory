@@ -26,6 +26,7 @@ var configKeyAliases = []configKeyAlias{
 	{canonical: "ssh.host_key_verification", legacy: "ssh_host_key_verification", section: "ssh", leaf: "host_key_verification"},
 	{canonical: "docker.mount_agent_credentials", legacy: "docker_mount_agent_credentials", section: "docker", leaf: "mount_agent_credentials"},
 	{canonical: "sandbox.ssh", legacy: "sandbox_ssh", section: "sandbox", leaf: "ssh"},
+	{canonical: "sandbox.binary", legacy: "sandbox_binary", section: "sandbox", leaf: "binary"},
 	{canonical: "network.listen_addr", legacy: "listen_addr", section: "network", leaf: "listen_addr"},
 	{canonical: "network.preview_listen_addr", legacy: "preview_listen_addr", section: "network", leaf: "preview_listen_addr"},
 	{canonical: "network.editor_origin_ports", legacy: "editor_origin_ports", section: "network", leaf: "editor_origin_ports"},
@@ -46,7 +47,8 @@ type globalSettingsTables struct {
 		MountAgentCredentials bool `toml:"mount_agent_credentials"`
 	} `toml:"docker"`
 	Sandbox struct {
-		SSH string `toml:"ssh"`
+		SSH    string `toml:"ssh"`
+		Binary string `toml:"binary"`
 	} `toml:"sandbox"`
 	Network struct {
 		ListenAddr                  string   `toml:"listen_addr"`

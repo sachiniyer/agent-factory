@@ -64,7 +64,8 @@ func (i *Instance) AgentConversation() AgentConversationData {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if len(i.Tabs) == 0 {
-		return AgentConversationData{}
+		// A reloaded off-box row holds its handle until Launch seeds the agent tab.
+		return i.reportedConversation
 	}
 	return i.Tabs[0].Conversation
 }

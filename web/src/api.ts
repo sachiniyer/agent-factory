@@ -25,7 +25,7 @@
 // a stored token (see shouldForgetToken) — a rotated token re-prompts once instead
 // of wedging the app.
 
-import type { BackendCatalog } from "./backends.js";
+import { type BackendCatalog, hostFromChoiceValue } from "./backends.js";
 import type { ProgramCatalog } from "./programs.js";
 import type {
   OnCompleteOption,
@@ -450,7 +450,13 @@ export async function createSession(input: CreateSessionInput, token: string): P
   // default that `af sessions create` (with no --backend) honours. Absent is the
   // only way to mean "let the repo decide" (#1933).
   const backend = (input.backend ?? "").trim();
-  if (backend !== "") {
+  const host = hostFromChoiceValue(backend);
+  if (host !== "") {
+    // A listed-host row of the same <select> (#5571 W6.3): the pick is `host`, and
+    // NO backend is sent — a host IS the ssh placement, and the daemon refuses a
+    // host paired with any other backend.
+    body.host = host;
+  } else if (backend !== "") {
     body.backend = backend;
   }
   // `account` is sent ONLY when the user picked one, for the same reason: absent is

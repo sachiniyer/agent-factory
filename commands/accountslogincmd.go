@@ -116,9 +116,9 @@ terminal.`,
 		if apiclient.IsRemoteTarget() {
 			return jsonWrapError(cmd, accountsJSONFlag, fmt.Errorf(
 				"af accounts login runs the agent's login flow on the machine whose agent-factory home holds "+
-					"the account, and hands you that pane's terminal; it cannot do that against a remote daemon. "+
+					"the account, and hands you that pane's terminal; it cannot do that against %s. "+
 					"Unset --daemon-url/AF_DAEMON_URL to act on this host, or run af accounts login on the "+
-					"daemon's host"))
+					"daemon's host", targetLabel()))
 		}
 
 		agent, name := args[0], args[1]

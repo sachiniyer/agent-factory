@@ -493,16 +493,22 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	} else {
 		restoreTmuxServerConfig := sessiontmux.ConfigureDaemonServer(home)
 		defer restoreTmuxServerConfig()
-		if serverErr := sessiontmux.EnsureDaemonServer(); serverErr != nil {
-			log.WarningLog.Printf("dedicated tmux server launch failed; session creation will use its fallback: %v", serverErr)
-		}
+		startupStep("dedicated tmux server", func() {
+			if serverErr := sessiontmux.EnsureDaemonServer(); serverErr != nil {
+				log.WarningLog.Printf("dedicated tmux server launch failed; session creation will use its fallback: %v", serverErr)
+			}
+		})
 	}
 	log.InfoLog.Printf("control socket bound; restoring instances")
 	restoreDone := make(chan error, 1)
 	// Capture the seam on the main flow: reading the package var inside the
 	// goroutine would race with tests restoring it after RunDaemon returns.
 	restore := restoreManagerForStartup
-	go func() { restoreDone <- restore(manager) }()
+	go func() {
+		var restoreErr error
+		startupStep("restore instances", func() { restoreErr = restore(manager) })
+		restoreDone <- restoreErr
+	}()
 	// The startup watcher was retired once the control-socket cleanup was
 	// armed (above); a signal landing since then sits buffered in sigChan for
 	// this select.
@@ -544,14 +550,19 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 
 	// Remove per-task timer units left behind by pre-#782 versions; the
 	// in-process scheduler below replaces them.
-	sweepLegacyTaskUnits()
+	startupStep("legacy task unit sweep", sweepLegacyTaskUnits)
 
-	sweepStartupOrphanSandboxTunnels()
+	startupStep("orphan tunnel sweep", sweepStartupOrphanSandboxTunnels)
 	// After the tunnel sweep, never before: the sweep would kill the tunnels
-	// reattachment opens (#5571 W1.5).
-	manager.reattachRestoredRuntimes()
-	sweepStartupOrphanContainers(manager)
-	sweepStartupTabCleanup(manager)
+	// reattachment opens (#5571 W1.5). The reattach itself runs in the background.
+	startupStep("start sandbox reattach", manager.reattachRestoredRuntimes)
+	// Arms the orphan-container sweep; it runs after readiness (see
+	// sweepStartupOrphanContainers), so a hung Docker engine cannot hold the
+	// daemon in "starting" (#5815).
+	startupStep("arm orphan container sweep", func() { sweepStartupOrphanContainers(manager) })
+	startupStep("tab cleanup sweep", func() { sweepStartupTabCleanup(manager) })
+	// Background and read-only until it proves an orphan; see sandbox_dir_sweep.go.
+	startupStep("sandbox orphan dir sweep", manager.sweepStartupOrphanSandboxDirs)
 	manager.finishInstanceRestore()
 
 	// Start task automation only after the control server is up and restore has
@@ -562,7 +573,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// policy can no longer materialize it. One preflight owns both cron and watch:
 	// on failure neither starts, and one actionable log replaces a permanent
 	// per-fire retry loop (#2646).
-	taskArmErr := armTaskAutomation(manager, scheduler, watchers)
+	var taskArmErr error
+	startupStep("arm task automation", func() { taskArmErr = armTaskAutomation(manager, scheduler, watchers) })
 	if taskArmErr != nil {
 		log.WarningLog.Printf("task automation not armed: %v", taskArmErr)
 	}
@@ -580,6 +592,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	wg := &sync.WaitGroup{}
 	stopCh := make(chan struct{})
 	startInstancePollLoop(manager, time.Duration(cfg.DaemonPollInterval)*time.Millisecond, stopCh, wg)
+	startHostReadinessRefresh(manager, stopCh)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an
@@ -611,6 +624,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return fmt.Errorf("failed to mark daemon ready: %w", err)
 	}
 	log.InfoLog.Printf("daemon ready")
+	// The destructive Docker orphan pass was deferred past the readiness barrier
+	// (it can spend 30s per Docker call on an unavailable engine). Launch it now
+	// rather than waiting for the first poll tick; createSweepMu keeps a create
+	// admitted after this point out of the protected-slug window (#2632).
+	launchDeferredOrphanSweepIfReady(manager, stopCh, wg)
 
 	// Start the daemon-owned release check only now, past the readiness barrier:
 	// a box that never opens the TUI never reaches the launch-path updater, so

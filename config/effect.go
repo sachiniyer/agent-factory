@@ -82,6 +82,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"docker.mount_agent_credentials": EffectAppliedLive,
 	"ssh.host_key_verification":      EffectAppliedLive,
 	"sandbox.ssh":                    EffectAppliedLive,
+	"sandbox.binary":                 EffectAppliedLive,
 	"hosts":                          EffectAppliedLive,
 	"default_host":                   EffectAppliedLive,
 	// The network listener keys apply live since #2480 PR2: require_token /

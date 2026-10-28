@@ -22,8 +22,8 @@ import (
 // session). The agent tab (index 0) is never added or dropped: it is the
 // instance's own session and is always present. Returns whether the local list
 // changed. A no-op for a not-started instance, one without an agent session, or
-// a remote instance (callers skip backends without TabManagement — remote tabs
-// come from hook config, not the snapshot). Per-tab reconnect failures are collected into the
+// a remote instance (callers skip backends without TabManagement — a remote
+// roster belongs to its runtime's agent-server, not the snapshot). Per-tab reconnect failures are collected into the
 // returned error after every other change is applied, so one bad tab can't wedge
 // the reconcile.
 func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {

@@ -128,7 +128,6 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"network.preview_listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error {
 		return validateListenAddrValue(v)
 	}},
-	// The editor-origin port pool (W5.2), validated eagerly.
 	"network.editor_origin_ports": {kind: cfgString, section: "network", validate: validateEditorOriginPorts},
 	// A []string written as a single-line TOML array, comma-separated on the CLI
 	// (empty clears it). Each element must be a well-formed browser origin
@@ -165,6 +164,8 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// Free-form: any ssh invocation the operator already uses. Its usability is
 	// checked at create time (BackendConfigError), like ssh.host — not here.
 	"sandbox.ssh": {kind: cfgString, section: "sandbox"},
+	// Daemon-local path streamed to remote hosts; a bad file surfaces at create.
+	"sandbox.binary": {kind: cfgString, section: "sandbox"},
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},

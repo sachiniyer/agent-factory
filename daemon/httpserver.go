@@ -203,12 +203,14 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		log.WarningLog.Printf("daemon sandbox callback endpoint disabled: %v", epErr)
 	} else {
 		sandboxEP = ep
+		manager.setSandboxEndpointSocket(epPath)
 	}
 
 	var closeOnce sync.Once
 	var closeErr error
 	return func() error {
 		closeOnce.Do(func() {
+			manager.setSandboxEndpointSocket("")
 			_ = sandboxEP.close()
 			// Stop route admission before closing the listeners. Close cancels
 			// context-aware calls immediately; the request drain below joins every

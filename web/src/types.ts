@@ -361,6 +361,9 @@ export interface OnCompleteOption {
  */
 export interface TaskData {
   on_complete?: string;
+  /** Listed host (global `hosts`) the sessions this task creates are placed on;
+   *  absent means the repo's backend decides (#5571 W6.3). */
+  host?: string;
   id: string;
   name?: string;
   prompt: string;
@@ -434,6 +437,8 @@ export interface TaskData {
  */
 export interface TaskUpdate {
   on_complete?: string;
+  /** "" clears the pick; absent leaves it alone. */
+  host?: string;
   name?: string;
   prompt?: string;
   cron_expr?: string;

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 type editorPortFixture struct {
@@ -38,16 +40,24 @@ func newEditorPortFixture(t *testing.T) *editorPortFixture {
 	m.readyOnce.Do(func() { close(m.ready) })
 
 	f := &editorPortFixture{cs: &controlServer{manager: m}, m: m}
+	insts := map[string]*session.Instance{}
 	for _, name := range []string{"editora", "editorb"} {
-		inst := startedLocalTabInstance(t, m, repo.ID, repoPath, name, "af_"+name+"_agent")
+		insts[name] = startedLocalTabInstance(t, m, repo.ID, repoPath, name, "af_"+name+"_agent")
+	}
+	// seedDiskInstance overwrites the repo's rows, so the second helper call leaves
+	// only one session on disk and a refresh would drop the other (and re-mint ids).
+	// Persist both rows with their ids before anything refreshes.
+	seeded, err := json.Marshal([]session.InstanceData{
+		{ID: insts["editora"].ID, Title: "editora", Path: repoPath, Status: session.Running},
+		{ID: insts["editorb"].ID, Title: "editorb", Path: repoPath, Status: session.Running},
+	})
+	require.NoError(t, err)
+	require.NoError(t, config.LoadState().SaveInstances(repo.ID, seeded))
+	for _, name := range []string{"editora", "editorb"} {
 		_, err := m.CreateTab(CreateTabRequest{Title: name, RepoID: repo.ID, Kind: "vscode"})
 		require.NoError(t, err)
-		if name == "editora" {
-			f.sidA = inst.ID
-		} else {
-			f.sidB = inst.ID
-		}
 	}
+	f.sidA, f.sidB = insts["editora"].ID, insts["editorb"].ID
 	// The pool ports are not bound for real: listeners land on free ports and the
 	// handler is driven directly.
 	m.editorPorts.listen = func(int) (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }

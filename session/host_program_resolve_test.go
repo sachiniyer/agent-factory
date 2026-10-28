@@ -38,7 +38,7 @@ func newTestProber(run hostProgramRunner) hostProgramProber {
 		host:        "sandbox.example",
 		processPATH: "/spawn/bin",
 		run:         run,
-		statFile:    os.Stat,
+		canExecute:  canExecuteFile,
 		nonce:       func() string { return "NONCE" },
 	}
 }
@@ -145,8 +145,6 @@ func TestResolveProgramOnHostComputedExecutable(t *testing.T) {
 		`"$(command -v claude)" --x`,
 		"exec $AGENT",
 		"env FOO=1 $AGENT",
-		`PATH="$HOME/bin" claude`,
-		`env PATH="$HOME/bin" claude`,
 		`env -u "$NAME" claude`,
 	} {
 		t.Run(program, func(t *testing.T) {
@@ -159,6 +157,19 @@ func TestResolveProgramOnHostComputedExecutable(t *testing.T) {
 			assert.Contains(t, err.Error(), "literal name or an absolute path")
 			assert.Contains(t, err.Error(), "sandbox.example")
 		})
+	}
+
+	// A computed PATH is refused only for a bare name it would resolve; a
+	// slash word never consults PATH (#5781).
+	for _, program := range []string{`PATH="$HOME/bin" claude`, `env PATH="$HOME/bin" claude`, `env "PATH=$HOME/bin" claude`} {
+		_, _, err := resolveProgramOnHost(context.Background(), program, loginPATHProber("", "/login/bin"))
+		require.Error(t, err, program)
+		assert.Contains(t, err.Error(), "computes its PATH at run time", program)
+	}
+	for _, program := range []string{`PATH=$HOME/bin:$PATH /abs/claude --x`, `env "PATH=$X" /abs/claude`} {
+		command, _, err := resolveProgramOnHost(context.Background(), program, loginPATHProber("", "/login/bin"))
+		require.NoError(t, err, program)
+		assert.Equal(t, program, command)
 	}
 
 	for _, program := range []string{`"$HOME/bin/claude" --x`, `exec $HOME/.local/bin/claude`} {
@@ -186,11 +197,13 @@ func TestResolveProgramOnHostRejectsAnythingButAnExecutableFile(t *testing.T) {
 		})
 	}
 
-	t.Run("relative PATH entries are skipped", func(t *testing.T) {
-		t.Chdir(dir)
-		executableFile(t, filepath.Join(dir, "rel"), "claude")
-		_, _, err := resolveProgramOnHost(context.Background(), "PATH=rel:: claude", loginPATHProber("", dir))
-		require.Error(t, err)
+	t.Run("a relative PATH entry leaves the lookup to the shell", func(t *testing.T) {
+		executableFile(t, dir, "claude")
+		for _, program := range []string{"PATH=rel:" + dir + " claude", "PATH=:" + dir + " claude"} {
+			command, _, err := resolveProgramOnHost(context.Background(), program, loginPATHProber("", dir))
+			require.NoError(t, err, program)
+			assert.Equal(t, program, command, "a cwd-relative entry precedes the absolute one")
+		}
 	})
 
 	t.Run("own PATH never falls back to the process PATH", func(t *testing.T) {

@@ -134,6 +134,12 @@ type HostOption struct {
 	Address string              `json:"address"`
 	Status  BackendAvailability `json:"status"`
 	Reason  string              `json:"reason,omitempty"`
+	// Readiness is af's last probe of this host: ready | blocked | stale |
+	// unprobed (CheckHost, a create, or the supervisor's refresh).
+	Readiness string `json:"readiness,omitempty"`
+	// Note is advisory text beside a host that is stale or not yet probed — never
+	// a block (a create re-checks the host live).
+	Note string `json:"note,omitempty"`
 }
 
 // hostCatalog answers for the operator's host list. An unreadable config is
@@ -152,6 +158,8 @@ func hostCatalog(cfg *config.ResolvedConfig, cfgErr error, repoRoot string) []Ho
 		opt := HostOption{Name: name, Address: cfg.Hosts[name].Host, Status: BackendAvailable}
 		if err := session.HostUnusableReason(name, cfg, repoRoot); err != nil {
 			opt.Status, opt.Reason = BackendUnavailable, err.Error()
+		} else {
+			applyListedHostReadiness(&opt)
 		}
 		out = append(out, opt)
 	}
@@ -178,7 +186,7 @@ func (s *controlServer) ListBackends(req ListBackendsRequest, resp *ListBackends
 	// which renders as no advisory rather than a fabricated finding.
 	callbackReason := ""
 	if s.manager != nil {
-		callbackReason = s.manager.callbackUnavailableReason(s.manager.Config())
+		callbackReason = s.manager.callbackUnavailableReason()
 	}
 	resp.Backends = backendCatalog(config.SupportedBackends, cfg, cfgErr, workspace, callbackReason)
 	resp.Default, resp.DefaultStatus, resp.DefaultReason = defaultFor(resp.Backends, cfg, cfgErr, workspace)
@@ -255,6 +263,22 @@ func backendOptionFor(kind session.BackendKind, cfg *config.ResolvedConfig, cfgE
 	return opt
 }
 
+// applyListedHostReadiness folds the cached probe verdict for a listed host into
+// its option, by the same rule applyHostReadiness applies to sandbox.ssh: only a
+// fresh blocking verdict makes it unavailable.
+func applyListedHostReadiness(opt *HostOption) {
+	r := session.ReadHostReadiness(session.HostReadinessKey(opt.Name))
+	opt.Readiness = string(r.State)
+	switch r.State {
+	case session.HostReadinessBlocked:
+		opt.Status = BackendUnavailable
+		opt.Reason = r.Reason + " (" + r.Describe() + "; a create re-checks the host)"
+	case session.HostReadinessReady:
+	default:
+		opt.Note = r.Describe()
+	}
+}
+
 // applyHostReadiness folds the cached remote-host verdict into a sandbox
 // option. Only a FRESH blocking verdict makes the backend unavailable — the
 // reason is the same text a create would fail with.
@@ -304,6 +328,14 @@ func backendLabel(kind session.BackendKind, cfg *config.ResolvedConfig) string {
 // their sessions would land on a backend they never chose.
 func defaultFor(backends []BackendOption, cfg *config.ResolvedConfig, cfgErr error, repoRoot string) (string, BackendAvailability, string) {
 	kind, kerr := session.BackendKindFor(session.InstanceOptions{}, repoRoot)
+	if kerr != nil && cfgErr != nil {
+		// The repo's config exists but could not be resolved, so a create with no
+		// explicit backend REFUSES (#5801) rather than guessing local. That is not
+		// "unavailable" (a checked precondition that failed) but "could not be
+		// evaluated", like the per-backend rows, and the user can still choose a
+		// backend explicitly (local reads no repo config) while they fix the file.
+		return "", BackendUnknown, kerr.Error()
+	}
 	if kerr != nil {
 		// Reached only when the config LOADED and named a backend we do not
 		// recognize (BackendKindFor falls back to local on a resolve failure). Name
