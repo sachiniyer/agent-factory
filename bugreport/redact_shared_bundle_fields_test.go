@@ -527,3 +527,29 @@ func TestCollapsePathFieldKeepsTheTokenIntact(t *testing.T) {
 		t.Errorf("collapsePathField = %q: the title below the root survived", got)
 	}
 }
+
+// TestRedactTaskDropsUserChosenName pins #4318: task.Task.Name is free text the
+// user typed (a client, codename or person), and the bundle is published as safe
+// to share, so the projection must not carry it — in the struct or in the final
+// marshalled JSON the Build pipeline scrubs.
+func TestRedactTaskDropsUserChosenName(t *testing.T) {
+	const name = "ConfidentialClient payroll migration"
+
+	r := &redactor{}
+	got := r.redactTask(task.Task{ID: "task-4318", Name: name, CronExpr: "0 9 * * *", Enabled: true})
+	if got.Name != redactedMarker {
+		t.Fatalf("task name leaked: got %q, want %q", got.Name, redactedMarker)
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "ConfidentialClient") {
+		t.Fatalf("task name leaked in marshalled projection: %s", data)
+	}
+
+	// An unnamed task keeps an empty name rather than a misleading marker.
+	if got := r.redactTask(task.Task{ID: "task-4319"}); got.Name != "" {
+		t.Fatalf("empty task name should stay empty, got %q", got.Name)
+	}
+}
