@@ -696,6 +696,11 @@ func sandboxAllowedPath(path string) bool {
 	return sandboxAllowedPaths[path]
 }
 
+// SandboxAllowedPath is sandboxAllowedPath for other packages' tests: the CLI's
+// end-to-end scope test asks the real table, not a copy of it, whether each route
+// a verb touches is one a sandbox credential is admitted to.
+func SandboxAllowedPath(path string) bool { return sandboxAllowedPath(path) }
+
 // sandboxAllowedPaths is the derived lookup, filled in init() rather than by a
 // var initializer. That is not style: httpRoutes' initializer transitively
 // references the auth gate, which references this, and Go rejects the resulting
