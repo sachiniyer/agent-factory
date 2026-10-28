@@ -172,7 +172,7 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 // ErrHandoffUnsupported is returned when an agent handoff (#2013) is requested
 // on a backend that cannot swap its agent in place. It is a typed sentinel so
 // callers can render the restriction rather than match on prose.
-var ErrHandoffUnsupported = errors.New("agent handoff is only supported for local-worktree sessions")
+var ErrHandoffUnsupported = errors.New("agent handoff is only supported for local-worktree sessions and ssh/sandbox sessions whose agent-server supports it")
 
 // Backend abstracts the session lifecycle so instances can be backed by local
 // tmux+git worktrees (the default) or an off-box docker, SSH, or hook runtime.
