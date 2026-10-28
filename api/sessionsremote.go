@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -151,4 +153,49 @@ func remoteSelfRefusal(flag string) error {
 	return fmt.Errorf("%s resolves the session from this machine's environment and cannot be combined with the daemon target %s. "+
 		"Name the session by <title> instead, or run the command inside the session without --daemon-url",
 		flag, apiclient.RemoteTargetURL())
+}
+
+// remoteCreateInputs is the client-side half of a create against a REMOTE
+// daemon (W9.2, topo:T3). Everything that reads the project — repo resolution,
+// the title-collision check, repo config, the default program, preflight and
+// account resolution — runs on the DAEMON, because each is an answer about its
+// filesystem and credentials, not this machine's. What stays here is what needs
+// no disk: flag syntax.
+//
+// --repo is REQUIRED and sent AS TYPED. This machine's cwd names a repository
+// the daemon may not have, and resolving the flag here would expand ~ against the
+// caller's home and reject a path that exists only on the daemon's host. An empty
+// program is sent empty so the daemon applies the project's default_program.
+func remoteCreateInputs(inPlace bool) (workspace, program string, err error) {
+	if strings.TrimSpace(repoFlag) == "" {
+		return "", "", fmt.Errorf("--repo is required against the daemon at %s: the project path is resolved on the DAEMON's host, "+
+			"and this machine's current directory names a repository the daemon may not have. "+
+			"Pass --repo <path on the daemon host>", apiclient.RemoteTargetURL())
+	}
+	program = createProgramFlag
+	if program != "" {
+		if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
+			return "", "", err
+		}
+	}
+	if _, err := session.ParseBackendKind(createBackendFlag); err != nil {
+		return "", "", err
+	}
+	if inPlace && createBackendFlag != "" && createBackendFlag != config.BackendLocal {
+		return "", "", fmt.Errorf("--here runs in the local working tree and is incompatible with --backend %s", createBackendFlag)
+	}
+	return repoFlag, program, nil
+}
+
+func routedCreateSession(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.CreateSession(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return nil, err
+	}
+	defer c.CloseIdleConnections()
+	data, err := c.CreateSession(req)
+	return data, remoteMutationError("create", err)
 }

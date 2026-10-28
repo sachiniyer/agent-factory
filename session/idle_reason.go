@@ -187,6 +187,7 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 		(i.taskRunPromptAttemptAt.IsZero() ||
 			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
 		i.taskRunPromptAttemptAt = attemptedAt
+		i.taskRunPromptBound = true
 	}
 	// A send that affirmatively failed while the run's boundary was still
 	// unbound is the run's INITIAL delivery proven undelivered (#5278): the
@@ -194,7 +195,12 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	// have delivered it. The run ends here, failed — left open, its unarmed
 	// gate lets the first idle edge read as a completion and hand on_complete
 	// a session that never received its prompt.
-	if status == PromptNotDelivered && i.taskRunActive && i.taskRunPromptAttemptAt.IsZero() {
+	//
+	// The boundary must also have NEVER bound (#5644): a replacement mission's
+	// failed send after a handoff lands on a boundary the swap cleared, though
+	// the original prompt provably landed — that run is not this failure.
+	if status == PromptNotDelivered && i.taskRunActive &&
+		i.taskRunPromptAttemptAt.IsZero() && !i.taskRunPromptBound {
 		i.endTaskRunFailedLocked()
 		i.taskRunFailedStamp = true
 		i.taskRunFailurePending = true
@@ -548,7 +554,13 @@ func (i *Instance) ConsumeTaskRunFailed() bool {
 func (i *Instance) AckTaskRunFailureStamped() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.taskRunFailurePending = false
+	if i.taskRunFailurePending {
+		i.taskRunFailurePending = false
+		// Mark the row dirty so the cleared flag reaches disk with the next
+		// checkpoint (#5662). The task's run-keyed status write is idempotent
+		// against a stale re-arm either way, so this is belt and braces.
+		i.touchLocked()
+	}
 }
 
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.

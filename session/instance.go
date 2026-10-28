@@ -185,6 +185,14 @@ type Instance struct {
 	// lands between the edge and the stamp, which would otherwise leave the task
 	// reading "started" forever for a run that provably failed.
 	taskRunFailurePending bool
+	// taskRunPromptBound records that this run's prompt boundary was bound at
+	// least once — the initial prompt reached a verdict that could have
+	// delivered (#5644). ClearIdleEvidence retires the boundary itself when a
+	// runtime is replaced (handoff), but the bound bit stays: a later
+	// PromptNotDelivered on a replacement mission is NOT the initial delivery
+	// failing, and only a never-bound run may be ended failed by it. Persisted
+	// while the run is in flight, with the boundary it qualifies.
+	taskRunPromptBound bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.

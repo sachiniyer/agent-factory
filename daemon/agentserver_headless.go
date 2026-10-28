@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/log"
@@ -402,6 +403,9 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("GET /v1/sessions/{id}/stream", hs.streamHandler)
 	mux.HandleFunc("GET /v1/sessions/{id}/stream-info", hs.streamInfoHandler)
 	mux.HandleFunc("GET /v1/events", hs.eventsHandler)
+
+	// Loopback port relay (W5.1): raw TCP to 127.0.0.1:<port> in the workspace.
+	mux.HandleFunc("GET "+agentproto.RelayPath, hs.relayHandler)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, r, http.StatusNotFound, fmt.Errorf("unknown route %q", r.URL.Path))
