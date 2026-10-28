@@ -87,7 +87,13 @@ type Task struct {
 	// session's owned branch. A run whose output already landed in a pushed
 	// branch or a PR usually wants kill; a run that might need inspecting wants
 	// archive. af must not pick for the user, so the default does neither.
-	OnComplete  string `json:"on_complete,omitempty"`
+	OnComplete string `json:"on_complete,omitempty"`
+	// Host names a listed host (the operator's global `hosts` table) the sessions
+	// this task creates are placed on, over ssh (#5571 W6.3). Empty keeps the
+	// historical behavior: the repo's backend / default_host decide. It is a
+	// NAME, never an address, and a write that names a host the list does not
+	// carry is refused (validateTaskHost). Additive: no tasks schema bump.
+	Host        string `json:"host,omitempty"`
 	ProjectPath string `json:"project_path"`
 	// RepoID is the owning project's repo ID, resolved ONCE at bind time and
 	// retained. It is derived, never patchable — AddTask sets it and UpdateTask
@@ -359,7 +365,11 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 	// session" and then behave as one at delivery time (#1892).
 	t.canonicalizeTargetSession()
 	t.canonicalizeOnComplete()
+	t.Host = strings.TrimSpace(t.Host)
 	if err := t.ValidateTrigger(); err != nil {
+		return Task{}, err
+	}
+	if err := validateTaskHost(t.Host); err != nil {
 		return Task{}, err
 	}
 	// Empty Program means "fall back to the configured default_program at

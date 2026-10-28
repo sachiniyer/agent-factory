@@ -2606,6 +2606,7 @@ af sessions send-prompt <title> <prompt> [flags]
 | `--all` |  | Broadcast the prompt to every live session in scope (current repo by default; excludes the reserved root session) |
 | `--all-repos` |  | With --all, broadcast across every repo instead of only the current/--repo one |
 | `--create` |  | Auto-create the session if it doesn't exist |
+| `--host` | `string` | With --create: place a NEWLY created session on a host from your global `hosts` list, over ssh (see `af sessions backends`). If the session already exists the prompt is sent to it unchanged |
 | `--include-root` |  | With --all, also deliver to the reserved root session (excluded by default) |
 | `--program` | `string` | Program to run when creating a new session (one of: claude, codex, aider, gemini, amp, opencode, devin; defaults to config default) |
 | `--prompt` | `string` | The prompt to send (alias for the positional <prompt>, matching 'sessions create --prompt') |
@@ -3095,6 +3096,7 @@ af tasks add [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--cron` | `string` | Cron expression (exactly one of --cron / --watch-cmd) |
+| `--host` | `string` | Place each session this task creates on a host from your global `hosts` list, over ssh (see `af sessions backends`); empty uses the repo's backend. A name that is not in the list is refused |
 | `--max-concurrent-runs` | `int` | Cap how many sessions this watch task may have in flight at once; excess events are queued in order instead of spawning runs, subject to the durable queue's retention limits (0 = unlimited; --watch-cmd tasks without --target-session only) (default `0`) |
 | `--name` | `string` | Task name (required) |
 | `--on-complete` | `string` | What happens to the session a run spawns once it finishes: keep (default, leaves it in place), archive (restorable, but retains its whole worktree), or kill (reclaims the worktree and prunes the session's branch). Not for --target-session tasks, whose session is meant to be reused |
@@ -3298,6 +3300,7 @@ af tasks update <id-or-name> [flags]
 |------|------|-------------|
 | `--cron` | `string` | New cron expression (clears watch-cmd) |
 | `--enabled` | `string` | Enable or disable the task (true/false) |
+| `--host` | `string` | New host for the sessions this task creates (a name from your global `hosts` list); pass an empty value (--host "") to clear it |
 | `--max-concurrent-runs` | `int` | New in-flight session cap for this watch task; pass 0 to revert to unlimited (default `0`) |
 | `--name` | `string` | New task name |
 | `--on-complete` | `string` | New spawned-session lifecycle: keep, archive, or kill; pass keep to revert to leaving sessions in place |

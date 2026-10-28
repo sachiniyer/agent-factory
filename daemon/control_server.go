@@ -63,6 +63,8 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.AccountHandoff = true
 	resp.HostPick = true
+	resp.DeliverHostPick = true
+	resp.TaskHost = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
