@@ -748,6 +748,38 @@ recipe in
 
 ---
 
+## Moving a live session to a sandbox (move script)
+
+> **Status:** the building blocks (worktree snapshot, move-script contract,
+> all-or-nothing orchestration) live in the `move` package. The
+> `af sessions move <title> --to <host>` command is not wired yet. The global-only
+> `move_cmd` setting exists (a checked-in value is a load error) but nothing reads
+> it yet, so nothing here is user-invokable today; this
+> section is the contract the script will run under.
+
+A move seeds the sandbox workspace from a snapshot of the local worktree — the
+branch history plus every uncommitted and untracked file — rather than a fresh
+clone. `.gitignore`d files are not carried; the operator's **move script** copies
+them. The script runs on the daemon box, never from repository config.
+
+- **stdin:** a JSON object with `session_id`, `title`, `branch`,
+  `source_worktree`, `host`, `dest_workspace` and (when scoped) `account`.
+- **env:** `AF_SSH` — the ssh command **without** the destination (options
+  only); `AF_SSH_DEST` — the destination (`user@host` or an ssh alias);
+  `AF_SSH_FULL` — the complete command including the destination. So
+  `rsync -e "$AF_SSH" file "$AF_SSH_DEST:dir/"` and
+  `$AF_SSH "$AF_SSH_DEST" 'cmd'` reach the same machine af does. The same three
+  values are in the JSON as `ssh`, `ssh_dest` and `ssh_full`. A free-form
+  `sandbox.ssh` command already embeds its host and af cannot split it, so there
+  `AF_SSH` and `AF_SSH_DEST` are empty and only `AF_SSH_FULL` is set: run
+  `$AF_SSH_FULL 'cmd'` and, instead of `rsync -e`, pipe tar:
+  `tar -C src -c . | $AF_SSH_FULL 'tar -C dir -x'`.
+- **exit:** `0` continues; anything else aborts. Any failure before the session
+  row switches leaves the local session running exactly as before and reaps the
+  half-built sandbox workspace.
+
+See `examples/move-script/move.sh` for a documented example.
+
 ## Archive & restore
 
 For the disposable sandbox backends (`docker`, `ssh`, and `sandbox`), archive and restore

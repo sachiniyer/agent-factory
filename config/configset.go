@@ -174,6 +174,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"log_max_backups":    {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
 	"branch_prefix":      {kind: cfgString},
 	"on_archive_command": {kind: cfgString},
+	"move_cmd":           {kind: cfgString},
 	"worktree_root": {kind: cfgString, validate: func(_, v string) error {
 		if !validateWorktreeRootValue(v) {
 			return fmt.Errorf("worktree_root must be one of [%s, %s], got %q", WorktreeRootSubdirectory, WorktreeRootSibling, v)
