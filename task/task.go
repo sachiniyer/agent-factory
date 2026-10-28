@@ -113,7 +113,15 @@ type Task struct {
 	// migration on purpose: the backfill would have to shell out to git for
 	// every task inside the tasks.json load path, and rows pick the field up as
 	// they are next written anyway.
-	RepoID        string     `json:"repo_id,omitempty"`
+	RepoID string `json:"repo_id,omitempty"`
+	// SandboxOwner is the id of the sandbox session whose credential created this
+	// task (#5571 W3.5). It is durable provenance the DAEMON writes — a sandbox's
+	// own value is overwritten — and every delivery re-checks against it: the
+	// target must still be an existing off-box session in the owner's project, and
+	// the delivery never auto-creates. Empty for every operator-created task.
+	// UpdateTask is refused to a sandbox credential, so it cannot be edited away
+	// by the agent it constrains.
+	SandboxOwner  string     `json:"sandbox_owner,omitempty"`
 	Program       string     `json:"program"`
 	Enabled       bool       `json:"enabled"`
 	CreatedAt     time.Time  `json:"created_at"`

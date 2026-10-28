@@ -252,6 +252,14 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 	unlock := m.lockTarget(repo.ID, req.Title)
 	defer unlock()
 	testHookDeliverAfterTargetLock()
+	if req.SandboxOwner != "" {
+		// Provenance of a sandbox-created task (#5571 W3.5): the target must STILL
+		// be an existing off-box, unarchived session in the owner's project. Checked
+		// under the target lock so it cannot go stale before the send below.
+		if err := m.checkSandboxTaskDelivery(req.SandboxOwner, repo.ID, req.Title); err != nil {
+			return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		}
+	}
 
 	exists, deleting, err := m.targetSessionState(repo.ID, req.Title)
 	if err != nil {
@@ -291,6 +299,13 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 			return "", session.PromptCouldNotConfirm, false, err
 		}
 		return "sent", deliveryStatus, false, nil
+	}
+
+	if req.SandboxOwner != "" {
+		// Defense in depth: the check above proved the target exists, so reaching
+		// here means it vanished under us. A sandbox-created task never creates.
+		return "", session.PromptCouldNotConfirm, false, notAttempted(sandboxRefusal(
+			"target session %q no longer exists; a sandbox-created task never creates one; %s", req.Title, notDeliveredMarker))
 	}
 
 	// If the absent target is this repo's daemon-managed root agent — only

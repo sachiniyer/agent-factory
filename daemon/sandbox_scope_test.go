@@ -66,6 +66,9 @@ type scopeFixture struct {
 	other  *session.Instance // another project, off-box
 	secret string
 	gated  http.Handler
+	// backends is the persisted backend type per session title (the seam).
+	backends map[string]string
+	rows     func(insts ...*session.Instance) []byte
 }
 
 func newScopeFixture(t *testing.T) *scopeFixture {
@@ -78,7 +81,7 @@ func newScopeFixture(t *testing.T) *scopeFixture {
 	instanceBackendType = func(i *session.Instance) string { return backends[i.Title] }
 	t.Cleanup(func() { instanceBackendType = prev })
 
-	f := &scopeFixture{mgr: mgr, repoA: repoA, repoB: repoB}
+	f := &scopeFixture{mgr: mgr, repoA: repoA, repoB: repoB, backends: backends}
 	mk := func(repoID, title, backend string) *session.Instance {
 		inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoPath, Program: "claude"})
 		require.NoError(t, err)
@@ -104,6 +107,7 @@ func newScopeFixture(t *testing.T) *scopeFixture {
 		require.NoError(t, err)
 		return raw
 	}
+	f.rows = rows
 	require.NoError(t, config.LoadState().SaveInstances(repoA, rows(f.me, f.peer, f.local)))
 	require.NoError(t, config.LoadState().SaveInstances(repoB, rows(f.other)))
 
@@ -325,4 +329,132 @@ func TestSandboxScope_OperatorIsNotNarrowed(t *testing.T) {
 	f := newScopeFixture(t)
 	code, out := f.call(t, "operator-token", "/v1/SendPrompt", `{"prompt":"hi","id":"`+f.other.ID+`"}`)
 	assert.NotContains(t, out, scopeRefusal, "the operator may address any project's session (status %d)", code)
+}
+
+// A task created by a sandbox credential is enforced on EVERY delivery, not only
+// at creation (Codex P1 on #5823). The task carries the owner session as durable
+// provenance; each firing re-checks that the target is still an existing,
+// unarchived, off-box session in the owner's project, and never creates one.
+func TestSandboxTaskIsRecheckedOnEveryDelivery(t *testing.T) {
+	deliver := func(f *scopeFixture) error {
+		return f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoA, "peer")
+	}
+
+	t.Run("a valid target still delivers", func(t *testing.T) {
+		f := newScopeFixture(t)
+		assert.NoError(t, deliver(f))
+	})
+	t.Run("the target is archived", func(t *testing.T) {
+		f := newScopeFixture(t)
+		require.NoError(t, deliver(f), "anti-vacuous: valid before the change")
+		f.peer.SetStatusForTest(session.Archived)
+		err := deliver(f)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errSandboxOutOfScope)
+	})
+	t.Run("the target title now names a session on the daemon host", func(t *testing.T) {
+		f := newScopeFixture(t)
+		require.NoError(t, deliver(f))
+		f.backends["peer"] = "local"
+		err := deliver(f)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errSandboxOutOfScope)
+	})
+	t.Run("the target moved to another project", func(t *testing.T) {
+		f := newScopeFixture(t)
+		require.NoError(t, deliver(f))
+		f.mgr.mu.Lock()
+		delete(f.mgr.instances, daemonInstanceKey(f.repoA, "peer"))
+		f.mgr.instances[daemonInstanceKey(f.repoB, "peer")] = f.peer
+		f.mgr.mu.Unlock()
+		require.NoError(t, config.LoadState().SaveInstances(f.repoA, f.rows(f.me, f.local)))
+		require.NoError(t, config.LoadState().SaveInstances(f.repoB, f.rows(f.other, f.peer)))
+		err := deliver(f)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errSandboxOutOfScope)
+	})
+	t.Run("the delivery resolved a different project than the owner's", func(t *testing.T) {
+		f := newScopeFixture(t)
+		err := f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoB, "peer")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errSandboxOutOfScope)
+	})
+	t.Run("the owner session is gone", func(t *testing.T) {
+		f := newScopeFixture(t)
+		f.mgr.mu.Lock()
+		delete(f.mgr.instances, daemonInstanceKey(f.repoA, "me"))
+		f.mgr.mu.Unlock()
+		require.NoError(t, config.LoadState().SaveInstances(f.repoA, f.rows(f.peer, f.local)))
+		err := deliver(f)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errSandboxOutOfScope)
+	})
+	t.Run("no target", func(t *testing.T) {
+		f := newScopeFixture(t)
+		assert.ErrorIs(t, f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoA, "  "), errSandboxOutOfScope)
+	})
+}
+
+// The daemon's delivery boundary enforces it: a broken target skips the run with
+// the reason, sends nothing, and creates nothing.
+func TestSandboxTaskDeliveryNeverCreatesItsTarget(t *testing.T) {
+	f := newScopeFixture(t)
+	f.backends["peer"] = "local" // retitled into a session on the daemon host
+
+	f.mgr.mu.Lock()
+	before := len(f.mgr.instances)
+	f.mgr.mu.Unlock()
+	_, _, _, err := f.mgr.deliverPromptWithOutcome(DeliverPromptRequest{
+		Title: "peer", RepoPath: f.me.Path, Prompt: "x", TaskOrigin: true,
+		TaskRepoID: f.repoA, SandboxOwner: f.me.ID,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), scopeRefusal)
+	assert.Contains(t, err.Error(), notDeliveredMarker, "a skipped run is pre-flight: it refunds the rate slot")
+	f.mgr.mu.Lock()
+	after := len(f.mgr.instances)
+	f.mgr.mu.Unlock()
+	assert.Equal(t, before, after, "no session may be created by a refused sandbox-task delivery")
+
+	// A target that does not exist at all is refused, not auto-created.
+	_, _, _, err = f.mgr.deliverPromptWithOutcome(DeliverPromptRequest{
+		Title: "does-not-exist", RepoPath: f.me.Path, Prompt: "x", TaskOrigin: true,
+		TaskRepoID: f.repoA, SandboxOwner: f.me.ID,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), scopeRefusal)
+	f.mgr.mu.Lock()
+	assert.Equal(t, before, len(f.mgr.instances))
+	f.mgr.mu.Unlock()
+}
+
+// A sandbox-created task with no target would spawn a session on the daemon
+// host: the run is skipped before any create is attempted.
+func TestSandboxTaskWithoutTargetNeverSpawns(t *testing.T) {
+	prev := createSessionForTask
+	createSessionForTask = func(CreateSessionRequest) (*session.InstanceData, error) {
+		t.Fatal("a sandbox-created task must never create a session")
+		return nil, nil
+	}
+	t.Cleanup(func() { createSessionForTask = prev })
+
+	_, _, err := deliverTaskPromptRun(&task.Task{ID: "t1", SandboxOwner: "sess-a", ProjectPath: t.TempDir()}, "p", false, new(task.RunKey))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errSandboxOutOfScope)
+}
+
+// The provenance is stamped by the daemon from the credential, over anything the
+// caller sent, so the agent cannot claim another owner or clear its own.
+func TestStampSandboxTaskOverwritesCallerProvenance(t *testing.T) {
+	proj := sandboxProject{repoID: "r1", path: "/proj"}
+	got := stampSandboxTask(task.Task{
+		Prompt: "p", CronExpr: "0 * * * *", TargetSession: " peer ",
+		SandboxOwner: "someone-else", Host: "h1", RepoID: "r-other", ProjectPath: "/elsewhere", OnComplete: "kill",
+	}, "sess-a", proj, "peer")
+	assert.Equal(t, "sess-a", got.SandboxOwner)
+	assert.Equal(t, "peer", got.TargetSession)
+	assert.Equal(t, "/proj", got.ProjectPath)
+	assert.Empty(t, got.RepoID)
+	assert.Empty(t, got.Host)
+	assert.Empty(t, got.OnComplete)
 }

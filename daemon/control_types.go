@@ -303,6 +303,11 @@ type DeliverPromptRequest struct {
 	// retain a provable not-attempted outcome without claiming TaskID ownership.
 	TaskRepoID string `json:"-"`
 	TaskOrigin bool   `json:"-"`
+	// SandboxOwner is the sandbox session that created the task being delivered
+	// (task.Task.SandboxOwner, #5571 W3.5). Daemon-internal like TaskRepoID: it
+	// rides the gob loopback only. When set the delivery is re-authorized against
+	// the owner's project and NEVER auto-creates its target.
+	SandboxOwner string `json:"-"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a

@@ -225,6 +225,17 @@ func checkSandboxCreate(req CreateSessionRequest) error {
 
 // --- tasks: prompt-delivery tasks on the project's own off-box sessions ------
 
+// stampSandboxTask binds a sandbox-created task to its owner and project. The
+// provenance is durable and overwrites anything the caller sent: every later
+// delivery re-checks against it (checkSandboxTaskDelivery).
+func stampSandboxTask(t task.Task, owner string, proj sandboxProject, target string) task.Task {
+	t.TargetSession = target
+	t.ProjectPath, t.RepoID, t.Host = proj.path, "", ""
+	t.OnComplete = ""
+	t.SandboxOwner = owner
+	return t
+}
+
 // checkSandboxTaskShape is the task-shape rule for a sandbox caller.
 func checkSandboxTaskShape(t task.Task) error {
 	if strings.TrimSpace(t.WatchCmd) != "" {
@@ -249,10 +260,7 @@ func (s *controlServer) addTaskScoped(ctx context.Context, req AddTaskRequest, r
 		if err != nil {
 			return err
 		}
-		t.TargetSession = inst.Title
-		t.ProjectPath, t.RepoID, t.Host = proj.path, "", ""
-		t.OnComplete = ""
-		req.Task = t
+		req.Task = stampSandboxTask(t, owner, proj, inst.Title)
 		req.Actor = fmt.Sprintf("sandbox session %s", owner)
 	}
 	return s.addTask(ctx, req, resp)
@@ -307,4 +315,26 @@ func (s *controlServer) removeTaskScoped(ctx context.Context, req RemoveTaskRequ
 		}
 	}
 	return s.RemoveTask(req, resp)
+}
+
+// checkSandboxTaskDelivery re-authorizes one firing of a sandbox-created task.
+// The target must be an existing, unarchived, off-box session in the project of
+// the session that created the task, and that project must be the one the
+// delivery resolved. Any failure skips the run with the reason; there is no
+// fallback to the task's own project path or to a create.
+func (m *Manager) checkSandboxTaskDelivery(owner, deliveryRepoID, title string) error {
+	if strings.TrimSpace(title) == "" {
+		return sandboxRefusal("the task has no target session")
+	}
+	proj, inst, err := m.authorizeSandboxSession(owner, "", title, false)
+	if err != nil {
+		return err
+	}
+	if proj.repoID != deliveryRepoID {
+		return sandboxRefusal("the target is not in the project the task was created in")
+	}
+	if inst.IsArchived() {
+		return sandboxRefusal("the target session %q is archived", title)
+	}
+	return nil
 }
