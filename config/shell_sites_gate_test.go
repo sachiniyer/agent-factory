@@ -194,10 +194,15 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "groupPinScript, a const in the same file; the spawner pid and its start stamp " +
 			"arrive as $1/$2 positional parameters, never spliced into the script text",
 	}},
-	"session/backend_docker_account.go:(*dockerProvisioner).prepareNonAccountUser": {
+	"session/backend_docker_account_chown.go:(*dockerProvisioner).prepareNonAccountUser": {
 		{class: afAuthored, note: "af's `id -u:$(id -g)` probe of the image's default user"},
-		{class: afAuthored, note: "af's mkdir/chown script for the default-user HOME and workspace"},
+		{class: afAuthored, note: "af's mkdir/chown script for the default-user HOME and workspace; paths are shellQuote'd"},
 	},
+	"session/backend_docker_account_chown.go:(*dockerProvisioner).readMountTable": {{
+		class: afAuthored,
+		note: "af's mkdir/pwd/mountinfo const script; the HOME and workspace paths arrive as $1/$2 " +
+			"positional parameters, never spliced into the script text",
+	}},
 
 	"session/host_program.go:(hostProgramProber).probe": {{
 		class: afAuthored,
