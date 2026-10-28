@@ -26,8 +26,8 @@ af_set_config 'default_program = "claude"
 claude = "bash"'
 
 # _pane_boxes — how many pane frames the workspace draws, counted off the top
-# border row (each pane contributes one ╭; the sidebar has no border).
-_pane_boxes() { af_capture | grep -m1 '╭' | grep -o '╭' | wc -l; }
+# border row (each pane contributes one ┌; the sidebar has no border).
+_pane_boxes() { af_capture | grep -m1 '┌' | grep -o '┌' | wc -l; }
 
 # _terminal_headers — committed 'tests · › Terminal' headers on the pane header
 # row. The selection hint ('— selected: …') never contains the full
@@ -51,7 +51,7 @@ af_send k               # pane focus -> tree focus, cursor to the instance row
 af_wait_for 'n new' "$AF_DRIVER_TIMEOUT" 'tree focus after nav key'
 af_send j               # cursor onto the agent tab row
 af_wait_for 'hide pane' "$AF_DRIVER_TIMEOUT" 'already-open gate focuses the agent pane'
-af_assert_screen '◆ Agent \*' 'sidebar marks the agent tab active'
+af_assert_screen 'cursor: tests · Agent' 'tree cursor sits on the agent tab'
 
 # The issue's steps 4-5: pane-focused 1 (own tab, a no-op that pins intent),
 # then pane-focused 2 — the jump to the tab the OTHER pane already shows.
@@ -67,7 +67,7 @@ if [ "$(_terminal_headers)" != 1 ]; then
     exit 1
 fi
 [ "$(_pane_boxes)" = 2 ] || { _af_fail "#3267: both panes must survive the jump, got $(_pane_boxes)"; exit 1; }
-af_assert_screen '◆ Agent \*' 'the sidebar still marks the agent tab active (pane jumps do not move the tree)'
+af_assert_screen 'cursor: tests · Agent' 'the tree cursor stays on the agent tab (pane jumps do not move the tree)'
 
 # Snapshot the live view-state while both panes are open — the relaunch phase
 # below rewrites it into the duplicated shape a buggy build persisted.
@@ -90,7 +90,7 @@ if [ "$(_terminal_headers)" != 0 ]; then
     _af_fail "#3267: x must hide the just-focused Terminal pane; still see $(_terminal_headers) Terminal pane(s): [$(_af_pane_header_row)]"
     exit 1
 fi
-af_assert_screen 'tests · ◆ Agent' 'the agent pane survives the hide — the jump had focused the Terminal pane'
+af_assert_screen 'tests · Agent' 'the agent pane survives the hide — the jump had focused the Terminal pane'
 
 af_quit
 

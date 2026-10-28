@@ -83,9 +83,9 @@ af_select killed-handoff
 # Commit the kill through the real UI. The wrapper leaves the runtime present,
 # so the daemon retains the tombstone and reports the unknown teardown outcome.
 af_send D
-af_wait_for "Kill session 'killed-handoff'" "$AF_DRIVER_TIMEOUT" 'kill confirmation'
+af_wait_for "Delete session 'killed-handoff'" "$AF_DRIVER_TIMEOUT" 'kill confirmation'
 af_send y
-af_wait_for "failed to kill session 'killed-handoff'" "$AF_DRIVER_TIMEOUT" \
+af_wait_for 'could not finish tearing it down safely' "$AF_DRIVER_TIMEOUT" \
     'unknown teardown is surfaced to the user'
 grep -q '^blocked =af_' "$AGENT_FACTORY_HOME/tmux-wrapper.log" ||
     _af_fail '#2591 fixture failed: the daemon did not execute the isolated tmux timeout wrapper'

@@ -123,6 +123,23 @@ function idleReasonLabel(reason: IdleReason | undefined): string {
   return reason ? (IDLE_REASON_LABELS as Partial<Record<string, string>>)[reason] ?? "" : "";
 }
 
+/** Row detail for a live remote-probe outage (#5571 W1.3): static text, never
+ *  an animated indicator, mirroring the TUI's "unreachable <age> · <err>"
+ *  (render.go). It outranks the idle detail — the outage is why every other
+ *  fact on the row may be stale. Returns "" when the pair is incomplete, so a
+ *  malformed projection renders nothing rather than half a claim. */
+export function unreachableDetail(s: SessionData, now: Date = new Date()): string {
+  const u = s.unreachable;
+  if (!u?.since || !u.error) {
+    return "";
+  }
+  const since = new Date(u.since);
+  if (Number.isNaN(since.getTime())) {
+    return "";
+  }
+  return `unreachable ${formatPaneChurnAge(since, now)} ago · ${u.error}`;
+}
+
 function formatPaneChurnAge(churn: Date, now: Date): string {
   return formatDuration(now.getTime() - churn.getTime());
 }
@@ -496,6 +513,11 @@ export function rowTitle(s: SessionData): string {
   }
   if (archiveWarningText(s) !== "") {
     title = "[archive incomplete] " + title;
+  }
+  // Mirroring render.go: the outage marker is static text and sits just inside
+  // [model changed]; only a complete since/error pair earns it.
+  if (s.unreachable?.since && s.unreachable?.error) {
+    title = "[unreachable] " + title;
   }
   if (s.model_change) {
     title = "[model changed] " + title;

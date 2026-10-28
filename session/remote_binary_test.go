@@ -397,3 +397,28 @@ func TestReleaseArtifactURLUsesStaticArchiveOnLinuxOnly(t *testing.T) {
 	assert.Equal(t, autoupdate.DownloadURL("v1.0.9", "darwin", "arm64"),
 		releaseArtifactURL("v1.0.9", remotePlatform{goos: "darwin", goarch: "arm64"}))
 }
+
+// binaryStageReplies answers the W2.2 staged-binary steps (platform probe, cache
+// check, link, remote `af version`) for tests that drive a whole provision and
+// care about what comes after the binary is in place. The cache always
+// "hits", so no stream is expected.
+func binaryStageReplies(t *testing.T, local string) func(script string) ([]byte, bool) {
+	t.Helper()
+	t.Cleanup(func() { SetDaemonVersion("") })
+	SetDaemonVersion("1.0.328")
+	sha, err := sha256File(local)
+	require.NoError(t, err)
+	return func(script string) ([]byte, bool) {
+		switch {
+		case strings.Contains(script, "uname -s"):
+			return []byte(unamePair()), true
+		case strings.Contains(script, "sha256sum") || strings.Contains(script, "shasum"):
+			return []byte(sha + "\n"), true
+		case strings.Contains(script, "ln -sfn"):
+			return nil, true
+		case strings.HasSuffix(strings.TrimSpace(script), " version"):
+			return []byte("agent-factory version 1.0.328\n"), true
+		}
+		return nil, false
+	}
+}
