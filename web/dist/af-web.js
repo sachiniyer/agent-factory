@@ -6867,6 +6867,68 @@ async function copyText(text) {
   }
 }
 
+// src/backends.ts
+var HOST_VALUE_PREFIX = "host:";
+function hostFromChoiceValue(value) {
+  return value.startsWith(HOST_VALUE_PREFIX) ? value.slice(HOST_VALUE_PREFIX.length) : "";
+}
+var REPO_DEFAULT = "";
+function backendChoices(catalog) {
+  if (catalog === null) {
+    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
+  }
+  const callbackAdvisory = (opt) => {
+    if (opt?.status !== "available") return "";
+    const parts = [];
+    if (opt.note) parts.push(`Host ${opt.note}`);
+    if (opt.callback_unavailable_reason) parts.push(CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason);
+    return parts.join(" \xB7 ");
+  };
+  const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
+  const choices = [
+    {
+      value: REPO_DEFAULT,
+      // "Repo default" with no parenthetical when the daemon reports no default:
+      // that is the misconfigured case, where naming a backend would be inventing
+      // one. The reason says what is wrong with the key.
+      label: catalog.default === "" ? "Repo default" : `Repo default (${resolvedDefault?.label ?? catalog.default})`,
+      // Taken from the daemon, not inferred here. A repo whose declared default is
+      // broken resolves to that broken backend and FAILS — it does not quietly run
+      // local — so the default is not automatically a safe harbour.
+      status: catalog.default_status,
+      reason: catalog.default_status === "available" ? callbackAdvisory(resolvedDefault) : catalog.default_reason ?? ""
+    }
+  ];
+  for (const opt of catalog.backends) {
+    choices.push({
+      value: opt.name,
+      label: opt.label,
+      status: opt.status,
+      reason: opt.status === "available" ? callbackAdvisory(opt) : opt.reason ?? ""
+    });
+  }
+  for (const h2 of catalog.hosts ?? []) {
+    const parts = [`host: ${h2.name}`];
+    if (h2.address) parts[0] += ` (${h2.address})`;
+    if (h2.name === catalog.default_host) parts[0] += " \xB7 default";
+    choices.push({
+      value: HOST_VALUE_PREFIX + h2.name,
+      label: parts[0],
+      status: h2.status,
+      reason: h2.status === "available" ? "" : h2.reason ?? ""
+    });
+  }
+  return choices;
+}
+function backendNotice(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 ? "" : choice.reason;
+}
+function backendSelectable(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 || choice.status === "available";
+}
+
 // src/api.ts
 var TOKEN_KEY = "af.token";
 function loadToken() {
@@ -7041,7 +7103,10 @@ async function createSession(input, token2) {
     prompt: input.prompt
   };
   const backend = (input.backend ?? "").trim();
-  if (backend !== "") {
+  const host = hostFromChoiceValue(backend);
+  if (host !== "") {
+    body.host = host;
+  } else if (backend !== "") {
     body.backend = backend;
   }
   const account = (input.account ?? "").trim();
@@ -7303,7 +7368,10 @@ async function updateTask(task, update, token2) {
 }
 async function triggerTask(task, token2) {
   requireTaskID(task.id, "trigger a task");
-  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+  const result = await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 async function removeTask(task, token2) {
   requireTaskID(task.id, "remove a task");
@@ -7350,6 +7418,10 @@ async function listAccounts(token2, repoPath = "") {
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af("ListAccounts", body, token2);
   return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
+}
+async function quotaReport(token2) {
+  const resp = await af("QuotaReport", {}, token2);
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
@@ -8164,6 +8236,59 @@ function appendStatus(row, status, agent, name) {
   row.append(h("div", { class: "af-accounts-echo" }, status.message));
 }
 
+// src/quota.ts
+function emptyQuotaState() {
+  return { agents: [], warnings: [], loaded: false, error: "" };
+}
+var QUOTA_NOTE = "Quota is what the provider reports \u2014 today \u201Cnot reported\u201D everywhere, af declining to guess a ceiling. Observed is what af\u2019s own sessions show. af quota prints the same report.";
+function renderQuotaSection(state) {
+  const section = h("section", { class: "af-quota" });
+  section.setAttribute("aria-label", "Usage");
+  if (state.loaded === false && !state.error) {
+    section.append(h("p", {}, "Connecting\u2026"));
+    return section;
+  }
+  const head = h(
+    "div",
+    { class: "af-quota-head" },
+    h("span", { class: "af-quota-title" }, "Usage"),
+    h("span", { class: "af-view-count" }, String(state.agents.length))
+  );
+  section.append(head, h("p", { class: "af-quota-note" }, QUOTA_NOTE));
+  if (state.error !== "") {
+    section.append(
+      h("p", { class: "af-quota-error", role: "alert" }, `Usage limits could not be read: ${state.error}`)
+    );
+    return section;
+  }
+  for (const warning of state.warnings) {
+    section.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
+  }
+  if (state.agents.length === 0) {
+    section.append(
+      h("p", { class: "af-quota-empty" }, "No agent CLIs are configured, so there is nothing to report.")
+    );
+    return section;
+  }
+  const list = h("div", { class: "af-quota-list" });
+  for (const agent of state.agents) {
+    const row = h(
+      "div",
+      { class: "af-quota-row" },
+      h("span", { class: "af-quota-agent" }, agent.program),
+      h("span", { class: "af-quota-cell" }, agent.quota),
+      h(
+        "span",
+        { class: agent.limited_sessions > 0 ? "af-quota-cell af-quota-limited" : "af-quota-cell" },
+        agent.observed
+      )
+    );
+    list.append(row, h("p", { class: "af-quota-detail" }, agent.detail));
+  }
+  section.append(list);
+  return section;
+}
+
 // src/scrollkeep.ts
 function listToken(parts) {
   return parts.map((p) => p ?? "none").join("\0");
@@ -8278,6 +8403,9 @@ var ConfigPane = class {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   accounts = emptyAccountsState();
+  /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
+   *  Accounts. Same "not config" rule: see quota.ts. */
+  quota = emptyQuotaState();
   theme = "system";
   showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
@@ -8306,11 +8434,12 @@ var ConfigPane = class {
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
+  lastQuota = null;
   lastTheme = null;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status, accounts, theme = this.theme) {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastTheme === theme) {
+  update(entries, path, status, accounts, quota, theme = this.theme) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastQuota === quota && this.lastTheme === theme) {
       return;
     }
     const statusIsNew = status !== this.lastStatus;
@@ -8323,12 +8452,14 @@ var ConfigPane = class {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastQuota = quota;
     this.lastTheme = theme;
     this.theme = theme;
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    this.quota = quota;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
@@ -8489,7 +8620,8 @@ var ConfigPane = class {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
-      renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
+      renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
+      renderQuotaSection(this.quota)
     );
   }
   /** Theme and the saved token live in this browser's localStorage, not in
@@ -12367,47 +12499,6 @@ var AccountSelection = class {
   }
 };
 
-// src/backends.ts
-var REPO_DEFAULT = "";
-function backendChoices(catalog) {
-  if (catalog === null) {
-    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
-  }
-  const callbackAdvisory = (opt) => opt?.status === "available" && opt.callback_unavailable_reason ? CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason : "";
-  const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
-  const choices = [
-    {
-      value: REPO_DEFAULT,
-      // "Repo default" with no parenthetical when the daemon reports no default:
-      // that is the misconfigured case, where naming a backend would be inventing
-      // one. The reason says what is wrong with the key.
-      label: catalog.default === "" ? "Repo default" : `Repo default (${resolvedDefault?.label ?? catalog.default})`,
-      // Taken from the daemon, not inferred here. A repo whose declared default is
-      // broken resolves to that broken backend and FAILS — it does not quietly run
-      // local — so the default is not automatically a safe harbour.
-      status: catalog.default_status,
-      reason: catalog.default_status === "available" ? callbackAdvisory(resolvedDefault) : catalog.default_reason ?? ""
-    }
-  ];
-  for (const opt of catalog.backends) {
-    choices.push({
-      value: opt.name,
-      label: opt.label,
-      status: opt.status,
-      reason: opt.status === "available" ? callbackAdvisory(opt) : opt.reason ?? ""
-    });
-  }
-  return choices;
-}
-function backendNotice(choices, selected) {
-  const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 ? "" : choice.reason;
-}
-function backendSelectable(choices, selected) {
-  const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 || choice.status === "available";
-}
-
 // src/dirpicker.ts
 var INITIAL_PICKER_STATE = { listing: null, error: null, loading: false };
 function pickerLoading(prev) {
@@ -16026,6 +16117,7 @@ function buildTask(input) {
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
     on_complete: input.targetSession.trim() ? "" : input.onComplete ?? "",
+    host: (input.host ?? "").trim(),
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
@@ -16671,6 +16763,47 @@ function taskFormModal(opts) {
   }).catch(() => {
     onCompleteHint.textContent = "Choices unavailable \xB7 current value kept.";
   });
+  const hostSelect = h("select", { class: "af-input" });
+  hostSelect.setAttribute("aria-label", "Host");
+  const hostHint = h("span", { class: "af-modal-hint", id: "af-task-host-hint" });
+  hostSelect.setAttribute("aria-describedby", hostHint.id);
+  const keepHost = opts.seed?.host ?? "";
+  let hostOptions = [];
+  const renderHosts = () => {
+    const previous = hostSelect.value || keepHost;
+    hostSelect.replaceChildren(h("option", { value: "" }, "Repo backend"));
+    for (const o of hostOptions) {
+      const opt = h("option", { value: o.name }, o.status === "available" ? o.name : `${o.name} \u2014 unavailable`);
+      if (o.status !== "available") opt.disabled = true;
+      hostSelect.append(opt);
+    }
+    if (keepHost !== "" && !hostOptions.some((o) => o.name === keepHost)) {
+      hostSelect.append(h("option", { value: keepHost }, keepHost));
+    }
+    hostSelect.value = previous;
+    if (hostSelect.value !== previous) hostSelect.value = "";
+    const chosen = hostOptions.find((o) => o.name === hostSelect.value);
+    hostHint.textContent = chosen && chosen.status !== "available" ? chosen.reason ?? "" : "";
+  };
+  const hostField = field("Host", hostSelect);
+  hostField.append(hostHint);
+  renderHosts();
+  hostSelect.addEventListener("change", renderHosts);
+  let hostSeq = 0;
+  const loadHostsFor = (repoPath) => {
+    const seq = ++hostSeq;
+    void opts.loadHosts(repoPath).then((hosts) => {
+      if (seq !== hostSeq) return;
+      hostOptions = hosts;
+      renderHosts();
+    }).catch(() => {
+      if (seq !== hostSeq) return;
+      hostOptions = [];
+      renderHosts();
+      hostHint.textContent = "Hosts unavailable \xB7 current value kept.";
+    });
+  };
+  projectSelect.addEventListener("change", () => loadHostsFor(projectSelect.value));
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
   const keepProgram = opts.seed?.program ?? "";
@@ -16715,6 +16848,7 @@ function taskFormModal(opts) {
     programSelect.value = s.program ?? "";
   }
   loadProgramsFor(projectSelect.value);
+  loadHostsFor(projectSelect.value);
   syncOnComplete();
   body.append(
     field("Name", nameInput),
@@ -16726,6 +16860,7 @@ function taskFormModal(opts) {
     field("Target session", targetInput),
     onCompleteField,
     onCompleteReasonField,
+    hostField,
     field("Program", programSelect)
   );
   const card = handle.el.firstElementChild;
@@ -16762,6 +16897,7 @@ function taskFormModal(opts) {
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
       onComplete: onCompleteSelect.value,
+      host: hostSelect.value,
       program: programSelect.value
     });
   });
@@ -16776,6 +16912,7 @@ function addTaskModal(projects, defaultProject2, callbacks) {
     defaultProject: defaultProject2,
     loadPrograms: callbacks.loadPrograms,
     loadOnComplete: callbacks.loadOnComplete,
+    loadHosts: callbacks.loadHosts,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
@@ -16789,6 +16926,7 @@ function editTaskModal(projects, task, callbacks) {
     seed: task,
     loadPrograms: callbacks.loadPrograms,
     loadOnComplete: callbacks.loadOnComplete,
+    loadHosts: callbacks.loadHosts,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
@@ -17822,7 +17960,7 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.themeChoice);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -19453,6 +19591,7 @@ var store = new Store({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  quota: emptyQuotaState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -19503,6 +19642,7 @@ var narrowViewport = window.matchMedia("(max-width: 768px)");
 function noteAttentionSeen() {
   attentionClearer.note(store.get(), agentPaneExposed(document, narrowViewport.matches));
 }
+var loadHosts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token).then((catalog) => catalog.hosts ?? []);
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 var resyncTimer = null;
@@ -19815,6 +19955,7 @@ function switchView(view) {
   if (view === "config") {
     refreshConfig();
     refreshAccounts();
+    refreshQuota();
   }
 }
 function setStatusFilter(kind, on) {
@@ -20681,6 +20822,21 @@ var accountsRefetcher = createFencedRefetcher({
 function refreshAccounts() {
   accountsRefetcher.refresh();
 }
+var quotaRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], error: "", loaded: true }
+    });
+  },
+  onError: (err) => {
+    store.set({ quota: { ...store.get().quota, error: errorText(err) } });
+  }
+});
+function refreshQuota() {
+  quotaRefetcher.refresh();
+}
 function setAccountStatus(agent, name, message, error) {
   store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
 }
@@ -20889,6 +21045,7 @@ function openAddTask() {
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -20920,6 +21077,7 @@ function openEditTask(task) {
     editTaskModal(projects, task, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -20937,6 +21095,7 @@ function openEditTask(task) {
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
             on_complete: value.on_complete ?? "",
+            host: (input.host ?? "") !== (task.host ?? "") ? input.host ?? "" : void 0,
             project_path: input.projectPath,
             program: input.program
           },
@@ -20976,7 +21135,12 @@ function doTriggerTask(task) {
   if (tok === null) {
     return;
   }
-  void triggerTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void triggerTask(task, tok).then(refreshTasks).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      refreshTasks();
+    }
+    surfaceTabError(e);
+  });
 }
 function doRetryLimit() {
   const sel = selectedSession2();
@@ -21230,6 +21394,7 @@ function stopStream() {
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
   accountsRefetcher.invalidate();
+  quotaRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

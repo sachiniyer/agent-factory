@@ -30,6 +30,10 @@ func drainDaemon(
 	// persist behind SaveInstances' repo flock. The transport cleanup functions
 	// wait for those dispatched handlers, so nothing user-driven can begin or
 	// remain in flight across the checkpoint.
+	// Advisory work (host probes) is abandoned before anything else: it must not be
+	// able to hold the drain, or the final checkpoint below, past the stopper's
+	// SIGKILL (#5839).
+	m.advisory.Cancel()
 	m.lifecycle.markQuiescing()
 	if closeHTTP != nil {
 		*httpClosed = true

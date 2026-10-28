@@ -510,10 +510,10 @@ export function compareSessionsForRail(a: SessionData, b: SessionData): number {
 }
 
 /** The backend types whose workspace lives off-box (session/archive_sandbox.go
- *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
- *  them can service tab management: every Add*Tab path needs a daemon-side git
- *  worktree they do not have, so the daemon's Capabilities().TabManagement is
- *  false for all three (#1874).
+ *  backendKindForType: docker, ssh, "sandbox", and "remote" — the hook runtime).
+ *  None of them can service tab management: every Add*Tab path needs a
+ *  daemon-side git worktree they do not have, so the daemon's
+ *  Capabilities().TabManagement is false for all four (#1874).
  *
  *  This list is the ONE place the web names backend types. It exists only because
  *  the session envelope carries `backend_type` but not the daemon's capability

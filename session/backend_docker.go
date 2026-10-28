@@ -434,16 +434,22 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.verifyAccountRuntimeBoundary(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 	}
-	if err := p.prepareAccountUser(); err != nil {
+	if err := p.prepareContainerUser(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpRootExec)
 	}
-	if err := p.configureGit(); err != nil {
+	if err := p.trustWorkspaceDirectories(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	if err := p.cloneWorkspace(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
+	if err := p.configureGit(); err != nil {
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
+	}
 	if err := p.copyAfBinary(); err != nil {
+		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
+	}
+	if err := p.copyPolicy(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
 	if err := p.startAgentServer(); err != nil {
@@ -596,87 +602,6 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 	return sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
 }
 
-// configureGit sets a git identity and marks every directory safe inside the
-// container so the clone + worktree creation (which run as root over a possibly
-// foreign-owned bind mount) don't trip on "dubious ownership" or a missing
-// committer identity.
-func (p *dockerProvisioner) configureGit() error {
-	script := `git config --global user.email "af@agent-factory.local" && ` +
-		`git config --global user.name "Agent Factory" && ` +
-		`git config --global --add safe.directory "*"`
-	out, err := p.execSessionSh(dockerShortStepTimeout, script)
-	if err != nil {
-		return fmt.Errorf("backend=docker: git config in container failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-// cloneWorkspace clones the repo's origin into /workspace inside the container.
-// A fresh create clones the default branch; the in-container agent-server's LOCAL
-// backend then creates the session's git worktree + branch off it. On a RESTORE
-// (spec.RestoreBranch set, #1592 Phase 4 PR6) it additionally materializes the
-// pushed session branch as a local ref so the in-container Setup checks it out.
-func (p *dockerProvisioner) cloneWorkspace() error {
-	script := gitCloneCommand(p.spec.CloneURL, dockerWorkspaceDir)
-	out, err := p.execSessionSh(dockerProvisionStepTimeout, script)
-	if err != nil {
-		return fmt.Errorf("backend=docker: cloning %q into the container failed (is git in the image, and the URL reachable from inside the container?): %s: %w",
-			p.spec.CloneURL, strings.TrimSpace(string(out)), err)
-	}
-	if credentialCommand := gitPersistCredentialCommand(p.spec.CloneURL, dockerWorkspaceDir); credentialCommand != "" {
-		out, err = p.execSessionSh(dockerShortStepTimeout, credentialCommand)
-		if err != nil {
-			return fmt.Errorf("backend=docker: configuring value-free GitHub credentials in the clone failed: %s: %w",
-				strings.TrimSpace(string(out)), err)
-		}
-	}
-	if branch := strings.TrimSpace(p.spec.RestoreBranch); branch != "" {
-		return p.fetchRestoreBranch(branch)
-	}
-	return nil
-}
-
-// fetchRestoreBranch materializes the archived session branch (pushed to origin
-// at archive time) as a LOCAL ref in the fresh clone, WITHOUT checking it out in
-// /workspace's main tree (#1592 Phase 4 PR6). The `<branch>:<branch>` refspec
-// creates refs/heads/<branch> from origin/<branch>; the in-container local
-// backend's Setup then finds that local ref and adds the session worktree from
-// it (setupFromExistingBranch), bringing the pushed commits back. It stays on the
-// main tree's default branch so the later `git worktree add <path> <branch>` does
-// not collide with a checked-out branch.
-func (p *dockerProvisioner) fetchRestoreBranch(branch string) error {
-	script := fmt.Sprintf("git -C %s fetch origin %s:%s",
-		shellQuote(dockerWorkspaceDir), shellQuote(branch), shellQuote(branch))
-	out, err := p.execSessionSh(dockerProvisionStepTimeout, script)
-	if err != nil {
-		return fmt.Errorf("backend=docker: restoring archived branch %q into the container failed (was it pushed to origin?): %s: %w",
-			branch, strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-// copyAfBinary docker cp's the daemon's own `af` binary into the container and
-// makes it executable, so `af agent-server` is runnable inside. The binary must
-// be compatible with the image (matching arch/libc) — a static build runs
-// anywhere; documented in docs/backends.md.
-func (p *dockerProvisioner) copyAfBinary() error {
-	out, err := p.docker(dockerShortStepTimeout, "cp", p.afBin, p.containerID+":"+dockerAfBinaryPath)
-	if err != nil {
-		return fmt.Errorf("backend=docker: copying the af binary into the container failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	if out, err := p.execSh(dockerShortStepTimeout, "chmod +x "+shellQuote(dockerAfBinaryPath)); err != nil {
-		// execSh pins --user 0:0 for account sessions; otherwise the exec
-		// inherits the image's USER. Mark it so the callsite's daemon-write
-		// default doesn't mislabel an exec that ran as a container user.
-		op := dockerOpSessionExec
-		if p.spec.Account.Dir != "" {
-			op = dockerOpRootExec
-		}
-		return dockerStepErr(fmt.Errorf("backend=docker: chmod on the copied af binary failed: %s: %w", strings.TrimSpace(string(out)), err), op)
-	}
-	return nil
-}
-
 // startAgentServer launches `af agent-server` headless in the container,
 // detached, with its stdout banner + stderr redirected to files. It binds
 // :<port> (all interfaces) so the published host port forwards to it. The
@@ -716,6 +641,12 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	}
 	for _, name := range p.spec.SessionEnvPassthrough {
 		args = append(args, "--session-env", name)
+	}
+	if branch := strings.TrimSpace(p.spec.Branch); branch != "" {
+		args = append(args, "--branch", branch)
+	}
+	if len(p.spec.AgentPolicy) > 0 {
+		args = append(args, "--policy-file", dockerPolicyPath)
 	}
 	// This is an execution binding, not a path proof. The copied af enters a
 	// dedicated mode that derives the allowlist from these exact args and execs
@@ -833,13 +764,17 @@ func (p *dockerProvisioner) dockerEnvironment() []string {
 	return sessionenv.DockerCLIEnvironment(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
 }
 
-// execSh runs a `sh -c <script>` inside the container.
+// execSh runs a `sh -c <script>` inside the container as root (0:0). It is the
+// provisioning step that operates on root-owned container state — `docker cp`
+// lands the `af` binary owned by root, and `chmod +x` on it must run as root
+// regardless of the image's default USER. A non-root default USER (a common
+// hardening practice on BYO images) cannot chmod a root-owned file, so gating
+// the root override on account sessions left the non-account chmod failing with
+// "Operation not permitted" on any such image. Running as 0:0 unconditionally
+// is a no-op for a root-default image (its default user IS root) and is the
+// only thing that works for a non-root one.
 func (p *dockerProvisioner) execSh(timeout time.Duration, script string) ([]byte, error) {
-	args := []string{"exec"}
-	if p.spec.Account.Dir != "" {
-		args = append(args, "--user", "0:0")
-	}
-	args = append(args, p.containerID, "sh", "-c", script)
+	args := []string{"exec", "--user", "0:0", p.containerID, "sh", "-c", script}
 	return p.docker(timeout, args...)
 }
 

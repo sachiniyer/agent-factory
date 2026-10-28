@@ -23,6 +23,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The daemon-hosted HTTP/JSON server (#1029 PR 4) makes HTTP just another thin
@@ -189,7 +190,10 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	_, recErr := wl.reconcile(manager.Config())
 	manager.configApplyMu.Unlock()
 	if recErr != nil {
-		log.WarningLog.Printf("daemon web listener(s): %v", recErr)
+		log.WarningLog.Printf("daemon web listener(s): %v — retrying in the background", recErr)
+		// A startup bind that lost a race (tailnet IP not assigned yet) is retried
+		// with capped backoff instead of staying down until a restart (#5571 W9.9).
+		wl.retryFailedBinds()
 	}
 
 	// The dedicated sandbox callback endpoint (#5571 W3.4). Non-fatal like the
@@ -202,12 +206,14 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		log.WarningLog.Printf("daemon sandbox callback endpoint disabled: %v", epErr)
 	} else {
 		sandboxEP = ep
+		manager.setSandboxEndpointSocket(epPath)
 	}
 
 	var closeOnce sync.Once
 	var closeErr error
 	return func() error {
 		closeOnce.Do(func() {
+			manager.setSandboxEndpointSocket("")
 			_ = sandboxEP.close()
 			// Stop route admission before closing the listeners. Close cancels
 			// context-aware calls immediately; the request drain below joins every
@@ -323,6 +329,9 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 //
 //	200 — success: {"data": <resp>, "error": null}
 //	400 — malformed / unreadable JSON request body, or unknown request field
+//	404 — the addressed tab is gone (session.ErrTabGone — the same mapping the
+//	      stream data plane applies, shared so an id-keyed RPC answers like
+//	      the WS it drives, #5571 W4.3)
 //	405 — wrong HTTP verb (not POST)
 //	413 — request body exceeds maxHTTPBodyBytes
 //	503 — daemon warm-up or upgrade probation (typed, retryable)
@@ -378,7 +387,7 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 		pending := &pendingUntracks{}
 		ctx := context.WithValue(withHTTPRPCRequester(r), teardownReplyPendingContextKey{}, pending)
 		if err := call(ctx, req, &resp); err != nil {
-			status := http.StatusInternalServerError
+			status := httpStatusForTab(err)
 			var shaped interface{ HTTPStatus() int }
 			if IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
@@ -532,6 +541,15 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 			env.Data = withData.EnvelopeData()
 		}
 		writeHTTPEnvelope(w, r, status, env)
+		return
+	}
+	// A stale stable-id refusal is a bare 404 on the status line — the same
+	// status the catch-all gives an unknown route — so without a code the two
+	// are indistinguishable on the wire. tab_gone lets a remote client
+	// reconstruct session.ErrTabGone instead of guessing (#5571 W4.3).
+	if errors.Is(err, session.ErrTabGone) {
+		writeHTTPEnvelope(w, r, status,
+			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeTabGone))
 		return
 	}
 	// A verified resource errno is worth a machine-readable code on the wire:

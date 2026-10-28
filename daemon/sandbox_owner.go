@@ -79,6 +79,16 @@ func sandboxOwner(ctx context.Context) (string, bool) {
 // on: the constraint itself lives in the handler, which is the only place that
 // knows what "the caller's own" means for that route.
 var sandboxConstrainedRoutes = map[string]string{
-	"/v1/Snapshot":     "returns ONLY the caller's own session, and no delivery alarms",
-	"/v1/SetAttention": "targets ONLY the caller's own session: the owner id replaces every selector in the request",
+	"/v1/Snapshot":       "rows of the caller's own project only, sandbox-safe projection, no delivery alarms or repo ids",
+	"/v1/SendPrompt":     "target must be an off-box session in the caller's project (id or title, resolved then checked)",
+	"/v1/ArchiveSession": "target must be an off-box session in the caller's project (--self names the caller)",
+	"/v1/CreateTab":      "the caller's own session only; process and shell tabs only (web/VS Code/docs are daemon-served)",
+	"/v1/CloseTab":       "the caller's own session only",
+	"/v1/RenameTab":      "the caller's own session only",
+	"/v1/ReorderTab":     "the caller's own session only",
+	"/v1/CreateSession":  "repo is the caller's project; a listed host (ssh runtime) is required; no --here; no account selection",
+	"/v1/ListTasks":      "tasks of the caller's own project only",
+	"/v1/AddTask":        "cron tasks only, delivering to an off-box session in the caller's project; no watch_cmd, host or spawn",
+	"/v1/RemoveTask":     "non-watch tasks of the caller's own project only",
+	"/v1/SetAttention":   "targets ONLY the caller's own session: the owner id replaces every selector in the request",
 }

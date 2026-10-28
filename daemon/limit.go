@@ -205,7 +205,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	data := instance.ToInstanceData()
 	livenessChanged := data.Liveness != before
 	resetChanged := !data.LimitResetAt.Equal(beforeReset)
-	durableChanged := livenessChanged || resetChanged || settlementCheckpoint
+	durableChanged := livenessChanged || resetChanged || settlementCheckpoint || conversationNeedsWrite(instance)
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return
@@ -243,6 +243,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	var err error
 	if durableChanged {
 		err = persistInstanceData(repoID, data)
+		noteConversationWritten(instance, data, err)
 	}
 	key := daemonInstanceKey(repoID, instance.Title)
 	testHookPollBeforeSettlementRecord()
@@ -640,7 +641,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// restore paths guard, reached through a third door (#2923). Push and durably
 		// record the branch first, and refuse rather than re-spawn if that cannot be
 		// done. A local session has no sandbox to preserve and falls through.
-		if isRemoteWorkspace(instance) {
+		if replacesSandbox(instance) {
 			// kill, not --force-reap: RestoreSession refuses a LiveLimitReached
 			// session and ResumeFromLimitRequest has no force option, so the
 			// forced-reap hatch cannot open from this door (Codex on #2967).

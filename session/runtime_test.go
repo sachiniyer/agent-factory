@@ -216,3 +216,35 @@ func TestResolveBackendKind_Precedence(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, BackendSSH, got)
 }
+
+// #5801: a repo whose in-repo config exists but cannot be parsed has an
+// undeterminable backend; the create must refuse, never fall back to local.
+func TestResolveBackendKind_UnresolvableRepoConfigRefuses(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	dir := filepath.Join(repoRoot, config.InRepoConfigDirName)
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, config.ConfigFileName),
+		[]byte("backend = \"docker\"\nthis is = = not toml\n"), 0644))
+
+	got, err := resolveBackendKind(InstanceOptions{}, repoRoot)
+	require.Error(t, err)
+	assert.NotEqual(t, BackendLocal, got)
+	assert.Contains(t, err.Error(), "cannot determine the backend")
+	assert.Contains(t, err.Error(), config.ConfigFileName, "the error names the file")
+
+	// An explicit selection never reads the repo config, so it is unaffected.
+	got, err = resolveBackendKind(InstanceOptions{Backend: BackendLocal}, repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, BackendLocal, got)
+
+	// An absent in-repo config, or one with no backend key, is still local.
+	clean := initTempGitRepo(t)
+	got, err = resolveBackendKind(InstanceOptions{}, clean)
+	require.NoError(t, err)
+	assert.Equal(t, BackendLocal, got)
+	writeInRepoConfig(t, clean, map[string]any{"default_program": "claude"})
+	got, err = resolveBackendKind(InstanceOptions{}, clean)
+	require.NoError(t, err)
+	assert.Equal(t, BackendLocal, got)
+}

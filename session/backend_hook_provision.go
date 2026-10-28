@@ -327,6 +327,7 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 	// identity-checked reap. That reuse is the whole point of splitting
 	// provisioning from transport.
 	sp := newHookSandboxProvisioner(p.spec, hookProvisionSSHCommand(knownHosts, &pinned), afBin, p.program)
+	sp.sandboxBinary = p.sandboxBinary
 	res, err := sp.provision()
 	if err != nil {
 		// sp owns LOCAL state the hook cleanup cannot touch: a tunnel child whose

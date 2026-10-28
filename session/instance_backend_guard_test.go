@@ -35,6 +35,9 @@ import (
 //     branch, where the in-memory wiring is retained for the abort-to-Lost
 //     retry. The whole body runs under the i.mu.Lock it takes at the top, so
 //     the read is synchronized.
+//   - ReattachSandbox — reads i.backend twice, each time inside an explicit
+//     i.mu.Lock section: once to snapshot the backend it will probe, and once
+//     to verify the row still holds that backend immediately before binding.
 //
 // owesNoRuntimeTeardownLocked is deliberately NOT in this allowlist: it takes the
 // backend pointer its caller already read under i.mu as an argument and never
@@ -59,6 +62,7 @@ var backendReadersUnderLock = map[string]bool{
 	"toInstanceDataLocked":          true,
 	"PreviewTabSnapshotByID":        true,
 	"FromInstanceData":              true,
+	"ReattachSandbox":               true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.

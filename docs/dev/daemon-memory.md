@@ -539,7 +539,7 @@ counts processes, and the heap profile counts allocations — and what these
 children burn is child CPU rather than daemon CPU in any case. Nor does the count
 decompose into one capture per session per poll: on the local path a single poll
 captures the pane **twice** (`CheckAndHandleTrustPrompt` in
-`session/tmux/start.go`, then `HasUpdatedWithBaseline` in `session/tmux/io.go`),
+`session/tmux/trust_prompt.go`, then `HasUpdatedWithBaseline` in `session/tmux/io.go`),
 and other contexts skip polling altogether. Take the count over its window as
 measured and leave it there.
 

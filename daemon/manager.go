@@ -16,6 +16,11 @@ import (
 
 // Manager owns the daemon's authoritative session mutations.
 type Manager struct {
+	// advisory scopes best-effort background work (host-readiness probes) that
+	// must never delay shutdown: drainDaemon cancels it FIRST, before it closes the
+	// transports or joins anything, so a probe's ssh child is killed rather than
+	// waited on (#5839). Zero-value safe; see advisory.go.
+	advisory advisoryScope
 	// cfg is the FROZEN startup config. It is read only by the keys that
 	// deliberately do NOT hot-reload: root_agents (its next-daemon-start contract,
 	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and
@@ -62,6 +67,11 @@ type Manager struct {
 	// daemon restart invalidates every outstanding one, which is the correct
 	// side to fail on.
 	sandboxTokens sandboxTokenRegistry
+
+	// sandboxEndpointSocket is the live dedicated sandbox callback endpoint's
+	// socket path (#5571 W3.4); nil or empty while it is not listening. The mint
+	// reads it instead of the client listener's address and auth posture.
+	sandboxEndpointSocket atomic.Pointer[string]
 
 	// previewSecret is the HMAC key from which the web-tab PREVIEW listener derives
 	// a PER-TAB credential (#1856 step 3): the origin label for (sessionID, tabID) is

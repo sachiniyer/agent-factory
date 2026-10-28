@@ -47,6 +47,11 @@ type localAgentServer struct {
 	// capture goroutine on a session that is already being torn down and never gets
 	// closed — the #1632 leak). ensureBroker refuses once closed.
 	closed bool
+	// relaunch collapses overlapping Relaunch requests onto one attempt (W7.1).
+	relaunch relaunchFlight
+	// agentOpMu serializes the operations that replace the agent process — a
+	// relaunch and an agent swap — so two of them never interleave (W7.1/W7.5).
+	agentOpMu sync.Mutex
 }
 
 // AgentServer returns the cached agent-server for this instance's runtime (#1592
@@ -100,7 +105,7 @@ func (i *Instance) agentServerLocked() AgentServer {
 			// out-of-process case (no sandbox to reap), set for a docker session.
 			i.agentSrv = &remoteAgentServer{rc: i.remoteClient, inst: i, teardown: i.runtimeTeardown}
 		case backendIsRemoteWorkspace(i.backend):
-			// A remote-workspace backend (docker/ssh/hook) with NO live client:
+			// A remote-workspace backend (docker/ssh/sandbox/hook) with NO live client:
 			// remoteClient is nil because the runtime wiring was torn down — a
 			// sandbox session loaded inert from disk, or one left Lost by a FAILED
 			// lost-recovery (reprovisionRemote succeeded, Start failed, then
@@ -122,7 +127,7 @@ func (i *Instance) agentServerLocked() AgentServer {
 }
 
 // backendIsRemoteWorkspace reports whether b drives an off-box workspace
-// (docker/ssh/hook) — the backends whose data-plane methods delegate back to
+// (docker/ssh/sandbox/hook) — the backends whose data-plane methods delegate back to
 // i.AgentServer() (they embed remoteAgentBackend), and which therefore must never
 // be wrapped in a localAgentServer (#2005). A nil backend is treated as local
 // (the not-yet-initialised default, matching Instance.Capabilities).
@@ -250,6 +255,29 @@ func (s *localAgentServer) PreviewGrid(tab int) (PaneSnapshot, error) {
 	s.inst.mu.RUnlock()
 	if ts == nil {
 		return PaneSnapshot{}, fmt.Errorf("session %q tab %d: no tmux pane to capture a grid from", s.inst.Title, tab)
+	}
+	return tmuxPaneSnapshot(ts)
+}
+
+// PreviewGridByID is PreviewGrid bound to one stable tab identity: the pane is
+// selected under the roster lock, so no ordinal crosses it (#2200).
+func (s *localAgentServer) PreviewGridByID(tabID string) (PaneSnapshot, error) {
+	s.inst.mu.RLock()
+	idx, ok := s.inst.tabIndexByIDLocked(tabID)
+	var ts *tmux.TmuxSession
+	if ok {
+		if idx == 0 {
+			ts = s.inst.tmuxLocked()
+		} else {
+			ts = s.inst.Tabs[idx].tmux
+		}
+	}
+	s.inst.mu.RUnlock()
+	if !ok {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab id %q: %w", s.inst.Title, tabID, ErrTabGone)
+	}
+	if ts == nil {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab id %q: no tmux pane to capture a grid from", s.inst.Title, tabID)
 	}
 	return tmuxPaneSnapshot(ts)
 }
@@ -541,6 +569,21 @@ func (s *localAgentServer) Archive() (string, error) {
 }
 
 // trustLiveGeneration is threaded straight to Backend.Kill (#3413).
+// StopPreservingWorkspace stops the agent and every tab and leaves the workspace
+// in place (#5571 W8.5): the same data-plane teardown as Kill, then a tab
+// teardown that keeps the worktree.
+func (s *localAgentServer) StopPreservingWorkspace() error {
+	s.mu.Lock()
+	s.closed = true
+	brokers := s.brokers
+	s.brokers = nil
+	s.mu.Unlock()
+	for _, br := range brokers {
+		br.close()
+	}
+	return s.inst.teardownTabs(teardownKill{keepWorkspace: true})
+}
+
 func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	// Tear every tab's data plane down first so the clientless captures stop and
 	// each subscriber's NextEvent returns io.EOF, then kill the underlying session.

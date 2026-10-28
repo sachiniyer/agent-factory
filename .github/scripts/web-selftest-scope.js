@@ -92,6 +92,30 @@ function scopePerf(changedPaths) {
   return { run: matched.length > 0, matched };
 }
 
+// The surface the TUI driver selftest measures (#4000): the Bubble Tea app, its
+// widgets and key bindings, the tmux integration it drives, and the driver and
+// container harness itself. A footer copy change in ui/** broke it on master
+// once (#5549 -> #5643); on a PR touching these paths it runs before merge.
+// Exact paths and `dir/**` only — scripts/tui-driver*.sh is the two files it names.
+const TUI_PATHS = [
+  "ui/**",
+  "app/**",
+  "keys/**",
+  "session/tmux/**",
+  "scripts/tui-driver.sh",
+  "scripts/tui-driver-selftest.sh",
+  "scripts/testbox.sh",
+  "scripts/container/**",
+  ".github/workflows/tui-driver-selftest.yml",
+];
+
+function scopeTui(changedPaths) {
+  const matched = changedPaths.filter((path) =>
+    TUI_PATHS.some((pattern) => matchesPattern(pattern, path)),
+  );
+  return { run: matched.length > 0, matched };
+}
+
 // A deliberately tiny subset of GitHub's `paths:` globbing, matching what the
 // trigger filter does for the three shapes actually used:
 //
@@ -136,9 +160,11 @@ function scopeWebSelftest(changedPaths) {
 if (require.main === module) {
   const fs = require("node:fs");
   const file = process.argv[2];
-  const perf = process.argv[3] === "perf";
-  const output = perf ? "perf_run" : "run";
-  const label = perf ? "perf-scope" : "web-selftest-scope";
+  const mode = process.argv[3];
+  const perf = mode === "perf";
+  const tui = mode === "tui";
+  const output = perf ? "perf_run" : tui ? "tui_run" : "run";
+  const label = perf ? "perf-scope" : tui ? "tui-scope" : "web-selftest-scope";
   let changed;
   try {
     changed = fs.readFileSync(file, "utf8").split("\n");
@@ -148,7 +174,7 @@ if (require.main === module) {
     process.exit(0);
   }
   const paths = changed.map((line) => line.trim()).filter((line) => line.length > 0);
-  const { run, matched } = (perf ? scopePerf : scopeWebSelftest)(paths);
+  const { run, matched } = (perf ? scopePerf : tui ? scopeTui : scopeWebSelftest)(paths);
   if (run) {
     process.stderr.write(
       `${label}: ${matched.length} of ${paths.length} changed path(s) are in scope, e.g.\n` +
@@ -165,4 +191,4 @@ if (require.main === module) {
   process.stdout.write(`${output}=${run}\n`);
 }
 
-module.exports = { SELFTEST_PATHS, PERF_PATHS, scopeWebSelftest, scopePerf, matchesPattern };
+module.exports = { SELFTEST_PATHS, PERF_PATHS, TUI_PATHS, scopeWebSelftest, scopePerf, scopeTui, matchesPattern };

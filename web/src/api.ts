@@ -25,7 +25,7 @@
 // a stored token (see shouldForgetToken) — a rotated token re-prompts once instead
 // of wedging the app.
 
-import type { BackendCatalog } from "./backends.js";
+import { type BackendCatalog, hostFromChoiceValue } from "./backends.js";
 import type { ProgramCatalog } from "./programs.js";
 import type {
   OnCompleteOption,
@@ -34,6 +34,7 @@ import type {
   ConfigResponse,
   ConfigSetResponse,
   ExplainConfigResponse,
+  QuotaReportResponse,
   RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
@@ -449,7 +450,13 @@ export async function createSession(input: CreateSessionInput, token: string): P
   // default that `af sessions create` (with no --backend) honours. Absent is the
   // only way to mean "let the repo decide" (#1933).
   const backend = (input.backend ?? "").trim();
-  if (backend !== "") {
+  const host = hostFromChoiceValue(backend);
+  if (host !== "") {
+    // A listed-host row of the same <select> (#5571 W6.3): the pick is `host`, and
+    // NO backend is sent — a host IS the ssh placement, and the daemon refuses a
+    // host paired with any other backend.
+    body.host = host;
+  } else if (backend !== "") {
     body.backend = backend;
   }
   // `account` is sent ONLY when the user picked one, for the same reason: absent is
@@ -1257,7 +1264,13 @@ export async function updateTask(task: TaskMutationRef, update: TaskUpdate, toke
  *  DISPLAYED record and pins its project binding (#3230). */
 export async function triggerTask(task: TaskMutationRef, token: string): Promise<void> {
   requireTaskID(task.id, "trigger a task");
-  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
+  const result = await af<{ warning?: string }>("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
+  if (result.warning) {
+    // The run reached a committed outcome — e.g. it auto-created its target
+    // session but could not confirm the start. Surface it through the shared
+    // mutation-committed path like every sibling mutation, not as plain success.
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 
 /** Removes a task (mirrors `af tasks remove`). Refuses a task with no stable
@@ -1391,6 +1404,15 @@ export async function listAccounts(token: string, repoPath = ""): Promise<Accoun
   // targets by the agent the resolved command launches, and dropping the map
   // here would silently return them to enum semantics (#4430 review round 5).
   return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
+}
+
+/** Reads the daemon's per-agent usage/quota report (#2983): the same
+ *  records→quota.Build read `af quota` makes, with the words rendered
+ *  server-side — so this surface shows exactly what the CLI prints rather than
+ *  re-deriving vocabulary from fields. */
+export async function quotaReport(token: string): Promise<QuotaReportResponse> {
+  const resp = await af<QuotaReportResponse>("QuotaReport", {}, token);
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
 }
 
 /** Creates an account's credential directory without logging in. Idempotent.
