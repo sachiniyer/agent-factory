@@ -80,17 +80,18 @@ func TestProbeRemotePlatformParsesAndRefuses(t *testing.T) {
 
 func TestRemoteBinaryNameSanitizesTheVersion(t *testing.T) {
 	plat := remotePlatform{goos: "linux", goarch: "arm64"}
+	const sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	for version, want := range map[string]string{
-		"1.0.328":        "af-1.0.328-linux-arm64",
-		"v1.0.328":       "af-v1.0.328-linux-arm64",
-		"":               "af-unknown-linux-arm64",
-		"1.0.328-beta.1": "af-1.0.328-beta.1-linux-arm64",
+		"1.0.328":        "af-1.0.328-linux-arm64-0123456789abcdef",
+		"v1.0.328":       "af-v1.0.328-linux-arm64-0123456789abcdef",
+		"":               "af-unknown-linux-arm64-0123456789abcdef",
+		"1.0.328-beta.1": "af-1.0.328-beta.1-linux-arm64-0123456789abcdef",
 		// A version must never inject path or shell syntax into the remote
 		// filename.
-		"a/b/../../c":      "af-a_b_.._.._c-linux-arm64",
-		"semi;colon$(x)`y": "af-semi_colon__x__y-linux-arm64",
+		"a/b/../../c":      "af-a_b_.._.._c-linux-arm64-0123456789abcdef",
+		"semi;colon$(x)`y": "af-semi_colon__x__y-linux-arm64-0123456789abcdef",
 	} {
-		got := remoteBinaryName(version, plat)
+		got := remoteBinaryName(version, plat, sha)
 		assert.Equal(t, want, got, "version %q", version)
 		assert.NotContains(t, got, "/")
 		assert.NotContains(t, got, `"`)
@@ -222,7 +223,7 @@ func TestInstallRemoteBinaryCacheHitSkipsTheStream(t *testing.T) {
 		remotePlatform{goos: "linux", goarch: "amd64"},
 		remoteBinaryCandidate{path: p.afBin, label: "the daemon's own binary"})
 	require.NoError(t, err)
-	assert.Equal(t, `"$HOME/.af-bin/af-unknown-linux-amd64"`, got)
+	assert.Equal(t, `"$HOME/.af-bin/af-unknown-linux-amd64-`+sha[:16]+`"`, got)
 }
 
 func TestInstallRemoteBinaryRejectsACorruptedCopy(t *testing.T) {
@@ -421,4 +422,80 @@ func binaryStageReplies(t *testing.T, local string) func(script string) ([]byte,
 		}
 		return nil, false
 	}
+}
+
+// #5876: two candidates for one version and platform must not share a cache
+// path, or the second install rewrites the binary the first one's sessions
+// link to.
+func TestRemoteBinaryCacheIsContentAddressed(t *testing.T) {
+	t.Cleanup(func() { SetDaemonVersion("") })
+	SetDaemonVersion("1.0.328")
+	plat := remotePlatform{goos: "linux", goarch: "amd64"}
+	dir := t.TempDir()
+	paths := map[string]string{}
+	for name, content := range map[string]string{"own": "daemon build", "release": "release build"} {
+		local := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(local, []byte(content), 0o755))
+		sha, err := sha256File(local)
+		require.NoError(t, err)
+		p := &sandboxProvisioner{afBin: local}
+		var uploaded string
+		p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+			if strings.Contains(script, "sha256sum") || strings.Contains(script, "shasum") {
+				if uploaded == "" {
+					return nil, nil
+				}
+				return []byte(sha + "\n"), nil
+			}
+			uploaded = script
+			return nil, nil
+		}
+		w := &sandboxWorkspace{shell: p, SessionDir: "$HOME/.af-sessions/sess"}
+		got, err := w.installRemoteBinary(sshProvisionStepTimeout, plat, remoteBinaryCandidate{path: local, label: name})
+		require.NoError(t, err)
+		assert.Contains(t, uploaded, "mv \"$tmp\" "+got, "the upload publishes exactly the content-addressed path")
+		paths[name] = got
+	}
+	assert.NotEqual(t, paths["own"], paths["release"], "different bytes must never share a cache path")
+}
+
+// #5875: an explicit sandbox.binary is honoured on a host whose platform af
+// publishes no build for; the probe only gates af's own selection.
+func TestStageRemoteBinaryOverrideSurvivesAnUnpublishedPlatform(t *testing.T) {
+	t.Cleanup(func() { SetDaemonVersion("") })
+	SetDaemonVersion("1.0.328")
+	local := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(local, []byte("x"), 0o755))
+	sha, err := sha256File(local)
+	require.NoError(t, err)
+
+	run := func(override string) (staged bool, err error) {
+		p := &sandboxProvisioner{afBin: local, sshCmd: "ssh", sandboxBinary: override}
+		p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+			switch {
+			case strings.Contains(script, "uname -s"):
+				return []byte("FreeBSD\namd64\n"), nil
+			case strings.Contains(script, "sha256sum") || strings.Contains(script, "shasum"):
+				return []byte(sha + "\n"), nil
+			case strings.Contains(script, "ln -sfn"):
+				staged = true
+				return nil, nil
+			case strings.HasSuffix(strings.TrimSpace(script), " version"):
+				return []byte("agent-factory version 1.0.328\n"), nil
+			}
+			return nil, fmt.Errorf("unexpected remote step: %s", script)
+		}
+		w := &sandboxWorkspace{shell: p, SessionDir: "$HOME/.af-sessions/sess"}
+		return staged, p.stageRemoteBinary(w)
+	}
+	staged, err := run(local)
+	require.NoError(t, err)
+	assert.True(t, staged)
+
+	// Control: with no override af must pick the binary itself, and for a
+	// platform it publishes nothing for that is still a refusal.
+	staged, err = run("")
+	require.Error(t, err)
+	assert.False(t, staged)
+	assert.Contains(t, err.Error(), "names no platform")
 }

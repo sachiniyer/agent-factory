@@ -323,6 +323,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("af agent-server: %w", rerr)
 	}
 	if loginPATH != "" {
+		// The session directory holding the staged af keeps PATH precedence
+		// over whatever the login profile put first (#5877).
+		loginPATH = session.PinPATHDir(loginPATH, session.SessionBinDir(os.Args[0]))
 		if err := os.Setenv("PATH", loginPATH); err != nil {
 			log.WarningLog.Printf("agent-server: could not adopt login-shell PATH for the agent pane: %v", err)
 		}
