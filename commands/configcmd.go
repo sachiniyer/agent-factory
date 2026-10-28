@@ -137,6 +137,7 @@ var globalConfigReadOrder = []string{
 	"on_archive_command",
 	"move_cmd",
 	"worktree_root",
+	"projects_root",
 	"detach_keys",
 	"update_channel",
 	"upgrade_clear_unverifiable_artifacts",
@@ -536,6 +537,7 @@ Settable keys:
   branch_prefix              string
   on_archive_command         shell command run before a local worktree moves into the archive, or "" to disable
   worktree_root              subdirectory | sibling
+  projects_root              absolute path on the daemon host where af projects add <git-url> clones (default <af home>/projects)
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH

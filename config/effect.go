@@ -70,6 +70,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"on_archive_command":             EffectAppliedLive,
 	"move_cmd":                       EffectAppliedLive,
 	"worktree_root":                  EffectAppliedLive,
+	"projects_root":                  EffectAppliedLive,
 	"vscode_server_binary":           EffectAppliedLive,
 	"daemon_poll_interval":           EffectAppliedLive,
 	"log_max_size_mb":                EffectAppliedLive,

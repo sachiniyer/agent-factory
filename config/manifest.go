@@ -351,6 +351,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "projects_root",
+		Type:       "string",
+		Default:    `""`,
+		Purpose:    "Directory on the daemon host where `af projects add <git-url>` clones repositories · empty means <af home>/projects · global-only: the daemon creates it and runs git there for any caller, so a repository must not choose where.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "worktree_root",
 		Type:       "string",
 		Default:    WorktreeRootSibling,

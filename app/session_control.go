@@ -284,6 +284,16 @@ var registerProjectThroughDaemon = func(path string) error {
 	})
 }
 
+// registerProjectURLThroughDaemon is the add-project verb for a git URL (W9.10):
+// the daemon clones it on its own host and registers the checkout. A package var
+// for the same reason as registerProjectThroughDaemon.
+var registerProjectURLThroughDaemon = func(url string) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
+		_, e := c.RegisterProjectURL(url)
+		return e
+	})
+}
+
 // rebindProjectThroughDaemon routes the TUI's rebind-project verb — the picker's
 // `b` — through the daemon (the single writer): config.RebindProject moves the
 // registration's stable id to the replacement checkout, refusing a path another

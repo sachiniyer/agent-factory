@@ -917,6 +917,7 @@ Settable keys:
   branch_prefix              string
   on_archive_command         shell command run before a local worktree moves into the archive, or "" to disable
   worktree_root              subdirectory | sibling
+  projects_root              absolute path on the daemon host where af projects add <git-url> clones (default <af home>/projects)
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
@@ -1490,10 +1491,17 @@ With --daemon-url (or AF_DAEMON_URL) the registration goes to that daemon and th
 path is a path ON ITS HOST, sent as typed: absolute or starting with ~, never
 relative.
 
+Instead of a path, give a git URL (https://host/owner/repo, ssh://host/owner/repo
+or git@host:owner/repo) and the DAEMON clones it on its own host, with its own
+credentials (ssh keys, credential helper), under its projects_root (default
+<af home>/projects), then registers it. The URL is validated by the daemon: file://,
+local paths, option-like values and URLs with an embedded password are refused.
+Re-adding the same URL returns the existing project.
+
 'register' is a deprecated alias for 'add'.
 
 ```
-af projects add <path>
+af projects add <path-or-git-url>
 ```
 
 **Aliases:** `register`

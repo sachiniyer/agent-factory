@@ -510,6 +510,25 @@
       "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); all three surfaces route through it — `af projects add` (register is a deprecated alias) over the gob control socket, the TUI's picker '+ Add project' via apiclient (registerProjectThroughDaemon), and the web switcher's '+ Add project' via af() — so the checkout is resolved on the daemon's filesystem and the single writer (#960) owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Parity now that the TUI add writes the durable registry instead of the legacy in-process root_agents entry, and all three switchers union the registry into their project lists (project.list)."
     },
     {
+      "id": "project.add.url",
+      "title": "Register a project by git URL: the daemon clones it under projects_root",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/switch_project.go handleAddProject (a git URL) → registerProjectURLThroughDaemon (apiclient RegisterProjectURL)"
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/projects.go newProjectsAddCmd (a git URL argument) → daemon.RegisterProjectRequest.URL"
+      },
+      "verdict": "real-gap",
+      "issue": "#5571",
+      "notes": "W9.10. The daemon clones the URL on ITS host with ITS credentials under the global projects_root and registers the checkout; the URL is validated there (https/ssh/scp-like only; file://, paths, option-like values and embedded passwords refused). The CLI and the TUI add-project prompt accept a URL; the web add-project modal still takes only a daemon-host path. When the modal learns to send `url`, flip the web cell to yes and delete the web_rpcs field_coverage gap for RegisterProject.url."
+    },
+    {
       "id": "project.browse",
       "title": "Browse the daemon host's directories to find a repo to add",
       "tui": {
@@ -2699,6 +2718,11 @@
       "PruneSessionsRequest": {}
     },
     "web_rpcs": {
+      "RegisterProject": {
+        "url": {
+          "gap": "project.add.url"
+        }
+      },
       "ListAccounts": {
         "agent": {
           "ok": "The web section lists EVERY agent's accounts at once — it renders one group per agent and a register form under each — so it never narrows the read. The filter exists for `af accounts list <agent>`, where a caller asked for one agent; a UI that sent it would have to decide which agent the operator meant before showing them the list they came for."
