@@ -49,8 +49,27 @@ func (i *Instance) PendingTabCleanup() []TabCleanupData {
 // A zero retired count means no handle was retired and therefore nothing needs
 // persisting, so the caller can skip the write entirely.
 func (i *Instance) RetryPendingTabCleanup() (retired, remaining int) {
+	retired, remaining, _ = i.retryPendingTabCleanup(false)
+	return retired, remaining
+}
+
+// RetryPendingTabCleanupAndWait is RetryPendingTabCleanup on the waiting
+// teardown path: each leftover session's pane process tree must be observed
+// exited before its handle retires. The rebuild teardown uses it because a
+// replacement spawned over Close's async reaper can launch while a survivor
+// is still writing the checkout it just vacated (#5371 review). anyBlind
+// aggregates the closes whose "session already gone" answer could not prove
+// nothing survived it — the caller owes the worktree an occupancy check
+// before it may believe the teardown is complete.
+func (i *Instance) RetryPendingTabCleanupAndWait() (retired, remaining int, anyBlind bool) {
+	return i.retryPendingTabCleanup(true)
+}
+
+func (i *Instance) retryPendingTabCleanup(wait bool) (retired, remaining int, anyBlind bool) {
 	for _, handle := range i.PendingTabCleanup() {
-		if err := killTabCleanupSession(handle); err != nil {
+		blind, err := killTabCleanupSession(handle, wait)
+		anyBlind = anyBlind || blind
+		if err != nil {
 			log.WarningLog.Printf(
 				"session %q: tab cleanup for tmux session %q is still unconfirmed and will be retried on the next daemon start: %v",
 				i.Title, handle.TmuxName, err)
@@ -64,7 +83,7 @@ func (i *Instance) RetryPendingTabCleanup() (retired, remaining int) {
 		log.InfoLog.Printf("session %q: reaped the leftover tmux session %q of a closed tab", i.Title, handle.TmuxName)
 		retired++
 	}
-	return retired, remaining
+	return retired, remaining, anyBlind
 }
 
 // killTabCleanupSession tears down one leftover session by its EXACT persisted
@@ -75,16 +94,21 @@ func (i *Instance) RetryPendingTabCleanup() (retired, remaining int) {
 // It goes through the same package var restore does so tests can stay hermetic;
 // production builds a real tmux session. Pane state is ignored for the reason
 // closeRemovedTab ignores it: reaping one tab's session touches no worktree, so
-// nothing destructive follows an unknown.
-func killTabCleanupSession(handle TabCleanupData) error {
+// nothing destructive follows an unknown. On the waiting path the blindness
+// verdict IS reported — a conclusive-but-blind close cannot prove nothing the
+// vanished session spawned survived, and the rebuild teardown aggregates that
+// fact into its occupancy gate (#5371 review).
+func killTabCleanupSession(handle TabCleanupData, wait bool) (blind bool, err error) {
 	if handle.TmuxName == "" {
-		return fmt.Errorf("tab cleanup handle has no tmux session name")
+		return false, fmt.Errorf("tab cleanup handle has no tmux session name")
 	}
 	// The program is irrelevant to a kill and this session is never started from
 	// here, so an empty one keeps the handle honest about carrying no command.
 	ts := restoreTmuxSession(handle.TmuxName, "")
-	if _, err := ts.Close(); err != nil {
-		return err
+	if wait {
+		_, blind, err := ts.CloseAndWaitForPaneExitReportingBlindness()
+		return blind, err
 	}
-	return nil
+	_, err = ts.Close()
+	return false, err
 }

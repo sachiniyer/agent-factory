@@ -282,8 +282,8 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if idx <= 0 {
 		return m, m.handleNotice(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
 	}
-	if !inst.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("this session's tab list is fixed by its runtime and can't be edited"))
+	if !inst.TabRosterMutable() {
+		return m, m.handleNotice(fmt.Errorf("cannot close tabs on archived session %q; restore it first (af sessions restore)", inst.Title))
 	}
 	tabs := inst.GetTabs()
 	if idx >= len(tabs) {
@@ -307,7 +307,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	}
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
 		current := m.resolveSessionActionTarget(target)
-		if current == nil || !current.Capabilities().TabManagement {
+		if current == nil || !current.TabRosterMutable() {
 			return m.handleNotice(fmt.Errorf("Tab %q is no longer available to delete", tabLabel))
 		}
 		if current.HasInFlightOp() {
@@ -625,9 +625,6 @@ func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
 		if cur := m.sidebar.GetSelectedInstance(); cur != nil && cur.IsArchived() {
 			return m, m.handleNotice(fmt.Errorf("cannot reorder tabs on archived session %q; restore it first (af sessions restore)", cur.Title))
 		}
-	}
-	if !inst.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("only local sessions support tab moves — this session's workspace runs off-box (docker/ssh/remote), so its tab order belongs to the runtime"))
 	}
 	if inst.IsArchived() {
 		return m, m.handleNotice(fmt.Errorf("cannot reorder tabs on archived session %q; restore it first (af sessions restore)", inst.Title))

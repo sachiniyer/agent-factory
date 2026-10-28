@@ -61,3 +61,27 @@ func unlockWorktreeAdmission(lock *sync.Mutex) {
 		lock.Unlock()
 	}
 }
+
+// rebuildTeardownNotify returns the synchronous durable-checkpoint callback
+// every respawn entry point installs before Recover can arm or discharge the
+// rebuild-teardown obligation. It deliberately bypasses persistInstanceErr's
+// repoStartLock: every entry point that reaches the notify holds this repo's
+// worktree-admission lock, while CreateSession takes repoStartLock BEFORE
+// waiting on that admission — the reverse order here closes an ABBA cycle,
+// with recovery blocked on the start lock (unbounded) while holding the
+// admission create needs, so the create's bounded wait fails it ~opLockTimeout
+// later and stalls the poll's own recovery lane (#5371 review).
+//
+// persistInstanceData is safe here for the same reason the lock contract
+// names it for callers under m.mu: it never re-enters m.mu or repoStartLock
+// and takes only the instances.json file lock, which is what actually
+// serializes writers of the row. No stale whole-row snapshot can clobber the
+// flag either — the notify fires only under the recover/respawn op fence
+// (OpRespawning/OpRestoring), the op axis already excludes the poll's
+// whole-row persist (the data.InFlightOp gate in settleInstancePoll), and
+// every mutation writer for the row is action-gated while the op is up.
+func (m *Manager) rebuildTeardownNotify(repoID string) func(*session.Instance) error {
+	return func(i *session.Instance) error {
+		return persistInstanceData(repoID, i.ToInstanceData())
+	}
+}

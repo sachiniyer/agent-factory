@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -142,10 +141,12 @@ func TestPreview_InvalidOrdinalAndStaleIDReturnErrors(t *testing.T) {
 	require.ErrorIs(t, err, ErrTabGone, "a closed stable id must be refused")
 }
 
-// TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture covers the remote-runtime
-// compatibility bridge. Its private wire is ordinal-shaped, so the daemon must
-// retain the roster read lock from ID resolution through the bounded capture.
-func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
+// TestPreviewByIDAsOrdinalDoesNotHoldRosterAcrossCapture covers the remote
+// compatibility bridge. Its private wire is ordinal-shaped, so a capture that
+// raced a close must be discarded and retried against the tab's new ordinal —
+// but the roster lock must NOT be held through the capture, or a wedged host
+// stalls every roster writer (W4.1).
+func TestPreviewByIDAsOrdinalDoesNotHoldRosterAcrossCapture(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
@@ -155,21 +156,18 @@ func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
 	b, err := inst.AddProcessTab("b", "b")
 	require.NoError(t, err)
 
-	closeDone := make(chan error, 1)
+	var seen []int
 	content, err := inst.previewByIDAsOrdinal(b.ID, func(idx int) (string, error) {
-		require.Equal(t, 2, idx)
-		go func() { closeDone <- inst.CloseTabByID(a.ID) }()
-		select {
-		case err := <-closeDone:
-			t.Fatalf("tab close completed during the capture critical section: %v", err)
-		case <-time.After(25 * time.Millisecond):
+		seen = append(seen, idx)
+		if len(seen) == 1 {
+			// A writer completes while the capture is in flight.
+			require.NoError(t, inst.CloseTabByID(a.ID))
 		}
 		return "remote-b", nil
 	})
 	require.NoError(t, err)
 	require.Equal(t, "remote-b", content)
-	require.NoError(t, <-closeDone)
-	requireIndex(t, inst, b.ID, 1)
+	require.Equal(t, []int{2, 1}, seen, "the raced capture is discarded and retried at the new ordinal")
 }
 
 // #3169 review: a producer that does not answer the combined capture shape must

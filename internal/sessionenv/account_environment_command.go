@@ -480,7 +480,11 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 // another wrapper's tail — `echo env env … env x` — is scanned once, not once
 // per enclosing env word (#4966).
 func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	return wrapperTailHidesAccountAssignment(words[1:], isAccountCommandName(words[0], "strace"), names, memo)
+	strace := isAccountCommandName(words[0], "strace")
+	if strace && straceOptionsRefused(words[1:], names) {
+		return true
+	}
+	return wrapperTailHidesAccountAssignment(words[1:], strace, names, memo)
 }
 
 // wrapperTailHidesAccountAssignment scans an unrecognized wrapper's tail from
@@ -519,6 +523,11 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		return 1, envCallMutatesAccountEnvironment(words[1:], names, true, memo)
 	}
 	literal, ok := literalShellWord(word)
+	if !ok && strace && stracePrefixMutates(word, names) {
+		// The option word itself is judged before the unprovable-word path
+		// below, which only reads the words AFTER it (#5033).
+		return 1, true
+	}
 	if !ok {
 		// An unprovable tail word can itself expand to `env` (or to a
 		// multiword `env NAME=value` after word splitting); judge the
@@ -541,7 +550,7 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 	}
 	if strace {
 		switch {
-		case literal == "-E" || literal == "--env":
+		case literal == "-E" || straceEnvLongName(literal):
 			// strace's env option takes var[=val] as a separate word and
 			// injects or REMOVES the variable in the traced child's
 			// environment — the same mutation the env arm refuses, in
@@ -552,8 +561,27 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 			}
 			value, ok := literalShellWord(words[1])
 			return 2, !ok || accountEnvironmentOperandDenied(value, names)
-		case strings.HasPrefix(literal, "-E"):
-			return 1, accountEnvironmentOperandDenied(literal[2:], names)
+		case strings.HasPrefix(literal, "--") && strings.Contains(literal, "="):
+			name, operand, _ := strings.Cut(literal, "=")
+			if straceEnvLongName(name) {
+				return 1, accountEnvironmentOperandDenied(operand, names)
+			}
+		case !strings.HasPrefix(literal, "--"):
+			// A short-option cluster reaches -E after its flags
+			// (`-fECODEX_HOME=/o`), but an option that takes an operand
+			// consumes the REST of the cluster (`-oECODEX_HOME=x` is -o with
+			// that file name), so read it with strace's real option table.
+			if operand, isEnv := straceClusterEnvOperand(literal[1:]); isEnv {
+				if operand != "" {
+					return 1, accountEnvironmentOperandDenied(operand, names)
+				}
+				// A trailing -E takes the NEXT word (`-fE CODEX_HOME=/o`).
+				if len(words) < 2 {
+					return 1, true
+				}
+				value, ok := literalShellWord(words[1])
+				return 2, !ok || accountEnvironmentOperandDenied(value, names)
+			}
 		}
 	}
 	// An unrecognized wrapper may expose options that mutate its
@@ -583,4 +611,62 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 // (see #5034) and the literal payloads the report names are closed here.
 func childTailBuriesMutation(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	return len(words) > 1 && laterLiteralChildSuffixMutates(words[1:], names, memo)
+}
+
+// stracePrefixMutates judges a strace option word that carries an expansion by
+// the literal text before its first non-literal part, where that text alone
+// decides: strace's -E/--env takes var[=val], so a literal NAME ahead of the
+// `=` refuses on its own whatever the value expands to (`-ECODEX_HOME=$V`
+// refuses, `-EPORT=$V` does not). Whether an unprovable NAME or option identity
+// refuses depends on a traced command following, which a single word cannot
+// see; straceOptionsRefused judges that over strace's option run.
+func stracePrefixMutates(word *syntax.Word, names map[string]struct{}) bool {
+	var prefix strings.Builder
+	for _, part := range word.Parts {
+		if !appendLiteralShellPart(&prefix, part) {
+			break
+		}
+	}
+	text := prefix.String()
+	if !strings.HasPrefix(text, "-") {
+		return false
+	}
+	var operand string
+	isEnv := false
+	if name, rest, found := strings.Cut(text, "="); found && straceEnvLongName(name) {
+		operand, isEnv = rest, true
+	}
+	if !isEnv && !strings.HasPrefix(text, "--") {
+		operand, isEnv = straceClusterEnvOperand(text[1:])
+	}
+	return isEnv && strings.Contains(operand, "=") && accountEnvironmentOperandDenied(operand, names)
+}
+
+// straceEnvLongName reports whether word is --env or an abbreviation of it:
+// strace parses long options with getopt_long, which accepts any unambiguous
+// prefix, so `--en=CODEX_HOME=/o` sets the variable under the installed
+// strace. Three or more characters are treated as --env (fail closed — `--e`
+// would be ambiguous to getopt, and refusing it costs nothing real).
+func straceEnvLongName(word string) bool {
+	return len(word) >= 3 && strings.HasPrefix("--env", word)
+}
+
+// straceClusterEnvOperand reads a short-option cluster (the word without its
+// leading dash) with strace's option table: flags that take no operand are
+// skipped, and the first option that takes one consumes the rest of the
+// cluster. It reports that operand only when that option is -E; any other
+// operand-taking option (-o, -p, -s, …) owns the rest, so `oECODEX_HOME=x` is
+// a file name. A letter the table cannot place ends the read without a verdict
+// — straceOptionsRefused refuses it where the word is a strace option.
+func straceClusterEnvOperand(cluster string) (operand string, isEnv bool) {
+	for i := 0; i < len(cluster); i++ {
+		switch {
+		case strings.IndexByte(straceShortFlags, cluster[i]) >= 0:
+		case strings.IndexByte(straceShortValueFlags, cluster[i]) >= 0:
+			return cluster[i+1:], cluster[i] == 'E'
+		default:
+			return "", false
+		}
+	}
+	return "", false
 }
