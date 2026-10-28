@@ -87,6 +87,14 @@ type PreviewResponse struct {
 	// session really did die mid-capture. Carrying the fact is the alternative to
 	// inferring it.
 	TabGone bool `json:"tab_gone,omitempty"`
+	// TabPaneGone also NARROWS Gone, for the third cause: the addressed tab
+	// RESOLVES (it is in the roster) but its own tmux session is gone — a process
+	// tab restored without a pane, or whose command exited (#4647). The session's
+	// agent tab is unaffected, so a client must not say the session stopped. It is
+	// never set for the agent tab (slot 0), whose runtime IS the session's: there a
+	// plain Gone is accurate. Gone is always set alongside it, so a client that
+	// only knows Gone behaves exactly as before.
+	TabPaneGone bool `json:"tab_pane_gone,omitempty"`
 	// LinesAbove / LinesAboveKnown carry how much scrollback sits ABOVE the captured
 	// region, so a visible-screen capture can say it was partial (#3169).
 	//
@@ -167,6 +175,7 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 		}
 		if errors.Is(err, tmux.ErrSessionGone) {
 			resp.Gone = true
+			resp.TabPaneGone = tab != 0
 			return nil
 		}
 		return err
