@@ -56,6 +56,12 @@ func TestLocateProgramExecutable(t *testing.T) {
 		"env $AGENT":         ErrProgramDynamic,
 		`env -u "$N" claude`: ErrProgramDynamic,
 		"env":                ErrProgramNotLiteral,
+		// An unquoted expansion field-splits into extra env operands (#5872).
+		`env "VAR="$X claude`:  ErrProgramDynamic,
+		`env VAR=$X claude`:    ErrProgramDynamic,
+		`env VAR=${X} claude`:  ErrProgramDynamic,
+		`env VAR=$(id) claude`: ErrProgramDynamic,
+		`env VAR=* claude`:     ErrProgramDynamic,
 	} {
 		_, err := LocateProgramExecutable(command)
 		assert.ErrorIs(t, err, want, command)

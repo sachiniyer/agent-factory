@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Archive without publishing (#5571 W8.5). The default archive of an ssh/sandbox
@@ -84,9 +86,10 @@ func (i *Instance) CanPreserveWorkspace() bool {
 // credential, and leaves the workspace on its host. The runtime cleanup identity
 // is kept, so killing the archived row later still reaps exactly what af made.
 //
-// A row with no live client (Lost, or unreachable and since re-dialled out) has
-// no agent af can still reach; it archives too, since the workspace is on the host
-// either way.
+// The archive records Archived only over a stop it has proven. A row with no live
+// client (a daemon restart, or a Lost row) is reattached first; when it cannot be
+// reached the archive is refused, because a missing client does not mean the
+// remote agent is gone.
 func (i *Instance) ArchiveSandboxPreserving() (ArchivedWorkspaceData, error) {
 	i.mu.RLock()
 	isSandbox := i.capabilitiesLocked().Workspace == WorkspaceRemote
@@ -100,16 +103,34 @@ func (i *Instance) ArchiveSandboxPreserving() (ArchivedWorkspaceData, error) {
 	if dir == "" {
 		return ArchivedWorkspaceData{}, fmt.Errorf("session %q has no preservable session directory: %w", i.Title, ErrPreserveUnsupported)
 	}
-	if hasClient {
-		stopper, ok := i.AgentServer().(WorkspaceStopper)
-		if !ok {
-			return ArchivedWorkspaceData{}, fmt.Errorf("session %q: %w", i.Title, ErrPreserveUnsupported)
-		}
-		if err := stopper.StopPreservingWorkspace(); err != nil {
-			return ArchivedWorkspaceData{}, fmt.Errorf("failed to stop session %q before archive: %w", i.Title, err)
+	if !hasClient {
+		// A missing client is not evidence the agent stopped: a daemon restart
+		// leaves the remote agent and its tabs running and rebuilds only the cleanup
+		// handle. Reconnect from the persisted runtime identity and stop it for real;
+		// if that cannot be done the archive is refused rather than recorded over a
+		// live agent (#5868).
+		if err := i.ReattachSandbox(); err != nil {
+			i.mu.RLock()
+			bound := i.remoteClient != nil
+			i.mu.RUnlock()
+			if !bound {
+				return ArchivedWorkspaceData{}, fmt.Errorf("session %q: cannot confirm its agent has stopped, because the daemon has no connection to it and reconnecting failed: %w; retry once the host is reachable, or kill the session to remove it", i.Title, err)
+			}
 		}
 	}
+	stopper, ok := i.AgentServer().(WorkspaceStopper)
+	if !ok {
+		return ArchivedWorkspaceData{}, fmt.Errorf("session %q: %w", i.Title, ErrPreserveUnsupported)
+	}
+	if err := stopper.StopPreservingWorkspace(); err != nil {
+		return ArchivedWorkspaceData{}, fmt.Errorf("failed to stop session %q before archive: %w", i.Title, err)
+	}
 	loc := ArchivedWorkspaceData{Host: host, Dir: dir}
+	// The agent is stopped, so nothing can refresh the synced account any more:
+	// write it back, then remove it from the host. The skipped teardown is what
+	// normally does this (the reap), and an archive that keeps the workspace must
+	// not keep the credentials with it (W8.5: "synced credentials are removed").
+	i.releaseSyncedAccount()
 	// The skipped teardown is what normally stops the ssh transport; without this
 	// each archived session would keep its ssh process, forwarded port and
 	// supervisor (re-dialling if the link drops) until the daemon exits.
@@ -144,23 +165,58 @@ func (i *Instance) RestoreRefusedForPreservedWorkspace() error {
 	return fmt.Errorf("session %q was archived without pushing: its work is preserved at %s, and restoring from a preserved workspace is not available yet (#5571 W8.6); the work is untouched, and you can push it from the host", i.Title, where)
 }
 
+// sandboxProvisioner is this session's provisioner, or nil for a backend with none.
+func (i *Instance) sandboxProvisioner() *sandboxProvisioner {
+	switch b := i.currentBackend().(type) {
+	case *sandboxBackend:
+		return b.provisioner
+	case *sshBackend:
+		return b.provisioner
+	}
+	return nil
+}
+
+// releaseSyncedAccount writes the session's synced account back to the registry
+// and removes it from the host (W7.3's teardownAccount), for a path that keeps the
+// workspace but must not keep the credentials. Best-effort and logged, exactly like
+// the reap path: a failed write-back never blocks the archive, and the reap of the
+// archived row later removes the session directory — credentials included — as the
+// backstop. A session with no synced account does nothing.
+func (i *Instance) releaseSyncedAccount() {
+	p := i.sandboxProvisioner()
+	if p == nil {
+		return
+	}
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if p.account == nil {
+		return
+	}
+	if err := p.account.teardownAccount(sshShortStepTimeout); err != nil {
+		log.WarningLog.Printf("archive of %q: removing the synced account from %q: %v", i.Title, p.sessionDir, err)
+	}
+}
+
 // stopRemoteTransport stops the session's ssh tunnel and its supervisor without
 // reaping anything on the host. The provisioner's cleanup identity is untouched,
 // so a later kill of the archived row still reaps the directory (stopTunnel is
 // idempotent, which reap relies on for retries).
 func (i *Instance) stopRemoteTransport() {
-	b := i.currentBackend()
-	var p *sandboxProvisioner
-	switch b := b.(type) {
-	case *sandboxBackend:
-		p = b.provisioner
-	case *sshBackend:
-		p = b.provisioner
-	}
+	p := i.sandboxProvisioner()
 	if p == nil {
 		return
 	}
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
 	p.stopTunnel()
+}
+
+// keepsPreservedWorkspaceHandle reports whether an archived row still owes the
+// reap of a workspace it left on its host: an unpushed preserve (#5571 W8.5). Such
+// a row keeps its runtime-cleanup identity in storage, so a kill after a daemon
+// restart removes exactly what af made instead of orphaning it (#5867). A pushed
+// archive reaped its sandbox, so it owes nothing.
+func (d InstanceData) keepsPreservedWorkspaceHandle() bool {
+	w := d.ArchivedWorkspace
+	return isSandboxBackendType(d.BackendType) && w != nil && !w.Pushed && w.Dir != ""
 }

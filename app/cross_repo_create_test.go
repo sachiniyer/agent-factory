@@ -393,16 +393,13 @@ func TestSaveContentPaneState_CrossRepoRetargetQueuesBindingNotice(t *testing.T)
 	require.Equal(t, stateTasks, h.state)
 	require.True(t, tp.IsEditing(),
 		"showTasksOverlay drops into the selected task's edit form when a task is seeded")
-	// Tab through Name -> Trigger -> TriggerValue -> Prompt -> Target -> OnComplete -> Path
-	// (six Tab presses: taskFocusName=0 .. taskFocusPath=6), then clear the path
-	// field, type B's root, and submit via Enter. Enter submits from any non-prompt
+	// Tab to the Path field by its identity (not a press count, which every new
+	// form field shifts), then clear the path field, type B's root, and submit via Enter. Enter submits from any non-prompt
 	// field, so the focus position does not need to land on Save to commit. The
 	// path field was seeded with repoA (the task's stored ProjectPath), so its
 	// existing length is len(repoA) — backspace once per rune to clear it.
 	press := func(k tea.KeyMsg) { _, _ = h.handleStateTasks(k) }
-	for i := 0; i < 6; i++ {
-		press(tea.KeyMsg{Type: tea.KeyTab})
-	}
+	tabToTaskField(t, h, "path")
 	require.True(t, tp.IsTextFieldFocused(),
 		"the focus must be on a text input (Path) after the tab walk from Name")
 	for range repoA {
@@ -491,9 +488,7 @@ func TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeOnCommittedWarning(t 
 		"showTasksOverlay drops into the selected task's edit form when a task is seeded")
 	// Tab to the Path field, clear it, and enter B's root to retarget the task.
 	press := func(k tea.KeyMsg) { _, _ = h.handleStateTasks(k) }
-	for i := 0; i < 6; i++ {
-		press(tea.KeyMsg{Type: tea.KeyTab})
-	}
+	tabToTaskField(t, h, "path")
 	require.True(t, tp.IsTextFieldFocused(),
 		"the focus must be on a text input (Path) after the tab walk from Name")
 	for range repoA {
@@ -585,9 +580,7 @@ func TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeWhenReloadFails(t *te
 	require.True(t, tp.IsEditing(),
 		"showTasksOverlay drops into the selected task's edit form when a task is seeded")
 	press := func(k tea.KeyMsg) { _, _ = h.handleStateTasks(k) }
-	for i := 0; i < 6; i++ {
-		press(tea.KeyMsg{Type: tea.KeyTab})
-	}
+	tabToTaskField(t, h, "path")
 	require.True(t, tp.IsTextFieldFocused(),
 		"the focus must be on a text input (Path) after the tab walk from Name")
 	for range repoA {
@@ -780,4 +773,15 @@ func TestHandleTaskCreate_CrossRepoTaskSurvivesSnapshotPoll(t *testing.T) {
 	// cross-repo task leak back into A's scope via string-prefix coincidence —
 	// repo identity, not path strings, drives the filter.
 	assert.NotEqual(t, filepath.Base(repoA), "cross-only")
+}
+
+// tabToTaskField presses Tab until the task form's focus is on the named field,
+// so the walk does not depend on how many fields precede it.
+func tabToTaskField(t *testing.T, h *home, field string) {
+	t.Helper()
+	tp := h.automations.TaskPane()
+	for i := 0; i < 32 && tp.FocusedField() != field; i++ {
+		_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	require.Equal(t, field, tp.FocusedField(), "tab walk must reach the %q field", field)
 }

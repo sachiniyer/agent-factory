@@ -154,6 +154,9 @@ func ValidateHosts(hosts map[string]HostConfig, defaultHost string) error {
 	return nil
 }
 
+// SortedHostNames is the host names in order.
+func SortedHostNames(hosts map[string]HostConfig) []string { return sortedHostNames(hosts) }
+
 func sortedHostNames(hosts map[string]HostConfig) []string {
 	names := make([]string, 0, len(hosts))
 	for name := range hosts {

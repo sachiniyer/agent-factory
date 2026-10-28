@@ -323,8 +323,20 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("af agent-server: %w", rerr)
 	}
 	if loginPATH != "" {
+		// The session directory holding the staged af keeps PATH precedence
+		// over whatever the login profile put first (#5877).
+		loginPATH = session.PinPATHDir(loginPATH, session.SessionBinDir(os.Args[0]))
 		if err := os.Setenv("PATH", loginPATH); err != nil {
 			log.WarningLog.Printf("agent-server: could not adopt login-shell PATH for the agent pane: %v", err)
+		}
+	}
+
+	// An account-scoped sandbox proves executable attribution BEFORE any pane can
+	// receive the scope: the resolved command must name an absolute executable, not
+	// a bare name a workspace-relative PATH entry could answer (#5571 W7.4).
+	if agent := os.Getenv(session.AccountScopeAgentEnv); agent != "" {
+		if err := session.RequireAttributedAccountProgram(resolvedProgram, agent); err != nil {
+			return fmt.Errorf("af agent-server: %w", err)
 		}
 	}
 
@@ -346,6 +358,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		// The daemon holds this session as a remote workspace and admits its tabs
 		// accordingly; the injected guidance must match (#5571 W3.3).
 		HostedRemotely: true,
+		// What /v1/health tells the daemon this server speaks; the guidance
+		// follows it rather than a static floor (#5878).
+		AdvertisedFeatures: agentServerWireFeatures,
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,
@@ -368,7 +383,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	if sdErr != nil {
 		return fmt.Errorf("agent-server: %w", sdErr)
 	}
-	if err := instance.InstallDurableRebuildTeardown(sessionDir); err != nil {
+	if err := instance.InstallDurableRebuildTeardown(sessionDir, session.RebuildTeardownKey(opts.RepoPath, opts.Title)); err != nil {
 		return fmt.Errorf("agent-server: %w", err)
 	}
 
@@ -473,6 +488,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
 	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
+	mux.HandleFunc("/v1/agent/workspace-facts", rpcHandler(hs.WorkspaceFacts))
 	mux.HandleFunc("/v1/agent/stop", rpcHandler(hs.StopPreserving))
 	// W7.1: stop the agent and start it again in this workspace, resuming the
 	// provider's conversation. Advertised as the "relaunch" feature.
@@ -587,8 +603,12 @@ func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKRespons
 	}
 	if codex && hs.inst != nil {
 		// Before the spawn, so the capture can tell the new rollout from old ones.
+		// Correlated against the directory the launch command actually runs the
+		// agent in (an `env -C DIR codex` moves it off the worktree), not the
+		// worktree; unscoped when that is not provable (#5861).
 		codexSnap = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(
-			codexHomeFor(hs.program, hs.inst.GetWorktreePath()), hs.inst.GetWorktreePath())
+			codexHomeFor(hs.program, hs.inst.GetWorktreePath()),
+			session.LaunchCaptureWorkingDir(hs.program, hs.inst.GetWorktreePath()))
 	}
 	if err := hs.as.Launch(req.FirstTimeSetup); err != nil {
 		return err
@@ -947,4 +967,26 @@ func (hs *headlessServer) eventsHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	serveEvents(hs.events, conn)
+}
+
+// WorkspaceFacts measures this server's workspace for the daemon's kill
+// confirmation (#5571 W8.2). Read-only: git status/rev-list/for-each-ref/reflog.
+func (hs *headlessServer) WorkspaceFacts(_ struct{}, resp *session.WorkspaceFacts) error {
+	if hs.inst == nil {
+		return fmt.Errorf("this agent-server has no workspace")
+	}
+	*resp = session.MeasureWorkspace(headlessWorkspaceDir(hs.inst))
+	return nil
+}
+
+// headlessWorkspaceDir is the directory the session's work lives in: the agent's
+// own linked worktree, which is what a kill destroys. inst.Path is the clone root
+// the worktree hangs off, and measuring it misses the checkout's uncommitted
+// changes and reports a deleted worktree as present. The root is the fallback for
+// an instance that has no worktree recorded.
+func headlessWorkspaceDir(inst *session.Instance) string {
+	if wt := inst.GetWorktreePath(); wt != "" {
+		return wt
+	}
+	return inst.Path
 }
