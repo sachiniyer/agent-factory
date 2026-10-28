@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/unixurl"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -386,7 +387,7 @@ func (w *sandboxWorkspace) callbackReverseForward() (string, string) {
 	if local == "" || !filepath.IsAbs(local) || strings.ContainsAny(local, ": \t\n") {
 		return fail("the daemon's sandbox endpoint socket path is unusable")
 	}
-	w.spec.CallbackURL = "unix://" + remote
+	w.spec.CallbackURL = unixurl.Build(remote)
 	return remote + ":" + local, ""
 }
 
