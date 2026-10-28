@@ -150,20 +150,6 @@ type sandboxProvisioner struct {
 	remoteAddr         string
 	agentServerVersion string
 
-	// The reattach half of the runtime identity (#5571 W1.1), recorded at
-	// provision so the backend's cleanup handle — and therefore the persisted
-	// row — carries everything reattach and reap need:
-	//
-	//	tokenRef           the opaque nonce the row stores; the daemon's
-	//	                   runtime-identity key derives the agent-server's
-	//	                   expected bearer token from it. Never the token.
-	//	remoteAddr         the agent-server's loopback address on the sandbox
-	//	                   (the banner's addr) — the -L forward's destination.
-	//	agentServerVersion the version the remote binary reported in its banner.
-	tokenRef           string
-	remoteAddr         string
-	agentServerVersion string
-
 	// tunnel is the currently published generation of the supervised ssh
 	// transport (#5571 W1.2): nil between a death and its re-dial, and after
 	// stopTunnel. forward/localAddr pin the -L contract — localAddr is the
