@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -193,8 +194,52 @@ func (w *sandboxWorkspace) cloneWorkspace(cloneTimeout, shortTimeout time.Durati
 	if branch := strings.TrimSpace(w.spec.RestoreBranch); branch != "" {
 		return w.fetchRestoreBranch(branch, cloneTimeout)
 	}
+	return w.seedFromBundle(cloneTimeout)
+}
+
+// seedFromBundle streams spec.SeedBundlePath into the session dir and fetches
+// spec.SeedRefs from it as local refs of the cloned workspace (W7.9). A no-op
+// when no bundle was given, so every ordinary create is unchanged.
+func (w *sandboxWorkspace) seedFromBundle(timeout time.Duration) error {
+	if w.spec.SeedBundlePath == "" {
+		return nil
+	}
+	if len(w.spec.SeedRefs) == 0 {
+		return fmt.Errorf("seeding the remote workspace: a bundle was given with no refs to fetch")
+	}
+	f, err := os.Open(w.spec.SeedBundlePath)
+	if err != nil {
+		return fmt.Errorf("seeding the remote workspace: %w", err)
+	}
+	defer f.Close()
+	dst := w.SeedBundlePath()
+	if out, err := w.shell.Run(timeout, "cat > "+shellQuote(dst), f, true); err != nil {
+		return fmt.Errorf("streaming the seed bundle to the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	args := make([]string, 0, len(w.spec.SeedRefs))
+	for _, ref := range w.spec.SeedRefs {
+		args = append(args, shellQuote(ref+":"+ref))
+	}
+	// git refuses to fetch into the branch a non-bare repo has checked out, and
+	// the clone has the origin's default branch checked out — the very branch a
+	// session working on it brings (#5685). Detach HEAD first: the clone was made
+	// a moment ago and is clean, so this moves nothing on disk, and the session's
+	// worktree is created later by the agent-server on its own branch. An unborn
+	// HEAD (empty origin) cannot be detached and has no checkout to protect, so
+	// --update-head-ok is the safe spelling there.
+	ws := shellQuote(w.WorkspacePath())
+	script := fmt.Sprintf(
+		"if git -C %[1]s rev-parse -q --verify HEAD >/dev/null; then git -C %[1]s checkout -q --detach && git -C %[1]s fetch %[2]s %[3]s; "+
+			"else git -C %[1]s fetch --update-head-ok %[2]s %[3]s; fi && rm -f %[2]s",
+		ws, shellQuote(dst), strings.Join(args, " "))
+	if out, err := w.shell.Run(timeout, script, nil, true); err != nil {
+		return fmt.Errorf("seeding the remote workspace from the move bundle failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
 	return nil
 }
+
+// SeedBundlePath is where the seed bundle is staged inside the session dir.
+func (w *sandboxWorkspace) SeedBundlePath() string { return w.SessionDir + "/seed.bundle" }
 
 func (w *sandboxWorkspace) fetchRestoreBranch(branch string, timeout time.Duration) error {
 	script := fmt.Sprintf("git -C %s fetch origin %s:%s",

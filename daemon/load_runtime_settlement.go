@@ -12,11 +12,26 @@ import (
 // loudly tracked metadata gap.
 func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []settleOwedEntry {
 	var owed []settleOwedEntry
+	// The loaded map is not yet installed — build the peer view for
+	// stampTaskRunInterrupted's newer-run guard from it directly (#4222).
+	peers := make([]*session.Instance, 0, len(instances))
+	for _, peer := range instances {
+		peers = append(peers, peer)
+	}
 	for key, instance := range instances {
 		if !instance.ConsumeLoadRuntimeReplacement() {
 			continue
 		}
 		repoID, _ := splitDaemonInstanceKey(key)
+		// A task run still in flight on a row whose load spawned a REPLACEMENT
+		// runtime ended with the process that owned its prompt: interrupt it —
+		// before the row persists — so the reboot cannot turn it into a
+		// completed run for on_complete (#4222). There is no ConfirmLive edge on
+		// this path, so the daemon drives the same end the restore carve-out
+		// performs in session/transition.go.
+		if instance.InterruptTaskRunIfRuntimeReplaced() {
+			stampTaskRunInterrupted(instance, peers)
+		}
 		if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
 			log.WarningLog.Printf("load-time runtime replacement for %q could not persist its timestamp and idle evidence; the daemon will retry: %v", instance.Title, err)
 			owed = append(owed, settleOwedEntry{repoID: repoID, key: key, instance: instance})

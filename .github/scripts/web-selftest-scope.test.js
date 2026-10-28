@@ -426,3 +426,15 @@ test("the visual gate diffs stills against committed goldens and cannot regenera
   assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", AF_UPDATE_GOLDENS: "1" }).updateSnapshots, "changed",
     "update mode belongs to AF_UPDATE_GOLDENS runs a human reviews, and rewrites only goldens the gate rejects");
 });
+
+test("web-selftest.yml's standalone and called runs never share a concurrency group (#5660)", () => {
+  // In a called workflow github.workflow is the caller's name, so keying on it
+  // is what stops pr.yml's reusable call and the standalone master push run
+  // from cancelling each other on the same ref.
+  const yaml = readWorkflow("web-selftest.yml");
+  const group = /^ {2}group: (.+)$/m.exec(yaml.slice(yaml.indexOf("\nconcurrency:\n")))[1];
+  assert.match(group, /github\.workflow == 'Web selftest' && 'standalone' \|\| 'called'/);
+  assert.match(group, /github\.event_name == 'schedule' && '-nightly'/);
+  assert.match(group, /github\.event_name == 'workflow_dispatch' && '-dispatch'/);
+  assert.match(yaml, /^ {2}cancel-in-progress: true$/m);
+});

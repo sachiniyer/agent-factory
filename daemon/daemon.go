@@ -522,12 +522,16 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	}
 	// Upgrade candidates deliberately park before the orphan sweep. Preserve the
 	// pre-existing probation contract: restored state is readable while every
-	// mutation remains blocked by the lifecycle gate.
+	// mutation remains blocked by the lifecycle gate. A candidate parks whether
+	// or not it is still in probation: a supervisor release that raced the
+	// restore is applied by finishInstanceRestore itself (#5693), and a released
+	// candidate (DaemonPhaseHandoffPending) never arms its loops — the post-commit
+	// hand-off replaces it with a fresh daemon. Keying the park on probation would
+	// let that candidate fall through and start cron, watchers, and the update
+	// driver on a daemon that is about to be stopped.
 	if manager.lifecycle.snapshot().transactionID != "" {
 		manager.finishInstanceRestore()
-	}
-	if manager.lifecycle.isUpgradeProbation() {
-		log.InfoLog.Printf("instance restore complete; daemon is in upgrade probation")
+		log.InfoLog.Printf("instance restore complete; upgrade candidate parked (phase %s)", manager.lifecycle.snapshot().phase)
 		select {
 		case sig := <-sigChan:
 			log.InfoLog.Printf("received signal %s during upgrade probation; exiting", sig.String())

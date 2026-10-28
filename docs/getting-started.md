@@ -123,8 +123,9 @@ or `[::1]` instead of `[::]`, when browsing on this machine; keep the reported
 port. An empty global `network.listen_addr` disables the web listener; see
 [Web client](web.md) for configuration.
 
-The header switches between **Sessions**, **Tasks** and **Config**. Choose
-**Light · Dark · System** there for browser appearance; System follows your OS.
+The header switches between **Sessions**, **Tasks** and **Config**. Browser
+**Theme** (Light · Dark · System) is in **Config**'s **This browser** section;
+System follows your OS.
 The TUI has its own **appearance** setting in Config (`,`), applied at the next
 launch; its System choice follows the terminal background.
 

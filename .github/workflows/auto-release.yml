@@ -179,15 +179,20 @@ jobs:
     # there — do exactly that against the just-built artifact so a binary that
     # cannot execute on a bare host fails here, not on a user's machine. Both
     # linux legs must be statically linked; only the native amd64 leg can also
-    # exec it for `version`.
+    # exec it for `version`, and that run must print the RELEASE version, not
+    # merely exit 0 — an unstamped build prints "dev" and exits 0 (#5666). The
+    # arm64 leg is this same step on another GOARCH, so that it is stamped is
+    # pinned by scripts/release_version_stamp_test.go rather than executed.
     - name: Smoke-test the static sandbox-host artifact
       if: matrix.goos == 'linux'
+      env:
+        VERSION: ${{ needs.check.outputs.new_version }}
       run: |
         tmp="$(mktemp -d)"
         tar xzf "agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}-static.tar.gz" -C "$tmp"
         file "$tmp/agent-factory" | grep -q "statically linked"
         if [ "${{ matrix.goarch }}" = amd64 ]; then
-          "$tmp/agent-factory" version
+          .github/scripts/assert-binary-version.sh "$tmp/agent-factory" "$VERSION"
         fi
 
     - name: Upload build artifact

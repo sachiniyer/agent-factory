@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,11 +13,12 @@ import (
 // TestRecoverStaleWatcherStatusRetiresTerminalOnly pins the crashWindow
 // recovery rule (#5441): a watch that proves healthy for a full crash window
 // earns "started" back ONLY as a compare-and-swap over the exact store row
-// the watcher was armed with — status text AND every other persisted field.
-// A row rewritten inside the window — a fresh arming refusal, a delivered or
-// parked outcome, an unrelated field edit — is newer evidence and is never
-// clobbered, while a rewrite that changes nothing persisted cannot carry new
-// evidence either (Codex #5457). LastRunAt is never touched.
+// the watcher was armed with — status text AND the rest of its supervision
+// evidence. A row rewritten inside the window — a fresh arming refusal, a
+// delivered or parked outcome, a process-changing edit — is newer evidence and
+// is never clobbered, while a rewrite that changes nothing of that kind
+// cannot carry new evidence either (Codex #5457; delivery-only edits #5650).
+// LastRunAt is never touched.
 func TestRecoverStaleWatcherStatusRetiresTerminalOnly(t *testing.T) {
 	created := time.Date(2026, time.October, 22, 11, 0, 0, 0, time.UTC)
 	deliveredAt := created.Add(time.Hour)
@@ -118,4 +120,53 @@ func TestRecoverStaleWatcherStatusRejectsMissingAndInvalid(t *testing.T) {
 	recovered, err := RecoverStaleWatcherStatus("f9a0b1c3", armed, "started")
 	require.Error(t, err)
 	assert.False(t, recovered)
+}
+
+// TestRecoverStaleWatcherStatusSurvivesBenignEdit pins #5650: a delivery-only
+// edit (prompt) during the recovery window keeps the same watch process, so it
+// must not strand the healthy watcher on its stale terminal status; an edit
+// that changes the process (watch_cmd) or disables the task still refuses.
+func TestRecoverStaleWatcherStatusSurvivesBenignEdit(t *testing.T) {
+	cases := []struct {
+		name      string
+		edit      func(*Task)
+		recovered bool
+	}{
+		{"prompt edit", func(x *Task) { x.Prompt = "new prompt" }, true},
+		{"program edit", func(x *Task) { x.Program = "claude" }, true},
+		{"watch command edit", func(x *Task) { x.WatchCmd = "other.sh" }, false},
+		{"disabled", func(x *Task) { x.Enabled = false }, false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			require.NoError(t, AddTask(Task{ID: "f9a0b1c2", Name: "watcher", WatchCmd: "watch.sh", Prompt: "p", Enabled: true}))
+			_, err := UpdateTaskStatus("f9a0b1c2", nil, "stopped")
+			require.NoError(t, err)
+			armed, err := GetTask("f9a0b1c2")
+			require.NoError(t, err)
+
+			path, err := getTasksPathFn()
+			require.NoError(t, err)
+			require.NoError(t, config.WithFileLock(path, func() error {
+				tasks, err := loadTasksLocked(path)
+				require.NoError(t, err)
+				c.edit(&tasks[0])
+				_, err = writeTasks(tasks)
+				return err
+			}))
+
+			recovered, err := RecoverStaleWatcherStatus("f9a0b1c2", *armed, "started")
+			require.NoError(t, err)
+			assert.Equal(t, c.recovered, recovered)
+			got, err := GetTask("f9a0b1c2")
+			require.NoError(t, err)
+			if c.recovered {
+				assert.Equal(t, "started", got.LastRunStatus)
+			} else {
+				assert.Equal(t, "stopped", got.LastRunStatus)
+			}
+		})
+	}
 }

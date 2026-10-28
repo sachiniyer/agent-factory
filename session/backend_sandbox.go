@@ -97,11 +97,6 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
-		// Probe BEFORE the reap: removing the partial workspace frees space and
-		// could mask the very condition being measured (#5382 item 1).
-		if evidence := p.remoteCapacityEvidence(err); evidence != nil {
-			err = errors.Join(err, evidence)
-		}
 		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
 	return res, nil
@@ -132,6 +127,14 @@ type sandboxProvisioner struct {
 	// reported back in the startup banner (#5571 W2.1). Empty until the banner
 	// arrives; remoteAgentBackend falls back to the wire program without it.
 	hostProgram string
+	// launchAttempted records that provision() reached the startAgentServer
+	// call. An empty remotePID after that point is not the "nothing to signal"
+	// pre-launch case (a clone/binary-copy failure before startAgentServer, where
+	// no nohup'd server exists): the launch ran, and a wrapper that suppressed
+	// `echo $!` left no PID to reap by even though the agent-server may still be
+	// detached and running. reap() uses this to fail closed on an empty post-launch
+	// PID rather than `rm -rf`-ing the workspace of a possibly-running server.
+	launchAttempted bool
 
 	// The reattach half of the runtime identity (#5571 W1.1), recorded at
 	// provision so the backend's cleanup handle — and therefore the persisted
@@ -190,6 +193,11 @@ type sandboxProvisioner struct {
 
 func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	w := &sandboxWorkspace{shell: p, spec: p.spec, program: p.program}
+	// Before anything is created on the host: a missing tool refuses the create
+	// with its fix instead of failing a later step half-provisioned (#5571 W2.3).
+	if err := w.checkHostPrereqs(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxErr(err)
+	}
 	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
@@ -242,7 +250,13 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
+	// Reached only past the pre-launch steps (clone, binary copy, callback env),
+	// so a startAgentServer failure here is not the pre-launch empty-PID case: a
+	// nohup'd agent-server may have started even when the captured PID is empty or
+	// garbage. Set the flag before the call so the reap refuses on either.
+	p.launchAttempted = true
 	if err := w.startAgentServer(sshShortStepTimeout); err != nil {
+		p.remotePID = w.RemotePID
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	p.remotePID = w.RemotePID
@@ -374,8 +388,18 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 // buildRunCommand composes the child. Split out so the WaitDelay rule below is
 // exercised by a test against the real constructor rather than a restatement of
 // it.
+// remoteShScript wraps a provisioning or reap script as an explicit POSIX
+// `sh -c` invocation. ssh hands its command argument to the remote account's
+// LOGIN shell, so a bare script is parsed by fish or csh when that is what the
+// account uses — and every `&&`, `$(...)`, `$!` and `mktemp -d "$HOME/..."` in
+// these scripts is POSIX. The wrapper is a single-quoted word, which fish and
+// POSIX shells both read the same way (#5571 W2.9).
+func remoteShScript(script string) string {
+	return "sh -c " + shellQuote(script)
+}
+
 func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string, stdin io.Reader) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "sh", "-c", p.sshCmd+` "$@"`, "af-sandbox", script)
+	cmd := exec.CommandContext(ctx, "sh", "-c", p.sshCmd+` "$@"`, "af-sandbox", remoteShScript(script))
 	cmd.Stdin = stdin
 	// Its own process group, so the deadline tears down the whole tree rather
 	// than the `sh` alone. exec.CommandContext's default Cancel kills only the
@@ -554,6 +578,13 @@ func waitForSandboxTunnelWithin(label, localAddr string, timeout, poll time.Dura
 }
 
 func (p *sandboxProvisioner) reapProvisionFailure(provisionErr error) error {
+	// Probe BEFORE the reap: removing the partial workspace frees space and
+	// could mask the very condition being measured (#5382 item 1). Doing it here
+	// — the one failure path sandbox, ssh and hook provisioning all share —
+	// keeps the classification identical across them (#5686).
+	if evidence := p.remoteCapacityEvidence(provisionErr); evidence != nil {
+		provisionErr = errors.Join(provisionErr, evidence)
+	}
 	reapErr := p.reap()
 	if reapErr == nil {
 		return provisionErr
@@ -590,6 +621,26 @@ func (p *sandboxProvisioner) reap() error {
 	if p.sessionDir == "" {
 		p.reaped = true
 		return nil
+	}
+
+	if p.remotePID != "" && !positivePID(p.remotePID) {
+		reapErr := fmt.Errorf("%w: backend=%s: refusing to reap %q with invalid remote PID %q — the agent-server may still be running; inspect before retrying",
+			ErrWorkspaceStateUnknown, p.label(), p.sessionDir, p.remotePID)
+		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
+		return reapErr
+	}
+	// A launch that returned no PID at all is not the pre-launch empty-PID path
+	// (a clone or binary-copy failure, where no nohup'd server exists): the
+	// nohup ran, and a wrapper that suppressed `echo $!` left the agent-server
+	// detached with no PID to reap by. The empty-PID branch of reapScript would
+	// `rm -rf` the session dir without a kill and latch a clean reap, leaking the
+	// server. Refuse the same way an unverifiable non-empty PID does: no latch, no
+	// removal, the record is retained for retry/manual inspection.
+	if p.launchAttempted && p.remotePID == "" {
+		reapErr := fmt.Errorf("%w: backend=%s: refusing to reap %q after a launch returned no remote PID — the agent-server may still be running; inspect before retrying",
+			ErrWorkspaceStateUnknown, p.label(), p.sessionDir)
+		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
+		return reapErr
 	}
 
 	nonce, nonceErr := sandboxReapNonce()
