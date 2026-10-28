@@ -200,6 +200,12 @@ type sandboxProvisioner struct {
 	stopped   bool
 	stoppedCh chan struct{}
 
+	// runCtx, when set, parents every command Run starts, so cancelling it kills
+	// the ssh process group. nil means context.Background (a create, which must
+	// not be torn down by anything but its own timeout). Set only by an advisory
+	// probe (CheckHost), which a daemon shutdown has to be able to abandon.
+	runCtx context.Context
+
 	// runCommandFn is a per-instance seam so a test can drive the traps below
 	// without a real sshd. Production leaves it nil.
 	runCommandFn func(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error)
@@ -394,7 +400,11 @@ func (p *sandboxProvisioner) Run(timeout time.Duration, script string, stdin io.
 }
 
 func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	parent := p.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	cmd := p.buildRunCommand(ctx, script, stdin)

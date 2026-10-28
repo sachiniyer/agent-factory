@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -16,7 +17,7 @@ func stubProbe(t *testing.T, fn func(string) (session.HostCheck, error)) *[]stri
 	t.Helper()
 	prev := probeHostsFn
 	var called []string
-	probeHostsFn = func(name string, _ map[string]config.HostConfig, _ string, _ time.Duration) (session.HostCheck, error) {
+	probeHostsFn = func(_ context.Context, name string, _ map[string]config.HostConfig, _ string, _ time.Duration) (session.HostCheck, error) {
 		called = append(called, name)
 		return fn(name)
 	}
@@ -28,13 +29,13 @@ func TestProbeOne_ReportsTheProbeAndSkipsAnInFlightHost(t *testing.T) {
 	called := stubProbe(t, func(string) (session.HostCheck, error) {
 		return session.HostCheck{Reachable: true, Complete: true}, nil
 	})
-	r := probeOne("one-probe", nil, "")
+	r := probeOne(context.Background(), "one-probe", nil, "")
 	assert.True(t, r.Probed && r.Reachable)
 	assert.Equal(t, []string{"one-probe"}, *called)
 
 	require.True(t, daemonHostProbes.tryAcquire("busy-probe"))
 	defer daemonHostProbes.release("busy-probe")
-	r = probeOne("busy-probe", nil, "")
+	r = probeOne(context.Background(), "busy-probe", nil, "")
 	assert.False(t, r.Probed, "a second probe of a host mid-probe is skipped, not stacked")
 	assert.Len(t, *called, 1)
 }
@@ -43,7 +44,7 @@ func TestProbeOne_RefusalSurfacesAsErrorText(t *testing.T) {
 	stubProbe(t, func(string) (session.HostCheck, error) {
 		return session.HostCheck{}, errors.New("host \"x\" is not in the host list")
 	})
-	r := probeOne("x-refused", nil, "")
+	r := probeOne(context.Background(), "x-refused", nil, "")
 	assert.True(t, r.Probed)
 	assert.False(t, r.Reachable)
 	assert.Contains(t, r.Error, "not in the host list")
