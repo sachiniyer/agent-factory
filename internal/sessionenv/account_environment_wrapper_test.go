@@ -303,6 +303,24 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace -p 1234 codex", false},
 		{"strace -- codex", false},
 		{"strace -E PORT codex", false},
+		// A strace in command position of another strace, env, or a modeled
+		// wrapper is option-walked too, however deep (#5033 follow-up).
+		{"strace -f strace --en=CODEX_HOME=/other codex", true},
+		{"strace -f strace --bogus codex", true},
+		{"strace strace -fECODEX_HOME=/other codex", true},
+		{"env strace --en=CODEX_HOME=/other codex", true},
+		{"env A=1 strace --bogus codex", true},
+		{"strace env strace --en=CODEX_HOME=/other codex", true},
+		{"strace -f env A=1 strace --bogus codex", true},
+		{"strace env -i strace --bogus codex", true},
+		{"strace nice strace --bogus codex", true},
+		{"strace timeout 5 strace --bogus codex", true},
+		{"nohup strace -f strace --bogus codex", true},
+		{"strace strace strace --bogus codex", true},
+		{"strace -f strace -o x codex", false},
+		{"strace strace -f codex --model x", false},
+		{"env strace -o x codex", false},
+		{"strace env FOO=1 strace -f -o x codex", false},
 		// Control: the same expansions on a name af does not own, and the
 		// non-strace spelling, stay allowed.
 		{"strace -EPORT=$V codex", false},

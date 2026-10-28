@@ -27,6 +27,16 @@ import (
 // would have judged, never admit one the per-word scan refuses, because the
 // caller still runs that scan over every tail word.
 func straceOptionsRefused(words []*syntax.Word, names map[string]struct{}) bool {
+	return straceOptionRunRefused(words, names, true)
+}
+
+// straceOptionRunRefused is straceOptionsRefused with the leading-expansion rule
+// optional. A strace that sits in another wrapper's tail is behind a walk that
+// already judges a dynamic word there (the xargs differential oracle holds a
+// substituted marker and "$y" to one verdict), so the nested caller ends the run
+// at such a word instead of refusing it, and the option words before it are
+// still judged.
+func straceOptionRunRefused(words []*syntax.Word, names map[string]struct{}, refuseLeadingExpansion bool) bool {
 	// suspect records an option word that is not provably safe. It refuses only
 	// once a traced command follows: strace with options and no command runs
 	// nothing, so there is no child whose environment could be placed.
@@ -49,7 +59,7 @@ func straceOptionsRefused(words []*syntax.Word, names map[string]struct{}) bool 
 		if text == "" {
 			// A word that opens with an expansion is in option position and
 			// could expand to any option (or be the command itself).
-			return true
+			return refuseLeadingExpansion || suspect
 		}
 		if !strings.HasPrefix(text, "-") {
 			return suspect // the traced command starts here
