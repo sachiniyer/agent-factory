@@ -66,3 +66,32 @@ func TestToInstanceData_LostSandboxRowPublishesRoster(t *testing.T) {
 	require.Equal(t, TabKindAgent, d.Tabs[0].Kind)
 	require.Equal(t, "docs", d.Tabs[1].Name)
 }
+
+// A byte-identical id-less row cannot distinguish "unchanged" from close +
+// recreate under one name, so a delete confirmation armed before the snapshot
+// must refuse afterwards even though the roster looks identical.
+func TestReconcileTabsFromData_IdlessRowAdvancesGeneration(t *testing.T) {
+	inst, err := FromInstanceData(sandboxRowData(LiveReady))
+	require.NoError(t, err)
+	roster := []TabData{
+		{ID: "a1", Name: "agent", Kind: TabKindAgent},
+		{Name: "logs", Kind: TabKindProcess, Command: "tail -f x"},
+	}
+	_, err = inst.ReconcileTabsFromData(roster)
+	require.NoError(t, err)
+	armed := inst.TabRosterGeneration()
+
+	changed, err := inst.ReconcileTabsFromData(roster)
+	require.NoError(t, err)
+	require.False(t, changed, "pane-facing result stays unchanged")
+	require.Greater(t, inst.TabRosterGeneration(), armed)
+
+	// Control: an all-id roster does not churn the generation.
+	idd := []TabData{roster[0], {ID: "t1", Name: "logs", Kind: TabKindProcess, Command: "tail -f x"}}
+	_, err = inst.ReconcileTabsFromData(idd)
+	require.NoError(t, err)
+	g := inst.TabRosterGeneration()
+	_, err = inst.ReconcileTabsFromData(idd)
+	require.NoError(t, err)
+	require.Equal(t, g, inst.TabRosterGeneration())
+}
