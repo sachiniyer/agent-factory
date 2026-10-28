@@ -19,9 +19,9 @@ type swapFake struct {
 	err     error
 }
 
-func (s *swapFake) SwapAgentTo(target string) error {
+func (s *swapFake) SwapAgentTo(target string) (string, error) {
 	s.targets = append(s.targets, target)
-	return s.err
+	return "/host/bin/" + target, s.err
 }
 func (s *swapFake) CanSwapAgent() (bool, error) { return true, nil }
 
@@ -41,9 +41,10 @@ func TestHeadlessSwapAgentRoute(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	env := decodeEnvelope(t, rec)
 	require.Nil(t, env.Error)
-	var resp agentOKResponse
+	var resp agentSwapResponse
 	dataInto(t, env, &resp)
 	assert.True(t, resp.OK)
+	assert.Equal(t, "/host/bin/gemini", resp.Program, "the host-resolved command travels back for the daemon's evidence")
 	assert.Equal(t, []string{"gemini"}, fake.targets)
 	assert.False(t, fake.killed, "a swap must not kill the workspace")
 }

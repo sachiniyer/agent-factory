@@ -36,8 +36,9 @@ const SwapAgentFeature = swapAgentFeature
 type AgentSwapper interface {
 	// SwapAgentTo stops the current agent and starts target in the same
 	// workspace. target is an agent name (one of tmux.SupportedPrograms); the
-	// server resolves its program on its own machine.
-	SwapAgentTo(target string) error
+	// server resolves its program on its own machine and returns the command it
+	// resolved — the evidence the driving daemon records for the new runtime.
+	SwapAgentTo(target string) (program string, err error)
 	// CanSwapAgent reports whether SwapAgentTo is available, without side
 	// effects. An error means the answer could not be determined.
 	CanSwapAgent() (bool, error)
@@ -57,7 +58,7 @@ var ErrSwapNeedsAccountHandoff = errors.New("an account-scoped sandbox session c
 
 // SwapAgentTo runs the swap in the in-sandbox instance, serialized with any
 // relaunch (agentOpMu): two operations replacing one agent must not interleave.
-func (s *localAgentServer) SwapAgentTo(target string) error {
+func (s *localAgentServer) SwapAgentTo(target string) (string, error) {
 	s.agentOpMu.Lock()
 	defer s.agentOpMu.Unlock()
 	return s.inst.swapAgentInPlace(target)
@@ -70,31 +71,55 @@ func (s *localAgentServer) CanSwapAgent() (bool, error) { return true, nil }
 // agent-server for its own instance: freeze the launch, fence the window, record,
 // swap, commit. The mission is delivered by the DRIVING daemon over the ordinary
 // prompt path, so no delivery happens here.
-func (i *Instance) swapAgentInPlace(target string) error {
+func (i *Instance) swapAgentInPlace(target string) (string, error) {
 	target = strings.TrimSpace(target)
 	if account, _ := i.AccountSelection(); account != "" {
-		return ErrSwapNeedsAccountHandoff
+		return "", i.accountSwapRefusal(account)
 	}
 	plan, err := i.PrepareAgentSwap(target)
 	if err != nil {
-		return fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", i.Title, target, err)
+		return "", fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", i.Title, target, err)
 	}
 	if err := i.Transition(BeginHandoff()); err != nil {
-		return err
+		return "", err
 	}
 	entry, err := i.RecordHandoffSwap(target, plan.EffectiveAgent(), HandoffReasonManual, "", false)
 	if err != nil {
 		_ = i.Transition(AbortHandoff())
-		return err
+		return "", err
 	}
 	if _, err := i.SwapAgent(plan); err != nil {
 		if rbErr := i.RevertHandoff(entry); rbErr != nil {
 			err = fmt.Errorf("%w (and the record could not be reverted: %v)", err, rbErr)
 		}
 		_ = i.Transition(AbortHandoff())
-		return err
+		return "", err
 	}
-	return i.Transition(CommitHandoff())
+	// The command the host resolved and launched: what the driving daemon records
+	// as the new runtime's evidence (plan.baseProgram is override-resolved).
+	return plan.baseProgram, i.Transition(CommitHandoff())
+}
+
+// accountSwapRefusal is the actionable refusal for an account-scoped sandbox
+// session. It wraps ErrSwapNeedsAccountHandoff so callers can match it.
+func (i *Instance) accountSwapRefusal(account string) error {
+	return fmt.Errorf("session %q is scoped to account %q, and handing an account-scoped sandbox session to another agent is not supported yet; "+
+		"start the session without --account, or use a local session, to hand it off: %w", i.Title, account, ErrSwapNeedsAccountHandoff)
+}
+
+// RefuseOffBoxAccountHandoff refuses `handoff --account` on a session whose
+// workspace is off-box. Moving an account across a sandbox boundary needs the
+// credential sync and relaunch work of W7.4/W7.6, so until then it is refused up
+// front, before anything is stopped.
+func (i *Instance) RefuseOffBoxAccountHandoff() error {
+	i.mu.RLock()
+	remote := i.capabilitiesLocked().Workspace == WorkspaceRemote
+	i.mu.RUnlock()
+	if !remote {
+		return nil
+	}
+	return fmt.Errorf("session %q runs in a sandbox, and account handoff is not supported off-box yet; hand it off to another agent without --account, or use a local session: %w",
+		i.Title, ErrSwapNeedsAccountHandoff)
 }
 
 // --- daemon side ---
@@ -112,13 +137,22 @@ type agentSwapReq struct {
 	Target string `json:"target"`
 }
 
-// SwapAgentTo asks the sandbox to swap its agent in place. Its own budget: the
-// call waits for the old agent to exit and the new one to start.
-func (s *remoteAgentServer) SwapAgentTo(target string) error {
-	return s.rc.callWithin("/v1/agent/swap-agent", agentSwapReq{Target: target}, nil, AgentRelaunchCallTimeout)
+type agentSwapResp struct {
+	OK      bool   `json:"ok"`
+	Program string `json:"program"`
 }
 
-func (s *deadRemoteAgentServer) SwapAgentTo(string) error { return s.err() }
+// SwapAgentTo asks the sandbox to swap its agent in place. Its own budget: the
+// call waits for the old agent to exit and the new one to start.
+func (s *remoteAgentServer) SwapAgentTo(target string) (string, error) {
+	var resp agentSwapResp
+	if err := s.rc.callWithin("/v1/agent/swap-agent", agentSwapReq{Target: target}, &resp, AgentRelaunchCallTimeout); err != nil {
+		return "", err
+	}
+	return resp.Program, nil
+}
+
+func (s *deadRemoteAgentServer) SwapAgentTo(string) (string, error) { return "", s.err() }
 func (s *deadRemoteAgentServer) CanSwapAgent() (bool, error) {
 	return false, s.err()
 }
@@ -128,6 +162,13 @@ func (s *deadRemoteAgentServer) CanSwapAgent() (bool, error) {
 // the plan carries only the target; ErrHandoffUnsupported when the sandbox's
 // agent-server predates the route.
 func (b *remoteAgentBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPlan, error) {
+	// BEFORE anything else, and before the daemon's record transaction can drop
+	// the account: an account-scoped sandbox session is refused up front, with
+	// its outgoing credentials still in place. The check is on the daemon's own
+	// row because the in-sandbox instance carries no account selection.
+	if account, _ := i.AccountSelection(); account != "" {
+		return AgentSwapPlan{}, i.accountSwapRefusal(account)
+	}
 	sw, ok := i.AgentServer().(AgentSwapper)
 	if !ok {
 		return AgentSwapPlan{}, ErrHandoffUnsupported
@@ -154,12 +195,26 @@ func (b *remoteAgentBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	if !ok {
 		return ErrHandoffUnsupported
 	}
-	if err := sw.SwapAgentTo(plan.target); err != nil {
+	// The mission brief is assembled BEFORE the swap, the point at which a local
+	// handoff captures it after stopping the old agent: a failure here aborts with
+	// the outgoing agent untouched. It carries the goal (the stored prompt or
+	// --brief); the branch summary needs a worktree the daemon does not hold.
+	if err := plan.CaptureAfterStop(); err != nil {
+		return err
+	}
+	program, err := sw.SwapAgentTo(plan.target)
+	if err != nil {
 		if errors.Is(err, ErrRemoteSandboxNotProvisioned) {
 			return fmt.Errorf("%w: %w", ErrHandoffUnsupported, err)
 		}
 		return err
 	}
+	// Replace the outgoing runtime's command evidence with the host-resolved
+	// command of the new one. CurrentAgentName and ResolvedAgent prefer this
+	// evidence over the recorded Program, so leaving the old command would report
+	// the outgoing agent and apply its readiness heuristics to the new one. With
+	// no answer the claim is retired rather than left naming an agent that is gone.
+	i.replaceRuntimeProgram(program)
 	// A new agent process, same workspace (#4222).
 	i.markAgentRuntimeReplaced(true)
 	return nil
@@ -170,4 +225,20 @@ func (b *remoteAgentBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 func (i *Instance) offBoxSwapAPILocked() bool {
 	rs := i.remoteTabServerCachedLocked()
 	return rs != nil && rs.hasFeatureCached(swapAgentFeature)
+}
+
+// replaceRuntimeProgram records program as the runtime's launch evidence, or
+// retires the claim when it is empty.
+func (i *Instance) replaceRuntimeProgram(program string) {
+	program = strings.TrimSpace(program)
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.setRuntimeEvidenceLocked(program, 0, 0)
+}
+
+// handoffInPlaceBackend says which off-box backends hand off in place: the ones
+// whose agent-server this slice drives and whose provisioner is shared (ssh and
+// sandbox). docker embeds the same remote backend but is not a parity goal here.
+func handoffInPlaceBackend(backendType string) bool {
+	return backendType == "ssh" || backendType == "sandbox"
 }

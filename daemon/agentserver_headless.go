@@ -869,17 +869,26 @@ type agentSwapRequest struct {
 	Target string `json:"target"`
 }
 
+// agentSwapResponse carries the command the host resolved and launched, which the
+// driving daemon records as the new runtime's evidence.
+type agentSwapResponse struct {
+	OK      bool   `json:"ok"`
+	Program string `json:"program"`
+}
+
 // SwapAgent replaces the agent with another in this workspace. The branch, tree
 // and uncommitted work stay as they are; nothing is pushed, reaped or re-cloned.
-func (hs *headlessServer) SwapAgent(req agentSwapRequest, resp *agentOKResponse) error {
+func (hs *headlessServer) SwapAgent(req agentSwapRequest, resp *agentSwapResponse) error {
 	sw, ok := hs.as.(session.AgentSwapper)
 	if !ok {
 		return session.ErrHandoffUnsupported
 	}
-	if err := sw.SwapAgentTo(req.Target); err != nil {
+	program, err := sw.SwapAgentTo(req.Target)
+	if err != nil {
 		return err
 	}
 	resp.OK = true
+	resp.Program = program
 	return nil
 }
 
