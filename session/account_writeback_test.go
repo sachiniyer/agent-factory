@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -273,4 +274,177 @@ func TestWriteBackUsesTheBoundedStreamWhenTheShellOffersIt(t *testing.T) {
 	_, err := w.writeBackAccount(time.Second)
 	require.ErrorIs(t, err, ErrOutputOverLimit)
 	_ = context.Background()
+}
+
+// --- #5928 (go/zipslip): the archive is untrusted, and no archive-controlled name
+// ever reaches a path. Every hostile shape is refused WHOLE — including when a valid
+// entry precedes it — and nothing is written, inside the registry or outside it.
+
+func hostileArchive(t *testing.T, entries ...*tar.Header) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, h := range entries {
+		require.NoError(t, tw.WriteHeader(h))
+		if h.Size > 0 {
+			_, err := tw.Write(bytes.Repeat([]byte("x"), int(h.Size)))
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, tw.Close())
+	return buf.Bytes()
+}
+
+func TestReadAccountArchiveRefusesEveryHostileNameWhole(t *testing.T) {
+	valid := &tar.Header{Name: ".credentials.json", Mode: 0o600, Size: 4, Typeflag: tar.TypeReg}
+	for name, hostile := range map[string]*tar.Header{
+		"dot-dot":                {Name: "../x", Mode: 0o600, Size: 1, Typeflag: tar.TypeReg},
+		"deep dot-dot":           {Name: "../../etc/x", Mode: 0o600, Size: 1, Typeflag: tar.TypeReg},
+		"dot-slash dotdot":       {Name: "./../x", Mode: 0o600, Size: 1, Typeflag: tar.TypeReg},
+		"absolute":               {Name: "/etc/x", Mode: 0o600, Size: 1, Typeflag: tar.TypeReg},
+		"nested absolute":        {Name: "/home/u/.claude/.credentials.json", Mode: 0o600, Size: 1, Typeflag: tar.TypeReg},
+		"unlisted":               {Name: "settings.json", Mode: 0o600, Size: 1, Typeflag: tar.TypeReg},
+		"symlink":                {Name: "link", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"},
+		"symlink by listed name": {Name: ".credentials.json", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"},
+		"hardlink":               {Name: "h", Typeflag: tar.TypeLink, Linkname: ".credentials.json"},
+		"directory":              {Name: "d/", Typeflag: tar.TypeDir, Mode: 0o700},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, order := range [][]*tar.Header{{hostile}, {valid, hostile}, {hostile, valid}} {
+				_, err := readAccountArchive(hostileArchive(t, order...), accountCredentialRel["claude"])
+				require.Error(t, err, "the archive is rejected whole, whatever order the hostile entry is in")
+			}
+		})
+	}
+	// Control: the valid entry alone is accepted, keyed by the allowlisted name.
+	got, err := readAccountArchive(hostileArchive(t, valid), accountCredentialRel["claude"])
+	require.NoError(t, err)
+	assert.Contains(t, got, ".credentials.json")
+	for key := range got {
+		assert.True(t, filepath.IsLocal(key))
+	}
+}
+
+func TestHostileArchiveWritesNothingAnywhere(t *testing.T) {
+	outside := t.TempDir()
+	acct := writeAccount(t, "claude", "v0")
+	w := &sandboxWorkspace{SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+		syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))}}
+	for _, name := range []string{"../" + filepath.Base(outside) + "/pwned", outside + "/pwned"} {
+		w.shell = fixedOutputShell{out: hostileArchive(t,
+			&tar.Header{Name: ".credentials.json", Mode: 0o600, Size: 5, Typeflag: tar.TypeReg},
+			&tar.Header{Name: name, Mode: 0o600, Size: 1, Typeflag: tar.TypeReg})}
+		_, err := w.writeBackAccount(time.Second)
+		require.Error(t, err)
+		got, _ := os.ReadFile(filepath.Join(acct.Dir, ".credentials.json"))
+		assert.Equal(t, "v0", string(got), "not even the valid first entry is written")
+		entries, _ := os.ReadDir(outside)
+		assert.Empty(t, entries, "nothing is created outside the registry")
+	}
+}
+
+// --- #5902: the registry is replaced ONLY from a fully validated archive.
+
+// failingTar stands in for the host's tar: it writes a complete, valid archive and
+// then exits non-zero, as GNU tar does for "File shrank … padding with zeros".
+func failingTar(t *testing.T) {
+	t.Helper()
+	real, err := exec.LookPath("tar")
+	if err != nil {
+		t.Skip("no tar on this machine")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" + real + " \"$@\"\nexit 1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tar"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestWriteBackKeepsCredentialsWhenTarFails(t *testing.T) {
+	s := newSharedAccount(t)
+	s.refresh(s.a, "A1-refreshed")
+	failingTar(t)
+	_, err := s.a.writeBackAccount(time.Minute)
+	require.Error(t, err, "tar's failure must fail the read — no limiter in the pipeline may mask it")
+	assert.Equal(t, "v0", s.reg(), "the existing credential is kept")
+}
+
+func TestWriteBackRefusesCorruptedContentWhateverTheTransportSaid(t *testing.T) {
+	for name, content := range map[string][]byte{
+		"zero-padded (a file that shrank under tar)": append([]byte("{\"t\":1}"), make([]byte, 64)...),
+		"empty (truncated to nothing)":               {},
+		"NUL in the middle":                          []byte("ab\x00cd"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			acct := writeAccount(t, "claude", "v0")
+			w := &sandboxWorkspace{SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+				syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))},
+				shell:         fixedOutputShell{out: archiveOf(t, map[string][]byte{".credentials.json": content}, []string{".credentials.json"})}}
+			_, err := w.writeBackAccount(time.Second)
+			require.Error(t, err)
+			got, _ := os.ReadFile(filepath.Join(acct.Dir, ".credentials.json"))
+			assert.Equal(t, "v0", string(got), "a valid credential is never replaced by corrupted content")
+		})
+	}
+}
+
+func TestWriteBackRefusesDuplicateAndUnterminatedArchives(t *testing.T) {
+	acct := writeAccount(t, "claude", "v0")
+	mk := func(out []byte) *sandboxWorkspace {
+		return &sandboxWorkspace{SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+			syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))}, shell: fixedOutputShell{out: out}}
+	}
+	one := map[string][]byte{".credentials.json": []byte("fresh")}
+	good := archiveOf(t, one, []string{".credentials.json"})
+
+	_, err := mk(archiveOf(t, one, []string{".credentials.json", ".credentials.json"})).writeBackAccount(time.Second)
+	require.ErrorContains(t, err, "twice")
+
+	// Cut at a block boundary after a whole entry: no end-of-archive marker.
+	_, err = mk(good[:1024]).writeBackAccount(time.Second)
+	require.ErrorContains(t, err, "end-of-archive")
+
+	got, _ := os.ReadFile(filepath.Join(acct.Dir, ".credentials.json"))
+	assert.Equal(t, "v0", string(got))
+	_, err = mk(good).writeBackAccount(time.Second)
+	require.NoError(t, err, "control: the intact archive is accepted")
+}
+
+// --- #5901: the bound is tar's own arithmetic, so a credential AT the cap fits.
+
+func TestAccountArchiveLimitIsTarsRealArithmetic(t *testing.T) {
+	// One max-size file under GNU tar's default 10,240-byte record: 512 header +
+	// 1 MiB data + 1,024 trailer = 1,050,112, padded up to 1,054,720.
+	assert.Equal(t, int64(1054720), tarArchiveSize([]int64{accountSyncMaxFileBytes}, tarRecord))
+	assert.Equal(t, int64(1050112), tarArchiveSize([]int64{accountSyncMaxFileBytes}, tarBlock), "with -b 1 the padding is a block")
+	assert.GreaterOrEqual(t, accountArchiveLimit("claude"), int64(1054720))
+
+	// And the real thing: a credential of EXACTLY the cap, archived by this
+	// machine's tar with its defaults, fits under the bound.
+	real, err := exec.LookPath("tar")
+	if err != nil {
+		t.Skip("no tar on this machine")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "auth.json"), bytes.Repeat([]byte("a"), accountSyncMaxFileBytes), 0o600))
+	cmd := exec.Command(real, "-cf", "-", "-C", dir, "auth.json")
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	assert.LessOrEqual(t, int64(len(out)), accountArchiveLimit("codex"), "a max-size credential must not be refused for tar's own padding")
+}
+
+func TestWriteBackAcceptsACredentialExactlyAtTheCap(t *testing.T) {
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("no tar on this machine")
+	}
+	big := func(b byte) []byte { return bytes.Repeat([]byte{b}, accountSyncMaxFileBytes) }
+	acct := writeAccount(t, "claude", string(big('a')))
+	w := workspaceOn(t, acct, "box1")
+	require.NoError(t, w.syncAccountIn(time.Minute), "sync-in admits a credential of exactly the cap")
+	require.NoError(t, os.WriteFile(filepath.Join(w.AccountDir(), ".credentials.json"), big('b'), 0o600))
+
+	res, err := w.writeBackAccount(time.Minute)
+	require.NoError(t, err, "write-back must not refuse what sync-in admitted")
+	assert.Equal(t, 1, res.Written)
+	got, _ := os.ReadFile(filepath.Join(acct.Dir, ".credentials.json"))
+	assert.Equal(t, big('b'), got)
 }

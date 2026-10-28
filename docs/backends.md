@@ -857,7 +857,13 @@ config, so the host's own login is neither read nor replaced.
   first, or the account was removed, the write is skipped and logged, so a stale
   snapshot can never overwrite a fresher one. The host is untrusted, so its archive is
   read under a hard byte limit while it streams — the command is killed when the limit
-  is crossed — and a truncated, oversized or malformed archive is refused whole.
+  is crossed — and a truncated, oversized or malformed archive is refused whole. The registry is
+  replaced ONLY from a fully validated archive: the host command's exit status is
+  tar's own (a file that shrank while it was read fails the read), the archive must
+  close with tar's end-of-archive marker, hold each allowlisted file exactly once with
+  a size matching its header, and carry no empty or NUL-padded content; any failure
+  keeps the existing credentials. The byte bound is tar's own arithmetic, so a
+  credential at the size cap is accepted.
   Replacement is atomic, mode 0600, credential files only. Teardown writes back one
   last time, then removes the scope. A refresh that loses the race stays on the host
   and is discarded with the session; fan-out to live sessions is not built yet.
