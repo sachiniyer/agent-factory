@@ -44,7 +44,12 @@ func checkListedHosts(ctx *scanContext, report *Report, cfg *config.Config, heal
 		name := "host " + h.Name
 		switch {
 		case !h.Probed:
-			report.Info(sectionRemote, name, "a probe was already running; cached state: "+h.Readiness)
+			// Another probe held the host's guard, so this run established nothing.
+			// That is unknown, never a pass or a bare note, and a cached block is
+			// surfaced rather than hidden behind it.
+			report.Warn(sectionRemote, name, "unknown: a probe was already running, so this run did not check it"+cachedHostState(h.Readiness),
+				"rerun `af doctor` once the running check finishes", false)
+			report.markIncomplete("hosts")
 		case !h.Reachable:
 			detail := "could not be probed"
 			if h.Error != "" {
@@ -56,6 +61,10 @@ func checkListedHosts(ctx *scanContext, report *Report, cfg *config.Config, heal
 		case len(h.Problems) > 0:
 			report.Warn(sectionRemote, name, "cannot run a session: "+strings.Join(h.Problems, "; "),
 				"install what is missing on the host, then rerun `af doctor`", true)
+		case !h.Complete:
+			report.Warn(sectionRemote, name, "unknown: the host answered but not with a recognisable git, tmux and gh report"+cachedHostState(h.Readiness),
+				fmt.Sprintf("check that a non-interactive `ssh` to %q prints no banner or extra output for a plain command, then rerun `af doctor`", h.Name), false)
+			report.markIncomplete("hosts")
 		default:
 			detail := "ready (git, tmux and gh answered)"
 			if len(h.Warnings) > 0 {
@@ -64,4 +73,13 @@ func checkListedHosts(ctx *scanContext, report *Report, cfg *config.Config, heal
 			report.Pass(sectionRemote, name, detail)
 		}
 	}
+}
+
+// cachedHostState words the daemon's cached verdict for an unknown probe, so a
+// stale "blocked" is visible next to the "unknown".
+func cachedHostState(readiness string) string {
+	if readiness == "" {
+		return ""
+	}
+	return "; cached state: " + readiness
 }
