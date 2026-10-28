@@ -5,7 +5,7 @@ page you will know what the daemon owns, why there is exactly one writer of that
 state, and the few commands that manage its lifecycle.
 
 Behind the TUI is a long-lived background process: the **Agent Factory daemon**.
-It is the piece that makes sessions survive restarts, keeps automations firing,
+It is the piece that keeps local sessions running across restarts (sessions on an off-box backend are not yet reattached after one; they recover by re-provisioning from their pushed branch), keeps automations firing,
 and guarantees the TUI, the CLI, and the HTTP API never disagree about what
 exists. You rarely interact with it directly, but understanding it explains a lot
 about how `af` behaves.
@@ -34,9 +34,10 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 ## What the daemon does
 
-- **Keeps sessions alive.** If a session's process dies unexpectedly, the daemon
-  re-spawns it in place — the worktree and record are preserved, so the agent
-  comes back where it was. The always-on [root agent](configuration.md#root-agents-always-ensured)
+- **Keeps sessions alive.** If a local session's process dies unexpectedly, the
+  daemon re-spawns it in place — the worktree and record are preserved, so the
+  agent comes back where it was. An off-box (docker/ssh/sandbox/hook) session that
+  dies is re-provisioned from its pushed branch instead, as a fresh agent. The always-on [root agent](configuration.md#root-agents-always-ensured)
   is re-created rather than re-spawned — its record is replaced, but its recorded
   conversation and its tabs are carried across, so it comes back on the same
   context with the same tab strip. When that conversation cannot be resumed the
@@ -65,7 +66,10 @@ exists so cron schedules are evaluated promptly, and the TUI ensures it on
 its first control call. `af` commands that need a live daemon ensure one when
 they execute, while read-only listings like `af sessions list` deliberately
 do not spawn one — they fall back to disk. With `--daemon-url`/`AF_DAEMON_URL`,
-`af` commands instead dial the remote daemon, which must already be running.
+the read verbs (`list`, `get`, `watch`, `preview`, `attach`), `tasks`, and
+global `config` writes dial the remote daemon, which must already be running;
+most other verbs still reach the local daemon (see
+[remote daemons](cli.md#remote-daemons)).
 For interactive use you usually don't have to think about it at all.
 
 To keep tasks and sessions running across logouts and reboots, install the
@@ -74,13 +78,14 @@ daemon's autostart unit once:
 ```bash
 af daemon install     # systemd user service on Linux, launchd agent on macOS
 af daemon status      # liveness, supervision ownership, and config freshness
-af daemon restart     # restart the daemon process; sessions are re-adopted
+af daemon restart     # restart the daemon process; local sessions are re-adopted
 af daemon uninstall   # remove the autostart unit
 ```
 
 Because the daemon owns live state, you don't stop it by force while sessions
 are running; let `af` manage its lifecycle. `af daemon restart` restarts only
-the daemon process and re-adopts existing tmux sessions from persisted state.
+the daemon process and re-adopts existing local tmux sessions from persisted
+state; off-box sessions are not yet reattached and recover by re-provisioning.
 `af daemon status` is the right tool when you want to know whether it's up,
 whether the installed unit actually owns the responder, whether config edits
 have reached it, and where its sockets are. Those checks are read-only; an

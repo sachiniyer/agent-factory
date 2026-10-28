@@ -217,11 +217,13 @@ func (b ordinalTabBinding) resize(rows, cols uint16) error {
 // mid-connection, later input/resize keep hitting the old index — the positional
 // misroute the stable id exists to prevent, reintroduced on this path (#1779). This
 // The resolve and remote ordinal lookup are not one atomic step, but this site is
-// exempt from #2200's shifting-roster race: remote workspaces advertise
-// TabManagement=false and the headless agent-server's tab roster is fixed for its
-// lifetime, so there is no close/reorder writer on either side. If remote tabs ever
-// become mutable, their wire protocol must gain an id-native plane before that
-// capability is enabled. A tab that no longer resolves is ErrTabGone — the op is
+// exempt from #2200's shifting-roster race for PTY-backed tabs: remote workspaces
+// advertise TabManagement=false, so no daemon-side writer closes or reorders a
+// process tab under it. The roster is NOT fixed for the session's lifetime — an
+// external web tab (#3062) can be added and closed — but a web tab has no PTY and
+// never reaches this binding. If remote PTY tabs ever become mutable, their wire
+// protocol must gain an id-native plane before that capability is enabled (W4.5
+// gates on this). A tab that no longer resolves is ErrTabGone — the op is
 // refused, not re-pointed.
 type resolvingTabBinding struct {
 	as       session.AgentServer

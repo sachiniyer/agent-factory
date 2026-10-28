@@ -124,9 +124,9 @@ func parseDaemonURL(daemonURL string) (httpBase, wsBase string, err error) {
 	case "http", "ws":
 	case "https", "wss":
 		return "", "", fmt.Errorf("--daemon-url %q uses a TLS scheme, but the daemon is HTTP-only; "+
-			"use http:// (or ws://) instead — TLS was removed. If you need transport encryption, "+
-			"terminate TLS at your own reverse proxy (nginx/caddy) or use a private network "+
-			"(Tailscale/VPN/SSH tunnel).", daemonURL)
+			"use http:// (or ws://) instead — this client dials plain HTTP only and TLS was removed. "+
+			"For transport encryption reach the daemon over a private network (Tailscale/VPN) "+
+			"or an SSH tunnel and point --daemon-url at the tunnel's http:// address.", daemonURL)
 	default:
 		return "", "", fmt.Errorf("--daemon-url %q must be an http:// or ws:// URL", daemonURL)
 	}

@@ -555,10 +555,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// Pick backend based on persisted BackendType.
 	switch {
 	case isSandboxBackendType(data.BackendType):
-		// A sandbox session (docker/ssh/hook, #1592 Phase 4 PR6/PR7) has no
+		// A sandbox session (docker/ssh/sandbox/hook, #1592 Phase 4 PR6/PR7) has no
 		// daemon-side worktree or tmux to reconstruct — its workspace lived in a
-		// container/remote/user-provisioned sandbox that does not survive a daemon
-		// restart; only its pushed branch on origin does. Rebuild only an INERT
+		// container/remote/user-provisioned sandbox that the daemon does not reattach
+		// to after a restart (W1.5); only its pushed branch on origin is relied on.
+		// Rebuild only an INERT
 		// sandbox backend so the row still classifies as its runtime
 		// (Type/Capabilities) for archive + restore; the live runtime is
 		// re-provisioned on restore (re-running launch_cmd for hook), never
@@ -808,9 +809,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return inertReturn(), nil
 	}
 
-	// A non-archived sandbox session (docker/ssh/hook) cannot be driven on load: its
-	// container/remote is gone after a daemon restart and only its pushed branch
-	// on origin survives (#1592 Phase 4 PR6). Load it INERT + Lost — started stays
+	// A non-archived sandbox session (docker/ssh/sandbox/hook) cannot be driven on
+	// load: the daemon does not yet reattach to its runtime (W1.5). The nohup'd
+	// agent-server on an ssh/sandbox host outlives the restart (see
+	// session/sandbox_tunnel.go), but nothing here dials it again, so recovery
+	// re-provisions from the branch pushed to origin (#1592 Phase 4 PR6). Load it INERT + Lost — started stays
 	// false, so the status poll and the Lost-restore loop both pass it by (the
 	// #1028 started=false fence) — and let an explicit restore re-provision a fresh
 	// sandbox from the branch. Skipping Start also avoids driving the recursive

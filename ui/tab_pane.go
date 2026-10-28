@@ -641,14 +641,14 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		}
 	}
 
-	// Remote instances have no local shell tab. When terminal_cmd is configured
-	// the tab is an interactive-only surface (#843): prompt the user to attach.
-	// Otherwise keep the "not available" fallback and name the config knob.
+	// Remote instances have no local shell tab. When the backend advertises a
+	// terminal surface the tab is interactive-only (#843): prompt the user to
+	// attach. Otherwise keep the "not available" fallback.
 	if caps := instance.Capabilities(); caps.Workspace == session.WorkspaceRemote {
 		if caps.TerminalTab {
 			p.setFallbackState("Enter to open a remote terminal.")
 		} else {
-			p.setFallbackState("Set remote_hooks.terminal_cmd for a remote terminal.\nUse the Agent tab for output.")
+			p.setFallbackState("This session has no remote terminal.\nUse the Agent tab for output.")
 		}
 		p.mu.Unlock()
 		return nil

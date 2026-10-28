@@ -677,7 +677,7 @@
     },
     {
       "id": "session.create.opt.backend",
-      "title": "Choose the session's backend (local/docker/ssh/hook) per session",
+      "title": "Choose the session's backend (local/docker/ssh/sandbox/hook) per session",
       "tui": {
         "status": "yes",
         "pointer": "keys/keys.go KeySetBackend (ctrl+r) -> app/backend_picker.go openBackendPicker + handleStateSelectBackend -> app/session_control.go sessionStartRequest.Backend"
@@ -688,7 +688,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:242,328 --backend local|docker|ssh|hook"
+        "pointer": "api/sessions.go:242,328 --backend local|docker|ssh|sandbox|hook"
       },
       "verdict": "parity",
       "issue": "#5290",

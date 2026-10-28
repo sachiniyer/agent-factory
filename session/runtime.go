@@ -75,8 +75,9 @@ type ProvisionSpec struct {
 	//
 	// The token is per-session, scoped and revocable — never the operator's, which
 	// grants DeliverPrompt over every agent on the machine. The scope it currently
-	// carries is deliberately one route (SuggestSessionName): it does not include
-	// creating a session, which would start an agent on the host with a
+	// carries is deliberately read-only and self-scoped: the daemon admits only
+	// /v1/Snapshot (see sandboxConstrainedRoutes), answering with the caller's own
+	// session. It does not include creating a session, which would start an agent on the host with a
 	// caller-supplied program, nor the repo/path reads, whose caller-supplied paths
 	// are a host oracle (#3012 review). See HTTPRoute.sandboxAllowed for the rule
 	// and what widening it waits on. Empty means no callback was granted, which is

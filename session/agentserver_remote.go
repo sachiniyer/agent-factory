@@ -320,7 +320,7 @@ func (s *remoteAgentServer) Archive() (string, error) {
 }
 
 // deadRemoteAgentServer is the AgentServer for a remote-workspace instance
-// (docker/ssh/hook) whose runtime wiring has been torn down: remoteClient is nil,
+// (docker/ssh/sandbox/hook) whose runtime wiring has been torn down: remoteClient is nil,
 // so there is no live `af agent-server` to reach. AgentServer() returns it — never
 // a localAgentServer — for such an instance (#2005): a remote backend's data-plane
 // methods delegate back to i.AgentServer(), so a localAgentServer wrapping one
