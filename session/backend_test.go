@@ -120,6 +120,7 @@ func TestBackendCapabilities(t *testing.T) {
 		TabManagement:    false,
 		TerminalTab:      true,
 		InteractiveInput: true,
+		LoopbackRelay:    true,
 		Handoff:          false,
 	}
 

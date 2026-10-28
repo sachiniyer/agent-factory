@@ -514,7 +514,10 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	// a server that is merely wedged around a still-live session would create a
 	// duplicate. The #386 respawn design has always fired only on definitive
 	// absence, and this preserves it.
-	existsOrUnknown, answered := sessionExistsReportingAnswer(t.cmdExec, t.sanitizedName)
+	existsOrUnknown, answered, existErr := t.restoreExistence()
+	if existErr != nil {
+		return RestoreReattached, existErr
+	}
 	if !existsOrUnknown {
 		if workDir == "" {
 			return RestoreReattached, fmt.Errorf("tmux session %q does not exist", t.sanitizedName)

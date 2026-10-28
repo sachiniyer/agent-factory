@@ -243,6 +243,7 @@ func (i *Instance) reprovisionRemote() error {
 		Program:               i.Program,
 		CloneURL:              originRemoteURL(i.Path),
 		RestoreBranch:         i.Branch,
+		Host:                  i.Host,
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 	}
 	i.mu.RUnlock()

@@ -31,6 +31,10 @@ Other halt: an open `master broken by merge batch <sha>` issue while master stil
 
 To let it merge those PRs too, the owner can add a repository secret `AUTO_MERGE_TOKEN`: a fine-grained PAT with **Contents**, **Pull requests** and **Workflows** read/write. The merge calls then use it (`secrets.AUTO_MERGE_TOKEN || github.token`), the files check is skipped, and — because a PAT merge fires push workflows itself — the post-merge dispatches are skipped to avoid duplicate runs.
 
+## Head-branch cleanup
+
+GitHub applies the repository's `delete_branch_on_merge` setting only to merges made with a user token, not `GITHUB_TOKEN`, so after each successful merge the merger deletes the head branch itself — best effort (a failure is logged, never fails the run). It keeps the branch when the head is a fork, is the default branch, is protected, is already gone, or when any open PR uses it as its base (deleting it would close the stacked PR); each keep is logged with its reason. Stranded branches from before this (the #4672 census) are not touched here.
+
 ## Controls
 
 - **Hold a PR:** add the `no-auto-merge` label (`gh api -X POST repos/sachiniyer/agent-factory/issues/N/labels -f 'labels[]=no-auto-merge'`). Remove it to release.
