@@ -511,11 +511,6 @@ func (p *sandboxProvisioner) openTunnel(remoteAddr string) (string, error) {
 	if err := waitForSandboxTunnelFn(p.label(), localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
 		return "", err
 	}
-	// The supervisor starts only after the FIRST generation proves ready: an
-	// ssh that cannot establish at all is a provision failure (reaped as one),
-	// not an outage to retry — the re-dial loop exists for transports that die
-	// AFTER they once worked.
-	go p.superviseTunnel()
 	return localAddr, nil
 }
 

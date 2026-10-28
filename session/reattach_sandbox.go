@@ -83,6 +83,17 @@ func (i *Instance) ReattachSandbox() error {
 		return fmt.Errorf("reattach %q: the agent-server did not answer: %w", i.Title, err)
 	}
 
+	// Re-verify under i.mu that the row is still the one this attempt probed: a
+	// restore or Lost recovery that ran while the probe was in flight has already
+	// installed its own runtime, and binding the old one over it would strand
+	// the replacement and point the row at a reaped runtime.
+	i.mu.Lock()
+	stillCurrent := i.remoteClient == nil && i.backend == b && !i.userKilled && i.liveness != LiveArchived
+	i.mu.Unlock()
+	if !stillCurrent {
+		p.abandonUnadoptedTunnel()
+		return ErrReattachIneligible
+	}
 	if err := i.bindProvisionResult(ProvisionResult{Backend: b, Endpoint: endpoint, Teardown: p.reap}); err != nil {
 		p.abandonUnadoptedTunnel()
 		return fmt.Errorf("reattach %q: %w", i.Title, err)

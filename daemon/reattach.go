@@ -19,29 +19,53 @@ const reattachConcurrency = 8
 // host must not hold up daemon readiness, and a row that cannot be reached
 // simply stays as the loader left it (inert, Lost) — today's behavior — until
 // the unreachable-state work (W1.3) projects it properly.
-func (m *Manager) reattachRestoredRuntimes(instances map[string]*session.Instance) {
-	rows := make([]*session.Instance, 0, len(instances))
-	for _, inst := range instances {
+//
+// It must be called only AFTER sweepStartupOrphanSandboxTunnels: that sweep kills
+// every tunnel bearing this AF home's ownership marker, which would catch the
+// tunnels reattachment has just opened. Each attempt runs under the session's
+// operation lock — the same one restore and Lost recovery hold — and re-verifies
+// the row is still the registered instance before probing.
+func (m *Manager) reattachRestoredRuntimes() {
+	type row struct {
+		key  string
+		inst *session.Instance
+	}
+	m.mu.Lock()
+	rows := make([]row, 0, len(m.instances))
+	for key, inst := range m.instances {
 		if inst != nil {
-			rows = append(rows, inst)
+			rows = append(rows, row{key, inst})
 		}
 	}
+	m.mu.Unlock()
 	go func() {
 		sem := make(chan struct{}, reattachConcurrency)
 		var wg sync.WaitGroup
-		for _, inst := range rows {
+		for _, r := range rows {
 			wg.Add(1)
 			sem <- struct{}{}
-			go func(inst *session.Instance) {
+			go func(key string, inst *session.Instance) {
 				defer wg.Done()
 				defer func() { <-sem }()
 				// Ineligible rows (local, docker, hook, archived, tombstoned, or written
 				// before the runtime identity existed) return immediately.
+				opLock, _, lockErr := m.lockSessionOperationWithin(key, "reattach", inst.Title)
+				if lockErr != nil {
+					log.WarningLog.Printf("daemon: skipped reattaching session %q: %v", inst.Title, lockErr)
+					return
+				}
+				defer opLock.Unlock()
+				m.mu.Lock()
+				current := m.instances[key] == inst
+				m.mu.Unlock()
+				if !current {
+					return
+				}
 				err := inst.ReattachSandbox()
 				if err != nil && !errors.Is(err, session.ErrReattachIneligible) {
 					log.WarningLog.Printf("daemon: could not reattach session %q to its sandbox after restart: %v", inst.Title, err)
 				}
-			}(inst)
+			}(r.key, r.inst)
 		}
 		wg.Wait()
 	}()

@@ -543,6 +543,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	sweepLegacyTaskUnits()
 
 	sweepStartupOrphanSandboxTunnels()
+	// After the tunnel sweep, never before: the sweep would kill the tunnels
+	// reattachment opens (#5571 W1.5).
+	manager.reattachRestoredRuntimes()
 	sweepStartupOrphanContainers(manager)
 	sweepStartupTabCleanup(manager)
 	manager.finishInstanceRestore()
