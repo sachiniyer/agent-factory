@@ -366,18 +366,20 @@ committed numbers, CI margins, and the explicit golden-update command.
 
 ## What CI runs where
 
-Per-PR CI (`pr.yml`, `pull_request`) runs only the fast, high-signal jobs: Lint,
-the Linux `Test` job, `Web`, `Registry-free image build` and `Build`. The heavy
-jobs — `Test (macOS)`, `Test (systemd, …)`, `Web selftest` and `Performance and
-visual baselines` — do **not** run on a pull request. They run on a push to
-master, on the nightly schedule (04:37 UTC), on `merge_group` and on
-`workflow_dispatch`, so a regression they catch is named on master (or in the
-merge queue) rather than blocking each PR.
+Per-PR CI (`pr.yml`, `pull_request`) runs the fast, high-signal jobs — Lint,
+the Linux `Test` job, `Web`, `Registry-free image build` and `Build` — plus the
+`Performance and visual baselines` and `TUI driver selftest` jobs when the PR
+touches that job's surface (the `web-selftest-scope` job decides from the
+changed-file list; a skipped call is `skipped`, which `Build` counts as
+success). The always-off-PR heavy jobs — `Test (macOS)`, `Test (systemd, …)`
+and `Web selftest` — run on a push to master, on the nightly schedule (04:37
+UTC), on `merge_group` and on `workflow_dispatch`, so a regression they catch
+is named on master (or in the merge queue) rather than blocking each PR.
 
-`Build` stays honest because it still lists every job in `needs`: on a PR the
-heavy jobs are skipped by design (the scope job emits `heavy=false`), while on
-any other event `Build` fails unless macOS, systemd and perf succeeded, so a
-skip can never stand in for a pass on master. A master push also runs
+`Build` stays honest because it still lists every job in `needs`: on a PR an
+out-of-scope heavy job is `skipped` by design while `Build` runs; on any other
+event `Build` fails unless macOS, systemd and perf succeeded, so a skip can
+never stand in for a pass on master. A master push also runs
 `web-selftest.yml` directly (path-filtered), which is why `pr.yml` skips its own
 `Web selftest` call on `push` only. Push workflows cancel a superseded run
 (`concurrency` keyed on workflow + ref), so a burst of merges verifies the tip.
