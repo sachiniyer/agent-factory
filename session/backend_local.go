@@ -909,7 +909,9 @@ func (b *LocalBackend) IsAlive(i *Instance) (bool, error) {
 	// the daemon's poll turns it into probeAlive, which clears a session's restore
 	// history and marks it Ready. ExistsOrUnknown reports a timed-out probe as
 	// "exists", so taking it here would report a wedged server as a live agent.
-	exists, known := ts.ProbeSession()
+	// ProbeSessionLiveness: an unlinked socket with a live server is unknown,
+	// not gone, so a live agent is never respawned over (#4135).
+	exists, known := ts.ProbeSessionLiveness()
 	if !known {
 		return false, fmt.Errorf("%w: has-session while probing liveness", tmux.ErrTmuxTimeout)
 	}
