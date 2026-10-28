@@ -241,7 +241,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	p.tokenRef, w.tokenRef, w.agentServerToken = ref, ref, token
 	if err := w.writeRuntimeIdentity(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	// Re-check the callback credential at the LAST step that can still keep a
 	// dead grant out of the launched agent-server's environment (#5571 W3.1,
