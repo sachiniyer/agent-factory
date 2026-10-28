@@ -4,7 +4,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -69,4 +71,30 @@ func TestStaticBinaryStillPinsAnIPLiteral(t *testing.T) {
 	staticResolverMode(t)
 	port := listenLoopback(t)
 	assert.Equal(t, "127.0.0.1", resolvePinnedSSHDialAddress("127.0.0.1", port))
+}
+
+// #5769: a first address that never answers must not consume the whole budget.
+func TestStaticBinaryDeadFirstAddressDoesNotStarveTheRest(t *testing.T) {
+	staticResolverMode(t)
+	port := listenLoopback(t)
+	fakeGetent(t, "dead-first.test", "198.51.100.9 STREAM dead-first.test\n127.0.0.1 STREAM dead-first.test\n")
+
+	prevT := sshDialProbeTimeout
+	sshDialProbeTimeout = 2 * time.Second
+	defer func() { sshDialProbeTimeout = prevT }()
+
+	var firstShare time.Duration
+	prev := dialPinCandidate
+	dialPinCandidate = func(addr string, timeout time.Duration) (net.Conn, error) {
+		if strings.HasPrefix(addr, "198.51.100.9") {
+			firstShare = timeout
+			time.Sleep(timeout) // never answers
+			return nil, os.ErrDeadlineExceeded
+		}
+		return net.DialTimeout("tcp", addr, timeout)
+	}
+	defer func() { dialPinCandidate = prev }()
+
+	assert.Equal(t, "127.0.0.1", resolvePinnedSSHDialAddress("dead-first.test", port))
+	assert.Less(t, firstShare, sshDialProbeTimeout, "the dead address must get a share, not the whole budget")
 }
