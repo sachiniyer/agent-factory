@@ -107,27 +107,50 @@ func (m *Manager) authorizeSandboxSession(owner, id, title string, selfOnly bool
 
 // --- session verbs -----------------------------------------------------------
 
+// testHookSandboxAfterAuthorize runs between a scoped session verb's
+// authorization and its action, so a test can interleave a replacement or rebind
+// there. Nil in production.
+var testHookSandboxAfterAuthorize func()
+
 func (s *controlServer) sendPromptScoped(ctx context.Context, req SendPromptRequest, resp *SendPromptResponse) error {
-	if owner, ok := sandboxOwner(ctx); ok {
-		proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, false)
-		if err != nil {
-			return err
-		}
-		req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
-		req.TaskOrigin = false
+	owner, ok := sandboxOwner(ctx)
+	if !ok {
+		return s.SendPrompt(req, resp)
 	}
-	return s.SendPrompt(req, resp)
+	proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, false)
+	if err != nil {
+		return err
+	}
+	req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
+	req.TaskOrigin = false
+	if testHookSandboxAfterAuthorize != nil {
+		testHookSandboxAfterAuthorize()
+	}
+	// Addressed by the authorized session's ID, never re-resolved by title, and
+	// re-validated under the target's op lock on the instance the send reaches:
+	// authorization is atomic with the action.
+	return s.sendPrompt(req, resp, s.manager.sandboxSessionGuard(inst.ID, proj.repoID))
 }
 
 func (s *controlServer) archiveSessionScoped(ctx context.Context, req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
-	if owner, ok := sandboxOwner(ctx); ok {
-		proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, false)
-		if err != nil {
-			return err
-		}
-		req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
+	owner, ok := sandboxOwner(ctx)
+	if !ok {
+		return s.archiveSession(ctx, req, resp)
 	}
-	return s.archiveSession(ctx, req, resp)
+	proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, false)
+	if err != nil {
+		return err
+	}
+	req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
+	if testHookSandboxAfterAuthorize != nil {
+		testHookSandboxAfterAuthorize()
+	}
+	id := inst.ID
+	guard := func(current *session.Instance) error {
+		// Inside the archive fence, on the instance the manager holds right now.
+		return sandboxSessionStillAuthorized(current, id)
+	}
+	return s.archiveSessionGuarded(ctx, req, resp, guard)
 }
 
 // --- tab verbs: the credential's own session only ---------------------------
@@ -206,8 +229,22 @@ func (s *controlServer) createSessionScoped(ctx context.Context, req CreateSessi
 		// The project is the owner's, never the caller's: the sandbox's own
 		// working directory is not a path on this host.
 		req.RepoPath = proj.path
+		if err := s.createSession(ctx, req, resp); err != nil {
+			return err
+		}
+		// The create response is the manager's complete InstanceData: the
+		// daemon-host repository path, worktree and tmux name. A sandbox gets the
+		// same projection the snapshot paths give it (#5888).
+		projectSandboxCreateResponse(resp)
+		return nil
 	}
 	return s.createSession(ctx, req, resp)
+}
+
+// projectSandboxCreateResponse narrows a create response to what a sandbox may
+// learn about the session it just started (#5888).
+func projectSandboxCreateResponse(resp *CreateSessionResponse) {
+	resp.Instance = sandboxSafeInstanceData(resp.Instance)
 }
 
 // checkSandboxCreate is the create-shape rule for a sandbox caller.
@@ -341,22 +378,53 @@ func sandboxSafeTask(t task.Task) task.Task {
 	}
 }
 
+// testHookSandboxRemoveAfterPrecheck runs between a scoped RemoveTask's early
+// refusal and the locked removal, so a test can rebind or convert the task there.
+var testHookSandboxRemoveAfterPrecheck func()
+
 func (s *controlServer) removeTaskScoped(ctx context.Context, req RemoveTaskRequest, resp *RemoveTaskResponse) error {
-	if owner, ok := sandboxOwner(ctx); ok {
-		proj, err := s.manager.sandboxProjectOf(owner)
-		if err != nil {
-			return err
-		}
-		// Scope before existence, with one answer: a task that does not exist,
-		// belongs to another project, or is a watch task is the same refusal, so
-		// the id space is not an oracle. Keyed on the task's retained RepoID (the
-		// project identity), never on its path.
-		t, err := task.GetTask(req.ID)
-		if err != nil || !sandboxTaskInProject(*t, proj) || strings.TrimSpace(t.WatchCmd) != "" {
-			return sandboxRefusal("that task is not available to this credential")
-		}
+	owner, ok := sandboxOwner(ctx)
+	if !ok {
+		return s.RemoveTask(req, resp)
 	}
-	return s.RemoveTask(req, resp)
+	unavailable := func() error { return sandboxRefusal("that task is not available to this credential") }
+	proj, err := s.manager.sandboxProjectOf(owner)
+	if err != nil {
+		return err
+	}
+	// Scope before existence, with ONE answer: a task that does not exist,
+	// belongs to another project, or is a watch task is the same refusal, so the
+	// id space is not an oracle. This early read only decides which refusal the
+	// caller sees; it authorizes nothing.
+	admit := func(t task.Task) error {
+		if !sandboxTaskInProject(t, proj) || strings.TrimSpace(t.WatchCmd) != "" {
+			return unavailable()
+		}
+		return nil
+	}
+	t, err := task.GetTask(req.ID)
+	if err != nil {
+		return unavailable()
+	}
+	if err := admit(*t); err != nil {
+		return err
+	}
+	if testHookSandboxRemoveAfterPrecheck != nil {
+		testHookSandboxRemoveAfterPrecheck()
+	}
+	// The caller's expectation is never consulted: its mismatch error is composed
+	// from the stored record, host path included (#5893). The authorization is the
+	// project's identity, re-validated on the record loaded under the same lock
+	// that performs the delete (#5889).
+	req.Expect = task.ProjectExpectation{}
+	if err := s.removeTask(req, resp, admit); err != nil {
+		var nf *task.NotFoundError
+		if errors.As(err, &nf) {
+			return unavailable()
+		}
+		return err
+	}
+	return nil
 }
 
 // checkSandboxTaskDelivery re-authorizes one firing of a sandbox-created task.
@@ -388,16 +456,41 @@ func (m *Manager) checkSandboxTaskDelivery(owner, deliveryRepoID, title string) 
 // refused rather than reached: authorization is by ID and delivery is by that
 // same ID, never a second title resolution.
 func (m *Manager) sandboxDeliveryGuard(id, repoID string) func(*session.Instance, string) error {
+	base := m.sandboxSessionGuard(id, repoID)
 	return func(inst *session.Instance, resolvedRepo string) error {
-		switch {
-		case inst == nil || id == "" || inst.ID != id:
-			return sandboxRefusal("the authorized target session is gone; the title now names another session")
-		case resolvedRepo != repoID:
-			return sandboxRefusal("the target is no longer in the project the task was created in")
-		case inst.IsArchived():
+		if err := base(inst, resolvedRepo); err != nil {
+			return err
+		}
+		if inst.IsArchived() {
 			return sandboxRefusal("the target session %q is archived", inst.Title)
-		case !offBoxBackendType(instanceBackendType(inst)):
-			return sandboxRefusal("the target session %q now runs on the daemon host", inst.Title)
+		}
+		return nil
+	}
+}
+
+// sandboxSessionStillAuthorized is the re-check every scoped session mutation
+// runs on the instance it is about to act on, under the lock that performs the
+// action: it is still the authorized session (by ID, never by title) and still
+// runs off-box.
+func sandboxSessionStillAuthorized(inst *session.Instance, id string) error {
+	switch {
+	case inst == nil || id == "" || inst.ID != id:
+		return sandboxRefusal("that session is not available to this credential")
+	case !offBoxBackendType(instanceBackendType(inst)):
+		return sandboxRefusal("that session is not available to this credential")
+	}
+	return nil
+}
+
+// sandboxSessionGuard is sandboxSessionStillAuthorized plus the project check,
+// shaped for the send path, which also learns the repo it resolved.
+func (m *Manager) sandboxSessionGuard(id, repoID string) func(*session.Instance, string) error {
+	return func(inst *session.Instance, resolvedRepo string) error {
+		if err := sandboxSessionStillAuthorized(inst, id); err != nil {
+			return err
+		}
+		if resolvedRepo != repoID {
+			return sandboxRefusal("that session is not available to this credential")
 		}
 		return nil
 	}

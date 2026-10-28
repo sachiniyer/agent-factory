@@ -311,6 +311,14 @@ func servePosture(w http.ResponseWriter, r *http.Request, next http.Handler, p r
 			// owner = the operator's authority, which stays unconstrained.
 			if owner != "" {
 				r = r.WithContext(withSandboxOwner(r.Context(), owner))
+				// One response boundary for the whole sandbox surface: no body or
+				// error envelope reaches a sandbox credential carrying the daemon
+				// host's layout (daemon/sandbox_scrub.go).
+				var layout func() []string
+				if p.gate.sandboxTokens != nil {
+					layout = p.gate.sandboxTokens.layout
+				}
+				next = scrubbedSandboxResponses(next, layout)
 			}
 		} else {
 			if p.previewOrigin {

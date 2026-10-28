@@ -37,6 +37,11 @@ import (
 // sandboxTokenRegistry maps live sandbox credentials to the session that owns
 // them. Zero value is usable.
 type sandboxTokenRegistry struct {
+	// layout returns the daemon host's layout strings, withheld from every response
+	// for a request that authenticated with a credential from this registry. Set
+	// once at construction, before any request.
+	layout func() []string
+
 	mu sync.RWMutex
 	// invalidations counts events that voided EVERY outstanding credential at once
 	// — a listener rebind, a teardown, an unexpected listener death, or an auth

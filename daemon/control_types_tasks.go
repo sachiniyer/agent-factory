@@ -44,6 +44,10 @@ type AddTaskRequest struct {
 }
 type AddTaskResponse struct {
 	OK bool `json:"ok"`
+	// ID is the canonical id of the task that was stored. It equals the request's
+	// id except where the daemon mints it (a sandbox credential's add), where it
+	// is the only way the caller learns it.
+	ID string `json:"id,omitempty"`
 	MutationOutcome
 }
 

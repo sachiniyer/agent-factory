@@ -118,19 +118,22 @@ func remoteTaskByID(verb, id string) (*task.Task, error) {
 // control socket, so a reload failure after a durable remote write is still
 // reported as "saved, do not retry" rather than as a plain failure.
 
-func routedAddTask(t task.Task, actor task.Actor) error {
+// routedAddTask returns the id the daemon stored, which differs from t.ID when
+// the daemon mints it (a sandbox credential's add, #5890).
+func routedAddTask(t task.Task, actor task.Actor) (string, error) {
 	if !apiclient.IsRemoteTarget() {
-		return daemonAddTask(t, actor)
+		return t.ID, daemonAddTask(t, actor)
 	}
 	client, err := remoteTaskClient()
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer client.CloseIdleConnections()
-	if err := client.AddTask(t, actor); err != nil {
-		return remoteTaskError(client, "af tasks add", "AddTask", err, remoteNothingWritten)
+	id, err := client.AddTaskID(t, actor)
+	if err != nil {
+		return "", remoteTaskError(client, "af tasks add", "AddTask", err, remoteNothingWritten)
 	}
-	return nil
+	return id, nil
 }
 
 func routedUpdateTask(id string, patch task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {

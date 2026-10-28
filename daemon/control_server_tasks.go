@@ -109,6 +109,10 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		return err
 	}
 	resp.OK = true
+	// The canonical stored ID: a daemon that mints the ID (a sandbox credential's
+	// add) is the only party that knows it, and the caller must be able to get and
+	// remove what was actually stored (#5890).
+	resp.ID = created.ID
 	// The task-file write is the durable commit. Publish it before the
 	// non-transactional scheduler/watch reload so other clients never remain
 	// stale when that follow-up fails.
@@ -231,6 +235,13 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
+	return s.removeTask(req, resp, nil)
+}
+
+// removeTask is RemoveTask with an optional admission predicate evaluated on the
+// record loaded under the tasks-file lock, so a scoped caller's authorization is
+// atomic with the delete (#5889).
+func (s *controlServer) removeTask(req RemoveTaskRequest, resp *RemoveTaskResponse, admit func(task.Task) error) error {
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
@@ -239,7 +250,7 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 		return err
 	}
 	defer unlock()
-	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
+	if err := task.RemoveTaskChecked(req.ID, req.Expect, admit); err != nil {
 		return err
 	}
 	resp.OK = true

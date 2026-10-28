@@ -871,6 +871,9 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		return ""
 	}
 	mgr.configAssistants = newConfigAssistantHub(mgr)
+	// Every response for a sandbox-owned request is scrubbed of this host's layout
+	// (daemon/sandbox_scrub.go).
+	mgr.sandboxTokens.layout = mgr.sandboxHostLayout
 	return mgr, nil
 }
 

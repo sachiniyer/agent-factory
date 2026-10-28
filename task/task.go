@@ -467,6 +467,16 @@ func repoIDForPath(projectPath string) string {
 // operation, that the task is still bound to the project the caller authorized
 // it against — see ProjectExpectation.
 func RemoveTask(id string, expect ProjectExpectation) error {
+	return RemoveTaskChecked(id, expect, nil)
+}
+
+// RemoveTaskChecked is RemoveTask with an admission predicate evaluated against
+// the record loaded UNDER the tasks-file lock, immediately before the delete. A
+// scoped caller (a sandbox credential bounded to one project) authorizes the
+// task there, not on a record it read earlier: a rebind or an update that lands
+// between a read and the delete can then never carry the removal across its
+// boundary (#5889). A non-nil admit error aborts with nothing changed.
+func RemoveTaskChecked(id string, expect ProjectExpectation, admit func(Task) error) error {
 	if err := ValidateTaskID(id); err != nil {
 		return err
 	}
@@ -487,8 +497,14 @@ func RemoveTask(id string, expect ProjectExpectation) error {
 		found := false
 		for _, t := range tasks {
 			if t.ID == id {
-				// Verify against the record just loaded under the lock, not one
-				// the caller carried in — that freshness is the whole point.
+				// Admission and verification run against the record just loaded
+				// under the lock, not one the caller carried in — that freshness
+				// is the whole point.
+				if admit != nil {
+					if err := admit(t); err != nil {
+						return err
+					}
+				}
 				if err := expect.Verify(t); err != nil {
 					return err
 				}
@@ -499,7 +515,7 @@ func RemoveTask(id string, expect ProjectExpectation) error {
 		}
 
 		if !found {
-			return fmt.Errorf("task with id %q not found", id)
+			return &NotFoundError{ID: id}
 		}
 
 		return saveTasks(filtered)

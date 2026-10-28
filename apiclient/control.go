@@ -218,7 +218,23 @@ func (c *Client) ResumeStatusPoll(req daemon.ResumeStatusPollRequest) error {
 // the daemon over these same HTTP routes the web UI uses, so the transport alone
 // cannot tell them apart and each client says which it is.
 func (c *Client) AddTask(t task.Task, actor task.Actor) error {
-	return c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &daemon.AddTaskResponse{})
+	_, err := c.AddTaskID(t, actor)
+	return err
+}
+
+// AddTaskID is AddTask returning the canonical id the daemon stored. It differs
+// from t.ID only where the daemon mints the id (a sandbox credential's add), where
+// it is the only way the caller learns it; an older daemon answers no id, and the
+// request's own is returned (#5890).
+func (c *Client) AddTaskID(t task.Task, actor task.Actor) (string, error) {
+	var resp daemon.AddTaskResponse
+	if err := c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &resp); err != nil {
+		return "", err
+	}
+	if resp.ID != "" {
+		return resp.ID, nil
+	}
+	return t.ID, nil
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the
