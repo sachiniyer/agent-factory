@@ -111,6 +111,19 @@ type TriggerTaskRequest struct {
 	ID     string                  `json:"id"`
 	Expect task.ProjectExpectation `json:"expect,omitempty"`
 }
+
+// TriggerTask fires a task through RunTask, whose deliver path can reach
+// Manager.CreateSession's committed auto-create via DeliverPrompt's
+// absent-target branch (#3357): a sandbox was provisioned but its
+// teardown/startup could not be confirmed, so the recorded-for-inspection row
+// is durable. net/rpc flattens a returned error to a plain string, and the
+// legacy task-CRUD prefixes do not cover a trigger's deliver outcome, so the
+// marker would not survive for callDaemon to classify. The committed outcome
+// rides this envelope so callDaemon's CommittedOutcome() carrier check
+// reconstructs it — mirroring CreateSession/KillSession/ArchiveSession and the
+// DeliverPrompt handler (#3357). VALUE embed, never a pointer: gob elides zero
+// values (see control_expect_gob_test.go and #1700).
 type TriggerTaskResponse struct {
 	OK bool `json:"ok"`
+	MutationOutcome
 }

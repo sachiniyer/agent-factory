@@ -201,7 +201,7 @@ var shellSiteRegistry = map[string][]classifiedSite{
 
 	"session/host_program.go:(hostProgramProber).probe": {{
 		class: afAuthored,
-		note: "the login-shell program probes (`command -v -- \"$1\"`, `which -- \"$1\"`) — af-authored " +
+		note: "the login-shell program probe (`command -v -- \"$1\"`, fenced by a nonce) — af-authored " +
 			"const scripts; the operator's program name arrives as a POSITIONAL argument, never in the " +
 			"script text, which is the #5571 W2.1 contract",
 	}},

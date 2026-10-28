@@ -51,6 +51,12 @@ type SnapshotRequest struct {
 
 type SnapshotResponse struct {
 	Instances []session.InstanceData `json:"instances"`
+	// Caller is the id of the session the presented sandbox credential is bound
+	// to (#5571 W3.2). It lets an in-sandbox `whoami` / `archive --self` resolve
+	// the caller from the credential instead of from TmuxName, which the narrowed
+	// projection withholds. Empty for an operator credential, so every existing
+	// client and the local path are unchanged.
+	Caller string `json:"caller,omitempty"`
 	// BootID is the same per-process daemon identity reported by Ping. A changed
 	// value proves requests admitted by the previous process can no longer run.
 	BootID string `json:"boot_id,omitempty"`
@@ -485,6 +491,7 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	alarms := s.deliveryAlarms(req.RepoID)
 	if owner, isSandbox := sandboxOwner(ctx); isSandbox {
 		instances = onlyOwnedBySandbox(instances, owner)
+		resp.Caller = owner
 		alarms = nil
 		// A repo ID is operator identity a sandbox must not learn — the
 		// sandboxSafeInstanceData projection already withholds Path/Worktree/

@@ -497,33 +497,54 @@ func reapWatchGroupLeader(cmd *exec.Cmd, anchor *watchGroupAnchor, beforeKill ..
 }
 
 // awaitWatchReaders waits for the run's stdout and stderr readers to reach
-// EOF. After the group cleanup kill every write end is gone, so that wait is
-// short. When the kill was skipped, a leftover the script backgrounded may
-// still hold an inherited write end, and waiting for its EOF would wedge stop,
-// reload and graceful shutdown on it. So it waits only up to grace, then closes
-// the read ends itself, loudly: the leftover's later writes fail with EPIPE
-// instead.
-func awaitWatchReaders(taskID string, groupKilled bool, grace time.Duration, readEnds []*os.File, done ...<-chan struct{}) {
-	if !groupKilled {
-		timeout := time.After(grace)
-		for _, ch := range done {
+// EOF. After the group cleanup kill every write end is normally gone, so that
+// wait is short. But a process the script started can leave the group (setsid,
+// setpgid, a library's start_new_session) and so survive the kill while holding
+// an inherited write end; and when the kill was skipped a plain backgrounded
+// leftover may hold one too. Waiting for either one's EOF would wedge stop,
+// reload and graceful shutdown on it (#4321), so the wait is bounded by grace in
+// both cases, after which the read ends are closed here, loudly: the leftover's
+// later writes fail with EPIPE instead.
+//
+// working, when non-nil, reports a reader that is not idle: it is delivering an
+// event (a synchronous delivery can outlast grace while later events wait in the
+// pipe), made progress during the last grace, or is parked on usage-limit
+// backpressure (waitForLimitQueueCapacity). The pipe is the lossless buffer in
+// those cases, so the wait continues rather than closing it; only a reader that
+// sat idle for a whole grace is treated as held by an escaped writer. The bound
+// may stop WAITING; it never discards events not yet delivered (#4321 review).
+func awaitWatchReaders(taskID string, groupKilled bool, grace time.Duration, readEnds []*os.File, working func() bool, done ...<-chan struct{}) {
+	timeout := time.After(grace)
+	for _, ch := range done {
+	wait:
+		for {
 			select {
 			case <-ch:
-				continue
+				break wait
 			case <-timeout:
-			}
-			log.WarningLog.Printf("watch task %s: a process the watch command started still holds its output "+
-				"%s after the command exited, and the group cleanup kill was skipped; closing the output so "+
-				"the task can stop (that process may still be running)", taskID, grace)
-			for _, f := range readEnds {
-				if f != nil {
-					_ = f.Close()
+				if working != nil && working() {
+					timeout = time.After(grace)
+					continue
 				}
+				if groupKilled {
+					log.WarningLog.Printf("watch task %s: a process the watch command started still holds its output "+
+						"%s after the command exited and the group was killed (it left the process group); closing the "+
+						"output so the task can stop (that process may still be running)", taskID, grace)
+				} else {
+					log.WarningLog.Printf("watch task %s: a process the watch command started still holds its output "+
+						"%s after the command exited, and the group cleanup kill was skipped; closing the output so "+
+						"the task can stop (that process may still be running)", taskID, grace)
+				}
+				for _, f := range readEnds {
+					if f != nil {
+						_ = f.Close()
+					}
+				}
+				for _, rest := range done {
+					<-rest
+				}
+				return
 			}
-			break
 		}
-	}
-	for _, ch := range done {
-		<-ch
 	}
 }

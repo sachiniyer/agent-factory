@@ -165,7 +165,7 @@ func TestNewHomeSeedsTheLaunchResolvedDefault(t *testing.T) {
 
 	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil
 	}))
 
