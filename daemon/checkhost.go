@@ -96,6 +96,12 @@ func probeOne(name string, hosts map[string]config.HostConfig, posture string) H
 // CheckHost probes req.Host (or every listed host) and records each verdict in
 // the readiness cache.
 func (s *controlServer) CheckHost(req CheckHostRequest, resp *CheckHostResponse) error {
+	// Blocked while the daemon is an upgrade candidate in probation: the probe
+	// dials the operator's hosts and may learn host keys (see the ledger entry in
+	// lifecycle_test.go). It needs no manager state, so only the admission gate.
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("cannot read the host list: %w", err)
@@ -124,7 +130,7 @@ const hostRefreshInterval = 10 * time.Minute
 // it never stacks on an in-flight probe. An unreachable or incomplete probe
 // records nothing (see session.CheckHost), so a blocked verdict is never
 // overwritten by an unanswered one.
-func startHostReadinessRefresh(stopCh <-chan struct{}, wg *sync.WaitGroup) {
+func startHostReadinessRefresh(manager *Manager, stopCh <-chan struct{}, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -135,6 +141,11 @@ func startHostReadinessRefresh(stopCh <-chan struct{}, wg *sync.WaitGroup) {
 			case <-stopCh:
 				return
 			case <-time.After(d):
+			}
+			// A candidate in upgrade probation dials nothing and learns no host
+			// keys, as the CheckHost RPC refuses for the same window.
+			if manager.lifecycle != nil && manager.lifecycle.isUpgradeProbation() {
+				continue
 			}
 			cfg, err := config.LoadConfig()
 			if err != nil || len(cfg.Hosts) == 0 {
