@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -80,14 +81,20 @@ func (h *hostProbes) release(name string) {
 // probeHostsFn is the seam tests replace; production probes over ssh.
 var probeHostsFn = session.CheckHost
 
-func probeOne(name string, hosts map[string]config.HostConfig, posture string) HostCheckResult {
+// hostProbeFunc is the shape of the probe seam (session.CheckHost).
+type hostProbeFunc = func(ctx context.Context, name string, hosts map[string]config.HostConfig, posture string, timeout time.Duration) (session.HostCheck, error)
+
+// probeOne probes one host with the given probe. The caller passes the probe in
+// rather than this function reading probeHostsFn, so a background loop that
+// outlives its starter never touches the package variable after it starts.
+func probeOne(ctx context.Context, probe hostProbeFunc, name string, hosts map[string]config.HostConfig, posture string) HostCheckResult {
 	res := HostCheckResult{Name: name}
 	if !daemonHostProbes.tryAcquire(name) {
 		res.Readiness = string(session.ReadHostReadiness(session.HostReadinessKey(name)).State)
 		return res
 	}
 	defer daemonHostProbes.release(name)
-	c, err := probeHostsFn(name, hosts, posture, session.HostCheckTimeout)
+	c, err := probe(ctx, name, hosts, posture, session.HostCheckTimeout)
 	res.Probed = true
 	if err != nil {
 		res.Error = err.Error()
@@ -99,7 +106,10 @@ func probeOne(name string, hosts map[string]config.HostConfig, posture string) H
 }
 
 // CheckHost probes req.Host (or every listed host) and records each verdict in
-// the readiness cache.
+// the readiness cache. The probe runs under the daemon's advisory scope, so a
+// shutdown kills its ssh child instead of waiting for it (#5839): a control
+// handler still in flight would otherwise hold closeControl, and with it the
+// final checkpoint, for up to the 30s probe bound.
 func (s *controlServer) CheckHost(req CheckHostRequest, resp *CheckHostResponse) error {
 	// Blocked while the daemon is an upgrade candidate in probation: the probe
 	// dials the operator's hosts and may learn host keys (see the ledger entry in
@@ -107,6 +117,7 @@ func (s *controlServer) CheckHost(req CheckHostRequest, resp *CheckHostResponse)
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
+	ctx := s.manager.advisoryContext()
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("cannot read the host list: %w", err)
@@ -116,18 +127,43 @@ func (s *controlServer) CheckHost(req CheckHostRequest, resp *CheckHostResponse)
 		if err := config.ValidateHostPick(cfg.Hosts, name); err != nil {
 			return err
 		}
-		resp.Hosts = []HostCheckResult{probeOne(name, cfg.Hosts, cfg.SSHHostKeyVerification)}
+		resp.Hosts = []HostCheckResult{probeOne(ctx, probeHostsFn, name, cfg.Hosts, cfg.SSHHostKeyVerification)}
 		return nil
 	}
 	for _, n := range config.SortedHostNames(cfg.Hosts) {
-		resp.Hosts = append(resp.Hosts, probeOne(n, cfg.Hosts, cfg.SSHHostKeyVerification))
+		if ctx.Err() != nil {
+			break
+		}
+		resp.Hosts = append(resp.Hosts, probeOne(ctx, probeHostsFn, n, cfg.Hosts, cfg.SSHHostKeyVerification))
 	}
 	return nil
 }
 
 // hostRefreshInterval is how often the supervisor re-probes the listed hosts.
-// Under hostReadinessFreshFor (15m) so a healthy host never reads stale.
-const hostRefreshInterval = 10 * time.Minute
+// Under hostReadinessFreshFor (15m) so a healthy host never reads stale. A var
+// so a test can shorten it.
+var hostRefreshInterval = 10 * time.Minute
+
+// refreshListedHosts probes every listed host once under ctx, with probe.
+func refreshListedHosts(ctx context.Context, manager *Manager, probe hostProbeFunc) {
+	// A candidate in upgrade probation dials nothing and learns no host keys, as
+	// the CheckHost RPC refuses for the same window.
+	if manager != nil && manager.lifecycle != nil && manager.lifecycle.isUpgradeProbation() {
+		return
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil || len(cfg.Hosts) == 0 {
+		return
+	}
+	for _, n := range config.SortedHostNames(cfg.Hosts) {
+		if ctx.Err() != nil {
+			return
+		}
+		if r := probeOne(ctx, probe, n, cfg.Hosts, cfg.SSHHostKeyVerification); r.Probed && !r.Reachable && ctx.Err() == nil {
+			log.InfoLog.Printf("host %q readiness refresh: %s", n, r.Error)
+		}
+	}
+}
 
 // startHostReadinessRefresh re-probes the listed hosts on a jittered timer so
 // `af doctor` and the pickers read a recent verdict without a create. It does
@@ -135,37 +171,38 @@ const hostRefreshInterval = 10 * time.Minute
 // it never stacks on an in-flight probe. An unreachable or incomplete probe
 // records nothing (see session.CheckHost), so a blocked verdict is never
 // overwritten by an unanswered one.
-func startHostReadinessRefresh(manager *Manager, stopCh <-chan struct{}, wg *sync.WaitGroup) {
-	wg.Add(1)
+//
+// ADVISORY, so deliberately NOT joined by the drain waitgroup (#5839). A probe
+// can block on ssh for 30s, longer than the stopper's SIGKILL grace, and joining
+// it put that wait in front of the final SaveInstancesForShutdown. It stops on
+// the advisory scope (cancelled first thing in drainDaemon, which kills the ssh
+// child) and on stopCh; if the process exits before it notices, nothing is lost —
+// its only output is an in-memory cache.
+//
+// Because it outlives its starter, it reads the package seams (the interval and
+// the probe) ONCE, here, and the goroutine uses only those copies: a later write
+// to a seam, such as a test restoring it, cannot race with the loop. The
+// returned channel closes when the loop has exited. It is NOT the drain
+// waitgroup — shutdown never waits on it — and exists so a caller that wants to
+// know the loop is gone (a test, before it restores state) can wait.
+func startHostReadinessRefresh(manager *Manager, stopCh <-chan struct{}) <-chan struct{} {
+	ctx := manager.advisoryContext()
+	interval, probe := hostRefreshInterval, probeHostsFn
+	done := make(chan struct{})
 	go func() {
-		defer wg.Done()
+		defer close(done)
 		for {
 			// +/-10% jitter so many daemons do not hit a shared host together.
-			d := hostRefreshInterval + time.Duration(rand.Int63n(int64(hostRefreshInterval/5))) - hostRefreshInterval/10
+			d := interval + time.Duration(rand.Int63n(int64(interval/5))) - interval/10
 			select {
 			case <-stopCh:
 				return
+			case <-ctx.Done():
+				return
 			case <-time.After(d):
 			}
-			// A candidate in upgrade probation dials nothing and learns no host
-			// keys, as the CheckHost RPC refuses for the same window.
-			if manager.lifecycle != nil && manager.lifecycle.isUpgradeProbation() {
-				continue
-			}
-			cfg, err := config.LoadConfig()
-			if err != nil || len(cfg.Hosts) == 0 {
-				continue
-			}
-			for _, n := range config.SortedHostNames(cfg.Hosts) {
-				select {
-				case <-stopCh:
-					return
-				default:
-				}
-				if r := probeOne(n, cfg.Hosts, cfg.SSHHostKeyVerification); r.Probed && !r.Reachable {
-					log.InfoLog.Printf("host %q readiness refresh: %s", n, r.Error)
-				}
-			}
+			refreshListedHosts(ctx, manager, probe)
 		}
 	}()
+	return done
 }

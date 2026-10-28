@@ -86,9 +86,10 @@ func (i *Instance) CanPreserveWorkspace() bool {
 // credential, and leaves the workspace on its host. The runtime cleanup identity
 // is kept, so killing the archived row later still reaps exactly what af made.
 //
-// A row with no live client (Lost, or unreachable and since re-dialled out) has
-// no agent af can still reach; it archives too, since the workspace is on the host
-// either way.
+// The archive records Archived only over a stop it has proven. A row with no live
+// client (a daemon restart, or a Lost row) is reattached first; when it cannot be
+// reached the archive is refused, because a missing client does not mean the
+// remote agent is gone.
 func (i *Instance) ArchiveSandboxPreserving() (ArchivedWorkspaceData, error) {
 	i.mu.RLock()
 	isSandbox := i.capabilitiesLocked().Workspace == WorkspaceRemote
@@ -102,14 +103,27 @@ func (i *Instance) ArchiveSandboxPreserving() (ArchivedWorkspaceData, error) {
 	if dir == "" {
 		return ArchivedWorkspaceData{}, fmt.Errorf("session %q has no preservable session directory: %w", i.Title, ErrPreserveUnsupported)
 	}
-	if hasClient {
-		stopper, ok := i.AgentServer().(WorkspaceStopper)
-		if !ok {
-			return ArchivedWorkspaceData{}, fmt.Errorf("session %q: %w", i.Title, ErrPreserveUnsupported)
+	if !hasClient {
+		// A missing client is not evidence the agent stopped: a daemon restart
+		// leaves the remote agent and its tabs running and rebuilds only the cleanup
+		// handle. Reconnect from the persisted runtime identity and stop it for real;
+		// if that cannot be done the archive is refused rather than recorded over a
+		// live agent (#5868).
+		if err := i.ReattachSandbox(); err != nil {
+			i.mu.RLock()
+			bound := i.remoteClient != nil
+			i.mu.RUnlock()
+			if !bound {
+				return ArchivedWorkspaceData{}, fmt.Errorf("session %q: cannot confirm its agent has stopped, because the daemon has no connection to it and reconnecting failed: %w; retry once the host is reachable, or kill the session to remove it", i.Title, err)
+			}
 		}
-		if err := stopper.StopPreservingWorkspace(); err != nil {
-			return ArchivedWorkspaceData{}, fmt.Errorf("failed to stop session %q before archive: %w", i.Title, err)
-		}
+	}
+	stopper, ok := i.AgentServer().(WorkspaceStopper)
+	if !ok {
+		return ArchivedWorkspaceData{}, fmt.Errorf("session %q: %w", i.Title, ErrPreserveUnsupported)
+	}
+	if err := stopper.StopPreservingWorkspace(); err != nil {
+		return ArchivedWorkspaceData{}, fmt.Errorf("failed to stop session %q before archive: %w", i.Title, err)
 	}
 	loc := ArchivedWorkspaceData{Host: host, Dir: dir}
 	// The agent is stopped, so nothing can refresh the synced account any more:
@@ -195,4 +209,14 @@ func (i *Instance) stopRemoteTransport() {
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
 	p.stopTunnel()
+}
+
+// keepsPreservedWorkspaceHandle reports whether an archived row still owes the
+// reap of a workspace it left on its host: an unpushed preserve (#5571 W8.5). Such
+// a row keeps its runtime-cleanup identity in storage, so a kill after a daemon
+// restart removes exactly what af made instead of orphaning it (#5867). A pushed
+// archive reaped its sandbox, so it owes nothing.
+func (d InstanceData) keepsPreservedWorkspaceHandle() bool {
+	w := d.ArchivedWorkspace
+	return isSandboxBackendType(d.BackendType) && w != nil && !w.Pushed && w.Dir != ""
 }

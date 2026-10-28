@@ -323,8 +323,20 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("af agent-server: %w", rerr)
 	}
 	if loginPATH != "" {
+		// The session directory holding the staged af keeps PATH precedence
+		// over whatever the login profile put first (#5877).
+		loginPATH = session.PinPATHDir(loginPATH, session.SessionBinDir(os.Args[0]))
 		if err := os.Setenv("PATH", loginPATH); err != nil {
 			log.WarningLog.Printf("agent-server: could not adopt login-shell PATH for the agent pane: %v", err)
+		}
+	}
+
+	// An account-scoped sandbox proves executable attribution BEFORE any pane can
+	// receive the scope: the resolved command must name an absolute executable, not
+	// a bare name a workspace-relative PATH entry could answer (#5571 W7.4).
+	if agent := os.Getenv(session.AccountScopeAgentEnv); agent != "" {
+		if err := session.RequireAttributedAccountProgram(resolvedProgram, agent); err != nil {
+			return fmt.Errorf("af agent-server: %w", err)
 		}
 	}
 
@@ -346,6 +358,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		// The daemon holds this session as a remote workspace and admits its tabs
 		// accordingly; the injected guidance must match (#5571 W3.3).
 		HostedRemotely: true,
+		// What /v1/health tells the daemon this server speaks; the guidance
+		// follows it rather than a static floor (#5878).
+		AdvertisedFeatures: agentServerWireFeatures,
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,
@@ -587,8 +602,12 @@ func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKRespons
 	}
 	if codex && hs.inst != nil {
 		// Before the spawn, so the capture can tell the new rollout from old ones.
+		// Correlated against the directory the launch command actually runs the
+		// agent in (an `env -C DIR codex` moves it off the worktree), not the
+		// worktree; unscoped when that is not provable (#5861).
 		codexSnap = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(
-			codexHomeFor(hs.program, hs.inst.GetWorktreePath()), hs.inst.GetWorktreePath())
+			codexHomeFor(hs.program, hs.inst.GetWorktreePath()),
+			session.LaunchCaptureWorkingDir(hs.program, hs.inst.GetWorktreePath()))
 	}
 	if err := hs.as.Launch(req.FirstTimeSetup); err != nil {
 		return err

@@ -19,6 +19,13 @@ type HooksPane struct {
 	height      int
 	dirty       bool
 	hasFocus    bool
+	// committed is the list as last loaded or saved, so Discard can put back what
+	// is actually stored instead of leaving the pane dirty forever.
+	committed []string
+	// readOnly, when non-empty, is why this pane cannot be edited (W9.7: a remote
+	// target's hooks live in the checkout on the daemon host). The edit keys do
+	// nothing, so an unsaveable edit cannot be made in the first place.
+	readOnly string
 }
 
 func NewHooksPane() *HooksPane {
@@ -32,11 +39,32 @@ func (h *HooksPane) SetSize(width, height int) {
 
 func (h *HooksPane) SetCommands(commands []string) {
 	h.commands = commands
+	h.committed = append([]string(nil), commands...)
 	h.dirty = false
 	if len(h.commands) == 0 {
 		h.selectedIdx = 0
 	} else if h.selectedIdx >= len(h.commands) {
 		h.selectedIdx = len(h.commands) - 1
+	}
+}
+
+// Discard drops every unsaved edit and restores the last loaded or saved list.
+func (h *HooksPane) Discard() {
+	h.commands = append([]string(nil), h.committed...)
+	h.dirty = false
+	h.editing = false
+	h.adding = false
+	h.editBuffer = ""
+	if h.selectedIdx >= len(h.commands) {
+		h.selectedIdx = max(0, len(h.commands)-1)
+	}
+}
+
+// SetReadOnly makes the pane refuse edits and explain why; "" makes it editable.
+func (h *HooksPane) SetReadOnly(reason string) {
+	h.readOnly = reason
+	if reason != "" {
+		h.Discard()
 	}
 }
 
@@ -98,6 +126,12 @@ func (h *HooksPane) handleNormalMode(msg tea.KeyMsg) bool {
 			h.selectedIdx++
 		}
 		return true
+	case "n", "enter", "D":
+		if h.readOnly != "" {
+			return true // consumed, and nothing to edit: the pane says why
+		}
+	}
+	switch msg.String() {
 	case "n":
 		h.adding = true
 		h.editBuffer = ""
@@ -164,7 +198,11 @@ func (h *HooksPane) String() string {
 	b.WriteString(descStyle.Render("Commands run async in new worktrees"))
 	b.WriteString("\n\n")
 
-	if len(h.commands) == 0 && !h.adding {
+	if h.readOnly != "" {
+		b.WriteString(hintStyle.Render("  " + h.readOnly))
+		b.WriteString("\n\n")
+	}
+	if len(h.commands) == 0 && !h.adding && h.readOnly == "" {
 		msg := "  No hooks configured. Press Enter to focus, then n to add."
 		if h.width > 0 && lipgloss.Width(msg) > h.width {
 			msg = "  No hooks configured. Press n to add."
@@ -194,6 +232,8 @@ func (h *HooksPane) String() string {
 	if h.hasFocus {
 		if h.editing || h.adding {
 			b.WriteString(hintStyle.Render("enter save · esc cancel"))
+		} else if h.readOnly != "" {
+			b.WriteString(hintStyle.Render("esc back"))
 		} else {
 			hint := "n add · enter edit · D delete · esc back"
 			if h.width > 0 && lipgloss.Width(hint) > h.width {

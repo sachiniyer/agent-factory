@@ -152,6 +152,12 @@ type InstanceOptions struct {
 	// guidance reflects the remote runtime's tab admission rather than the local
 	// capabilities it happens to execute on (#5571 W3.3).
 	HostedRemotely bool
+	// AdvertisedFeatures is the /v1/health feature list the hosting
+	// agent-server advertises to the daemon. A hosted instance renders its
+	// guidance from what is advertised, not from a static per-backend floor
+	// (#5878): the daemon admits shell and process tabs only for a sandbox that
+	// advertises "tab-api".
+	AdvertisedFeatures []string
 }
 
 // backendFactory provisions the already-resolved runtime for a new Instance,
@@ -214,7 +220,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// path is a symlink out of the registry), and those must be checked on THIS
 	// machine, where the registry lives, before a path derived from them is handed
 	// to a runtime that will mount it.
-	if kind.CarriesAccount() && strings.TrimSpace(opts.Account) != "" {
+	if accountCarried(kind, absPath, opts.Host) && strings.TrimSpace(opts.Account) != "" {
 		account, aerr := resolveAccountForProvision(absPath, opts.Program, opts.Account)
 		if aerr != nil {
 			return ProvisionResult{}, aerr
@@ -550,6 +556,21 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	accountBackendErr := error(nil)
 	if resolveBackendErr == nil {
 		accountBackendErr = refuseOffBoxAccountForKind(opts, kind)
+		if accountBackendErr != nil && accountCarried(kind, absPath, opts.Host) {
+			// An account on a LISTED host is carried by W7.3's synced scope (#5571
+			// W7.4); the refusal below stands for every other off-box target.
+			accountBackendErr = nil
+		} else if accountBackendErr != nil && opts.AccountSource != "" {
+			// A DEFAULT account (default_accounts) must never make a sandbox create
+			// impossible: nobody typed it, so there is no identity to defend and no
+			// flag to fix. The session runs without it — on the host's own
+			// credentials, as an unlisted target always did — and the operator is
+			// told. An explicit --account is still refused with its remedy.
+			log.WarningLog.Printf("not applying account %q to %q on a %s target that cannot carry it: %s; %s",
+				opts.Account, opts.Title, kind, opts.AccountSource, listedHostAccountRemedy())
+			opts.Account, opts.AccountSource = "", ""
+			accountBackendErr = nil
+		}
 	} else {
 		// Preserve the direct guard's established answer for an explicitly invalid
 		// backend; the resolver error remains authoritative for repo-config errors.
@@ -647,7 +668,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		repoIdentityPath:      opts.RepoIdentityPath,
 		Program:               opts.Program,
 		Account:               opts.Account,
-		Host:                  opts.Host,
+		Host:                  recordedAccountHost(opts, kind, absPath),
 		accountAgent:          accountAgent,
 		Height:                0,
 		Width:                 0,
@@ -667,6 +688,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		runtimeTeardown:       res.Teardown,
 		callbackUnavailable:   callbackUnavailableReasonFor(opts, res),
 		hostedRemotely:        opts.HostedRemotely,
+		advertisedFeatures:    opts.AdvertisedFeatures,
 	}, nil
 }
 
@@ -734,13 +756,11 @@ const offBoxRoundTripReason = AccountWriteBackRationale +
 func offBoxAccountRefusal(kind BackendKind) string {
 	switch kind {
 	case BackendSSH:
-		// ssh shares the invariant AND may add the concrete consequence, because it is
-		// the one refusing backend whose session-directory lifecycle af owns — so
-		// "teardown removes it" is established here and nowhere else (#3103 review).
-		return "af can put the account on that host, and deliberately does not: " + offBoxRoundTripReason +
-			" On this backend af owns the remote session directory, so the teardown that removes it removes " +
-			"the refresh with it. Use the docker or local backend for account-scoped sessions, or omit " +
-			"--account to use the remote host's own credentials"
+		// Reached only for an ssh target that is NOT a listed host (#5571 W7.4): a
+		// listed host carries the account through W7.3's synced scope, so the old
+		// "refused by design" reasoning no longer applies to it. What remains is
+		// that af will not send an account to a target an operator did not list.
+		return listedHostAccountReason + "; " + listedHostAccountRemedy()
 
 	case BackendSandbox:
 		// The same round-trip reason as ssh, and NOT a "no provable location" one:

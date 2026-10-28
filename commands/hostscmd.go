@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,8 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // `af hosts` (#5571 W10.5): add a sandbox host in one command.
@@ -41,7 +42,9 @@ var (
 	hostsRemoveClearDefault   bool
 	hostsCheckProbe           = daemon.CheckHost
 	hostsConfigSet            = globalConfigSet
+	hostsEditApply            = globalHostsEdit
 	hostsLoad                 = loadGlobalHosts
+	hostsPosture              = globalHostKeyPosture
 	errHostsNotReady          = errors.New("the host is saved but not ready to run a session")
 	errHostsCheckHasProblems  = errors.New("one or more hosts are not ready to run a session")
 	errHostsUnreachableOrBusy = errors.New("one or more hosts could not be probed")
@@ -76,6 +79,30 @@ type hostListEntry struct {
 	Default bool              `json:"default"`
 }
 
+// globalHostKeyPosture is the global ssh.host_key_verification, "" when unreadable
+// (the composer then applies strict, its default).
+func globalHostKeyPosture() string {
+	load, err := config.LoadConfigReadOnly()
+	if err != nil || load.Config == nil {
+		return ""
+	}
+	return load.Config.SSHHostKeyVerification
+}
+
+// sshRemedyCommand is the command printed for the operator to test a host's
+// connection: af's own ssh invocation for the entry (session.OperatorSSHCommand),
+// so every shape the list accepts — a bare host, a user, a custom port, a key —
+// is valid as printed. Never `ssh user@host:port`, which OpenSSH reads as the
+// hostname "host:port" on port 22 (#5852).
+func sshRemedyCommand(entry config.HostConfig) string {
+	cmd, err := session.OperatorSSHCommand(entry, hostsPosture())
+	if err != nil {
+		// An entry that cannot compose cannot be saved either (ValidateHostEntry).
+		return "ssh <the saved host> true"
+	}
+	return cmd + " true"
+}
+
 func loadGlobalHosts() (map[string]config.HostConfig, string, error) {
 	load, err := config.LoadConfigReadOnly()
 	if err != nil {
@@ -95,7 +122,7 @@ func loadGlobalHosts() (map[string]config.HostConfig, string, error) {
 // bare IPv6 literal (more than one colon) is a host, not host:port.
 func parseHostDestination(dest string) (config.HostConfig, error) {
 	var h config.HostConfig
-	dest = strings.TrimSpace(dest)
+	dest = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(dest), "ssh://"), "/")
 	if user, rest, ok := strings.Cut(dest, "@"); ok {
 		h.User, dest = user, rest
 	}
@@ -111,25 +138,63 @@ func parseHostDestination(dest string) (config.HostConfig, error) {
 	return h, nil
 }
 
-func writeHostList(hosts map[string]config.HostConfig) error {
-	raw, err := json.Marshal(hosts)
-	if err != nil {
-		return err
-	}
-	_, err = hostsConfigSet("hosts", string(raw))
+// applyHostsEdit sends one per-entry edit of the host list to the writer, which
+// performs the read, the exists/default checks and the write as ONE
+// read-modify-write under the exclusive config file lock (config.EditGlobalHosts).
+// Concurrent add, remove and `af config set` block on that lock and run one after
+// the other, so none is lost and none retries (#5855). The CLI never reads the
+// table and writes it back itself: the write is made by the daemon, another
+// process, so the CLI could not hold the lock across its own read.
+func applyHostsEdit(edit config.HostsEdit) error {
+	_, err := hostsEditApply(edit)
 	return err
 }
 
+// hostsFailJSON ends a failed command. With --json the error rides in the one
+// envelope on STDOUT, where a script reads the outcome; nothing else is printed
+// on either stream. The returned error still sets the exit code.
 func hostsFailJSON(cmd *cobra.Command, err error) error {
-	return jsonWrapError(cmd, hostsJSONFlag, err)
+	return hostsEnvelopeError(cmd, nil, err, "")
 }
+
+// hostsEnvelopeError emits {data, error} for an outcome that is partly done: the
+// host was saved (data) and a later step failed (error, with its code). A script
+// can then tell "saved but unchecked" from "saved and verified" from a hard
+// failure without scraping stderr. Off --json it is a passthrough.
+func hostsEnvelopeError(cmd *cobra.Command, data any, err error, code string) error {
+	if !hostsJSONFlag || err == nil {
+		return err
+	}
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	if root := cmd.Root(); root != nil {
+		root.SilenceUsage = true
+		root.SilenceErrors = true
+	}
+	log.CloseQuiet()
+	_ = apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Envelope{
+		Data:  data,
+		Error: &apiproto.EnvelopeError{Message: err.Error(), Code: code},
+	})
+	return err
+}
+
+// Error codes in the --json envelope of `af hosts` (additive; absent on an
+// ordinary failure).
+const (
+	// hostsCodeNotReady: the host is saved, the probe answered, and it cannot run a
+	// session yet (or could not be reached). data carries the probe result.
+	hostsCodeNotReady = "host_not_ready"
+	// apiproto.ErrorCodeMutationCommitted: the host is saved but a later step (the
+	// default pick, or the probe itself) could not run.
+)
 
 var hostsAddCmd = &cobra.Command{
 	Use:   "add <name> <ssh-destination>",
 	Short: "Save a host and check that it can run a session",
 	Long: `Save <name> as a sandbox host and probe it.
 
-<ssh-destination> is [user@]host[:port], for example ubuntu@box1.tailnet.ts.net.
+<ssh-destination> is [user@]host[:port] (an ssh:// URL works too), for example ubuntu@box1.tailnet.ts.net.
 The name is what 'af sessions create --host <name>' takes. The host is probed
 for git, tmux (3.2 or newer) and gh, and every missing tool is reported with
 its fix. The entry is kept either way; use --no-check to skip the probe.`,
@@ -151,23 +216,16 @@ its fix. The entry is kept either way; use --no-check to skip the probe.`,
 		if err := config.ValidateHostEntry(name, entry); err != nil {
 			return hostsFailJSON(cmd, err)
 		}
-		hosts, _, err := hostsLoad()
-		if err != nil {
-			return hostsFailJSON(cmd, fmt.Errorf("cannot read the host list: %w", err))
-		}
-		if _, exists := hosts[name]; exists {
-			return hostsFailJSON(cmd, fmt.Errorf("host %q is already listed; remove it first with `af hosts remove %s`, or probe it with `af hosts check %s`", name, name, name))
-		}
-		hosts[name] = entry
-		if err := writeHostList(hosts); err != nil {
+		if err := applyHostsEdit(config.HostsEdit{Op: config.HostsEditAdd, Name: name, Host: &entry}); err != nil {
 			return hostsFailJSON(cmd, err)
 		}
+		result := hostsAddResult{Name: name, Host: entry}
 		if hostsAddDefault {
 			if _, err := hostsConfigSet("default_host", name); err != nil {
-				return hostsFailJSON(cmd, fmt.Errorf("saved host %q, but could not make it the default: %w", name, err))
+				return hostsEnvelopeError(cmd, result, fmt.Errorf("saved host %q, but could not make it the default: %w", name, err), apiproto.ErrorCodeMutationCommitted)
 			}
+			result.Default = true
 		}
-		result := hostsAddResult{Name: name, Host: entry, Default: hostsAddDefault}
 		var checkErr error
 		if !hostsAddNoCheck {
 			resp, err := hostsCheckProbe(daemon.CheckHostRequest{Host: name})
@@ -178,21 +236,26 @@ its fix. The entry is kept either way; use --no-check to skip the probe.`,
 				result.Check = &resp.Hosts[0]
 			}
 		}
+		notReady := result.Check != nil && !hostReady(*result.Check)
 		if hostsJSONFlag {
-			if err := apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(result)); err != nil {
-				return err
+			// ONE envelope on stdout, whatever happened after the save.
+			switch {
+			case checkErr != nil:
+				return hostsEnvelopeError(cmd, result, checkErr, apiproto.ErrorCodeMutationCommitted)
+			case notReady:
+				return hostsEnvelopeError(cmd, result, errHostsNotReady, hostsCodeNotReady)
 			}
-		} else {
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "saved host %s (%s)%s\n", name, describeHost(entry), map[bool]string{true: " as the default", false: ""}[hostsAddDefault])
-			if result.Check != nil {
-				renderHostCheck(out, *result.Check, entry)
-			}
+			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(result))
+		}
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "saved host %s (%s)%s\n", name, describeHost(entry), map[bool]string{true: " as the default", false: ""}[result.Default])
+		if result.Check != nil {
+			renderHostCheck(out, *result.Check, entry)
 		}
 		if checkErr != nil {
 			return checkErr
 		}
-		if result.Check != nil && !hostReady(*result.Check) {
+		if notReady {
 			return errHostsNotReady
 		}
 		return nil
@@ -227,7 +290,7 @@ func renderHostCheck(w io.Writer, r daemon.HostCheckResult, entry config.HostCon
 		if r.Error != "" {
 			fmt.Fprintf(w, ": %s", r.Error)
 		}
-		fmt.Fprintf(w, "\n    fix: make `ssh %s` work non-interactively from this machine (bring the tailnet or VPN up, load your key, trust the host key), then run `af hosts check %s`. af opens no tunnel and edits no ssh config.\n", describeHost(entry), r.Name)
+		fmt.Fprintf(w, "\n    fix: make `%s` succeed from this machine (bring the tailnet or VPN up, load your key, trust the host key), then run `af hosts check %s`. af opens no tunnel and edits no ssh config.\n", sshRemedyCommand(entry), r.Name)
 	case len(r.Problems) > 0:
 		fmt.Fprintf(w, "  %s: cannot run a session yet\n", r.Name)
 		for _, p := range r.Problems {
@@ -307,11 +370,7 @@ probed. Exits non-zero when a host is not ready or could not be reached.`,
 		if err != nil {
 			return hostsFailJSON(cmd, err)
 		}
-		if hostsJSONFlag {
-			if err := apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(resp)); err != nil {
-				return err
-			}
-		} else if len(resp.Hosts) == 0 {
+		if !hostsJSONFlag && len(resp.Hosts) == 0 {
 			fmt.Fprintln(cmd.OutOrStdout(), "no hosts saved; add one with `af hosts add <name> <ssh-destination>`")
 		}
 		hosts, _, _ := hostsLoad()
@@ -327,13 +386,22 @@ probed. Exits non-zero when a host is not ready or could not be reached.`,
 				unreachable = true
 			}
 		}
+		var outcome error
 		switch {
 		case blocked:
-			return errHostsCheckHasProblems
+			outcome = errHostsCheckHasProblems
 		case unreachable:
-			return errHostsUnreachableOrBusy
+			outcome = errHostsUnreachableOrBusy
 		}
-		return nil
+		if hostsJSONFlag {
+			// One envelope on stdout: the probe results are the data, and a host
+			// that is not ready is the error beside them.
+			if outcome != nil {
+				return hostsEnvelopeError(cmd, resp, outcome, hostsCodeNotReady)
+			}
+			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(resp))
+		}
+		return outcome
 	},
 }
 
@@ -350,23 +418,7 @@ refused unless you pass --clear-default.`,
 			return hostsFailJSON(cmd, err)
 		}
 		name := strings.TrimSpace(args[0])
-		hosts, def, err := hostsLoad()
-		if err != nil {
-			return hostsFailJSON(cmd, fmt.Errorf("cannot read the host list: %w", err))
-		}
-		if err := config.ValidateHostPick(hosts, name); err != nil {
-			return hostsFailJSON(cmd, err)
-		}
-		if def == name {
-			if !hostsRemoveClearDefault {
-				return hostsFailJSON(cmd, fmt.Errorf("host %q is the default_host; pass --clear-default to remove it and clear the default, or point default_host elsewhere first (`af config set default_host <name>`)", name))
-			}
-			if _, err := hostsConfigSet("default_host", ""); err != nil {
-				return hostsFailJSON(cmd, fmt.Errorf("could not clear default_host: %w", err))
-			}
-		}
-		delete(hosts, name)
-		if err := writeHostList(hosts); err != nil {
+		if err := applyHostsEdit(config.HostsEdit{Op: config.HostsEditRemove, Name: name, ClearDefault: hostsRemoveClearDefault}); err != nil {
 			return hostsFailJSON(cmd, err)
 		}
 		if hostsJSONFlag {

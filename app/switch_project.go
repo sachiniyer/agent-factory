@@ -720,6 +720,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		}
 		m.store.SetHookCount(0)
 		m.hooksPane.SetCommands(nil)
+		m.hooksPane.SetReadOnly(remoteHooksReadOnlyReason())
 	} else if resolved, err := config.ResolveConfigForRepo(repo); err == nil {
 		// A project that sets no default_program already arrives here as the
 		// global default: ResolveConfig seeds DefaultProgram from the global

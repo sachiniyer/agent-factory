@@ -34,6 +34,7 @@ func preservedSessionWithAccount(t *testing.T, run func(time.Duration, string, i
 
 	b := &sshBackend{provisioner: p, cleanup: &SSHRuntimeCleanupData{SessionDir: dir}}
 	inst = &Instance{Title: "t", backend: b, started: true, Host: "box1", Tabs: []*Tab{newRemoteAgentTab()}}
+	attachStoppableAgent(t, inst, false)
 	return inst, dir, filepath.Join(acct.Dir, ".credentials.json")
 }
 
@@ -79,6 +80,7 @@ func TestArchivePreserveWithoutAnAccountTouchesNoAccountState(t *testing.T) {
 	}}
 	b := &sshBackend{provisioner: p, cleanup: &SSHRuntimeCleanupData{SessionDir: dir}}
 	inst := &Instance{Title: "t", backend: b, started: true, Tabs: []*Tab{newRemoteAgentTab()}}
+	attachStoppableAgent(t, inst, false)
 	_, err := inst.ArchiveSandboxPreserving()
 	require.NoError(t, err)
 }

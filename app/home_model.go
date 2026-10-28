@@ -38,6 +38,12 @@ type home struct {
 	// remote caches the target's registry and tasks in remote mode (W9.7); the
 	// poll refreshes it off the event loop.
 	remote remoteCache
+	// pendingPaneNotice is a one-shot message a save queued for the next frame
+	// that can show it (a discarded unsaveable edit, W9.7).
+	pendingPaneNotice string
+	// quitSaveFailure is the text of the save error that last aborted a quit; the
+	// same error again on the next quit is the user's choice to discard and leave.
+	quitSaveFailure string
 	// projectPathResolutions retains successful Git identity lookups across the
 	// 750ms Projects poll. It is event-loop-owned like the rest of home state.
 	projectPathResolutions map[string]projectPathResolution
@@ -423,6 +429,9 @@ type home struct {
 	// so an untouched field keeps today's behavior byte-identical. Reset by
 	// startNewInstance so a cancelled create cannot leak a backend into the next.
 	pendingBackend string
+	// pendingHost is the listed host picked in the same field (#5571 W6.3), or ""
+	// for none. It is cleared everywhere pendingBackend is.
+	pendingHost string
 	// backendPickerPending prevents submitting or switching fields before the
 	// configured new_remote binding has delivered its promised backend picker.
 	backendPickerPending bool
@@ -610,7 +619,8 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 	if isRemoteTarget() {
 		// Pre-loop (bubbletea has not started), bounded by remoteReadTimeout: seeds
 		// the cache the first render reads. Every later refresh is the poll's.
-		h.remote.apply(fetchRemoteReads(ctx))
+		h.remote.apply(fetchRemoteReads(ctx), h.remote.seq)
+		h.hooksPane.SetReadOnly(remoteHooksReadOnlyReason())
 	}
 	h.refreshSidebarProjects()
 	// In registry mode (launched outside a repo, #2477) the session tree is empty

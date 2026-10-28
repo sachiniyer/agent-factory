@@ -23,8 +23,9 @@ import (
 // and restoreLocalTabs reconnects it by exact name on reload) so it survives a
 // daemon/af restart — Sachin's hard #930 requirement. Off-box
 // instances have no daemon-side worktree from which to spawn a process, shell
-// or vscode tab, so RefuseTabKind refuses those kinds there; the one kind it
-// admits is a web tab on an external target (#3062), which spawns nothing. Also
+// or vscode tab, so RefuseTabKind refuses those kinds there; the kinds it
+// admits there are web tabs on an external target (#3062) and docs tabs,
+// which spawn nothing. Also
 // rejected for an empty command; there has been no tab-count cap since #3023.
 func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	// An empty kind is the default (shell-or-process, per req.Shell), not a kind;

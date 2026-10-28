@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -49,7 +50,7 @@ type HostCheck struct {
 func (c HostCheck) Blocked() bool { return c.Reachable && len(c.Problems) > 0 }
 
 // hostCheckShell builds the shell a probe of h runs through. A seam for tests.
-var hostCheckShell = func(h config.HostConfig, globalPosture string) (sandboxShell, error) {
+var hostCheckShell = func(ctx context.Context, h config.HostConfig, globalPosture string) (sandboxShell, error) {
 	cfg := sshConfigForHost(h)
 	posture := hostPosture(h, globalPosture)
 	if err := verifySSHIdentityFile(cfg); err != nil {
@@ -64,13 +65,16 @@ var hostCheckShell = func(h config.HostConfig, globalPosture string) (sandboxShe
 			return nil, err
 		}
 	}
-	return newSSHSandboxProvisioner(ProvisionSpec{}, cmd, "", ""), nil
+	p := newSSHSandboxProvisioner(ProvisionSpec{}, cmd, "", "")
+	p.runCtx = ctx
+	return p, nil
 }
 
 // CheckHost probes the listed host name and records the verdict under
 // HostReadinessKey(name) by the same rule the create path uses. An unlisted or
-// malformed name is an error before anything is dialed.
-func CheckHost(name string, hosts map[string]config.HostConfig, globalPosture string, timeout time.Duration) (HostCheck, error) {
+// malformed name is an error before anything is dialed. Cancelling ctx kills the
+// ssh child; a probe abandoned that way records nothing.
+func CheckHost(ctx context.Context, name string, hosts map[string]config.HostConfig, globalPosture string, timeout time.Duration) (HostCheck, error) {
 	name = strings.TrimSpace(name)
 	if err := config.ValidateHostPick(hosts, name); err != nil {
 		return HostCheck{}, err
@@ -79,7 +83,7 @@ func CheckHost(name string, hosts map[string]config.HostConfig, globalPosture st
 	if err := config.ValidateHostEntry(name, entry); err != nil {
 		return HostCheck{}, err
 	}
-	shell, err := hostCheckShell(entry, globalPosture)
+	shell, err := hostCheckShell(ctx, entry, globalPosture)
 	if err != nil {
 		return HostCheck{}, fmt.Errorf("host %q: %w", name, err)
 	}
@@ -99,7 +103,7 @@ func CheckHost(name string, hosts map[string]config.HostConfig, globalPosture st
 // CheckAllHosts probes every listed host in name order, skipping the names in
 // skip. It returns each host's result; a refusal for one host does not stop the
 // others.
-func CheckAllHosts(hosts map[string]config.HostConfig, globalPosture string, timeout time.Duration, skip func(name string) bool) (map[string]HostCheck, map[string]error) {
+func CheckAllHosts(ctx context.Context, hosts map[string]config.HostConfig, globalPosture string, timeout time.Duration, skip func(name string) bool) (map[string]HostCheck, map[string]error) {
 	out := map[string]HostCheck{}
 	errs := map[string]error{}
 	names := make([]string, 0, len(hosts))
@@ -111,7 +115,7 @@ func CheckAllHosts(hosts map[string]config.HostConfig, globalPosture string, tim
 		if skip != nil && skip(name) {
 			continue
 		}
-		c, err := CheckHost(name, hosts, globalPosture, timeout)
+		c, err := CheckHost(ctx, name, hosts, globalPosture, timeout)
 		if err != nil {
 			errs[name] = err
 			continue
