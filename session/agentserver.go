@@ -337,3 +337,15 @@ type PTYEvent struct {
 	HasModes          bool
 	RepaintProvenance PTYRepaintProvenance
 }
+
+// PaneGridServer is the optional grid-capture surface (#5571 W4.2): the pane as
+// one line per row (no -J), with its cursor, modes and measured size — what a
+// local subscriber's repaint is built from. An agent-server that has it lets a
+// remote client paint a fresh subscriber exactly, at any width; one that lacks
+// it leaves the client on the -J-joined Preview content.
+type PaneGridServer interface {
+	PreviewGrid(tab int) (PaneSnapshot, error)
+	// PreviewGridByID is PreviewGrid addressed by stable tab id; a stale id is
+	// ErrTabGone, never an ordinal fallback (#5571 W4.3).
+	PreviewGridByID(tabID string) (PaneSnapshot, error)
+}

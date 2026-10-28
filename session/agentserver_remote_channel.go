@@ -250,29 +250,14 @@ func (c *remoteClientlessChannel) Resize(rows, cols uint16) error {
 // the first live byte, mirroring tmux capture-pane. The WS stream carries only
 // future output, so without this a just-opened remote pane would render blank.
 func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
-	var snapshot PreviewSnapshot
-	var err error
+	// The grid form (one line per row, no -J) plus cursor and size, so the
+	// repaint lands exactly at any client width (#1688, #5571 W4.2). Against an
+	// agent-server that predates it, the grid call returns the joined screen only
+	// and the repaint stays the screen-only best effort it was.
 	if c.tabID != "" {
-		snapshot, err = c.rc.previewByID(c.tabID, false)
-	} else {
-		snapshot, err = c.rc.preview(c.tab, false)
+		return c.rc.previewGridByID(c.tabID)
 	}
-	if err != nil {
-		return PaneSnapshot{}, err
-	}
-	// REST Preview carries only the screen, not the cursor position, so the repaint
-	// omits cursor restore for remote panes (HasCursor stays false). It is also
-	// -J-joined (the agent-server's Preview uses CapturePaneContent), NOT the grid form
-	// buildRepaint's per-row positioning wants (#1688) — so a wrapped logical line
-	// re-wraps by the client width here. This is a known screen-only best-effort
-	// limitation of the still-dark remote runtime (no cursor cascade to corrupt, since
-	// HasCursor is false); productizing it needs the agent-server to expose a grid
-	// capture + cursor over REST, mirroring tmuxClientlessChannel.Snapshot.
-	return PaneSnapshot{
-		Screen:   []byte(snapshot.Content),
-		Modes:    snapshot.Modes,
-		HasModes: snapshot.HasModes,
-	}, nil
+	return c.rc.previewGrid(c.tab)
 }
 
 // activeConn returns the live capture socket and its context, or an error if

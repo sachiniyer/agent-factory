@@ -482,6 +482,12 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	instance.SetRelocationSettleNotify(func(i *session.Instance) error {
 		return m.persistInstanceErr(repoID, i)
 	})
+	// A rebuild teardown obligation must be durable when it is set and again
+	// when it is discharged — before any replacement launches (#5371 review).
+	instance.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
+	instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
+		return m.stopVSCodeForInstance(key, i.ID)
+	})
 	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)

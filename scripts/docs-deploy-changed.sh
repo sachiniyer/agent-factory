@@ -26,6 +26,11 @@ if [[ "${EVENT_NAME:-}" == "workflow_dispatch" && "${DEPLOY_DOCS:-auto}" != "aut
   exit 0
 fi
 
+# `built` is the tree this run builds and publishes (#5688). The deployed-base
+# comparison must reach it: diffing up to an older verify_sha would compare the
+# base against itself (verify_sha already deployed, a newer docs commit pending)
+# and skip a needed deploy. verify_sha only pins the FALLBACK diff below.
+built="$EVENT_SHA"
 after="${VERIFY_SHA:-$EVENT_SHA}"
 before="${EVENT_BEFORE:-}"
 
@@ -48,9 +53,9 @@ last_deployed() {
 base="$(last_deployed || true)"
 if [[ "$base" =~ ^[0-9a-f]{40}$ ]] \
   && git cat-file -e "${base}^{commit}" 2>/dev/null \
-  && git merge-base --is-ancestor "$base" "$after" 2>/dev/null; then
+  && git merge-base --is-ancestor "$base" "$built" 2>/dev/null; then
   echo "::notice::Diffing docs paths against the last deployed commit ${base:0:12}." >&2
-  changed="$(git diff --name-only "$base" "$after")"
+  changed="$(git diff --name-only "$base" "$built")"
 else
   echo "::notice::No usable last-deployed commit (got '${base:-none}'); falling back to the push range." >&2
   # An explicitly named commit is always diffed on its own, never against a

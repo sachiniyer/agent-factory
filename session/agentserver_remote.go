@@ -79,6 +79,9 @@ type remoteAgentServer struct {
 	idPlaneKnown bool
 	idPlane      bool
 	features     []string
+
+	// relays are the open loopback port relays (W5.1); Kill closes them.
+	relays map[*trackedRelayConn]struct{}
 	// closed latches once Kill has run so a Subscribe/Input/Resize racing the kill
 	// cannot lazily resurrect a broker (and dial a fresh WS to a torn-down sandbox
 	// that never gets closed) — the local runtime's #1632 guard, same reasoning.
@@ -314,6 +317,7 @@ func (s *remoteAgentServer) Kill(_ bool) error {
 	for _, br := range idBrokers {
 		br.close()
 	}
+	s.closeRelays()
 	// Kill the in-sandbox workspace over REST, THEN reap the sandbox itself. Both
 	// run even if the REST kill fails (the container must not leak because its
 	// agent-server was already down) — the errors are joined so a caller sees
@@ -621,9 +625,41 @@ func (c *remoteAgentClient) previewReq(req agentPreviewReq) (PreviewSnapshot, er
 		return PreviewSnapshot{}, err
 	}
 	return PreviewSnapshot{
-		Content:  resp.Content,
-		Modes:    resp.Modes,
-		HasModes: resp.HasModes,
+		Content:         resp.Content,
+		Modes:           resp.Modes,
+		HasModes:        resp.HasModes,
+		LinesAbove:      resp.LinesAbove,
+		LinesAboveKnown: resp.LinesAboveKnown,
+	}, nil
+}
+
+// previewGrid is the repaint capture: the pane as one line per row with its
+// cursor, modes and size (#5571 W4.2). A sandbox that predates the grid answers
+// with the joined Content and no has_grid, and the result is then today's
+// screen-only snapshot — same bytes, no cursor, no size — so an old agent-server
+// degrades instead of failing.
+func (c *remoteAgentClient) previewGrid(tab int) (PaneSnapshot, error) {
+	return c.previewGridReq(agentPreviewReq{Tab: tab, Grid: true})
+}
+
+// previewGridByID is previewGrid addressed by stable tab id (#5571 W4.4).
+func (c *remoteAgentClient) previewGridByID(tabID string) (PaneSnapshot, error) {
+	return c.previewGridReq(agentPreviewReq{TabID: tabID, Grid: true})
+}
+
+func (c *remoteAgentClient) previewGridReq(req agentPreviewReq) (PaneSnapshot, error) {
+	var resp agentPreviewResp
+	if err := c.call("/v1/agent/preview", req, &resp); err != nil {
+		return PaneSnapshot{}, err
+	}
+	if !resp.HasGrid {
+		return PaneSnapshot{Screen: []byte(resp.Content), Modes: resp.Modes, HasModes: resp.HasModes}, nil
+	}
+	return PaneSnapshot{
+		Screen:    []byte(resp.Grid),
+		CursorRow: resp.CursorRow, CursorCol: resp.CursorCol, HasCursor: resp.HasCursor,
+		Modes: resp.Modes, HasModes: resp.HasModes,
+		Rows: resp.Rows, Cols: resp.Cols, HasSize: resp.HasSize,
 	}, nil
 }
 
@@ -795,12 +831,23 @@ type agentPreviewReq struct {
 	TabID string `json:"tab_id,omitempty"`
 	Tab   int    `json:"tab"`
 	Full  bool   `json:"full"`
+	Grid  bool   `json:"grid,omitempty"`
 }
 
 type agentPreviewResp struct {
-	Content  string         `json:"content"`
-	Modes    terminal.Modes `json:"terminal_modes,omitempty"`
-	HasModes bool           `json:"has_terminal_modes,omitempty"`
+	Content         string         `json:"content"`
+	Modes           terminal.Modes `json:"terminal_modes,omitempty"`
+	HasModes        bool           `json:"has_terminal_modes,omitempty"`
+	LinesAbove      int            `json:"lines_above,omitempty"`
+	LinesAboveKnown bool           `json:"lines_above_known,omitempty"`
+	HasGrid         bool           `json:"has_grid,omitempty"`
+	Grid            string         `json:"grid,omitempty"`
+	HasCursor       bool           `json:"has_cursor,omitempty"`
+	CursorRow       int            `json:"cursor_row,omitempty"`
+	CursorCol       int            `json:"cursor_col,omitempty"`
+	HasSize         bool           `json:"has_size,omitempty"`
+	Rows            uint16         `json:"rows,omitempty"`
+	Cols            uint16         `json:"cols,omitempty"`
 }
 
 type agentAliveResp struct {
