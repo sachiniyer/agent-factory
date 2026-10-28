@@ -839,11 +839,12 @@ What the sandbox host needs, and what af does to it:
   in the backend picker). Only the `/v1/Snapshot` route is admitted for this
   credential, answering with the caller's own session.
 - **Daemon restart.** The agent-server is started with `nohup`, so it
-  outlives a daemon restart on the host. The daemon does **not** reattach to it
-  yet (tracked as W1.5 in #5571): a live sandbox row reloads inert and Lost,
-  and recovery pushes its work to `origin`, then re-provisions a fresh sandbox
-  from the branch. An unreachable host alone is not death and never triggers that
-  replacement.
+  outlives a daemon restart on the host, and on start the daemon reattaches
+  to it: it re-dials the tunnel and rebinds the same agent-server, with no
+  re-provision. A row that cannot be reattached (no persisted runtime identity,
+  or the agent-server is gone) stays Lost, and recovery pushes its work to
+  `origin`, then re-provisions a fresh sandbox from the branch. An unreachable
+  host alone is not death and never triggers that replacement.
 
 ### What survives, and what doesn't
 

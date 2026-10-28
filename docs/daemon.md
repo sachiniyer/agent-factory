@@ -5,7 +5,7 @@ page you will know what the daemon owns, why there is exactly one writer of that
 state, and the few commands that manage its lifecycle.
 
 Behind the TUI is a long-lived background process: the **Agent Factory daemon**.
-It is the piece that keeps local sessions running across restarts (sessions on an off-box backend are not yet reattached after one; they recover by re-provisioning from their pushed branch), keeps automations firing,
+It is the piece that keeps sessions running across restarts (local sessions are re-adopted, ssh and sandbox sessions reattach to their agent-server, and docker and hook sessions recover by re-provisioning from their pushed branch), keeps automations firing,
 and guarantees the TUI, the CLI, and the HTTP API never disagree about what
 exists. You rarely interact with it directly, but understanding it explains a lot
 about how `af` behaves.
@@ -85,7 +85,8 @@ af daemon uninstall   # remove the autostart unit
 Because the daemon owns live state, you don't stop it by force while sessions
 are running; let `af` manage its lifecycle. `af daemon restart` restarts only
 the daemon process and re-adopts existing local tmux sessions from persisted
-state; off-box sessions are not yet reattached and recover by re-provisioning.
+state; ssh and sandbox sessions reattach to their running agent-server, and docker
+and hook sessions recover by re-provisioning.
 `af daemon status` is the right tool when you want to know whether it's up,
 whether the installed unit actually owns the responder, whether config edits
 have reached it, and where its sockets are. Those checks are read-only; an

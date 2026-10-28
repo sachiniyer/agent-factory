@@ -93,8 +93,8 @@ and confirm with Enter to archive it.
 - **Session** — one agent working on one task, with its own tabs and lifecycle.
 - **Worktree** — the isolated checkout and branch a session gets, so agents
   never collide and the result is ordinary git work you can diff and merge.
-- **Daemon** — the background process that owns all state, keeps local sessions
-  alive across restarts, and serves the web client; every surface is a thin client.
+- **Daemon** — the background process that owns all state, keeps sessions alive
+  across restarts, and serves the web client; every surface is a thin client.
 - **Task** — a prompt the daemon delivers on its own, on a cron schedule or on
   each line a watch command prints.
 - **Account** — a named credential home for an agent, so a session can be pinned
