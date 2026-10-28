@@ -638,6 +638,17 @@ func TestBindMountTargets(t *testing.T) {
 		dockerContainerHome + "/y",
 	}, got, "only host-source binds under home are pruned; a named/anonymous volume is not a bind")
 
+	// Docker Engine 23+ accepts a relative host path as a bind source; it is a
+	// host bind, not a named volume, and must be pruned like an absolute one.
+	got = bindMountTargets([]string{
+		"-v", "./cache:" + target,
+		"-v", "../up:" + dockerContainerHome + "/up:ro",
+		"-v", ".:" + dockerContainerHome + "/dot",
+		"-v", "cache:" + dockerContainerHome + "/named",
+	}, dockerContainerHome)
+	assert.Equal(t, []string{target, dockerContainerHome + "/up", dockerContainerHome + "/dot"}, got,
+		"relative host-path sources are binds; a bare name is a volume")
+
 	// A -v hidden behind another option in a combined short option (e.g. -tv)
 	// is still read by the pflag walk the run_args validator uses, so a bind
 	// mounted that way is pruned too.

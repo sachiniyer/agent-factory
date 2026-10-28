@@ -110,10 +110,19 @@ func volumeBindContainer(spec string) (container string, ok bool) {
 		host = body[:sep]
 		container = body[sep+1:]
 	}
-	if container == "" || !strings.HasPrefix(host, "/") {
+	if container == "" || !volumeSourceIsHostPath(host) {
 		return "", false // a named/anonymous volume, not a host-source bind
 	}
 	return container, true
+}
+
+// volumeSourceIsHostPath reports whether the source half of a -v spec names a
+// host path rather than a volume. A volume name cannot start with "/" or ".",
+// so an absolute path and — since Docker Engine 23 — a relative one ("./cache",
+// "../cache", "." or "..") are both host binds.
+func volumeSourceIsHostPath(source string) bool {
+	return strings.HasPrefix(source, "/") || strings.HasPrefix(source, "./") ||
+		strings.HasPrefix(source, "../") || source == "." || source == ".."
 }
 
 // mountBindContainer reports the container destination of a --mount value when
