@@ -465,6 +465,13 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.Prompt != "" {
 		d.Prompt = redactedMarker
 	}
+	// Unreachable.Error is free-text transport detail — ssh errors name the
+	// user-supplied host/user/port and can embed a dial path — so it takes the
+	// free-text trade. Since stays: an outage duration is the triage-relevant
+	// fact and a timestamp is structural.
+	if d.Unreachable != nil && d.Unreachable.Error != "" {
+		d.Unreachable.Error = redactedMarker
+	}
 	// CallbackUnavailable is a reason string minted from an error — mint
 	// refusals and revalidation failures can embed the operator's configured
 	// callback endpoint or sandbox host detail (e.g. the callback_url an

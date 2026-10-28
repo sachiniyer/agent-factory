@@ -129,12 +129,18 @@ jobs:
     # Go, which cannot honour NSS hosts modules (mDNS/LDAP/SSSD ordered ahead
     # of DNS), and the ssh dial-pin would then pin a different address than
     # ssh resolves for the same name.
+    #
+    # Stamped with the release version exactly like the installed build above.
+    # VERSION is per step, and an unset one stamps "" — the binary then falls
+    # back to reporting "dev" and exits 0, which is how these archives shipped
+    # unstamped (#5666).
     - name: Build the static sandbox-host binary
       if: matrix.goos == 'linux'
       env:
         GOOS: linux
         GOARCH: ${{ matrix.goarch }}
         CGO_ENABLED: "0"
+        VERSION: ${{ inputs.version }}
       run: |
         ARCHIVE_NAME=agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}-static
         mkdir -p dist-static
@@ -146,15 +152,20 @@ jobs:
     # there — do exactly that against the just-built artifact so a binary that
     # cannot execute on a bare host fails here, not on a user's machine. Both
     # linux legs must be statically linked; only the native amd64 leg can also
-    # exec it for `version`.
+    # exec it for `version`, and that run must print the RELEASE version, not
+    # merely exit 0 — an unstamped build prints "dev" and exits 0 (#5666). The
+    # arm64 leg is this same step on another GOARCH, so that it is stamped is
+    # pinned by scripts/release_version_stamp_test.go rather than executed.
     - name: Smoke-test the static sandbox-host artifact
       if: matrix.goos == 'linux'
+      env:
+        VERSION: ${{ inputs.version }}
       run: |
         tmp="$(mktemp -d)"
         tar xzf "agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}-static.tar.gz" -C "$tmp"
         file "$tmp/agent-factory" | grep -q "statically linked"
         if [ "${{ matrix.goarch }}" = amd64 ]; then
-          "$tmp/agent-factory" version
+          .github/scripts/assert-binary-version.sh "$tmp/agent-factory" "$VERSION"
         fi
 
     - name: Upload build artifact

@@ -91,7 +91,9 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 
 // ReleaseUpgradeProbation lifts this daemon's upgrade probation once its
 // previous-binary supervisor has validated it (#2212 R2). A release for a
-// non-matching or non-probationary transaction is refused. It is deliberately NOT
+// non-matching or non-probationary transaction is refused; one that arrives
+// while the instance restore is still running is accepted and takes effect when
+// the restore completes (#5693). It is deliberately NOT
 // gated on requireMutationAdmission — probation is exactly what it lifts, so
 // gating it on admission would deadlock. (Authority rests on the control socket
 // being owner-only and already privileged, NOT on the transaction id being

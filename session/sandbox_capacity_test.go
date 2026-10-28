@@ -64,3 +64,29 @@ func TestRemoteCapacityEvidenceSkipsSSHTransportFailure(t *testing.T) {
 		t.Fatalf("ssh exit 255 must not probe: got %v, calls %d", got, len(calls))
 	}
 }
+
+// The probe lives in the failure path every ssh-transport runtime shares
+// (#5686): a backend=ssh (named host list) failure must classify exactly like
+// backend=sandbox, and the hook runtime's provisioner too.
+func TestReapProvisionFailureJoinsCapacityEvidenceForEverySSHRuntime(t *testing.T) {
+	probeFull := func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		if strings.Contains(script, "AF_CAPACITY") {
+			return []byte("AF_CAPACITY_FAIL write error: No space left on device\n"), nil
+		}
+		return nil, errors.New("reap: not exercised")
+	}
+	for name, p := range map[string]*sandboxProvisioner{
+		"ssh":     newSSHSandboxProvisioner(ProvisionSpec{}, "ssh host", "/af", "claude"),
+		"sandbox": {backendLabel: ""},
+		"hook":    newHookSandboxProvisioner(ProvisionSpec{}, "ssh host", "/af", "claude"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			p.sessionDir = "/home/u/.af/s.abc"
+			p.runCommandFn = probeFull
+			err := p.reapProvisionFailure(errors.New("cloning the workspace failed"))
+			if !errors.Is(err, syscall.ENOSPC) {
+				t.Fatalf("backend=%s provisioning failure lost its ENOSPC evidence: %v", name, err)
+			}
+		})
+	}
+}

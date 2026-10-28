@@ -12029,6 +12029,17 @@ function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
 function idleReasonLabel(reason) {
   return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
 }
+function unreachableDetail(s, now = /* @__PURE__ */ new Date()) {
+  const u = s.unreachable;
+  if (!u?.since || !u.error) {
+    return "";
+  }
+  const since = new Date(u.since);
+  if (Number.isNaN(since.getTime())) {
+    return "";
+  }
+  return `unreachable ${formatPaneChurnAge(since, now)} ago \xB7 ${u.error}`;
+}
 function formatPaneChurnAge(churn, now) {
   return formatDuration(now.getTime() - churn.getTime());
 }
@@ -12196,6 +12207,9 @@ function rowTitle(s) {
   }
   if (archiveWarningText(s) !== "") {
     title = "[archive incomplete] " + title;
+  }
+  if (s.unreachable?.since && s.unreachable?.error) {
+    title = "[unreachable] " + title;
   }
   if (s.model_change) {
     title = "[model changed] " + title;
@@ -13757,6 +13771,27 @@ function remapByIdentity(root2, prevIds, ids) {
       cur = closeLeaf(cur, leaf.id) ?? cur;
     }
   }
+  const max = ids.length - 1;
+  const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
+  if (maxLeaf) {
+    const isSynth = (id) => /^\d+:/.test(id);
+    const backfill = ids.some((id) => id !== "" && !isSynth(id) && !prevIds.includes(id));
+    const deadIdentity = (tab) => {
+      const prev = prevIds[tab];
+      if (prev === void 0 || prev === "") {
+        return true;
+      }
+      return !isSynth(prev) || !backfill;
+    };
+    for (const leaf of leaves(cur)) {
+      if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
+        cur = closeLeaf(cur, leaf.id) ?? cur;
+      }
+    }
+    if (!moved.has(maxLeaf.id) && deadIdentity(maxLeaf.tab) && leaves(cur).some((l) => !moved.has(l.id) && l.tab >= ids.length && !deadIdentity(l.tab))) {
+      cur = closeLeaf(cur, maxLeaf.id) ?? cur;
+    }
+  }
   return cur;
 }
 function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
@@ -14400,6 +14435,7 @@ var SplitView = class {
     }
     const desired = leaves(this.tree);
     const wanted = new Set(desired.map((l) => l.id));
+    const focusedDropped = this.focusedId !== null && !wanted.has(this.focusedId);
     for (const [id, pane] of this.panes) {
       if (!wanted.has(id)) {
         pane.term?.dispose();
@@ -14487,36 +14523,50 @@ var SplitView = class {
       pane.label.textContent = tabLabel(named);
     }
     this.applyFocusClass();
-    this.reEngageFocusAfterRebuild(focusedRebuilt);
+    this.reEngageFocusAfterRebuild(focusedRebuilt, focusedDropped);
   }
-  /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, correcting
-   *  the desync where `store.focus` stays "terminal" while DOM focus fell back to
-   *  `document.body` (the disposed terminal's blur is suppressed, so nothing else
-   *  reports the loss).
+  /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, or closed it
+   *  and re-pointed focus at a survivor, correcting the desync where `store.focus`
+   *  stays "terminal" while DOM focus fell back to `document.body` (a disposed
+   *  terminal's blur is suppressed, so nothing else reports the loss).
    *
-   *  Gated on BOTH a focused-pane rebuild AND `termHoldsFocus` so it only fires when
-   *  the operator was keyboard-attached at the moment of the rebuild: a passive
-   *  repaint (rename, archive flip on a sibling, proxy change) that reaches a user
-   *  who DELIBERATELY detached to rail via Ctrl+] does not rebuild the focused pane
-   *  (so `focusedRebuilt` is false anyway), and a same-session rebuild that happens
-   *  to reach a rail-mode user is skipped by `termHoldsFocus` — neither yanks a
-   *  detached operator back into "terminal" without intent.
+   *  Gated on a focused-pane change AND `termHoldsFocus` so it only fires when the
+   *  operator was keyboard-attached at the moment of the change: a passive repaint
+   *  (rename, archive flip on a sibling, proxy change) that reaches a user who
+   *  DELIBERATELY detached to rail via Ctrl+] does not rebuild or close the focused
+   *  pane (so `focusedRebuilt`/`focusedDropped` are both false), and a same-session
+   *  change that happens to reach a rail-mode user is skipped by `termHoldsFocus` —
+   *  neither yanks a detached operator back into "terminal" without intent.
    *
-   *  Two rebuild outcomes land differently, and both are the correct one:
+   *  `focusedRebuilt`: the focused pane's terminal/iframe was torn down and rebuilt
+   *  this pass (an out-of-band close slid a different tab into its ordinal). The new
+   *  terminal never auto-focuses, so refocus() hands it the keyboard.
    *
-   *    - Rebuilt as a TERMINAL: refocus() → focus() focuses the new textarea, whose
-   *      focus listener echoes onPaneFocus(_, true), re-confirming store.focus=
-   *      "terminal" against the new DOM-focal textarea. The desync is undone.
-   *    - Rebuilt as a WEB/VS Code pane (no terminal to hand the keyboard to): DOM
-   *      focus is on document.body and no textarea blur can arm onPaneFocus's
-   *      corrector, so report the loss ourselves — store.focus lands on "rail",
-   *      which is the right mode when the focused pane ceases to be a terminal.
+   *  `focusedDropped`: the focused pane was CLOSED this pass (a pure-shrink
+   *  remapByIdentity evicted a dead pane that happened to hold focus, or validate's
+   *  dedup dropped it) and focus was re-pointed at the first survivor. The closed
+   *  terminal's blur was suppressed, so without an explicit re-engage the keyboard
+   *  would stay on `document.body` while `store.focus` still reads "terminal" — the
+   *  same desync as the rebuild case. Mirrors closePane's explicit refocus on a
+   *  user-initiated close.
+   *
+   *  Both outcomes land the same way, and each is the correct one:
+   *
+   *    - The new focused pane has a TERMINAL: refocus() → focus() focuses its
+   *      textarea, whose focus listener echoes onPaneFocus(_, true), re-confirming
+   *      store.focus="terminal" against the now-DOM-focal textarea. The desync is
+   *      undone.
+   *    - The new focused pane is a WEB/VS Code pane (no terminal to hand the
+   *      keyboard to): DOM focus is on document.body and no textarea blur can arm
+   *      onPaneFocus's corrector, so report the loss ourselves — store.focus lands
+   *      on "rail", which is the right mode when the focused pane ceases to be a
+   *      terminal.
    *
    *  Split out from reconcile() so the boolean contract is unit-testable without a
    *  DOM/xterm/WS (split_focus.test.ts stages the pane map directly); the end-to-end
    *  behavior is pinned by the Playwright selftest. */
-  reEngageFocusAfterRebuild(focusedRebuilt) {
-    if (!focusedRebuilt || !this.termHoldsFocus) {
+  reEngageFocusAfterRebuild(focusedRebuilt, focusedDropped = false) {
+    if (!focusedRebuilt && !focusedDropped || !this.termHoldsFocus) {
       return;
     }
     const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
@@ -18918,14 +18968,18 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const killable = isKillableSession(s);
   const managed = actionable || killable;
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
-  const idleDetail = idleReasonDetail(s);
+  const outageDetail = unreachableDetail(s);
+  const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
   const branchParts = [
     h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator])
   ];
-  if (selected && idleDetail) {
+  if ((selected || outageDetail !== "") && idleDetail) {
     const idle = h("span", { class: "af-idle-reason" }, ` \xB7 ${idleDetail}`);
     idle.dataset.idleReason = s.idle_reason ?? "";
-    if (s.last_pane_churn_at) {
+    if (outageDetail !== "" && s.unreachable) {
+      idle.dataset.unreachableSince = s.unreachable.since ?? "";
+      idle.dataset.unreachableError = s.unreachable.error ?? "";
+    } else if (s.last_pane_churn_at) {
       idle.dataset.paneChurnAt = s.last_pane_churn_at;
     }
     branchParts.push(idle);
@@ -18984,6 +19038,23 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   return row;
 }
 function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
+  for (const idle of root2.querySelectorAll(".af-idle-reason[data-unreachable-since]")) {
+    const detail = unreachableDetail(
+      {
+        unreachable: { since: idle.dataset.unreachableSince, error: idle.dataset.unreachableError }
+      },
+      now
+    );
+    idle.textContent = detail ? ` \xB7 ${detail}` : "";
+    const row = idle.closest(".af-row");
+    if (row) {
+      const reason = detail ? `; ${detail}` : "";
+      row.setAttribute(
+        "title",
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`
+      );
+    }
+  }
   for (const idle of root2.querySelectorAll(".af-idle-reason[data-pane-churn-at]")) {
     const detail = idleReasonDetail(
       {

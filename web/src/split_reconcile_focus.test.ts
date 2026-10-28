@@ -30,7 +30,7 @@ type SplitViewInternals = {
   panes: Map<string, unknown>;
   focusedId: string | null;
   termHoldsFocus: boolean;
-  reEngageFocusAfterRebuild: (focusedRebuilt: boolean) => void;
+  reEngageFocusAfterRebuild: (focusedRebuilt: boolean, focusedDropped?: boolean) => void;
   onPaneFocus: (leafId: string, focused: boolean) => void;
 };
 
@@ -161,6 +161,64 @@ test("reEngageFocusAfterRebuild: no focused pane is a no-op, not a crash", () =>
   internals.focusedId = null;
   internals.termHoldsFocus = true;
   assert.doesNotThrow(() => internals.reEngageFocusAfterRebuild(true));
+});
+
+// --- the focused pane was CLOSED (a pure-shrink evicted it), not rebuilt ----------
+//
+// reconcile() re-points focusedId at the first survivor and passes focusedDropped;
+// the closed terminal's blur is suppressed, so without an explicit re-engage the
+// keyboard would stay on document.body while store.focus still reads "terminal"
+// (#5056). The survivor already has a live terminal (it was not rebuilt), so the
+// rebuild flag (focusedRebuilt) is false — only the dropped flag re-attaches it.
+
+test("reEngageFocusAfterRebuild: a dropped focused TERMINAL re-focuses the survivor that took its place", () => {
+  // The pure-shrink case from #5056: a dead pane that held the keyboard was closed
+  // by remapByIdentity, focus moved to the survivor, and the survivor's terminal was
+  // NOT rebuilt (its identity still matches). focusedRebuilt is false; focusedDropped
+  // is what re-engages the keyboard on the survivor.
+  const { cb, calls } = recordCallbacks();
+  const survivor = fakePane(true);
+  const view = new SplitView(null as unknown as HTMLElement, cb);
+  const internals = view as unknown as SplitViewInternals;
+  internals.panes.set("leaf-surv", survivor.pane);
+  // reconcile already re-pointed focusedId at the first survivor (desired[0]).
+  internals.focusedId = "leaf-surv";
+  internals.termHoldsFocus = true;
+  internals.reEngageFocusAfterRebuild(false, true);
+  assert.equal(survivor.focused(), 1, "the survivor's terminal is re-focused — the desync corrector");
+  assert.deepEqual(calls, [], "the helper itself echoes nothing on the terminal path");
+});
+
+test("reEngageFocusAfterRebuild: a dropped focused pane onto a WEB survivor reports rail", () => {
+  // The survivor that takes focus has no terminal (a web/VS Code pane), so there is
+  // nothing to hand the keyboard to; the disposed terminal's blur was suppressed,
+  // so the loss is reported here — store.focus lands on "rail".
+  const { cb, calls } = recordCallbacks();
+  const survivor = fakePane(false);
+  const view = new SplitView(null as unknown as HTMLElement, cb);
+  const internals = view as unknown as SplitViewInternals;
+  internals.panes.set("leaf-surv", survivor.pane);
+  internals.focusedId = "leaf-surv";
+  internals.termHoldsFocus = true;
+  internals.reEngageFocusAfterRebuild(false, true);
+  assert.equal(survivor.focused(), 0, "a web pane has no term to focus");
+  assert.deepEqual(calls, [false], "the focus loss is reported so store.focus becomes \"rail\"");
+  assert.equal(internals.termHoldsFocus, false, "the keyboard-attached mirror is cleared");
+});
+
+test("reEngageFocusAfterRebuild: a dropped focused pane while in RAIL mode does not re-attach", () => {
+  // The operator had deliberately detached to rail (Ctrl+]), so a dropped focused
+  // pane must not yank them back into "terminal". termHoldsFocus=false skips it.
+  const { cb, calls } = recordCallbacks();
+  const survivor = fakePane(true);
+  const view = new SplitView(null as unknown as HTMLElement, cb);
+  const internals = view as unknown as SplitViewInternals;
+  internals.panes.set("leaf-surv", survivor.pane);
+  internals.focusedId = "leaf-surv";
+  internals.termHoldsFocus = false;
+  internals.reEngageFocusAfterRebuild(false, true);
+  assert.equal(survivor.focused(), 0, "a detached operator is not re-attached to the survivor");
+  assert.deepEqual(calls, []);
 });
 
 // --- the mirror the gate reads: onPaneFocus maintains termHoldsFocus ----------
