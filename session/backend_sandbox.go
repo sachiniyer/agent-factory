@@ -191,15 +191,15 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	w.resolveSessionDirSymlinks(sshShortStepTimeout)
 	p.sessionDir = w.SessionDir
 	if err := w.configureGit(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	binary, err := os.Open(p.afBin)
 	if err != nil {
@@ -208,7 +208,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	copyErr := w.copyAfBinary(sshProvisionStepTimeout, binary)
 	_ = binary.Close()
 	if copyErr != nil {
-		return ProvisionResult{}, p.sandboxErr(copyErr)
+		return ProvisionResult{}, p.sandboxWriteErr(copyErr)
 	}
 	if err := p.verifyCopiedBinary(); err != nil {
 		return ProvisionResult{}, err
@@ -240,10 +240,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	// PR #5577 review — see revalidateCallbackBeforeEnv for why this point).
 	callbackLost := w.revalidateCallbackBeforeEnv()
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	if err := w.startAgentServer(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	p.remotePID = w.RemotePID
 	banner, err := w.readBanner(sshBannerPollTimeout, sshBannerPollInterval, sshShortStepTimeout)
