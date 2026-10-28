@@ -37,11 +37,29 @@ func pinSocketClaimProof(t *testing.T, available bool) {
 	t.Cleanup(func() { socketClaimProofAvailable = prev })
 }
 
-func probeLiveness(t *testing.T, name string) (exists, known bool) {
+func livenessProbeFor(t *testing.T, name string) (exists, known bool) {
 	t.Helper()
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	return probeSessionLivenessContext(ctx, socketMissingExecutor(t), name)
+	a := probeSessionAs(ctx, socketMissingExecutor(t), name, probeLiveness)
+	return a.exists, a.known
+}
+
+// spawnCountingSocketMissingExecutor is socketMissingExecutor that also records
+// any new-session: a restore that respawns would show up here.
+func spawnCountingSocketMissingExecutor(t *testing.T, spawns *int) cmd_test.MockCmdExec {
+	t.Helper()
+	base := socketMissingExecutor(t)
+	run := base.RunFunc
+	base.RunFunc = func(c *exec.Cmd) error {
+		for _, a := range c.Args {
+			if a == "new-session" {
+				*spawns++
+			}
+		}
+		return run(c)
+	}
+	return base
 }
 
 // #4135: a socket file a /tmp cleaner unlinked while its server (and the agent
@@ -54,7 +72,7 @@ func TestLivenessProbeSocketMissingWithALiveServerIsUnknown(t *testing.T) {
 	// can neither signal it nor disprove that it owns the unlinked socket.
 	t.Cleanup(PinServerProbeForTest(os.Getpid()))
 
-	exists, known := probeLiveness(t, "af_live_agent")
+	exists, known := livenessProbeFor(t, "af_live_agent")
 	require.False(t, exists)
 	require.False(t, known, "an unlinked socket backed by a live server must not be read as absence")
 }
@@ -65,7 +83,7 @@ func TestLivenessProbeSocketMissingWithNoServerIsAbsent(t *testing.T) {
 	pinSocketClaimProof(t, true)
 	t.Cleanup(PinServerProbeForTest())
 
-	exists, known := probeLiveness(t, "af_gone_agent")
+	exists, known := livenessProbeFor(t, "af_gone_agent")
 	require.False(t, exists)
 	require.True(t, known)
 }
@@ -78,7 +96,7 @@ func TestLivenessProbeFallsBackToAbsentWhereTheServerCheckIsInconclusive(t *test
 	pinSocketClaimProof(t, false)
 	t.Cleanup(PinServerProbeForTest(0))
 
-	exists, known := probeLiveness(t, "af_agent")
+	exists, known := livenessProbeFor(t, "af_agent")
 	require.False(t, exists)
 	require.True(t, known, "without a conclusive live-server check the liveness probe keeps the legacy answer")
 }
@@ -138,7 +156,72 @@ func TestLivenessProbeAnswersWithinABoundEvenWhenUnknown(t *testing.T) {
 	t.Cleanup(PinServerProbeForTest(os.Getpid()))
 
 	start := time.Now()
-	_, known := probeLiveness(t, "af_live_agent")
+	_, known := livenessProbeFor(t, "af_live_agent")
 	require.False(t, known)
 	require.Less(t, time.Since(start), 2*time.Second)
+}
+
+// Caller kind (b): RESTORE of an existing session would REPLACE it, so a missing
+// socket under a possibly-live server must refuse — never respawn a second agent
+// beside a running one.
+func TestRestoreRefusesWhenTheSocketIsGoneUnderAPossiblyLiveServer(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		proof      bool
+		serverPID  []int
+		wantRefuse bool
+	}{
+		{"linux with a live server", true, []int{os.Getpid()}, true},
+		// The darwin shape: no /proc, the live-server check is inconclusive.
+		// Restore still refuses rather than risk a duplicate.
+		{"darwin shape, server check inconclusive", false, []int{0}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinSocketClaimProof(t, tc.proof)
+			t.Cleanup(PinServerProbeForTest(tc.serverPID...))
+
+			var spawns int
+			s := newTmuxSession(toTmuxName("restore-socket-gone", ""), "claude", NewMockPtyFactory(t),
+				spawnCountingSocketMissingExecutor(t, &spawns))
+			res, err := s.RestoreWithResult(t.TempDir())
+			require.ErrorIs(t, err, ErrSessionSocketUnverified)
+			require.Equal(t, RestoreReattached, res)
+			require.Zero(t, spawns, "restore must not start a second agent")
+		})
+	}
+}
+
+// (a) liveness on a host where the proof is unavailable (darwin) keeps the
+// pre-#4135 answer, so it is not held unknown forever.
+func TestLivenessKindFallsBackWhereTheServerCheckIsUnavailable(t *testing.T) {
+	pinSocketClaimProof(t, false)
+	t.Cleanup(PinServerProbeForTest(0))
+	a := probeSessionAs(context.Background(), socketMissingExecutor(t), "af_agent", probeLiveness)
+	require.False(t, a.exists)
+	require.True(t, a.known)
+	require.False(t, a.socketGone)
+}
+
+// (b) restore with the server check conclusive and NO server alive is a
+// determinate absence: a real reboot (server gone with its socket) still
+// respawns.
+func TestRestoreStillRespawnsWhenNoServerHoldsTheSocket(t *testing.T) {
+	pinSocketClaimProof(t, true)
+	t.Cleanup(PinServerProbeForTest())
+	a := probeSessionAs(context.Background(), socketMissingExecutor(t), "af_agent", probeRestore)
+	require.True(t, a.known)
+	require.False(t, a.exists)
+	require.False(t, a.socketGone)
+}
+
+// (c) pre-spawn of a NEW name, and the read-only legacy kind, never hold socket-
+// ENOENT unknown whatever the server check says.
+func TestNewNameAndReadOnlyKindsTreatSocketGoneAsAbsent(t *testing.T) {
+	pinSocketClaimProof(t, true)
+	t.Cleanup(PinServerProbeForTest(os.Getpid()))
+	for _, kind := range []probeKind{probeNewName, probeReadOnly} {
+		a := probeSessionAs(context.Background(), socketMissingExecutor(t), "af_new", kind)
+		require.True(t, a.known)
+		require.False(t, a.exists)
+	}
 }

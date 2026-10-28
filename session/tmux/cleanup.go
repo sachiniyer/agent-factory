@@ -92,6 +92,10 @@ func sessionExistsReportingAnswer(cmdExec cmd.Executor, name string) (existsOrUn
 // server came to be reported as a live agent, and how a liveness counter built on
 // affirmative evidence got fooled anyway. Callers that treat "alive" as EVIDENCE
 // must take this form; callers that merely need a bool keep the lie, knowingly.
+//
+// Its caller kind is probeNewName (Start's pre-spawn gate) — socket-ENOENT is
+// plain absence. Existing-session callers use ProbeSessionLiveness or Restore's
+// probeRestore instead (see probeKind).
 func (t *TmuxSession) ProbeSession() (exists bool, known bool) {
 	return probeSession(t.cmdExec, t.sanitizedName)
 }
