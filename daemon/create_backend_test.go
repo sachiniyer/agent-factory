@@ -2,10 +2,13 @@ package daemon
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -18,9 +21,14 @@ import (
 // docker, ssh, hook) must never demand tmux or the agent on the daemon host.
 func TestCreateBackendDecisionIsOneResolverForValidateAndLaunch(t *testing.T) {
 	for _, repoDefault := range []string{"local", "ssh", "docker"} {
-		_, repoPath, project := defaultAccountFixture(t, "claude", "")
+		_, repoPath, _ := defaultAccountFixture(t, "claude", "")
 		if repoDefault != "local" {
-			writeProjectAccounts(t, project, fmt.Sprintf("backend = %q\n", repoDefault))
+			// `backend` is a repo-only key (config/manifest.go: sourceRepoOnly), read
+			// from the repo's in-repo config; the personal project file ignores it.
+			dir := filepath.Join(repoPath, config.InRepoConfigDirName)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"),
+				[]byte(fmt.Sprintf("backend = %q\n", repoDefault)), 0o644))
 		}
 		for _, host := range []string{"", "gpu-box"} {
 			for _, backend := range []string{"", "local", "ssh", "docker", "hook"} {
