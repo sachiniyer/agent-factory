@@ -73,10 +73,18 @@ func SweepRowsOf(instances []*Instance) []SweepRow {
 			continue
 		}
 		d := inst.ToInstanceData()
-		if d.RuntimeCleanup == nil {
+		// ToInstanceData stages the backend's identity privately; the public
+		// RuntimeCleanup is only published by ForStorage. Read the staged one
+		// first so a live instance is never projected as owning nothing — that
+		// would hide its dir from the ownership checks and let it look orphaned.
+		cleanup := d.runtimeCleanup
+		if cleanup == nil {
+			cleanup = d.RuntimeCleanup
+		}
+		if cleanup == nil {
 			continue
 		}
-		rows = append(rows, SweepRow{Title: d.Title, BackendType: d.BackendType, Cleanup: d.RuntimeCleanup})
+		rows = append(rows, SweepRow{Title: d.Title, BackendType: d.BackendType, Cleanup: cleanup})
 	}
 	return rows
 }

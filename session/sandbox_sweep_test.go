@@ -374,3 +374,23 @@ func TestSweepReapsACleanWorkspaceWithACleanLinkedWorktree(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 	assert.False(t, procAlive(proc))
 }
+
+// SweepRowsOf must see what a LIVE instance owns: ToInstanceData stages the
+// cleanup identity privately, so an instance-backed projection (not a hand-built
+// SweepRow) is what proves the ownership checks can see a running session's dir
+// (Codex P2 on #5850).
+func TestSweepRowsOfSeesALiveSandboxInstancesIdentity(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "live", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	inst.backend = &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{
+		SSHCommand: "ssh sandbox.invalid",
+		SessionDir: "/remote/af-sessions/live.AAA111",
+		TokenRef:   "v1.liveref000001",
+	}}
+
+	rows := SweepRowsOf([]*Instance{inst, nil})
+	require.Len(t, rows, 1, "a live sandbox instance must be projected")
+	dir, ref := rows[0].Identity()
+	assert.Equal(t, "/remote/af-sessions/live.AAA111", dir)
+	assert.Equal(t, "v1.liveref000001", ref)
+}
