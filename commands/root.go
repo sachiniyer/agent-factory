@@ -429,6 +429,7 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(targetCmd)
+	rootCmd.AddCommand(hostsCmd)
 	rootCmd.AddCommand(accountsCmd)
 	rootCmd.AddCommand(quotaCmd)
 	rootCmd.AddCommand(api.SessionsCmd)
