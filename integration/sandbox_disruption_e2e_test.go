@@ -1,6 +1,7 @@
 package integration_test
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -147,12 +148,43 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 	prompt("after-daemon-restart-marker")
 
 	// --- 2. the ssh connection dies ---------------------------------------------
+	// The supervisor (W1.2) re-dials after a capped backoff, so the forward is
+	// down for a moment after the kill and liveness has not noticed yet: a prompt
+	// sent now is refused on the dead local port (the first run of this test did
+	// exactly that). Wait on the transport itself, not on a sleep: a replacement
+	// ssh -L process (not one of the killed pids) must carry the SAME local port
+	// the session already holds, and that port must accept connections. The bound
+	// is the redial ladder's ceiling (30s, +25% jitter) plus the readiness probe
+	// (20s) with margin.
 	killed := killTunnelSSH(t, host.privKey)
 	if len(killed) == 0 {
 		t.Fatalf("found no daemon-owned ssh -L tunnel for %s to kill", host.privKey)
 	}
+	forwardPort := killed[0].port
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("supervisor lines from the daemon log:\n%s", transportLogLines(home))
+		}
+	})
+	waitFor(t, "a replacement ssh tunnel forwarding local port "+forwardPort, 90*time.Second, func() bool {
+		for _, tun := range tunnelSSHProcs(host.privKey) {
+			if tun.port == forwardPort && !containsInt(pidsOf(killed), tun.pid) {
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, "the restored forward on 127.0.0.1:"+forwardPort+" to accept connections", 60*time.Second, func() bool {
+		c, err := net.DialTimeout("tcp", "127.0.0.1:"+forwardPort, time.Second)
+		if err != nil {
+			return false
+		}
+		_ = c.Close()
+		return true
+	})
 	waitFor(t, "the session to be live after the tunnel loss", 120*time.Second, live)
 	prompt("after-tunnel-loss-marker")
+	t.Logf("supervisor lines after the tunnel loss:\n%s", transportLogLines(home))
 	// Reconnected, not abandoned: a prompt only round-trips through a live tunnel.
 	if len(tunnelSSHPIDs(host.privKey)) == 0 {
 		t.Fatalf("the prompt round-tripped but no ssh tunnel is running")
@@ -180,12 +212,19 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 	})
 }
 
-// tunnelSSHPIDs lists the daemon-host `ssh -L` processes that carry a session's
+// tunnelProc is one daemon-host `ssh -L` tunnel process and the local port it
+// forwards.
+type tunnelProc struct {
+	pid  int
+	port string
+}
+
+// tunnelSSHProcs lists the daemon-host `ssh -L` processes that carry a session's
 // tunnel to this fixture's host: the ssh binary itself (not the sh or lifeline
 // wrapper around it), with a forward, using the fixture's key.
-func tunnelSSHPIDs(privKey string) []int {
+func tunnelSSHProcs(privKey string) []tunnelProc {
 	out, _ := exec.Command("pgrep", "-f", privKey).Output()
-	var pids []int
+	var procs []tunnelProc
 	for _, f := range strings.Fields(string(out)) {
 		pid, err := strconv.Atoi(f)
 		if err != nil {
@@ -193,23 +232,35 @@ func tunnelSSHPIDs(privKey string) []int {
 		}
 		comm, _ := os.ReadFile("/proc/" + f + "/comm")
 		cmdline, _ := os.ReadFile("/proc/" + f + "/cmdline")
-		args := strings.Split(string(cmdline), "\x00")
-		if strings.TrimSpace(string(comm)) == "ssh" && hasForward(args) {
-			pids = append(pids, pid)
+		if strings.TrimSpace(string(comm)) != "ssh" {
+			continue
+		}
+		if port := forwardLocalPort(strings.Split(string(cmdline), "\x00")); port != "" {
+			procs = append(procs, tunnelProc{pid: pid, port: port})
 		}
 	}
-	return pids
+	return procs
 }
 
+func tunnelSSHPIDs(privKey string) []int { return pidsOf(tunnelSSHProcs(privKey)) }
+
 // killTunnelSSH SIGKILLs those processes — a dropped connection, not a daemon
-// shutdown — and returns the pids it killed.
-func killTunnelSSH(t *testing.T, privKey string) []int {
+// shutdown — and returns what it killed.
+func killTunnelSSH(t *testing.T, privKey string) []tunnelProc {
 	t.Helper()
-	pids := tunnelSSHPIDs(privKey)
-	for _, pid := range pids {
-		if p, err := os.FindProcess(pid); err == nil {
+	procs := tunnelSSHProcs(privKey)
+	for _, tun := range procs {
+		if p, err := os.FindProcess(tun.pid); err == nil {
 			_ = p.Kill()
 		}
+	}
+	return procs
+}
+
+func pidsOf(procs []tunnelProc) []int {
+	var pids []int
+	for _, p := range procs {
+		pids = append(pids, p.pid)
 	}
 	return pids
 }
@@ -223,13 +274,37 @@ func containsInt(xs []int, x int) bool {
 	return false
 }
 
-// hasForward reports whether an ssh argv carries a -L port forward, spelled
-// `-L spec` or `-Lspec`.
-func hasForward(args []string) bool {
-	for _, a := range args {
-		if strings.HasPrefix(a, "-L") {
-			return true
+// forwardLocalPort returns the local port of an ssh argv's -L forward, spelled
+// `-L spec` or `-Lspec` with spec `[bind:]port:host:hostport`; "" if none.
+func forwardLocalPort(args []string) string {
+	for i, a := range args {
+		spec := ""
+		switch {
+		case a == "-L" && i+1 < len(args):
+			spec = args[i+1]
+		case strings.HasPrefix(a, "-L") && len(a) > 2:
+			spec = a[2:]
+		default:
+			continue
+		}
+		switch f := strings.Split(spec, ":"); len(f) {
+		case 3:
+			return f[0]
+		case 4:
+			return f[1]
 		}
 	}
-	return false
+	return ""
+}
+
+// transportLogLines returns the supervisor's lines from the daemon log.
+func transportLogLines(home string) string {
+	raw, _ := os.ReadFile(filepath.Join(home, "agent-factory.log"))
+	var out []string
+	for _, l := range strings.Split(string(raw), "\n") {
+		if strings.Contains(l, "ssh transport") || strings.Contains(l, "sandbox runtime") {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
 }
