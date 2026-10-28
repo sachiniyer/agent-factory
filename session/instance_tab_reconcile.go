@@ -380,8 +380,15 @@ func (i *Instance) reconcileProjectedTabs(target []TabData) bool {
 	defer i.mu.Unlock()
 	next := make([]*Tab, 0, len(target))
 	changed := len(i.Tabs) != len(target)
+	// A byte-identical id-less row cannot tell "unchanged" from close +
+	// recreate under the same name, so any id-less non-agent row invalidates
+	// destructive consent on every snapshot (same rule as the local path).
+	legacySnapshot := false
 	for idx, td := range target {
 		kind := tabKindForData(td.Kind)
+		if kind != TabKindAgent && td.ID == "" {
+			legacySnapshot = true
+		}
 		var cur *Tab
 		for _, t := range i.Tabs {
 			if t.ID == td.ID && (td.ID != "" || t.Name == td.Name) {
@@ -416,6 +423,9 @@ func (i *Instance) reconcileProjectedTabs(target []TabData) bool {
 		next = append(next, &cp)
 	}
 	if !changed {
+		if legacySnapshot {
+			i.tabRosterGeneration++
+		}
 		return false
 	}
 	i.Tabs = next

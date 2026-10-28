@@ -97,3 +97,70 @@ func TestHostsWholeTableWriteValidates(t *testing.T) {
 	assert.Contains(t, canonical, `"host":"h"`)
 	assert.Contains(t, encoded, "[hosts]")
 }
+
+// The host address rules, as one table: every address the validator accepts is
+// one the ssh runtime's resolver accepts unchanged, and the shapes it refuses are
+// the ones that would conflict with the port field or smuggle an ssh option.
+func TestValidateHostEntryAddressForms(t *testing.T) {
+	for _, addr := range []string{"box1", "box1.tailnet.ts.net", "10.0.0.1", "::1", "::", "::ffff:192.0.2.1", "2001:db8::1", "fe80::1"} {
+		require.NoErrorf(t, ValidateHostEntry("a", HostConfig{Host: addr}), "%q must be accepted", addr)
+	}
+	for _, addr := range []string{"box.example:2222", "[::1]", "[::1]:22", "::1%eth0", "::zz", ":22", "1:2:3", "-::1", "box_1", "a b"} {
+		require.Errorf(t, ValidateHostEntry("a", HostConfig{Host: addr}), "%q must be refused", addr)
+	}
+}
+
+// Set, load and the whole-table writer agree on every host-list shape: a value
+// the writer accepts is one the loader keeps, and one the writer refuses is one
+// the loader would have dropped.
+func TestHostListSetAndLoadAgree(t *testing.T) {
+	cases := []struct {
+		name  string
+		hosts map[string]HostConfig
+		def   string
+		valid bool
+	}{
+		{"listed default", map[string]HostConfig{"a": {Host: "h"}}, "a", true},
+		{"no default", map[string]HostConfig{"a": {Host: "h"}}, "", true},
+		{"dangling default", map[string]HostConfig{"a": {Host: "h"}}, "missing", false},
+		{"ipv6 leading colons", map[string]HostConfig{"a": {Host: "::1"}}, "a", true},
+		{"embedded port", map[string]HostConfig{"a": {Host: "h:2222", Port: 22}}, "a", false},
+		{"option host", map[string]HostConfig{"a": {Host: "-oProxyCommand=x"}}, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setErr := ValidateHosts(tc.hosts, tc.def)
+			require.Equal(t, tc.valid, setErr == nil, "writer verdict: %v", setErr)
+
+			c := &Config{Hosts: map[string]HostConfig{}, DefaultHost: tc.def}
+			for k, v := range tc.hosts {
+				c.Hosts[k] = v
+			}
+			sanitizeHosts(c)
+			loadKept := len(c.Hosts) == len(tc.hosts) && c.DefaultHost == tc.def
+			require.Equal(t, tc.valid, loadKept, "loader kept the list as written")
+		})
+	}
+}
+
+// `af config set default_host <unlisted>` must fail instead of reporting a
+// success the loader then discards (#5740).
+func TestSetDefaultHostRefusesUnlisted(t *testing.T) {
+	writeTempConfig(t, "schema_version = 1\n")
+	_, err := SetGlobalConfigValue("hosts", `{"a":{"host":"h"}}`)
+	require.NoError(t, err)
+
+	_, err = SetGlobalConfigValue("default_host", "missing")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `default_host "missing"`)
+
+	_, err = SetGlobalConfigValue("default_host", "a")
+	require.NoError(t, err)
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "a", cfg.DefaultHost)
+
+	// And the list cannot be rewritten out from under its default.
+	_, err = SetGlobalConfigValue("hosts", `{"b":{"host":"h"}}`)
+	require.Error(t, err)
+}

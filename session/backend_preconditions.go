@@ -76,8 +76,12 @@ func BackendConfigError(kind BackendKind, cfg *config.ResolvedConfig) error {
 	case BackendSSH:
 		// A default_host stands in for the repo's [ssh] section (W6.3); chooseListedHost
 		// is the create-time half of the same rule.
-		if cfg != nil && (cfg.SSH == nil || strings.TrimSpace(cfg.SSH.Host) == "") && cfg.DefaultHost != "" {
-			if _, ok := cfg.Hosts[cfg.DefaultHost]; ok {
+		// It goes through chooseListedHost itself, so a default create would refuse
+		// (use_ssh_config, a malformed entry) is not reported as configured.
+		if cfg != nil {
+			if _, entry, err := chooseListedHost("", cfg); err != nil {
+				return err
+			} else if entry != nil {
 				return nil
 			}
 		}
@@ -162,9 +166,18 @@ func BackendUnusableReason(kind BackendKind, cfg *config.ResolvedConfig, repoRoo
 		// fact — so a repo whose key path is a typo must not be told the backend is
 		// usable and then fail deterministically at create (#3092). Same validator
 		// the runtime runs, so choose time and create time cannot disagree.
-		if cfg != nil && cfg.SSH != nil {
-			if err := verifySSHIdentityFile(*cfg.SSH); err != nil {
-				return err
+		if cfg != nil {
+			if _, entry, _ := chooseListedHost("", cfg); entry != nil {
+				// No repo [ssh] host, so a default create lands on the default host:
+				// check its key, not the (absent) repo one — the same call a host
+				// pick makes, so the two cannot disagree.
+				if err := verifySSHIdentityFile(sshConfigForHost(*entry)); err != nil {
+					return err
+				}
+			} else if cfg.SSH != nil {
+				if err := verifySSHIdentityFile(*cfg.SSH); err != nil {
+					return err
+				}
 			}
 		}
 		if originRemoteURL(repoRoot) == "" {

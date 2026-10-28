@@ -557,6 +557,15 @@ func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 	return &resp.Instance, err
 }
 
+// PingCapabilities asks the daemon for its Ping reply, ensuring one is running
+// like every other control call. A client reads a capability bit from it before
+// sending a field an older daemon would silently drop (HostPick).
+func PingCapabilities() (PingResponse, error) {
+	var resp PingResponse
+	err := callDaemon("Ping", PingRequest{}, &resp)
+	return resp, err
+}
+
 // ListBackends asks the daemon which runtimes a create against req.RepoPath may
 // select, and which one an unspecified create resolves to. It is the read that
 // makes CreateSession's Backend field choosable rather than guessable, and it
