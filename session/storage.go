@@ -304,6 +304,8 @@ type InstanceData struct {
 	// ambient account would spend the wrong quota while still displaying the
 	// account it was created with.
 	Account string `json:"account,omitempty"`
+	// Host is the listed host the session was placed on (#5571 W6.3); additive.
+	Host string `json:"host,omitempty"`
 	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
 	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
 	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`
@@ -338,6 +340,20 @@ type InstanceData struct {
 	// respawns from them. Additive + omitempty on the TabData.ID rollforward
 	// precedent: records written before this field simply have none.
 	PendingTabCleanup []TabCleanupData `json:"pending_tab_cleanup,omitempty"`
+	// RebuildTeardownPending records that a recovery rebuilt this worktree at a
+	// new identity while sessions bound to it still answered has-session, and
+	// the teardown of those stale panes is unconfirmed. The next attempt cannot
+	// re-derive a committed rebuild from os.Stat (the rebuilt directory
+	// exists), so the obligation to remove the pre-rebuild panes — whose cwd is
+	// the deleted inode — persists (#5370, #5371 review). Set at rebuild commit,
+	// cleared only once every bound name and cleanup handle is confirmed gone.
+	RebuildTeardownPending bool `json:"rebuild_teardown_pending,omitempty"`
+	// RebuildTeardownOriginalStartupStateUnknown is a storage-only rollback
+	// fence: a current reader removes it before interpreting the row, while the
+	// previous release sees StartupStateUnknown and leaves the row undriven —
+	// it would otherwise find the rebuilt worktree present, skip the rebuild,
+	// reattach the deleted-inode pane, and mark it Running (#5370, #5371 review).
+	RebuildTeardownOriginalStartupStateUnknown *bool `json:"rebuild_teardown_original_startup_state_unknown,omitempty"`
 	// AgentConversation mirrors the Agent tab's provider conversation id for
 	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
 	AgentConversation *AgentConversationData `json:"agent_conversation,omitempty"`
@@ -500,44 +516,6 @@ func (d InstanceData) UsesLocalTmux() bool {
 	return d.BackendType == "" || d.BackendType == "local"
 }
 
-// RestoreArchiveRollbackFence removes the previous-release safety projection
-// from a persisted row. FromInstanceData uses it before reconstructing an
-// Instance; storage-only cleanup paths use it before manually reconstructing a
-// GitWorktree. Keeping that decoding here prevents a current daemon from
-// mistaking its own old-reader fence for the session's real ownership.
-func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
-	if d.ArchiveReport == nil || d.ArchiveReport.RollbackFence == nil {
-		return d
-	}
-	fence := d.ArchiveReport.RollbackFence
-	d.StartupStateUnknown = fence.OriginalStartupStateUnknown
-	d.Worktree.ExternalWorktree = fence.OriginalExternalWorktree
-	d.Worktree.BranchCreatedByUs = cloneBoolPointer(fence.OriginalBranchCreatedByUs)
-	if fence.RelocationRecoveryProjected {
-		d.Worktree.RelocationRecovery = archiveRollbackRelocationRecovery(fence.OriginalRelocationRecovery)
-	}
-	return d
-}
-
-// RestoreRuntimeCleanupRollbackFence removes the ordinary-sandbox projection
-// ForStorage writes so a current reader interprets the row as the ordinary
-// session it is, not the retention row a previous release needs to see. The
-// previous release's FromInstanceData only rebuilds a teardown for a UserKilled
-// tombstone or an unknown-cleanup row, so ForStorage publishes an ordinary
-// sandbox row's RuntimeCleanup under a projected RuntimeCleanupStateUnknown=true
-// and saves the real false here. A current reader restores the real value before
-// deciding whether the row is unknown-cleanup or ordinary; a rolled-back reader
-// ignores this additive field and treats the projected row as a retention row,
-// rebuilding and preserving the handle instead of orphaning the runtime.
-func (d InstanceData) RestoreRuntimeCleanupRollbackFence() InstanceData {
-	if d.OriginalRuntimeCleanupStateUnknown == nil {
-		return d
-	}
-	d.RuntimeCleanupStateUnknown = *d.OriginalRuntimeCleanupStateUnknown
-	d.OriginalRuntimeCleanupStateUnknown = nil
-	return d
-}
-
 // ForClientRead converts a storage row into the same bounded shape emitted by a
 // live daemon snapshot. Disk fallback callers must not expose the complete
 // report or the compatibility-only ownership flags merely because the daemon is
@@ -561,6 +539,11 @@ func (d InstanceData) ForClientRead() InstanceData {
 	if err == nil {
 		d = restored
 	}
+	// Reverse projection order — see FromInstanceData: the rebuild-teardown
+	// projector runs last of the pending projections in ForStorage (after
+	// relocation), so its restore runs here, ahead of the handoff and
+	// account-swap restores.
+	d = d.RestoreRebuildTeardownRollbackFence()
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()

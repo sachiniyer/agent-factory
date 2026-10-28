@@ -922,6 +922,8 @@ Settable keys:
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root} (global-only)
+  default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
 require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
@@ -2156,6 +2158,7 @@ af sessions create [title] [flags]
 | `--account` | `string` | Credential account `name` to run the agent as (register it with af accounts add; defaults to this project's default_accounts entry for the agent, else the ambient identity) |
 | `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, sandbox, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run "af sessions backends" for which of these this project can actually use, and why not |
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
+| `--host` | `string` | Listed host to run the session on, by name from the global host list (af config set hosts …); implies --backend ssh. Run "af sessions backends" to see each host and whether it is usable |
 | `--in-place` |  | Alias for --here |
 | `--name` | `string` | Session title (alternative to positional <title>) |
 | `--program` | `string` | Program to run (one of: claude, codex, aider, gemini, amp, opencode, devin; defaults to config default) |
