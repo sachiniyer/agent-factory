@@ -92,6 +92,13 @@ type ProvisionSpec struct {
 	// the normal case for a local session and also what a refusal leaves behind.
 	CallbackURL   string
 	CallbackToken string
+	// CallbackSocket is the daemon-host unix socket the supervised connection's
+	// -R forward terminates on (#5571 W3.4): CallbackURL names a loopback port on
+	// the SANDBOX, and ssh carries that port to this socket. It is af's own
+	// dedicated sandbox-only endpoint, chosen by the daemon at mint — never a
+	// value from repo config or the sandbox. Empty means the credential has no
+	// carrier and the provisioner opens no -R.
+	CallbackSocket string
 	// CallbackRevalidate re-checks the minted credential's posture INSIDE
 	// provisioning, at the last step that can still keep a dead credential out
 	// of the launched agent-server's environment — after the clone/binary

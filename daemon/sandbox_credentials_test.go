@@ -75,47 +75,22 @@ func seedDiskInstanceWithID(t *testing.T, repoID, id, title, repoPath string) {
 	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
 }
 
-// The minter reads LIVE config, never a snapshot captured when it was built.
-//
-// A stored closure holding create-time config was the previous shape: if the
-// operator later disabled require_token, ApplyConfig revoked every outstanding
-// credential and a re-mint through that closure still saw RequireToken=true — so
-// it succeeded against a listener that by then authenticated nobody, and the
-// invalidation predated the new mint's fence, so the fence could not catch it.
-func TestSandboxCredentials_MintReadsTheLivePosture(t *testing.T) {
+// The minter reads the endpoint's LIVE state, never a snapshot captured when it
+// was built, and does not consult the client listener's address or auth posture
+// (#5571 W3.4).
+func TestSandboxCredentials_MintReadsTheLiveEndpoint(t *testing.T) {
 	m := applyConfigTestManager(t)
 	creds := newSandboxCredentials(m, "sess-a")
 
-	// A dialable listen_addr first. DefaultConfig's is loopback, which is refused
-	// for a reason of its own — a sandbox dialling it reaches itself — and that
-	// refusal would mask the posture one this test is about. (My first version
-	// asserted the require_token hint here and got the loopback message, because
-	// dialability is checked first.) The network address makes this a tokenless
-	// non-loopback posture, so the opt-in goes in first — without it #5137
-	// refuses the listen_addr write itself.
-	_, err := config.SetGlobalConfigValue("allow_unauthenticated_network", "true")
-	require.NoError(t, err)
-	_, err = config.SetGlobalConfigValue("listen_addr", "10.0.0.5:8443")
-	require.NoError(t, err)
-	_, err = m.ApplyConfig()
-	require.NoError(t, err)
+	// Default config: loopback listener, require_token false. Both used to refuse.
+	_, err := creds.Mint()
+	require.Error(t, err, "no endpoint is listening yet")
 
-	// require_token is still false, so a mint must REFUSE: a scoped credential
-	// against a listener that demands none enforces nothing.
-	_, err = creds.Mint()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), requireTokenFixHint)
-
-	// Flip the posture LIVE. The same minter, already built, must see it — that is
-	// the whole point: the previous shape captured its config at construction.
-	_, err = config.SetGlobalConfigValue("require_token", "true")
-	require.NoError(t, err)
-	_, err = m.ApplyConfig()
-	require.NoError(t, err)
-
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
 	cred, err := creds.Mint()
-	require.NoError(t, err, "the minter must read the posture live, not the one captured when it was built")
-	assert.Equal(t, "http://10.0.0.5:8443", cred.URL)
+	require.NoError(t, err, "the minter must read the endpoint live, not the state captured when it was built")
+	assert.Equal(t, "/tmp/af-home/sandbox-callback.sock", cred.Socket)
+	assert.Regexp(t, `^http://127\.0\.0\.1:[0-9]+$`, cred.URL)
 	assert.NotEmpty(t, cred.Token)
 
 	// And it revokes through the same object — what the runtime lifecycle calls
