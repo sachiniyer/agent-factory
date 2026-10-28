@@ -223,3 +223,42 @@ func TestRoutedTabAndProjectVerbsReachRemoteTarget(t *testing.T) {
 	}
 	require.JSONEq(t, `{"path":"~/src/alpha"}`, string(hits["/v1/RegisterProject"]))
 }
+
+// A remote rebind must put each value in its own field: the destination path in
+// `path`, the guard in expected_root/expected_checkout_id (the apiclient method
+// takes them in a different order than the request struct, and all are strings).
+func TestRoutedRebindProjectKeepsPathAndGuardApart(t *testing.T) {
+	var mu sync.Mutex
+	got := map[string]map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		got[r.URL.Path] = body
+		mu.Unlock()
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.RebindProjectResponse{OK: true,
+			Project: config.Project{ID: "prj_x", Root: body["path"]}}))
+	}))
+	defer srv.Close()
+	oldURL := apiclient.FlagDaemonURL
+	apiclient.FlagDaemonURL = srv.URL
+	t.Cleanup(func() { apiclient.FlagDaemonURL = oldURL })
+
+	p, err := routedRebindProject(daemon.RebindProjectRequest{ID: "prj_x", Path: "/srv/new"})
+	require.NoError(t, err)
+	require.Equal(t, "/srv/new", p.Root)
+	mu.Lock()
+	require.Equal(t, "/srv/new", got["/v1/RebindProject"]["path"])
+	require.Equal(t, "prj_x", got["/v1/RebindProject"]["id"])
+	mu.Unlock()
+
+	_, err = routedRebindProject(daemon.RebindProjectRequest{
+		ID: "prj_x", Path: "/srv/new", ExpectedRoot: "/srv/old", ExpectedCheckoutID: "chk1"})
+	require.NoError(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	g := got["/v1/RebindProjectGuarded"]
+	require.Equal(t, "/srv/new", g["path"])
+	require.Equal(t, "/srv/old", g["expected_root"])
+	require.Equal(t, "chk1", g["expected_checkout_id"])
+}

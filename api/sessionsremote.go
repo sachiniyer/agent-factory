@@ -291,7 +291,7 @@ func routedRebindProject(req daemon.RebindProjectRequest) (config.Project, error
 		return config.Project{}, err
 	}
 	defer c.CloseIdleConnections()
-	p, err := c.RebindProject(req.ID, req.Path, req.ExpectedRoot, req.ExpectedCheckoutID)
+	p, err := c.RebindProject(req.ID, req.ExpectedRoot, req.ExpectedCheckoutID, req.Path)
 	return p, remoteMutationError("projects rebind", err)
 }
 
