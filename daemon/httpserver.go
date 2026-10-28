@@ -136,7 +136,10 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	wl := newWebListeners(manager, mux, newPreviewMux(cs))
 	manager.webListeners = wl
 	if _, err := wl.reconcile(manager.cfg); err != nil {
-		log.WarningLog.Printf("daemon web listener(s): %v", err)
+		log.WarningLog.Printf("daemon web listener(s): %v — retrying in the background", err)
+		// A startup bind that lost a race (tailnet IP not assigned yet) is retried
+		// with capped backoff instead of staying down until a restart (#5571 W9.9).
+		wl.retryFailedBinds()
 	}
 
 	return func() error {

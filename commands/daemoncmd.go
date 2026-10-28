@@ -264,7 +264,7 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 		case info.Listeners.TCPBound:
 			fmt.Fprintf(w, "  tcp listener:   %s (bound)\n", info.Listeners.TCPBoundAddr)
 		default:
-			fmt.Fprintf(w, "  tcp listener:   %s (not bound)\n", info.Listeners.TCPListenAddr)
+			fmt.Fprintf(w, "  tcp listener:   %s (%s)\n", info.Listeners.TCPListenAddr, notBoundNote(info.Listeners.TCPBindError, info.Listeners.BindRetrying))
 		}
 		// The web-tab preview listener (#1856). Only printed when configured, so an
 		// operator who never set network.preview_listen_addr sees no extra line.
@@ -274,7 +274,7 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 		case info.Listeners.PreviewBound:
 			fmt.Fprintf(w, "  preview listen: %s (bound)\n", info.Listeners.PreviewBoundAddr)
 		default:
-			fmt.Fprintf(w, "  preview listen: %s (not bound)\n", info.Listeners.PreviewListenAddr)
+			fmt.Fprintf(w, "  preview listen: %s (%s)\n", info.Listeners.PreviewListenAddr, notBoundNote(info.Listeners.PreviewBindError, info.Listeners.BindRetrying))
 		}
 	}
 	fmt.Fprintf(w, "  control socket: %s (%s)\n", info.ControlSocket, presence(info.ControlSocketFile))
@@ -787,4 +787,18 @@ func ensureDaemonForTasks() {
 			return
 		}
 	}
+}
+
+// notBoundNote words a listener that is configured but not accepting: the last
+// bind failure and, when the daemon is still retrying it in the background
+// (#5571 W9.9), that it will keep trying.
+func notBoundNote(bindErr string, retrying bool) string {
+	note := "not bound"
+	if retrying {
+		note += ", retrying"
+	}
+	if bindErr != "" {
+		note += ": " + bindErr
+	}
+	return note
 }
