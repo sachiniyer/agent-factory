@@ -48,8 +48,15 @@ func configuredGitHubHostname(raw string) string {
 	return u.Hostname()
 }
 
+// gitCloneCommand clones with safe.directory trusted for this one invocation
+// only. A local clone source (a bind-mounted repository, file:///repo.git) is
+// usually owned by another uid, and git refuses it as "dubious ownership"; the
+// per-process config (the GIT_CONFIG_COUNT environment, command scope, which
+// safe.directory honours) lets the clone proceed without writing anything to the
+// remote user's global config (#5571 W2.7). The env prefix keeps the "git clone"
+// words contiguous.
 func gitCloneCommand(cloneURL, destination string) string {
-	command := "git "
+	command := "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*' git "
 	if key, helper, ok := githubEnvironmentCredential(cloneURL); ok {
 		command += "-c " + shellQuote(key+"="+helper) + " "
 	}
