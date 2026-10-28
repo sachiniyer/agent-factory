@@ -496,6 +496,10 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// W7.5: swap the agent for another in this workspace. Advertised as the
 	// "agent-swap" feature.
 	mux.HandleFunc("/v1/agent/swap-agent", rpcHandler(hs.SwapAgent))
+	// W7.6: rotate the account scope and relaunch. Advertised as the
+	// "account-swap" feature.
+	mux.HandleFunc("/v1/agent/swap-account", rpcHandler(hs.SwapAccount))
+	mux.HandleFunc("/v1/agent/swap-account-status", rpcHandler(hs.SwapAccountStatus))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -539,6 +543,9 @@ var agentServerWireFeatures = []string{
 	// "agent-swap": POST /v1/agent/swap-agent — replace the agent with another
 	// in this workspace, resolving the new agent's program on this host (#5571 W7.5).
 	session.SwapAgentFeature,
+	// "account-swap": POST /v1/agent/swap-account — rotate the staged account
+	// scope in and relaunch the agent on it (#5571 W7.6).
+	session.AccountSwapFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version

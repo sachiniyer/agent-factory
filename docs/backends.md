@@ -884,6 +884,17 @@ config, so the host's own login is neither read nor replaced.
   Replacement is atomic, mode 0600, credential files only. Teardown writes back one
   last time, then removes the scope. A refresh that loses the race stays on the host
   and is discarded with the session; fan-out to live sessions is not built yet.
+- **`handoff --account` and limit failover work on a listed host.** The new account is
+  staged beside the live scope while the old agent still runs; the agent-server then
+  stops the agent, moves the old scope aside, moves the new one into place and starts
+  the agent again, so the old agent never writes into the new account's files. The old
+  account is written back (the same compare-and-swap) and removed. The agent keeps its
+  identity environment from launch, so the swap is within the **same agent** — a
+  cross-agent `--to` with `--account` is refused. The replacement starts a **fresh
+  conversation** (a transcript lives in the old account's store) and is told so, with
+  the session's task. Every refusal (an unlisted host, an unattributed command, an
+  account of another agent, an older sandbox without the route) happens before anything
+  is stopped. A failure inside the host puts the old scope back.
 - **Sessions on one host share its ssh user**, so they can read each other's
   workspaces and synced credentials, exactly as local worktrees share one user
   today. A Unix user per session is a later hardening, not part of this contract.

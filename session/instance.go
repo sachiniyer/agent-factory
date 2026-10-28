@@ -410,6 +410,11 @@ type Instance struct {
 	// Account is ambient or the record predates the field — those selections
 	// could only have used the Program enum's namespace.
 	accountAgent string
+	// restartingSameAgent is raised, in-sandbox only, for the duration of an
+	// account swap (#5571 W7.6): the replacement is the SAME agent on another
+	// account, which the handoff validation otherwise refuses as "already running".
+	// Every boundary of the handoff chain (prepare, record, swap) reads it.
+	restartingSameAgent bool
 	// accountAutoSelected distinguishes a scheduler choice; false keeps pre-#3127 accounts pinned.
 	accountAutoSelected bool
 	// pendingAccountSwap survives until the replacement notice and task land.

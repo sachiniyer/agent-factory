@@ -12,7 +12,13 @@ import (
 // SwapAgent consumes the returned plan and cannot drift to a different override
 // in the destructive close/start gap.
 func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPlan, error) {
-	resolved := resolveProgramForAgent(i, target)
+	return prepareAgentSwapFrom(i, target, resolveProgramForAgent(i, target))
+}
+
+// prepareAgentSwapFrom is PrepareAgentSwap for an already-resolved command: an
+// account swap restarts the command that was proven and is running, not whatever
+// its agent name resolves to under today's overrides.
+func prepareAgentSwapFrom(i *Instance, target, resolved string) (AgentSwapPlan, error) {
 	// A plain handoff never carries the outgoing scope: a scoped session can
 	// only reach this preflight when the target cannot hold an account —
 	// scoped-to-scopable without --account is refused at admission — so the
