@@ -40,6 +40,8 @@ query($owner: String!, $repo: String!, $base: String!, $after: String) {
       nodes {
         number
         headRefOid
+        headRefName
+        isCrossRepository
         isDraft
         mergeable
         labels(first: 20) { pageInfo { hasNextPage } nodes { name } }
@@ -167,6 +169,50 @@ function isTruncated(conn) {
   if (!conn) return false;
   if (conn.pageInfo && conn.pageInfo.hasNextPage) return true;
   return typeof conn.totalCount === "number" && conn.totalCount > (conn.nodes || []).length;
+}
+
+// Head-branch cleanup. GitHub applies delete_branch_on_merge only to merges made
+// by a user token, not GITHUB_TOKEN, so the merger deletes the branch itself.
+// Returns {delete: true} or {delete: false, reason}. `branch` is the repos.getBranch
+// payload (null when the branch is already gone); `stackedOpenPrs` is the number
+// of open PRs using the branch as their BASE (deleting it would close them).
+function branchDeletionDecision({ pr, defaultBranch, branch, stackedOpenPrs }) {
+  if (pr.isCrossRepository) return { delete: false, reason: "fork head — never touched" };
+  const name = pr.headRefName;
+  if (!name) return { delete: false, reason: "no head ref name" };
+  if (name === defaultBranch || name === BASE) return { delete: false, reason: "default branch" };
+  if (!branch) return { delete: false, reason: "branch already gone" };
+  if (branch.protected) return { delete: false, reason: "protected branch" };
+  if (stackedOpenPrs > 0) {
+    return { delete: false, reason: `${stackedOpenPrs} open PR(s) use it as their base` };
+  }
+  return { delete: true };
+}
+
+async function deleteMergedBranch({ github, core, owner, repo, pr, defaultBranch }) {
+  try {
+    let branch = null;
+    if (!pr.isCrossRepository && pr.headRefName && pr.headRefName !== defaultBranch) {
+      try {
+        branch = (await github.rest.repos.getBranch({ owner, repo, branch: pr.headRefName })).data;
+      } catch (error) {
+        if (error.status !== 404) throw error;
+      }
+    }
+    const stacked = branch
+      ? (await github.rest.pulls.list({ owner, repo, state: "open", base: pr.headRefName, per_page: 1 })).data.length
+      : 0;
+    const decision = branchDeletionDecision({ pr, defaultBranch, branch, stackedOpenPrs: stacked });
+    if (!decision.delete) {
+      core.info(`#${pr.number}: keeping branch ${pr.headRefName} (${decision.reason})`);
+      return;
+    }
+    await github.rest.git.deleteRef({ owner, repo, ref: `heads/${pr.headRefName}` });
+    core.notice(`Deleted merged branch ${pr.headRefName} (#${pr.number}).`);
+  } catch (error) {
+    // Cleanup is best-effort: never fail or undo a merge over it.
+    core.warning(`#${pr.number}: could not delete branch ${pr.headRefName}: ${error.message}`);
+  }
 }
 
 function isCodex(login) {
@@ -382,6 +428,7 @@ async function mergeAll({ github, core, context }) {
       merged.push(pr.number);
       lastSha = res.data.sha;
       core.notice(`Merged #${pr.number} at ${pr.headRefOid} -> ${lastSha}`);
+      await deleteMergedBranch({ github, core, owner, repo, pr, defaultBranch: BASE });
     } catch (error) {
       // 405/409: head moved, conflict from an earlier merge in this batch, or a
       // protection rule. The next run re-evaluates from fresh state.
@@ -432,5 +479,5 @@ module.exports = {
   checkHalt, settleBroken, mergeAll, reportBroken,
   workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
-  isTruncated, ACK_RE,
+  isTruncated, ACK_RE, branchDeletionDecision,
 };
