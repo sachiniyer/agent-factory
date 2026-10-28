@@ -134,9 +134,19 @@ func TestCodexHomeFromCommandModelsDashClearThenAssignment(t *testing.T) {
 }
 
 func TestCodexHomeFromCommandRefusesPhantomChdirAfterDash(t *testing.T) {
+	prev := osAccountHome
+	t.Cleanup(func() { osAccountHome = prev })
+	osAccountHome = func() (string, error) { return "/os-home", nil }
 	launchDir := filepath.Join(string(filepath.Separator), "launch")
-	_, err := CodexHomeFromCommand("env - -C /evilpath CODEX_HOME=mystore codex", launchDir)
-	require.ErrorContains(t, err, "CODEX_HOME is unset")
+	got, err := CodexHomeFromCommand("env - -C /evilpath CODEX_HOME=mystore codex", launchDir)
+	// The dash clears the environment and `-C /evilpath` is the command, not a
+	// chdir, so the assignment after it never reaches codex: CODEX_HOME and HOME
+	// are both absent and codex reads the OS account home (#5986). Neither the
+	// phantom chdir nor the phantom assignment may leak into the answer.
+	require.NoError(t, err)
+	require.Equal(t, filepath.FromSlash("/os-home/.codex"), got)
+	require.NotContains(t, got, "evilpath")
+	require.NotContains(t, got, "mystore")
 }
 
 // The OS-home fallback (#5986): with HOME and the agent's variable both absent
