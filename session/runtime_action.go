@@ -158,6 +158,17 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 				"session %q still owes the mission from its last handoff; resolve it first — `af sessions retry-limit %s` resends it, `--delivered` retires it",
 				v.Title, v.Title)
 		}
+		if v.RebuildTeardownPending {
+			// A handoff's replacement binds a NEW runtime inside the worktree
+			// while the committed teardown still owes the old one: the next
+			// teardown pass snapshots names, not vintages, and would kill the
+			// incoming runtime together with the genuinely stale ones (#5371
+			// review). The obligation's owner retries through recover/resume —
+			// those actions stay admitted above.
+			return fmt.Errorf(
+				"session %q still owes the teardown of the runtime it replaced; let its recovery finish before handing off",
+				v.Title)
+		}
 		if v.InFlightOp != OpNone {
 			return runtimeActionBusyError(v)
 		}

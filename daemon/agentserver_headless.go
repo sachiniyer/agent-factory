@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/terminal"
@@ -183,6 +185,11 @@ type AgentServerOptions struct {
 	// Branch is the exact branch the daemon named for this session (#5571 W2.4).
 	// Empty derives it from this host's own branch_prefix, as before.
 	Branch string
+	// Version is this binary's own build stamp, echoed in the startup banner so
+	// the provisioning daemon can persist which agent-server generation the
+	// session runs (#5571 W1.1 — reattach keys off it). Empty means the banner
+	// omits it, which a persisted row reads as "pre-W1.1".
+	Version string
 }
 
 // AgentServerInfo is the machine-readable startup banner the process prints to
@@ -198,6 +205,9 @@ type AgentServerInfo struct {
 	Addr  string `json:"addr"`
 	Token string `json:"token"`
 	Title string `json:"title"`
+	// Version is the server binary's self-reported build stamp (#5571 W1.1).
+	// omitempty keeps the wire byte-identical for a server that has none.
+	Version string `json:"version,omitempty"`
 	// Program is the command this host resolved and bound — the daemon sent
 	// the configured name and flags; the executable's absolute path only
 	// exists after the login-shell probe here (#5571 W2.1). The driver records
@@ -299,13 +309,33 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		events: newEventsHub(),
 	}
 
+	// The bearer token this server expects comes from a 0600 file beside this
+	// binary when the provisioning daemon placed one there (#5571 W1.1): a
+	// per-session credential derived from the daemon's runtime-identity key,
+	// replacing this host's shared daemon-token. It is read from the FILE —
+	// never argv or the environment — so neither the token nor its path can
+	// reach anything this server spawns. When the file is absent the listener
+	// keeps the file-backed daemon-token of the AF home it runs under, the
+	// pre-W1.1 shape.
+	suppliedToken, err := runtimetoken.SuppliedAgentServerToken()
+	if err != nil {
+		return fmt.Errorf("agent-server: %w", err)
+	}
+	var listenerAuth *tcpListenerAuth
+	if suppliedToken != "" {
+		expected := suppliedToken
+		listenerAuth = &tcpListenerAuth{
+			expectedForRequest: func(*http.Request) (string, error) { return expected, nil },
+		}
+	}
+
 	// The agent-server's token is MANDATORY for every peer — it exists to be
 	// reached over the network by a remote daemon, so the token must never be
 	// optional and loopback is NOT exempt (unlike the daemon web listener, #1696).
 	// The zero-value policy is exactly that strict posture; pass it explicitly so
 	// the intent is on the page and a future require_token=false in the host
 	// config can never weaken this listener.
-	closeTCP, tcpInfo, err := startTCPListener(hs.newMux(), cfg.ListenAddr, cfg, tokenGatePolicy{}, withoutWebShell, nil, nil)
+	closeTCP, tcpInfo, err := startTCPListener(hs.newMux(), cfg.ListenAddr, cfg, tokenGatePolicy{}, withoutWebShell, listenerAuth, nil)
 	if err != nil {
 		return fmt.Errorf("failed to start agent-server listener on %q: %w", opts.ListenAddr, err)
 	}
@@ -314,7 +344,14 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		Addr:    tcpInfo.Addr,
 		Token:   tcpInfo.Token,
 		Title:   opts.Title,
+		Version: opts.Version,
 		Program: resolvedProgram,
+	}
+	if suppliedToken != "" {
+		// An auth override leaves tcpInfo.Token empty — the listener has no
+		// single credential to advertise — so the banner names the supplied one
+		// directly. The provisioning daemon verifies it matches what it derived.
+		info.Token = suppliedToken
 	}
 	// The startup banner is a single JSON line on stdout — the agent-server's only
 	// channel to hand a driver the address+token, since it runs headless with
@@ -370,6 +407,9 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("GET /v1/sessions/{id}/stream", hs.streamHandler)
 	mux.HandleFunc("GET /v1/sessions/{id}/stream-info", hs.streamInfoHandler)
 	mux.HandleFunc("GET /v1/events", hs.eventsHandler)
+
+	// Loopback port relay (W5.1): raw TCP to 127.0.0.1:<port> in the workspace.
+	mux.HandleFunc("GET "+agentproto.RelayPath, hs.relayHandler)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, r, http.StatusNotFound, fmt.Errorf("unknown route %q", r.URL.Path))
@@ -464,12 +504,30 @@ func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) erro
 type agentPreviewRequest struct {
 	Tab  int  `json:"tab"`
 	Full bool `json:"full"`
+	// Grid asks for the per-row grid capture with cursor and size (#5571 W4.2).
+	// A server that predates it ignores the field and never sets HasGrid, which
+	// is how the client knows to keep the joined Content.
+	Grid bool `json:"grid,omitempty"`
 }
 
 type agentPreviewResponse struct {
 	Content  string         `json:"content"`
 	Modes    terminal.Modes `json:"terminal_modes,omitempty"`
 	HasModes bool           `json:"has_terminal_modes,omitempty"`
+	// LinesAbove is the scrollback above Content; LinesAboveKnown says whether
+	// it was measured (0 and "unmeasured" differ, #3169).
+	LinesAbove      int  `json:"lines_above,omitempty"`
+	LinesAboveKnown bool `json:"lines_above_known,omitempty"`
+	// The grid answer: Grid is one line per pane row, the cursor is 0-based,
+	// Rows/Cols are the pane's measured size when HasSize.
+	HasGrid   bool   `json:"has_grid,omitempty"`
+	Grid      string `json:"grid,omitempty"`
+	HasCursor bool   `json:"has_cursor,omitempty"`
+	CursorRow int    `json:"cursor_row,omitempty"`
+	CursorCol int    `json:"cursor_col,omitempty"`
+	HasSize   bool   `json:"has_size,omitempty"`
+	Rows      uint16 `json:"rows,omitempty"`
+	Cols      uint16 `json:"cols,omitempty"`
 }
 
 func (hs *headlessServer) Preview(req agentPreviewRequest, resp *agentPreviewResponse) error {
@@ -480,6 +538,26 @@ func (hs *headlessServer) Preview(req agentPreviewRequest, resp *agentPreviewRes
 	resp.Content = snapshot.Content
 	resp.Modes = snapshot.Modes
 	resp.HasModes = snapshot.HasModes
+	resp.LinesAbove, resp.LinesAboveKnown = snapshot.LinesAbove, snapshot.LinesAboveKnown
+	if !req.Grid || req.Full {
+		return nil
+	}
+	gs, ok := hs.as.(session.PaneGridServer)
+	if !ok {
+		return nil
+	}
+	pane, gerr := gs.PreviewGrid(req.Tab)
+	if gerr != nil {
+		// The joined Content above is still a valid answer; the client falls
+		// back to it when HasGrid is absent.
+		return nil
+	}
+	resp.HasGrid, resp.Grid = true, string(pane.Screen)
+	resp.HasCursor, resp.CursorRow, resp.CursorCol = pane.HasCursor, pane.CursorRow, pane.CursorCol
+	resp.HasSize, resp.Rows, resp.Cols = pane.HasSize, pane.Rows, pane.Cols
+	if pane.HasModes {
+		resp.Modes, resp.HasModes = pane.Modes, true
+	}
 	return nil
 }
 

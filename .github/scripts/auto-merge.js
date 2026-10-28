@@ -12,13 +12,19 @@ const FIX_LABEL = "fix-master";
 const HOLD_LABELS = ["hold", "no-auto-merge"];
 const REQUIRED_CHECKS = ["Build", "Lint"];
 const CODEX_LOGIN = "chatgpt-codex-connector";
-const ACK_RE = /RESOLVED|ACCEPTED|\[gate-ack\]/;
+// A reply is an acknowledgment only when it STARTS with the marker (optionally
+// after whitespace / markdown emphasis): a substring match would let "UNRESOLVED"
+// or "NOT ACCEPTED" clear a P1 finding (#5676).
+const ACK_RE = /^[\s*_>]*(?:RESOLVED|ACCEPTED|\[gate-ack\])(?![A-Za-z])/;
 const BROKEN_TITLE_PREFIX = "master broken by merge batch";
 // Same list auto-gate.js re-raised after a merge (MASTER_PUSH_WORKFLOWS).
 const MASTER_WORKFLOWS = [
   "build.yml",
   "docs.yml",
   "lint.yml",
+  // Since slim PR CI (#5615) the heavy jobs (macOS, systemd, perf) run only on
+  // master's pr.yml, and a GITHUB_TOKEN merge fires no push to run them (#5674).
+  "pr.yml",
   "tui-driver-selftest.yml",
   "web-selftest.yml",
 ];
@@ -34,10 +40,13 @@ query($owner: String!, $repo: String!, $base: String!, $after: String) {
       nodes {
         number
         headRefOid
+        headRefName
+        isCrossRepository
         isDraft
         mergeable
-        labels(first: 20) { nodes { name } }
+        labels(first: 20) { pageInfo { hasNextPage } nodes { name } }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
+          totalCount
           pageInfo { hasNextPage }
           nodes {
             __typename
@@ -99,31 +108,141 @@ function touchesWorkflows(files) {
   return (files.nodes || []).some((f) => f.path.startsWith(".github/workflows/"));
 }
 
-// Master's own Build/Lint workflows. Their newest COMPLETED run (cancelled and
-// skipped runs say nothing about the tree) decides: a failure halts merging
-// until a later run passes. Catches composed breaks the Go-only composition
-// check cannot see (e.g. test expectations that a sibling PR invalidated).
-const MASTER_HEALTH_WORKFLOWS = [
-  ".github/workflows/build.yml",
-  ".github/workflows/lint.yml",
-];
-const INCONCLUSIVE = new Set(["cancelled", "skipped", "neutral", "stale"]);
+// BATCH-THEN-VERIFY. Under continuous merging every master Build is cancelled by
+// the next push, so "latest completed run" reads a stale success. Instead the
+// merger only merges onto a master HEAD whose OWN build.yml and lint.yml runs
+// (queried by head_sha) have concluded success, then merges at most
+// AUTO_MERGE_BATCH_SIZE PRs before the head moves and must be verified again.
+const VERIFY_WORKFLOWS = ["build.yml", "lint.yml"];
+const DEFAULT_BATCH_SIZE = 8;
+const RED_CONCLUSIONS = new Set(["failure", "timed_out", "startup_failure"]);
 
-// `runs` is the newest-first list from one actions/runs call. Returns the failing
-// run that causes the halt, or null.
-function findRedMasterRun(runs) {
-  for (const path of MASTER_HEALTH_WORKFLOWS) {
-    const latest = runs.find((r) => r.path === path && !INCONCLUSIVE.has(r.conclusion));
-    if (latest && latest.conclusion === "failure") return latest;
-  }
-  return null;
+// Rows are the runs of ONE workflow for the master head.
+//   ok       any run succeeded
+//   red      (none succeeded) any run failed
+//   wait     any run is queued / in progress
+//   dispatch no live run at all (all cancelled, or a push that never ran it)
+function workflowState(rows) {
+  if (rows.some((r) => r.status === "completed" && r.conclusion === "success")) return "ok";
+  if (rows.some((r) => r.status === "completed" && RED_CONCLUSIONS.has(r.conclusion))) return "red";
+  if (rows.some((r) => r.status !== "completed")) return "wait";
+  return "dispatch";
 }
 
-async function masterRedRun(github, owner, repo) {
-  const res = await github.rest.actions.listWorkflowRunsForRepo({
-    owner, repo, branch: BASE, status: "completed", per_page: 30,
-  });
-  return findRedMasterRun(res.data.workflow_runs);
+// states: {workflow: state}. A failure halts even if the other workflow is still
+// running; then waiting beats dispatching; only all-ok verifies the head.
+function combineVerification(states) {
+  const vals = Object.values(states);
+  if (vals.includes("red")) return "red";
+  if (vals.includes("wait") || vals.includes("dispatch")) return "wait";
+  return "ok";
+}
+
+// Returns {status: ok|red|wait, head, states, runs: {workflow: failing/blocking run}}.
+// Dispatches workflows that have no live run. A failed read throws: no merge.
+async function verifyMasterHead(github, core, owner, repo) {
+  const branch = await github.rest.repos.getBranch({ owner, repo, branch: BASE });
+  const head = branch.data.commit.sha;
+  const states = {};
+  const runs = {};
+  for (const workflow_id of VERIFY_WORKFLOWS) {
+    const res = await github.rest.actions.listWorkflowRuns({
+      owner, repo, workflow_id, head_sha: head, per_page: 20,
+    });
+    const rows = res.data.workflow_runs.filter((r) => !r.head_sha || r.head_sha === head);
+    states[workflow_id] = workflowState(rows);
+    runs[workflow_id] = rows.find((r) => r.status !== "completed" || RED_CONCLUSIONS.has(r.conclusion)) || null;
+  }
+  const status = combineVerification(states);
+  if (status !== "red") {
+    for (const workflow_id of VERIFY_WORKFLOWS) {
+      if (states[workflow_id] !== "dispatch") continue;
+      await github.rest.actions.createWorkflowDispatch({ owner, repo, workflow_id, ref: BASE });
+      core.notice(`Dispatched ${workflow_id} on master: no live run for ${head}.`);
+    }
+  }
+  return { status, head, states, runs };
+}
+
+// A connection read with `first: N` that has more than it returned.
+function isTruncated(conn) {
+  if (!conn) return false;
+  if (conn.pageInfo && conn.pageInfo.hasNextPage) return true;
+  return typeof conn.totalCount === "number" && conn.totalCount > (conn.nodes || []).length;
+}
+
+// Head-branch cleanup. GitHub applies delete_branch_on_merge only to merges made
+// by a user token, not GITHUB_TOKEN, so the merger deletes the branch itself.
+// The tip re-read and the open-PR checks are ported from deleteMergedHeadRef in
+// auto-gate.js. Returns {delete: true} or {delete: false, reason}.
+//   branch          repos.getBranch payload (null when already gone)
+//   blockingOpenPrs open PRs based ON the branch (deleting closes them) or whose
+//                   HEAD is the branch (deleting leaves them headless)
+//   tip             branch tip re-read immediately before the delete; undefined
+//                   until read. It must equal the merged head: a push after the
+//                   merge is work master does not have, and that ref may be its
+//                   only copy.
+function branchDeletionDecision({ pr, defaultBranch, branch, blockingOpenPrs, stackedOpenPrs, tip }) {
+  if (pr.isCrossRepository) return { delete: false, reason: "fork head — never touched" };
+  const name = pr.headRefName;
+  if (!name) return { delete: false, reason: "no head ref name" };
+  if (name === defaultBranch || name === BASE) return { delete: false, reason: "default branch" };
+  if (!branch) return { delete: false, reason: "branch already gone" };
+  if (branch.protected) return { delete: false, reason: "protected branch" };
+  const blocking = blockingOpenPrs ?? stackedOpenPrs ?? 0;
+  if (blocking > 0) {
+    return { delete: false, reason: `${blocking} open PR(s) use it as their base or head` };
+  }
+  if (tip !== undefined && String(tip).toLowerCase() !== String(pr.headRefOid).toLowerCase()) {
+    return {
+      delete: false,
+      reason: `tip moved after merge (${tip || "unreadable"}, merged ${pr.headRefOid}) — carries work this merge did not take`,
+    };
+  }
+  return { delete: true };
+}
+
+async function deleteMergedBranch({ github, core, owner, repo, pr, defaultBranch }) {
+  try {
+    let branch = null;
+    if (!pr.isCrossRepository && pr.headRefName && pr.headRefName !== defaultBranch) {
+      try {
+        branch = (await github.rest.repos.getBranch({ owner, repo, branch: pr.headRefName })).data;
+      } catch (error) {
+        if (error.status !== 404) throw error;
+      }
+    }
+    let blocking = 0;
+    if (branch) {
+      const [dependents, siblings] = await Promise.all([
+        github.rest.pulls.list({ owner, repo, state: "open", base: pr.headRefName, per_page: 1 }),
+        // The merged PR is closed by now, so an open head-PR here is a different one.
+        github.rest.pulls.list({ owner, repo, state: "open", head: `${owner}:${pr.headRefName}`, per_page: 1 }),
+      ]);
+      blocking = dependents.data.length + siblings.data.length;
+    }
+    const first = branchDeletionDecision({ pr, defaultBranch, branch, blockingOpenPrs: blocking });
+    if (!first.delete) {
+      core.info(`#${pr.number}: keeping branch ${pr.headRefName} (${first.reason})`);
+      return;
+    }
+    // LAST read before the delete: the REST delete takes no expected OID, so
+    // ordering is the only lever against a push landing in between.
+    const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${pr.headRefName}` });
+    const tip = String((ref && ref.data && ref.data.object && ref.data.object.sha) || "");
+    const decision = branchDeletionDecision({ pr, defaultBranch, branch, blockingOpenPrs: blocking, tip });
+    if (!decision.delete) {
+      core.notice(`Keeping ${pr.headRefName} (#${pr.number}): ${decision.reason}.`);
+      return;
+    }
+    await github.rest.git.deleteRef({ owner, repo, ref: `heads/${pr.headRefName}` });
+    core.notice(`Deleted merged branch ${pr.headRefName} (#${pr.number}).`);
+  } catch (error) {
+    // Best-effort. 404/422: already gone or the ref moved under us — nothing to prune.
+    const status = Number(error && (error.status || (error.response && error.response.status)));
+    const msg = status === 404 || status === 422 ? "nothing to prune" : "could not delete";
+    core.warning(`#${pr.number}: ${msg} branch ${pr.headRefName}: ${error.message}`);
+  }
 }
 
 function isCodex(login) {
@@ -152,6 +271,8 @@ function checksGreen(pr) {
   const rollup = commit && commit.commit && commit.commit.statusCheckRollup;
   if (!rollup) return false;
   const nodes = (rollup.contexts && rollup.contexts.nodes) || [];
+  // A truncated read could hide a second (failing) Build/Lint run: fail closed (#5678).
+  if (isTruncated(rollup.contexts)) return false;
   return REQUIRED_CHECKS.every((name) => {
     const runs = nodes.filter((n) => n.__typename === "CheckRun" && n.name === name);
     return (
@@ -163,6 +284,8 @@ function checksGreen(pr) {
 
 // Returns {pr, reason} entries: reason is null for a PR to merge.
 function evaluate(pr) {
+  // A hold label could sit past the labels we read: fail closed (#5678).
+  if (isTruncated(pr.labels)) return "labels truncated";
   const labels = ((pr.labels && pr.labels.nodes) || []).map((l) => l.name);
   if (pr.isDraft) return "draft";
   const held = HOLD_LABELS.find((l) => labels.includes(l));
@@ -251,20 +374,28 @@ async function settleBroken({ github, core, context, passed, number }) {
 // Step 3: merge everything selectable, then re-raise master verification once.
 async function mergeAll({ github, core, context }) {
   const { owner, repo } = context.repo;
-  // Refuse to merge onto a red master. A failed read throws: no merge this run.
-  const red = await masterRedRun(github, owner, repo);
+  // Only merge onto a verified master head. A failed read throws: no merge.
+  const verdict = await verifyMasterHead(github, core, owner, repo);
+  const red = verdict.status === "red";
+  const lines = Object.entries(verdict.states).map(([wf, st]) => {
+    const run = verdict.runs[wf];
+    return `- \`${wf}\`: ${st}${run ? ` ([run ${run.id}](${run.html_url}))` : ""}`;
+  });
+  if (verdict.status !== "ok") {
+    await core.summary
+      .addHeading(red ? "Merging halted: master is red" : "Waiting for master verification", 3)
+      .addRaw(`Master head ${verdict.head.slice(0, 10)}:\n\n${lines.join("\n")}\n\n`)
+      .write();
+  }
+  if (verdict.status === "wait") {
+    core.notice(`Master ${verdict.head} not yet verified; exiting without merging.`);
+    core.setOutput("merged", "false");
+    return;
+  }
   if (red) {
     // Not a deadlock: a fix-forward PR labelled `fix-master` (Build + Lint still
     // required on its head) may land, since nothing else could turn master green.
-    core.warning(`Master ${red.name} run ${red.id} concluded failure; only ${FIX_LABEL} PRs may merge.`);
-    await core.summary
-      .addHeading("Merging halted: master is red", 3)
-      .addRaw(
-        `Latest completed master **${red.name}** run [${red.id}](${red.html_url}) ` +
-          `on ${(red.head_sha || "").slice(0, 10)} concluded \`failure\`. ` +
-          `Only PRs labelled \`${FIX_LABEL}\` merge until a later master run passes.\n`,
-      )
-      .write();
+    core.warning(`Master ${verdict.head} failed verification; only ${FIX_LABEL} PRs may merge.`);
   }
   const prs = await fetchOpenPrs(github, core, owner, repo);
   const phase1 = selectCandidates(prs);
@@ -304,9 +435,16 @@ async function mergeAll({ github, core, context }) {
       .addList(workflowSkipped.map((n) => `#${n}`))
       .write();
   }
+  const batchSize = Number(process.env.AUTO_MERGE_BATCH_SIZE) > 0
+    ? Math.floor(Number(process.env.AUTO_MERGE_BATCH_SIZE))
+    : DEFAULT_BATCH_SIZE;
   const merged = [];
   let lastSha = "";
   for (const { pr, reason } of selected) {
+    if (merged.length >= batchSize) {
+      core.info(`#${pr.number}: skip (batch of ${batchSize} reached; master head must be verified again)`);
+      continue;
+    }
     if (reason) {
       core.info(`#${pr.number}: skip (${reason})`);
       continue;
@@ -320,6 +458,7 @@ async function mergeAll({ github, core, context }) {
       merged.push(pr.number);
       lastSha = res.data.sha;
       core.notice(`Merged #${pr.number} at ${pr.headRefOid} -> ${lastSha}`);
+      await deleteMergedBranch({ github, core, owner, repo, pr, defaultBranch: BASE });
     } catch (error) {
       // 405/409: head moved, conflict from an earlier merge in this batch, or a
       // protection rule. The next run re-evaluates from fresh state.
@@ -368,6 +507,7 @@ async function reportBroken({ github, core, context, merged }) {
 
 module.exports = {
   checkHalt, settleBroken, mergeAll, reportBroken,
-  findRedMasterRun, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
+  workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
+  isTruncated, ACK_RE, branchDeletionDecision,
 };

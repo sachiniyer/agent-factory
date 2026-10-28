@@ -144,6 +144,10 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
 	d.ArchiveWarning = ""
+	// A live-probe outage is exactly the class of transient observation the
+	// fields above are scrubbed for: re-derived by the restarted daemon's own
+	// probes, never inherited (#5571 W1.3).
+	d.Unreachable = nil
 	// The compatibility projection must capture original values before either it
 	// or the relocation fence below overwrites them. The live archiveReportSource
 	// block above already stamps the fence pre-projection; on the disk-reload path
@@ -176,6 +180,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d = d.restoreMissingAccountSwapMissionEvidence()
 	d = d.projectPendingAccountSwapForPreviousRelease()
 	d = d.projectPendingHandoffForPreviousRelease()
+	d = d.projectRebuildTeardownForPreviousRelease()
 	// Older binaries ignore ArchiveReport, but the previous release understands
 	// the inert/ownership fields and relocation recovery. Together they refuse
 	// restore and explicit kill instead of publishing an incomplete tree or

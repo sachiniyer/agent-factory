@@ -768,16 +768,14 @@ func literalShellWord(word *syntax.Word) (string, bool) {
 			panic(errWorkLimitExceeded)
 		}
 	}
-	if word == nil {
-		return "", false
-	}
-	var value strings.Builder
-	for _, part := range word.Parts {
-		if !appendLiteralShellPart(&value, part) {
-			return "", false
-		}
-	}
-	return value.String(), true
+	// Read the word the way the shell will pass it, not as its written text
+	// (#4523): literalArgvWord removes unquoted backslashes (`\env` is env,
+	// `CODEX\_HOME` is CODEX_HOME) and fails closed on what the shell expands
+	// at run time — glob characters, a leading tilde, brace expansion and
+	// $'…'/$"…" — so a word that decides a command name, an option or an
+	// assignment is never judged by raw source bytes.
+	text, _, ok := literalArgvWord(word)
+	return text, ok
 }
 
 func appendLiteralShellPart(value *strings.Builder, part syntax.WordPart) bool {

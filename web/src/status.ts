@@ -123,6 +123,23 @@ function idleReasonLabel(reason: IdleReason | undefined): string {
   return reason ? (IDLE_REASON_LABELS as Partial<Record<string, string>>)[reason] ?? "" : "";
 }
 
+/** Row detail for a live remote-probe outage (#5571 W1.3): static text, never
+ *  an animated indicator, mirroring the TUI's "unreachable <age> · <err>"
+ *  (render.go). It outranks the idle detail — the outage is why every other
+ *  fact on the row may be stale. Returns "" when the pair is incomplete, so a
+ *  malformed projection renders nothing rather than half a claim. */
+export function unreachableDetail(s: SessionData, now: Date = new Date()): string {
+  const u = s.unreachable;
+  if (!u?.since || !u.error) {
+    return "";
+  }
+  const since = new Date(u.since);
+  if (Number.isNaN(since.getTime())) {
+    return "";
+  }
+  return `unreachable ${formatPaneChurnAge(since, now)} ago · ${u.error}`;
+}
+
 function formatPaneChurnAge(churn: Date, now: Date): string {
   return formatDuration(now.getTime() - churn.getTime());
 }
@@ -467,6 +484,24 @@ export function compareSessionsForRail(a: SessionData, b: SessionData): number {
   return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
 }
 
+/** The backend types whose workspace lives off-box (session/archive_sandbox.go
+ *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
+ *  them can service tab management: every Add*Tab path needs a daemon-side git
+ *  worktree they do not have, so the daemon's Capabilities().TabManagement is
+ *  false for all three (#1874).
+ *
+ *  This list is the ONE place the web names backend types. It exists only because
+ *  the session envelope carries `backend_type` but not the daemon's capability
+ *  bits — the honest fix is to serialize the capability so no client re-derives
+ *  it (see #1874). Until then, a NEW off-box runtime must be added here, which is
+ *  what ui.test.ts pins. */
+const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
+
+/** The existing backend-type fallback for off-box workspace ownership. */
+export function isOffBoxWorkspace(s: Pick<SessionData, "backend_type">): boolean {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
+
 /**
  * Builds the row title with the same prefixes the TUI prepends (render.go:400-465),
  * in the same precedence for ordinary status prefixes, with the orthogonal model
@@ -478,7 +513,7 @@ export function rowTitle(s: SessionData): string {
   const lv = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
   let title = s.title;
-  if (s.backend_type === "remote") {
+  if (isOffBoxWorkspace(s)) {
     title = "[remote] " + title;
   }
   if (lv === Liveness.Lost) {
@@ -496,6 +531,11 @@ export function rowTitle(s: SessionData): string {
   }
   if (archiveWarningText(s) !== "") {
     title = "[archive incomplete] " + title;
+  }
+  // Mirroring render.go: the outage marker is static text and sits just inside
+  // [model changed]; only a complete since/error pair earns it.
+  if (s.unreachable?.since && s.unreachable?.error) {
+    title = "[unreachable] " + title;
   }
   if (s.model_change) {
     title = "[model changed] " + title;
