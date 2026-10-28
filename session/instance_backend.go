@@ -945,6 +945,11 @@ func (i *Instance) capabilitiesLocked() Capabilities {
 	if caps.Workspace == WorkspaceRemote && i.offBoxTabAPILocked() {
 		caps.TabManagement = true
 	}
+	// A sandbox whose agent-server advertises the swap route can hand its agent
+	// off in place (#5571 W7.5), by the same cached-advertisement rule.
+	if caps.Workspace == WorkspaceRemote && i.offBoxSwapAPILocked() {
+		caps.Handoff = true
+	}
 	return caps
 }
 

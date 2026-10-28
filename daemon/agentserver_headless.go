@@ -447,6 +447,9 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// W7.1: stop the agent and start it again in this workspace, resuming the
 	// provider's conversation. Advertised as the "relaunch" feature.
 	mux.HandleFunc("/v1/agent/relaunch", rpcHandler(hs.Relaunch))
+	// W7.5: swap the agent for another in this workspace. Advertised as the
+	// "agent-swap" feature.
+	mux.HandleFunc("/v1/agent/swap-agent", rpcHandler(hs.SwapAgent))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -487,6 +490,9 @@ var agentServerWireFeatures = []string{
 	// "relaunch": POST /v1/agent/relaunch — stop the agent and start it again
 	// in this workspace with the provider's resume (#5571 W7.1).
 	session.RelaunchFeature,
+	// "agent-swap": POST /v1/agent/swap-agent — replace the agent with another
+	// in this workspace, resolving the new agent's program on this host (#5571 W7.5).
+	session.SwapAgentFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version
@@ -853,6 +859,24 @@ func (hs *headlessServer) Relaunch(_ struct{}, resp *agentOKResponse) error {
 		return session.ErrRelaunchUnsupported
 	}
 	if err := r.Relaunch(); err != nil {
+		return err
+	}
+	resp.OK = true
+	return nil
+}
+
+type agentSwapRequest struct {
+	Target string `json:"target"`
+}
+
+// SwapAgent replaces the agent with another in this workspace. The branch, tree
+// and uncommitted work stay as they are; nothing is pushed, reaped or re-cloned.
+func (hs *headlessServer) SwapAgent(req agentSwapRequest, resp *agentOKResponse) error {
+	sw, ok := hs.as.(session.AgentSwapper)
+	if !ok {
+		return session.ErrHandoffUnsupported
+	}
+	if err := sw.SwapAgentTo(req.Target); err != nil {
 		return err
 	}
 	resp.OK = true

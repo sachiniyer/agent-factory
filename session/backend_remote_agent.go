@@ -35,21 +35,6 @@ func (b *remoteAgentBackend) Capabilities() Capabilities {
 	}
 }
 
-// SwapAgent is not serviced off-box (#2013). Swapping the agent inside a
-// provisioned sandbox means re-launching a different process INSIDE it while
-// keeping the workspace — but every re-spawn path these runtimes have
-// (recoverSandbox) re-provisions the sandbox and re-clones the branch from
-// origin, which would discard unpushed work rather than hand it over. Wiring a
-// genuine in-sandbox relaunch is its own change; until then this says so instead
-// of quietly doing the destructive thing.
-func (b *remoteAgentBackend) PrepareAgentSwap(*Instance, string) (AgentSwapPlan, error) {
-	return AgentSwapPlan{}, ErrHandoffUnsupported
-}
-
-func (b *remoteAgentBackend) SwapAgent(*Instance, AgentSwapPlan) error {
-	return ErrHandoffUnsupported
-}
-
 // Start provisions then launches the remote workspace through its AgentServer.
 func (b *remoteAgentBackend) Start(i *Instance, firstTimeSetup bool) error {
 	if err := b.Provision(i, firstTimeSetup); err != nil {
