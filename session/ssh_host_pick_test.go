@@ -83,3 +83,13 @@ func TestBackendConfigErrorSSHAcceptsAListedDefaultHost(t *testing.T) {
 	// A default that is not in the list is not a stand-in for ssh.host.
 	require.Error(t, BackendConfigError(BackendSSH, resolvedWithHosts(hosts, "gone", nil)))
 }
+
+// A listed-host pick must survive the storage round trip, because restore and
+// recovery re-provision from the row, not from the (cleared) cleanup handle.
+func TestInstanceDataRoundTripsHostPick(t *testing.T) {
+	inst := &Instance{Title: "h", Path: t.TempDir(), Host: "box"}
+	data := inst.ToInstanceData()
+	if data.Host != "box" {
+		t.Fatalf("ToInstanceData dropped Host: %q", data.Host)
+	}
+}

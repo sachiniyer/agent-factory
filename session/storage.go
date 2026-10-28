@@ -277,6 +277,8 @@ type InstanceData struct {
 	// ambient account would spend the wrong quota while still displaying the
 	// account it was created with.
 	Account string `json:"account,omitempty"`
+	// Host is the listed host the session was placed on (#5571 W6.3); additive.
+	Host string `json:"host,omitempty"`
 	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
 	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
 	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`
