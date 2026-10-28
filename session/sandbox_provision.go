@@ -307,6 +307,12 @@ func (w *sandboxWorkspace) writeRuntimeIdentity(timeout time.Duration) error {
 	envBody := fmt.Sprintf("%s=%s\n", runtimetoken.RefEnvName, shellQuote(w.tokenRef))
 	if name, value, ok := w.accountEnv(); ok {
 		envBody += fmt.Sprintf("%s=%s\n", name, shellQuote(value))
+		// And every identity variable EMPTY, so the host's own keys cannot outrank
+		// the account (W7.4).
+		envBody += w.accountScrubEnv()
+		// Tells the in-sandbox agent-server it is account-scoped, so it proves
+		// executable attribution before starting (RequireAttributedAccountProgram).
+		envBody += AccountScopeAgentEnv + "=" + shellQuote(w.spec.Account.Agent) + "\n"
 	}
 	envScript := "umask 077 && cat > " + shellQuote(w.IdentityEnvPath())
 	out, err = w.shell.Run(timeout, envScript, strings.NewReader(envBody), false)
@@ -465,7 +471,7 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	// agent-server's exec-time environment so the persisted identity's host-side
 	// /proc/<pid>/environ probe can bind the live process to the row. Same
 	// `set -a`/`;`/`|| exit 1` contract the callback source below documents.
-	launch = "set -a && . " + shellQuote(w.IdentityEnvPath()) + " && set +a || exit 1; " + launch
+	launch = "set -a && . " + shellQuote(w.IdentityEnvPath()) + " && set +a || exit 1; " + w.accountLaunchGuard() + launch
 	if w.spec.CallbackToken != "" {
 		// Sourced into the shell that launches the agent-server, so the variables
 		// are in its ENVIRONMENT rather than its argv. AF_DAEMON_URL and
@@ -522,9 +528,19 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	// W7.3: the account's own variable reaches the agent-server and, through
 	// --session-env, the agent — pointing it at the session-scoped account dir.
 	// The VALUE lives in the 0600 identity env file, never in argv.
-	if name, _, ok := w.accountEnv(); ok {
+	// The scoped variable AND every identity name the launch defines empty (see
+	// accountScrubEnv): the filters drop a name that is not allowed, and an empty
+	// pin that vanishes lets the agent's own late environment source (gemini's
+	// .env) put an identity back. Naming them as explicit extras keeps each present
+	// and empty through BOTH filters — the agent-server's re-exec and the pane's.
+	for _, name := range w.accountPassthroughNames() {
 		args = append(args, "--session-env", name)
 		extras = append(extras, name)
+	}
+	if _, _, ok := w.accountEnv(); ok {
+		// To the agent-server's own environment only — not --session-env, so the
+		// pane never inherits it.
+		extras = append(extras, AccountScopeAgentEnv)
 	}
 	// The marker re-execs the staged binary it is already running, so a symlinked
 	// session directory changes no launch-side identity comparison: there is none

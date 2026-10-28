@@ -202,16 +202,24 @@ accounts, keep agent credential variables out of your shell startup files.
 
 ### Docker and backend boundaries
 
-Account selection supports local and Docker sessions and requires tmux 3.2 or
+Account selection supports local and Docker sessions, and ssh sessions on a host in
+the global host list, and requires tmux 3.2 or
 newer. Docker bind-mounts the selected credential directory read-write so token
 refreshes reach the real account. This differs from
 `docker.mount_agent_credentials`, which opts into mounting an ambient agent
 credential read-only. Account selection must establish the selected identity
 or refuse the create; it never silently uses an ambient login.
 
-SSH, sandbox, and hook backends refuse account selection because af cannot
-ensure refreshed credentials are written back. Automatic account replacement
-also excludes Docker; see [Opt-in auto-resume](#opt-in-auto-resume).
+On an ssh session placed on a listed host (`--host <name>`), af syncs the account's
+credential files into that session's own directory on the host, writes refreshes
+back, and removes them at kill and archive; see
+[Session-scoped account sync](backends.md#session-scoped-account-sync-listed-hosts).
+A `default_accounts` entry is applied the same way, and on a target that is not a
+listed host it is not applied (the session runs on the host's own credentials)
+rather than failing the create. An explicit `--account` on an unlisted ssh target,
+or on a sandbox or hook target, is refused with the remedy. Automatic account
+replacement also excludes Docker and every off-box session; see
+[Opt-in auto-resume](#opt-in-auto-resume).
 
 ### Account-scoped handoff
 
