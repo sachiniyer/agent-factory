@@ -86,10 +86,12 @@ func (s *TaskPane) validateForm() (string, int) {
 // schedule picker's Custom/raw-cron cell is a free-text input that r/x/D must
 // reach — so the verbs never fire while the trigger value is focused.
 func (s *TaskPane) textFocusStop() bool {
-	return textStopAt(s.focusIndex)
+	return textStopAt(s.focusIndex, s.capApplies())
 }
 
-func textStopAt(focusIndex int) bool {
+// textStopAt is the pure form of textFocusStop. capApplies is whether the form's
+// current shape carries a run cap, which decides if the cap row is a text stop.
+func textStopAt(focusIndex int, capApplies bool) bool {
 	switch focusIndex {
 	case taskFocusName, taskFocusTriggerValue, taskFocusPrompt, taskFocusTarget, taskFocusPath:
 		return true
@@ -97,7 +99,7 @@ func textStopAt(focusIndex int) bool {
 		// The cap row is a live text input only when the shape carries one;
 		// inapplicable it renders a reason line and routes verbs like a
 		// selector, matching the input gate in handleEditMode (#4180).
-		return s.capApplies()
+		return capApplies
 	}
 	return false
 }
@@ -110,7 +112,7 @@ func textStopAt(focusIndex int) bool {
 // stops; it always terminates because non-text stops exist.
 func (s *TaskPane) tabsToVerbStop() int {
 	for n := 1; n <= taskFocusCount; n++ {
-		if !textStopAt((s.focusIndex + n) % taskFocusCount) {
+		if !textStopAt((s.focusIndex+n)%taskFocusCount, s.capApplies()) {
 			return n
 		}
 	}
