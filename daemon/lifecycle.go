@@ -48,6 +48,16 @@ type DaemonListenerStatus struct {
 	TCPBound      bool   `json:"tcp_bound"`
 	TCPListenAddr string `json:"tcp_listen_addr,omitempty"`
 	TCPBoundAddr  string `json:"tcp_bound_addr,omitempty"`
+	// TCPRefusalReason is non-empty only while the daemon is REFUSING to bind
+	// the configured control listener: a non-loopback listen_addr with
+	// network.require_token off and no network.allow_unauthenticated_network
+	// opt-in (#5137). It distinguishes "configured but the bind failed or was
+	// never attempted" (the not-bound case) from "deliberately not bound" — and
+	// carries the shared remediation sentence verbatim, so every surface that
+	// renders it (af daemon status, af doctor, Ping's listeners block) states
+	// the same three fixes. A bound listener can never carry one: setTCPBound
+	// clears it.
+	TCPRefusalReason string `json:"tcp_refusal_reason,omitempty"`
 	// Preview* mirror the TCP* fields for the web-tab preview listener (#1856),
 	// the second TCP listener bound from preview_listen_addr. PreviewConfigured is
 	// whether preview_listen_addr is set; PreviewBound / PreviewBoundAddr report
@@ -79,6 +89,13 @@ type daemonLifecycle struct {
 	// probation. It gates mutation ADMISSION; transactionID is kept for the whole
 	// boot as the supervisor's IDENTITY (#1947), so the two never conflate.
 	released bool
+	// releaseRequested records a release that arrived while the instance restore
+	// was still running. markRestoreComplete applies it, so released still
+	// implies restored and admission never opens over a half-loaded manager —
+	// but the supervisor's single approve call is accepted instead of refused,
+	// which used to fail the actor until its restart budget ran out and wedge
+	// the upgrade permanently (#5693).
+	releaseRequested bool
 	// quiescing is set when this daemon has authorized an upgrade activation and is
 	// handing off. It closes admission (the daemon is about to exit) and drives the
 	// reported DaemonPhaseQuiescing so a stuck hand-off is visible, not silent.
@@ -118,16 +135,24 @@ func generateDaemonBootID() (string, error) {
 	return hex.EncodeToString(random), nil
 }
 
-// markRestoreComplete moves an upgrade launch into probation. A normal launch
-// remains warming until RunDaemon has armed its scheduler, watchers, and poll
-// loop; a restored Manager is not by itself a fully ready daemon.
+// markRestoreComplete moves an upgrade launch into probation — or straight to
+// DaemonPhaseHandoffPending when its supervisor's release already arrived during
+// the restore (#5693). A normal launch remains warming until RunDaemon has armed
+// its scheduler, watchers, and poll loop; a restored Manager is not by itself a
+// fully ready daemon.
 func (l *daemonLifecycle) markRestoreComplete() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.restored = true
-	if l.transactionID != "" {
-		l.phase = DaemonPhaseUpgradeProbation
+	if l.transactionID == "" {
+		return
 	}
+	if l.releaseRequested {
+		l.released = true
+		l.phase = DaemonPhaseHandoffPending
+		return
+	}
+	l.phase = DaemonPhaseUpgradeProbation
 }
 
 func (l *daemonLifecycle) markReady() error {
@@ -176,6 +201,16 @@ func (l *daemonLifecycle) markQuiescing() {
 // so reporting it ready would let a skipped or failed post-commit hand-off pass as
 // a healthy daemon. The distinct phase keeps the readiness surfaces honest while
 // admission opens.
+//
+// A release that arrives BEFORE the instance restore completes is accepted and
+// deferred, not refused (#5693): markRestoreComplete applies it, and until then
+// the phase stays warming and admission stays closed. The supervisor sends it
+// once, right after Commit — the irreversible verdict — and a refusal failed the
+// whole recovery actor, whose only retry is a service-manager restart budget
+// sized for a crash loop, not for a slow restore. The supervisor is the PREVIOUS
+// binary, so whether it waits for restore before approving is out of this
+// binary's hands; accepting the early release is what keeps any supervisor from
+// wedging this candidate.
 func (l *daemonLifecycle) releaseUpgradeProbation(expectedTransactionID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -190,7 +225,8 @@ func (l *daemonLifecycle) releaseUpgradeProbation(expectedTransactionID string) 
 		return nil // idempotent: already released for this transaction
 	}
 	if !l.restored {
-		return fmt.Errorf("cannot release upgrade probation before instance restore completes")
+		l.releaseRequested = true // applied by markRestoreComplete
+		return nil
 	}
 	l.released = true
 	l.phase = DaemonPhaseHandoffPending
@@ -259,6 +295,26 @@ func (l *daemonLifecycle) setTCPBound(addr string) {
 	defer l.mu.Unlock()
 	l.listeners.TCPBound = true
 	l.listeners.TCPBoundAddr = addr
+	// A listener that just bound cannot be in the refused posture — the refusal
+	// means "no listener". Clearing here keeps the two states exclusive even if
+	// a posture flip raced a rebind.
+	l.listeners.TCPRefusalReason = ""
+}
+
+// setTCPRefused records the one configured-but-not-bound state that is a
+// DECISION rather than a failure: the #5137 refusal of a tokenless non-loopback
+// control listener. It is a single locked update — configured, unbound, and
+// reasoned together — so a concurrent /v1/health or `af daemon status` snapshot
+// can never render the pair half-applied: a refused listener always reports
+// TCPConfigured=true with TCPBound=false and the remediation text beside them.
+func (l *daemonLifecycle) setTCPRefused(addr, reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners.TCPConfigured = true
+	l.listeners.TCPListenAddr = addr
+	l.listeners.TCPBound = false
+	l.listeners.TCPBoundAddr = ""
+	l.listeners.TCPRefusalReason = reason
 }
 
 func (l *daemonLifecycle) clearTCPBound() {
@@ -279,16 +335,23 @@ func (l *daemonLifecycle) clearTCPBound() {
 // configured↔unconfigured boundary left TCPConfigured/TCPListenAddr contradicting
 // TCPBound for the rest of the boot — exactly the stale snapshot `af daemon status`
 // keys on (`daemoncmd.go` checks TCPConfigured first) and `/v1/health` serialises.
-// Call this ONLY from the config-driven success branches of bindWebLocked: after a
-// successful bind (with the configured address, not the kernel-resolved one) and on
-// the addr=="" opt-out teardown. The unexpected-listener-death closure must NOT
+// Call this ONLY from the config-driven branches of bindWebLocked: after a
+// successful bind (with the configured address, not the kernel-resolved one),
+// on the addr=="" opt-out teardown, and on the no-retained-socket pre-bind
+// resync that leaves the refused posture (a failed bind there is honestly
+// "configured, not bound" — never a stale refusal). The
+// unexpected-listener-death closure must NOT
 // call it — network.listen_addr is still set there, so the configured half must
 // stay so `af daemon status` renders "<addr> (not bound)" rather than "disabled".
+// The refusal half clears here too: every caller of this setter is a posture
+// that ISN'T refused (an allowed bind, or the opt-out), so a reason left over
+// from a refused generation would be stale.
 func (l *daemonLifecycle) setTCPConfigured(addr string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.listeners.TCPConfigured = addr != ""
 	l.listeners.TCPListenAddr = addr
+	l.listeners.TCPRefusalReason = ""
 }
 
 func (l *daemonLifecycle) setPreviewBound(addr string) {

@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/internal/sshrelay"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -136,10 +137,16 @@ func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string, dialPort
 		// FIRST, and the reason the rest of these pins are sufficient rather than a
 		// best-effort list. See sshNoConfigFile.
 		"-F", sshNoConfigFile,
-		"-o", "User=" + shellQuote(sshLoginUser(cfg)),
+		// Two-layer quoting for User and UserKnownHostsFile: sshConfigQuote groups
+		// the value for ssh's own config parser (a multi-value keyword re-splits a
+		// bare value on whitespace, and User's strdelim takes only the first token),
+		// and shellQuote keeps the whole `keyword=<value>` token one argv element
+		// across the outer `sh -c '<sshCmd> "$@"'`. An AF home or ssh.known_hosts
+		// containing a space would otherwise never be the file af prepared.
+		"-o", shellQuote("User=" + sshConfigQuote(sshLoginUser(cfg))),
 		"-p", strconv.Itoa(port),
 		"-o", "StrictHostKeyChecking=" + strictOpt,
-		"-o", "UserKnownHostsFile=" + shellQuote(knownHosts),
+		"-o", shellQuote("UserKnownHostsFile=" + sshConfigQuote(knownHosts)),
 		// The x/crypto client consulted ONE file, so this preserves today's
 		// semantics rather than tightening them.
 		//
@@ -407,6 +414,34 @@ func escapeSSHPercent(s string) string {
 	return strings.ReplaceAll(s, "%", "%%")
 }
 
+// sshConfigQuote wraps value as a single ssh_config(5) token for an `-o` option,
+// so an option VALUE containing whitespace (or a double quote, or a backslash)
+// reaches ssh's own config parser as ONE path rather than being re-split into
+// many. It is the INNER layer of the two-stage quoting discipline
+// sshPinnedProxyCommand applies to its path; UserKnownHostsFile is a MULTI-VALUE
+// ssh_config keyword, so without this layer ssh tokenizes the value on
+// whitespace after the outer `sh -c '<sshCmd> "$@"'` consumes shellQuote's single
+// quotes — turning `/dir with space/kh` into the three files `/dir`, `with`,
+// `space/kh`, none of which is the store af prepared.
+//
+// The OUTER layer is still shellQuote: sshConfigQuote returns a double-quoted
+// token, which the caller embeds in `keyword=<token>` and shellQuote()s for the
+// `sh -c` wrapper. A double quote is literal inside the single-quoted region the
+// outer shell sees, so it survives unchanged into ssh's argv; ssh's own config
+// parser then groups everything between the surviving double quotes as one
+// value. ssh_config honours `\"` and `\\` inside a double-quoted value (measured
+// against OpenSSH 10.0p2, Debian 13, via `ssh -G`), so a path that contains
+// either character round-trips exactly — a property the single-layer form never
+// had, and the reason both are escaped here rather than only the space.
+//
+// This is the form the bug report verified end-to-end (#3061's transport
+// convergence quoted UserKnownHostsFile only for the outer shell; the fix
+// restores the inner layer the ProxyCommand already had).
+func sshConfigQuote(value string) string {
+	r := strings.NewReplacer("\\", "\\\\", "\"", "\\\"")
+	return "\"" + r.Replace(value) + "\""
+}
+
 // sshHostKeyOptions maps ssh_host_key_verification onto the ssh binary's own
 // options, preserving each posture's meaning AND its store.
 //
@@ -528,10 +563,20 @@ func sshLoginUser(cfg config.SSHConfig) string {
 // be killed by mistake. It moved here when the x/crypto reap was deleted (#3052);
 // it was always transport-agnostic, which is why one copy now serves every
 // backend that reaps a remote agent-server.
-func remotePIDIdentityKillScript(remotePID, afPath string) string {
+//
+// tokenRef adds the second identity check from #5571 W1.1: when the persisted
+// row carries a token reference, /proc/<pid>/environ must yield an AF_TOKEN_REF
+// equal to it — the probe extracts ONLY that variable, never the environment
+// itself — before either signal. An unreadable environ reports "unknown" (75:
+// do not kill, retain and retry) rather than guessing; a ref mismatch reports a
+// definite non-match, exactly as a wrong argv[0] does. Empty tokenRef is a row
+// provisioned before W1.1 (or a remote without /proc, where the ps fallback
+// below stands in for the cmdline check and the ref is left unverified) — the
+// argv[0]-only identity such rows always had, no weaker.
+func remotePIDIdentityKillScript(remotePID, afPath, tokenRef string) string {
 	return fmt.Sprintf(
-		`pid=%s; expected=%s; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ]; return; fi; actual=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 2; actual=${actual#"${actual%%%%[![:space:]]*}"}; case "$actual" in "$expected"|"$expected "*) return 0 ;; *) return 1 ;; esac; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
-		shellQuote(remotePID), shellQuote(afPath))
+		`pid=%s; expected=%s; expected_ref=%s; has_session_ref() { if [ -r "/proc/$pid/environ" ]; then actual_ref=$(tr '\000' '\n' < "/proc/$pid/environ" | sed -n "s/^%s=//p" | sed -n '1p') || return 2; [ "$actual_ref" = "$expected_ref" ]; return; fi; return 2; }; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ] || return 1; if [ -n "$expected_ref" ]; then has_session_ref; return; fi; return 0; fi; actual=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 2; actual=${actual#"${actual%%%%[![:space:]]*}"}; case "$actual" in "$expected"|"$expected "*) return 0 ;; *) return 1 ;; esac; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
+		shellQuote(remotePID), shellQuote(afPath), shellQuote(tokenRef), runtimetoken.RefEnvName)
 }
 
 // expandUserPath expands a leading ~ to the user's home dir, so ssh.identity_file

@@ -701,6 +701,21 @@ func argvIsLaunchShim(argv []string) bool {
 	return false
 }
 
+// PaneDead reports tmux's pane_dead flag: the pane's terminal is gone, which
+// is the condition pipe-pane refuses — whether or not the pane's root still
+// runs (#5330). ProbePaneExit's stricter "the root is gone" answer would miss
+// the closed-terminal-but-alive shape, so this reads the flag directly and
+// cheaply: one bounded display-message, no reap wait or nudge — a stream
+// subscribe only needs to know whether the pane can still produce. Any
+// unreadable answer is false: the ordinary capture path then gets its usual
+// error instead of a guessed dead verdict.
+func (t *TmuxSession) PaneDead() bool {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{pane_dead}")
+	return err == nil && strings.TrimSpace(string(out)) == "1"
+}
+
 // FinishedAndQuiet reports whether the session holds only a finished command
 // with nothing of it still running: the pane's root has exited, and its kernel
 // session has no surviving member. Such a pane carries no process to stop, so a

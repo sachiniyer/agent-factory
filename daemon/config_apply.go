@@ -21,13 +21,82 @@ import (
 // applied-live (livePosture per request; network.listen_addr/network.preview_listen_addr rebind in
 // place), so they no longer do.
 func (m *Manager) Config() *config.Config {
-	if c := m.live.Load(); c != nil {
-		return c
+	if p := m.live.Load(); p != nil {
+		return p.cfg
 	}
 	// A manager built directly as &Manager{cfg: …} (some tests, and any path that
 	// skips newManagerShellForDaemon) never seeds live; fall back to the frozen
 	// startup config so Config() is never nil.
 	return m.cfg
+}
+
+// livePosturePublication is what m.live carries: the applied-live config and
+// the #5183 upgrade-probation token floor as ONE atomic value. The apply
+// sequence is three ordered writes — arm the floor, publish the new config,
+// disarm the floor once the socket settled — and a request that read cfg and
+// floor as separate atomics could straddle them into a pair that never
+// coexisted (tokenless config + cleared floor → admitted unauthenticated on a
+// socket both neighboring snapshots gated). Publishing the pair makes every
+// observed (cfg, floor) a real instantaneous state.
+type livePosturePublication struct {
+	cfg          *config.Config
+	tokenFloored bool
+}
+
+// authPosturePair is the control listener's per-request read: config and
+// probation floor in ONE load — the pairing livePosturePublication exists to
+// keep un-splittable. It sits on Manager rather than webListeners so Ping can
+// read it during warm-up, while startHTTPServer is still writing
+// m.webListeners.
+func (m *Manager) authPosturePair() (*config.Config, bool) {
+	if p := m.live.Load(); p != nil {
+		return p.cfg, p.tokenFloored
+	}
+	return m.cfg, false
+}
+
+// tokenFloorArmed reports whether the probation floor currently demands the
+// bearer token. Sourced from the same publication the gate reads, so a caller
+// (Ping, the apply-exposure notice) can never observe a floor that has
+// already been disarmed under a stale config, or vice versa.
+func (m *Manager) tokenFloorArmed() bool {
+	_, floored := m.authPosturePair()
+	return floored
+}
+
+// servedPosture is the posture the control gate is enforcing right now: the
+// live config with the probation floor overlaid — what livePosture.current
+// reads for an unfrozen generation. retireWebBeforePostureSwap captures THIS
+// as postureBeforeSwap, not the raw config: under the floor the raw config
+// reads tokenless, so an apply that will disarm it (a tokenless → tokenless
+// write whose socket left the network) would not register as a relaxation,
+// and a floored network generation still draining from an earlier rebind
+// would fall to the unfloored live read the moment reconcile disarms (#5183
+// review). Judged against the served posture the disarm is the relaxation it
+// is, and the kind freeze pins those generations onto the floored config.
+func (m *Manager) servedPosture() *config.Config {
+	cfg, floored := m.authPosturePair()
+	if floored {
+		return withProbationTokenFloor(cfg)
+	}
+	return cfg
+}
+
+// storeLivePosture publishes a new applied-live config, carrying the floor
+// forward unchanged. Writers are serialized — the apply path under
+// configApplyMu, startup before serving — so the Load→Store carry cannot lose
+// a concurrent floor write; pre-swap arms and reconcile disarms happen on the
+// same serialized apply goroutine.
+func (m *Manager) storeLivePosture(cfg *config.Config) {
+	m.live.Store(&livePosturePublication{cfg: cfg, tokenFloored: m.tokenFloorArmed()})
+}
+
+// setTokenFloor republishes the current config with the floor flag flipped —
+// the arm (pre-swap) and disarm (reconcile, post-settle) halves of the apply
+// sequence. Each write is a complete pair, so no reader can observe the flag
+// apart from the config it was decided under.
+func (m *Manager) setTokenFloor(armed bool) {
+	m.live.Store(&livePosturePublication{cfg: m.Config(), tokenFloored: armed})
 }
 
 // ApplyConfigResult reports the outcome of an in-place config apply (#2480), so a
@@ -46,9 +115,11 @@ type ApplyConfigResult struct {
 	// enabling entry also requires killing it.
 	Pending []string
 	// Warnings are operator/user-facing notices produced while applying (#2480 PR2):
-	// the tokenless-network exposure notice (#2168 — warn, never refuse) and a
-	// listener rebind failure (bind-new-before-close kept the OLD listener serving,
-	// so the requested network.listen_addr / network.preview_listen_addr did NOT take effect). A save
+	// the tokenless-network exposure notice (fired only under the explicit opt-in
+	// since #5137 — the refused posture reports its own reason on the same
+	// channel), the listener-refusal reason itself, and a listener rebind failure
+	// (bind-new-before-close kept the OLD listener serving, so the requested
+	// network.listen_addr / network.preview_listen_addr did NOT take effect). A save
 	// surface shows these so the user learns when a socket key did not apply.
 	Warnings []string
 	// FailedListenerKeys names the socket keys (network.listen_addr / network.preview_listen_addr)
@@ -101,6 +172,8 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"docker.mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
 	"ssh.host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
 	"sandbox.ssh":                    func(a, b *config.Config) bool { return a.SandboxSSH != b.SandboxSSH },
+	"hosts":                          func(a, b *config.Config) bool { return !reflect.DeepEqual(a.Hosts, b.Hosts) },
+	"default_host":                   func(a, b *config.Config) bool { return a.DefaultHost != b.DefaultHost },
 	// Network listener keys — applied-live since #2480 PR2: the auth/CORS keys are
 	// read per request (livePosture); network.listen_addr / network.preview_listen_addr rebind the
 	// socket in place (webListeners.reconcile, below in ApplyConfig).
@@ -109,6 +182,12 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"network.require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
 	"network.require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
 	"network.cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
+	// The #5137 opt-in flips the listener refusal posture, which reconcile
+	// evaluates on every apply — it can bind a refused listener or retire a
+	// serving one with no address change, so it applies live.
+	"network.allow_unauthenticated_network": func(a, b *config.Config) bool {
+		return a.AllowUnauthenticatedNetwork != b.AllowUnauthenticatedNetwork
+	},
 	// Read at the moment an upgrade activates (update_driver.go), from the live
 	// config ApplyConfig swaps, so a save is in force for the next upgrade attempt
 	// with nothing to restart (config/effect.go classifies it EffectAppliedLive).
@@ -190,6 +269,61 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	sort.Strings(result.Applied)
 	sort.Strings(result.Pending)
 
+	// Capture the serving address BEFORE the swap and the refusal guard below,
+	// so the exposure transition check after reconcile uses the posture this
+	// apply STARTED from. If a prior rebind failed, old.ListenAddr already
+	// carries the (failed) requested address while the socket still serves the
+	// previously bound one — using it for wasExposed would compute false even
+	// though the daemon has been exposed throughout, causing the transition
+	// gate (!wasExposed) to fire on every subsequent unrelated save.
+	//
+	// When listener machinery exists, always use the kernel-resolved bound
+	// address (even "" when the listener is absent — initial bind failed or an
+	// unexpected Serve exit cleared webBoundAddr). Preserving "" here prevents
+	// old.ListenAddr (a tokenless non-loopback requested address) from being
+	// treated as "serving" when no listener is actually accepting: a later
+	// apply that successfully restores the listener would then see
+	// wasExposed=true and suppress the exposure notice for the transition from
+	// no listener to an exposed one. Reserve the old.ListenAddr fallback for
+	// managers with no webListeners at all. The same pre-apply capture is
+	// needed for the preview listener's exposure transition (below): when a
+	// prior preview rebind failed, old.PreviewListenAddr carries the
+	// never-bound requested address while the socket still serves the
+	// previously bound one, so wasPreviewExposed must be computed from the
+	// kernel-resolved bound address, not the requested one.
+	//
+	// The refusal reason the listener already carries is likewise captured
+	// pre-apply so the warning below is transition-gated: a refused posture
+	// that stays refused across an unrelated save does not re-emit it.
+	preReconcileServingAddr := old.ListenAddr
+	preReconcilePreviewAddr := old.PreviewListenAddr
+	preReconcileRefusal := ""
+	preSwapRevokedSandbox := 0
+	// The #5183 probation token floor (upgrade-candidate window) makes the
+	// EFFECTIVE token demand stricter than either config generation says: a
+	// candidate keeping a journaled socket bound answers 401 even under a
+	// tokenless apply. wasExposed must read the pre-apply floor —
+	// retireWebBeforePostureSwap itself may arm it — and servingExposed the
+	// post-reconcile one, so the notice's transition test tracks real exposure
+	// rather than the file.
+	preReconcileFloored := false
+	if m.webListeners != nil {
+		preReconcileServingAddr = m.ListenerAddress("network.listen_addr")
+		preReconcilePreviewAddr = m.ListenerAddress("network.preview_listen_addr")
+		preReconcileFloored = m.tokenFloorArmed()
+		if m.lifecycle != nil {
+			preReconcileRefusal = m.lifecycle.snapshot().listeners.TCPRefusalReason
+		}
+		// #5137 ordering: the auth keys are live-posture, so the swap below
+		// relaxes the per-request gate on any still-bound socket the moment it
+		// lands — while reconcile, which owns the refusal bookkeeping, runs
+		// afterward. Enforce the refused posture FIRST so no socket can serve
+		// the full control API unauthenticated even for the span of this
+		// apply, including a retained socket whose earlier failed rebind left
+		// it answering on a network address the file no longer names.
+		preSwapRevokedSandbox = m.webListeners.retireWebBeforePostureSwap(newCfg)
+	}
+
 	// Swap the live config: per-op keys (default_program, session_env_passthrough,
 	// limit_auto_resume, limit_retry_interval, …) read it at their next op entry.
 	// branch_prefix rides along in the swapped config, but its runtime consumers
@@ -227,31 +361,12 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// rebind that fails keeps the OLD listener serving and is reported deferred with
 	// the reason — never silently dropped.
 	//
-	// Capture the serving address BEFORE reconcile so the exposure transition check
-	// below uses the pre-reconciliation serving posture. If a prior rebind failed,
-	// old.ListenAddr already carries the (failed) requested address while the socket
-	// still serves the previously bound one — using it for wasExposed would compute
-	// false even though the daemon has been exposed throughout, causing the
-	// transition gate (!wasExposed) to fire on every subsequent unrelated save.
-	//
-	// When listener machinery exists, always use the kernel-resolved bound address
-	// (even "" when the listener is absent — initial bind failed or an unexpected
-	// Serve exit cleared webBoundAddr). Preserving "" here prevents old.ListenAddr
-	// (a tokenless non-loopback requested address) from being treated as "serving"
-	// when no listener is actually accepting: a later apply that successfully
-	// restores the listener would then see wasExposed=true and suppress the
-	// exposure notice for the transition from no listener to an exposed one.
-	// Reserve the old.ListenAddr fallback for managers with no webListeners at all.
-	// The same pre-reconcile capture is needed for the preview listener's
-	// exposure transition (below): when a prior preview rebind failed,
-	// old.PreviewListenAddr carries the never-bound requested address while the
-	// socket still serves the previously bound one, so wasPreviewExposed must be
-	// computed from the kernel-resolved bound address, not the requested one.
-	preReconcileServingAddr := old.ListenAddr
-	preReconcilePreviewAddr := old.PreviewListenAddr
+	// The refused posture was already enforced above —
+	// retireWebBeforePostureSwap runs before the live swap so no bound socket
+	// ever serves under the relaxed auth the swap publishes; reconcile's own
+	// refusal branch below is the no-socket bookkeeping (and the startup path's
+	// only enforcement) and is idempotent against it.
 	if m.webListeners != nil {
-		preReconcileServingAddr = m.ListenerAddress("network.listen_addr")
-		preReconcilePreviewAddr = m.ListenerAddress("network.preview_listen_addr")
 		if failed, rerr := m.webListeners.reconcile(newCfg); rerr != nil {
 			result.Warnings = append(result.Warnings, rerr.Error())
 			result.FailedListenerKeys = append(result.FailedListenerKeys, failed...)
@@ -291,15 +406,47 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// false the control plane answers every caller anonymously, so a sandbox does not
 	// need a credential to reach it. Only re-enabling the key restores it.
 	if old.RequireToken && !newCfg.RequireToken {
-		if n := m.sandboxTokens.revokeAll(); n > 0 {
-			warning := fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. This does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
+		// Some or all of the revocations may already have run inside
+		// retireWebBeforePostureSwap's pre-publish fence — the credentials are
+		// gone either way, so the count must cover both sweeps or a hand-edited
+		// refused apply would silently consume the fence's revocations and this
+		// warning would never reach the save surface (#5137 review).
+		if n := preSwapRevokedSandbox + m.sandboxTokens.revokeAll(); n > 0 {
+			// The warning must describe the boundary the operator is actually
+			// left with. When the posture was REFUSED — or no TCP listener is
+			// bound at all — nothing answers unauthenticated callers on TCP,
+			// so the generic exposure wording would falsely report an active
+			// unauthenticated endpoint and give remediation for a boundary
+			// the refusal already enforced by taking the socket down
+			// (#5137 review).
+			servingAddr := ""
+			refusal := ""
+			if m.webListeners != nil {
+				servingAddr = m.ListenerAddress("network.listen_addr")
+				if m.lifecycle != nil {
+					refusal = m.lifecycle.snapshot().listeners.TCPRefusalReason
+				}
+			}
+			var warning string
+			switch {
+			case refusal != "" || servingAddr == "":
+				warning = fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s). Those sessions lose callback — and no TCP control listener is serving (the posture was refused rather than left answering unauthenticated over TCP), so no unauthenticated network endpoint exists. Re-enable network.require_token or bind a listener and re-provision to restore sandbox callback", n)
+			case m.tokenFloorArmed():
+				// #5183: an upgrade candidate holding the journaled socket keeps
+				// demanding the token on it, so "answers unauthenticated callers"
+				// would be false today — but only until the upgrade completes.
+				warning = fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s). Those sessions lose callback. The control listener on %s keeps demanding the bearer token only until the in-progress af upgrade completes — the daemon that replaces it applies the tokenless posture on disk; re-enable network.require_token to keep the boundary", n, servingAddr)
+			default:
+				warning = fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. This does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
+			}
 			m.warn().Printf("%s", warning)
 			result.Warnings = append(result.Warnings, warning)
 		}
 	}
 	// The tokenless-network exposure notice, surfaced at SAVE time so a user who
-	// makes the control API reachable without a token is told once — warned, never
-	// refused (#2168 Phase 0 / config/authposture.go). Emitted ONLY on the
+	// makes the control API reachable without a token is told once — reachable
+	// only under the explicit opt-in since #5137, when the same posture without
+	// it is refused rather than warned (config/authposture.go). Emitted ONLY on the
 	// transition INTO the exposed posture, not on every apply while already
 	// exposed: ListenerExposureNotice is a stateless predicate of the current
 	// posture (not a transition detector), so calling it unconditionally would
@@ -339,12 +486,20 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// daemon that has been continuously exposed since the prior apply, causing the
 	// transition gate to fire — and the notice to re-emit — on every subsequent
 	// unrelated save.
-	wasExposed := config.ListenerServesUnauthenticatedNetwork(preReconcileServingAddr, old.RequireToken)
+	wasExposed := config.ListenerServesUnauthenticatedNetwork(preReconcileServingAddr,
+		old.RequireToken || preReconcileFloored)
 	servingAddr := newCfg.ListenAddr
 	if m.webListeners != nil {
 		servingAddr = m.ListenerAddress("network.listen_addr")
 	}
-	servingExposed := config.ListenerServesUnauthenticatedNetwork(servingAddr, newCfg.RequireToken)
+	// The floor is part of the serving posture: an upgrade candidate holding a
+	// journaled socket demands the bearer token even though newCfg says
+	// tokenless, so the notice must not claim an unauthenticated service that
+	// answers 401. The transition still fires the moment probation ends — a
+	// later apply (or the post-adoption daemon's own bind notice) reports the
+	// now-genuine exposure.
+	servingExposed := config.ListenerServesUnauthenticatedNetwork(servingAddr,
+		newCfg.RequireToken || m.tokenFloorArmed())
 	if !wasExposed && servingExposed {
 		// ListenerExposureNotice formats the address out of cfg.ListenAddr, so
 		// build a throwaway config carrying the SERVING bound address: the notice
@@ -355,6 +510,37 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 		if notice := config.ListenerExposureNotice(&serving); notice != "" {
 			result.Warnings = append(result.Warnings, notice)
 		}
+	}
+
+	// The #5137 refusal is the posture's other live transition: a config whose
+	// non-loopback tokenless bind the daemon declines to make. It can only reach
+	// here through a hand-edit (the `af config` writers refuse to leave one), so
+	// the save surface that triggered this apply is exactly where the operator
+	// learns the listener they configured is down — the daemon's unix socket
+	// answered their apply, so the reply carrying the reason still lands. The
+	// daemon log already holds it at ERROR from reconcile; this repeats it on
+	// the channel the person making the change reads.
+	//
+	// The predicate is the lifecycle's POST-reconcile recorded refusal, not
+	// ListenerBindRefusal(newCfg): reconcile is the authority on whether the
+	// posture actually refused — refusing is not a bind attempt, so the file
+	// predicate alone cannot say whether the socket was declined, and the
+	// upgrade-probation carry (#5183) deliberately keeps a refused-FILE socket
+	// bound under the token floor for the supervisor's TCPBound check. Judging
+	// the file there would warn "refused" on every apply during the journal
+	// window for a listener that is in fact bound and token-gated, and re-warn
+	// on every unrelated apply that leaves the posture refused.
+	// Transition-gated on the recorded reason (pre- vs post-reconcile): a
+	// posture that stays refused across an unrelated save does not re-warn,
+	// matching the exposure notice's own at-most-once contract — and a NEW
+	// refusal (a different address, or the first refusal) always fires because
+	// the reason text differs.
+	postReconcileRefusal := ""
+	if m.lifecycle != nil {
+		postReconcileRefusal = m.lifecycle.snapshot().listeners.TCPRefusalReason
+	}
+	if postReconcileRefusal != "" && postReconcileRefusal != preReconcileRefusal {
+		result.Warnings = append(result.Warnings, postReconcileRefusal)
 	}
 
 	// The web-tab preview listener's exposure notice (#1856) — the preview analog

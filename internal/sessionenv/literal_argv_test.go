@@ -1,0 +1,331 @@
+package sessionenv
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// #5487/#5504's shared compare: a configured command is trusted — and a drift
+// warning skipped — only when it is the SAME literal argv, so quoting a word
+// differently must not matter and nothing else may.
+func TestLiteralCommandArgv(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		command string
+		want    []string
+		ok      bool
+		why     string
+	}{
+		{"bare agent", "claude", []string{"claude"}, true,
+			"a single literal word"},
+		{"unquoted path and flag", "/opt/af/claude --dangerously-skip-permissions",
+			[]string{"/opt/af/claude", "--dangerously-skip-permissions"}, true, ""},
+		{"single-quoted path", "'/opt/af/claude' --x",
+			[]string{"/opt/af/claude", "--x"}, true,
+			"quoting a word does not change the word"},
+		{"double-quoted path", `"/opt/af/claude" --x`,
+			[]string{"/opt/af/claude", "--x"}, true, ""},
+		{"quoted path with a space", "'/opt/af space/claude' --x",
+			[]string{"/opt/af space/claude", "--x"}, true,
+			"a space inside quotes is still one word"},
+		{"quoted flag", `'/opt/af/claude' '--x'`,
+			[]string{"/opt/af/claude", "--x"}, true,
+			"quoting applies to any word, not only the executable"},
+		{"exec prefix kept", "exec /opt/af/claude --x",
+			[]string{"exec", "/opt/af/claude", "--x"}, true,
+			"exec is a literal word of the command; dropping it would misdescribe the argv"},
+		{"single-quoted dollar text", `claude 'a $b'`,
+			[]string{"claude", "a $b"}, true,
+			"single quotes make the $ literal text"},
+		{"empty word", `claude ''`,
+			[]string{"claude", ""}, true, "an empty literal word is a word"},
+
+		{"quoted glob is literal", `claude '*'`, []string{"claude", "*"}, true,
+			"a quoted * is the literal word *"},
+		{"quoted question mark", `claude 'a?b'`, []string{"claude", "a?b"}, true, ""},
+		{"quoted bracket class", `claude '[a-z]'`, []string{"claude", "[a-z]"}, true, ""},
+		{"quoted tilde is literal", `claude '~'`, []string{"claude", "~"}, true,
+			"a quoted ~ is the literal word ~"},
+		{"mid-word tilde is literal", "claude a~", []string{"claude", "a~"}, true,
+			"~ only expands at word start or after =/:, so a~ is plain text in every shell"},
+		{"tilde after quoted text stays literal", "claude 'a'~", []string{"claude", "a~"}, true,
+			"the ~ is not at word start"},
+		{"quoted braces are literal", `claude '{a,b}'`, []string{"claude", "{a,b}"}, true, ""},
+		{"braces without a separator", "claude {}", []string{"claude", "{}"}, true,
+			"{} expands to nothing in bash but stays one literal-looking word; no , or .. means no expansion"},
+		{"unclosed brace is literal", "claude a{b", []string{"claude", "a{b"}, true,
+			"an unmatched { is literal text in every shell"},
+		{"quoted comma inside braces", `claude a{','}b`, []string{"claude", "a{,}b"}, true,
+			"brace expansion needs an UNQUOTED comma — a{','}b is the literal word a{,}b in bash too"},
+		{"quoted backslash is literal", `claude 'a\ b'`, []string{"claude", `a\ b`}, true,
+			"a backslash inside quotes is literal text"},
+		{"unquoted escape decodes", `claude a\ b`, []string{"claude", "a b"}, true,
+			`POSIX decode: \  emits a literal space — a\ b IS the word "a b"`},
+		{"escaped glob char decodes", `claude \*`, []string{"claude", "*"}, true,
+			"the escaped * is literal text, not a glob"},
+		{"escaped dollar decodes", `claude \$x`, []string{"claude", "$x"}, true, ""},
+		{"escaped backslash decodes", `claude a\\b`, []string{"claude", `a\b`}, true, ""},
+		{"escaped apostrophe joins quotes", `claude '/o'\''b'`, []string{"claude", "/o'b"}, true,
+			"the ShellQuotePath idiom: ' quoted text \\' literal apostrophe ' — must round-trip"},
+		{"backslash-newline is unparseable", "claude a\\\nb", nil, false,
+			"a continuation joins words for keyword recognition but vanishes elsewhere — fail closed"},
+		{"escaped equals suppresses tilde", `claude a\=~`, []string{"claude", "a=~"}, true,
+			"the escaped = cannot put the ~ in expansion position"},
+		{"colon-tilde in a non-assignment word", "claude /tmp/a:~/claude", []string{"claude", "/tmp/a:~/claude"}, true,
+			"~ after : expands only inside NAME=… words — a path with a colon keeps it literal"},
+		{"tilde after a second equals", "claude v=a=~", []string{"claude", "v=a=~"}, true,
+			"only the FIRST = enables a following ~; v=a=~ is literal under bash"},
+		{"tilde after equals with invalid name", "claude a:b=~", []string{"claude", "a:b=~"}, true,
+			"a:b is not a valid shell name, so the = is not an assignment delimiter"},
+		{"tilde after colon before equals", "claude x:=~", []string{"claude", "x:=~"}, true,
+			"x: is not a valid shell name — not an assignment"},
+		{"escaped braces are literal", `claude \{a,b\}`, []string{"claude", "{a,b}"}, true,
+			"escaped braces cannot open a brace expansion"},
+		{"escaped tilde is literal", `claude \~`, []string{"claude", "~"}, true, ""},
+		{"tilde after empty quote stays literal", "claude ''~", []string{"claude", "~"}, true,
+			"the ~ is not the word's first character, so no tilde expansion applies"},
+		{"escaped dollar inside double quotes", `claude "a\$b"`, []string{"claude", "a$b"}, true,
+			"POSIX decodes \\$ inside \"…\" — the raw bytes are not the word"},
+		{"escaped quote inside double quotes", `claude "a\"b"`, []string{"claude", `a"b`}, true, ""},
+		{"escaped backslash inside double quotes", `claude "a\\b"`, []string{"claude", `a\b`}, true, ""},
+		{"escaped backtick inside double quotes", "claude \"a\\`b\"", []string{"claude", "a`b"}, true, ""},
+		{"inert backslash inside double quotes", `claude "a\tb"`, []string{"claude", `a\tb`}, true,
+			"\\t is not an escapable pair inside \"…\", so both bytes are literal"},
+		{"keyword as an argument stays literal", "claude time", []string{"claude", "time"}, true,
+			"keywords are quote-sensitive only in command position; mid-argv time is a word"},
+		{"quoted keyword spelling is a normal word", "'time' claude", []string{"time", "claude"}, true,
+			"quoted time is executable lookup — a different command than unquoted time"},
+		{"escaped keyword spelling is a normal word", `ti\me claude`, []string{"time", "claude"}, true,
+			"escaping any letter defeats keyword recognition, so ti\\me runs the time binary"},
+		{"nested braces without separator", "claude " + strings.Repeat("{", 400) + "a" + strings.Repeat("}", 400),
+			[]string{"claude", strings.Repeat("{", 400) + "a" + strings.Repeat("}", 400)}, true,
+			"400 open/close pairs and no separator is literal — and must not trip the cubic scan (review round 4)"},
+		{"absorbed close then unmatched inner brace", "claude {a},{b}", []string{"claude", "{a},{b}"}, true,
+			"the inner { keeps the outer one from ever closing, so bash leaves {a},{b} literal"},
+
+		{"command substitution", "claude $(id)", nil, false,
+			"the text on disk is not the word that runs"},
+		{"command substitution inside quotes", `claude "$(id)"`, nil, false,
+			"double quotes still expand"},
+		{"backtick substitution", "claude `id`", nil, false, ""},
+		{"parameter expansion", "claude $HOME", nil, false, ""},
+		{"unquoted glob star", "claude *", nil, false,
+			"a bare * globs to whatever the cwd contains — the written word is not the argv (#5487 review)"},
+		{"unquoted question mark", "claude a?b", nil, false, ""},
+		{"unquoted bracket class", "claude [a-z]", nil, false, ""},
+		{"glob adjacent to quote", `claude a*b'c'`, nil, false,
+			"the unquoted part still expands"},
+		{"leading tilde", "claude ~", nil, false,
+			"a word-leading ~ expands to a home directory"},
+		{"tilde user prefix", "claude ~u/x", nil, false, ""},
+		{"tilde slash prefix", "claude ~/x", nil, false, ""},
+		{"tilde after equals is literal to /bin/sh", "claude a=~", []string{"claude", "a=~"}, true,
+			"dash and bash-as-sh both pass arg-position = tildes literally — only bash-as-bash expands"},
+		{"tilde after colon is literal to /bin/sh", "claude a=b:~", []string{"claude", "a=b:~"}, true,
+			"same rule: :~ expands only in a real assignment word, which is refused on call.Assigns"},
+		{"continuation-joined keyword", "ti\\\nme claude", nil, false,
+			"\\<newline> cannot be certified: the joined word is unquoted time — bash keyword (review round 6)"},
+		{"brace expansion comma", "claude {a,b}", nil, false,
+			"{a,b} expands to two words before quote removal"},
+		{"brace expansion range", "claude {1..3}", nil, false, ""},
+		{"unquoted comma inside braces", `claude a{'x',y}b`, nil, false,
+			"the comma is unquoted so the brace expands even though a part is quoted"},
+		{"nested brace expansion", "claude {a{b},c}", nil, false,
+			"bash pairs braces: the outer { matches the LAST }, so {a{b},c} expands (review round 2)"},
+		{"nested brace range", "claude {a{1..3},x}", nil, false, ""},
+		{"brace comma after a nested group", "claude {{a,b},c}", nil, false, ""},
+		{"separator past an unmarked close", "claude {a},b}", nil, false,
+			"bash absorbs an unmarked } and pairs { with the later }: expands to a} + b (review round 5)"},
+		{"comma and nested group past unmarked close", "claude {a,{b}c}", nil, false,
+			"the level-1 comma marks the outer { and the inner { closes normally — expands"},
+		{"separator and text past unmarked close", "claude {a}x,b}", nil, false, ""},
+		{"inner expansion after absorbed closes", "claude {a}}b{,c}", nil, false,
+			"the inner {,c} expands even though the outer { never closes"},
+		{"continuation before tilde expands", "claude \\\n~", nil, false,
+			"the \\<newline> vanishes before tilde-prefix evaluation, leaving an expanding ~ (review round 4)"},
+		{"unquoted keyword in command position", "time claude", nil, false,
+			"unquoted time is bash pipeline syntax, not the time binary"},
+		{"unquoted coproc in command position", "coproc claude", nil, false, ""},
+		{"unquoted conditional-test syntax", "[[ claude ]]", nil, false,
+			"[[ parses as a plain word under POSIX but is a bash keyword"},
+		{"ansi-c quoting", `claude $'x'`, nil, false,
+			"$'..' is literal $x to a POSIX sh but decoded x to bash — ambiguous, refuse"},
+		{"localized dollar quoting", `claude $"x"`, nil, false,
+			"same ambiguity for $\"..\""},
+		{"dollar-quote mid-word", `claude a$'x'b`, nil, false, ""},
+		{"assignment prefix", "HOME=/tmp claude --x", nil, false,
+			"an assignment mutates the command's environment; it is not a plain word list"},
+		{"two commands", "claude; cat", nil, false, ""},
+		{"pipe", "claude | cat", nil, false, ""},
+		{"and", "claude && cat", nil, false, ""},
+		{"redirection", "claude >log", nil, false, ""},
+		{"background", "claude &", nil, false, ""},
+		{"negated", "! claude", nil, false, ""},
+		{"empty", "", nil, false, ""},
+		{"whitespace only", "   ", nil, false, ""},
+		{"unterminated quote", "claude 'x", nil, false,
+			"does not parse"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := LiteralCommandArgv(test.command)
+			require.Equal(t, test.ok, ok, test.why)
+			if test.ok {
+				require.Equal(t, test.want, got, test.why)
+			}
+		})
+	}
+}
+
+func TestLiteralCommandsEqual(t *testing.T) {
+	const detected = "'/opt/af/claude' --dangerously-skip-permissions"
+	for _, test := range []struct {
+		name string
+		a, b string
+		want bool
+		why  string
+	}{
+		{"identical", detected, detected, true, ""},
+		{"unquoted against quoted", "/opt/af/claude --dangerously-skip-permissions", detected, true,
+			"the #5487 pair: same argv spelled without quotes"},
+		{"double against single quotes", `"/opt/af/claude" --dangerously-skip-permissions`, detected, true, ""},
+		{"quoted flag against bare flag", `/opt/af/claude '--dangerously-skip-permissions'`, detected, true, ""},
+		{"extra whitespace", "  /opt/af/claude   --dangerously-skip-permissions  ", detected, true,
+			"spacing between words is not part of the argv"},
+
+		{"different path", "/opt/other/claude --dangerously-skip-permissions", detected, false, ""},
+		{"extra argument", "/opt/af/claude --dangerously-skip-permissions --settings /x", detected, false,
+			"an added word is a different command even though every shared word matches"},
+		{"missing argument", "/opt/af/claude", detected, false, ""},
+		{"reordered", "--dangerously-skip-permissions /opt/af/claude", detected, false,
+			"position is part of the word list"},
+		{"exec on one side", "exec /opt/af/claude --dangerously-skip-permissions", detected, false,
+			"exec is a word; argv equality does not unwrap it (review note: strict)"},
+		{"bare name against path", "claude --dangerously-skip-permissions", detected, false,
+			"PATH resolution is deliberately not part of the comparison"},
+
+		{"substitution on one side", "/opt/af/claude $(echo x)", detected, false,
+			"non-literal is not equal, whichever side carries it"},
+		{"identical substitution on both", "claude $(id)", "claude $(id)", false,
+			"byte-equal is not argv-equal: a non-literal word list is not equal to itself"},
+		{"identical assignment on both", "HOME=/tmp claude", "HOME=/tmp claude", false,
+			"same fail-closed rule for assignment prefixes"},
+		{"expansion inside quotes", `"/opt/af/claude" "$(id)"`, detected, false, ""},
+		{"ansi-c quoting never decodes", `claude $'x'`, "claude x", false,
+			"$'..' is literal $x to POSIX sh but decoded x to bash — refuse the ambiguous form"},
+
+		{"unquoted glob against quoted", "claude *", "claude '*'", false,
+			"THE REVIEW BUG: the quoted word is literal * but the bare one globs — not the same argv"},
+		{"unquoted tilde against quoted", "claude ~", "claude '~'", false,
+			"word-leading ~ expands to a home directory; the quoted one is literal ~"},
+		{"identical unquoted glob", "claude *", "claude *", false,
+			"byte-equal is not argv-equal for a word list the parse cannot prove"},
+		{"unquoted braces against quoted", "claude {a,b}", "claude '{a,b}'", false,
+			"{a,b} expands to two words; '{a,b}' is one literal word"},
+		{"nested braces against quoted", "claude {a{b},c}", "claude '{a{b},c}'", false,
+			"the nested pair still expands under bash — an earlier version missed it"},
+		{"separator past unmarked close against quoted", "claude {a},b}", "claude '{a},b}'", false,
+			"bash expands the left side to a} + b; the quoted side is one literal word (review round 5)"},
+		{"absorbed-close literal against quoted", "claude {a},{b}", "claude '{a},{b}'", true,
+			"bash leaves {a},{b} literal — the inner { never lets the outer one close"},
+		{"tilde-equals against quoted", "claude a=~", "claude 'a=~'", true,
+			"the /bin/sh launch shell passes arg-position = tildes literally — identical argv"},
+		{"colon-tilde path against quoted", "claude /tmp/a:~/claude", "claude '/tmp/a:~/claude'", true,
+			"~ after : in a non-assignment word is literal in every shell (review round 6)"},
+		{"assignment colon-tilde against quoted", "claude x=a:~", "claude 'x=a:~'", true,
+			"literal under /bin/sh — refusing it was the false-drift shape #5504 is about"},
+		{"second-equals tilde against quoted", "claude v=a=~", "claude 'v=a=~'", true,
+			"only the first = enables a following ~, so both spell the literal v=a=~"},
+		{"continuation-keyword against quoted", "ti\\\nme claude", "'time' claude", false,
+			"the joined word is unquoted time — a keyword, not the time binary"},
+		{"double-quoted escape against single-quoted", `claude "a\$b"`, `claude 'a\$b'`, false,
+			"the \"…\" side decodes to a$b while the '…' side stays a\\$b — different argv"},
+		{"continuation-tilde against quoted", "claude \\\n~", "claude '~'", false,
+			"the continued word still expands under bash while '~' is literal"},
+		{"unquoted keyword against quoted", "time claude", "'time' claude", false,
+			"unquoted time is syntax and quoted time is a binary — not the same command"},
+
+		{"escaped space equals quoted", `claude a\ b`, "claude 'a b'", true,
+			`POSIX decode: \  emits a literal space — both spell the word "a b"`},
+		{"escaped glob equals quoted", `claude \*`, "claude '*'", true,
+			"the escaped * is the literal word *"},
+		{"escaped tilde equals quoted", `claude \~`, "claude '~'", true, ""},
+		{"escaped braces equal quoted", `claude \{a,b\}`, "claude '{a,b}'", true,
+			"escaped braces are literal text; they cannot open a brace expansion"},
+		{"escaped dollar before quote", `claude a\$'x'`, "claude 'a$x'", true,
+			"the escaped $ is literal text; only a BARE $ adjacent to a quote is ambiguous"},
+		{"escaped keyword spelling equals quoted", `ti\me claude`, "'time' claude", true,
+			"escaping defeats keyword recognition — both spellings run the time binary"},
+		{"apostrophe idiom equals double-quoted", `claude '/o'\''b'`, `claude "/o'b"`, true,
+			"the ShellQuotePath spelling of /o'b round-trips"},
+		{"escaped dollar in quotes equals its decode", `claude "a\$b"`, "claude 'a$b'", true,
+			"POSIX decodes \\$ inside \"…\" to the same word 'a$b' spells"},
+		{"inert backslash in quotes equals single-quoted", `claude "a\tb"`, `claude 'a\tb'`, true,
+			"\\t survives decode on both sides, so the spellings are the same argv"},
+		{"mid-word tilde against quoted", "claude a~", "claude 'a~'", true,
+			"a~ is literal text in every shell, so both spellings give the same word"},
+		{"quoted-comma braces against quoted", `claude a{','}b`, "claude 'a{,}b'", true,
+			"the quoted comma cannot expand; both spell the literal word a{,}b"},
+		{"ansi-c against dollar literal", `claude $'x'`, "claude '$x'", false,
+			"ambiguous across shells: $'x' decodes under bash but the quoted word is always $x"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, LiteralCommandsEqual(test.a, test.b), test.why)
+			require.Equal(t, test.want, LiteralCommandsEqual(test.b, test.a),
+				"equality is symmetric: "+test.why)
+		})
+	}
+}
+
+// Codex review round 7: the word walk must stay linear — a long word of
+// delimiter bytes (or thousands of quoted parts) must not trigger a rescan of
+// the accumulated buffer per byte/part. testing.AllocsPerRun is the op-count
+// proxy: a quadratic rescan allocates a fresh copy of the whole word on every
+// delimiter, so its allocation count scales with the input while a linear
+// walk allocates only the handful of amortized builder growths and the final
+// strings.
+func TestLiteralCommandArgv_LinearOnPathologicalWords(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		command string
+	}{
+		{"name-like prefix with many delimiters",
+			"claude " + strings.Repeat("a", 20000) + strings.Repeat("=", 20000)},
+		{"many quoted parts",
+			"claude a" + strings.Repeat("'b'", 50000)},
+		{"many escaped characters",
+			"claude " + strings.Repeat(`\x`, 50000)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			call, ok := singleSimpleCall(test.command)
+			require.True(t, ok)
+			require.Len(t, call.Args, 2)
+			word := call.Args[1]
+			if _, _, ok := literalArgvWord(word); !ok {
+				t.Fatalf("the pathological word must stay literal: %q", test.command[:40])
+			}
+			// Measure the walker alone: the parser's per-part objects are
+			// linear noise — a rescan of the accumulated value per byte or
+			// part allocates O(input) buffer copies inside literalArgvWord.
+			if allocs := testing.AllocsPerRun(3, func() { literalArgvWord(word) }); allocs > 256 {
+				t.Fatalf("word walk allocated %.0f objects — a rescan of the accumulated "+
+					"value per byte/part allocates O(input) copies", allocs)
+			}
+		})
+	}
+}
+
+// A word of many unmatched brackets is judged without rescanning its suffix per
+// `[` (Codex P2 on #5718); the closing bracket is found once per part. These
+// sizes would not finish under the old per-bracket scan.
+func TestLiteralCommandArgv_UnmatchedBracketsStayLinear(t *testing.T) {
+	small := strings.Repeat("[", 20000)
+	large := strings.Repeat("[", 400000)
+	_, ok := LiteralCommandArgv("codex " + small)
+	require.True(t, ok, "an unmatched [ is literal text")
+	_, ok = LiteralCommandArgv("codex " + large)
+	require.True(t, ok)
+	_, ok = LiteralCommandArgv("codex [a]" + strings.Repeat("[", 1000))
+	require.False(t, ok, "a closed class is a glob")
+}

@@ -511,6 +511,17 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	// is in flight is asking a question the user never saw, and the keyed clear
 	// must leave it alone.
 	answered := instance.Attention()
+	// Liveness cannot express "owed a stale-pane teardown": a committed retry
+	// restores LiveRunning/LiveReady for its owner, and the pane this would
+	// reach may still be bound to the deleted inode. The durable flag is the
+	// fence — refused here rather than in the liveness guard so the rejection
+	// carries notAttempted and the watch path refunds the rate slot (#5371
+	// review). Recovery owns the row and retries through its own seam.
+	if instance.RebuildTeardownPending() {
+		releaseObservationFence()
+		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf(
+			"target session %q still owes the teardown of the runtime its rebuilt worktree replaced; prompt not delivered; its recovery retries on its own", req.Title))
+	}
 	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
 	// Backend method — the daemon's delivery path is runtime-agnostic. SendPrompt
 	// is the reliable command path automated deliveries need. This crosses the

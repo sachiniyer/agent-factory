@@ -78,14 +78,14 @@ func TestEnsurePluginDirRefusesASymlinkedCommandFile(t *testing.T) {
 	commandsDir := filepath.Join(home, "plugin", "commands")
 	require.NoError(t, os.MkdirAll(commandsDir, 0755))
 	var link string
-	for name := range pluginCommands {
+	for name := range pluginCommands(false) {
 		link = filepath.Join(commandsDir, name)
 		break
 	}
 	require.NotEmpty(t, link, "pluginCommands must declare at least one command to link")
 	require.NoError(t, os.Symlink(target, link))
 
-	_, err := ensurePluginDir()
+	_, err := ensurePluginDir(false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, config.ErrManagedFileSymlink)
 	assert.Contains(t, err.Error(), link)

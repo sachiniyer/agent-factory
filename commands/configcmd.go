@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -126,6 +125,7 @@ var globalConfigReadOrder = []string{
 	"network.listen_addr",
 	"network.require_token",
 	"network.require_loopback_token",
+	"network.allow_unauthenticated_network",
 	"network.preview_listen_addr",
 	"network.cors_allowed_origins",
 	"daemon_poll_interval",
@@ -149,6 +149,8 @@ var globalConfigReadOrder = []string{
 	"docker.mount_agent_credentials",
 	"ssh.host_key_verification",
 	"sandbox.ssh",
+	"hosts",
+	"default_host",
 	"limit_retry_interval",
 	"limit_patterns",
 	"keys",
@@ -175,24 +177,11 @@ func loadGlobalConfigEntries() ([]configEntry, error) {
 	return entries, nil
 }
 
-// formatConfigValue renders a value for human output: scalars bare (so
-// `af config get default_program` prints exactly `claude`, script-friendly),
-// composites as compact JSON.
+// formatConfigValue renders a value for human output, delegating to
+// config.FormatValue — the one renderer the CLI's get/list output, --explain's
+// values, and the TUI explain view share.
 func formatConfigValue(v any) string {
-	switch x := v.(type) {
-	case string:
-		return x
-	case bool:
-		return strconv.FormatBool(x)
-	case int:
-		return strconv.Itoa(x)
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return fmt.Sprintf("%v", v)
-		}
-		return string(b)
-	}
+	return config.FormatValue(v)
 }
 
 // formatConfigListValue makes absence visible without hiding an explicit
@@ -208,7 +197,7 @@ func formatConfigListValue(entry configEntry) string {
 	} else if !entry.configured {
 		rendered = "(unset)"
 	} else {
-		rendered = formatConfigExplanationValue(entry.Value)
+		rendered = config.FormatExplainValue(entry.Value)
 	}
 	if entry.note != "" {
 		rendered += " " + entry.note
@@ -323,7 +312,7 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 				// registry. For root_agent keys, degrade the surrounding
 				// explanation context to global scope and let the specialized
 				// value below answer; every other key keeps the loud error.
-				if !isRootAgentExplainKey(args[0]) {
+				if !config.IsRootAgentExplainKey(args[0]) {
 					return jsonWrapError(cmd, configJSONFlag, err)
 				}
 				resolved, err = loadResolvedConfig("")
@@ -358,14 +347,14 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 			// root_agent.program has no generic origin when no global program is
 			// configured, so the generic lookup reports it unknown before the
 			// fail-closed projector can answer (#3264 review).
-			if isRootAgentExplainKey(args[0]) {
-				specialized, err := rootAgentReadValue(projectSelector, args[0], explicitProject)
+			if config.IsRootAgentExplainKey(args[0]) {
+				specialized, err := config.RootAgentExplainValue(projectSelector, args[0], explicitProject)
 				if err != nil {
 					return jsonWrapError(cmd, configJSONFlag, err)
 				}
 				value = specialized
 			} else if !ok {
-				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
+				return jsonWrapError(cmd, configJSONFlag, config.UnknownConfigKeyError(args[0]))
 			}
 			if configGetExplainFlag {
 				if configJSONFlag {
@@ -404,7 +393,7 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 				return nil
 			}
 		}
-		return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
+		return jsonWrapError(cmd, configJSONFlag, config.UnknownConfigKeyError(args[0]))
 	},
 }
 
@@ -440,7 +429,7 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 			if err != nil {
 				return jsonWrapError(cmd, configJSONFlag, err)
 			}
-			values, err := rootAgentAwareResolution(resolved, projectSelector, explicitProject)
+			values, err := config.RootAgentAwareResolution(resolved, projectSelector, explicitProject)
 			if err != nil {
 				return jsonWrapError(cmd, configJSONFlag, err)
 			}
@@ -494,16 +483,6 @@ func writeRootAgentShapeLegend(w io.Writer) error {
 	return err
 }
 
-func unknownConfigKeyError(key string) error {
-	if err := config.RetiredThemeKeyError(key); err != nil {
-		return err
-	}
-	if key == "auto_yes" {
-		return config.RemovedAutoYesError()
-	}
-	return fmt.Errorf("unknown config key %q; run `af config list` to see all keys", key)
-}
-
 var configSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
 	Short: "Set one global config key",
@@ -529,13 +508,17 @@ Settable keys:
   web.terminal_font_size_desktop number in [4, 32] — xterm font size at desktop width (default 13)
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to false —
-                             set network.require_token = true in the same breath, or anyone who can reach the
-                             address controls this machine. af serves plain HTTP, so front a routable
-                             listener with a TLS-terminating proxy or a private network.
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) with
+                             network.require_token off is refused by default — the daemon still starts and
+                             the unix socket still works, but the TCP listener stays unbound until
+                             network.require_token = true, a loopback address, or
+                             network.allow_unauthenticated_network = true lands. af serves plain HTTP, so
+                             front a routable listener with a TLS-terminating proxy or a private network.
   network.require_token      true | false  (default false: the web UI needs no token; set true to require one from network peers)
   network.require_loopback_token  true | false  (default false: also require the token from same-machine browsers; only has an effect with network.require_token = true)
+  network.allow_unauthenticated_network  true | false  (default false: explicit opt-in that lets a non-loopback
+                             listen_addr bind with the token off — the full control API, DeliverPrompt included,
+                             is then served unauthenticated to anyone who can reach the address)
   network.preview_listen_addr  host:port for a separate per-tab web-tab preview origin (and, on a loopback
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
@@ -564,11 +547,13 @@ Settable keys:
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root} (global-only)
+  default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
-require_loopback_token, cors_allowed_origins, docker_mount_agent_credentials,
-ssh_host_key_verification, and sandbox_ssh remain accepted and edit the same
-canonical grouped values.
+require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
+docker_mount_agent_credentials, ssh_host_key_verification, and sandbox_ssh
+remain accepted and edit the same canonical grouped values.
 
 Structured values must be shell-quoted so the JSON remains one argument. A write
 uses the same apply-on-save path as the TUI and web config panes (#2480). Most

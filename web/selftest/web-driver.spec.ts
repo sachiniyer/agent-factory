@@ -1186,6 +1186,9 @@ let page: Page;
 // module state, so a worker restart resets it — which is exactly why the two flows
 // that share it live in one serial describe rather than at the top level.
 let createdTitle = "";
+// The hook-backend twin of createdTitle, handed between the remote create and
+// remote kill pair below — module state for the same worker-restart reason.
+let remoteCreatedTitle = "";
 let realRailUnavailable = "";
 // Keep the tagged details at each declaration (instead of registering through a
 // wrapper) so a failure still reports its real source line; beforeEach uses the tag
@@ -4524,6 +4527,109 @@ test("config: a select save keeps focus on the rebuilt control", REAL_FIXTURE, a
   }
 });
 
+test("config: a click-focused-but-untyped text field keeps focus across an unrelated rebuild", REAL_FIXTURE, async ({ browser }) => {
+  // The text-input sibling of the #4244/checkbox/select family. #4244 types into
+  // the field first, so the `input` event assigns `this.editingInput` and the
+  // `wasEditing` branch (caret-preserving) restores focus. This test deliberately
+  // SKIPS the `input` event: the user has only CLICKED into the field.
+  // `editingInput` is therefore null (it is set only on the `input` event in
+  // renderControl, i.e. once the user has typed), so `wasEditing` is false, and
+  // before the fix the restoration ladder had no branch for a click-focused text
+  // input — `focusedConfigControlKey` matched only checkbox/select — so the
+  // rebuild detached the focused input and focus fell to <body>. The user's next
+  // `[` then cycled the view out of config mid-edit, and any other printable key
+  // was silently swallowed. The fix extends `focusedConfigControlKey` to
+  // `type === "text"`, and because render() already sets `aria-label = e.key` on
+  // every text input, the unchanged querySelector restore re-locates the rebuilt
+  // input — exactly the path already used for checkbox/select. The `wasEditing`
+  // check is first in the ladder, so a TYPED text row keeps the caret-preserving
+  // branch; this branch only fires for the untyped, click-focused case.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the held checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // Hold an unrelated save response so its rebuild lands only after this field
+    // has been click-focused. The daemon is not mutated: the intercepted reply is
+    // enough to drive configStatus and the same ConfigPane.update/render path.
+    await pane.locator('.af-config-row[data-key="auto_update"] input').click();
+    await saveStarted;
+
+    // Click-focus the text field WITHOUT typing. The #4244 sibling dispatches an
+    // `input` event here (setting `editingInput`); this test deliberately does not,
+    // so `wasEditing` is false and only the `focusedConfigControlKey` branch can
+    // restore focus.
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.click();
+    // Place the caret at a NON-default position (the middle of the value) before
+    // the rebuild lands. The `focusedConfigControlKey` branch must restore not only
+    // focus but the caret, so the user's first keystroke lands where they clicked
+    // rather than at the field's default selection. RED without the caret
+    // preservation: focus comes back but at position 0 (the input's default), so
+    // the next keystroke inserts at the start instead of where the user aimed.
+    const fieldValue = await field.inputValue();
+    const caretStart = Math.max(1, Math.floor(fieldValue.length / 2));
+    await field.focus();
+    await field.evaluate((el, start) => {
+      const input = el as HTMLInputElement;
+      input.setSelectionRange(start, start);
+    }, caretStart);
+    expect(await field.evaluate((el) => (el as HTMLInputElement).selectionStart)).toBe(caretStart);
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran) — the
+    // exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt input replaced the focused one and the
+    // restoration ladder had no branch for a click-focused text field, so focus
+    // fell to <body>.
+    await expect(field).toBeFocused();
+    // The caret survived the rebuild and is still where the user placed it — not
+    // reset to the input's default. RED without the caret-preservation fix.
+    expect(await field.evaluate((el) => (el as HTMLInputElement).selectionStart)).toBe(caretStart);
+    expect(await field.evaluate((el) => (el as HTMLInputElement).selectionEnd)).toBe(caretStart);
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native INPUT the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix:
+    // focus on <body> let `[` cycle the view out from under the user mid-edit.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
 test("config: a later save's status does not pull focus out of the field the user is in", REAL_FIXTURE, async ({ browser }) => {
   // The third case in this family, and the only one that moves focus to the WRONG
   // ROW rather than to <body>. Saves are serialized PER KEY (createKeyedQueue), and
@@ -5959,6 +6065,111 @@ test("split panes (#1817 follow-up): Alt+j onto a WEB pane returns the keyboard 
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
 });
 
+test("split panes (#1737 a11y): Enter on the keyboard-focused pane-close × closes the pane (Space parity)", REAL_FIXTURE, async () => {
+  // The bug: onKeydown's native-control exemption used `!inTerminal`, so the per-pane close
+  // <button> (rendered INSIDE termHost by SplitView, unlike af-term-head's buttons which are
+  // a SIBLING of termHost) was NOT exempted. Enter on the focused × flowed to decideKey,
+  // which in rail mode with a selection returned {kind:"attach"}, so onKeydown preventDefault'd
+  // the button's native Enter→click and focusTerminal()'d instead — the pane stayed open while
+  // Space still activated it. The fix keys the exemption on the xterm <textarea> tag, not on
+  // "anything in termHost", so every native control EXCEPT the xterm textarea keeps its keys.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await resetToAgentTab(page);
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  // Give A a second tab, so there is a distinct tab to drag into a split (dragging the only
+  // tab onto itself just moves it — no split).
+  const tabbar = page.locator(".af-tabbar");
+  await createTerminalTab(page);
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+  // Drag the Agent tab (index 0) onto the RIGHT edge → the pane splits into two.
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
+
+  // The × is inside termHost (the bug's root cause): prove the containment the guard saw, so
+  // this test stays readable as "the exemption must cover a button inside termHost too".
+  const inTermHost = await page.evaluate(() => {
+    const btn = document.querySelector(".af-pane-close");
+    return btn ? document.querySelector(".af-term-host")!.contains(btn) : false;
+  });
+  expect(inTermHost, "the pane-close button lives inside .af-term-host").toBe(true);
+
+  // Detach to the rail so state.focus is "rail" — the exact mode that resolves Enter→attach,
+  // i.e. the path that used to hijack the ×'s Enter before the fix.
+  await page.keyboard.press("Control+]");
+  await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
+
+  // Keyboard-focus the × of one pane (NOT a click). Tabbing from outside termHost lands on it
+  // because paneChrome's head precedes .af-pane-host in DOM order (split.ts:979).
+  const pane = page.locator(".af-term-host .af-pane").first();
+  const closeBtn = pane.locator(".af-pane-close");
+  await closeBtn.focus();
+  await expect(closeBtn).toBeFocused();
+
+  // G1/G5: Enter must activate the button (native button activation) and close the pane —
+  // exactly as Space already did. The pane count drops 2 → 1…
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  // …and the underlying tab is NOT closed (closing a pane is NOT closing a tab).
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
+
+  // Restore A to a single tab for the flows that follow.
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
+test("split panes (#1737 a11y): Space still closes the focused ×; Escape does NOT close the pane", REAL_FIXTURE, async () => {
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await resetToAgentTab(page);
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  const tabbar = page.locator(".af-tabbar");
+  await createTerminalTab(page);
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await page.keyboard.press("Control+]");
+  await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
+
+  // G5 (no regression): Space still closes the focused × (decideKey returns {kind:"none"} for
+  // Space, so onKeydown never preventDefaults, and the button's native Space→click fires).
+  const pane = page.locator(".af-term-host .af-pane").first();
+  await pane.locator(".af-pane-close").focus();
+  await expect(pane.locator(".af-pane-close")).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
+
+  // Re-split for the Escape assertion. The two original tabs (Agent + Terminal) are still
+  // present — closing a pane does NOT close a tab — so re-drag the Agent tab into a split
+  // without creating a third tab.
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await page.keyboard.press("Control+]");
+
+  // G6: Escape on the focused × must NOT close the pane. decideKey returns {kind:"none"} for
+  // Escape in rail mode (no modal, not terminal mode), so onKeydown does not preventDefault;
+  // a <button>'s native Escape is a no-op. The pane count stays at 2.
+  const pane2 = page.locator(".af-term-host .af-pane").first();
+  await pane2.locator(".af-pane-close").focus();
+  await expect(pane2.locator(".af-pane-close")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
+
+  // Cleanup: collapse back to a single tab for the flows that follow.
+  await pane2.locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
 test("split panes (fix): a pane iframe is inert ONLY while dragging — normal interaction is untouched", REAL_FIXTURE, async () => {
   // The fix must not cost the web tab its interactivity: the frame is inert for the drag
   // and immediately usable again afterwards. Both states are asserted on the live frame.
@@ -6975,6 +7186,132 @@ test.describe("create → kill (one session, two flows)", () => {
 
     // The killed row disappears from the rail (the killed event removes it).
     await expect(row(page, createdTitle)).toHaveCount(0, { timeout: 30_000 });
+  });
+});
+
+test.describe("remote create → kill (one hook session, two flows)", () => {
+  // The hook-backend twin of the pair above: its create hands a title to its
+  // kill through module state, so the same serial binding applies — scoped to
+  // its own two tests for the same #1898 blast-radius reason, so a local-create
+  // failure cannot also blind the remote proof (or vice versa).
+  test.describe.configure({ mode: "serial" });
+
+  test("create remote: the + New modal provisions a hook session and its row appears", REAL_FIXTURE, async () => {
+    // This submit picks backend=hook, so the daemon provisions a real remote
+    // sandbox (clone + agent-server + remote readiness) — seconds warm, tens of
+    // seconds cold in this container. The default test budget leaves no margin
+    // for the asserting half on a cold box; triple it like the slow-create tests.
+    test.setTimeout(180_000);
+    const created = `probe-remote-${Date.now().toString(36)}`;
+
+    // Same regression guard as the local create (#1592 PR7 review): move the
+    // CURRENT session onto a NON-agent tab first, so a create path that wrongly
+    // preserved activeTab would build a ?tab=1 stream URL for the brand-new
+    // session (which has only the agent tab). SESSION_B carries the guard so the
+    // pair does not stack a second terminal on SESSION_A's bar.
+    await row(page, SESSION_B).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await createTerminalTab(page);
+    await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+
+    // Capture every PTY stream WebSocket opened from here on, so we can assert the
+    // new session's stream carries NO stale tab= selector — the remote pane
+    // arrives over the daemon's remote-pane proxy, and this URL is the seam a
+    // wrong selector would hide in.
+    const streamUrls: string[] = [];
+    page.on("websocket", (ws) => {
+      if (ws.url().includes("/stream")) {
+        streamUrls.push(ws.url());
+      }
+    });
+
+    await page.locator("button.af-rail-new").click();
+    const modal = page.locator(".af-modal-card");
+    await expect(modal).toBeVisible();
+
+    // Capture the submit's request body: a session that comes up locally
+    // satisfies every assertion below while proving nothing about the remote
+    // path, so the picked backend must be read off the wire, not inferred.
+    let createBody: { backend?: string } | undefined;
+    await page.route("**/v1/CreateSession", async (route) => {
+      createBody = route.request().postDataJSON() as { backend?: string };
+      await route.continue();
+    });
+
+    // The picker chain — daemon ListBackends → rendered options → reasoned
+    // hints — is already proven by the local create above; here the field only
+    // has to carry hook to the submit, the seam this pair exists to cover.
+    if (!await modal.locator(".af-defaults").evaluate((el) => (el as HTMLDetailsElement).open)) await modal.locator(".af-defaults summary").click();
+    const backendSelect = modal.locator('select[aria-label="Backend"]');
+    await expect(backendSelect.locator("option")).not.toHaveCount(1, { timeout: 30_000 });
+    await backendSelect.selectOption("hook");
+    await expect(modal.locator(".af-backend-hint")).toHaveText("");
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
+
+    // Title is required; project and program stay at the same defaults the
+    // local create leaves them on, so the ONLY thing this submit changes is
+    // the backend.
+    await modal.locator('input[aria-label="Session title"]').fill(created);
+
+    // The submit goes out with backend=hook (#1933/#5107): the picker already
+    // proved the option exists and enables Create; sending it is the seam a
+    // regression could silently break — daemon-side remote create is covered by
+    // integration's TestWebCreateSessionOnHookBackend, so the browser half must
+    // carry the modal-to-createSession propagation all the way to a WORKING
+    // remote session. The fixture's coder-launch.sh is a real provisioner, so
+    // everything asserted below — row ready, Agent tab attached, ready marker —
+    // arrives over the daemon's remote-pane proxy, not a local PTY.
+    await modal.locator("button.af-primary").click();
+    expect(createBody?.backend, "the modal must send the picked backend — a dropped " +
+      "field would create locally and pass every later assertion without touching " +
+      "the remote path").toBe("hook");
+
+    // The remote create crosses OpCreating for real: the row lands as an inert
+    // creating row while launch_cmd provisions, and only the completed
+    // projection selects it — so the waits below are sized for remote
+    // provisioning, not the local fast path.
+    await expect(modal).toBeHidden();
+    await expect(row(page, created)).toBeVisible({ timeout: 30_000 });
+
+    // The new session is auto-selected AND attached at its AGENT tab (index 0):
+    // its tab bar has just the agent tab, and its terminal shows the fake
+    // agent's ready marker — which could only arrive over the remote proxy if
+    // the stream bound to the right session's right tab.
+    await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(1, { timeout: 90_000 });
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 60_000 });
+
+    // And the new session's stream URL carries no stale tab= selector (the agent tab
+    // is the default, sent only for a non-agent tab).
+    const lastStream = streamUrls[streamUrls.length - 1];
+    expect(lastStream, "a PTY stream WS should have opened for the new session").toBeTruthy();
+    expect(lastStream).not.toContain("tab=");
+
+    await page.unroute("**/v1/CreateSession");
+
+    // Stash it for the kill flow.
+    remoteCreatedTitle = created;
+  });
+
+  test("kill remote: the kill confirm removes the remote session's row", REAL_FIXTURE, async () => {
+    // The session it kills is the remote hook one from the serial pair above —
+    // KillSession tears down the agent-server transport and runs delete_cmd,
+    // slower than a local tmux teardown but well inside this budget.
+    test.setTimeout(90_000);
+    expect(remoteCreatedTitle).not.toBe("");
+    // The created session is the current selection, so its rail row reveals the
+    // quiet actions. Delete session it and confirm.
+    await row(page, remoteCreatedTitle).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await clickRailAction(page, remoteCreatedTitle, "Delete session");
+
+    const modal = page.locator(".af-modal-card");
+    await expect(modal).toBeVisible();
+    await modal.getByRole("button", { name: "Delete session", exact: true }).click();
+
+    // The killed row disappears from the rail (the killed event removes it).
+    await expect(row(page, remoteCreatedTitle)).toHaveCount(0, { timeout: 30_000 });
   });
 });
 

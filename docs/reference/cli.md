@@ -885,13 +885,17 @@ Settable keys:
   web.terminal_font_size_desktop number in [4, 32] — xterm font size at desktop width (default 13)
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to false —
-                             set network.require_token = true in the same breath, or anyone who can reach the
-                             address controls this machine. af serves plain HTTP, so front a routable
-                             listener with a TLS-terminating proxy or a private network.
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) with
+                             network.require_token off is refused by default — the daemon still starts and
+                             the unix socket still works, but the TCP listener stays unbound until
+                             network.require_token = true, a loopback address, or
+                             network.allow_unauthenticated_network = true lands. af serves plain HTTP, so
+                             front a routable listener with a TLS-terminating proxy or a private network.
   network.require_token      true | false  (default false: the web UI needs no token; set true to require one from network peers)
   network.require_loopback_token  true | false  (default false: also require the token from same-machine browsers; only has an effect with network.require_token = true)
+  network.allow_unauthenticated_network  true | false  (default false: explicit opt-in that lets a non-loopback
+                             listen_addr bind with the token off — the full control API, DeliverPrompt included,
+                             is then served unauthenticated to anyone who can reach the address)
   network.preview_listen_addr  host:port for a separate per-tab web-tab preview origin (and, on a loopback
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
@@ -920,11 +924,13 @@ Settable keys:
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root} (global-only)
+  default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
-require_loopback_token, cors_allowed_origins, docker_mount_agent_credentials,
-ssh_host_key_verification, and sandbox_ssh remain accepted and edit the same
-canonical grouped values.
+require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
+docker_mount_agent_credentials, ssh_host_key_verification, and sandbox_ssh
+remain accepted and edit the same canonical grouped values.
 
 Structured values must be shell-quoted so the JSON remains one argument. A write
 uses the same apply-on-save path as the TUI and web config panes (#2480). Most
@@ -1091,10 +1097,13 @@ per-workspace backend a daemon drives on a remote machine.
 Clients reach the daemon over a local Unix socket by default. To drive one from
 another machine, either ssh to that host and run 'af' there, or give network.listen_addr
 a routable address and point a client at it with the persistent --daemon-url and
---token flags. A routable listener is allowed with the token off, but af warns
-once at daemon start: with network.require_token = false anyone who can reach the
-address drives your agents, so set network.require_token = true unless you trust the
-network. That listener speaks plain HTTP either way, so put it behind a reverse
+--token flags. A routable listener with the token off is REFUSED: with
+network.require_token = false anyone who can reach the address drives your agents,
+so af declines to bind it unless you opt in with
+network.allow_unauthenticated_network = true. Set network.require_token = true
+instead unless you trust the network (turn it on BEFORE moving the address — the
+write guard refuses the tokenless-network posture). That listener speaks plain
+HTTP either way, so put it behind a reverse
 proxy or a private network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
 
@@ -2163,6 +2172,11 @@ names the offending value.
 The reasons are the same text a create prints when it refuses, because both come
 from the same precondition checks.
 
+An available backend may also carry "callback_unavailable_reason": a create on
+it succeeds but the session gets no af callback, because the daemon cannot mint
+a credential under its current listener/auth posture. It is advisory, not a
+precondition — the session still works, it just cannot call back into af.
+
 Example:
   af sessions backends
   af sessions backends --repo ~/src/myproject
@@ -2209,6 +2223,7 @@ af sessions create [title] [flags]
 | `--account` | `string` | Credential account `name` to run the agent as (register it with af accounts add; defaults to this project's default_accounts entry for the agent, else the ambient identity) |
 | `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, sandbox, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run "af sessions backends" for which of these this project can actually use, and why not |
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
+| `--host` | `string` | Listed host to run the session on, by name from the global host list (af config set hosts …); implies --backend ssh. Run "af sessions backends" to see each host and whether it is usable |
 | `--in-place` |  | Alias for --here |
 | `--name` | `string` | Session title (alternative to positional <title>) |
 | `--program` | `string` | Program to run (one of: claude, codex, aider, gemini, amp, opencode, devin; defaults to config default) |
@@ -2593,7 +2608,10 @@ For one target, the JSON acknowledgement includes status: delivered,
 not-delivered, sent-unverified, or could-not-confirm. sent-unverified means tmux
 accepted the paste and Enter while a readable pane did not render exact content
 proof; could-not-confirm means the pane observer itself was unavailable. Neither
-status claims delivery, and the command adds no second confirmation wait.
+status claims delivery. A draft still staged in the composer shortly after Enter
+gets one more Enter only when it is exactly the single paste chip bound to this
+delivery and nothing in the composer changed; every other staged shape is
+reported sent-unverified. It is never re-pasted.
 
 With --all, broadcast a single prompt to every live session in scope:
 
@@ -2684,11 +2702,13 @@ the session (auto-suffixed -2, -3, …). So the name you pass is not always the
 name you get — the resolved tab name is printed on success, and that is the one
 the other tab verbs address.
 
-For remote sessions, only external HTTPS web tabs are admitted. That kind is
-metadata-only: it needs no PTY and spawns no process in the missing daemon-side
-worktree. Shell, process, and VS Code tabs still require local runtime/worktree
-resources, while loopback web targets still need a relay through the off-box
-agent and plain HTTP cannot be framed by an HTTPS Agent Factory UI.
+For remote sessions, web tabs are admitted. That kind is metadata-only: it needs
+no PTY and spawns no process. An external HTTPS URL is iframed
+directly, and a loopback target (including --port) is served from the session's
+own workspace through the agent-server's port relay, so it shows what listens on
+that port in the sandbox rather than on the daemon host. Plain-HTTP external URLs
+cannot be framed by an HTTPS Agent Factory UI. Shell, process, and VS Code tabs
+still require local runtime/worktree resources.
 
 ```
 af sessions tab-create <title> [flags]

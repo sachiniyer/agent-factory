@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,6 +62,7 @@ const (
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.AccountHandoff = true
+	resp.HostPick = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
@@ -76,13 +78,24 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 			RequireToken:         s.manager.cfg.RequireToken,
 			RequireLoopbackToken: s.manager.cfg.RequireLoopbackToken,
 		}
+		// The #5183 upgrade-probation floor is enforcement OUTSIDE the file:
+		// while it holds, the control listener's gate demands the bearer token
+		// even though the loaded config reads tokenless. Report what the socket
+		// enforces — otherwise status and doctor would call a floored socket
+		// unauthenticated. Read from the same paired publication the gate reads
+		// (authPosturePair), never a separate flag.
+		if s.manager.tokenFloorArmed() {
+			resp.BootConfig.RequireToken = true
+		}
 	}
 	return nil
 }
 
 // ReleaseUpgradeProbation lifts this daemon's upgrade probation once its
 // previous-binary supervisor has validated it (#2212 R2). A release for a
-// non-matching or non-probationary transaction is refused. It is deliberately NOT
+// non-matching or non-probationary transaction is refused; one that arrives
+// while the instance restore is still running is accepted and takes effect when
+// the restore completes (#5693). It is deliberately NOT
 // gated on requireMutationAdmission — probation is exactly what it lifts, so
 // gating it on admission would deadlock. (Authority rests on the control socket
 // being owner-only and already privileged, NOT on the transaction id being
@@ -226,6 +239,28 @@ func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) e
 	}
 	resp.Entries = config.ManifestWithValues(cfg)
 	resp.Path = filepath.Join(configDir, config.TomlConfigFileName)
+	return nil
+}
+
+// ExplainConfig returns one global config key's provenance — the same
+// config.ResolvedValue `af config get <key> --explain` prints — so the TUI and
+// web config surfaces answer "which layer supplied this value" through the
+// identical resolver rather than growing a second precedence implementation
+// (#4803, the UI half of #2216's explain ask).
+//
+// Like GetConfig it is deliberately NOT gated on requireManagerReady: the trace
+// is resolved from the on-disk sources fresh per call, so it describes the file
+// as it is now — including a hand-edit made since the daemon started — and the
+// answer stays available while the daemon warms up. That is also why
+// RunningValueChecked reports false: the explanation is about the FILE the user
+// edits, the same contract the CLI prints ("running daemon value not checked").
+func (s *controlServer) ExplainConfig(req ExplainConfigRequest, resp *ExplainConfigResponse) error {
+	value, err := config.ExplainGlobalValue(req.Key)
+	if err != nil {
+		return err
+	}
+	resp.Explanation = value
+	resp.Scope = "global"
 	return nil
 }
 
@@ -402,18 +437,21 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 		return err
 	}
 	// Reject a program that runs no recognized agent BEFORE the create proceeds —
-	// the one boundary a raw RPC caller (token-holding automation over the
-	// listener, any local process over the unix socket) can reach without the
-	// upstream enum validation every shipped client applies (CLI, TUI, task
-	// runner, config loader). See validateCreateProgram for why the check is
-	// DetectAgentFromCommand and why it lives HERE (the RPC boundary) rather than
-	// in Manager.CreateSession: the daemon's own root-agent ensure loop calls
-	// Manager.CreateSession directly with fully-resolved command strings (some
-	// not agent-named, e.g. "/opt/bare-root") that must NOT be rejected, so the
-	// gate is on the external-RPC path only.
+	// the one boundary a raw RPC caller can reach without the upstream enum
+	// validation every shipped client applies (see validateCreateProgram for why
+	// this gate is at the RPC boundary, not Manager.CreateSession, which the
+	// root-agent ensure loop calls with command strings that must NOT be trimmed).
+	// trimProgramEnumIfBare normalizes only a bare enum with surrounding whitespace
+	// into Instance.Program (the form the opaque same-target guard and
+	// ResolveProgram's exact program_overrides lookup care about); it preserves
+	// arbitrary command strings verbatim so an intentional trailing space survives.
 	if err := validateCreateProgram(req.Program); err != nil {
 		return err
 	}
+	// A remote client sends the project path as typed; expand ~ against this
+	// daemon's home before anything resolves it.
+	req.RepoPath = config.ExpandTilde(strings.TrimSpace(req.RepoPath))
+	req.Program = trimProgramEnumIfBare(req.Program)
 	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)
 	// A committed retained create (#3233) lands in the envelope with the
@@ -691,7 +729,12 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	}
 	managerDelegated = true
 	status, deliveryStatus, promptRetained, err := s.manager.deliverPromptWithOutcome(req)
-	if err != nil {
+	// A committed retained auto-create (#3357) — the absent-target branch
+	// routed through Manager.CreateSession, which provisioned a sandbox but
+	// could not confirm its teardown/startup — lands in the envelope so the
+	// marker survives the net/rpc hop that would otherwise flatten it to a
+	// plain rpc.ServerError string. A genuine failure returns unchanged.
+	if !resp.record(err) {
 		return err
 	}
 	resp.Status = status

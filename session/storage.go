@@ -116,6 +116,16 @@ type InstanceData struct {
 	// row that reloads INERT drops it on load instead: no automatic retry can
 	// reach that row, so the record would report an armed retry forever.
 	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
+	// Unreachable projects a live remote-probe outage (#5571 W1.3): the
+	// daemon's observation stopped being answered at Since, and Error is the
+	// last transport failure — collapsed, bounded, and token-redacted before it
+	// was stored on the record, so it is safe to ride every client surface. It
+	// is an observation flag, not a liveness: it coexists with Running/Ready/
+	// Lost and suppresses the destructive lifecycle verbs for the flag's
+	// duration. Projection-only like IdleReason above: ForStorage scrubs it so
+	// a restarted daemon re-derives the claim from its own probes rather than
+	// inheriting an outage it never observed.
+	Unreachable *UnreachableData `json:"unreachable,omitempty"`
 
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
 	// pane churn. Callers capture it before sending so churn racing the delivery is
@@ -147,6 +157,28 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunInterrupted records that the run ended interrupted by a runtime
+	// replacement — Lost-restore respawn or load-time re-spawn — rather than on
+	// an agent-idle completion edge (#4222). Persisted because the daemon's
+	// startup reconcile must recognize the row: a pending fire marker that
+	// still names it describes an occurrence that was never delivered to the
+	// replacement runtime, so adopting the row as the fire's product would
+	// misreport the interrupted run as started and discharge a prompt that was
+	// never replayed. omitempty + additive: an older record decodes to false —
+	// indistinguishable from a normally-ended run, which is the pre-fix
+	// reading and matches it.
+	TaskRunInterrupted bool `json:"task_run_interrupted,omitempty"`
+	// TaskRunFailurePending records that the run ended failed (initial prompt
+	// proven undelivered, #5278) and the task's errored status has not yet been
+	// acknowledged as written (#5646). omitempty + additive: an older record
+	// decodes to false, the pre-fix behaviour.
+	TaskRunFailurePending bool `json:"task_run_failure_pending,omitempty"`
+	// TaskRunPromptBound records that the run's prompt boundary was bound at
+	// least once (#5644). A cleared task_run_prompt_attempt_at can mean "never
+	// bound" or "bound then retired by a runtime replacement" (handoff); only
+	// the former may end the run failed on a PromptNotDelivered verdict.
+	// Persisted while the run is in flight, same as the boundary it qualifies.
+	TaskRunPromptBound bool `json:"task_run_prompt_bound,omitempty"`
 	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
 	// a handoff mission was still owed (#4429), so the next idle observation
 	// after the mission is retired ends the run.
@@ -272,6 +304,8 @@ type InstanceData struct {
 	// ambient account would spend the wrong quota while still displaying the
 	// account it was created with.
 	Account string `json:"account,omitempty"`
+	// Host is the listed host the session was placed on (#5571 W6.3); additive.
+	Host string `json:"host,omitempty"`
 	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
 	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
 	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`
@@ -306,6 +340,20 @@ type InstanceData struct {
 	// respawns from them. Additive + omitempty on the TabData.ID rollforward
 	// precedent: records written before this field simply have none.
 	PendingTabCleanup []TabCleanupData `json:"pending_tab_cleanup,omitempty"`
+	// RebuildTeardownPending records that a recovery rebuilt this worktree at a
+	// new identity while sessions bound to it still answered has-session, and
+	// the teardown of those stale panes is unconfirmed. The next attempt cannot
+	// re-derive a committed rebuild from os.Stat (the rebuilt directory
+	// exists), so the obligation to remove the pre-rebuild panes — whose cwd is
+	// the deleted inode — persists (#5370, #5371 review). Set at rebuild commit,
+	// cleared only once every bound name and cleanup handle is confirmed gone.
+	RebuildTeardownPending bool `json:"rebuild_teardown_pending,omitempty"`
+	// RebuildTeardownOriginalStartupStateUnknown is a storage-only rollback
+	// fence: a current reader removes it before interpreting the row, while the
+	// previous release sees StartupStateUnknown and leaves the row undriven —
+	// it would otherwise find the rebuilt worktree present, skip the rebuild,
+	// reattach the deleted-inode pane, and mark it Running (#5370, #5371 review).
+	RebuildTeardownOriginalStartupStateUnknown *bool `json:"rebuild_teardown_original_startup_state_unknown,omitempty"`
 	// AgentConversation mirrors the Agent tab's provider conversation id for
 	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
 	AgentConversation *AgentConversationData `json:"agent_conversation,omitempty"`
@@ -383,7 +431,24 @@ type InstanceData struct {
 	// stage the live handle in the private field below until ForStorage reaches a
 	// retention boundary.
 	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
-	runtimeCleanup *RuntimeCleanupData
+	// OriginalRuntimeCleanupStateUnknown is a storage-only rollback fence for the
+	// ordinary-sandbox RuntimeCleanup projection ForStorage writes so a binary
+	// rolled back to the immediately preceding release does not load the row inert
+	// and orphan its off-box runtime. That release's FromInstanceData only
+	// restores a cleanup handle for a UserKilled tombstone or an unknown-cleanup
+	// row, and its ForStorage clears RuntimeCleanup on the ordinary branch — so a
+	// handle this release persists on an ordinary sandbox row would be erased on
+	// the next checkpoint or staged as a nothing-owed kill. ForStorage therefore
+	// publishes the handle on a row the previous release already treats as a
+	// retention row (RuntimeCleanupStateUnknown=true), and carries the real false
+	// here so a current reader restores it before interpreting the row. A previous
+	// release ignores this additive field and keeps the projected value, which is
+	// the safe direction: its FromInstanceData rebuilds the teardown and its
+	// ForStorage default branch preserves the handle on reload. A current reader
+	// removes it via RestoreRuntimeCleanupRollbackFence before any decision; the
+	// private staging field below is never serialized.
+	OriginalRuntimeCleanupStateUnknown *bool `json:"original_runtime_cleanup_state_unknown,omitempty"`
+	runtimeCleanup                     *RuntimeCleanupData
 	// KilledWithoutLiveRuntime is the inert-at-kill admission marker for a
 	// sandbox kill tombstone (docker/ssh/hook/remote) whose commit found no live
 	// off-box runtime to reap: the kill ran against an inert rebuild (nil
@@ -416,6 +481,13 @@ type InstanceData struct {
 	// may ride snapshots and lifecycle events; the full report is storage-only so
 	// a large unreadable tree cannot turn every status response into megabytes.
 	ArchiveWarning string `json:"archive_warning,omitempty"`
+	// CallbackUnavailable is the reason this session has no af callback (#5571
+	// W3.1) — the mint refusal recorded when its sandbox provisioned without one,
+	// or the in-sandbox agent-server's undelivered-credential notice. Persisted
+	// like the LostRestoreFailure durability class: it survives restarts so the
+	// surfaces never silently drop the explanation, and it is additive +
+	// omitempty so older binaries read and rewrite the row untouched.
+	CallbackUnavailable string `json:"callback_unavailable,omitempty"`
 	// ArchiveReport makes a deliberately incomplete archive discoverable across
 	// daemon restarts and at restore time. It lives beside the session record,
 	// never inside the copied tree where a user path could collide with it. Live
@@ -448,25 +520,6 @@ func (d InstanceData) UsesLocalTmux() bool {
 	return d.BackendType == "" || d.BackendType == "local"
 }
 
-// RestoreArchiveRollbackFence removes the previous-release safety projection
-// from a persisted row. FromInstanceData uses it before reconstructing an
-// Instance; storage-only cleanup paths use it before manually reconstructing a
-// GitWorktree. Keeping that decoding here prevents a current daemon from
-// mistaking its own old-reader fence for the session's real ownership.
-func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
-	if d.ArchiveReport == nil || d.ArchiveReport.RollbackFence == nil {
-		return d
-	}
-	fence := d.ArchiveReport.RollbackFence
-	d.StartupStateUnknown = fence.OriginalStartupStateUnknown
-	d.Worktree.ExternalWorktree = fence.OriginalExternalWorktree
-	d.Worktree.BranchCreatedByUs = cloneBoolPointer(fence.OriginalBranchCreatedByUs)
-	if fence.RelocationRecoveryProjected {
-		d.Worktree.RelocationRecovery = archiveRollbackRelocationRecovery(fence.OriginalRelocationRecovery)
-	}
-	return d
-}
-
 // ForClientRead converts a storage row into the same bounded shape emitted by a
 // live daemon snapshot. Disk fallback callers must not expose the complete
 // report or the compatibility-only ownership flags merely because the daemon is
@@ -483,14 +536,31 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // every other reader takes (the loader refuses such a row outright).
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	// Mirror FromInstanceData's fence order so a disk-fallback client does not
+	// see the projected RuntimeCleanupStateUnknown a previous release needs.
+	d = d.RestoreRuntimeCleanupRollbackFence()
 	restored, err := d.RestoreRelocationRecoveryOriginals()
 	if err == nil {
 		d = restored
 	}
+	// Reverse projection order — see FromInstanceData: the rebuild-teardown
+	// projector runs last of the pending projections in ForStorage (after
+	// relocation), so its restore runs here, ahead of the handoff and
+	// account-swap restores.
+	d = d.RestoreRebuildTeardownRollbackFence()
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
+	// ForStorage persists RuntimeCleanup on ordinary sandbox rows so a daemon
+	// restart can rebuild the off-box teardown handle, but that handle is
+	// operator-private (a container id, an ssh host/identity-file path, a hook
+	// delete command). The live-daemon snapshot never publishes it — ToInstanceData
+	// stages it only in the private field ForStorage consumes — so a disk-fallback
+	// client reading instances.json directly must not either: scrub it here so the
+	// daemonless `sessions list`/`get` path exposes the same shape the live path
+	// does, not the cleanup identity an ordinary row now carries on disk.
+	d.RuntimeCleanup = nil
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}
@@ -675,9 +745,18 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 // DeleteInstanceByStableID) keep the disk current on every mutation; this full save is the
 // shutdown checkpoint. Records are deduped by title (#808) before marshaling.
 // Because the manager's memory is the source of truth, ordinary rows do not read
-// disk first. Only a sandbox archive snapshot re-reads the exact repo under its
-// file lock, and only a newer committed outcome for the same stable identity can
-// displace memory.
+// disk first. One on-disk read remains, under the repo file lock, serving two
+// preservation purposes for rows the in-memory snapshot cannot see or has
+// dropped:
+//
+//   - A mid-archive sandbox snapshot re-reads the repo so a newer committed
+//     archive outcome for the same stable identity can displace the stale
+//     pre-push in-memory snapshot.
+//   - Every checkpoint re-reads the repo so on-disk rows the daemon did NOT
+//     materialize (unloadable "ghost" rows the loader deliberately left on
+//     disk for repair, #4162/#1892/#3310) survive the wholesale rewrite. The
+//     carve-out for an older binary's disposable Loading/Deleting projection
+//     (#551) is reaped; durable ghosts are preserved verbatim.
 func (s *Storage) SaveInstances(instances []*Instance) error {
 	// Keep the live instances grouped by their stable storage repo. Each repo is
 	// projected once to decide whether it has anything to checkpoint, then again
@@ -694,6 +773,22 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		if !initial.shouldWrite() {
 			continue
 		}
+		// inMemoryTitles is the set of titles the daemon holds in memory for
+		// THIS repo. Titles are unique per repo (the daemon's
+		// findTitleConflictLocked enforces this on create), so a title match is
+		// a same-logical-session match. preserveUnmaterializedGhostRows uses it
+		// to recognize an on-disk row that is the durable record for a live
+		// (even if checkpoint-dropped) instance and must not be re-persisted as
+		// a ghost — including a killed instance the snapshot legitimately
+		// drops (#819/#844). Scoped per repo: a same-titled session in a
+		// DIFFERENT repo is a distinct logical session and must not silence
+		// this repo's ghost.
+		inMemoryTitles := make(map[string]struct{}, len(repoInstances))
+		for _, inst := range repoInstances {
+			if inst.Title != "" {
+				inMemoryTitles[inst.Title] = struct{}{}
+			}
+		}
 		path, pathErr := config.RepoInstancesPath(rid)
 		if pathErr != nil {
 			return pathErr
@@ -704,20 +799,44 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 				return nil
 			}
 			group := checkpoint.group
-			if checkpoint.needsArchiveReconcile() {
-				raw, readErr := s.state.GetInstances(rid)
-				if readErr != nil {
-					return fmt.Errorf("reconcile: read disk for repo %s: %w", rid, readErr)
+			// Read the on-disk rows for this repo under the file lock. The
+			// checkpoint rewrites the repo's instances.json wholesale from the
+			// in-memory group, so without preserving rows the daemon did not
+			// materialize the rewrite would silently erase every unloadable
+			// ("ghost") row in the file — the opposite of the
+			// durable-across-restarts promise the loader makes to those rows
+			// (#4162/#1892/#3310). The archive reconciliation below used to be
+			// the only on-disk read; this single read generalizes it so a mixed
+			// repo's ghosts survive the shutdown checkpoint too. A read failure
+			// propagates: silently proceeding would let the wholesale rewrite
+			// clobber ghost rows (or a committed archive row) with the stale
+			// in-memory snapshot, the exact data loss (#938) the file lock
+			// exists to prevent.
+			raw, readErr := s.state.GetInstances(rid)
+			if readErr != nil {
+				// Classify the read failure: a newer-schema file or an
+				// I/O failure propagates so the checkpoint does not clobber
+				// rows it cannot read (#4783/#766); a corrupt-but-readable
+				// file falls back to overwrite (#938). GetInstances maps a
+				// missing file to "[]".
+				if err := checkpointReadError(readErr, path); err != nil {
+					return fmt.Errorf("checkpoint: read disk for repo %s: %w", rid, err)
 				}
-				if len(raw) > 0 {
-					var onDisk []InstanceData
-					if jsonErr := json.Unmarshal(raw, &onDisk); jsonErr == nil {
-						reconcilePendingArchiveRows(group, checkpoint.inFlightArchive, onDisk)
-						group = mergeCommittedArchiveRows(group, onDisk, checkpoint.prePushArchive)
-					}
-				}
+				raw = nil
 			}
-			jsonData, err := json.Marshal(dedupeInstanceData(group))
+			// onDisk is the decoded form used for matching (title), the
+			// disposable-ghost carve-out, and archive reconciliation. onDiskRaw
+			// is the parallel raw form preserved verbatim so additive fields a
+			// newer binary wrote under the same schema version — which this
+			// binary's InstanceData does not know and would silently drop on a
+			// decode/encode round trip — survive the checkpoint (#6).
+			onDisk, onDiskRaw := decodeOnDiskRows(raw)
+			if checkpoint.needsArchiveReconcile() {
+				reconcilePendingArchiveRows(group, checkpoint.inFlightArchive, onDisk)
+				group = mergeCommittedArchiveRows(group, onDisk, checkpoint.prePushArchive)
+			}
+			ghosts := preserveUnmaterializedGhostRows(onDisk, onDiskRaw, inMemoryTitles)
+			jsonData, err := marshalCheckpointInstances(group, ghosts)
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
 			}

@@ -824,6 +824,17 @@ export class SplitView {
     const desired = leaves(this.tree);
     const wanted = new Set(desired.map((l) => l.id));
 
+    // Whether the FOCUSED pane was dropped this pass — its leaf closed by a pure-shrink
+    // remapByIdentity (a dead pane whose tab was the highest-ordinal one) or by
+    // validate's dedup. The disposed terminal suppresses its blur, so without an
+    // explicit re-engage the keyboard would be left on document.body while store.focus
+    // still reads "terminal" (the same desync reEngageFocusAfterRebuild corrects for
+    // a rebuilt focused pane). Tracked separately from focusedRebuilt: a dropped pane
+    // is gone, so the rebuild loop below never marks it rebuilt (focusedRebuilt stays
+    // false) and the rebuild path alone would miss it — focus would silently move to
+    // desired[0] without re-attaching the keyboard.
+    const focusedDropped = this.focusedId !== null && !wanted.has(this.focusedId);
+
     // Drop panes no longer in the tree.
     for (const [id, pane] of this.panes) {
       if (!wanted.has(id)) {
@@ -985,37 +996,51 @@ export class SplitView {
     }
 
     this.applyFocusClass();
-    this.reEngageFocusAfterRebuild(focusedRebuilt);
+    this.reEngageFocusAfterRebuild(focusedRebuilt, focusedDropped);
   }
 
-  /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, correcting
-   *  the desync where `store.focus` stays "terminal" while DOM focus fell back to
-   *  `document.body` (the disposed terminal's blur is suppressed, so nothing else
-   *  reports the loss).
+  /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, or closed it
+   *  and re-pointed focus at a survivor, correcting the desync where `store.focus`
+   *  stays "terminal" while DOM focus fell back to `document.body` (a disposed
+   *  terminal's blur is suppressed, so nothing else reports the loss).
    *
-   *  Gated on BOTH a focused-pane rebuild AND `termHoldsFocus` so it only fires when
-   *  the operator was keyboard-attached at the moment of the rebuild: a passive
-   *  repaint (rename, archive flip on a sibling, proxy change) that reaches a user
-   *  who DELIBERATELY detached to rail via Ctrl+] does not rebuild the focused pane
-   *  (so `focusedRebuilt` is false anyway), and a same-session rebuild that happens
-   *  to reach a rail-mode user is skipped by `termHoldsFocus` — neither yanks a
-   *  detached operator back into "terminal" without intent.
+   *  Gated on a focused-pane change AND `termHoldsFocus` so it only fires when the
+   *  operator was keyboard-attached at the moment of the change: a passive repaint
+   *  (rename, archive flip on a sibling, proxy change) that reaches a user who
+   *  DELIBERATELY detached to rail via Ctrl+] does not rebuild or close the focused
+   *  pane (so `focusedRebuilt`/`focusedDropped` are both false), and a same-session
+   *  change that happens to reach a rail-mode user is skipped by `termHoldsFocus` —
+   *  neither yanks a detached operator back into "terminal" without intent.
    *
-   *  Two rebuild outcomes land differently, and both are the correct one:
+   *  `focusedRebuilt`: the focused pane's terminal/iframe was torn down and rebuilt
+   *  this pass (an out-of-band close slid a different tab into its ordinal). The new
+   *  terminal never auto-focuses, so refocus() hands it the keyboard.
    *
-   *    - Rebuilt as a TERMINAL: refocus() → focus() focuses the new textarea, whose
-   *      focus listener echoes onPaneFocus(_, true), re-confirming store.focus=
-   *      "terminal" against the new DOM-focal textarea. The desync is undone.
-   *    - Rebuilt as a WEB/VS Code pane (no terminal to hand the keyboard to): DOM
-   *      focus is on document.body and no textarea blur can arm onPaneFocus's
-   *      corrector, so report the loss ourselves — store.focus lands on "rail",
-   *      which is the right mode when the focused pane ceases to be a terminal.
+   *  `focusedDropped`: the focused pane was CLOSED this pass (a pure-shrink
+   *  remapByIdentity evicted a dead pane that happened to hold focus, or validate's
+   *  dedup dropped it) and focus was re-pointed at the first survivor. The closed
+   *  terminal's blur was suppressed, so without an explicit re-engage the keyboard
+   *  would stay on `document.body` while `store.focus` still reads "terminal" — the
+   *  same desync as the rebuild case. Mirrors closePane's explicit refocus on a
+   *  user-initiated close.
+   *
+   *  Both outcomes land the same way, and each is the correct one:
+   *
+   *    - The new focused pane has a TERMINAL: refocus() → focus() focuses its
+   *      textarea, whose focus listener echoes onPaneFocus(_, true), re-confirming
+   *      store.focus="terminal" against the now-DOM-focal textarea. The desync is
+   *      undone.
+   *    - The new focused pane is a WEB/VS Code pane (no terminal to hand the
+   *      keyboard to): DOM focus is on document.body and no textarea blur can arm
+   *      onPaneFocus's corrector, so report the loss ourselves — store.focus lands
+   *      on "rail", which is the right mode when the focused pane ceases to be a
+   *      terminal.
    *
    *  Split out from reconcile() so the boolean contract is unit-testable without a
    *  DOM/xterm/WS (split_focus.test.ts stages the pane map directly); the end-to-end
    *  behavior is pinned by the Playwright selftest. */
-  private reEngageFocusAfterRebuild(focusedRebuilt: boolean): void {
-    if (!focusedRebuilt || !this.termHoldsFocus) {
+  private reEngageFocusAfterRebuild(focusedRebuilt: boolean, focusedDropped = false): void {
+    if ((!focusedRebuilt && !focusedDropped) || !this.termHoldsFocus) {
       return;
     }
     const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
@@ -1038,7 +1063,14 @@ export class SplitView {
 
     // Click-to-focus (#1694): mousedown fires before xterm's textarea focus, so the
     // pane is the focused one by the time keys flow.
-    container.addEventListener("mousedown", () => this.focusPane(leaf.id));
+    container.addEventListener("mousedown", (e) => {
+      this.onPaneMouseDown(leaf.id);
+      // A header click lands on non-focusable chrome, whose default action would
+      // blur the textarea refocus() just focused. Keep the keyboard where we put it.
+      if (!paneHost.contains(e.target as Node | null)) {
+        e.preventDefault();
+      }
+    });
 
     const pane: Pane = {
       leafId: leaf.id,
@@ -1795,6 +1827,20 @@ export class SplitView {
   }
 
   // --- internal: focus + status ---------------------------------------------
+
+  /** Click-to-focus (#1694, #4341). focusPane only moves the bookkeeping; the DOM
+   *  focus handoff lives in refocus(), so a click that does not reach xterm's own
+   *  textarea (the pane header) must go through both or the highlight and the
+   *  keyboard disagree. A click on the pane that already holds focus is left to
+   *  xterm: re-focusing here would steal the keyboard from rail mode on every
+   *  click of an already-selected pane. */
+  private onPaneMouseDown(leafId: string): void {
+    if (this.focusedId === leafId) {
+      return;
+    }
+    this.focusPane(leafId);
+    this.refocus();
+  }
 
   private focusPane(leafId: string): void {
     if (this.focusedId === leafId) {

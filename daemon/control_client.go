@@ -259,19 +259,22 @@ func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
 		return daemonAdmissionDeadlineError()
 	}
 
-	// No auth-posture pre-flight here any more (#2168 Phase 0). This used to load
-	// the config and return the #2090 refusal before spawning, because a spawned
-	// daemon's stderr is discarded (startDaemonChild) and the refusal would
-	// otherwise reach the user only as the 5s "did not become ready" timeout
-	// below. There is nothing left to pre-flight: a tokenless network bind starts
-	// and serves, so this path can no longer predict a startup failure — and
-	// keeping the check would turn the very config the owner chose to allow into
-	// an `af` that refuses to run at all.
+	// No auth-posture pre-flight here (#2168 Phase 0, kept through #5137). This
+	// used to load the config and return the #2090 refusal before spawning,
+	// because a spawned daemon's stderr is discarded (startDaemonChild) and the
+	// refusal would otherwise reach the user only as the 5s "did not become
+	// ready" timeout below. There is still nothing to pre-flight: #5137 scopes
+	// the refusal to the TCP LISTENER — the daemon starts and its unix sockets
+	// work under every config — so this path can no longer predict a startup
+	// failure, and keeping the check would turn a listener posture into an `af`
+	// that refuses to run at all.
 	//
-	// The exposure is still reported, on surfaces the user is actually looking
-	// at: `af config set` warns at write time, the daemon warns once when the
-	// listener binds (startHTTPServer), and `af doctor` / `af daemon status`
-	// carry a row for it.
+	// The posture is still reported, on surfaces the user is actually looking
+	// at: `af config set` refuses the unsafe write outright (or warns when the
+	// opt-in makes it a real exposure), the daemon logs the refused bind at
+	// ERROR and reports the exposure notice when it binds an opted-in listener
+	// (startHTTPServer), and `af doctor` / `af daemon status` carry a row for
+	// each.
 
 	// Scope the spawn marker to this launch before the launcher runs: a
 	// stubbed or early-failing launcher must not let a marker from an earlier
@@ -554,6 +557,15 @@ func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 	return &resp.Instance, err
 }
 
+// PingCapabilities asks the daemon for its Ping reply, ensuring one is running
+// like every other control call. A client reads a capability bit from it before
+// sending a field an older daemon would silently drop (HostPick).
+func PingCapabilities() (PingResponse, error) {
+	var resp PingResponse
+	err := callDaemon("Ping", PingRequest{}, &resp)
+	return resp, err
+}
+
 // ListBackends asks the daemon which runtimes a create against req.RepoPath may
 // select, and which one an unspecified create resolves to. It is the read that
 // makes CreateSession's Backend field choosable rather than guessable, and it
@@ -752,13 +764,43 @@ func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// ErrGuardedRebindUnsupported is returned for a guarded rebind sent to a
+// daemon that predates the precondition: that daemon drops expected_root and
+// expected_checkout_id as unknown fields and would apply the rebind
+// unconditionally — exactly the silent last-writer-wins the caller asked a
+// precondition to prevent (#4822 spec). Refusing, with a message that names
+// the upgrade path, beats believing the precondition was honored.
+var ErrGuardedRebindUnsupported = errors.New("this daemon predates guarded rebinds — upgrade it, or rebind from the daemon host")
+
+// callRebindProjectRPC sends a rebind under the method name the caller's guard
+// picked. A var so tests can stand in a pre-guard daemon's "can't find method"
+// answer without a real socket.
+var callRebindProjectRPC = func(method string, req RebindProjectRequest, resp *RebindProjectResponse) error {
+	return callDaemon(method, req, resp)
+}
+
 // RebindProject asks the daemon to move a registered project's stable identity
 // to the checkout at req.Path (`af projects rebind`) — the same single-writer
 // registry path RegisterProject takes, so a running client is told through
 // projects.changed rather than discovering the move on a later read.
+//
+// A request carrying expected_root or expected_checkout_id is guarded (#4822)
+// and goes to RebindProjectGuarded: the METHOD NAME is the capability check,
+// atomic with the mutation. A daemon that lacks the method answers "can't find
+// method" — definitive proof the precondition would be ignored — which this
+// maps to ErrGuardedRebindUnsupported. No Ping probe decides: a probe is never
+// affine with the mutation it predicts (#4888 review). An unguarded request —
+// the explicit CLI form — keeps last-writer-wins on every daemon vintage.
 func RebindProject(req RebindProjectRequest) (config.Project, error) {
+	method := "RebindProject"
+	if req.ExpectedRoot != "" || req.ExpectedCheckoutID != "" {
+		method = "RebindProjectGuarded"
+	}
 	var resp RebindProjectResponse
-	if err := callDaemon("RebindProject", req, &resp); err != nil {
+	if err := callRebindProjectRPC(method, req, &resp); err != nil {
+		if method == "RebindProjectGuarded" && isRPCMethodNotFoundErr(err) {
+			return config.Project{}, ErrGuardedRebindUnsupported
+		}
 		return config.Project{}, err
 	}
 	return resp.Project, nil

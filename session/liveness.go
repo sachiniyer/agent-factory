@@ -143,9 +143,21 @@ func opIsTeardown(op InFlightOp) bool {
 // other settled row archives. Kill addressability is intentionally independent
 // (CanKill): a retained tombstone or startup-unknown row must remain removable
 // without becoming attachable, archivable, or restorable.
-func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap bool) LifecycleAction {
+//
+// An unreachable row (#5571 W3) also offers nothing: Archive would try to push
+// a worktree the daemon cannot reach, and Restore's live recheck would refuse
+// — both verbs fail on press exactly like the #2500 fence above, so the flag
+// hides them for the outage's duration while Kill stays available.
+func lifecycleActionFor(id, title string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap, unreachable bool) LifecycleAction {
 	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning || op == OpRestoring ||
-		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap {
+		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap || unreachable {
+		return LifecycleActionNone
+	}
+	// The daemon refuses archive and restore of the reserved root session
+	// unconditionally (daemon/archive.go, daemon/restore.go), so projecting either
+	// verb offers a control that can never succeed (#5406). Same shared-predicate
+	// treatment as the handoff refusal (#2436).
+	if IsReservedTitle(title) {
 		return LifecycleActionNone
 	}
 	switch liveness {
@@ -203,7 +215,7 @@ func canKillFor(id string, op InFlightOp) bool {
 func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil)
+	return lifecycleActionFor(i.ID, i.Title, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil)
 }
 
 // CanKill reports whether interactive clients may offer explicit teardown for
@@ -319,9 +331,26 @@ func (i *Instance) setStatusLocked(s Status) {
 		i.inFlightOp = OpKilling
 	default:
 		i.inFlightOp = OpNone
-		i.liveness = LivenessForStatus(s)
+		i.assignLivenessLocked(LivenessForStatus(s))
 	}
 	i.noteStateChangeLocked(lv, op, resetAt)
+}
+
+// assignLivenessLocked is the ONE write path for i.liveness outside the
+// transition table itself, which routes here too. While a rebuild teardown
+// obligation is owed, every reviving write coerces to LiveLost: a positive
+// answer can be coming from a pane still bound to the DELETED inode — exactly
+// the pane the teardown has not yet proven gone — and leaving Lost is what
+// keeps the owning loop retrying (#5371 review). LiveLost passes through
+// trivially; LiveArchived also passes through, because archive is the row
+// leaving service under its own stop-everything teardown, not an observation
+// that could be lying about the stale pane.
+// Callers hold i.mu.
+func (i *Instance) assignLivenessLocked(l Liveness) {
+	if i.rebuildTeardownPending && l != LiveLost && l != LiveArchived {
+		l = LiveLost
+	}
+	i.liveness = l
 }
 
 // SetStatusForTest sets the status under the instance mutex by decomposing the
@@ -539,6 +568,13 @@ func (i *Instance) tabSpawnBlockedLocked() error {
 	if i.accountSwapLaunch != nil || i.pendingAccountSwap != nil {
 		return fmt.Errorf("cannot add a tab while session %q has an account swap in progress", i.Title)
 	}
+	if i.rebuildTeardownPending {
+		// A spawned tab binds a NEW session inside the worktree while the
+		// committed teardown still owes the old one: it snapshots names, not
+		// vintages, and would kill the fresh tab together with the genuinely
+		// stale sessions (#5371 review).
+		return fmt.Errorf("cannot add a tab to session %q while a worktree-rebuild teardown is pending; let its recovery finish", i.Title)
+	}
 	return nil
 }
 
@@ -591,7 +627,7 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 		return false
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
-	i.liveness = LiveLimitReached
+	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
 	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
@@ -693,8 +729,45 @@ func (i *Instance) ReparkLimitUnderResumeFence(resetAt time.Time) error {
 			i.Title, opLabel(i.inFlightOp))
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
+	// Direct write, not assignLivenessLocked: this is the transaction owner
+	// restoring its own parked disposition after a refused respawn, not a pane
+	// observation. While a rebuild teardown is owed, the coerce-to-Lost guard
+	// exists to keep LYING observations from reviving the row — but it must not
+	// strand the owner: a pending row coerced to LiveLost is refused by the
+	// ordinary lost-restore gate when a PendingAccountSwap rides it, and the
+	// limit scheduler admits only a row still parked at LiveLimitReached
+	// (#5371 review). The teardown obligation stays armed on its own flag and
+	// re-runs inside the retry's respawn regardless of what the row reads.
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return nil
+}
+
+// RestoreLivenessUnderResumeFence restores the liveness a committed respawn
+// attempt found on entry after that attempt fails — the transaction-owned
+// twin of Transition(ObserveLiveness) for the same reason
+// ReparkLimitUnderResumeFence is the twin of SetLimitReached: it is owner
+// bookkeeping about the attempt's own precondition, not a pane observation,
+// so the rebuild-teardown coerce-to-Lost guard in assignLivenessLocked must
+// not apply to it. Without it a committed manual account swap whose respawn
+// armed the teardown obligation is parked at LiveLost — refused by the
+// ordinary lost-restore gate on PendingAccountSwap, and ineligible for the
+// scheduled-swap retry that only admits LiveRunning/LiveReady — stranded with
+// no owning loop (#5371 review).
+//
+// Refuses unless OpRespawning is actually held, matching
+// ReparkLimitUnderResumeFence, so it cannot become a back door around the
+// observation guard it deliberately steps past.
+func (i *Instance) RestoreLivenessUnderResumeFence(l Liveness) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning {
+		return fmt.Errorf("restoring liveness for %q requires the resume fence (in-flight op is %s)",
+			i.Title, opLabel(i.inFlightOp))
+	}
+	lv, op, prevReset := i.lifecycleStateLocked()
+	i.liveness = l
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }
@@ -706,7 +779,7 @@ func (i *Instance) ClearLimitReached() {
 		return
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
-	i.liveness = LiveRunning
+	i.assignLivenessLocked(LiveRunning)
 	i.limitResetAt = time.Time{}
 	i.limitAgent = ""
 	i.limitAccount = ""

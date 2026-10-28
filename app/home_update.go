@@ -118,14 +118,26 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// swallow the very notice it is the fallback for. Hold it for a
 		// frame whose bar is actually painted.
 		if m.recovery == nil {
-			if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
-				cmds = append(cmds, m.showTransientMessage(notice))
+			// Drain every notice a save queued in priority order — a discarded
+			// draft (#4798, lost work), a settled draft (#4824, an unconfirmed
+			// edit that landed), and a cross-repo retarget (#1836, a save that
+			// landed in another project) — and surface them in one message.
+			// showTransientMessage replaces the bar, so per-notice Takes would
+			// drop every notice but the last: a save that both discards an
+			// externally deleted draft and retargets another task to a different
+			// repo runs both branches in this tick, and the later Take would
+			// clobber the more urgent discarded-work warning after both queues
+			// were already cleared. One combined message keeps each notice
+			// visible. The Takes always run (they clear the durable copies),
+			// so a notice a save raised still drains exactly once.
+			notices := []string{
+				m.automations.TaskPane().TakeDiscardedDraftNotice(),
+				m.automations.TaskPane().TakeSettledDraftNotice(),
+				m.automations.TaskPane().TakeCrossRepoRetargetNotice(),
 			}
-			// A reload showed a kept, unconfirmed edit did land (#4824); held
-			// by the same recovery-shadows-the-bar guard, since its Take
-			// clears the durable settledDrafts copy just as lossily.
-			if notice := m.automations.TaskPane().TakeSettledDraftNotice(); notice != "" {
-				cmds = append(cmds, m.showTransientMessage(notice))
+			combined := strings.TrimSpace(strings.Join(notices, " "))
+			if combined != "" {
+				cmds = append(cmds, m.showTransientMessage(combined))
 			}
 		}
 		if changed {
@@ -261,6 +273,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleProjectAdded(msg)
 	case projectReboundMsg:
 		return m.handleProjectRebound(msg)
+	case rebindConflictSnapshotMsg:
+		return m.handleRebindConflictSnapshot(msg)
 	case limitRetriedMsg:
 		return m.handleLimitRetried(msg)
 	case handoffDeliveryConfirmedMsg:

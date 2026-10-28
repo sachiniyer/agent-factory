@@ -388,6 +388,61 @@ func ImportNamesForCommand(source []string, agent, command string, extras []stri
 	return out
 }
 
+// ImportedCredentialNames returns every variable name af can write into a tmux
+// server's global update-environment expansion whose PERSISTENCE there would
+// leak an identity across sessions: all per-agent names, every conditional
+// cloud-credential name regardless of selector state, the shell-startup hooks
+// the account boundary strips for the same reason, and the credential-bearing
+// entries of the common allowlist (the GitHub CLI tokens).
+//
+// The expansion is meant to be transient — these names only widen the import
+// list for the duration of one new-session queue — so af never intends any of
+// them to survive in the stored option. Finding one there means an interrupted
+// expansion left it behind (or an operator opted into exactly the cross-session
+// credential import this boundary exists to refuse), and a launch restoring the
+// option drops it from the baseline rather than re-persisting it (#5390).
+//
+// The set is derived from the name tables rather than listed, so a newly
+// rostered agent or cloud-mode group is covered without being remembered here.
+func ImportedCredentialNames() []string {
+	set := make(map[string]struct{})
+	for _, names := range agentNames {
+		for name := range names {
+			set[name] = struct{}{}
+		}
+	}
+	for _, groups := range conditionalAgentNames {
+		for _, group := range groups {
+			for name := range group.names {
+				set[name] = struct{}{}
+			}
+		}
+	}
+	for _, names := range accountLateEnvironmentNames {
+		for name := range names {
+			set[name] = struct{}{}
+		}
+	}
+	for name := range accountShellStartupNames {
+		set[name] = struct{}{}
+	}
+	// The common allowlist's credential-bearing entries: everything else in it is
+	// a plausible hand-set update-environment name (SSH_AUTH_SOCK is even in the
+	// tmux default), but a GitHub CLI token in the stored option can only be the
+	// expansion's residue or a deliberate opt-in to the refused import.
+	for _, name := range []string{
+		"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+	} {
+		set[name] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // DockerCLIEnvironment is the environment for the trusted, short-lived Docker
 // client. Agent and GitHub credentials are deliberately absent unless the
 // operator named them explicitly: repo-controlled run_args can ask Docker to
@@ -497,7 +552,7 @@ func selectedAgentNames(agent string, selectors []string) map[string]struct{} {
 // so the untrusted layer rejects such a value instead (config.LoadInRepoConfig).
 //
 // The agent is derived from the command rather than taken from the caller,
-// because that is exactly what the launch paths do (TmuxSession.launchEnvironment
+// because that is exactly what the launch paths do (TmuxSession.prepareLaunchEnvironment
 // and hookProvisioner.environmentAgent both classify the command itself). A check that
 // re-derived it differently could disagree with the resolution it is guarding —
 // the key a repo files an override under does not have to name the agent the
