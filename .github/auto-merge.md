@@ -25,6 +25,12 @@ A PR labelled `fix-master` (Build + Lint still required on its head) is exempt f
 
 Other halt: an open `master broken by merge batch <sha>` issue while master still fails the composition check.
 
+## UNKNOWN mergeability, and how verification re-wakes the merger
+
+- GitHub computes `mergeable` lazily: the first read returns `UNKNOWN`. The merger re-reads only the otherwise-eligible UNKNOWN PRs, up to 3 times ~12s apart, and logs a PR that is still UNKNOWN as a skip "after 3 re-reads".
+- Events made with `GITHUB_TOKEN` never start `workflow_run` workflows, so the verification runs the merger dispatches could not wake it. `build.yml` and `lint.yml` therefore end with a `kick-auto-merge` job: on a master `workflow_dispatch` run that was not cancelled (success **or** failure — a red master still has `fix-master` PRs to merge) it runs `gh workflow run auto-merge.yml --ref master`. `workflow_dispatch` is the one event `GITHUB_TOKEN` may trigger. The kicked run keeps the usual concurrency group; the debounce only applies to `workflow_run`.
+- Why this terminates: a run dispatches verification only when it merged something (the head moved) or a verification workflow has no live run. A verified master with nothing to merge, a red master, and a master still being verified dispatch nothing; a cancelled run does not kick, so the next scheduled run recovers it.
+
 ## Workflow-touching PRs and `AUTO_MERGE_TOKEN`
 
 `GITHUB_TOKEN` cannot merge a PR whose diff touches `.github/workflows/` (GitHub refuses: "refusing to allow a GitHub App to create or update workflow … without workflows permission"). On `GITHUB_TOKEN` the merger runs one cheap files query for the merge candidates only, skips such PRs with the reason *workflow files — needs AUTO_MERGE_TOKEN or a maintainer merge*, and lists them in the job summary instead of failing the run.
