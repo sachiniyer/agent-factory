@@ -560,3 +560,22 @@ func TestEndLimitResumeReportsWhetherItReleased(t *testing.T) {
 	require.True(t, i.EndLimitResume(), "the first call lowered it")
 	require.False(t, i.EndLimitResume(), "the deferred second call must not re-announce")
 }
+
+// While a rebuild teardown is owed, the fence release is an operation-only edge:
+// it must leave the liveness the transaction owner restored under the fence, not
+// re-run it through the coerce-to-Lost guard that exists for lying observations
+// (#5371 review).
+func TestEndLimitResumeKeepsTheOwnersRestoredLivenessWhileATeardownIsPending(t *testing.T) {
+	reset := time.Now().Add(42 * time.Minute).UTC()
+	i := limitBlockedInstance(t, newRespawnProbe())
+	i.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	require.NoError(t, i.BeginLimitResume())
+	require.NoError(t, i.SetRebuildTeardownPending(true))
+
+	require.NoError(t, i.ReparkLimitUnderResumeFence(reset))
+	require.Equal(t, LiveLimitReached, i.GetLiveness())
+
+	require.True(t, i.EndLimitResume())
+	require.Equal(t, LiveLimitReached, i.GetLiveness(), "releasing the fence must not coerce the restored disposition to Lost")
+	require.Equal(t, OpNone, i.GetInFlightOp())
+}

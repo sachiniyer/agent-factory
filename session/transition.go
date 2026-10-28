@@ -735,7 +735,14 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		}
 	}
 	prevResetAt := i.limitResetAt
-	i.assignLivenessLocked(to.liveness)
+	// Only an edge that MOVES liveness goes through the coerce-to-Lost guard. An
+	// operation-only edge (ClearOp releasing a fence, BeginRespawn, …) leaves the
+	// liveness it found, which may be a disposition the transaction owner
+	// deliberately restored while a rebuild teardown is owed — re-assigning it
+	// would coerce that back to Lost and strand the row (#5371 review).
+	if to.liveness != from.liveness {
+		i.assignLivenessLocked(to.liveness)
+	}
 	i.inFlightOp = to.op
 	switch spec.limitReset {
 	case limitResetClear:
