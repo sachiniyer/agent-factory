@@ -1,6 +1,6 @@
 ---
 name: gate-pr
-description: Gate and merge YOUR OWN pull request — CI, the Codex review for the exact head, zero unresolved findings, real testing, then merge
+description: Throughput-mode merge — Build + Lint green ⇒ the auto-merger squash-merges; P1 Codex findings fixed, P2/P3 advisory. The hand gate below applies only if the Auto Gate is re-enabled
 user_invocable: true
 ---
 
