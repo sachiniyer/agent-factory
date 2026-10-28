@@ -35,7 +35,7 @@ func operatorGitIdentity(repoRoot string) (name, email string) {
 
 // gitIdentityCommand writes the committer identity into the workspace repo's
 // LOCAL config only. It never touches ~/.gitconfig and never sets
-// safe.directory (the clone passes it on its own command line): the
+// safe.directory on the remote: the
 // workspace is cloned by the user that runs af there, so neither is needed, and
 // a host's own git configuration must be byte-identical before and after a
 // session (#5571 W2.7). Linked worktrees share the repo's local config, so the
