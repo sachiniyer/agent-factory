@@ -41,6 +41,15 @@ func accountCarried(kind BackendKind, repoRoot, pick string) bool {
 	return ok
 }
 
+// listedHostAccountReason is WHY an account is not sent to an unlisted target, stated
+// as the missing GUARANTEE rather than as a claim about mechanism: on a host the
+// operator listed, af syncs the credentials into the session's own scope, writes
+// refreshes back, and removes them at teardown; on a target it does not control that
+// way, it can give none of those guarantees.
+const listedHostAccountReason = "on a host in your global host list af can give the GUARANTEE that those writes come back " +
+	"(a refreshed token is written back and the credentials are removed with the session) and that the credentials stay in that " +
+	"session's own scope; for any other target it cannot"
+
 // listedHostAccountRemedy is the actionable tail of a refusal on an unlisted
 // target.
 func listedHostAccountRemedy() string {

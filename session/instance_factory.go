@@ -753,7 +753,7 @@ func offBoxAccountRefusal(kind BackendKind) string {
 		// listed host carries the account through W7.3's synced scope, so the old
 		// "refused by design" reasoning no longer applies to it. What remains is
 		// that af will not send an account to a target an operator did not list.
-		return listedHostAccountRemedy()
+		return listedHostAccountReason + "; " + listedHostAccountRemedy()
 
 	case BackendSandbox:
 		// The same round-trip reason as ssh, and NOT a "no provable location" one:
