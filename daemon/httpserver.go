@@ -370,6 +370,8 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 			if IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
 			} else if errors.As(err, &shaped) {
+				// A refusal that names its own status (projectReboundError's
+				// 409, proposal conflicts) keeps it; the rest stay a 500.
 				status = shaped.HTTPStatus()
 			}
 			writeHTTPError(w, r, status, err)
