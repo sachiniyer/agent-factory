@@ -172,6 +172,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"docker.mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
 	"ssh.host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
 	"sandbox.ssh":                    func(a, b *config.Config) bool { return a.SandboxSSH != b.SandboxSSH },
+	"sandbox.binary":                 func(a, b *config.Config) bool { return a.SandboxBinary != b.SandboxBinary },
 	// Network listener keys — applied-live since #2480 PR2: the auth/CORS keys are
 	// read per request (livePosture); network.listen_addr / network.preview_listen_addr rebind the
 	// socket in place (webListeners.reconcile, below in ApplyConfig).

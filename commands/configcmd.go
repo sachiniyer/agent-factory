@@ -149,6 +149,7 @@ var globalConfigReadOrder = []string{
 	"docker.mount_agent_credentials",
 	"ssh.host_key_verification",
 	"sandbox.ssh",
+	"sandbox.binary",
 	"limit_retry_interval",
 	"limit_patterns",
 	"keys",
