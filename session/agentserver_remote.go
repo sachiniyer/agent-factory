@@ -75,7 +75,9 @@ type remoteAgentServer struct {
 	// idBrokers is brokers keyed by stable tab id, for the id-addressed plane
 	// (#5571 W4.4); see agentserver_remote_tabid.go. idPlaneKnown/idPlane cache
 	// the sandbox's tab-id-addressing advertisement.
-	idBrokers    map[string]*ptyBroker
+	idBrokers map[string]*ptyBroker
+	// goneTabs are ids whose tab closed: terminal for subscriptions (#5963).
+	goneTabs     map[string]bool
 	idPlaneKnown bool
 	idPlane      bool
 	features     []string

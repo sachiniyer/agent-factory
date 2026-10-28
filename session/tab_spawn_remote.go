@@ -52,6 +52,12 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 	var claim *tabCreateClaim
 	i.mu.Lock()
 	for {
+		if id == "" {
+			// An earlier attempt at this exact request whose outcome the daemon
+			// could not see keeps its id (#5958): the sandbox's id idempotency
+			// then answers the one execution instead of running the command again.
+			id = i.intentIDLocked(kind, command, requestedName)
+		}
 		if refused, existing, found := i.tabIDCollisionLocked(id, kind, command); found {
 			i.mu.Unlock()
 			return existing, refused
@@ -112,29 +118,51 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 	}
 	td, err := rs.rc.createTab(id, TabKindName(kind), command, displayName)
 	if err != nil {
+		uncertain := createOutcomeUncertain(err)
+		i.mu.Lock()
+		if uncertain {
+			i.recordIntentLocked(id, kind, command, requestedName, displayName)
+		} else {
+			i.clearIntentLocked(kind, command, requestedName)
+		}
+		i.mu.Unlock()
+		if uncertain {
+			return nil, fmt.Errorf("failed to create %s tab in the sandbox (the sandbox may have started it; a retry reuses tab id %s and cannot run it twice): %w", TabKindName(kind), id, err)
+		}
 		return nil, fmt.Errorf("failed to create %s tab in the sandbox: %w", TabKindName(kind), err)
 	}
 	name := displayName
 	if strings.TrimSpace(td.Name) != "" {
 		name = td.Name
 	}
-	tab := &Tab{ID: id, Name: name, Kind: kind, Command: command, Exit: tabExitFromData(td.Exit)}
+	tab := &Tab{ID: id, Name: name, Kind: kind, Command: command, Exit: tabExitFromData(td.Exit), gen: td.Gen}
 
 	i.mu.Lock()
 	stale := !i.started || i.tabSpawnBlockedLocked() != nil
 	colErr, existing, collide := i.tabIDCollisionLocked(id, kind, command)
 	adopt := !stale && !collide
+	i.clearIntentLocked(kind, command, requestedName)
 	if adopt {
 		i.Tabs = append(i.Tabs, tab)
 		i.touchLocked()
 	}
 	i.mu.Unlock()
+	if adopt {
+		// The id may be a re-creation of a closed tab: lift the terminal mark so
+		// streams to the new incarnation are admitted (#5963).
+		rs.clearTabGone(id)
+	}
 	switch {
 	case stale:
 		// The session was killed or archived while the sandbox spawned the tab;
-		// close it there so it does not outlive the roster that would own it.
+		// close it there so it does not outlive the roster that would own it. An
+		// unconfirmed close is recorded, not just reported (#5957).
 		if cerr := rs.rc.closeTab(id); cerr != nil && !errors.Is(cerr, ErrTabGone) {
-			return nil, fmt.Errorf("session was killed during tab creation (sandbox tab %q left behind: %v)", id, cerr)
+			i.mu.Lock()
+			i.pendingRemoteClose = append(i.pendingRemoteClose, RemoteTabCleanupData{TabID: id, Gen: td.Gen})
+			i.touchLocked()
+			i.mu.Unlock()
+			return nil, fmt.Errorf("session was killed during tab creation (sandbox tab %q left behind, close pending: %v)", id, cerr)
 		}
 		return nil, fmt.Errorf("session was killed during tab creation")
 	case collide:
@@ -144,16 +172,23 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 }
 
 // closeOffBoxTab ends the sandbox-side process of a tmux-less shell/process tab
-// by stable id. ErrTabGone is success: the tab is already closed there.
+// by stable id. ErrTabGone is success: the tab is already closed there. When the
+// sandbox cannot be asked (not connected, or it does not answer) the error is
+// returned and the caller's staged pending-close record keeps the id until a
+// later sweep gets the sandbox's confirmation (#5957).
 func (i *Instance) closeOffBoxTab(tab *Tab) error {
 	if tab.tmux != nil || (tab.Kind != TabKindShell && tab.Kind != TabKindProcess) {
 		return nil
 	}
 	i.mu.RLock()
+	remote := i.capabilitiesLocked().Workspace == WorkspaceRemote
 	rs := i.remoteTabServerCachedLocked()
 	i.mu.RUnlock()
-	if rs == nil || !rs.hasFeatureCached(tabAPIFeature) {
+	if !remote {
 		return nil
+	}
+	if rs == nil || !rs.hasFeatureCached(tabAPIFeature) {
+		return fmt.Errorf("failed to close tab %q: the session's sandbox is not connected; the close is pending", tab.Name)
 	}
 	if err := rs.rc.closeTab(tab.ID); err != nil && !errors.Is(err, ErrTabGone) {
 		return fmt.Errorf("failed to close tab %q: %w", tab.Name, err)

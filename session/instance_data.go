@@ -224,6 +224,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	if len(i.pendingTabCleanup) > 0 {
 		data.PendingTabCleanup = append([]TabCleanupData(nil), i.pendingTabCleanup...)
 	}
+	data.PendingRemoteTabClose = i.remoteCloseDataLocked()
 
 	// Keep writing the legacy single TmuxName field (set from the agent tab) for
 	// one release: a binary rolled back to before #930 PR 2 still finds the
@@ -752,6 +753,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// retries the kill, and a spawn reserves against them, but no tab is
 		// rebuilt from a tombstone.
 		instance.pendingTabCleanup = restoredTabCleanup(data.PendingTabCleanup)
+		instance.pendingRemoteClose = restoredRemoteClose(data.PendingRemoteTabClose)
 	}
 
 	// Every return below hands back a row no automatic restore can reach —
@@ -948,6 +950,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
 				Exit:                          tabExitFromData(td.Exit),
+				gen:                           td.Gen,
 				tmux:                          ts,
 				accountScope:                  td.AccountScope,
 				accountScopeProvenanceUnknown: idx > 0 && kind.HasTmux() && ts != nil && siblingScopeUnknown(data.Account, td.AccountScope),

@@ -638,6 +638,16 @@ type Instance struct {
 	// deliberately NOT part of the roster: nothing renders or respawns from it.
 	pendingTabCleanup []TabCleanupData
 
+	// pendingRemoteClose is pendingTabCleanup for off-box tabs: closes the
+	// sandbox never confirmed (#5957). Persisted with the session; retried by
+	// ReconcileOffBoxTabs. Guarded by i.mu.
+	pendingRemoteClose []RemoteTabCleanupData
+	// tabCreateIntents holds the minted ids of remote creates whose outcome was
+	// uncertain, keyed by request shape, so a retry reuses the id (#5958).
+	// Guarded by i.mu; in memory — a restart before the retry loses the mapping,
+	// and the sandbox's own roster then still holds the tab it started.
+	tabCreateIntents map[string]*tabCreateIntent
+
 	// tabSpawnClaims reserves the FULL tmux session names of sibling spawns
 	// still in flight — derived under i.mu, released once the append resolves
 	// (#5571 W4.3). uniqueTabTmuxNameReserving consults it alongside the roster
