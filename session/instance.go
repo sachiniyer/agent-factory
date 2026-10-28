@@ -296,6 +296,10 @@ type Instance struct {
 	// client-side projection. Persisted; surfaces render it under
 	// CallbackUnavailablePrefix. Mutex-protected; see callback_unavailable.go.
 	callbackUnavailable string
+	// hostedRemotely marks an instance running INSIDE a sandbox, where the daemon
+	// holds the session as a remote workspace. It decides which capability
+	// projection the injected guidance is rendered from (guidance.go, #5571 W3.3).
+	hostedRemotely bool
 	// worktreeMissing is true once a bounded probe proved the tracked worktree
 	// path absent with no af relocation owning it — deleted outside af (#5102).
 	// Persisted with the worktree record; see worktree_missing.go for who sets
