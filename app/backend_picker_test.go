@@ -614,3 +614,28 @@ func TestBackendChoicesFromKeepsRefusalsOverAdvisories(t *testing.T) {
 		"the precondition names what to fix; the advisory would say what would also be missing")
 	assert.False(t, ssh.callbackless, "a create that cannot run has no 'will lack callback' to flag")
 }
+
+// TestBackendChoicesFromCarriesHostReadinessNote is #5785: the web renders the
+// readiness note of an unprobed or stale host beside the available backend; the
+// TUI must too, still selectable, joined to any callback advisory.
+func TestBackendChoicesFromCarriesHostReadinessNote(t *testing.T) {
+	const note = "not probed yet — the host is checked when a session is created"
+	choices := backendChoicesFrom(daemon.ListBackendsResponse{
+		Backends: []daemon.BackendOption{
+			{Name: config.BackendSandbox, Label: "sandbox", Status: daemon.BackendAvailable, Note: note},
+			{Name: config.BackendSSH, Label: "ssh", Status: daemon.BackendAvailable, Note: note, CallbackUnavailableReason: "no listener"},
+		},
+		Default:       config.BackendSandbox,
+		DefaultStatus: daemon.BackendAvailable,
+	})
+	byValue := map[string]backendChoice{}
+	for _, c := range choices {
+		byValue[c.value] = c
+	}
+	assert.Equal(t, "Host "+note, byValue[config.BackendSandbox].reason)
+	assert.Equal(t, daemon.BackendAvailable, byValue[config.BackendSandbox].status)
+	assert.Equal(t, "Host "+note, byValue[repoDefaultBackend].reason, "the repo-default row resolves to the same backend")
+	assert.False(t, byValue[config.BackendSandbox].callbackless)
+	assert.Equal(t, "Host "+note+" · "+"af callback unavailable: no listener", byValue[config.BackendSSH].reason)
+	assert.True(t, byValue[config.BackendSSH].callbackless)
+}
