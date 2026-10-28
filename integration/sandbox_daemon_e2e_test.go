@@ -20,7 +20,8 @@ import (
 // bare name `claude` — drives a session on a containerized sshd host through the
 // daemon's own RPCs:
 //
-//	create → prompt → preview → tab → archive → restore → kill, then a
+//	create → prompt → preview → tab → archive (nothing published, workspace kept,
+//	restore refused) → kill, then archive --push → restore → kill, then a
 //	task-fired create.
 //
 // Every step asserts on BOTH sides: the daemon's Snapshot and the host's
@@ -129,42 +130,102 @@ func TestSandboxDaemonE2E(t *testing.T) {
 		return host.exec(t, "main=$(dirname $(find /root/.af-sessions -maxdepth 4 -name .git | head -1)); "+
 			"git -C $main worktree list --porcelain | awk '/^worktree /{p=$2} END{print p}'")
 	}
-	ws := workspace()
-	committed := host.exec(t, "cd "+ws+" && echo e2e > e2e-work.txt && git add e2e-work.txt && git -c user.name=e2e -c user.email=e2e@example.com commit -q -m sbx-e2e-work 2>&1; git log --oneline -3 2>&1; git branch --show-current")
-	if !strings.Contains(committed, "sbx-e2e-work") {
-		t.Fatalf("could not commit in the sandbox workspace %q:\n%s", ws, committed)
+	commitWork := func() {
+		t.Helper()
+		ws := workspace()
+		committed := host.exec(t, "cd "+ws+" && echo e2e > e2e-work.txt && git add e2e-work.txt && git -c user.name=e2e -c user.email=e2e@example.com commit -q -m sbx-e2e-work 2>&1; git log --oneline -3 2>&1; git branch --show-current")
+		if !strings.Contains(committed, "sbx-e2e-work") {
+			t.Fatalf("could not commit in the sandbox workspace %q:\n%s", ws, committed)
+		}
+		t.Logf("sandbox workspace %s: %s", ws, committed)
 	}
-	t.Logf("sandbox workspace %s: %s", ws, committed)
+	originHasWork := func() bool {
+		return strings.Contains(host.exec(t, "git -c safe.directory='*' -C /repo.git log --all --format=%s 2>&1"), "sbx-e2e-work")
+	}
+	commitWork()
 
-	// --- archive: the host is reaped, the work survives on origin ---------------
-	post("/v1/ArchiveSession", daemon.ArchiveSessionRequest{Title: title, RepoID: repoID}, &daemon.ArchiveSessionResponse{})
+	// --- default archive (W8.5): nothing is published, the workspace stays -------
+	var archived daemon.ArchiveSessionResponse
+	post("/v1/ArchiveSession", daemon.ArchiveSessionRequest{Title: title, RepoID: repoID}, &archived)
 	if a := find(title); a == nil || a.Liveness != session.LiveArchived {
 		t.Fatalf("after ArchiveSession the session is %+v, want an archived row", a)
 	}
-	waitFor(t, "the archived session's agent-server to be reaped", 30*time.Second, func() bool { return agentServers() == 0 })
-	if log := host.exec(t, "git -c safe.directory='*' -C /repo.git log --all --format=%s 2>&1"); !strings.Contains(log, "sbx-e2e-work") {
-		t.Fatalf("origin lacks the session's commit after archive; log:\n%s\nbranches:\n%s", log,
+	waitFor(t, "the archived session's agent-server to stop", 30*time.Second, func() bool { return agentServers() == 0 })
+	if originHasWork() {
+		t.Fatalf("a default archive published the session's commit to origin; branches:\n%s",
 			host.exec(t, "git -c safe.directory='*' -C /repo.git branch -a 2>&1"))
+	}
+	loc := archived.ArchivedWorkspace
+	if loc == nil || loc.Pushed || loc.Dir == "" {
+		t.Fatalf("archive response archived_workspace = %+v, want an unpushed preserved dir", loc)
+	}
+	if row := find(title); row == nil || row.ArchivedWorkspace == nil || row.ArchivedWorkspace.Dir != loc.Dir {
+		t.Fatalf("the archived row does not report where the work lives: %+v", row)
+	}
+	if got := host.exec(t, "cat "+workspace()+"/e2e-work.txt"); got != "e2e" {
+		t.Fatalf("the preserved workspace on the host lost the session's file; e2e-work.txt = %q", got)
+	}
+	// Restore of an unpushed preserved row is refused (until W8.6) and names where the
+	// work is, through both restore routes — and touches nothing.
+	for _, route := range []string{"/v1/RestoreArchived", "/v1/RestoreSession"} {
+		var err error
+		if route == "/v1/RestoreArchived" {
+			err = h.tryHTTPPost(route, daemon.RestoreArchivedRequest{Title: title, RepoID: repoID}, &daemon.RestoreArchivedResponse{})
+		} else {
+			err = h.tryHTTPPost(route, daemon.RestoreSessionRequest{Title: title, RepoID: repoID}, &daemon.RestoreSessionResponse{})
+		}
+		if err == nil || !strings.Contains(err.Error(), loc.Dir) || !strings.Contains(err.Error(), "W8.6") {
+			t.Fatalf("%s of a preserved, unpushed row = %v, want a refusal naming %q", route, err, loc.Dir)
+		}
+	}
+	if got := host.exec(t, "cat "+workspace()+"/e2e-work.txt"); got != "e2e" {
+		t.Fatalf("a refused restore disturbed the preserved workspace; e2e-work.txt = %q", got)
+	}
+	// Killing the archived row still reaps what af made.
+	post("/v1/KillSession", daemon.KillSessionRequest{Title: title, RepoID: repoID}, &daemon.KillSessionResponse{})
+	waitFor(t, "the host to be clean after the preserved row is killed", 30*time.Second, func() bool {
+		return agentServers() == 0 && sessionDirs() == ""
+	})
+
+	// --- archive --push: published, restored as before ---------------------------
+	const pushTitle = "sbx-e2e-push"
+	post("/v1/CreateSession", daemon.CreateSessionRequest{Title: pushTitle, RepoPath: repo, Program: "claude"}, &created)
+	if find(pushTitle) == nil {
+		t.Fatalf("created session %q is not in the daemon snapshot", pushTitle)
+	}
+	commitWork()
+	var pushed daemon.ArchiveSessionResponse
+	post("/v1/ArchiveSession", daemon.ArchiveSessionRequest{Title: pushTitle, RepoID: repoID, Push: true}, &pushed)
+	if a := find(pushTitle); a == nil || a.Liveness != session.LiveArchived {
+		t.Fatalf("after ArchiveSession{push} the session is %+v, want an archived row", a)
+	}
+	waitFor(t, "the pushed archive's agent-server to be reaped", 30*time.Second, func() bool { return agentServers() == 0 })
+	if !originHasWork() {
+		t.Fatalf("origin lacks the session's commit after archive --push; branches:\n%s",
+			host.exec(t, "git -c safe.directory='*' -C /repo.git branch -a 2>&1"))
+	}
+	if w := pushed.ArchivedWorkspace; w == nil || !w.Pushed || w.Branch == "" {
+		t.Fatalf("pushed archive archived_workspace = %+v, want pushed with a branch", w)
 	}
 
 	// --- restore: a fresh sandbox, drivable ------------------------------------
-	post("/v1/RestoreArchived", daemon.RestoreArchivedRequest{Title: title, RepoID: repoID}, &daemon.RestoreArchivedResponse{})
+	post("/v1/RestoreArchived", daemon.RestoreArchivedRequest{Title: pushTitle, RepoID: repoID}, &daemon.RestoreArchivedResponse{})
 	waitFor(t, "the restored session to be live", 90*time.Second, func() bool {
-		r := find(title)
+		r := find(pushTitle)
 		return r != nil && r.Liveness != session.LiveArchived && agentServers() > 0
 	})
 	if got := host.exec(t, "cat "+workspace()+"/e2e-work.txt"); got != "e2e" {
 		t.Fatalf("restored workspace lost the session's file; e2e-work.txt = %q", got)
 	}
-	post("/v1/SendPrompt", daemon.SendPromptRequest{Title: title, RepoID: repoID, Prompt: "after-restore-marker"}, &sent)
+	post("/v1/SendPrompt", daemon.SendPromptRequest{Title: pushTitle, RepoID: repoID, Prompt: "after-restore-marker"}, &sent)
 	waitFor(t, "the restored agent to echo a prompt", 60*time.Second, func() bool {
-		return strings.Contains(preview(title, 0), "after-restore-marker")
+		return strings.Contains(preview(pushTitle, 0), "after-restore-marker")
 	})
 
 	// --- kill: nothing is left behind on the host ----------------------------
-	post("/v1/KillSession", daemon.KillSessionRequest{Title: title, RepoID: repoID}, &daemon.KillSessionResponse{})
-	if find(title) != nil {
-		t.Fatalf("session %q still in the snapshot after KillSession", title)
+	post("/v1/KillSession", daemon.KillSessionRequest{Title: pushTitle, RepoID: repoID}, &daemon.KillSessionResponse{})
+	if find(pushTitle) != nil {
+		t.Fatalf("session %q still in the snapshot after KillSession", pushTitle)
 	}
 	waitFor(t, "the host to be clean after kill", 30*time.Second, func() bool {
 		return agentServers() == 0 && sessionDirs() == ""

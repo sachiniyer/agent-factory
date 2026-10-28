@@ -112,6 +112,10 @@ func (i *Instance) ArchiveSandboxPreserving() (ArchivedWorkspaceData, error) {
 		}
 	}
 	loc := ArchivedWorkspaceData{Host: host, Dir: dir}
+	// The skipped teardown is what normally stops the ssh transport; without this
+	// each archived session would keep its ssh process, forwarded port and
+	// supervisor (re-dialling if the link drops) until the daemon exits.
+	i.stopRemoteTransport()
 	// The callback credential was minted for the runtime that just stopped.
 	i.revokeSandboxCredential()
 	i.mu.Lock()
@@ -140,4 +144,27 @@ func (i *Instance) RestoreRefusedForPreservedWorkspace() error {
 		where = w.Host + ":" + w.Dir
 	}
 	return fmt.Errorf("session %q was archived without pushing: its work is preserved at %s, and restoring from a preserved workspace is not available yet (#5571 W8.6); the work is untouched, and you can push it from the host", i.Title, where)
+}
+
+// stopRemoteTransport stops the session's ssh tunnel and its supervisor without
+// reaping anything on the host. The provisioner's cleanup identity is untouched,
+// so a later kill of the archived row still reaps the directory (stopTunnel is
+// idempotent, which reap relies on for retries).
+func (i *Instance) stopRemoteTransport() {
+	i.mu.RLock()
+	b := i.backend
+	i.mu.RUnlock()
+	var p *sandboxProvisioner
+	switch b := b.(type) {
+	case *sandboxBackend:
+		p = b.provisioner
+	case *sshBackend:
+		p = b.provisioner
+	}
+	if p == nil {
+		return
+	}
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	p.stopTunnel()
 }

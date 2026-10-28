@@ -109,13 +109,6 @@ func (m *Manager) RestoreSession(req RestoreSessionRequest) (string, session.Ins
 
 	switch instance.GetLiveness() {
 	case session.LiveArchived:
-		// An off-box row archived without a push keeps its work on its host, and a
-		// fresh sandbox would clone a branch origin does not have (#5571 W8.5).
-		// Refused before any fence is raised, so the row stays Archived and the work
-		// untouched until W8.6 reattaches it.
-		if err := instance.RestoreRefusedForPreservedWorkspace(); err != nil {
-			return "", resolved, err
-		}
 		path, restoreErr := m.restoreArchivedInstance(instance, repoID, title)
 		return path, resolved, restoreErr
 	case session.LiveLost, session.LiveDead:

@@ -46,3 +46,24 @@ func TestRestoreRefusedForPreservedWorkspace(t *testing.T) {
 		assert.NoError(t, build(nil).RestoreRefusedForPreservedWorkspace())
 	})
 }
+
+// Every re-provisioning route reaps the host directory first; the guard sits in
+// reprovisionRemote so none of them (restore, Lost recovery, the restore loop) can
+// replace a runtime whose directory holds the only copy of unpushed work.
+func TestReprovisionRefusesPreservedUnpushedWorkspace(t *testing.T) {
+	inst, err := FromInstanceData(InstanceData{
+		ID: "s1", Title: "t", Path: t.TempDir(), Status: Archived, BackendType: "local",
+		Worktree:          GitWorktreeData{RepoPath: "/r", WorktreePath: "/r/wt"},
+		ArchivedWorkspace: &ArchivedWorkspaceData{Dir: "/d"},
+	})
+	require.NoError(t, err)
+	for name, call := range map[string]func() error{
+		"reprovisionRemote": inst.reprovisionRemote,
+		"RestoreSandbox":    inst.RestoreSandbox,
+		"recoverSandbox":    func() error { return recoverSandbox(inst) },
+	} {
+		err := call()
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), "W8.6", name)
+	}
+}
