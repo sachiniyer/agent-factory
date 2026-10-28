@@ -304,6 +304,9 @@ type Instance struct {
 	// holds the session as a remote workspace. It decides which capability
 	// projection the injected guidance is rendered from (guidance.go, #5571 W3.3).
 	hostedRemotely bool
+	// advertisedFeatures is what the hosting agent-server advertises on
+	// /v1/health; guidance lifts the static remote floor by it (#5878).
+	advertisedFeatures []string
 	// worktreeMissing is true once a bounded probe proved the tracked worktree
 	// path absent with no af relocation owning it — deleted outside af (#5102).
 	// Persisted with the worktree record; see worktree_missing.go for who sets
