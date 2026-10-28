@@ -12298,7 +12298,13 @@ function backendChoices(catalog) {
   if (catalog === null) {
     return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
   }
-  const callbackAdvisory = (opt) => opt?.status === "available" && opt.callback_unavailable_reason ? CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason : "";
+  const callbackAdvisory = (opt) => {
+    if (opt?.status !== "available") return "";
+    const parts = [];
+    if (opt.note) parts.push(`Host ${opt.note}`);
+    if (opt.callback_unavailable_reason) parts.push(CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason);
+    return parts.join(" \xB7 ");
+  };
   const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
   const choices = [
     {
