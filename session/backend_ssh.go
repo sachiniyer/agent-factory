@@ -133,6 +133,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if listed != nil {
 		sshCfg = sshConfigForHost(*listed)
 		posture = hostPosture(*listed, cfg.SSHHostKeyVerification)
+		spec.WorkspaceRoot = listed.WorkspaceRoot
 	} else {
 		// Shared with the ListBackends RPC (#1933) — see BackendConfigError.
 		if err := BackendConfigError(BackendSSH, cfg); err != nil {

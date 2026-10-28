@@ -388,6 +388,7 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
    with every setting af owns passed explicitly and **no configuration file read
    at all** — reusing your keys and verifying the host key against `known_hosts`.
 2. It creates a fresh per-session directory under `~/.af-sessions` on the remote
+   (or under the picked host's `workspace_root`, see [configuration.md](configuration.md))
    and clones the repo (from the repo's `origin` remote) into `workspace/` there.
 3. It streams the `af` binary onto the remote and starts an **`af agent-server`**
    bound to `127.0.0.1:0` (a random loopback port — never exposed on the remote's

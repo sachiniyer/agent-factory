@@ -108,11 +108,30 @@ func splitRemoteLiveness(out string) (body, liveness string) {
 	return text, ""
 }
 
+// sessionRootDir is the shell-quoted directory per-session dirs are created
+// under: the host's workspace_root when it names one (an operator-chosen absolute
+// path, validated at config time), else "$HOME/.af-sessions".
+func sessionRootDir(spec ProvisionSpec) string {
+	if spec.WorkspaceRoot != "" {
+		return shellQuote(spec.WorkspaceRoot)
+	}
+	return `"$HOME/` + sshSessionRoot + `"`
+}
+
+// sessionDirScript makes the root if needed and mktemp's a unique per-session dir
+// under it. Only that unique dir is ever reaped, never the root itself.
+func sessionDirScript(spec ProvisionSpec) string {
+	root := sessionRootDir(spec)
+	if spec.WorkspaceRoot != "" {
+		return fmt.Sprintf(`mkdir -p %s && mktemp -d %s`, root, shellQuote(spec.WorkspaceRoot+"/"+Slugify(spec.Title)+".XXXXXX"))
+	}
+	return fmt.Sprintf(`mkdir -p %s && mktemp -d "$HOME/%s/%s.XXXXXX"`, root, sshSessionRoot, Slugify(spec.Title))
+}
+
 // makeSessionDir creates a fresh per-session dir under the remote home with
 // `mktemp -d` and captures its absolute path.
 func (w *sandboxWorkspace) makeSessionDir(timeout time.Duration) error {
-	slug := Slugify(w.spec.Title)
-	script := fmt.Sprintf(`mkdir -p "$HOME/%s" && mktemp -d "$HOME/%s/%s.XXXXXX"`, sshSessionRoot, sshSessionRoot, slug)
+	script := sessionDirScript(w.spec)
 	out, err := w.shell.Run(timeout, script, nil, false)
 	if err != nil {
 		return fmt.Errorf("creating the remote session dir failed: %s: %w", strings.TrimSpace(string(out)), err)

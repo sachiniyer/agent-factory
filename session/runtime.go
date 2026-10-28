@@ -71,6 +71,11 @@ type ProvisionSpec struct {
 	// Host is the listed host the session was placed on (W6.3); empty means the
 	// repo's own ssh settings, or the default_host where the runtime allows it.
 	Host string
+	// WorkspaceRoot is the absolute directory on the target under which the
+	// per-session dir is created (a listed host's workspace_root, #5742). Empty
+	// means the default, "$HOME/.af-sessions". Only the ssh runtime sets it, from
+	// the host it resolved — never from the repo.
+	WorkspaceRoot string
 	// CallbackURL and CallbackToken let the agent INSIDE a sandbox call back into
 	// the daemon (#2999) — the reverse of the daemon-drives-sandbox direction. They
 	// are AF_DAEMON_URL / AF_DAEMON_TOKEN, which apiclient already reads, so no new
