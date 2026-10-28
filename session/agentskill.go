@@ -439,6 +439,21 @@ type skillTarget struct {
 	legacy string
 	// why says why root is empty, for the launch log.
 	why error
+	// passthrough and workDir are the launch's own environment inputs: the
+	// session's merged exact-name pass-through list and the directory the pane
+	// starts in. injectSystemPrompt's opencode seam asks whether a name the user
+	// supplied will survive the pane's filter, and that answer depends on both
+	// (#5981). Zero values give the conservative "no extras, remote workDir".
+	passthrough []string
+	workDir     string
+}
+
+// withLaunchEnvironment returns t carrying the launch's pass-through names and
+// working directory (see skillTarget.passthrough).
+func (t skillTarget) withLaunchEnvironment(passthrough []string, workDir string) skillTarget {
+	t.passthrough = passthrough
+	t.workDir = workDir
+	return t
 }
 
 // errUnresolvedSkillRoot reports that af declined to place the skill because it
@@ -495,7 +510,9 @@ func resolveSkillTarget(i *Instance, program string) skillTarget {
 	if i == nil {
 		return skillTarget{}
 	}
-	return resolveSkillTargetForAccount(program, i.AccountAgent(), strings.TrimSpace(i.Account), i.GetWorktreePath())
+	workDir := i.GetWorktreePath()
+	return resolveSkillTargetForAccount(program, i.AccountAgent(), strings.TrimSpace(i.Account), workDir).
+		withLaunchEnvironment(SessionEnvPassthroughForInstance(i), workDir)
 }
 
 // resolveSkillTargetForAccount is resolveSkillTarget for an account this session

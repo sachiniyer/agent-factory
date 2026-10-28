@@ -348,7 +348,7 @@ func injectSystemPrompt(resolved string, target skillTarget, caps guidanceCaps) 
 		// behavior) and the pane still gets af's config. The inline-assignment
 		// channel (opencodeCarriesConfigEnv) is in the command string, which
 		// FilterForCommand never touches, so it is not subject to this gate.
-		if opencodeCarriesConfigEnv(resolved) || opencodeExportedConfigReachesPane(resolved) {
+		if opencodeCarriesConfigEnv(resolved) || opencodeExportedConfigReachesPane(resolved, target.passthrough, target.workDir) {
 			// INFO, not WARNING (#2166): the user pointed OPENCODE_CONFIG at
 			// their own file (program_overrides assignment OR exported env var
 			// that the pane's allowlist will actually deliver) and af is
@@ -415,21 +415,29 @@ func injectSystemPrompt(resolved string, target skillTarget, caps guidanceCaps) 
 // for, and a non-attributable spelling is exactly the case the credential grant
 // refuses.
 //
-// This helper mirrors the pane's grant decision so the env-channel guard does
-// not skip af's injection for a value the pane will never see — which would
-// leave the pane with neither the user's config nor af's, while the INFO log
-// claims the user's value was honored. workDir is unknown at this call site
-// (the daemon that runs injectSystemPrompt does not know the pane's working
-// directory), so the empty value is the same conservative default
-// GrantAgentForCommand uses for a remote host: it denies every non-absolute
-// spelling, which is exactly the class whose env does not survive the pane's
-// filter. An absolute path inside the real pane workDir is attributed here but
-// denied by the pane's own grant — for that rare spelling the env guard still
-// fires and the pane still gets nothing, matching the pre-env-channel behavior
-// and no worse than the silent skip this guard replaced.
-func opencodeExportedConfigReachesPane(resolved string) bool {
+// This helper asks the pane's own filter (FilterForCommand over the grant the
+// launch uses) so the env-channel guard does not skip af's injection for a value
+// the pane will never see — which would leave the pane with neither the user's
+// config nor af's, while the INFO log claims the user's value was honored. The
+// converse matters as much: a value the user explicitly named in the session's
+// pass-through list reaches the pane even for a spelling the grant refuses, and
+// af must not shadow it with a command-prefix assignment (#5981). passthrough
+// and workDir are the launch's own (skillTarget carries them); zero values give
+// the conservative "no extras, remote workDir" answer.
+func opencodeExportedConfigReachesPane(resolved string, passthrough []string, workDir string) bool {
 	if os.Getenv("OPENCODE_CONFIG") == "" {
 		return false
 	}
-	return sessionenv.GrantAgentForCommand(resolved, os.Environ(), "") == tmux.ProgramOpencode
+	// Ask the pane's own filter rather than re-deriving its rules: the value
+	// reaches the pane when FilterForCommand keeps it, whether the opencode
+	// allowlist admits it (an attributable command) or the operator named it in
+	// the pass-through list (which survives for an unattributable spelling too).
+	source := os.Environ()
+	agent := sessionenv.GrantAgentForCommand(resolved, source, workDir)
+	for _, entry := range sessionenv.FilterForCommand(source, agent, resolved, passthrough) {
+		if name, value, ok := strings.Cut(entry, "="); ok && name == "OPENCODE_CONFIG" && value != "" {
+			return true
+		}
+	}
+	return false
 }
