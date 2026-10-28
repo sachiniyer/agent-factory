@@ -199,15 +199,15 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	w.resolveSessionDirSymlinks(sshShortStepTimeout)
 	p.sessionDir = w.SessionDir
 	if err := w.configureGit(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	binary, err := os.Open(p.afBin)
 	if err != nil {
@@ -216,7 +216,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	copyErr := w.copyAfBinary(sshProvisionStepTimeout, binary)
 	_ = binary.Close()
 	if copyErr != nil {
-		return ProvisionResult{}, p.sandboxErr(copyErr)
+		return ProvisionResult{}, p.sandboxWriteErr(copyErr)
 	}
 	if err := p.verifyCopiedBinary(); err != nil {
 		return ProvisionResult{}, err
@@ -241,14 +241,14 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	p.tokenRef, w.tokenRef, w.agentServerToken = ref, ref, token
 	if err := w.writeRuntimeIdentity(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	// Re-check the callback credential at the LAST step that can still keep a
 	// dead grant out of the launched agent-server's environment (#5571 W3.1,
 	// PR #5577 review — see revalidateCallbackBeforeEnv for why this point).
 	callbackLost := w.revalidateCallbackBeforeEnv()
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	// Reached only past the pre-launch steps (clone, binary copy, callback env),
 	// so a startAgentServer failure here is not the pre-launch empty-PID case: a
@@ -257,7 +257,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	p.launchAttempted = true
 	if err := w.startAgentServer(sshShortStepTimeout); err != nil {
 		p.remotePID = w.RemotePID
-		return ProvisionResult{}, p.sandboxErr(err)
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	p.remotePID = w.RemotePID
 	banner, err := w.readBanner(sshBannerPollTimeout, sshBannerPollInterval, sshShortStepTimeout)

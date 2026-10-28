@@ -199,12 +199,23 @@ drive_swap_to_candidate() {
         'the daemon committed the configured candidate as the new identity' 180 || return 1
     wait_for_session_field ambient-swap account_auto_selected true \
         'the move is recorded as an af choice, not an explicit pin' 60 || return 1
-    if ! grep -q "auto-resumed limit-blocked session \"ambient-swap\".*on claude account \"$CANDIDATE_ACCOUNT\"" \
-        "$AGENT_FACTORY_HOME/agent-factory.log"; then
-        _af_fail 'the identity change did not come from the usage-limit path'
-        grep -E 'ambient-swap' "$AGENT_FACTORY_HOME/agent-factory.log" | tail -20 >&2
-        return 1
-    fi
+    # The account field flips when the daemon COMMITS the swap; the completion
+    # line is written only after the replacement panes are up and the pending
+    # swap is finalized, a few seconds later. Reading the log once right after
+    # the field flips raced that, so poll it (#5625 made the swap succeed, which
+    # is what exposed the race).
+    local log_deadline; log_deadline=$(( $(_af_now) + 90 ))
+    until grep -q "auto-resumed limit-blocked session \"ambient-swap\".*on claude account \"$CANDIDATE_ACCOUNT\"" \
+        "$AGENT_FACTORY_HOME/agent-factory.log"; do
+        if [ "$(_af_now)" -ge "$log_deadline" ]; then
+            _af_fail 'the identity change did not come from the usage-limit path'
+            grep -E 'ambient-swap' "$AGENT_FACTORY_HOME/agent-factory.log" | tail -20 >&2
+            (cd "$AF_DRIVER_REPO" && "$(_af_resolve_bin)" sessions get ambient-swap --json) >&2 || true
+            (cd "$AF_DRIVER_REPO" && "$(_af_resolve_bin)" sessions preview ambient-swap) >&2 || true
+            return 1
+        fi
+        sleep 2
+    done
     _af_log 'assert OK: the daemon logged the move as a limit-blocked auto-resume'
 
     af_select ambient-swap || return 1

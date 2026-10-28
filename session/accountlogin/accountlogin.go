@@ -490,7 +490,9 @@ func (s *Supervisor) live(agent, name string) *tmux.TmuxSession {
 	if !tracked {
 		return nil
 	}
-	exists, known := pane.ProbeSession()
+	// Liveness of an EXISTING tracked pane: a socket unlinked under a still-running
+	// login must read unknown, not gone, or forget() drops the live pane (#4135).
+	exists, known := pane.ProbeSessionLiveness()
 	if known && !exists {
 		s.forget(agent, name, pane)
 		return nil

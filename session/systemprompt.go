@@ -103,7 +103,7 @@ const AfInstallCommand = `curl -fsSL https://raw.githubusercontent.com/sachiniye
 // did.
 const (
 	afTabsLead         = `Tabs (extra processes and views in your instance's worktree; no limit on how many). `
-	afTabsRestrictions = `Shell, process, and VS Code tabs require a local session; external HTTPS web tabs work on remote sessions; loopback web targets still require a local session (--port is loopback). `
+	afTabsRestrictions = `Shell, process, and VS Code tabs require a local session; web tabs work on remote sessions too — an external HTTPS URL is framed directly, and a loopback target (--port is loopback) shows whatever listens on that port inside the session's own workspace. `
 	afTabsTail         = `The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.`
 	afTabLineShell     = `  af sessions tab-create <title> --kind shell                    Terminal tab running $SHELL in the worktree (the same Terminal the TUI/web opens)`
 	afTabLineProcess   = `  af sessions tab-create <title> --command <cmd> [--name <tab>]   Process tab running <cmd> in the worktree; prints the tab name; persists across restarts`

@@ -33,7 +33,20 @@ func stampTaskRunInterrupted(instance *session.Instance, peers []*session.Instan
 			return
 		}
 	}
-	if _, err := task.UpdateTaskStatus(taskID, nil, taskStatusAbortedRuntimeReplaced); err != nil {
+	if _, _, err := task.RecordRunStatus(taskID, taskRunKey(instance), nil, taskStatusAbortedRuntimeReplaced); err != nil {
 		log.WarningLog.Printf("could not record task %s's interrupted run (session %q): %v", taskID, instance.Title, err)
 	}
+}
+
+// taskRunPeerSnapshot copies the manager's registered sessions for
+// stampTaskRunInterrupted's newer-run guard — a slice, so the caller can take
+// the lock and the stamp can iterate after releasing it.
+func (m *Manager) taskRunPeerSnapshot() []*session.Instance {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	peers := make([]*session.Instance, 0, len(m.instances))
+	for _, peer := range m.instances {
+		peers = append(peers, peer)
+	}
+	return peers
 }
