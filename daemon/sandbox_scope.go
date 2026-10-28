@@ -228,7 +228,12 @@ func checkSandboxCreate(req CreateSessionRequest) error {
 // stampSandboxTask binds a sandbox-created task to its owner and project. The
 // provenance is durable and overwrites anything the caller sent: every later
 // delivery re-checks against it (checkSandboxTaskDelivery).
-func stampSandboxTask(t task.Task, owner string, proj sandboxProject, target string) task.Task {
+func stampSandboxTask(t task.Task, id, owner string, proj sandboxProject, target string) task.Task {
+	// The ID is the daemon's, minted per add and never the caller's: a caller
+	// that named an existing task's ID could otherwise shadow or re-arm a task it
+	// does not own (an operator watch task, another project's). The store also
+	// refuses a duplicate atomically (task.ErrTaskIDExists).
+	t.ID = id
 	t.TargetSession = target
 	t.ProjectPath, t.RepoID, t.Host = proj.path, "", ""
 	t.OnComplete = ""
@@ -260,8 +265,20 @@ func (s *controlServer) addTaskScoped(ctx context.Context, req AddTaskRequest, r
 		if err != nil {
 			return err
 		}
-		req.Task = stampSandboxTask(t, owner, proj, inst.Title)
 		req.Actor = fmt.Sprintf("sandbox session %s", owner)
+		// A minted ID can still collide (32 random bits) — the store refuses that
+		// atomically, and a fresh one is minted for the retry.
+		for attempt := 0; attempt < 3; attempt++ {
+			var id string
+			if id, err = task.GenerateID(); err != nil {
+				return fmt.Errorf("could not mint a task id: %w", err)
+			}
+			req.Task = stampSandboxTask(t, id, owner, proj, inst.Title)
+			if err = s.addTask(ctx, req, resp); !errors.Is(err, task.ErrTaskIDExists) {
+				return err
+			}
+		}
+		return err
 	}
 	return s.addTask(ctx, req, resp)
 }

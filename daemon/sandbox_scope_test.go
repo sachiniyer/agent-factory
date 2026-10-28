@@ -458,9 +458,10 @@ func TestSandboxTaskWithoutTargetNeverSpawns(t *testing.T) {
 func TestStampSandboxTaskOverwritesCallerProvenance(t *testing.T) {
 	proj := sandboxProject{repoID: "r1", path: "/proj"}
 	got := stampSandboxTask(task.Task{
-		Prompt: "p", CronExpr: "0 * * * *", TargetSession: " peer ",
+		ID: "operator-task-id", Prompt: "p", CronExpr: "0 * * * *", TargetSession: " peer ",
 		SandboxOwner: "someone-else", Host: "h1", RepoID: "r-other", ProjectPath: "/elsewhere", OnComplete: "kill",
-	}, "sess-a", proj, "peer")
+	}, "minted-id", "sess-a", proj, "peer")
+	assert.Equal(t, "minted-id", got.ID, "the ID is the daemon's, never the caller's")
 	assert.Equal(t, "sess-a", got.SandboxOwner)
 	assert.Equal(t, "peer", got.TargetSession)
 	assert.Equal(t, "/proj", got.ProjectPath)
@@ -486,4 +487,51 @@ func TestSandboxSafeTaskWithholdsHostState(t *testing.T) {
 	assert.Empty(t, got.SandboxOwner)
 	assert.Empty(t, got.OnComplete)
 	assert.Zero(t, got.MaxConcurrentRuns)
+}
+
+// A sandbox addition can never create, replace or shadow a task it does not own
+// (Codex P1 on #5823): the ID is minted by the daemon, and the store refuses a
+// duplicate atomically, so even a forced collision leaves the operator's task
+// exactly as it was.
+func TestSandboxAddNeverShadowsAnOperatorTask(t *testing.T) {
+	f := newScopeFixture(t)
+	op := task.Task{
+		ID: "op-watch", Prompt: "operator prompt", WatchCmd: "./operator-watch.sh",
+		ProjectPath: f.me.Path, RepoID: f.repoB, Enabled: false,
+	}
+	require.NoError(t, task.AddTask(op))
+	before, err := task.GetTask("op-watch")
+	require.NoError(t, err)
+
+	proj := sandboxProject{repoID: f.repoA, path: f.me.Path}
+	sandboxAdd := task.Task{ID: "op-watch", Prompt: "sandbox prompt", CronExpr: "0 * * * *", TargetSession: "peer"}
+
+	// 1. The normal path: the daemon mints the ID, so the caller's is gone.
+	minted := stampSandboxTask(sandboxAdd, "daemon-minted-1", f.me.ID, proj, "peer")
+	require.NotEqual(t, "op-watch", minted.ID)
+	require.NoError(t, task.AddTask(minted))
+
+	// 2. Defense in depth: even a stamp that kept the caller's ID collides in the
+	// store, which refuses it under the tasks-file lock.
+	forced := stampSandboxTask(sandboxAdd, "op-watch", f.me.ID, proj, "peer")
+	err = task.AddTask(forced)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, task.ErrTaskIDExists)
+
+	after, err := task.GetTask("op-watch")
+	require.NoError(t, err)
+	assert.Equal(t, before.WatchCmd, after.WatchCmd, "the operator's watch task must be untouched")
+	assert.Equal(t, before.Prompt, after.Prompt)
+	assert.Equal(t, before.RepoID, after.RepoID)
+	assert.Empty(t, after.SandboxOwner, "the operator's task must not gain sandbox provenance")
+
+	all, err := task.LoadTasks()
+	require.NoError(t, err)
+	count := 0
+	for _, tk := range all {
+		if tk.ID == "op-watch" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "exactly one task owns the id")
 }
