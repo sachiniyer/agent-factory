@@ -1,18 +1,13 @@
 package app
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
-
-	"github.com/sachiniyer/agent-factory/session"
-	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // TestHandleEnterAttachesCapturedInstanceAfterSelectionDrift is the regression
@@ -160,112 +155,4 @@ func TestKillConfirmationWarning(t *testing.T) {
 		warning := killConfirmationWarning(filepath.Join(t.TempDir(), "gone"))
 		require.Contains(t, warning, "Could not verify worktree status")
 	})
-}
-
-// TestOpenCopyPRNoPRSurfacesMessage is the regression guard for #1170: p (open
-// PR) and y (copy PR URL) on a session that has no PR yet must surface a brief,
-// actionable message via the ErrBox rather than being a silent no-op. A nil
-// selection (no session at all) stays silent — there is no session context to
-// message about.
-func TestOpenCopyPRNoPRSurfacesMessage(t *testing.T) {
-	h := newTestHome(t)
-	h.errBox.SetSize(200, 1)
-
-	inst, err := session.NewInstance(session.InstanceOptions{Title: "no-pr", Path: t.TempDir(), Program: "claude"})
-	require.NoError(t, err)
-	inst.SetStatusForTest(session.Running)
-	h.store.AddInstance(inst)
-	h.sidebar.SetSelectedInstance(0)
-	require.Nil(t, inst.GetPRInfo(), "precondition: session has no PR")
-
-	// p (open PR)
-	_, cmd := h.handleOpenPR()
-	require.NotNil(t, cmd, "handleOpenPR must return a cmd that clears the message")
-	require.Contains(t, h.errBox.String(), "no PR for this session yet")
-
-	h.errBox.Clear()
-
-	// y (copy PR URL)
-	_, cmd = h.handleCopyPR()
-	require.NotNil(t, cmd, "handleCopyPR must return a cmd that clears the message")
-	require.Contains(t, h.errBox.String(), "no PR for this session yet")
-
-	// Nil selection stays silent — no session context to report.
-	h.errBox.Clear()
-	h.store.RemoveInstanceByTitle("no-pr")
-	require.Nil(t, h.sidebar.GetSelectedInstance(), "precondition: no session selected")
-	_, cmd = h.handleOpenPR()
-	require.Nil(t, cmd, "handleOpenPR on an empty selection must stay a silent no-op")
-	require.Empty(t, strings.TrimSpace(h.errBox.String()))
-}
-
-func TestClipboardCommandForPlatform(t *testing.T) {
-	lookPath := func(paths map[string]string) func(string) (string, error) {
-		return func(name string) (string, error) {
-			if path, ok := paths[name]; ok {
-				return path, nil
-			}
-			return "", exec.ErrNotFound
-		}
-	}
-
-	t.Run("darwin uses pbcopy", func(t *testing.T) {
-		spec, err := clipboardCommandForPlatform("darwin", lookPath(map[string]string{"pbcopy": "/bin/pbcopy"}))
-		require.NoError(t, err)
-		require.Equal(t, clipboardCommandSpec{path: "/bin/pbcopy"}, spec)
-	})
-
-	t.Run("non-darwin prefers wl-copy", func(t *testing.T) {
-		spec, err := clipboardCommandForPlatform("linux", lookPath(map[string]string{
-			"wl-copy": "/bin/wl-copy",
-			"xclip":   "/bin/xclip",
-		}))
-		require.NoError(t, err)
-		require.Equal(t, clipboardCommandSpec{path: "/bin/wl-copy"}, spec)
-	})
-
-	t.Run("non-darwin falls back to xclip", func(t *testing.T) {
-		spec, err := clipboardCommandForPlatform("linux", lookPath(map[string]string{"xclip": "/bin/xclip"}))
-		require.NoError(t, err)
-		require.Equal(t, clipboardCommandSpec{path: "/bin/xclip", args: []string{"-selection", "clipboard"}}, spec)
-	})
-
-	t.Run("missing tools are actionable", func(t *testing.T) {
-		_, err := clipboardCommandForPlatform("linux", lookPath(nil))
-		require.EqualError(t, err, "no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS)")
-	})
-}
-
-func TestRunClipboardCommandCapturesStderr(t *testing.T) {
-	cmd := exec.Command("sh", "-c", "cat >/dev/null; printf 'cannot open display\\n' >&2; exit 1")
-	err := runClipboardCommand(cmd, "https://github.com/sachiniyer/agent-factory/pull/1")
-	require.EqualError(t, err, "copy failed: cannot open display")
-}
-
-func TestHandleCopyPRFailureShowsReasonAndURL(t *testing.T) {
-	const url = "https://github.com/sachiniyer/agent-factory/pull/1284"
-
-	h := newTestHome(t)
-	h.errBox.SetSize(500, 1)
-
-	inst, err := session.NewInstance(session.InstanceOptions{Title: "has-pr", Path: t.TempDir(), Program: "claude"})
-	require.NoError(t, err)
-	inst.SetStatusForTest(session.Running)
-	inst.SetPRInfo(&sessiongit.PRInfo{Number: 1284, Title: "clipboard", URL: url, State: "OPEN"})
-	h.store.AddInstance(inst)
-	h.sidebar.SetSelectedInstance(0)
-
-	prevCopy := copyToClipboard
-	copyToClipboard = func(text string) error {
-		require.Equal(t, url, text)
-		return errors.New("copy failed: cannot open display")
-	}
-	t.Cleanup(func() { copyToClipboard = prevCopy })
-
-	_, cmd := h.handleCopyPR()
-	require.NotNil(t, cmd, "copy failure should return the normal clear-message command")
-
-	rendered := h.errBox.String()
-	require.Contains(t, rendered, "copy failed: cannot open display")
-	require.Contains(t, rendered, "PR URL: "+url)
 }

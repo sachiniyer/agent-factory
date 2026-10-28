@@ -15,6 +15,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// existingDir returns path after ensuring it exists. tmux.Start refuses to
+// spawn into a directory that is not there (#5172), so a fixture worktree path
+// that is meant to stand in for a real worktree must be real on disk.
+func existingDir(t *testing.T, path string) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(path, 0o755))
+	return path
+}
+
 // startedMockInstance builds a started local instance whose agent tab is a
 // mock-backed tmux session (#930 PR 4). AddShellTab spawns siblings off that
 // session, so they inherit the mock PTY factory / executor and stay hermetic —
@@ -34,7 +43,7 @@ func startedMockInstance(t *testing.T, agentName string, extraAlive ...string) *
 
 	repoPath := "/tmp/tab-lifecycle-" + agentName
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), agentName,
 		agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -137,10 +146,10 @@ func TestAddShellTab_UsesAccountScopedShellLaunch(t *testing.T) {
 		"an account-scoped terminal must not source startup files that can replace its selected identity")
 }
 
-// TestCloseTab_RemovesAndProtectsAgent verifies CloseTab removes a shell tab and
-// kills its session, but refuses to close the agent tab (index 0) or any
-// out-of-range index.
-func TestCloseTab_RemovesAndProtectsAgent(t *testing.T) {
+// TestCloseTabByID_RemovesAndProtectsAgent verifies CloseTabByID removes a shell
+// tab, but refuses to close the agent tab (its id names idx 0) or any unknown tab
+// id.
+func TestCloseTabByID_RemovesAndProtectsAgent(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
@@ -149,13 +158,14 @@ func TestCloseTab_RemovesAndProtectsAgent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, inst.TabCount())
 
-	require.Error(t, inst.CloseTab(0), "the agent tab must be unclosable")
+	tabs := inst.GetTabs()
+	require.Error(t, inst.CloseTabByID(tabs[0].ID), "the agent tab must be unclosable")
 	require.Equal(t, 2, inst.TabCount(), "a rejected close must not mutate the tab list")
 
-	require.Error(t, inst.CloseTab(9), "an out-of-range index must be rejected")
+	require.Error(t, inst.CloseTabByID("nonexistent"), "an unknown tab id must be rejected")
 	require.Equal(t, 2, inst.TabCount())
 
-	require.NoError(t, inst.CloseTab(1))
+	require.NoError(t, inst.CloseTabByID(tabs[1].ID))
 	require.Equal(t, 1, inst.TabCount(), "closing a shell tab removes it")
 	require.False(t, inst.TabAlive(1), "the closed tab's session must be gone")
 }
@@ -314,8 +324,7 @@ func TestRestartSurvival_HumanCreatedShellTab(t *testing.T) {
 
 	loadStore, err := NewStorage(ms, repoID)
 	require.NoError(t, err)
-	loaded, err := loadStore.LoadInstances()
-	require.NoError(t, err)
+	loaded := loadInstancesForTest(t, loadStore)
 	require.Len(t, loaded, 1)
 
 	restored := loaded[0]
@@ -619,7 +628,17 @@ func TestToInstanceData_StagedRowsNeverOccupyTheAgentSlot(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, instance.Tabs, "premise: the pre-Launch state, nothing drained")
 
-	round := instance.ToInstanceData()
+	// W4.7: the SNAPSHOT projection publishes the staged row behind an implicit
+	// agent row, so a Lost/inert client still sees the roster — but the agent
+	// stays at index 0 and the staged web tab never occupies it.
+	projection := instance.ToInstanceData()
+	require.Len(t, projection.Tabs, 2)
+	require.Equal(t, TabKindAgent, projection.Tabs[0].Kind, "the agent slot stays the agent")
+	require.Equal(t, "https://example.com/app", projection.Tabs[1].URL)
+
+	// Durable storage is unchanged: the ordered roster stays empty and the
+	// staged row is persisted outside it, or it is lost.
+	round := projection.ForStorage()
 	require.Empty(t, round.Tabs, "no row may occupy the agent slot while the roster is empty")
 	require.Len(t, round.PendingTabs, 1, "but the staged row is still persisted, or it is lost")
 	require.Equal(t, "https://example.com/app", round.PendingTabs[0].URL)

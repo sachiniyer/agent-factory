@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -549,7 +550,7 @@ func TestStartUpdateDriver_JoinsAndReleasesTheDaemonWaitGroup(t *testing.T) {
 	t.Cleanup(func() { updateDriverWakeInterval = originalWake })
 
 	manager := &Manager{}
-	manager.live.Store(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelStable})
+	manager.storeLivePosture(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelStable})
 
 	wg := &sync.WaitGroup{}
 	stopCh := make(chan struct{})
@@ -578,12 +579,12 @@ func TestStartUpdateDriver_JoinsAndReleasesTheDaemonWaitGroup(t *testing.T) {
 // running daemon (Manager.ApplyConfig) reaches it without a restart.
 func TestNewUpdateDriverReadsTheLiveConfig(t *testing.T) {
 	manager := &Manager{}
-	manager.live.Store(&config.Config{AutoUpdate: false, UpdateChannel: config.UpdateChannelPreview})
+	manager.storeLivePosture(&config.Config{AutoUpdate: false, UpdateChannel: config.UpdateChannelPreview})
 
 	driver := newUpdateDriver(manager, func() {})
 	require.False(t, driver.config().AutoUpdate)
 
-	manager.live.Store(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelPreview})
+	manager.storeLivePosture(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelPreview})
 	require.True(t, driver.config().AutoUpdate, "the driver must re-read the live config, not a snapshot")
 	require.Equal(t, config.UpdateChannelPreview, driver.config().UpdateChannel)
 }
@@ -940,7 +941,7 @@ func TestUpdateDriver_NoExecutableBaselineBlocksActivation(t *testing.T) {
 // one this process exec'd from — later is too late.
 func TestNewUpdateDriver_CapturesTheExecutableBaselineAtStart(t *testing.T) {
 	manager := &Manager{}
-	manager.live.Store(&config.Config{AutoUpdate: true})
+	manager.storeLivePosture(&config.Config{AutoUpdate: true})
 
 	driver := newUpdateDriver(manager, func() {})
 	if driver.baselineErr != nil {
@@ -1031,4 +1032,45 @@ func TestUpdateDriver_MissingLedgerCheckerRefusesActivation(t *testing.T) {
 
 	require.Equal(t, updateCheckFailed, h.driver.checkOnce(context.Background()))
 	require.Equal(t, 0, rec.activations)
+}
+
+// A staged artifact this daemon cannot attribute is the one refusal an
+// unattended box can meet on every check for the life of the machine (#3864), so
+// the failure has to arrive with the way out attached — the error already names
+// the file and the evidence; this names the switch.
+//
+// The reason it needs its own line rather than trusting the wrapped error: the
+// operator reading a daemon log has no session to ask, and "prepare upgrade
+// transaction: another upgrade transaction is staging over this executable" tells
+// them what happened and nothing about what to do.
+func TestUpdateDriver_AForeignStagedArtifactRefusalNamesTheWayOut(t *testing.T) {
+	h := newDriverHarness(t)
+	h.tag = "v1.0.300"
+	rec := enableActivation(h, true)
+	rec.activateErr = fmt.Errorf("prepare upgrade transaction: %w", upgradetxn.ErrForeignStagedArtifact)
+	errorLog := captureErrors(t)
+
+	require.Equal(t, updateCheckFailed, h.driver.checkOnce(context.Background()))
+	require.Equal(t, 1, rec.activations)
+
+	logged := errorLog.String()
+	require.Contains(t, logged, "did not start", "the failure itself must still be reported")
+	require.Contains(t, logged, "upgrade_clear_unverifiable_artifacts",
+		"a block only an operator can lift has to name the way past it")
+	require.True(t, h.driver.rejected["v1.0.300"],
+		"and the daemon must stop walking into the same wall every six hours")
+}
+
+// The remedy line is scoped to that refusal. Every other activation failure is
+// transient or unrelated, and telling an operator to set an artifact-clearing
+// switch for a download error would be advice that breaks something else.
+func TestUpdateDriver_AnOrdinaryActivationFailureDoesNotSuggestClearingArtifacts(t *testing.T) {
+	h := newDriverHarness(t)
+	h.tag = "v1.0.300"
+	rec := enableActivation(h, true)
+	rec.activateErr = errors.New("install and start the recovery actor: systemd is unhappy")
+	errorLog := captureErrors(t)
+
+	require.Equal(t, updateCheckFailed, h.driver.checkOnce(context.Background()))
+	require.NotContains(t, errorLog.String(), "upgrade_clear_unverifiable_artifacts")
 }

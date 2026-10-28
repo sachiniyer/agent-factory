@@ -138,6 +138,94 @@ func setTabCreateFlagsForTest(t *testing.T, command, name, kind, url string, por
 	tabCreateURLFlag, tabCreatePortFlag = url, port
 }
 
+func setTabCreateFlagSuppliedForTest(t *testing.T, name string) {
+	t.Helper()
+	flag := sessionsTabCreateCmd.Flags().Lookup(name)
+	if flag == nil {
+		t.Fatalf("tab-create flag --%s is not registered", name)
+	}
+	previous := flag.Changed
+	flag.Changed = true
+	t.Cleanup(func() { flag.Changed = previous })
+}
+
+// TestSessionsTabCreateTargetFlagPresence distinguishes a flag's presence from
+// its value. In particular, pflag records both --port 0 and --url "" as
+// supplied even though their bound values are the Go zero values. Kinds that
+// cannot consume targets must reject those spellings, while web must validate
+// the supplied zero/empty value instead of claiming the flag was absent. Each
+// arm also pins its ordinary accepted path.
+func TestSessionsTabCreateTargetFlagPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, kind, url, wantErr string
+		port                              int
+		urlSupplied, portSupplied         bool
+		checkTargets                      bool
+	}{
+		{name: "shell/control", kind: "shell"},
+		{name: "shell/portZero", kind: "shell", portSupplied: true, wantErr: "--url/--port are not valid for a shell tab"},
+		{name: "shell/urlEmpty", kind: "shell", urlSupplied: true, wantErr: "--url/--port are not valid for a shell tab"},
+		{name: "shell/urlWhitespace", kind: "shell", url: "   ", urlSupplied: true, wantErr: "--url/--port are not valid for a shell tab"},
+		{name: "vscode/control", kind: "vscode"},
+		{name: "vscode/portZero", kind: "vscode", portSupplied: true, wantErr: "--url/--port are not valid for a vscode tab"},
+		{name: "vscode/urlEmpty", kind: "vscode", urlSupplied: true, wantErr: "--url/--port are not valid for a vscode tab"},
+		{name: "vscode/urlWhitespace", kind: "vscode", url: "   ", urlSupplied: true, wantErr: "--url/--port are not valid for a vscode tab"},
+		{name: "process/control", command: "npm run dev"},
+		{name: "process/portZero", command: "npm run dev", portSupplied: true, wantErr: "--url/--port are not valid for a process tab"},
+		{name: "process/urlEmpty", command: "npm run dev", urlSupplied: true, wantErr: "--url/--port are not valid for a process tab"},
+		{name: "process/urlWhitespace", command: "npm run dev", url: "   ", urlSupplied: true, wantErr: "--url/--port are not valid for a process tab"},
+		{name: "web/control", kind: "web", port: 3000},
+		{name: "web/portZero", kind: "web", portSupplied: true, wantErr: "web tab port must be between 1 and 65535, got 0"},
+		{name: "web/urlEmpty", kind: "web", urlSupplied: true, wantErr: "a web tab requires a target URL (--url or --port)"},
+		{name: "web/bothValid", kind: "web", url: "https://example.com", port: 3000, urlSupplied: true, portSupplied: true, checkTargets: true},
+		{name: "web/validURLInvalidPort", kind: "web", url: "https://example.com", urlSupplied: true, portSupplied: true, wantErr: "web tab port must be between 1 and 65535, got 0"},
+		{name: "web/invalidURLValidPort", kind: "web", port: 3000, urlSupplied: true, portSupplied: true, wantErr: "a web tab requires a target URL (--url or --port)"},
+		{name: "web/bothInvalid", kind: "web", urlSupplied: true, portSupplied: true, wantErr: "a web tab requires a target URL (--url or --port)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupRepoForCmd(t)
+			setTabCreateFlagsForTest(t, tc.command, "", tc.kind, tc.url, tc.port)
+			if tc.urlSupplied {
+				setTabCreateFlagSuppliedForTest(t, "url")
+			}
+			if tc.portSupplied {
+				setTabCreateFlagSuppliedForTest(t, "port")
+			}
+
+			var gotReq daemon.CreateTabRequest
+			called := false
+			previousCreate := createTabViaDaemon
+			createTabViaDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+				called = true
+				gotReq = req
+				return daemon.CreateTabResponse{Name: "created"}, nil
+			}
+			t.Cleanup(func() { createTabViaDaemon = previousCreate })
+
+			_, err := runCmdCaptureStdout(t, sessionsTabCreateCmd, []string{"worker"})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("accepted path returned error: %v", err)
+				}
+				if !called {
+					t.Fatal("accepted path did not reach the daemon")
+				}
+				if tc.checkTargets && (gotReq.URL != tc.url || gotReq.Port != tc.port) {
+					t.Fatalf("accepted request targets = URL %q, Port %d; want URL %q, Port %d",
+						gotReq.URL, gotReq.Port, tc.url, tc.port)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want one containing %q", err, tc.wantErr)
+			}
+			if called {
+				t.Fatal("invalid target flag reached the daemon")
+			}
+		})
+	}
+}
+
 // TestSessionsTabCreateShellUsesTheUIShellPath closes
 // session.tab.create.shell: --kind shell is the canonical CLI spelling, but the
 // request is normalized onto Shell=true — the same daemon path both UIs use —
@@ -241,6 +329,105 @@ func TestSessionsTabCreateMissingCommandNamesShellAlternative(t *testing.T) {
 	err := sessionsTabCreateCmd.RunE(sessionsTabCreateCmd, []string{"worker"})
 	if err == nil || !strings.Contains(err.Error(), "--kind shell") {
 		t.Fatalf("missing-command error = %v, want it to name --kind shell", err)
+	}
+}
+
+// TestSessionsTabCreateProcessRejectsTargets makes the default (process) arm
+// fail closed the way the shell and vscode arms do: AddProcessTab takes only a
+// command and name, so --url/--port have no field to land in and the daemon
+// drops them silently. Before this guard, `af sessions tab-create s --command
+// 'npm run dev' --port 3000` succeeded with a process tab and the --port was
+// invisible on every post-hoc surface (CreateTabResponse and the persisted Tab
+// carry no Port field). The CLI now rejects --url/--port before success instead
+// of forwarding a request whose target half the dispatcher cannot honor.
+func TestSessionsTabCreateProcessRejectsTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, url string
+		port               int
+		want               string
+	}{
+		{name: "url", command: "npm run dev", url: "http://localhost:3000", want: "--url/--port"},
+		{name: "port", command: "npm run dev", port: 3000, want: "--url/--port"},
+		{name: "urlAndPort", command: "npm run dev", url: "http://localhost:3000", port: 3000, want: "--url/--port"},
+		{name: "externalURL", command: "npm run dev", url: "https://example.com", want: "--url/--port"},
+		{name: "whitespaceURLWithPort", command: "npm run dev", url: "   ", port: 3000, want: "--url/--port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setTabCreateFlagsForTest(t, tc.command, "", "", tc.url, tc.port)
+
+			called := false
+			previousCreate := createTabViaDaemon
+			createTabViaDaemon = func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+				called = true
+				return daemon.CreateTabResponse{}, nil
+			}
+			defer func() { createTabViaDaemon = previousCreate }()
+
+			err := sessionsTabCreateCmd.RunE(sessionsTabCreateCmd, []string{"worker"})
+			if err == nil {
+				t.Fatalf("process with %s returned nil, want an error", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("process with %s error = %v, want an error containing %q", tc.name, err, tc.want)
+			}
+			if called {
+				t.Fatalf("process with invalid %s reached the daemon", tc.name)
+			}
+		})
+	}
+}
+
+// TestSessionsTabCreateProcessCommandOnlyStillSucceeds guards the happy path the
+// new --url/--port guard wraps: a process tab created with --command alone (or
+// with only whitespace where --url would go, which trims to absent, as the
+// shell/vscode arms treat it) must still reach the daemon with the command
+// preserved and empty URL/Port, so the guard tightened the no-target rule
+// without breaking the command-only shape.
+func TestSessionsTabCreateProcessCommandOnlyStillSucceeds(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, url string
+	}{
+		{name: "commandOnly", command: "npm run dev", url: ""},
+		{name: "commandWithWhitespaceURL", command: "npm run dev", url: "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoID := setupRepoForCmd(t)
+			setTabCreateFlagsForTest(t, tc.command, "", "", tc.url, 0)
+
+			var gotReq daemon.CreateTabRequest
+			prevCreate := createTabViaDaemon
+			createTabViaDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+				gotReq = req
+				return daemon.CreateTabResponse{Name: "npm"}, nil
+			}
+			defer func() { createTabViaDaemon = prevCreate }()
+
+			out, err := runCmdCaptureStdout(t, sessionsTabCreateCmd, []string{"worker"})
+			if err != nil {
+				t.Fatalf("tab-create --command returned error: %v", err)
+			}
+			if gotReq.Command != "npm run dev" || gotReq.Title != "worker" || gotReq.RepoID != repoID {
+				t.Fatalf("process request = %+v, want command=npm\\ run\\ dev title=worker repo_id=%q", gotReq, repoID)
+			}
+			if gotReq.Shell || gotReq.Kind != "" {
+				t.Fatalf("process request grew a kind/shell path: %+v", gotReq)
+			}
+			// The guard rejects a meaningful (--url/--port) target; a whitespace-only
+			// --url trims to absent and is forwarded raw (mirroring the shell/vscode
+			// arms), so assert no non-whitespace target is carried rather than an
+			// exactly-empty URL string.
+			if strings.TrimSpace(gotReq.URL) != "" || gotReq.Port != 0 {
+				t.Fatalf("process request carried a target: URL=%q Port=%d", gotReq.URL, gotReq.Port)
+			}
+
+			var parsed map[string]string
+			if err := json.Unmarshal(out, &parsed); err != nil {
+				t.Fatalf("output is not JSON (%q): %v", string(out), err)
+			}
+			if parsed["name"] != "npm" {
+				t.Fatalf("JSON name = %q, want npm", parsed["name"])
+			}
+		})
 	}
 }
 

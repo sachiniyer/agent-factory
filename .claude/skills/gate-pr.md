@@ -4,6 +4,31 @@ description: Gate and merge YOUR OWN pull request — CI, the Codex review for t
 user_invocable: true
 ---
 
+# Throughput mode (current policy, 2026-10-27)
+
+**The Auto Gate is disabled. Everything below the "Legacy gate procedure"
+heading applies only if it is re-enabled.** Today:
+
+1. Run the local checks from CLAUDE.md (gofmt, build, vet, golangci-lint
+   `--fast`, file-length, changed-package tests) and push. Do not wait for review
+   or play-tests.
+2. `Build` + `Lint` must be green on the **current** head, and the PR must not be
+   conflicting (`git merge origin/master`, resolve, push — never force-push). The
+   auto-merger (`.github/auto-merge.md`) then squash-merges it; you do not merge
+   by hand.
+3. A **P1** Codex finding blocks the merge until you fix it and reply
+   `RESOLVED in <sha>` on the thread. **P2/P3 are advisory**: fix if cheap, else
+   reply `ACCEPTED: <reason>`. Never write `ACCEPTED` for something you will fix.
+4. To stop a PR merging, add the `no-auto-merge` label.
+5. Play-tests and broader verification run on master. A regression they (or the
+   post-merge composition check) find is fixed forward on master, ahead of other
+   work. The nightly stable release preflight (full `go vet` + `-race` suite)
+   stays the hard gate before anything reaches users.
+
+---
+
+# Legacy gate procedure (only if the Auto Gate is re-enabled)
+
 # Gate your own pull request
 
 **You own your PR end to end, including the merge.** Nobody reviews it before it
@@ -87,6 +112,40 @@ grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' "$G/head-date.
 
 [[ "$BASE" == master ]] || { echo "ABORT: base is $BASE, not master"; exit 1; }
 [[ "$STATE" == open && "$DRAFT" == false ]] || { echo "ABORT: state=$STATE draft=$DRAFT"; exit 1; }
+
+# The maintainer hold (#4576). Presence comes free out of pr.json; the removal
+# half needs the timeline, because a hold someone stripped still holds. Same
+# .part/mv discipline — a truncated timeline reads as "nobody removed it".
+gh api "$R/issues/$PR/timeline" --paginate > "$G/timeline.json.part"
+mv "$G/timeline.json.part" "$G/timeline.json"
+
+jq -e '[.labels[].name | ascii_downcase] | index("hold") | not' "$G/pr.json" >/dev/null \
+  || { echo "ABORT: the hold label is on this PR — only an allowed author who did not open it may lift it"; exit 1; }
+
+# The newest labeled/unlabeled event naming `hold`, and whether whoever removed
+# it may. `jq -s` + `add` because --paginate emits ONE ARRAY PER PAGE, and a
+# per-page sort_by|last would answer from whichever page happened to come last.
+#
+# `norm` is normalizeAuthorLogin: GitHub renders one app as `app/detail-app`,
+# `detail-app` and `detail-app[bot]` depending on the surface, and the lift check
+# has to see those as one actor.
+AUTHOR=$(jq -r '.user.login | ascii_downcase | sub("^app/"; "") | sub("\\[bot\\]$"; "")' "$G/pr.json")
+HOLD_STRIP=$(jq -s -r --arg author "$AUTHOR" '
+  def norm: (. // "") | ascii_downcase | sub("^app/"; "") | sub("\\[bot\\]$"; "");
+  ["sachiniyer", "detail-app"] as $allowed
+  | ["sachiniyer"] as $selflift
+  | (add
+     | map(select((.event == "labeled" or .event == "unlabeled")
+                  and ((.label.name // "") | ascii_downcase) == "hold"))
+     | sort_by(.created_at) | last) as $newest
+  | if $newest == null or $newest.event != "unlabeled" then empty
+    else ($newest.actor.login | norm) as $by
+    | if ($selflift | index($by)) then empty
+      elif ($allowed | index($by)) and $author != "" and $by != $author then empty
+      elif $by == "" then "unknown"
+      else $by end
+    end' "$G/timeline.json")
+[[ -z "$HOLD_STRIP" ]] || { echo "ABORT: the hold label was removed by @$HOLD_STRIP, who may not lift it"; exit 1; }
 # Three states, three different actions — do not collapse them into one message.
 case "$MERGEABLE" in
   true)  ;;
@@ -106,6 +165,15 @@ code is an injection vector.
 
 `BASE` must be `master`, because every comparison below is against
 `origin/master` and is meaningless otherwise. A draft cannot merge.
+
+**The hold outranks everything below it.** A `hold` label is a maintainer saying
+this pull request waits, and no approval, verdict or green check answers it —
+which is why it aborts up here rather than joining the gates. It is also the one
+gate whose *absence* is not evidence: the label is removable by anyone with
+triage access, so the timeline read is what tells a lift from a strip. Mirror of
+`holdState` in `auto-gate.js`; the reasoning, the failure directions and the
+full state table are in `.github/auto-gate.md`. If the jq above fails to parse
+the timeline, treat that as a hold and say so — never as "no hold found".
 
 Later blocks re-derive `$G` and `$HEAD` from `$PR`, so each one stands alone.
 **Re-run this block after every push** — it overwrites `$G`, and a stale `$HEAD`
@@ -229,7 +297,7 @@ jq -s --arg head "$HEAD" '
   add
   | map(select(.user.login == "chatgpt-codex-connector[bot]"))
   | map(select((.body // "") | test("\\bCodex Review\\b"; "i")))
-  | map(select((.body // "") | test("reached your Codex usage limits for code reviews"; "i") | not))
+  | map(select((.body // "") | test("reached your Codex usage limits for cod[e] reviews"; "i") | not))
   | map(select((.body // "")
       | capture("(?:\\*\\*Reviewed commit:\\*\\*|Reviewed commit:)\\s*`(?<sha>[0-9a-f]{7,40})`"; "i")
       | .sha | ascii_downcase as $rc
@@ -282,10 +350,19 @@ Trigger a review with a `@codex review` comment and wait. If none arrives, read
 Codex sometimes puts a finding in the verdict body without a live inline comment.
 An inline count of zero does not mean clean.
 
-Scan **only the exact-head verdict** from step 2. Scanning every Codex body
-instead is its own bug in the other direction: bodies are immutable, so a
-P1 in a review of an older commit would block the PR forever even after the
-current head reviews clean.
+Two checks, and they are not interchangeable.
+
+**3a — the exact-head verdict's own body.** Scan *only* the verdict from step 2.
+Scanning every Codex body instead is its own bug in the other direction: bodies
+are immutable, so a P1 in a review of an older commit would block the PR forever
+even after the current head reviews clean.
+
+**3b — finding artifacts that bind to no head at all.** A Codex *issue* comment
+carrying `P` badges with no `Reviewed commit:` line and no `commit_id` is not the
+verdict, so 3a never reads it — and that is the shape that merged #3656. Auto
+Gate has blocked it since #3676. This step CALLS that same code rather than
+restating it, because the jq restatement drifted: #3689 and #3728 updated it,
+#3670 did not, and nothing noticed for months (#3773).
 
 ```bash
 set -euo pipefail
@@ -305,16 +382,80 @@ fi
 echo "verdict body clean"
 ```
 
+Then 3b, over the artifacts already fetched in Set up. This is not a mirror of
+`auto-gate.js`; it is a call into it, so the two gates cannot answer differently.
+A test fails if this recipe and the script disagree.
+
+```bash
+set -euo pipefail
+PR=<n>; G="${TMPDIR:-/tmp}/gate-pr-$PR"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+HEAD=$(jq -r '.head.sha' "$G/pr.json")
+HD=$(cat "$G/head-date.txt")
+
+node -e '
+const [gate, dir, head, headDate] = process.argv.slice(1);
+const { __test } = require(gate);
+const load = (name) => {
+  const parsed = JSON.parse(require("fs").readFileSync(`${dir}/${name}`, "utf8"));
+  if (!Array.isArray(parsed)) throw new Error(`${name} is not a JSON array — rerun Set up`);
+  return parsed;
+};
+const all = [...load("issue-comments.json"), ...load("reviews.json")];
+const unanswered = __test.unansweredFindingArtifacts({
+  artifacts: all.filter((a) => a.user && a.user.login === "chatgpt-codex-connector[bot]"),
+  acknowledgementCandidates: all,
+  headSha: head,
+  headCommitTime: Date.parse(headDate),
+});
+for (const a of unanswered) {
+  console.log(`  ${a.id}  ${__test.artifactReferences(a)[0] || "(no reference)"}`);
+}
+if (unanswered.length > 0) {
+  console.log(`${unanswered.length} Codex artifact(s) carry a P0-P3 finding and name no commit`);
+  console.log("answer each in a PR comment that LINKS it and carries RESOLVED, ACCEPTED or [gate-ack]");
+  process.exit(1);
+}
+console.log("no unbound finding artifacts");
+' "$REPO_ROOT/.github/scripts/auto-gate.js" "$G" "$HEAD" "$HD"
+```
+
+**Do not replace that with jq.** The rule it applies is three interacting tests —
+does the body carry a finding, is it Codex's summary comment, does it bind to
+this head by any of three spellings — and the last of those has changed twice.
+Restating it is how the hand gate came to be months behind the real one.
+
 **Do not** write this as `grep … || echo "clean"`. A failed read and a
 no-match grep both exit non-zero, so that form reports clean when the check did
 not run. An unrun check is not a passed check.
 
 ### 4. Zero unresolved inline findings
 
-This mirrors `.github/scripts/auto-gate.js`. A reply only resolves a finding when
+This one is still a restatement of `.github/scripts/auto-gate.js`, not a call:
+the inline-finding classification is not exported as a pure function the way
+step 3b's is, so it cannot be called from here yet. Treat the claim narrowly —
+what follows mirrors the script's *inline* rule, and only that. Step 3b covers
+the artifacts this cannot see, and #3773 is where the general problem with
+restating rules is recorded.
+
+A reply only resolves a finding when
 it comes from an **allowed author** and carries a whole-word `RESOLVED` or
 `ACCEPTED` — note `UNRESOLVED` contains `RESOLVED` as a substring, so match on
 word boundaries.
+
+**Every `$allowed` list in this skill must match `ALLOWED_AUTHORS` in
+`.github/scripts/auto-gate.js` exactly.** There is no mechanical derivation —
+they are kept in sync by hand. Whenever `ALLOWED_AUTHORS` changes in the
+script, update every occurrence here in lockstep; a copy that disagrees with the
+real predicate produces confident wrong answers and is worse than no copy.
+
+**A thread's location is not part of the test (#3689).** GitHub nulls `line`
+once a push moves the code a thread points at, and a rebase, a re-indent, or a
+fix to the *neighbouring* line does that exactly as readily as the fix itself —
+so an outdated thread says nothing about whether anyone read the finding. Both
+queries below therefore select on `.in_reply_to_id == null` alone and report the
+thread's `original_line`; filtering on `.line != null` is what merged #3687 and
+#3688 unanswered on #3669. Only an answer clears a finding; a push never does.
 
 ```bash
 set -euo pipefail
@@ -324,11 +465,11 @@ jq -s -e 'length > 0 and all(type == "array")' "$G/inline.json" >/dev/null \
 
 jq -s '
   add as $all
-  | ["sachiniyer","app-detail-app","app-detail-app[bot]"] as $allowed
+  | ["sachiniyer","detail-app"] as $allowed
   | ($all
      | map(select(
          .in_reply_to_id != null
-         and (.user.login | IN($allowed[]))
+         and (((.user.login // "") | sub("^app/";"") | sub("\\[bot\\]$";"")) | IN($allowed[]))
          and ((((.body // "") | test("\\b(RESOLVED|ACCEPTED)\\b"))
                or ((.body // "") | contains("[gate-ack]"))))))
      | map(.in_reply_to_id)) as $resolved
@@ -336,12 +477,12 @@ jq -s '
   | map(select(
       .user.login == "chatgpt-codex-connector[bot]"
       and .in_reply_to_id == null
-      and .line != null
       and ((.id | IN($resolved[])) | not)))
-  | map({id, path, line})
+  | map({id, path, line: (.line // .original_line), outdated: (.line == null)})
 ' "$G/inline.json" > "$G/unresolved.json"
 
-jq -r '.[] | "  \(.id)  \(.path):\(.line)"' "$G/unresolved.json"
+jq -r '.[] | "  \(.id)  \(.path):\(.line)\(if .outdated then "  (outdated — a push moved the line, the finding is still live)" else "" end)"' \
+  "$G/unresolved.json"
 N=$(jq 'length' "$G/unresolved.json")
 [[ "$N" == 0 ]] || { echo "$N unresolved finding(s) — do not merge"; exit 1; }
 echo "no unresolved inline findings"
@@ -355,21 +496,20 @@ HD=$(cat "$G/head-date.txt")
 
 jq -s -r --arg hd "$HD" '
   add as $all
-  | ["sachiniyer","app-detail-app","app-detail-app[bot]"] as $allowed
+  | ["sachiniyer","detail-app"] as $allowed
   | ($all
      | map(select(
          .in_reply_to_id != null
-         and (.user.login | IN($allowed[]))
+         and (((.user.login // "") | sub("^app/";"") | sub("\\[bot\\]$";"")) | IN($allowed[]))
          and ((.body // "") | test("\\bRESOLVED\\b"))))
      | map(.in_reply_to_id)) as $claimed
   | $all
   | map(select(
       .user.login == "chatgpt-codex-connector[bot]"
       and .in_reply_to_id == null
-      and .line != null
       and (.id | IN($claimed[]))
       and (.created_at >= $hd)))
-  | .[] | "  \(.id)  \(.path):\(.line)  filed \(.created_at), head committed \($hd)"
+  | .[] | "  \(.id)  \(.path):\(.line // .original_line)  filed \(.created_at), head committed \($hd)"
 ' "$G/inline.json" > "$G/unpushed.txt"
 
 [[ -s "$G/unpushed.txt" ]] && {
@@ -475,7 +615,7 @@ writing files the commit does not contain. Tear it down with `git worktree
 remove --force "$WT"` when you are done — not with `rm -rf`, which leaves the
 worktree registered and blocks the next run's `git worktree add`.
 
-- **Cheap checks locally, the matrix in CI.** Run `gofmt -l .`, `go build ./...`, `golangci-lint run --timeout=3m --fast`, `scripts/lint-file-length.sh`, and `go test` on **only the package you changed**. Leave `deadcode` to CI — it is whole-program reachability analysis rather than a lint, and the fleet running it concurrently took this box to a load average of 36; the Lint job runs it on every push. Do **not** run `make test-container`, `make remote-roundtrip-container`, or `make playtest-container` as a routine gate — CI runs `go test -race ./...` on every push, so a local container run duplicates it while rebuilding the whole Go tree; ~20 sessions doing that concurrently took the shared box to a load average of 160. Push, then fix what CI reports on your PR head. One targeted container run is fine to reproduce a CI failure you cannot diagnose from the logs — then stop.
+- **Cheap checks locally, the matrix in CI.** Run `gofmt -l .`, `go build ./...`, `go vet ./...`, `golangci-lint run --timeout=3m --fast`, `scripts/lint-file-length.sh`, and `go test` on **only the package you changed**. When the diff touched a generated-docs input — a Cobra def in `commands/` or `api/`, `daemon/httproutes.go`, the `session/` usage text, `design/`, the `web/src` shells, recovery goldens, or a generator — also run `scripts/gen-docs.sh` and require a clean `git status --porcelain` on the generated paths (the full list is in CLAUDE.md's Lint section and mirrors `docs.yml`). Leave `deadcode` to CI — it is whole-program reachability analysis rather than a lint, and the fleet running it concurrently took this box to a load average of 36; the Lint job runs it on every push. Do **not** run `make test-container`, `make remote-roundtrip-container`, or `make playtest-container` as a routine gate — CI runs `go test -race ./...` on every push, so a local container run duplicates it while rebuilding the whole Go tree; ~20 sessions doing that concurrently took the shared box to a load average of 160. Push, then fix what CI reports on your PR head. One targeted container run is fine to reproduce a CI failure you cannot diagnose from the logs — then stop.
 - **Never bare `go test ./...` on the host. If your change is in `daemon/` or `app/`, run no tests for it locally at all — push and let CI test it.** Not `go test ./daemon/`, not a `-run`-scoped subset, not `-race`. This is a safety rule rather than a performance one: those tests spawn real `af` daemons and drive real tmux on a box where the maintainer's own daemon and ~15 live sessions are running, so a local run risks killing production sessions, not just burning CPU. `go test $(go list ./... | grep -vE '/(daemon|app)')` if you need breadth elsewhere.
 - **Watch every new test FAIL first**, against the unmodified tree. Quote the failure in the PR. A test never observed red is not evidence.
 - **TUI changes: drive the real TUI.** `app/` tests swap the backend factory and cannot see real provisioning — a green unit suite proves nothing about them. The scenario subcommand needs a script path:
@@ -485,7 +625,7 @@ worktree registered and blocks the next run's `git worktree add`.
   See `scripts/tui-2599-scenario.sh` for the shape.
 - **A PR-specific scenario does not replace the shared acceptance gate.** Your scenario proves your change works; `make tui-driver-selftest` proves you did not break someone else's. Run both. Require the self-test to report **all** steps green — match the `N/N` in its final `SELF-TEST PASSED` line rather than a hard-coded number, because the suite grows.
 
-  These two are the **only** container runs that survive the no-routine-containers rule above, and only for a TUI-touching PR. They are not exempt because TUI work is special — they are exempt because **CI does not run them at all.** `go test -race ./...` covers the Go suite, but nothing in `.github/workflows/` invokes `scripts/testbox.sh selftest`, so skipping them locally means the interaction is never exercised anywhere. That is also why `auto-gate.js` demands the `play-tested` label on TUI paths. If your PR touches no TUI path, run neither.
+  These two are the **only** container runs that survive the no-routine-containers rule above, and only for a TUI-touching PR. They are not exempt because TUI work is special — they are exempt because **no PR gate runs them.** `go test -race ./...` covers the Go suite, but no workflow in `.github/workflows/` runs `scripts/testbox.sh selftest` as a PR gate — the `TUI driver selftest` workflow fires on Auto Gate's post-merge dispatch after every merge and on native pushes touching TUI paths — never on a PR head — so skipping the local run means the regression shows up post-merge on `master` rather than on your PR head. That is also why `auto-gate.js` demands the `play-tested` label on TUI paths. If your PR touches no TUI path, run neither. The same goes for a PR whose only TUI-path changes reword comments in `.go` files: the gate proves those comment-only and waives the label itself (`.github/auto-gate.md`, "Comment-only changes"). The decision summary names each file it waived, so check that note before skipping the run.
 - **tmux work: isolated socket only.** `-L <unique-name>`, removed afterward. Never the default server, never `tmux kill-server`, never `af reset`. An agent once destroyed every live session on this box that way (#2175).
 - **A fake must model production's real error shape**, not the shape your assertion needs. #2711 shipped a test that injected `context.DeadlineExceeded` directly while production returned `signal: killed` — green, and proving a property the code did not have.
 
@@ -509,6 +649,41 @@ stale — fix it rather than merging it.
 For a decomposition PR the diff must show exactly the one source file being
 decomposed, its split files, and any expected `scripts/file-length-allowlist.txt`
 or docs changes. Anything else is a tangled branch.
+
+### 7b. Reading the Auto Gate decision, when you need to
+
+You mostly do not — the gate's own decision is not one of the gates above. But
+when a landing stalls and you go to read it, read it correctly, because one field
+on this check does not mean what it means anywhere else.
+
+**The per-PR decision is refreshed IN PLACE.** `started_at` stays pinned to the
+*first* evaluation of that head forever, and `completed_at` is stamped by GitHub
+only on the first transition to `completed`. A later evaluation rewrites the
+output and moves neither. So the ordinary one-line read —
+`--jq '.check_runs[] | "\(.started_at) \(.output.title)"'` — reports a fresh
+decision as a stale one. That read is what cost #3776 its landing: a check stamped
+`09:26:48` was carrying a `CONFLICTING/DIRTY` summary that could not have been
+written before `09:55`, and the conclusion drawn was "my dispatch did not run".
+
+**Read the stamp instead.** The first line of `output.summary` is
+`evaluated: <ISO time> (run <id>)`, written on every evaluation, and the title
+names the first unmet requirement rather than one string for every block.
+
+```bash
+set -euo pipefail
+PR=<n>; G="${TMPDIR:-/tmp}/gate-pr-$PR"
+HEAD=$(jq -r '.head.sha' "$G/pr.json")
+
+gh api "repos/{owner}/{repo}/commits/$HEAD/check-runs" \
+  --jq '.check_runs[]
+        | select(.name | startswith("Auto Gate decision"))
+        | "\(.name)\n  \(.conclusion)  \(.output.title)\n  \(.output.summary | split("\n")[0])"'
+```
+
+If that first line is older than the last thing you did, the decision really is
+stale and a `workflow_dispatch` of Auto Gate by PR number will refresh it. If it
+is newer, the decision is current and the title tells you what it is waiting on —
+do not read `started_at` to decide.
 
 ### 8. Merge
 
@@ -539,21 +714,188 @@ explicitly if not.
 
 ## When no review exists
 
-Codex reviewing is intermittent: the account hits usage limits, and stretches
-pass where PRs get no verdict at all. Absence shows up two ways, and **neither
-is a pass**:
+Codex reviewing is intermittent, and stretches pass where PRs get no verdict at
+all. Absence shows up two ways, and **neither is a pass**:
 
 - **No artifact.** Step 2 writes an empty `verdict.json`. That means the review
   step *did not run*, not that it ran and found nothing.
-- **A usage-limit comment** (`reached your Codex usage limits for code reviews`).
-  Step 2 filters it out, and so does `parseReviewedCommit` in `auto-gate.js`.
-  A message saying the reviewer declined to look is the opposite of a clean
-  verdict, and it is the one most likely to be misread as "Codex responded".
+- **A reviewer-unavailable response.** The observed forms include the scoped and
+  bare usage-limit messages (#3728), `Codex Review: Something went wrong. Try
+  again later by commenting "@codex review". Unknown error` (#3951), and “To use
+  Codex here, [create an environment for this
+  repo](https://chatgpt.com/codex/cloud/settings/environments).” (#3985). Each
+  means no review happened. A message saying the reviewer declined to look is
+  the opposite of a clean verdict, and it is the one most likely to be misread
+  as "Codex responded".
 
-Auto Gate does not auto-merge an unreviewed head — silence blocks it, and a
-fresh usage-limit reply degrades it to a manual-only pass that still does not
-merge — `Codex has not reviewed head <sha> yet` either way, so it will not
-merge for you. What to do:
+  `classifyCodexUnavailableArtifact()` no longer tries to enumerate every vendor
+  wording. It first preserves a review body (`CODEX_REVIEW_RE` plus
+  `REVIEWED_COMMIT_RE`), a finding-shaped inline reply, and a parseable summary
+  or verdict. Known usage-limit and transient-failure responses retain their
+  `usage-limit` and `failure` kinds. Any other non-empty Codex artifact is
+  `unrecognised`, carrying its first body line as the cause shown in the gate
+  summary. Silence and GitHub's empty enclosing-review wrapper remain ordinary
+  missing-review state.
+
+  **The unavailable, quota-scope, and verdict questions stay separate.**
+
+  *Is the reviewer out of quota?* — `codexReportsReviewUsageLimit()`. It matches
+  the stems `reached your Codex usage limits?` and `Codex usage limits have
+  been reached` (#3932), then counts the message,
+  **unless** the clause after `for` contains a phrase on a short list of
+  other-job scopes actually OBSERVED in the wild. That list is empty today.
+
+  The rule, stated once as `CODEX_LIMIT_RULE` in `auto-gate.js` and quoted here
+  verbatim because a test requires every statement of it to agree (#3744):
+
+  > A Codex usage-limit message counts as a review outage unless its
+  > scope clause names a job this repository has OBSERVED naming something other
+  > than review. An unobserved phrasing counts, because a false block during a real
+  > outage has no exit while a false degrade leaves a maintainer-review exit a
+  > human can take.
+
+  Four attempts to classify the clause by grammar each leaked one way or the
+  other — a false block during a real outage is the #3728 defect — which is why
+  the list holds no inference. The residual: an unobserved other-scope wording
+  degrades to maintainer review until it is observed and added to the list.
+  Documented and accepted on #3743.
+  Practically: if the latest Codex artifact is not one of the preserved review,
+  finding, or verdict shapes, treat the reviewer as unavailable — the same
+  answer the gate gives.
+
+  *Is this body disqualified from being a verdict?* — step 2's jq filter above,
+  and `parseReviewedCommit`. This one REQUIRES the literal code-review scope
+  clause, and must stay that way. Both reach it only on a body already carrying
+  the `Codex Review` marker, which a real limit message never has, so widening it
+  buys nothing and costs something real: a review that merely QUOTES the detector
+  — every review of `auto-gate.js` does — would stop counting as a verdict while
+  `!looksLikeReviewArtifact` also denies it the degradation. `Codex has not
+  reviewed head <sha>` about a head it just reviewed, with no exit.
+
+  Step 2's jq is only this `parseReviewedCommit` mirror. It does not duplicate
+  the unavailable classifier or list its wordings; an absent verdict already
+  blocks this hand gate.
+
+  For the same reason, do not write the literal phrase out in these files.
+  `auto-gate.js` elides it, `auto-gate.test.js` splits it across a
+  concatenation, and a test fails if any of the four regains it.
+
+Auto Gate does not auto-merge an unreviewed head, and since #3819 it does not
+publish a green decision on one either. Silence blocks it — and, since #4091,
+blocks the manual path too, where its exit is `@codex review` on this head (a
+fresh covering verdict clears it). A fresh reviewer-unavailable response blocks
+it as well, with the unmet item
+
+> awaiting maintainer review — post `## Review — approve` on this head
+
+That is the whole exit, and anyone with the marker can take it on any PR,
+external ones included — it needs nothing from the author, which is why blocking
+on it is a gate rather than a stop with no way out. Post it and, on an allowlisted
+author's PR, the gate merges on its own (#3796); on anyone else's the PR was
+always maintainer-merged, so the marker restores the manual pass and you land it
+by hand. There is no longer a green manual-merge state for a hand to act on before
+the marker exists. The old rule left the review to a convention, and #3760 merged
+with zero reviews, zero review comments and no review events through exactly that
+gap.
+
+**Check that on an external PR by reading the blockers, not the unmet list.** The
+manual decision's conclusion is computed from `manualMergeBlockers` alone, and
+#3824 recorded the awaiting-review item only in `reasons` — so on external PRs the
+check kept going green with the verbatim title `PASS: reviewer usage-limited;
+maintainer review and manual merge required`, which is the string #3819 opened
+with as the defect (#3825). A BLOCKED manual decision names its first blocker in
+the title and lists every one of them, each with its own remedy, above the
+`Unmet automatic-merge requirements:` line.
+
+Either way the decision carries `Codex has not reviewed head <sha> yet`, and
+either way it will not merge for you. What to do:
+
+### Approving in Codex's place, so the gate can land it
+
+When Codex is unavailable the gate blocks with *awaiting maintainer review —
+post `## Review — approve` on this head* and declines to merge — correct, no
+review arrived. Before #3790 it also skipped the update-and-merge loop, so
+landing it meant landing by hand; under a strict up-to-date rule that means
+winning a race against the fleet: master merges every 18-22 minutes and one
+landing cycle is about 20, so the green head is behind by exactly one when the
+gate flips. #3767 lost six consecutive green heads that way.
+
+So a **maintainer approval bound to the head** carries the degraded pass onto the
+ordinary path (#3790). Write it as a PR comment whose FIRST line is exactly:
+
+```
+## Review — approve
+```
+
+or leave an APPROVED review — but the maintainer account cannot approve its own
+PR, which is why the comment marker exists.
+
+**The marker is not a self-approval for anyone but the maintainer (#4554).** A
+comment carries none of GitHub's authorship checks, so the gate counts a marker
+on the commenter's own PR only from `SELF_APPROVING_AUTHORS` (today
+`sachiniyer`). `## Review — approve` from `detail-app` on a PR `detail-app`
+opened is not an approval, and neither is any non-maintainer marker when the PR
+author cannot be read. Read who posted the marker before relying on it.
+
+Two things the gate insists on, and both matter:
+
+- **The entire first line, exactly.** Not a prefix. `## Review — approve, one fix
+  owed before landing` is the commonest heading here and it is **not** an
+  approval — a qualifier on the heading withholds it, on purpose, and that is how
+  a reviewer says "not yet" without inventing a second form. A prefix match would
+  read it as a sign-off and merge with the fix unlanded, which is worse than
+  having no marker at all, since the heading says in words that something is
+  owed. "Looks good to me, approving" is not an approval either, and neither is a
+  body that quotes the marker mid-text — which a Codex review of `auto-gate.js`
+  produces.
+- **The approval is bound to the head** by `headCurrentSince`, the same rule
+  Codex artifacts are held to (#3702). Push after approving and the PR returns to
+  the manual pass; a sign-off is about the code it was written against.
+
+  **An update-branch is not such a push (#3803, #4235).** A merge commit with
+  exactly two parents whose SECOND is contained in `master` is the shape `PUT
+  update-branch` produces — but a cheap pre-filter only, since a hand-written
+  conflict resolution has the same parents. The full gate also reads the merge
+  base and both parent trees and requires the merge commit's tree to equal the
+  path-level three-way result, or carry is refused. A path both sides
+  changed has no path-level result. On the gate's own update merge the gate
+  proves it line by line instead (`.github/auto-gate.md`); on any other
+  merge such a path refuses. When the proof passes, the
+  anchors — the approval and every Codex artifact — bind to the merge's FIRST
+  parent, the content head, because nothing about the reviewed change moved.
+  Without that the gate's own update-branch voided the approval it had just
+  acted on, and #3799 livelocked: approve, update-branch, anchors reset, approve
+  again. Any other head resets as before. Differing blob SHAs between the PR's
+  files and the content head rule carry out immediately (cheap negative); the
+  shape check and tree proof in `auto-gate.js` are only needed when blobs
+  match. Reading it by hand (this is the shape pre-filter; the tree proof runs
+  in `auto-gate.js`):
+
+```bash
+set -euo pipefail
+PR=<n>; G="${TMPDIR:-/tmp}/gate-pr-$PR"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+HEAD=$(jq -r '.head.sha' "$G/pr.json")
+BASE=$(jq -r '.base.ref' "$G/pr.json")
+
+PARENTS=$(gh api "repos/{owner}/{repo}/commits/$HEAD" --jq '[.parents[].sha] | join(" ")')
+set -- $PARENTS
+if [[ $# -ne 2 ]]; then
+  echo "head is not a merge — anchors bind to $HEAD, as usual"
+else
+  # Contained in base? "identical" or "behind" means yes.
+  ST=$(gh api "repos/{owner}/{repo}/compare/$BASE...$2" --jq '.status')
+  if [[ "$ST" == "identical" || "$ST" == "behind" ]]; then
+    echo "update-branch shape: content head $1, current head $HEAD — bind evidence to $1 only if the merge tree preserves the reviewed content (auto-gate.js verifies)"
+  else
+    echo "merge of something other than $BASE — anchors bind to $HEAD"
+  fi
+fi
+```
+
+It waives the REVIEW requirement and nothing else. A live finding, a missing
+`play-tested` label or a red required check still blocks — those do not depend on
+who reviewed, and this path auto-merges.
 
 1. **Re-trigger** with a `@codex review` comment and wait. Limits reset.
 2. **If it still does not post, get a real review from something that is not

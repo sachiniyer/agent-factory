@@ -1,0 +1,9 @@
+AF_PLAYWRIGHT_ARGS='-g keybar' scripts/testbox.sh web-selftest (final-revision excerpt)
+
+Running 2 tests using 1 worker
+
+#4036 PTY input (prefix; scrollback fixture tail omitted): "字\u0018字\u0018x字\u0018字\u0018x字\u0018x字\u0018x각\u0018각\u0018x가나\u0018xab\u0018xab\u0018ab\u0018a\u0002\u0018\u0018字\u0018文字文\u0018ab字\u0008a\ra\na\u001b\na\u001b\u0018a\u001b\u0018a\u001b\ra\u001b\u007fa\u0008a\u001b[Za\u001b[Za\u001b[1;5Aa\u001b[1;6Aa\u001b\u001ba\u001b[1;5H\u001b[1;3F\u001b[3;5~\u001b[1;3P\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tz"
+  ✓  1 [chromium] › selftest/phone-keybar.spec.ts:6:1 › #4036 phone keybar applies and consumes modifiers before the next letter (21.9s)
+  ✓  2 [chromium] › selftest/web-driver.spec.ts:11223:1 › 320px focused keybar keeps its last button inside the viewport (829ms)
+
+  2 passed (34.0s)

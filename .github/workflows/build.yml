@@ -9,6 +9,18 @@ on:
       - 'go.sum'
       - '.github/workflows/build.yml'
 
+  # A merge performed with GITHUB_TOKEN does not trigger `push`, so an auto-gate
+  # merge would land on master without this gate ever running (#3435). The gate
+  # re-raises it here by hand; `workflow_dispatch` is the documented exception to
+  # that suppression. No `paths:` filter applies to a dispatch, so it always runs.
+  workflow_dispatch:
+
+concurrency:
+  # A newer master push supersedes a stale run: the tip is the question. Keyed on
+  # workflow + ref, so PRs, merge_group entries and master never share a group.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Read-only: workflow only checks out source, runs tests, and uploads artifacts (artifact upload uses the Actions API, not repo contents).
 permissions:
   contents: read
@@ -36,8 +48,10 @@ jobs:
     # lane that runs `go test` therefore needs zsh, not just pr.yml — this job
     # runs the suite on the release matrix, and auto-release/stable-release run it
     # too. The runner is ubuntu regardless of the GOOS/GOARCH it builds for.
+    # Routed through scripts/ci-apt-install.sh so a third-party source in the
+    # runner image cannot fail this step by failing the update (#3774).
     - name: Install zsh
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+      run: scripts/ci-apt-install.sh zsh
 
     # Every matrix cell runs this step on the amd64 ubuntu runner — GOOS/GOARCH are
     # set only on the Build step below, so `go test` compiles and runs the SAME
@@ -51,12 +65,21 @@ jobs:
     # tests while still compiling the tree and running the fast unit tests. The
     # required PR gates (pr.yml Test + Test (macOS), both -race) run the FULL suite
     # with no -short, so native E2E/integration coverage is unchanged.
+    #
+    # -timeout is explicit on both branches: Go's default is 10m PER PACKAGE, and
+    # the daemon package sits close to it. Run 35205849014 (v1.0.290) measured
+    # daemon at 404.5s, 402.0s and 399.7s in three cells and 600.014s — a panic —
+    # in the fourth, a uniformly slow runner (per-test time summed to 599.4s,
+    # 1.5x its siblings across ~550 tests, no test over 13.4s; it needed ~603s).
+    # -short barely touches daemon (2-3 skips), so both branches get one number.
+    # 20m is 2x that slow-runner run and 3x the ordinary one; only a real wedge
+    # reaches it. scripts/go_test_timeout_test.go keeps every lane explicit.
     - name: Run tests
       run: |
         if [ "${{ matrix.goos }}/${{ matrix.goarch }}" = "linux/amd64" ]; then
-          go test -v ./...
+          go test -v -timeout=20m ./...
         else
-          go test -short -v ./...
+          go test -short -v -timeout=20m ./...
         fi
 
     - name: Build
@@ -72,3 +95,22 @@ jobs:
         name: agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
         path: build/${{ matrix.goos }}_${{ matrix.goarch }}/*
         retention-days: 7
+
+  # Re-wake the auto-merger when a master verification run raised by it (a
+  # `workflow_dispatch`) completes. Events made with GITHUB_TOKEN never start
+  # `workflow_run` workflows, but `workflow_dispatch` is the one exception, so the
+  # run itself must dispatch auto-merge.yml. Success AND failure kick (a red
+  # master still has `fix-master` PRs to merge); a cancelled run does not.
+  kick-auto-merge:
+    name: Kick auto-merge
+    needs: [build]
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch auto-merge.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run auto-merge.yml --ref master --repo "$GITHUB_REPOSITORY"

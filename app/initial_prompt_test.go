@@ -21,36 +21,19 @@ import (
 // `af sessions create --prompt` and the web modal both had it.
 //
 // These tests drive the REAL key path (handleKeyPress, not the sub-handlers)
-// so they cover the state dispatch and the menu-highlight hop a key must
-// survive during naming — a key that opens the field in handleStateNew but is
+// so they cover the state dispatch and the menu highlight a key passes through
+// during naming — a key that opens the field in handleStateNew but is
 // swallowed on the way there is exactly the bug shape this flow invites. The
 // highlight RENDER for the new hint is pinned separately, in
 // TestNamingKeysHighlightMenu (handle_input_test.go).
 
 // pressFormKey feeds msg through handleKeyPress the way the Bubble Tea event loop
-// does, including the re-emit hop: during naming, handleMenuHighlighting
-// intercepts the form's action keys, fires the highlight, and re-emits the key
-// as a message. Replaying that hop here is what makes the tests cover the
-// highlight path rather than route around it. Returns every non-key message the
-// press produced.
+// does — the menu highlight and the key's action in one call — and returns
+// every message the press produced.
 func pressFormKey(t *testing.T, h *home, msg tea.KeyMsg) []tea.Msg {
 	t.Helper()
 	_, cmd := h.handleKeyPress(msg)
-	if cmd == nil {
-		return nil
-	}
-	var out []tea.Msg
-	for _, produced := range drainCmd(t, cmd, time.Second) {
-		km, ok := produced.(tea.KeyMsg)
-		if !ok {
-			out = append(out, produced)
-			continue
-		}
-		if _, replayCmd := h.handleKeyPress(km); replayCmd != nil {
-			out = append(out, drainCmd(t, replayCmd, time.Second)...)
-		}
-	}
-	return out
+	return drainCmd(t, cmd, time.Second)
 }
 
 func typeRunes(t *testing.T, h *home, s string) {
@@ -281,29 +264,50 @@ func TestStartNewInstanceResetsThePromptField(t *testing.T) {
 	h.errBox.SetSize(120, 1)
 	h.pendingPrompt = "a prompt stranded by some earlier create"
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance()
 	require.Same(t, h, model)
-	require.Nil(t, cmd)
+	requireNamingFormOpened(t, h)
 	require.Equal(t, stateNew, h.state)
 
 	assert.Empty(t, h.pendingPrompt,
 		"beginning a create must start with an empty initial-prompt field")
 }
 
-// TestInitialPromptCtrlCCancelsTheCreate pins that ctrl+c keeps meaning "cancel
-// this create" inside the field, rather than being a dead key behind a modal.
-func TestInitialPromptCtrlCCancelsTheCreate(t *testing.T) {
+// Canceling a nested field preserves the enclosing create form (#4017 item 9).
+func TestInitialPromptCancelPreservesNamingForm(t *testing.T) {
 	h := newTestHome(t)
-	h.errBox.SetSize(120, 1)
-	startNaming(t, h, "abandoned")
+	h.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	inst := startNaming(t, h, "pending-session")
+	h.pendingPrompt = "saved prompt"
+	h.pendingProgram = "codex"
+	h.pendingBackend = "local"
+	h.pendingAccount = "work"
+	h.pendingAccountChosen = true
+	h.namingPlaceholder = "suggested-name"
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyShiftTab})
-	typeRunes(t, h, "never mind")
+	typeRunes(t, h, " discarded edit")
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyCtrlC})
+	t.Logf("80x24 after cancel:\n%s", h.View())
 
-	assert.Equal(t, stateDefault, h.state, "ctrl+c must leave the naming form entirely")
-	assert.Nil(t, h.namingInstance, "ctrl+c must cancel the pending create")
+	require.Equal(t, stateNew, h.state, "cancel must return to naming")
+	require.Same(t, inst, h.namingInstance)
+	assert.Equal(t, "pending-session", inst.Title)
+	assert.Equal(t, "saved prompt", h.pendingPrompt)
+	assert.Equal(t, "codex", h.pendingProgram)
+	assert.Equal(t, "local", h.pendingBackend)
+	assert.Equal(t, "work", h.pendingAccount)
+	assert.True(t, h.pendingAccountChosen)
+	assert.Equal(t, "suggested-name", h.namingPlaceholder)
 	assert.Nil(t, h.promptOverlay)
+	assert.Contains(t, h.menu.String(), "initial prompt")
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyShiftTab})
+	require.Equal(t, "saved prompt", h.promptOverlay.Value())
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyTab})
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyCtrlC})
+	assert.Equal(t, stateDefault, h.state, "ctrl+c in naming still cancels the create")
+	assert.Nil(t, h.namingInstance)
 }
 
 // TestWhitespaceOnlyPromptSendsNoPrompt mirrors the #973 title rule: a field

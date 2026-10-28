@@ -10,6 +10,129 @@ Auto Gate publishes two kinds of check run:
   app. It passes only when every open pull request to `master` at the commit has
   a passing composite decision.
 
+## Maintainer hold
+
+The `hold` label stops Auto Gate on one pull request. While it is present the
+decision is BLOCKED whatever else passes, and the summary names who applied it
+and when.
+
+It sits with the structural refusals — open, master base, not a draft, mergeable
+— above every read that produces an approval, a verdict or a play-test
+attestation. That placement is the mechanism: the degraded
+reviewer-unavailable path waives its one requirement only when nothing else is
+unmet, so a hold recorded before it makes that degradation unreachable. A hold
+evaluated later would be cleared by the same branch that clears the review
+requirement.
+
+**Anyone who can label may apply it. Only an allowed author who did not open the
+pull request may lift it** — plus `sachiniyer`, who may lift a hold on his own,
+since he opens most pull requests here. Removing it any other way does not
+clear the hold: Auto Gate puts the label back and keeps blocking, naming who
+removed it. This asymmetry is the point. GitHub already restricts *applying* a
+label to accounts with triage or write access, and leaves *removing* one just as
+open — which is what made converting a pull request to a draft useless as a stop
+lever, since GitHub lets the pull request's own author undo that (#4383, #4576).
+
+Who applied or removed it is read from the pull request's `LABELED_EVENT` /
+`UNLABELED_EVENT` timeline, in the same GraphQL request as the label list
+itself. The two therefore cannot disagree: either both arrive, or the pull
+request read fails and the decision is BLOCKED.
+
+Every reading that is not a clean answer resolves to a hold:
+
+| The gate sees | Decision |
+| --- | --- |
+| The label on the pull request | Held |
+| Its newest removal is by someone who may not lift it | Held; the label is re-applied |
+| No label-event history at all | Held — a history that did not arrive cannot show what removed the label |
+| A label event whose timestamp cannot be ordered | Held — "which happened last" is the only question asked |
+| No `hold` event, and older label events exist outside the newest-100 window | Held — an incomplete window cannot show the label was never removed |
+| The newest `hold` event *adds* the label but the pull request does not carry it | Held — something removed it out of view |
+| Its newest removal is by an allowed author who may lift it | Clear |
+| No `hold` event, and the window is complete | Clear |
+
+A false hold costs a maintainer one label removal. A false clear merges a pull
+request a maintainer stopped, which is why the direction is never reversed.
+
+Re-applying the label is best effort and the block does not depend on it: the
+hold stands on the removal record whether or not the write lands, and a labels
+API that refuses produces a warning rather than a red run. The re-application
+raises a `labeled` event this workflow subscribes to; the run it starts reads
+the label as present and writes nothing, so it does not loop.
+
+## Play-test evidence
+
+A PR touching production files under `app/`, `ui/`, or `session/tmux/`
+(other than the comment-only changes described below)
+requires the `play-tested` label and a comment from an account in the gate's
+`ALLOWED_AUTHORS` set. After testing, start the comment with this exact line,
+using the full 40-character SHA of the commit actually tested:
+
+```text
+Play-tested commit: <full tested commit SHA>
+```
+
+Put the command, result, and signature on subsequent lines. The latest matching
+comment is the attestation; the label alone no longer satisfies the gate.
+Comments are ordered by their update time, then descending numeric comment ID
+when timestamps share a second.
+Existing labeled PRs need a comment identifying their actual tested commit.
+Do not substitute the current head unless that is the code you exercised.
+
+An attestation for the current head passes directly. So does one for any
+commit on the head's proven update-merge chain (the content head and every
+update merge the proof walked; see the approval section below): each link is its
+first parent plus master, merged with no hand resolution, so gated changes that
+arrived through a link's second parent are master's, already gated on master,
+not the PR's (#4886). For any other commit, the gate compares complete Git tree
+snapshots of the tested commit and current head, restricted to the same gated
+paths and excluding `_test.go` files, and, when the head is such a chain, also
+the tested commit and the content head: the attestation carries if either
+matches. Evidence survives a master merge or rebase when those files are
+unchanged.
+Content, path, or file-mode changes require another play-test and a new comment,
+except a comment-only change to a `.go` file (below);
+merge shape alone cannot exempt a conflict resolution. A gated file edited and
+then reverted to its original content inside the window keeps the attestation:
+the comparison is over bytes, so the tested bytes are the current bytes. Missing
+or truncated trees block verification. Removing the label also blocks the
+automatic gate.
+The existing manual-path advisory policy for the TUI requirement is unchanged.
+For non-allowlisted authors, snapshot read failures remain advisory as well;
+they do not suppress the manual path's independent review blockers.
+
+This uses snapshot equality rather than the compare API's merge-base diff,
+which can omit differences between rebased heads and truncate its file list.
+The decision names both the tested SHA and the head it covers.
+
+### Comment-only changes
+
+A change that only rewords comments leaves nothing for a play-test to see, so it
+neither requires the label nor makes an earlier attestation stale (#4477). The
+gate treats a file that way only when it can prove the change is comment-only:
+
+- The file is a `.go` file present on both sides with the same regular file
+  mode. An added, removed, or renamed file, a mode change, a symlink, and any
+  file that is not Go stay gated.
+- Both complete files are read, and they must be the same once ordinary comments
+  are removed and whitespace is normalized, with newlines still counted. A diff
+  alone cannot prove this: a `//` line inside a raw string literal is string
+  content, and that string's opening backtick can be any distance above the
+  hunk. The logic is in `.github/scripts/go-inert.js`.
+- A comment that tools read is kept in the comparison, not removed: any `//`
+  comment not followed by a space or tab (`//go:build`, `//go:embed`,
+  `//line`, `//nolint`, commented-out code), `// +build`, `// go:`, an import
+  comment, and every `/* */` comment. A file that imports `"C"` is never
+  comment-only, because the comments above that import are C source.
+- For the label, the pair compared is the merge base and the PR head, and the
+  gate reads the files only when every added or removed line in GitHub's patch
+  is blank or a whole-line comment. So an edited trailing comment still requires
+  the label. For an attestation, the pair is the tested commit and the head.
+- If the gate cannot finish the proof (a failed read, a blob that does not
+  match its SHA, more than 20 candidate files, a patch GitHub did not send), the
+  file stays gated. The decision notes say which files were treated as
+  comment-only.
+
 ## Shared heads
 
 Two pull requests can point at the same commit. Their composite decisions remain
@@ -30,12 +153,359 @@ The manual workflow uses the base repository's built-in Actions token. It does
 not require a PAT, custom GitHub App, or ruleset bypass.
 
 Auto Gate never auto-merges fork heads. For a non-allowlisted author, however,
-the required decision passes as manual-only and lists any unmet automatic-merge
-requirements in its summary, restoring the normal maintainer-review path for
-external contributions. The same manual-only pass applies when the Codex
-reviewer is observed to be usage-limited against the head — no verdict can
-arrive in that case, so the gate degrades to maintainer review rather than
-wait indefinitely. Auto Gate disables any pending GitHub-native auto-merge
+the required decision uses the manual-only path and lists any unmet
+automatic-merge requirements in its summary, restoring the normal
+maintainer-review path for external contributions once its answerable blockers
+are cleared.
+
+**Live Codex findings are the exception, and they block that pass** (#3558). A
+finding is a claim about the code; it is no less true because of who opened the
+PR, so an unanswered inline finding — or one marked `RESOLVED` with no commit
+pushed after it — makes the decision fail rather than pass, and the summary
+names it above the advisory list, with the recovery that actually clears **that**
+blocker: an unanswered finding takes a threaded `RESOLVED`, `ACCEPTED` or
+`[gate-ack]` reply, while one already marked `RESOLVED` needs a commit pushed
+after it (or `ACCEPTED` / `[gate-ack]` to withdraw the claim) — a second
+`RESOLVED` cannot clear that one. Marker replies count only from an author in
+`ALLOWED_AUTHORS`; one from any other author does not clear the thread, and the
+blocker names that author instead of reporting the finding as simply unanswered
+(#4117).
+
+**An absent or stale verdict blocks that pass too** (#4091). The test is not "is
+it a finding" but "can a maintainer answer it per item, without the author
+iterating": post `@codex review` on the current head, and the blocker clears when
+Codex returns a fresh covering verdict. The missing play-tested label remains an
+advisory note as a separate policy choice; #4091 changes only the review-verdict
+requirement.
+
+**An unreviewed reviewer-unavailable degradation also blocks that pass** (#3825),
+but it has a different exit because another review request cannot produce a
+verdict. It takes the approval marker below. The absent-verdict blocker is
+suppressed whenever the latest exact-head Codex artifact proves the reviewer is
+unavailable, even if another unmet requirement temporarily prevents degradation
+from activating. The approval blocker replaces it immediately on the manual path,
+so an independent advisory cannot make the required decision green with neither
+a verdict nor an approval. It can appear beside a finding blocker; each item
+keeps its own maintainer-only exit.
+
+A degraded pass plus a **maintainer approval bound to the head** rides the
+ordinary update-and-merge loop instead (#3790): the review requirement is
+satisfied by the maintainer rather than skipped, so what is left is the mechanical
+part the gate already performs for every other passing PR. The approval is an
+APPROVED review from an allowed author, or a comment from one whose first line is
+exactly `## Review — approve` — the maintainer account cannot approve its own PR.
+The comment carries none of GitHub's authorship checks, so it counts as an
+approval of the commenter's OWN pull request only for a self-approving maintainer
+(`SELF_APPROVING_AUTHORS`, today `sachiniyer`); any other allowed author — the
+Detail app included — needs a second party, and an unreadable PR author counts as
+possibly its own (#4554). APPROVED reviews need no such check: GitHub refuses a
+self-approving review server-side.
+That is the ENTIRE first line, exactly, not a prefix: a qualifier on the heading
+(`## Review — approve, one fix owed before landing`) withholds the approval on
+purpose, so a review that owes a fix cannot land on its own heading.
+It is bound by `headCurrentSince` like a Codex artifact, so a push after the
+sign-off returns the PR to the manual pass. It waives the review requirement and
+nothing else.
+
+An update-branch is not such a push (#3803, #4235). Exactly two parents with the
+second contained in the base branch is the shape `PUT update-branch` produces, but
+a cheap pre-filter only; a hand-written conflict resolution has the same parents.
+The carry check is the complete-tree proof itself: it reads the merge base and
+both parent trees, derives the only path-level three-way result from each
+path's leaf entry (mode, type and object id — the only place blob identity
+enters the decision), and requires the merge commit's tree to match it exactly —
+a truncated, malformed or mismatched tree refuses carry.
+
+A path BOTH sides changed has no path-level result (#4886). On the gate's own
+update merge (author `github-actions[bot]`, committer `web-flow`, a signature
+GitHub verified) the gate proves it line by line instead: it reads the four blobs
+(merge base, both parents, the committed file), checks each against the object
+id its tree named, and requires the committed file to be exactly the merge base
+with every hunk of each side applied, the two sides' hunks neither overlapping
+nor adjacent (`.github/scripts/text-merge.js`). That is what `git merge-tree
+--write-tree p1 p2` equality stands for: nothing in the merged file is a line
+neither side wrote. A binary file, an add/add, a delete on either side, a
+symlink or submodule, a mode conflict, more than 20 such paths, a blob over
+4 MiB, a failed read or any byte difference refuses carry. A merge the gate did
+not write keeps the path-level rule, where such a path refuses. Before #4886
+this refusal was the whole reason a maintainer approval failed to carry across
+some update merges and not others: #4789's `a7705950` and #4825's `52b78a17`
+each had one file (`app/home_update.go`) that master and the PR had both
+touched, on merges `merge-tree` reproduces exactly.
+
+When the proof passes, the approval and every Codex artifact bind
+to the merge's FIRST parent — the content head — because the reviewed change did
+not move. Otherwise the gate's own update-branch would void the approval it had
+just acted on, which is the livelock #3799 hit minutes after #3796 landed. The
+decision names both heads.
+
+**The runs that update-branch triggers arrive parked, and the gate approves them
+(#3807).** The merge commit `PUT update-branch` writes is authored by the workflow
+token, so every `pull_request` run it triggers is attributed to
+`github-actions[bot]` and GitHub holds it in `action_required` behind "Approve and
+run". Measured on #3799 (`e5ab353f`) and #3802 (`09ffb01f`): PR Validation, Docs
+and Dependency review were all parked, the required checks never reported, and the
+gate read them as "missing" for over half an hour until a maintainer pressed the
+button by hand.
+
+This is the token's actor, not the fork policy. The repository's fork-PR setting
+is `approval_policy: first_time_contributors`, which applies to fork
+contributors; these are same-repo branches, so narrowing that policy would not
+help. After a successful update the gate therefore re-reads the PR — the endpoint
+returns a status message, not the sha it created — and approves EVERY parked
+`pull_request` run on the new head. Every one, not the workflow it happens to
+require: it was never only PR Validation. A queued or running job is left alone.
+
+Because that loop brings a behind head up to date itself, the ruleset's strict
+required-status-checks policy can stay on: a hand merge no longer has to win a
+race against the fleet's merge rate.
+
+**A PR that ends during its own update-branch is a lost race, not an evaluation
+failure (#4462).** The gate does not own this PR, and the open read its
+evaluation was acting on is minutes old by the time the PUT writes — leaving a
+window where a hand or queue merge plus GitHub's delete-on-merge can land
+before the write completes. A fresh pre-write `pulls.get` narrows it to a round
+trip; a confirming re-read after a rejection or an accepted PUT closes the
+rest. When a read proves the PR merged or closed, the lane refuses as ordinary
+waiting — `Refusing to merge PR #N; the PR was merged while its update-branch
+was pending` for the pre-write read, or the same refusal with `was in flight`
+after a rejection or an accepted PUT — so `processAggregateHead` invalidates
+the fixed aggregate and returns the ordinary `waiting` state: the workflow run
+does not fail, but the fixed aggregate stays red as that invalidation's
+enforcement record (the required `Auto Gate decision` check remains red). An
+accepted PUT whose post-update re-read proves the PR ended approves no parked
+runs and schedules no successor: nothing remains for this run to merge. The
+proof is the read, never the update's error shape alone (a 422 is also a real
+tree conflict, a 404 could be a fork PR still owed an answer); a read that
+fails or shows the PR still open stays the update failure it always was only
+on a rejected PUT — an accepted PUT whose confirming re-read fails or still
+shows the old open head instead sets `recoveryError` or observes no new SHA,
+and dispatches the successor Auto Gate run anyway, returning the ordinary
+waiting above rather than an update failure (#3551).
+
+**Every accepted update-branch schedules another Auto Gate evaluation (#4209).**
+The update endpoint can acknowledge before a PR read exposes its new head. The
+immediate approval and run-existence checks only execute when that read returns
+a different SHA, so a stale read used to skip both. The PR Validation dispatch
+inside the existence check could not repair that exit, and it never dispatched
+Auto Gate itself.
+
+After immediate recovery, the gate now dispatches `auto-gate.yml` on the trusted
+base branch with `pr_number` and the initiating `previous_head_sha`, even if the
+head read was stale or recovery failed. Recovery checks the PR's eligibility on
+each read: closed, merged, and non-master PRs are successful no-ops, including
+in the resolver workflow that consumes an empty target list.
+
+For an eligible PR, the successor excludes the initiating SHA, then invokes the
+existing `ensureValidationRun` recovery. Seeing a new head does not prove that
+its runs exist: this shared helper queries the `pr.yml` workflow specifically,
+waits for its late run, and then approves parked runs on the head. An earlier
+Docs or Dependency review run cannot satisfy that wait. If PR Validation never
+appears, the helper dispatches it. Recovery rechecks the PR before those
+writes and after the wait; a changed head must itself be recovered before it
+becomes a target. Six bounded recovery attempts prevent endless polling.
+A poll that never observed a successor ends quietly only when every read
+confirmed the initiating SHA (#5064): the successor's own events re-evaluate
+the head once its push lands. A read that answered without a resolvable head
+spoils that exit and fails loudly instead. Otherwise exhaustion fails with a
+recovery command instead of publishing a stale target.
+Ordinary manual dispatch without `previous_head_sha` keeps its single-read
+behavior. Queued/running runs still receive no approval writes.
+
+The follow-up dispatch reconciles against any run the ambiguous failure may have
+created before retrying (#5010); only a definitive refusal or an exhausted retry
+still fails the run. A failure is then an infrastructure error, not an ordinary
+refusal. The caller posts the recovery command on the PR, where
+it stays visible even if the head moves again, and includes the observed
+post-update SHA when available. The initiating lane does not write an aggregate
+on the successor head: that head has its own serialized owner, whose newer PASS
+must not be superseded by an unfenced recovery failure. Publication failures
+retain the original command in the workflow error. The workflow still fails;
+ordinary merge refusals remain successful waiting states.
+
+The successor reports its own failures on the PR the same way. Nothing else is
+guaranteed to revisit the head the gate pushed while its runs sit parked, and
+the successor runs under `workflow_dispatch`, whose payload names no head the
+resolver workflow could turn red. Every failure in its recovery goes through one catch: a
+retry-exhausted read, a refused read, and a recovery it could not confirm alike.
+That catch posts the rerun command on the PR, with the observed successor head
+when it has one, and keeps the command in the workflow error. Before this, an
+exhausted run listing or PR read ended as a red run on master whose message had
+no command, and even the resolver's own refusals never reached the PR.
+
+The first version of this fix reproduced the class of failure it was meant to
+remove: its caller could report recovery as handled while the promised work
+never happened. A stale successor target and a swallowed dispatch error are now
+tested through their consumers, not just through the helper producing them.
+
+**A base that moves between the compare and the merge waits; it does not red the
+run (#3808).** `PUT /pulls/N/merge` answers 405 `Base branch was modified` when
+another merge lands in the window the up-to-date compare cannot close. Nobody won
+that head and nothing merged, so it is not a concession — the gate reports it as
+its own refusal, invalidates the aggregate as it already did, and the next
+evaluation brings the head up to date. Conceding instead would exit success
+having merged nothing. Any other unclassified refusal still fails loudly.
+
+**A ruleset refusal with no proven winner preserves PASS (#3902).** GitHub can
+answer 405 `Repository rule violations found` immediately after the aggregate
+PASS write, before the ruleset observes that success. Writing a new failing
+WAITING generation in response created a permanent loop on #3893: every run
+published PASS, got 405, and erased its own PASS.
+
+Before merging, the gate re-reads the exact aggregate check it published and
+requires `conclusion=success`. It polls at most four times with delays of 250,
+500 and 1000 milliseconds. If success is not observable yet, it reports a wait
+and leaves the published PASS alone. It also checks the latest aggregate
+generation before merging, so a newer owner still prevents the merge (#3829).
+These observations narrow the propagation window; they cannot guarantee the
+ruleset's internal view is already current.
+
+After a 405 rule violation, the gate checks for a competing winner. A proven
+winner keeps the existing concession behavior (#3324). With no winner, it leaves
+the aggregate PASS, waits one second, and retries the merge once, re-running the
+full merge preflight first. If the second attempt gets the same refusal, the
+run reports the wait and leaves PASS green for propagation and the next run.
+When the gate can prove the aggregate's check-suite placement was superseded
+by a newer suite of the same workflow on the head, the report instead names a
+permanent placement whose remedy is to push a new head — an identical-tree
+commit re-rolls placement (#4802). If that preflight no longer passes,
+the aggregate is invalidated as before.
+An unreadable ownership check is not proof of no winner: it stays loud and does
+not overwrite an unknown owner. A successful merge still invalidates the old
+shared-head authorization because master has advanced.
+
+The evidence for "another transaction owns this head" is the newest published
+generation of the aggregate check, ordered by the timestamps a check run
+actually carries. A check run has **no `created_at`** — the resource exposes
+`started_at` and `completed_at` — so a generation comparison written against
+`created_at` silently compares nothing (#3827).
+
+The hand gate in `.claude/skills/gate-pr.md` runs precisely where this one
+cannot — on a PR that changes `auto-gate.js`, since Auto Gate runs master's copy
+of the helper, and during a Codex outage. For finding artifacts that bind to no
+head, that gate now CALLS `unansweredFindingArtifacts` from this script rather
+than restating the rule in jq: the restatement had drifted, and the shape that
+merged #3656 passed the hand gate for months after this script started blocking
+it (#3773). A test runs the skill's recipe and fails if the two disagree.
+
+A push never clears an inline finding by itself, and where the thread currently
+points is no part of the test. Moving the code a thread was anchored to only
+marks that thread outdated, which a rebase or a fix to the neighbouring line does
+as readily as the fix itself — so an outdated thread blocks exactly like any
+other until it is answered in-thread (#3689).
+
+When the latest Codex response against the head is reviewer-unavailable, no
+verdict arrived, so the gate degrades to maintainer review rather than wait
+indefinitely. That degradation is a block, not a pass (#3819): the decision
+stays red with the unmet item
+
+> awaiting maintainer review — post `## Review — approve` on this head
+
+and a maintainer approval bound to the head clears it. On an allowlisted author's
+PR the gate then merges it itself; on any other author's the PR is a manual merge
+regardless, so the approval restores the manual pass and the maintainer lands it
+by hand. Either way the marker is what clears it, and either way the decision is
+red until someone posts one — including on external PRs, whose conclusion is
+computed from the blocker list rather than the unmet list (#3825). It used to
+publish a green manual-only pass instead, which made the PR mergeable while
+leaving the review to a convention — #3760 landed that way with no review of any
+kind, and #3824 closed that everywhere except the external path, which kept
+publishing the same green pass until #3825.
+
+The known responses keep distinct causes: the usage-limit family is
+`usage-limit`, and `Codex Review: Something went wrong. Try again later by
+commenting "@codex review". Unknown error` is `failure` (#3951). The production
+response “To use Codex here, [create an environment for this
+repo](https://chatgpt.com/codex/cloud/settings/environments).” exposed why
+enumerating vendor stems is not sufficient (#3985). Classification is now
+structural: a top-level pull-review comment is a finding surface and never
+availability evidence (`pull_request_review_id` set with no `in_reply_to_id`,
+#3989). After also preserving a review body (`CODEX_REVIEW_RE` plus
+`REVIEWED_COMMIT_RE`), an automatic-review body (the Codex Review heading with a
+clean result, suggestions, or findings), a finding-shaped inline reply, and a
+parseable summary or verdict, every other non-empty Codex-authored artifact is
+reviewer-unavailable with kind `unrecognised`. Its first body line is retained as the cause so the
+gate summary names what it saw. Silence remains ordinary missing-review state;
+the absence of an artifact is not an unrecognised artifact. All unavailable
+responses use the same strictly-after-`headCurrentSince` timing rule and
+maintainer-review requirement.
+
+The shared outage record treats `usage-limit` and `failure` as strong enough to
+open an episode. An `unrecognised` response is weaker evidence of a
+repository-wide outage, so it extends an open episode but never opens one alone;
+within an open episode it remains strong evidence that no review happened on
+that PR. The record preserves all three causes. When a notice adopts the
+repository episode's earlier start, it uses specific wording only if that
+episode has the same single cause as the local answer. Mixed or differing causes
+use “Codex unavailable since” and list the recorded causes in onset order.
+Without a usable record, the local answer supplies both the start and the cause.
+A real review quoting an unavailable message remains a review.
+
+`<!-- codex-pull-request-review-summary -->` identifies the maintained
+“Codex Review Summary” activity comment. Its edit time is excluded from
+latest-response selection: an edit cannot supersede an earlier head-current
+unavailable answer. A Completed row is **never a verdict by itself** (#4052).
+It may supply a completion timestamp only when a Codex-authored artifact for
+the same commit corroborates it: a `Reviewed commit:` prose verdict, a submitted
+pull-request review (`/pulls/N/reviews`, matching `commit_id`), or at least one
+top-level inline review comment (`/pulls/N/comments`, matching `commit_id`).
+The row and corroborating artifact must both post-date the head's push anchor
+(`headCurrentSince`). An inline comment uses its creation time, so editing it
+cannot refresh old evidence. A submitted review without the prose footer must
+carry a known automatic-review body: the Codex review heading with a clean
+result, automated-suggestions wrapper, or findings. Empty wrappers and arbitrary
+submitted bodies do not count. Every reviewer-unavailable classification,
+including `unrecognised` (such as the environment-missing response), is rejected
+as corroboration and retains its outage meaning. Replies do not corroborate a
+review, and body links alone do not corroborate one.
+For each row, the existing push floor is advanced to the latest preceding
+unavailable Codex response for that commit. The corroborating artifact must be
+strictly newer than this combined floor: an earlier successful review cannot
+certify a later bare Completed row after a failed retry on the same head.
+Unavailable issue comments bind by time; reviews and replies naming another
+commit do not reset the floor. Response creation/submission times are used so
+later edits cannot hide an earlier failed attempt.
+
+This preserves #3606: an automatic review with real artifacts counts even when
+it omits the prose footer. The gate summary identifies the corroborating review,
+prose verdict, or inline comment count. A bare row instead reports “Codex has not
+reviewed head”; a usage-limit notice still requires maintainer approval through
+the degraded path.
+
+Running rows, malformed rows, and uncorroborated Completed rows are excluded
+from availability ordering as well as verdict selection. A maintained summary
+is status, never an unrecognised outage response. The repository outage record
+uses the same corroboration rule for current and superseded commits, with
+commit dates, PR creation, force-push history and recorded head announcements
+supplying historical freshness floors. Recovery uses the row's own time, never
+the summary edit time, and cannot be earlier than the corroborating artifact. A
+later artifact therefore cannot backdate a recovery or erase an earlier degraded
+merge.
+
+Reviewer-unavailable evidence includes Codex inline review replies
+(`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review
+(#3900). The reply's
+`commit_id` must match the head, the content head, or any verified intermediate
+update-branch merge, and its `created_at` must be strictly later than
+`headCurrentSince`; an edit cannot refresh an old answer. The latest artifact
+across issue comments, reviews and eligible replies wins (the reply wins a tie
+with its empty enclosing review), and a later real verdict supersedes the
+unavailable response. The decision names the inline comment id. Replies do not
+supply verdicts or enter the body-finding artifact list, and finding-shaped text
+is not accepted as an inline outage answer. The existing finding predicates are
+unchanged.
+
+What counts as that observation is one rule, stated once as `CODEX_LIMIT_RULE` in
+`.github/scripts/auto-gate.js` and quoted here verbatim because a test requires
+every statement of it to agree (#3744):
+
+> A Codex usage-limit message counts as a review outage unless its
+> scope clause names a job this repository has OBSERVED naming something other
+> than review. An unobserved phrasing counts, because a false block during a real
+> outage has no exit while a false degrade leaves a maintainer-review exit a
+> human can take.
+
+Auto Gate disables any pending GitHub-native auto-merge
 request before publishing that pass. Review and review-comment workflows can be
 read-only for fork pull requests; if one cannot update the decision, run Auto
 Gate manually by PR number from the base repository. The `pull_request_target`
@@ -50,9 +520,93 @@ bypass: a maintainer's direct merge is supposed to meet the same required check
 as the workflow's merge. The stable-release deploy key may retain its narrow
 bypass because that non-session path updates the release commit directly.
 
+## Queued-only deduplication
+
+Every run follows this dependency graph:
+
+```text
+auto-gate (resolve event heads, then invalidate each selected aggregate)
+  -> apply-gate (one reusable-workflow call per invalidated head)
+    -> aggregate transaction (head-serialized evaluation/report/merge)
+```
+
+A concurrency group keeps at most one running and one pending run; a newer
+pending run replaces the older one. Replacement is safe only when the
+survivor's invalidation covers every head the cancelled pending run would have
+covered — a run discarded while pending never reaches invalidation, and an
+uncovered head keeps its stale verdict. The workflow-level group is keyed so
+that guarantee holds: scheduled and dispatched reconciliation passes share one
+fungible group; comment and
+review events coalesce per PR; status and workflow-run events
+coalesce per named commit; the remaining pull_request_target actions coalesce
+per (PR, payload head); synchronize stays keyed to its exact (before, after)
+transition and workflow_dispatch to its (PR, previous head), because those two
+carry coverage no later run reproduces.
+
+`cancel-in-progress` is `false` everywhere, so a queued run can never interrupt
+an active transaction — but it governs only pending-run replacement. The
+platform itself can cancel jobs inside an ACTIVE run: during GitHub's
+2026-10-05 hosted-runner incident, jobs queued inside running transactions for
+~15 minutes were cancelled without executing a step, and runs that had already
+resolved their coverage died before invalidating it (#5160). Selection and
+invalidation therefore share one job: a run whose evaluate step committed has
+no queued job boundary left between its selected heads and the WAITING
+aggregate marker that makes them recoverable. A head left at that marker is
+re-evaluated once it outlives a live transaction's 15-minute lease — and a pass
+that sees the marker while it is still young retains it, re-scanning inside its
+own run until it matures or resolves. A pass that saw work at all requests one
+rate-windowed successor — leftovers are owed the wakeup, and selected work is
+applied by apply-gate, a queued job the platform can still cancel after the
+pass ends. Healing needs no human action and never waits on the schedule's real
+delivery cadence. Heads a mid-job cancellation never reached
+stand where an undelivered event leaves them; the pass's stale-decision
+coverage is the backstop for both.
+
+Inside each surviving run nothing changed: neither the resolver nor
+invalidation waits on a grouped job, every event still invalidates before any
+serialized lane, and a newer event can still invalidate while an older
+transaction is running. Only successfully invalidated heads enter evaluation.
+This preserves generation ownership checks immediately before PASS and merge,
+including write retries. Runner availability and API failures still apply;
+concurrency adds no wait here.
+
+One exception: an invalidation GitHub's API could not complete — a rate limit
+(#4461), or a create answered with a 5xx whose marker never became listable
+(#4763) — is retried once and then deferred into the lane, which retries the
+invalidation itself. A check-run create is never replayed on an ambiguous
+failure; it is reconciled by its marker over a seven-second window. If the
+lane's own create is still unconfirmed after that, the lane reads the newest
+published generation of the fixed aggregate. When that generation is already
+non-passing, the transaction stops without evaluating, retitles it `UNKNOWN`
+(concluded `failure`, never `neutral`, which the ruleset counts as satisfied),
+and the run does not fail. When it satisfies the ruleset, is absent, or cannot
+be read, the run fails: a stale PASS may still be what the ruleset enforces, and
+nothing replaced it.
+
+The calling evaluation job holds `auto-gate-target-<target>-head-<head SHA>`
+for the entire reusable aggregate transaction. The target is the issue or PR
+number, dispatch PR number, workflow-run head SHA, or
+status SHA (in that order), falling back to the unique run ID. With
+`cancel-in-progress: false`, newer pending evaluation jobs replace older pending
+jobs for that target/head; active transactions are never cancelled. Every
+comment event remains subscribed, including marker replies. The surviving job
+re-reads current PR, review, and check state.
+
+`resolveAggregateHeads` consumes a synchronize payload's `before` in the
+ungrouped resolver, and invalidation covers both current and previous heads.
+The matrix creates a separate evaluation call for each head. Its head suffix
+prevents a later same-PR comment about the current head from replacing the
+previous-head refresh; that refresh still reevaluates other PRs sharing the
+previous commit. This also preserves a head resolved before a subsequent push.
+
+The reusable workflow keeps the existing `auto-gate-aggregate-<head SHA>` job
+lane with `cancel-in-progress: false`. Different PR or SHA targets sharing a
+commit still serialize there. The target and aggregate prefixes are distinct,
+so the caller never waits on a lock it already holds.
+
 ## Event and merge ordering
 
-Each subscribed input event first creates a new non-green aggregate generation
+Each subscribed run first creates a new non-green aggregate generation
 without waiting for the head's serialized lane. It then refreshes every
 associated PR/head decision, republishes its own generation, and considers a
 merge inside that lane. If a newer event invalidates the head while the older
@@ -62,15 +616,332 @@ synchronization reevaluates both the new head and the previous head because the
 set of associated PRs changed for both commits. After a successful merge, the
 same transaction explicitly makes the old-head aggregate non-green; it does not
 depend on a `closed` event that GitHub may suppress for token-authenticated
-writes.
+writes. A transaction that dies between invalidation and application — a
+platform cancellation, not a decision — leaves the head at that non-green
+marker; the reconciliation pass below re-evaluates it once it outlives a live
+transaction's lease.
 
-GitHub suppresses `check_suite` recursion for suites created by Actions. The
-required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
-also subscribes to that workflow's terminal `workflow_run` event. This ensures
-their completed state is reevaluated without subscribing Auto Gate to itself.
+Auto Gate does not subscribe to `check_suite` (#5177). GitHub does not
+suppress `check_suite` recursion for suites created by Actions — it only
+suppresses new workflow runs for events written with `GITHUB_TOKEN`, and a
+suite completing is a platform lifecycle transition, not a token write. So
+every run's own github-actions suite completing re-fired the workflow on the
+same head: ~200 self-triggered runs/hour measured on master for days. No
+payload predicate can run before the run exists (`on.check_suite` filters
+only on `types`), and a job skipped by `if` still completes its suite
+(skipped jobs land in it as completed check runs), so a filter inside the
+run would only trade working runs for skipped ones while the chain kept
+growing. The subscription itself is the only filter. Nothing needed is lost:
+every required check is Actions-owned, the required `Lint` and `Build` jobs
+both belong to **PR Validation** and Auto Gate still subscribes to that
+workflow's terminal `workflow_run` event, commit statuses arrive through
+`status`, and a suite completing on the master head never resolved a
+pull-request target anyway — no open PR owns that commit — so
+merge-triggered verification suites re-evaluated nothing the fleet needed;
+master-advance staleness belongs to the reconciliation pass. If the ruleset
+ever gains a required check owned by a non-Actions app, its pending state is
+a transient block the pass already re-evaluates; re-adding `check_suite`
+needs a trigger-level app filter that does not exist today.
+
+GitHub has intermittently omitted that `workflow_run` event, so a
+reconciliation pass backs it up: it wakes only an absent exact decision, or
+a failed decision that names `Build` or `Lint` as a blocker and recorded a
+different state for the now-complete check. Runs are coalesced per PR/head. The decision records the check-run ID,
+status and conclusion that its
+required-check read actually observed; the reconciler compares that tuple with
+the current completed run rather than ordering check and publication clocks.
+Missing or malformed legacy evidence is reconciled conservatively once.
+
+**A pass does not depend on the schedule (#4571).** The `*/5` schedule still
+starts passes, but GitHub has delivered it every two to five hours — measured
+at 30 fires in 6.6 days against ~288 expected per day (#5179). Every other
+Auto Gate run therefore ends by requesting a pass: it sends one
+`repository_dispatch` of type `auto-gate-reconcile`, and the run that starts is
+the same pass the schedule runs. A PR Validation run ends the same way
+(#5179): its last job POSTs the dispatch itself — a synchronous API write
+inside the run whose completion is at risk, so a dropped `workflow_run`
+delivery cannot strand the decision that completion should have refreshed —
+and its POST is a warning on failure, never a silent skip. Fork and Dependabot
+`pull_request` runs carry read-only tokens and cannot POST, so the job skips
+them outright and `workflow_run` remains their wakeup. Two guards bound this:
+
+- **No open-ended recursion.** A pass requests a pass only as a handoff: when
+  it saw work at all — leftovers its bounded wait could not finish or the caps
+  deferred, and the work it did select, whose application in apply-gate is a
+  queued job the platform can still cancel — it sends one dispatch through the
+  rate window. Two shapes in that window cannot cover the leftover work and so
+  cannot hold it: the pass's own run (a dispatched pass would otherwise always
+  count itself) and completed predecessor passes (a finished A is why B is
+  running at all — its coverage was already spent). A sibling still queued or
+  running does bind. A pass that scans an empty repository asks for nothing, so
+  every chain ends. The request step skips `schedule` and `repository_dispatch`
+  runs, and the helper refuses those events on the ordinary path, so no pass
+  ever starts the chain on the public lane. Runs that a pass causes, such as
+  update-branch recovery dispatches, can request one, but only through the
+  rate window.
+- **At most one request per five minutes.** The marker is the creation time of
+  Auto Gate's newest `repository_dispatch` run, read with one REST request
+  (`event=repository_dispatch`, `created>=` the window start, one short page so
+  the caller's own run — excluded client-side — cannot hide a sibling).
+  Every requested pass is such a run, so a pass that selected nothing still
+  counts. GitHub stores the marker, so the gate writes no variable, ref, or
+  check run. A failed or unreadable read sends nothing, and the schedule
+  remains the backstop. Two runs that read before either dispatch is visible
+  can both send one. Dispatched and scheduled passes share one concurrency
+  group, which holds one running pass and one pending pass, so that race costs
+  at most one extra scan.
+
+Each pass paginates every open PR in creation order and carries its current check
+rollup in the same GraphQL snapshot, 100 PRs per request. Eligibility therefore
+depends on neither `updated_at` ordering nor a wall-clock page assignment: every
+PR, including the least recently updated one, is inspected in the next pass. On
+an active repository, the first Auto Gate run after the window opens requests
+that pass. A frozen decision then waits about five minutes plus runner queue
+time, not hours. A quiet repository falls back to the schedule. A delay adds to
+that wait but cannot make a pass skip a page. At most ten stale decisions are
+reevaluated per pass, so S simultaneously stale decisions
+drain in at most `ceil(S / 10)` passes. A truncated per-head rollup is
+skipped fail-closed rather than treated as complete.
+
+The scan costs `ceil(N / 100)` GraphQL requests per snapshot, plus `ceil(B / 25)`
+GraphQL requests that re-read the outputs of the B completed non-success
+decisions whose output the page dropped, batched by node id (#4975). A pass that
+retains not-yet-eligible work re-runs that whole snapshot on each in-pass rescan
+(see below). Every rescan fetches current repository state, so both `N` and `B`
+can change between snapshots (e.g. a decision that becomes blocked after the
+initial scan adds output batches only to later scans). The per-pass total is
+therefore the sum over the initial scan plus each rescan,
+`Σ_i (max(1, ceil(N_i / 100)) + ceil(B_i / 25))` requests, with the rescans bounded by
+the sixteen-minute retention wait. A snapshot with no open PRs still costs one page
+(`requiredCheckReconciliationSnapshot` issues its initial GraphQL query before it can
+discover that pagination is finished), so the page-read term is `max(1, …)`. For a
+population that does not change
+between scans this collapses to `(1 + rescans) × (max(1, ceil(N / 100)) + ceil(B / 25))`.
+The rate window holds
+ordinary-request dispatches to about 12 an hour; a handoff chain paces itself
+by pass completion instead — one running pass plus one pending successor in the
+shared group, each link capped at ten evaluations — and a scheduled pass adds a
+few more.
+That is one request per snapshot (about 12/hour) through the 83-head REST-quota
+threshold, or two (about 24/hour) for 120 PRs, before bounded retries — plus the
+`ceil(B / 25)` output-batch reads above (four at the 83-head threshold when every
+head is blocked, before bounded retries), each repeated per in-pass rescan. The scan
+does no per-head REST reads except when a queued check run faces a dated
+rival; it then re-reads just that head via `listForRef` to order the run
+(#4427). Each other run pays one REST read for the marker,
+plus at most one dispatch per window. Passes skip unrelated branch-sweep
+housekeeping. This avoids both the frozen-decision failure and one gate
+evaluation per completed matrix job (#4242).
+
+**A pass also retries transient blocks (#4782).** Some blocks clear with time
+and send no event when they do, so a decision taken on them used to sit BLOCKED
+until someone ran a manual `workflow_dispatch`. A pass re-evaluates two shapes
+once they have aged, using the same snapshot, so they cost no extra read:
+
+- **A decision blocked only by transient state**, evaluated at least ten minutes
+  ago. There are three transient reasons, tagged where each is produced:
+  mergeability still `UNKNOWN` or absent (GitHub computes it asynchronously), a
+  required check still settling (queued, in progress, a pending status, or
+  CodeQL's interim neutral), and a `Build` or `Lint` check that has not reported
+  yet (every base-repository head gets a PR Validation run, and evaluation
+  dispatches one when none exists). `reportDecision` writes
+  `<!-- auto-gate-transient-block -->` into the decision's output text only when
+  every reason is one of those. Any other reason keeps the marker off,
+  including a hold, a failed check, a conflict, a finding, a missing verdict,
+  a missing approval, an unapproved parked run, or any reason added later
+  without a tag. Manual-merge decisions never carry it. An unmarked decision is
+  never selected.
+- **A fixed aggregate left at `WAITING: refreshing every PR/head decision at
+  this commit`** for at least fifteen minutes. That title belongs to an
+  aggregate transaction in progress, so one this old means the transaction died.
+  Re-evaluating any PR at the head re-applies the aggregate.
+
+The age is the spacing. A retry that still sees the transient state rewrites
+the decision stamp, so one PR costs at most one evaluation per ten minutes,
+however long the state lasts. Transient retries take only the slots that
+PR Validation wakes leave under the pass's ten-evaluation cap, and at most five.
+The oldest go first, so a backlog drains instead of starving.
+
+A pass does not leave either shape to luck when it sees them too young. The
+request that spawned the pass fired while the marker or decision was fresh, and
+a platform-cancelled lane schedules nothing at all, so the pass retains the
+pending work itself (#5160): it re-scans inside its own run — one early probe a
+minute in, then straight to each item's maturity point instead of a scan a
+minute — until each item matures and is selected, or resolves because its live
+lane finished first. The wait is bounded at sixteen minutes. A pass then hands
+exactly one successor dispatch through the same five-minute window whenever it
+saw work at all: unmet leftovers — still-pending items, or work the caps
+deferred — are owed the wakeup, and *selected* work is owed one too, because
+applying it is apply-gate's job and the platform can cancel that queued job
+after the pass ends. The successor sees the fresh markers young, retains them
+through the same wait, and re-applies them if the lane died; when nothing died
+it scans an empty repository and asks for nothing, so the handoff costs one
+quiet pass. A stranded head is therefore re-evaluated at its fifteen-minute
+boundary plus one probe, not at the schedule's real delivery cadence.
+
+**A head with no PR Validation run at all gets one dispatched (#4581).**
+Reconciliation wakes a decision when Build or Lint completes, so it cannot help
+a head whose run GitHub never created. #4430's `b63f9752` was an ordinary lane
+push that got an Auto Gate run and no PR Validation run, and its decision said
+"required check Build is missing" until someone dispatched `pr.yml` by hand.
+When an evaluation finds Build or Lint absent and no run parked, it first asks
+whether any PR Validation run exists for the head sha, under any event:
+
+- **A run exists** (queued, running, finished, or dispatched earlier): nothing
+  changes, and the decision reads as before.
+- **No run exists:** the gate dispatches `pr.yml` on the PR's branch, the same
+  mechanism the update-branch recovery uses, and the missing-check reasons say
+  so.
+
+Guards:
+
+- **Once per head.** The existence read is the marker. A dispatched run carries
+  the sha it ran at, so every later evaluation of that head finds it and stops.
+  The gate writes no state of its own. Two evaluations that read before either
+  dispatch is visible can both send one. The dispatch passes no inputs, so it
+  is a full run rather than a #4563 probe. `pr.yml` groups it by its branch ref
+  (`pr-<ref>`, apart from probes' `probe-<ref>`) and cancels in progress, so
+  that race costs one cancelled run, and a probe on the branch cancels neither.
+- **Toward waiting.** A failed or malformed read dispatches nothing, and the
+  decision reads as before. A missed dispatch costs a delay, but a dispatch loop
+  would cost the runner pool.
+- **Not mid-push.** GitHub creates a push's runs a few seconds after the head
+  moves, so absence is confirmed over the same bounded wait (three reads, five
+  seconds apart) that update-branch recovery uses.
+- **At this head only.** A dispatch takes a ref, so the branch tip is read last,
+  and a tip that is no longer the evaluated head skips the dispatch. The newer
+  head gets its own evaluation.
+- **Only where GitHub would have run it.** Fork heads, conflicting or
+  still-computing merges, PRs that are not open master PRs, and merge-queue
+  batches get no dispatch. GitHub creates no `pull_request` run for those either.
+
+The cost is one REST read per evaluation that finds a PR Validation check
+absent. It finds a run on the first read in the ordinary case. A dispatch also
+runs PR Validation for a head whose commit message skipped CI, because the gate
+cannot merge a head whose required checks never report.
+
+GitHub also suppresses `push` workflows when Auto Gate merges with its
+`GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five
+master-verification workflows named by `MASTER_PUSH_WORKFLOWS`: Build, Docs,
+Lint, TUI driver selftest, and Web selftest. A dispatch ignores each workflow's
+path filter, so all five run after every Auto Gate merge. The literal list is
+kept honest by the required auto-gate helper test, which scans workflow triggers
+and requires every listed workflow to accept `workflow_dispatch`.
+
+The gate runs master's pre-merge helper. A merge that first adds or renames one
+of those workflows cannot re-dispatch that new entry for its own landing commit;
+the post-merge warning names the gap, the maintainer dispatches that first run,
+and every later merge uses the updated list automatically.
 
 Repository-ruleset changes and mergeability changes caused only by `master`
-advancing have no GitHub event here. Use the same manual PR-number dispatch to
-refresh that observational state. The destructive merge path still reevaluates
+advancing have no GitHub event here. A mergeability still `UNKNOWN` is retried
+by the reconciliation pass (#4782). For anything else, use the same manual
+PR-number dispatch to refresh that observational state. The destructive merge path still reevaluates
 the target PR, every other associated PR, and the association set immediately
 before its write.
+
+## Head-branch pruning
+
+`delete_branch_on_merge` does not fire for a `GITHUB_TOKEN` merge, so the gate
+deletes the head branch itself (#3603). Three conditions have to hold, and each
+one no-ops rather than failing — the merge has already landed, and no pruning
+problem is worth reporting it as a failure:
+
+- **(a)** the head repository is this repository — a fork's branch is not ours,
+  and the token could not delete it anyway;
+- **(c)** no open PR is based on the branch, and no open PR still has it as a
+  head — deleting it would close the first and leave the second headless;
+- **(b)**, last and immediately before the delete, the branch still points at the
+  commit that was merged. A lane that pushed after the merge keeps its branch:
+  that work is not in `master`, and the pushed ref may be its only copy. Neither
+  the REST ref API nor GraphQL's `deleteRef` accepts an expected OID, so ordering
+  is the only lever there is.
+
+Those conditions are correct when the merge asks them and nothing revisits the
+answer, so a branch kept for a reason that later disappears leaks forever
+(#3852): #3847 was the base of the open #3849, and #3849 was retargeted onto
+`master` 89 seconds after #3847 merged.
+
+The resolver job therefore runs a **sweep** on every gate run, including the runs
+where nothing merges. It enumerates every branch on the repository in one
+GraphQL query — name, tip, ruleset rules, and the pull requests whose head it is
+— and treats a branch as a candidate only when a merged PR of this repository has
+it as a head and its tip still equals that merge's head. The default branch, a
+protected branch, and a branch whose rule list could not be read in full are
+never candidates. Each candidate then goes through the same helper the merge path
+uses, so the three conditions have one home and get fresh reads. The pass is
+capped per run, so a backlog drains over several runs rather than making one run
+slow, and its one-line summary is the `branch_sweep` output of the resolver job.
+
+Deleting a ref is the gate writing to the repository on its own, so the sweep is
+gated on `AUTO_GATE_ENABLED` like the merge itself. With that switch off nothing
+merges, so nothing new leaks either.
+
+## Reviewer outage record
+
+Master Health Watch (task `4ab7ba4f`, hourly) owns one comment on #3932,
+identified by `<!-- codex-reviewer-outage:v1 … -->`. Each run executes:
+
+```sh
+node .github/scripts/codex-outage.js sachiniyer/agent-factory
+```
+
+The helper creates that comment once, then updates it in place. It preserves
+completed outage episodes, closes each at the first real `Reviewed commit:`
+verdict, and names the start, latest notice, elapsed hours, and merged PRs.
+A later outage adds another episode to the same record. No issue is closed and
+no new issue or per-PR outage comment is opened. Run with a final `--dry-run`
+argument to inspect the proposed body without writing it.
+
+The sweep paginates PRs in updated order back to the #3932 evidence window
+(2026-09-05 UTC) on bootstrap, including open and closed PRs. Later sweeps use a
+named 24-hour recompute window: a completed episode's boundaries and outage
+evidence are frozen only when
+its recovery is older than `now - 24h`. The sweep scans from 1 ms after the
+latest frozen recovery, or from the bootstrap boundary when none is frozen, and
+re-aggregates everything after that boundary with the current classifier. This
+lets corrected classification discover earlier evidence and wholly missed
+recent episodes without re-aggregating frozen history. With no episode inside
+the window, the latest frozen recovery supplies the same scan start as before.
+Older history therefore cannot disappear and does not require rescanning all
+past PRs. An episode starts at the first observed known limit or transient
+failure, not the preceding verdict. An unrecognised response extends an episode
+already open but does not open one by itself. The sweep reads **both**
+`/pulls/N/comments` and
+`/issues/N/comments` unfiltered, plus review bodies. The shared classifier
+structurally removes top-level pull-review comments from that feed before body
+classification; those artifacts are finding surfaces, while replies retain the
+finding-shaped body guard. It reconstructs degraded merges using #3932's method:
+a reviewer-unavailable response whose artifact timestamp falls inside the
+episode and before merge, plus no real verdict covering the merged head before
+merge — where coverage admits the same head set the gate accepts: the merged
+head and each first parent the update-branch proof verifies content-preserving
+(#4238, #4241). Each degraded merge is attributed once, to the episode holding
+the latest qualifying notice at or before that merge, even when the merge lands
+after recovery. Scanned merged PRs have their attribution refreshed across both
+rebuilt and frozen episodes, so merges after the 24-hour boundary are counted
+too; unscanned PRs retain their recorded counts. This is historical coverage
+accounting, not a second
+implementation of the merge gate; the count is labelled with its method in the
+record. An unrecognised artifact before the episode is not evidence. Late
+reviews cannot undo a degraded merge. The shared `codexEvidence` export from
+`auto-gate.js` supplies structural classification, quotation/finding exclusions,
+verdict parsing, and the update-branch content-head proof, so the record and the
+gate cannot drift apart on what a covering verdict may name. Finding predicates
+and the hand gate's jq are unchanged.
+
+On a degraded evaluation, Auto Gate reads this record once and writes the
+outage duration to the job summary. It labels the watch's observation time;
+between sweeps, or if the record cannot be read, it falls back to the duration
+observed on the PR and says so. The record never authorizes a merge, and an
+unreadable record never changes a gate decision. Per-head unavailable evidence
+and maintainer approval are still required exactly as before.
+
+The live task prompt must run the helper before its no-findings early exit.
+Until this helper lands on master, it skips that command when the file is absent.
+The watch is the only writer; do not run overlapping write sweeps. Transient
+`gh api` failures — transport errors, empty or truncated bodies, 5xx, and
+rate-limit (including secondary) 403s — retry on a bounded backoff; real 4xx
+answers are not retried. A scan that still cannot finish writes a record
+marked incomplete, carrying the last complete episodes, rather than aborting
+or posing as a clean read (#4629).

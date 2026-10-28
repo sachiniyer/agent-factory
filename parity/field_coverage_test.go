@@ -63,7 +63,7 @@ func validateFieldDecls(t *testing.T, caps map[string]capability, surface, label
 				"  {\"gap\": \"<capability-id>\"}  — a real divergence, tracked by that capability\n"+
 				"  {\"ok\": \"<reason>\"}          — its absence is correct, and here is why\n\n"+
 				"This is the option dimension: the verb is present but the option is not. "+
-				"See docs/surface-parity.md.", label, f)
+				"See docs/dev/surface-parity.md.", label, f)
 			continue
 		}
 		switch {

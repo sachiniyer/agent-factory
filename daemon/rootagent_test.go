@@ -68,7 +68,8 @@ func TestLegacyRootAgentSelectionIsDeterministicAcrossEquivalentPaths(t *testing
 	}
 	manager := &Manager{cfg: cfg}
 	for range 100 {
-		got := manager.legacyRootAgentForRepo(repo.ID)
+		got, err := manager.legacyRootAgentForRepo(repo.ID)
+		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "first", got.Program)
 	}
@@ -86,7 +87,7 @@ func TestEnsureRootAgentsCreatesInPlaceRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("expected 1 create, got %d", len(*seen))
@@ -123,52 +124,13 @@ func TestEnsureRootAgentsHonorsProfileOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("expected 1 create, got %d", len(*seen))
 	}
 	if (*seen)[0].Program != customProgram {
 		t.Fatalf("explicit root program must be used verbatim, got %q", (*seen)[0].Program)
-	}
-}
-
-// TestRootAgentProgramOverrideMatrix pins the #1116-class fix in the root
-// profile: the claude-only --dangerously-skip-permissions flag is ensured
-// only when the RESOLVED command actually runs claude. A program_overrides
-// entry pointing "claude" at a non-claude program (e.g. the play-test
-// sandbox's "bash") must launch verbatim — the appended flag would make it
-// exit instantly and the root agent would flap forever.
-func TestRootAgentProgramOverrideMatrix(t *testing.T) {
-	tests := []struct {
-		name     string
-		override string // program_overrides["claude"]
-		want     string
-	}{
-		{"bare enum appends flag", "claude", "claude --dangerously-skip-permissions"},
-		{"claude path override appends flag", "/opt/claude-next/bin/claude --model opus",
-			"/opt/claude-next/bin/claude --model opus --dangerously-skip-permissions"},
-		{"flag already present not duplicated", "claude --dangerously-skip-permissions",
-			"claude --dangerously-skip-permissions"},
-		{"non-agent override left verbatim (#1116)", "bash", "bash"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-			repoPath := setupControlRepo(t)
-			// Every row pins an explicit override entry: with none present,
-			// config loading auto-detects a machine-local claude path into
-			// ProgramOverrides, which would make the row nondeterministic.
-			cfg := config.DefaultConfig()
-			cfg.ProgramOverrides = map[string]string{"claude": tt.override}
-			if err := config.SaveConfig(cfg); err != nil {
-				t.Fatalf("SaveConfig: %v", err)
-			}
-			got := rootAgentProgram(repoPath, config.RootAgentConfig{})
-			if got != tt.want {
-				t.Fatalf("rootAgentProgram = %q, want %q", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -184,7 +146,7 @@ func TestEnsureRootAgentsAdoptsLiveRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("expected initial create, got %d", len(*seen))
 	}
@@ -195,7 +157,7 @@ func TestEnsureRootAgentsAdoptsLiveRoot(t *testing.T) {
 
 	for _, status := range []session.Status{session.Running, session.Ready, session.Loading} {
 		first.SetStatusForTest(status)
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 		if len(*seen) != 1 {
 			t.Fatalf("ensure over a live root (status %v) must be a no-op, got %d creates", status, len(*seen))
 		}
@@ -216,14 +178,14 @@ func TestEnsureRootAgentsHealsDeadRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	if first == nil {
 		t.Fatalf("root instance missing after first ensure")
 	}
 
 	first.SetStatusForTest(session.Dead)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 2 {
 		t.Fatalf("expected a re-create after the root went Dead, got %d creates", len(*seen))
@@ -272,14 +234,14 @@ func TestEnsureRootAgentsHealsLostRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	if first == nil {
 		t.Fatalf("root instance missing after first ensure")
 	}
 
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 2 {
 		t.Fatalf("expected a re-create after the root went Lost, got %d creates", len(*seen))
@@ -310,14 +272,14 @@ func TestEnsureRootAgentsDoesNotAdoptArchivedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	if first == nil {
 		t.Fatalf("root instance missing after first ensure")
 	}
 
 	first.SetStatusForTest(session.Archived)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 2 {
 		t.Fatalf("expected a re-create after the root went Archived (never adopted), got %d creates", len(*seen))
@@ -360,7 +322,7 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("expected initial create, got %d", len(*seen))
 	}
@@ -375,8 +337,8 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 
 	// Inside the grace window: the kill is honored, no re-create.
 	clock = base.Add(rootKillHealDelay - time.Second)
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("ensure must honor the kill inside the grace window, got %d creates", len(*seen))
 	}
@@ -387,7 +349,7 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 	// Grace window elapsed: a still-configured root self-heals — NO daemon
 	// restart, unlike the pre-fix behavior.
 	clock = base.Add(rootKillHealDelay + time.Second)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 2 {
 		t.Fatalf("configured root must self-heal after the grace window without a daemon restart, got %d creates", len(*seen))
 	}
@@ -403,7 +365,7 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 	if stillKilled {
 		t.Fatalf("kill tombstone must be cleared after self-heal")
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 2 {
 		t.Fatalf("healed root must be adopted, not re-created, got %d creates", len(*seen))
 	}
@@ -431,7 +393,7 @@ func TestFinishUserKillArmsRootGraceWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("expected initial create, got %d", len(*seen))
 	}
@@ -454,8 +416,8 @@ func TestFinishUserKillArmsRootGraceWindow(t *testing.T) {
 	// Inside the grace window the user's stop is honored, exactly as it is when
 	// KillSession runs to completion uninterrupted.
 	clock = base.Add(rootKillHealDelay - time.Second)
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("a crash-recovered root kill must honor the grace window, got %d creates", len(*seen))
 	}
@@ -466,7 +428,7 @@ func TestFinishUserKillArmsRootGraceWindow(t *testing.T) {
 	// ...and still self-heals once the window elapses: an explicit kill delays
 	// re-creation, it is never a permanent stop (#1223).
 	clock = base.Add(rootKillHealDelay + time.Second)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 2 {
 		t.Fatalf("configured root must self-heal after the grace window, got %d creates", len(*seen))
 	}
@@ -488,7 +450,7 @@ func TestKillDeadRootDoesNotDeleteSelfHealedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("expected initial root create, got %d", len(*seen))
 	}
@@ -590,7 +552,7 @@ func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("expected initial root create, got %d", len(*seen))
 	}
@@ -608,7 +570,7 @@ func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
 	opLock := manager.opLockFor(key)
 	opLock.Lock()
 
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 1 {
 		t.Fatalf("busy reap skip must not create another root, got %d creates", len(*seen))
 	}
@@ -626,7 +588,7 @@ func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
 	}
 
 	opLock.Unlock()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 2 {
 		t.Fatalf("next tick after lock release must heal immediately, got %d creates", len(*seen))
 	}
@@ -670,8 +632,8 @@ func TestEnsureRootAgentsDoesNotHealUnconfiguredRoot(t *testing.T) {
 
 	// Well past the grace window, the unconfigured repo is still never visited.
 	clock = base.Add(rootKillHealDelay + time.Hour)
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 0 {
 		t.Fatalf("ensure must never create a root for a repo absent from root_agents, got %d creates", len(*seen))
 	}
@@ -705,7 +667,7 @@ func TestEnsureRootAgentsKeepsRetryingAndHeals(t *testing.T) {
 
 	attempts := rootEnsureEscalationThreshold + 3
 	for i := 0; i < attempts; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 
 	manager.mu.Lock()
@@ -730,7 +692,7 @@ func TestEnsureRootAgentsKeepsRetryingAndHeals(t *testing.T) {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if findRootInstance(t, manager, badPath) == nil {
 		t.Fatalf("first ensure pass after the cause cleared must create the root without a daemon restart")
@@ -759,9 +721,9 @@ func TestEnsureRootAgentsBacksOffBetweenFailures(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
 
 	manager.mu.Lock()
 	st := manager.rootEnsureStates[badPath]
@@ -793,8 +755,8 @@ func TestCreateSessionRejectsReservedRootTitle(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected reserved title %q to be rejected", title)
 		}
-		if !strings.Contains(err.Error(), "reserved") || !strings.Contains(err.Error(), "root_agents") {
-			t.Fatalf("rejection for %q must name the reservation and the root_agents opt-in, got: %v", title, err)
+		if !strings.Contains(err.Error(), "reserved") || !strings.Contains(err.Error(), "[root_agent]") {
+			t.Fatalf("rejection for %q must name the reservation and the [root_agent] profile, got: %v", title, err)
 		}
 	}
 }
@@ -900,7 +862,7 @@ func TestRunDaemonEnsuresRootAgent(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- RunDaemon(cfg) }()
 	t.Cleanup(func() {
-		if _, err := RequestShutdown(); err != nil {
+		if _, _, err := RequestShutdown(); err != nil {
 			t.Logf("RequestShutdown: %v", err)
 		}
 		select {
@@ -941,7 +903,7 @@ func TestDeliverPromptSendsIntoEnsuredRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	status, err := manager.DeliverPrompt(DeliverPromptRequest{
 		Title:    session.RootSessionTitle,
@@ -954,4 +916,24 @@ func TestDeliverPromptSendsIntoEnsuredRoot(t *testing.T) {
 	if status != "sent" {
 		t.Fatalf("expected status \"sent\" into the live root, got %q", status)
 	}
+}
+
+// ensureRootAgentsAndWait runs one ensure pass and joins the asynchronous root
+// work it launched.
+//
+// Since #3721 a root (re-)create runs on its own goroutine, so a test asserting
+// on the create's OUTCOME — the session it registered, the options it handed
+// session.NewInstance, the retry state it recorded — has to join it first. That
+// join is also the happens-before edge those reads need: without it, reading the
+// recording backend's slice while a create goroutine may still append to it is a
+// data race.
+//
+// Deliberately a test helper rather than a synchronous mode on the production
+// call: a code path only tests take is not the path being tested. The passes
+// that must NOT join — the ones asserting the sweep does not wait — call
+// EnsureRootAgents directly.
+func (m *Manager) ensureRootAgentsAndWait() {
+	m.EnsureRootAgents()
+	m.waitRootAgentCreates()
+	m.waitRootProgramDriftInspections()
 }

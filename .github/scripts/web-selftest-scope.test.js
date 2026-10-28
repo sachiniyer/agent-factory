@@ -229,6 +229,10 @@ test("every job in pr.yml is listed in Build's needs", () => {
   assert.notEqual(needs, null, "pr.yml's build job has no inline `needs: [...]` list");
   for (const id of jobIds(yaml)) {
     if (id === "build") continue;
+    // Deliberate exemption (#5179): gate-reconcile needs Build, not the reverse
+    // — it runs AFTER the required checks resolve so a dropped workflow_run
+    // event cannot strand their state, and a red dispatch must not block a PR.
+    if (id === "gate-reconcile") continue;
     assert.ok(needs.includes(id), `pr.yml job "${id}" is not in Build's needs, so it gates nothing`);
   }
 });
@@ -237,10 +241,11 @@ test("Build runs even when a need fails, so the required check goes red not skip
   // GitHub skips a job whose `needs` failed, and a SKIPPED required check does not
   // fail — the merge button stays live. `if: always()` plus the gate step is what
   // converts a failed need into a red "Build". Without it, every `needs` entry
-  // above is decorative.
+  // above is decorative. The `&& !inputs.probe` clause is true on every event
+  // but a probe dispatch (#4563), which gates nothing; pr-probe.test.js pins it.
   const yaml = readWorkflow("pr.yml");
   const build = yaml.slice(yaml.indexOf("\n  build:\n"));
-  assert.match(build, /^ {4}if: always\(\)$/m, "pr.yml's build job must keep `if: always()`");
+  assert.match(build, /^ {4}if: always\(\) && !inputs\.probe$/m, "pr.yml's build job must keep `if: always()`");
   assert.match(
     build,
     /^ {8}if: contains\(needs\.\*\.result, 'failure'\) \|\| contains\(needs\.\*\.result, 'cancelled'\)$/m,
@@ -256,7 +261,7 @@ test("pr.yml calls the web selftest workflow, and it is scoped rather than uncon
     "pr.yml must call web-selftest.yml as a reusable workflow — that is the only way Build can `needs` it",
   );
   assert.deepEqual(jobNeeds(yaml, "web-selftest"), ["web-selftest-scope"]);
-  assert.match(yaml, /^ {4}if: needs\.web-selftest-scope\.outputs\.run == 'true'$/m);
+  assert.match(yaml, /^ {4}if: needs\.web-selftest-scope\.outputs\.selftest == 'true'$/m);
 });
 
 test("web-selftest.yml is callable AND runs on master", () => {
@@ -269,4 +274,194 @@ test("web-selftest.yml is callable AND runs on master", () => {
   // A second `pull_request:` trigger would double every PR run — once standalone,
   // once through pr.yml — and the standalone one would gate nothing.
   assert.doesNotMatch(yaml, /^ {2}pull_request:$/m, "the PR run goes through pr.yml now, not a pull_request trigger");
+});
+
+const { PERF_PATHS, scopePerf } = require("./web-selftest-scope.js");
+
+test("performance path list is pinned to the reviewed client and harness scope", () => {
+  assert.deepEqual(PERF_PATHS, ["web/**", "app/**", "ui/**", "config/**", "scripts/perf/**", "scripts/container/**"]);
+  for (const changed of [
+    "web/src/ui.ts", "web/dist/af-web.js", "web/playwright.demo.config.ts",
+    "web/playwright.perf.config.ts", "web/playwright.visual.config.ts",
+    "web/selftest/goldens/dashboard-dark.png", "app/app.go", "ui/sidebar.go",
+    // The Config view renders the daemon manifest verbatim — a schema change
+    // moves pixels without touching web/** (#4358 -> #4360's red gate).
+    "config/manifest.go",
+    "scripts/perf/baselines.json", "scripts/container/web-demo-entry.sh",
+  ]) {
+    assert.equal(scopePerf([changed]).run, true, changed);
+  }
+  assert.deepEqual(scopePerf(["docs/dev/perf-baselines.md", "app/app.go"]), { run: true, matched: ["app/app.go"] });
+});
+
+test("config changes run the visual baselines — the Config pane renders the manifest", () => {
+  // #4362: the web Config pane's rows come from the config manifest over RPC, so
+  // a key added in config/ moves the stills while matching none of the old
+  // PERF_PATHS globs — the drift then surfaced on the next unrelated web PR
+  // (#4231). The whole directory is watched, not only the file that happened to
+  // drift: config_parse.go/config_types.go/resolve.go decide what the pane
+  // renders too.
+  for (const changed of ["config/manifest.go", "config/config_types.go", "config/resolve.go"]) {
+    assert.deepEqual(scopePerf([changed]), { run: true, matched: [changed] }, changed);
+  }
+  // Same-prefixed siblings must not match: config/** means under config/.
+  assert.deepEqual(scopePerf(["configs/other.go"]), { run: false, matched: [] });
+});
+
+test("docs-only, gate-only, empty, and similarly prefixed paths skip performance", () => {
+  for (const changed of [
+    "docs/dev/perf-baselines.md", "mkdocs.yml", "README.md", ".github/workflows/pr.yml",
+    ".github/scripts/web-selftest-scope.js", "webhooks/test.go", "apps/other.go", "scripts/performance/other.js",
+  ]) {
+    assert.deepEqual(scopePerf([changed]), { run: false, matched: [] }, changed);
+  }
+  assert.equal(scopePerf([]).run, false);
+  // Rename detection is disabled by the shared scope job, so the deleted
+  // source still triggers even when the destination moves out of scope.
+  assert.equal(scopePerf(["docs/old-harness.md", "scripts/perf/report.mjs"]).run, true);
+});
+
+test("shared scope exposes both decisions and performance skips only on a known out-of-scope diff", () => {
+  const yaml = readWorkflow("pr.yml");
+  assert.deepEqual(jobNeeds(yaml, "perf"), ["web-selftest-scope"]);
+  const perf = yaml.slice(yaml.indexOf("\n  perf:\n"), yaml.indexOf("\n  test-macos:\n"));
+  assert.match(perf, /^ {4}if: needs\.web-selftest-scope\.outputs\.perf == 'true'$/m);
+  assert.match(yaml, /perf: \$\{\{ steps\.scope\.outputs\.perf \}\}/);
+  // Heavy jobs are off pull_request and on for every other event.
+  assert.match(yaml, /heavy=false selftest=false perf=false tui=false\n\s+if \[ "\$\{GITHUB_EVENT_NAME\}" = "pull_request" \]; then/);
+  assert.match(yaml, /else\n\s+heavy=true perf=true selftest=true tui=true/);
+});
+
+test("performance scope CLI fails open for an unreadable diff and emits its own output key", () => {
+  const { execFileSync } = require("node:child_process");
+  const { mkdtempSync, writeFileSync, rmSync } = require("node:fs");
+  const { tmpdir } = require("node:os");
+  const dir = mkdtempSync(path.join(tmpdir(), "af-perf-scope-"));
+  const file = path.join(dir, "changed.txt");
+  const run = () => execFileSync(process.execPath, [path.join(__dirname, "web-selftest-scope.js"), file, "perf"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    assert.equal(run(), "perf_run=true\n");
+    writeFileSync(file, "docs/dev/index.md\n");
+    assert.equal(run(), "perf_run=false\n");
+    writeFileSync(file, "web/selftest/goldens/dashboard.png\n");
+    assert.equal(run(), "perf_run=true\n");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("performance preflight does not duplicate the Web job's application checks", () => {
+  const entry = fs.readFileSync(path.join(__dirname, "..", "..", "scripts/container/web-demo-entry.sh"), "utf8");
+  assert.doesNotMatch(entry, /npm (test|run typecheck)/);
+  assert.match(entry, /npx tsc -p tsconfig\.selftest\.json/);
+  assert.match(entry, /node --test \/work\/scripts\/perf\/check\.test\.mjs/);
+});
+
+test("the visual gate diffs stills against committed goldens and cannot regenerate in CI", () => {
+  // The drift gate is a diff, not a rerun: the visual spec pixel-diffs each
+  // capture against the committed golden, so a stale artifact fails the job.
+  // That property only holds if CI can never reach update mode — a run that
+  // rewrites the snapshots passes whatever the browser painted, which turns
+  // the oracle into a tautology (#3984). Both guards are pinned: the entry
+  // script refuses update/record under CI, and the config throws on the same
+  // combination instead of trusting the environment — so the committed
+  // artifact is always compared, never regenerated-and-blessed.
+  const entry = fs.readFileSync(path.join(__dirname, "..", "..", "scripts/container/web-demo-entry.sh"), "utf8");
+  // Pin the guard's BEHAVIOR, not its diagnostic. Matching the message text
+  // alone still passes a file whose guard was deleted or inverted while the
+  // string survived in a comment — so the actual if..fi block is sliced out
+  // and its truth table executed (#4399 review). The environment is explicit:
+  // this test itself runs under CI, so ambient CI/update variables must not
+  // leak in.
+  const guard = entry.match(/if \[ -n "\$\{CI:-\}" \][\s\S]*?\nfi\n/);
+  assert.ok(guard, "web-demo-entry.sh must guard CI against the update/record variables");
+  const { spawnSync } = require("node:child_process");
+  const runGuard = (vars) =>
+    spawnSync("bash", ["-c", guard[0]], {
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...vars },
+      encoding: "utf8",
+    });
+  const refused = runGuard({ CI: "1", AF_UPDATE_GOLDENS: "1" });
+  assert.equal(refused.status, 1, "CI + AF_UPDATE_GOLDENS must be refused");
+  assert.match(refused.stderr, /CI cannot update baselines or goldens/);
+  assert.equal(runGuard({ CI: "1", AF_PERF_RECORD: "1" }).status, 1,
+    "CI + AF_PERF_RECORD must be refused");
+  assert.equal(runGuard({ CI: "1" }).status, 0,
+    "a plain CI run must reach the script — the guard is about the update variables, not CI");
+  assert.equal(runGuard({ AF_UPDATE_GOLDENS: "1" }).status, 0,
+    "a human-run update outside CI is the path the guard exists to keep");
+  // The TypeScript guards get the same treatment as the shell guard above:
+  // EXECUTE the config under each environment combination rather than assert
+  // its source text — a regex still passes while the line is commented out or
+  // evaluates as dead code. The module body is evaluated verbatim with its two
+  // imports stubbed, so every guard statement runs at its real position and
+  // updateSnapshots is resolved by the file's own expression. A refactor that
+  // moves the logic behind a shape the replaces miss leaves `import` or
+  // `export` tokens behind and the Function constructor throws — the test
+  // fails loudly instead of passing on a stale pattern.
+  const visual = fs.readFileSync(path.join(__dirname, "..", "..", "web/playwright.visual.config.ts"), "utf8");
+  const loadVisualConfig = (env) => new Function(
+    "process",
+    "defineConfig",
+    "demo",
+    visual
+      .replace(/import \{ defineConfig \} from "@playwright\/test";/, "")
+      .replace(/import demo from "\.\/playwright\.demo\.config\.js";/, "")
+      .replace(/export default /, "return "),
+  )({ env }, (base, over) => ({ ...base, ...over }), {});
+  assert.throws(
+    () => loadVisualConfig({ AF_PERF_MODE: "1", CI: "1", AF_UPDATE_GOLDENS: "1" }),
+    /CI cannot update goldens/,
+    "CI + AF_UPDATE_GOLDENS must be refused by the config's own guard",
+  );
+  assert.throws(
+    () => loadVisualConfig({ CI: "1", AF_UPDATE_GOLDENS: "1" }),
+    /testbox\.sh perf/,
+    "the perf-mode guard fires before the CI guard ever matters",
+  );
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", CI: "1" }).updateSnapshots, "none",
+    "CI must always diff against the committed goldens (updateSnapshots: none)");
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1" }).updateSnapshots, "none",
+    "a plain human run diffs; it does not rewrite baselines");
+  // "changed", not "all": "all" rewrites every golden whose bytes differ, and
+  // the capture is byte-nondeterministic below the gate threshold (#4557), so
+  // each update run would hand a human noise to review as if it were a change.
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", AF_UPDATE_GOLDENS: "1" }).updateSnapshots, "changed",
+    "update mode belongs to AF_UPDATE_GOLDENS runs a human reviews, and rewrites only goldens the gate rejects");
+});
+
+test("web-selftest.yml's standalone and called runs never share a concurrency group (#5660)", () => {
+  // In a called workflow github.workflow is the caller's name, so keying on it
+  // is what stops pr.yml's reusable call and the standalone master push run
+  // from cancelling each other on the same ref.
+  const yaml = readWorkflow("web-selftest.yml");
+  const group = /^ {2}group: (.+)$/m.exec(yaml.slice(yaml.indexOf("\nconcurrency:\n")))[1];
+  assert.match(group, /github\.workflow == 'Web selftest' && 'standalone' \|\| 'called'/);
+  assert.match(group, /github\.event_name == 'schedule' && '-nightly'/);
+  assert.match(group, /github\.event_name == 'workflow_dispatch' && '-dispatch'/);
+  assert.match(yaml, /^ {2}cancel-in-progress: true$/m);
+});
+
+const { TUI_PATHS, scopeTui } = require("./web-selftest-scope.js");
+
+test("TUI driver selftest runs on PRs that touch the TUI surface and only those", () => {
+  for (const changed of ["ui/sidebar.go", "app/app.go", "keys/keys.go", "session/tmux/tmux.go",
+    "scripts/tui-driver.sh", "scripts/tui-driver-selftest.sh", "scripts/testbox.sh",
+    "scripts/container/Dockerfile.web-selftest", ".github/workflows/tui-driver-selftest.yml"]) {
+    assert.equal(scopeTui([changed]).run, true, changed);
+  }
+  for (const changed of ["daemon/x.go", "docs/dev/index.md", "web/src/ui.ts", "config/manifest.go", "apps/x.go", "uix/y.go"]) {
+    assert.equal(scopeTui([changed]).run, false, changed);
+  }
+  assert.equal(scopeTui([]).run, false);
+  for (const pattern of TUI_PATHS) {
+    assert.equal(pattern.endsWith("/**") ? pattern.slice(0, -3).includes("*") : pattern.includes("*"), false, pattern);
+  }
+});
+
+test("surface jobs are gated by the scope job and listed in Build's needs", () => {
+  const yaml = readWorkflow("pr.yml");
+  assert.deepEqual(jobNeeds(yaml, "tui-driver-selftest"), ["web-selftest-scope"]);
+  assert.match(yaml, /^ {4}if: needs\.web-selftest-scope\.outputs\.tui == 'true'$/m);
+  assert.match(yaml, /^ {4}uses: \.\/\.github\/workflows\/tui-driver-selftest\.yml$/m);
+  assert.ok(jobNeeds(yaml, "build").includes("tui-driver-selftest"));
+  assert.match(readWorkflow("tui-driver-selftest.yml"), /^ {2}workflow_call:$/m);
 });

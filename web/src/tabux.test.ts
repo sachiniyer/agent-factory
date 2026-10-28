@@ -53,9 +53,10 @@ test("tabLabel: a shell tab is always Terminal, ignoring its name", () => {
   assert.equal(tabLabel({ name: "my-shell", kind: TabKind.Shell }), "Terminal");
 });
 
-test("tabLabel: a web tab shows its name, or Web when it has none", () => {
-  assert.equal(tabLabel({ name: "preview", kind: TabKind.Web }), "preview");
+test("tabLabel: a web tab shows a custom name and proper-cases default names", () => {
+  assert.equal(tabLabel({ name: "My browser", kind: TabKind.Web }), "My browser");
   assert.equal(tabLabel({ name: "", kind: TabKind.Web }), "Web");
+  assert.equal(tabLabel({ name: "web", kind: TabKind.Web }), "Web");
 });
 
 test("tabLabel: a process tab shows its name, or Tab when it has none", () => {
@@ -63,11 +64,12 @@ test("tabLabel: a process tab shows its name, or Tab when it has none", () => {
   assert.equal(tabLabel({ name: "", kind: TabKind.Process }), "Tab");
 });
 
-test("tabLabel: a VS Code tab shows its name, or VS Code when it has none (#1817)", () => {
+test("tabLabel: a VS Code tab shows a custom name and proper-cases default names (#3997)", () => {
   // Mirrors ui/tree/labels.go textForTab's VSCode arm. This is also WHY a vscode tab
   // is renameable — it reads its Name — so the two assertions belong together.
-  assert.equal(tabLabel({ name: "editor", kind: TabKind.VSCode }), "editor");
+  assert.equal(tabLabel({ name: "My editor", kind: TabKind.VSCode }), "My editor");
   assert.equal(tabLabel({ name: "", kind: TabKind.VSCode }), "VS Code");
+  assert.equal(tabLabel({ name: "vscode", kind: TabKind.VSCode }), "VS Code");
 });
 
 test("a VS Code tab's text label stays independent of its decorative icon (#1817)", () => {

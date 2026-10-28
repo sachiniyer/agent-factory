@@ -2,12 +2,9 @@ package sessionenv
 
 import (
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
-
-	"github.com/sachiniyer/agent-factory/internal/envcommand"
 )
 
 // commandMutatesAccountEnvironment recognizes command-local mutations that can
@@ -24,9 +21,37 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		if err != nil {
 			return true
 		}
+		// Inverted arithmetic guard: refuse any command whose arithmetic context
+		// has an operand that is not provably a numeric constant. Rather than
+		// enumerating the ways a variable's stored value can become hazardous
+		// (command substitution, hazardous literal, runtime-input builtin,
+		// dynamically composed strings, …), the guard inverts the burden: an
+		// arithmetic context is refused UNLESS its operand provably consists of
+		// only integer literals, arithmetic operators, and parentheses. Any
+		// variable reference inside arithmetic — $((x)), (( x )), let x,
+		// arr[x], etc. — is unprovable regardless of how x was assigned.
+		//
+		// This single check subsumes the three coarse rules that preceded it:
+		//   - CmdSubst+arith: a CmdSubst inside arithmetic is never a constant.
+		//   - Literal-assignment+arith: a variable holding a hazardous literal
+		//     appears in arithmetic as a variable reference — not a constant.
+		//   - Runtime-input+arith: same as the literal case above.
+		//   - Dynamic-composition bypass (n=CODEX_HOME; x="${n}=1"; : $((x))):
+		//     x is a variable reference in arithmetic — not a constant.
+		//
+		// Safe-side false positives: commands that combine arithmetic with any
+		// non-constant expression are refused, including provably safe ones like
+		// n=5; : $((n+1)). That cost is documented and priced as acceptable:
+		// arithmetic over non-constant operands is uncommon in agent invocation
+		// strings, and the precision gain from tracking whether the variable was
+		// actually hazardous is outweighed by the unbounded enumeration gap it
+		// creates.
+		if fileHasArithmeticContextWithVariableOperand(file) {
+			return true
+		}
 		mutates := false
 		syntax.Walk(file, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names) {
+			if nodeMutatesAccountEnvironment(node, names, nil) {
 				mutates = true
 				return false
 			}
@@ -39,15 +64,54 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	return false
 }
 
-func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) bool {
+func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}, tainted map[string]struct{}) bool {
 	switch node := node.(type) {
 	case *syntax.CallExpr:
-		return callMutatesAccountEnvironment(node, names)
+		return callMutatesAccountEnvironment(node, names, tainted)
 	case *syntax.Assign:
+		// An indexed assignment (`arr[i]=val`) evaluates the subscript as
+		// arithmetic; a command substitution in the index is re-evaluated as
+		// fresh arithmetic by bash and can assign a denied name via its output
+		// even when `arr` itself is not denied.
+		if node.Index != nil && arithmeticExprHasCommandSubstitution(node.Index) {
+			return true
+		}
+		if node.Index != nil && arithmeticExprReferencesTaintedVar(node.Index, tainted) {
+			return true
+		}
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.WordIter:
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.ParamExp:
+		// An indexed subscript (`${arr[i]}`) is evaluated as arithmetic by
+		// bash, so a command substitution inside the index — e.g.
+		// `${arr[$(printf CODEX_HOME=1)]}` — is re-evaluated as fresh
+		// arithmetic and can assign a denied name even when `arr` itself is
+		// not denied. Fail closed when the index contains a substitution.
+		if node.Index != nil && arithmeticExprHasCommandSubstitution(node.Index) {
+			return true
+		}
+		if node.Index != nil && arithmeticExprReferencesTaintedVar(node.Index, tainted) {
+			return true
+		}
+		// Slice expressions (`${x:offset:length}`) also evaluate their
+		// operands as arithmetic; a command substitution in either position
+		// is re-evaluated as fresh arithmetic by bash and can assign a denied
+		// name (e.g. `${x:$(printf CODEX_HOME=1)}`). Fail closed on either.
+		if node.Slice != nil {
+			if node.Slice.Offset != nil && arithmeticExprHasCommandSubstitution(node.Slice.Offset) {
+				return true
+			}
+			if node.Slice.Offset != nil && arithmeticExprReferencesTaintedVar(node.Slice.Offset, tainted) {
+				return true
+			}
+			if node.Slice.Length != nil && arithmeticExprHasCommandSubstitution(node.Slice.Length) {
+				return true
+			}
+			if node.Slice.Length != nil && arithmeticExprReferencesTaintedVar(node.Slice.Length, tainted) {
+				return true
+			}
+		}
 		return node.Param != nil && node.Exp != nil &&
 			(node.Exp.Op == syntax.AssignUnset || node.Exp.Op == syntax.AssignUnsetOrNull) &&
 			accountEnvironmentNameDenied(node.Param.Value, names)
@@ -55,16 +119,84 @@ func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) 
 		return arithmeticAssignmentMutatesAccountEnvironment(node, names)
 	case *syntax.UnaryArithm:
 		return arithmeticIncrementMutatesAccountEnvironment(node, names)
+	case *syntax.ArithmCmd:
+		// `(( expr ))`. A command substitution inside the arithmetic is
+		// re-evaluated as fresh arithmetic by bash and can assign a denied name
+		// via its output; the literal assignment form is still caught by the
+		// BinaryArithm/UnaryArithm arms below once this returns false.
+		// A variable reference to a tainted var (one assigned from a command
+		// substitution earlier in the same command) is equally unprovable: bash
+		// re-evaluates the variable's value as arithmetic, so the prior
+		// substitution's stdout becomes a deferred arithmetic mutation.
+		if arithmeticExprHasCommandSubstitution(node.X) {
+			return true
+		}
+		return arithmeticExprReferencesTaintedVar(node.X, tainted)
+	case *syntax.ArithmExp:
+		// `$(( expr ))`. Same re-evaluation hazard as `(( ))`; appears inside a
+		// word (e.g. `echo $(( ... ))` or `x=$(( ... ))`), and the literal
+		// assignment form is still caught by the arithm arms below.
+		if arithmeticExprHasCommandSubstitution(node.X) {
+			return true
+		}
+		return arithmeticExprReferencesTaintedVar(node.X, tainted)
+	case *syntax.LetClause:
+		// A bash `let` clause parsed as a builtin (the POSIX parse keeps `let` as
+		// a CallExpr and is handled by letMutatesAccountEnvironment). The
+		// command-substitution hazard is the same; returning false lets the walk
+		// descend so a literal assignment (BinaryArithm/UnaryArithm) is still
+		// caught.
+		for _, expr := range node.Exprs {
+			if arithmeticExprHasCommandSubstitution(expr) {
+				return true
+			}
+			if arithmeticExprReferencesTaintedVar(expr, tainted) {
+				return true
+			}
+		}
+		return false
+	case *syntax.BinaryTest:
+		// Numeric comparison operators in `[[ ]]` (-eq, -ne, -lt, -gt, -le,
+		// -ge) cause bash to evaluate both operands as arithmetic. A command
+		// substitution in either operand is re-evaluated as fresh arithmetic by
+		// bash and can assign a denied name via its output, e.g.
+		// `[[ 0 -eq $(printf CODEX_HOME=1) ]]`. A tainted variable in either
+		// operand is the deferred form of the same bypass. Fail closed on either.
+		switch node.Op {
+		case syntax.TsEql, syntax.TsNeq, syntax.TsLeq, syntax.TsGeq, syntax.TsLss, syntax.TsGtr:
+			if wordHasCommandSubstitution(node.X) || wordHasCommandSubstitution(node.Y) {
+				return true
+			}
+			if wordReferencesTaintedVar(node.X, tainted) || wordReferencesTaintedVar(node.Y, tainted) {
+				return true
+			}
+		}
+		return false
+	case *syntax.CStyleLoop:
+		// C-style `for (( init; cond; post ))`. All three clauses are
+		// evaluated as arithmetic by bash; the same command-substitution and
+		// tainted-variable hazards apply. Fail closed on either. Returning
+		// true here prevents the walk from descending into Init/Cond/Post a
+		// second time; the BinaryArithm/UnaryArithm arms below still catch
+		// literal assignments when the loop is safe (no substitution, no
+		// tainted variable).
+		for _, expr := range []syntax.ArithmExpr{node.Init, node.Cond, node.Post} {
+			if expr == nil {
+				continue
+			}
+			if arithmeticExprHasCommandSubstitution(expr) {
+				return true
+			}
+			if arithmeticExprReferencesTaintedVar(expr, tainted) {
+				return true
+			}
+		}
+		return false
 	case *syntax.UnaryTest:
 		return unaryTestMutatesAccountEnvironment(node)
 	default:
 		return false
 	}
-}
-
-func accountEnvironmentNameDenied(name string, names map[string]struct{}) bool {
-	_, denied := names[name]
-	return denied
 }
 
 func arithmeticAssignmentMutatesAccountEnvironment(expr *syntax.BinaryArithm, names map[string]struct{}) bool {
@@ -116,7 +248,7 @@ func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
 	return literalShellWord(word)
 }
 
-func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}) bool {
+func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}, tainted map[string]struct{}) bool {
 	for _, assign := range call.Assigns {
 		if assign != nil && assign.Name != nil {
 			if _, denied := names[assign.Name.Value]; denied {
@@ -125,14 +257,15 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 		}
 	}
 
-	words, unsafe := unwrapAccountCommand(call.Args, names)
+	memo := newOperandTailMemo()
+	words, unsafe := unwrapAccountCommand(call.Args, names, memo)
 	if unsafe || len(words) == 0 {
 		return unsafe
 	}
-	return unwrappedAccountCommandMutates(words, names)
+	return unwrappedAccountCommandMutates(words, names, tainted, memo)
 }
 
-func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}) bool {
+func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}, tainted map[string]struct{}, memo operandTailMemo) bool {
 	if _, literal := literalShellWord(words[0]); !literal {
 		// A dynamic command name can resolve to env or a same-shell builtin such
 		// as unset/export, so its effect on the selected identity is unprovable.
@@ -140,7 +273,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	}
 	switch {
 	case isAccountCommandName(words[0], "env"):
-		return envCallMutatesAccountEnvironment(words[1:], names)
+		return envCallMutatesAccountEnvironment(words[1:], names, false, memo)
 	case isBareName(words[0], "unset"):
 		return unsetMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "set"):
@@ -156,7 +289,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	case isBareName(words[0], "printf"):
 		return printfMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "let"):
-		return letMutatesAccountEnvironment(words[1:], names)
+		return letMutatesAccountEnvironment(words[1:], names, tainted)
 	case isBareName(words[0], "mapfile"), isBareName(words[0], "readarray"):
 		return arrayReadMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "wait"):
@@ -182,463 +315,347 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 // unwrapAccountCommand removes shell wrappers that still execute the remaining
 // words in the current environment. Dynamic or unsupported wrapper forms are
 // unsafe because they could resolve to env or an environment-mutating builtin.
-func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
+//
+// Every position the peel passes through gets the chain's result, so a later
+// walk that starts inside the chain (an operand check, or an env command word)
+// answers from the memo instead of re-peeling the rest of it (#4966).
+func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+	var chain []*syntax.Word
+	var result unwrapResult
 	for len(words) > 0 {
-		switch {
-		case isBareName(words[0], "exec"):
-			words = words[1:]
-			if len(words) > 0 {
-				option, literal := literalShellWord(words[0])
-				if !literal {
-					return nil, true
-				}
-				if option == "--" {
-					words = words[1:]
-				} else if strings.HasPrefix(option, "-") && option != "-" {
-					// Bash and other shells give exec options environment-changing
-					// behavior (notably `exec -c`). No option is needed by af's
-					// sibling path, so unsupported forms fail closed.
-					return nil, true
-				}
-			}
-			for len(words) > 0 {
-				name, assignment := shellWordAssignmentName(words[0])
-				if !assignment {
-					break
-				}
-				if _, denied := names[name]; denied {
-					return nil, true
-				}
-				words = words[1:]
-			}
-		case isBareName(words[0], "command"):
-			var unsafe bool
-			words, unsafe = unwrapCommandBuiltin(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isBareName(words[0], "builtin"):
-			words = words[1:]
-			if len(words) > 0 && wordEquals(words[0], "--") {
-				words = words[1:]
-			}
-			if len(words) > 0 {
-				if _, literal := literalShellWord(words[0]); !literal {
-					return nil, true
-				}
-			}
-		case isAccountCommandName(words[0], "nohup"):
-			var unsafe bool
-			words, unsafe = unwrapNohup(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "nice"):
-			var unsafe bool
-			words, unsafe = unwrapNice(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "timeout"):
-			var unsafe bool
-			words, unsafe = unwrapTimeout(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "setsid"):
-			var unsafe bool
-			words, unsafe = unwrapSetsid(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "stdbuf"):
-			var unsafe bool
-			words, unsafe = unwrapStdbuf(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "ionice"):
-			var unsafe bool
-			words, unsafe = unwrapIonice(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "taskset"):
-			var unsafe bool
-			words, unsafe = unwrapTaskset(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		default:
-			return words, false
-		}
-	}
-	return nil, false
-}
-
-func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
-	for idx := 0; idx < len(words); idx++ {
-		option, literal := literalShellWord(words[idx])
-		if !literal {
-			return true
-		}
-		if option != "-v" {
-			continue
-		}
-		if idx+1 >= len(words) {
-			return true
-		}
-		operand, literal := literalShellWord(words[idx+1])
-		if !literal || strings.Contains(operand, "[") {
-			return true
-		}
-		idx++
-	}
-	return false
-}
-
-func unaryTestMutatesAccountEnvironment(test *syntax.UnaryTest) bool {
-	if test.Op != syntax.TsVarSet {
-		return false
-	}
-	word, ok := test.X.(*syntax.Word)
-	if !ok {
-		return true
-	}
-	operand, literal := literalShellWord(word)
-	return !literal || strings.Contains(operand, "[")
-}
-
-func unwrapCommandBuiltin(words []*syntax.Word) ([]*syntax.Word, bool) {
-	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
-		if !literal {
-			return nil, true
-		}
-		if option == "--" {
-			words = words[1:]
+		if cached, seen := memo.unwrapped[words[0]]; seen {
+			result = cached
 			break
 		}
-		if !strings.HasPrefix(option, "-") || option == "-" {
+		chain = append(chain, words[0])
+		next, peeled, unsafe := peelAccountWrapper(words, names, memo)
+		if !peeled {
+			result = unwrapResult{words: next, unsafe: unsafe}
 			break
 		}
-		for _, flag := range option[1:] {
-			switch flag {
-			case 'p':
-			case 'v', 'V':
-				return nil, false // query-only: command does not execute its operand
-			default:
-				return nil, true
-			}
-		}
+		words = next
+	}
+	for _, word := range chain {
+		memo.unwrapped[word] = result
+	}
+	return result.words, result.unsafe
+}
+
+// peelAccountWrapper removes the one wrapper at the head of words. It returns
+// (next, peeled, unsafe): when peeled, the walk continues with next; otherwise
+// next and unsafe are unwrapAccountCommand's result.
+func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool, bool) {
+	switch {
+	case isBareName(words[0], "exec"):
 		words = words[1:]
-	}
-	if len(words) > 0 {
-		if _, literal := literalShellWord(words[0]); !literal {
-			return nil, true
+		if len(words) > 0 {
+			option, literal := literalShellWord(words[0])
+			if !literal {
+				return nil, false, true
+			}
+			if option == "--" {
+				words = words[1:]
+			} else if strings.HasPrefix(option, "-") && option != "-" {
+				// Bash and other shells give exec options environment-changing
+				// behavior (notably `exec -c`). No option is needed by af's
+				// sibling path, so unsupported forms fail closed.
+				return nil, false, true
+			}
 		}
-	}
-	return words, false
-}
-
-func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
-	literals := make([]string, 0, len(words))
-	for _, word := range words {
-		value, literal := literalShellWord(word)
-		if !literal {
-			name, assignment := shellWordAssignmentName(word)
+		for len(words) > 0 {
+			name, assignment := shellWordAssignmentName(words[0])
 			if !assignment {
-				return true
+				break
 			}
-			value = name + "=AF_DYNAMIC_VALUE"
+			if _, denied := names[name]; denied {
+				return nil, false, true
+			}
+			words = words[1:]
 		}
-		literals = append(literals, value)
-	}
-	invocation, err := envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
-	if err != nil || invocation.ClearEnvironment {
-		return true
-	}
-	for _, mutation := range invocation.Mutations {
-		if _, denied := names[mutation.Name]; denied {
-			return true
-		}
-	}
-	if invocation.CommandIndex >= 0 {
-		commandWords, unsafe := unwrapAccountCommand(words[invocation.CommandIndex:], names)
+	case isBareName(words[0], "command"):
+		var unsafe bool
+		words, unsafe = unwrapCommandBuiltin(words[1:])
 		if unsafe {
-			return true
+			return nil, false, true
 		}
-		if len(commandWords) == 0 {
-			return false
-		}
-		return unwrappedAccountCommandMutates(commandWords, names)
-	}
-	return false
-}
-
-func shellCommandIsUnproven(words []*syntax.Word) bool {
-	if len(words) == 0 {
-		return false
-	}
-	command, literal := literalShellWord(words[0])
-	if !literal || !knownShellName(filepath.Base(command)) {
-		return false
-	}
-	return !accountShellCommandWordsProven(words)
-}
-
-func accountShellCommandWordsProven(words []*syntax.Word) bool {
-	if len(words) == 0 {
-		return false
-	}
-	command, _ := literalShellWord(words[0])
-	// A sibling shell may read profiles, stdin, a script, or a command string.
-	// The only statically proven form is the same absolute, startup-free command
-	// AccountShellCommand generates for a dedicated shell tab.
-	args, literal := literalCommandArgs(words)
-	if !literal || !filepath.IsAbs(command) {
-		return false
-	}
-	want := trustedAccountShellArgs(command)
-	return want != nil && slices.Equal(args[1:], want)
-}
-
-func knownShellName(name string) bool {
-	switch name {
-	case "ash", "bash", "csh", "dash", "fish", "ksh", "mksh", "sh", "tcsh", "zsh":
-		return true
-	default:
-		return false
-	}
-}
-
-func isAccountCommandName(word *syntax.Word, want string) bool {
-	value, literal := literalShellWord(word)
-	return literal && filepath.Base(value) == want
-}
-
-func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
-	functionsOnly := false
-	options := true
-	for _, word := range words {
-		value, literal := literalShellWord(word)
-		if !literal {
-			return true
-		}
-		if options {
-			switch value {
-			case "--":
-				options = false
-				continue
-			case "-f":
-				functionsOnly = true
-				continue
-			case "-v":
-				functionsOnly = false
-				continue
-			}
-			if strings.HasPrefix(value, "-") {
-				return true
-			}
-			options = false
-		}
-		if !functionsOnly {
-			if accountEnvironmentOperandDenied(value, names) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// setMutatesAccountEnvironment reports whether a `set` call switches the shell
-// into keyword mode, where an assignment-shaped word written AFTER a command
-// name is placed in that command's environment instead of staying an argument.
-//
-// This walk reads every later call under DEFAULT parsing rules, so the mode is
-// not a mutation of its own — it silently invalidates every verdict that
-// follows it. Under `set -k`, `codex CODEX_HOME=/other` is not the two-word
-// call this walk sees: bash removes the assignment from codex's arguments and
-// launches it with the replacement root. Refusing the switch is what keeps the
-// rest of the walk meaningful; tracking the mode across calls instead would
-// have to model the shell's own state machine.
-//
-// Deliberately narrow: a process tab runs an arbitrary user command, and an
-// ordinary `set -e` prologue must keep working. Only keyword mode is refused.
-func setMutatesAccountEnvironment(words []*syntax.Word) bool {
-	for idx := 0; idx < len(words); idx++ {
-		value, literal := literalShellWord(words[idx])
-		if !literal {
-			// An operand this parser cannot evaluate could expand to -k.
-			return true
-		}
-		// `--` and the first non-option operand both end option parsing: every
-		// word after one is a positional parameter, so `set -- -k` assigns the
-		// string "-k" to $1 and enables nothing.
-		if value == "--" || !strings.HasPrefix(value, "-") {
-			return false
-		}
-		// A long-form switch names its mode in the next word. `+o keyword` turns
-		// the mode OFF, so only the minus form is a switch on.
-		if value == "-o" || value == "+o" {
-			if idx+1 >= len(words) {
-				// A bare `set -o` prints the current settings.
-				continue
-			}
-			mode, ok := literalShellWord(words[idx+1])
-			if !ok {
-				return true
-			}
-			if value == "-o" && mode == "keyword" {
-				return true
-			}
-			idx++
-			continue
-		}
-		// Short options cluster, so a guard matching only a lone "-k" walks
-		// straight past "-ek" (the #3402 lesson). "+k" DISABLES keyword mode and
-		// is not a prefix match here.
-		if strings.ContainsRune(value[1:], 'k') {
-			return true
-		}
-	}
-	return false
-}
-
-// hashMutatesAccountEnvironment reports whether a `hash` call remaps a command
-// name to a path of its own choosing.
-//
-// `hash -p pathname name` makes `name` resolve to `pathname`, so every later
-// executable-name check in this walk answers about a different binary than the
-// one that will actually run: after `hash -p /usr/bin/env runner`, the
-// otherwise-unknown `runner` IS env, and `runner CODEX_HOME=/other codex`
-// applies the replacement root through a name this walk never modelled.
-//
-// Only the remapping form is refused — `hash -r` and `hash name` merely
-// maintain the lookup cache and leave every name meaning what it meant.
-func hashMutatesAccountEnvironment(words []*syntax.Word) bool {
-	for _, word := range words {
-		value, literal := literalShellWord(word)
-		if !literal {
-			return true
-		}
-		if value == "--" || !strings.HasPrefix(value, "-") {
-			return false
-		}
-		if strings.ContainsRune(value[1:], 'p') {
-			return true
-		}
-	}
-	return false
-}
-
-func isAccountDeclarationBuiltin(word *syntax.Word) bool {
-	for _, name := range []string{"export", "readonly", "declare", "typeset", "local"} {
-		if isBareName(word, name) {
-			return true
-		}
-	}
-	return false
-}
-
-func declarationMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
-	options := true
-	for _, word := range words {
-		if name, assignment := shellWordAssignmentName(word); assignment {
-			if accountEnvironmentOperandDenied(name, names) {
-				return true
-			}
-			options = false
-			continue
-		}
-		value, literal := literalShellWord(word)
-		if !literal {
-			return true
-		}
-		if options {
-			if value == "--" {
-				options = false
-				continue
-			}
-			if strings.HasPrefix(value, "-") || strings.HasPrefix(value, "+") {
-				if value == "-n" || value == "+n" || value == "--nameref" || value == "-i" {
-					return true
-				}
-				if len(value) != 2 {
-					return true
-				}
-				continue
-			}
-			options = false
-		}
-		if accountEnvironmentOperandDenied(value, names) {
-			return true
-		}
-	}
-	return false
-}
-
-func readMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
-	for len(words) > 0 && wordEquals(words[0], "-r") {
+	case isBareName(words[0], "builtin"):
 		words = words[1:]
+		if len(words) > 0 && wordEquals(words[0], "--") {
+			words = words[1:]
+		}
+		if len(words) > 0 {
+			if _, literal := literalShellWord(words[0]); !literal {
+				return nil, false, true
+			}
+		}
+	case isAccountCommandName(words[0], "nohup"):
+		var unsafe bool
+		words, unsafe = unwrapNohup(words[1:])
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "nice"):
+		var unsafe bool
+		words, unsafe = unwrapNice(words[1:], names, memo)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "timeout"):
+		var unsafe bool
+		words, unsafe = unwrapTimeout(words[1:], names, memo)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "setsid"):
+		var unsafe bool
+		words, unsafe = unwrapSetsid(words[1:], names, memo)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "stdbuf"):
+		var unsafe bool
+		words, unsafe = unwrapStdbuf(words[1:], names, memo)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "ionice"):
+		var unsafe bool
+		words, unsafe = unwrapIonice(words[1:], names, memo)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "taskset"):
+		var unsafe bool
+		words, unsafe = unwrapTaskset(words[1:], names, memo)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "xargs"):
+		var unsafe bool
+		words, unsafe = unwrapXargs(words[1:], names, memo)
+		if unsafe {
+			return nil, false, true
+		}
+	default:
+		if unrecognizedWrapperHidesAccountAssignment(words, names, memo) {
+			return nil, false, true
+		}
+		return words, false, false
 	}
-	for _, word := range words {
-		value, literal := literalShellWord(word)
-		if !literal {
-			return true
-		}
-		if strings.HasPrefix(value, "-") {
-			return true
-		}
-		if accountEnvironmentOperandDenied(value, names) {
-			return true
-		}
-	}
-	return false
+	return words, true, false
 }
 
-func getoptsMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
-	if len(words) < 2 {
-		return false
-	}
-	name, literal := literalShellWord(words[1])
-	if !literal {
+// unrecognizedWrapperHidesAccountAssignment reports whether the literal tail
+// words of an unrecognized argv-passthrough wrapper carry a NAME=... assignment
+// whose NAME is one af removes for the selected account, specifically by
+// nesting an env invocation inside the wrapper's argument list.
+//
+// unwrapAccountCommand peels a CLOSED list of wrappers (exec/command/builtin/
+// nohup/nice/timeout/setsid/stdbuf/ionice/taskset/xargs); every other binary
+// that runs a child command and passes argv through (strace/perf/valgrind/
+// gdb --args/...) falls to the default arm and was returned opaque. Wrapping the
+// modelled `env NAME=value <agent>` mutation — which the guard already refuses
+// bare and under every modelled wrapper — in an unmodeled wrapper hid the inner
+// assignment from the walk, so `strace env CODEX_HOME=/other codex` was accepted
+// while `nohup env CODEX_HOME=/other codex` was refused.
+//
+// This lifts envCallMutatesAccountEnvironment's NAME= rule one level: scan
+// the wrapper's literal argv tail for an `env` invocation and delegate to
+// envCallMutatesAccountEnvironment when one is found. Commands that do not
+// contain a nested env invocation are not refused even when an argument
+// resembles a NAME=value token, so noun-uses such as `echo CODEX_HOME=/tmp`,
+// `rg 'OPENAI_API_KEY='`, `man env`, `make env`, `git grep env`, `ls env/bin`,
+// `pip show env`, or `strace -p 1234 env` (none of which carries a nested env
+// invocation with a denied assignment) stay allowed.
+//
+// The same tail scan applies the modeled path's other two rules one level
+// down: a shell word with argv is judged by shellCommandIsUnproven exactly as
+// a bare `sh -c '...'` command is, and a literal option word whose VALUE is a
+// denied name or assignment (xargs --process-slot-var=NAME, strace -E var=val
+// and --env=var=val) is refused — a wrapper's own options can place the
+// mutation without any env word.
+//
+// The scan is memoized per (position, strace): the verdict at a tail word
+// depends only on the words from there on, so the tail of a wrapper nested in
+// another wrapper's tail — `echo env env … env x` — is scanned once, not once
+// per enclosing env word (#4966).
+func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+	strace := isAccountCommandName(words[0], "strace")
+	if strace && straceOptionsRefused(words[1:], names, memo) {
 		return true
 	}
-	return accountEnvironmentOperandDenied(name, names)
+	return wrapperTailHidesAccountAssignment(words[1:], strace, names, memo)
 }
 
-func printfMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
-	if len(words) == 0 {
-		return false
+// wrapperTailHidesAccountAssignment scans an unrecognized wrapper's tail from
+// words[0]. Every position the scan steps on gets the scan's answer: the scan
+// from there follows the same steps to the same end.
+func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) bool {
+	var chain []*syntax.Word
+	answer := false
+	for len(words) > 0 {
+		if cached, seen := memo.wrapperTails[wrapperTailKey{word: words[0], strace: strace}]; seen {
+			answer = cached
+			break
+		}
+		chain = append(chain, words[0])
+		width, hides := wrapperTailWordHidesAccountAssignment(words, strace, names, memo)
+		if hides {
+			answer = true
+			break
+		}
+		words = words[width:]
 	}
-	option, literal := literalShellWord(words[0])
-	if !literal {
-		return true
+	for _, word := range chain {
+		memo.wrapperTails[wrapperTailKey{word: word, strace: strace}] = answer
 	}
-	if strings.HasPrefix(option, "-v") && option != "-v" {
-		return true
-	}
-	if option != "-v" || len(words) < 2 {
-		return false
-	}
-	name, literal := literalShellWord(words[1])
-	if !literal {
-		return true
-	}
-	return accountEnvironmentOperandDenied(name, names)
+	return answer
 }
 
-func accountEnvironmentOperandDenied(value string, names map[string]struct{}) bool {
-	name := value
-	if strings.IndexByte(name, '[') >= 0 {
-		// Bash evaluates indexed-array subscripts as arithmetic and can assign a
-		// protected variable while resolving an unrelated base name. Proving the
-		// subscript is side-effect-free requires runtime semantics, so fail closed.
-		return true
+// wrapperTailWordHidesAccountAssignment judges the tail word at words[0] and
+// reports how many words it consumed.
+func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) (int, bool) {
+	word := words[0]
+	if isAccountCommandName(word, "strace") && straceOptionRunRefused(words[1:], names, false, memo) {
+		// A strace in an unrecognized wrapper's — or another strace's — child
+		// command position gets the same option-run judgement the outermost one
+		// does (#5033); the recognized wrappers reach it through the default arm.
+		return 1, true
 	}
-	if equal := strings.IndexByte(name, '='); equal >= 0 {
-		name = name[:equal]
+	if isAccountCommandName(word, "env") {
+		// A nested env only mutates the child it execs; requireCommand
+		// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
+		// print mode, which overrides nothing — allowed.
+		return 1, envCallMutatesAccountEnvironment(words[1:], names, true, memo)
 	}
-	return accountEnvironmentNameDenied(name, names)
+	literal, ok := literalShellWord(word)
+	if !ok && strace && stracePrefixMutates(word, names) {
+		// The option word itself is judged before the unprovable-word path
+		// below, which only reads the words AFTER it (#5033).
+		return 1, true
+	}
+	if !ok {
+		// An unprovable tail word can itself expand to `env` (or to a
+		// multiword `env NAME=value` after word splitting); judge the
+		// words after it as that invocation's argv. envScan admits a
+		// substituted xargs marker after a literal env's command slot, but
+		// this env is only a hypothesis, so a later marker is refused here as
+		// a later "$x" is.
+		return 1, memo.xargsItemFollows(words[1:]) ||
+			envCallMutatesAccountEnvironment(words[1:], names, true, memo)
+	}
+	if !strings.HasPrefix(literal, "-") {
+		// A shell in the wrapper's tail gets the same verdict a bare
+		// shell command gets: `strace sh -c 'unset CODEX_HOME; codex'`
+		// execs the literal script the modeled path already refuses
+		// under `nice sh -c ...`. Only the trusted account-shell form
+		// proves out. A trailing shell name with no argv (echo sh,
+		// strace -p 1 sh) has nothing to judge and stays allowed.
+		return 1, len(words) > 1 && knownShellName(filepath.Base(literal)) &&
+			shellCommandIsUnproven(words)
+	}
+	if strace {
+		switch {
+		case literal == "-E" || straceEnvLongName(literal):
+			// strace's env option takes var[=val] as a separate word and
+			// injects or REMOVES the variable in the traced child's
+			// environment — the same mutation the env arm refuses, in
+			// option spelling. It is strace-only because -E means
+			// extended-regexp to grep and friends.
+			if len(words) < 2 {
+				return 1, true
+			}
+			value, ok := literalShellWord(words[1])
+			return 2, !ok || accountEnvironmentOperandDenied(value, names)
+		case strings.HasPrefix(literal, "--") && strings.Contains(literal, "="):
+			name, operand, _ := strings.Cut(literal, "=")
+			if straceEnvLongName(name) {
+				return 1, accountEnvironmentOperandDenied(operand, names)
+			}
+		case !strings.HasPrefix(literal, "--"):
+			// A short-option cluster reaches -E after its flags
+			// (`-fECODEX_HOME=/o`), but an option that takes an operand
+			// consumes the REST of the cluster (`-oECODEX_HOME=x` is -o with
+			// that file name), so read it with strace's real option table.
+			if operand, isEnv := straceClusterEnvOperand(literal[1:]); isEnv {
+				if operand != "" {
+					return 1, accountEnvironmentOperandDenied(operand, names)
+				}
+				// A trailing -E takes the NEXT word (`-fE CODEX_HOME=/o`).
+				if len(words) < 2 {
+					return 1, true
+				}
+				value, ok := literalShellWord(words[1])
+				return 2, !ok || accountEnvironmentOperandDenied(value, names)
+			}
+		}
+	}
+	// An unrecognized wrapper may expose options that mutate its
+	// child's environment in option-value form — xargs's
+	// --process-slot-var=NAME sets NAME on every exec'd command, and
+	// strace's --env=var=val is analogous. A literal `--opt=DENIED` or
+	// `--opt=DENIED=value` is refused when its value names a denied
+	// variable or carries a denied assignment.
+	if _, value, ok := strings.Cut(literal, "="); ok {
+		return 1, accountEnvironmentOperandDenied(value, names)
+	}
+	return 1, false
+}
+
+// stracePrefixMutates judges a strace option word that carries an expansion by
+// the literal text before its first non-literal part, where that text alone
+// decides: strace's -E/--env takes var[=val], so a literal NAME ahead of the
+// `=` refuses on its own whatever the value expands to (`-ECODEX_HOME=$V`
+// refuses, `-EPORT=$V` does not). Whether an unprovable NAME or option identity
+// refuses depends on a traced command following, which a single word cannot
+// see; straceOptionsRefused judges that over strace's option run.
+func stracePrefixMutates(word *syntax.Word, names map[string]struct{}) bool {
+	var prefix strings.Builder
+	for _, part := range word.Parts {
+		if !appendLiteralShellPart(&prefix, part) {
+			break
+		}
+	}
+	text := prefix.String()
+	if !strings.HasPrefix(text, "-") {
+		return false
+	}
+	var operand string
+	isEnv := false
+	if name, rest, found := strings.Cut(text, "="); found && straceEnvLongName(name) {
+		operand, isEnv = rest, true
+	}
+	if !isEnv && !strings.HasPrefix(text, "--") {
+		operand, isEnv = straceClusterEnvOperand(text[1:])
+	}
+	return isEnv && strings.Contains(operand, "=") && accountEnvironmentOperandDenied(operand, names)
+}
+
+// straceEnvLongName reports whether word is --env or an abbreviation of it:
+// strace parses long options with getopt_long, which accepts any unambiguous
+// prefix, so `--en=CODEX_HOME=/o` sets the variable under the installed
+// strace. Three or more characters are treated as --env (fail closed — `--e`
+// would be ambiguous to getopt, and refusing it costs nothing real).
+func straceEnvLongName(word string) bool {
+	return len(word) >= 3 && strings.HasPrefix("--env", word)
+}
+
+// straceClusterEnvOperand reads a short-option cluster (the word without its
+// leading dash) with strace's option table: flags that take no operand are
+// skipped, and the first option that takes one consumes the rest of the
+// cluster. It reports that operand only when that option is -E; any other
+// operand-taking option (-o, -p, -s, …) owns the rest, so `oECODEX_HOME=x` is
+// a file name. A letter the table cannot place ends the read without a verdict
+// — straceOptionsRefused refuses it where the word is a strace option.
+func straceClusterEnvOperand(cluster string) (operand string, isEnv bool) {
+	for i := 0; i < len(cluster); i++ {
+		switch {
+		case strings.IndexByte(straceShortFlags, cluster[i]) >= 0:
+		case strings.IndexByte(straceShortValueFlags, cluster[i]) >= 0:
+			return cluster[i+1:], cluster[i] == 'E'
+		default:
+			return "", false
+		}
+	}
+	return "", false
 }

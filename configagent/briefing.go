@@ -141,21 +141,23 @@ network.listen_addr — anything that is not 127.0.0.1, ::1 or localhost — and
 full control plane, which can run commands on this machine, on the network.
 
 So if the user asks for access from anywhere other than this machine, set both, in
-the same breath, without being asked:
+the same breath, without being asked — the token FIRST, because af refuses to write
+a non-loopback network.listen_addr while it is still off:
 
-    af config set network.listen_addr <the address they want>
     af config set network.require_token true
+    af config set network.listen_addr <the address they want>
 
 and tell them plainly why: without the token, anyone who can reach that address can
 drive their agents and their machine.
 
 Never write a non-loopback network.listen_addr with network.require_token = false on your own
-initiative. af allows that pairing — the daemon starts, serves, and warns once — so
-it is the user's call to make, not a configuration that fails loudly and teaches
-them. That is exactly why you must not make it for them. If they ask for it anyway,
-write it, and say in the same breath that anyone who can reach the address can drive
-their agents, and that the token or a loopback bind reached over SSH or Tailscale
-port-forwarding is the alternative. Note that network.require_loopback_token does not
+initiative. af refuses that pairing outright — af config set rejects the write, and
+a hand-edited file leaves the listener unbound with the reason logged as an ERROR — so
+opting out takes an explicit network.allow_unauthenticated_network = true. If they ask
+for it anyway, set that first so the listen_addr write is accepted, then write it, and
+say in the same breath that anyone who can reach the address can drive their agents,
+and that the token or a loopback bind reached over SSH or Tailscale port-forwarding
+is the alternative. Note that network.require_loopback_token does not
 substitute for network.require_token here — it changes nothing while network.require_token is false.
 
 One more thing to tell them if they go off this machine: af serves plain HTTP and
@@ -164,7 +166,7 @@ reverse proxy that terminates TLS (nginx, caddy), or a VPN such as Tailscale.
 
 `)
 
-	fmt.Fprintf(&b, `
+	fmt.Fprint(&b, `
 ## Editing the structured settings
 
 Structured settings use one compact JSON value. Read the current JSON with
@@ -172,9 +174,6 @@ Structured settings use one compact JSON value. Read the current JSON with
 to `+"`af config set <key> '<json>'`"+`. Shell-quote the JSON so it remains one argument.
 The structured settings are:
 
-- `+"`theme`"+` — the `+"`nord`"+` or `+"`zenburn`"+` preset name, or a partial
-  object containing only the requested color slots as `+"`#RRGGBB`"+` strings;
-  omitted slots keep their current colors (there are %d slots in the full palette).
 - `+"`keys`"+` — an object whose entries rebind TUI actions.
 - `+"`root_agents`"+` — an object keyed by repository path, with one root-agent profile
   per value.
@@ -186,11 +185,9 @@ The structured settings are:
 - `+"`session_env_passthrough`"+` — an array of exact environment variable NAMES a
   session may inherit. Names only — never put a value here. This is a security setting.
 
-For `+"`theme`"+` specifically: do not offer to pick hex values slot by slot in
-conversation — that is a miserable way to choose colors. Ask what they want (a darker
-background, a different accent), submit only those slots in a partial object, and set it.
+Appearance offers only `+"`light`"+`, `+"`dark`"+`, or `+"`system`"+`; custom color editing is retired.
 
-`, config.ThemeSlotCount())
+`)
 
 	fmt.Fprintf(&b, "## The settings\n\nEvery setting below is shown with its current value on this machine.\n"+
 		"Recommend from these values · do not guess at what is set.\n\n%s\n",

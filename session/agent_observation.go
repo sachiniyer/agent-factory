@@ -23,6 +23,17 @@ type agentObservationTarget struct {
 	runtime *agentObservationRuntime
 }
 
+// HoldAgentObservationSettlement makes a daemon observation's transport read
+// and every state conclusion derived from it one boundary. Automated prompt
+// delivery takes the same per-instance fence around its final liveness check and
+// submission, so it runs wholly before the snapshot or wholly after its apply.
+// Manual delivery intentionally does not use this task-safety boundary.
+func (i *Instance) HoldAgentObservationSettlement() func() {
+	i.agentObservationSettlementMu.Lock()
+	var once sync.Once
+	return func() { once.Do(i.agentObservationSettlementMu.Unlock) }
+}
+
 // agentObservationTarget binds the server and its observation lock in the same
 // i.mu section. Runtime replacement clears i.agentObservation alongside the
 // derived server cache, so predecessor I/O and replacement I/O never share a
@@ -114,4 +125,53 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (
 		target.runtime.mu.Unlock()
 		return status, err
 	}
+}
+
+// paneObservationMinGap floors the continuity horizon: two successful
+// captures further apart than this AND than thrice the caller's declared
+// cadence mark the interval between them unobserved — a hole (failed probes,
+// a stalled serial walk) in which churn could hide. The floor keeps a
+// sub-second tick from declaring a hole on ordinary scheduler jitter.
+const paneObservationMinGap = 10 * time.Second
+
+// NotePaneCaptureObserved stamps pane evidence at the completion of a
+// successful pane capture (#5221 review). expectedInterval is the cadence the
+// CALLER's observation schedule intends — the live poll passes its configured
+// tick, the paused backstop passes its probe period — so captures arriving on
+// schedule keep the observation streak while a hole rebases it: an unobserved
+// interval is not silence, however short the wall-clock hole. A starved
+// streak merely holds the run until observation resumes; the release arms
+// measure observed silence, never elapsed wall time.
+func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.Duration) {
+	if at.IsZero() {
+		return
+	}
+	maxGap := 3 * expectedInterval
+	if maxGap < paneObservationMinGap {
+		maxGap = paneObservationMinGap
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.lastPaneCaptureAt.IsZero() || at.Sub(i.lastPaneCaptureAt) > maxGap {
+		i.paneObservationStreakAt = at
+	}
+	i.lastPaneCaptureAt = at
+	i.paneObservationExpiresAt = at.Add(maxGap)
+}
+
+// NotePaneCaptureFailed breaks the observation streak on a probe the daemon
+// attempted and lost — a confirmed failed capture, or a snapshot whose
+// transport errored before any frame could answer. Skipping the stamp is not
+// enough: two successful captures straddling one failure can sit inside the
+// gap horizon (60s apart under the paused path's 90s slack), leaving the old
+// streak intact while the failed frame in between could have hidden active
+// churn (#5221 review). Clearing lastPaneCaptureAt makes the next success
+// re-anchor a fresh streak from its own instant; clearing the expiry keeps a
+// stale streak from staying live through the blind window.
+func (i *Instance) NotePaneCaptureFailed() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.lastPaneCaptureAt = time.Time{}
+	i.paneObservationStreakAt = time.Time{}
+	i.paneObservationExpiresAt = time.Time{}
 }

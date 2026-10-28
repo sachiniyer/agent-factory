@@ -26,6 +26,7 @@ func projectsHomeWithRows(t *testing.T) *home {
 		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 1, Active: true},
 		{Name: "zzz-other", Root: "/repos/zzz-other", SessionCount: 0},
 	})
+	h.relayout() // Project rows determine whether this section is visible.
 	h.focusRegion(layout.RegionProjects)
 	require.Equal(t, layout.RegionProjects, h.ring.Active())
 	require.Equal(t, stateDefault, h.state)

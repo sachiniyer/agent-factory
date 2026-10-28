@@ -2,7 +2,7 @@ package daemon
 
 import (
 	"fmt"
-	"sort"
+	stdlog "log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/accountlogin"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -21,7 +22,7 @@ type Manager struct {
 	// branch_prefix (the title-reservation helpers). The network listener keys used
 	// to read it too; #2480 PR2 made them applied-live (livePosture per
 	// request; listen_addr/preview_listen_addr rebind in place). Everything
-	// hot-reloadable, including GetTheme's renderer generation, reads live via
+	// hot-reloadable reads live via
 	// Config() instead.
 	cfg *config.Config
 	// live is the hot-reloadable global config (#2480). ApplyConfig swaps it in
@@ -30,10 +31,16 @@ type Manager struct {
 	// and threads that snapshot down — a per-use read inside one op could observe
 	// two config generations and produce an inconsistent result (e.g. a branch
 	// derived from one generation and a worktree path from the next).
-	live atomic.Pointer[config.Config]
-	// configApplyMu serializes full and theme-only live-config swaps so a launch
-	// cannot restore unrelated fields from a generation an ApplyConfig just replaced.
+	// The publication also carries the #5183 upgrade-probation token floor —
+	// deliberately inside the same atomic, because the apply sequence (arm →
+	// publish → disarm) makes cfg and floor two halves of one state, and a gate
+	// that loaded them separately could observe a pair that never coexisted.
+	live atomic.Pointer[livePosturePublication]
+	// configApplyMu serializes live config swaps and their side effects.
 	configApplyMu sync.Mutex
+	// accountSwapAfterManualPrecheckForTest pauses a manual handoff after its
+	// advisory launch check and before personal policy is locked.
+	accountSwapAfterManualPrecheckForTest func()
 	// pollReloadCh signals the poll goroutine to reset its ticker after ApplyConfig
 	// changed daemon_poll_interval (#2480). Buffered size 1 with a non-blocking
 	// send, so a burst of applies collapses to one reset and ApplyConfig never
@@ -51,6 +58,11 @@ type Manager struct {
 	// daemon restart invalidates every outstanding one, which is the correct
 	// side to fail on.
 	sandboxTokens sandboxTokenRegistry
+
+	// sandboxEndpointSocket is the live dedicated sandbox callback endpoint's
+	// socket path (#5571 W3.4); nil or empty while it is not listening. The mint
+	// reads it instead of the client listener's address and auth posture.
+	sandboxEndpointSocket atomic.Pointer[string]
 
 	// previewSecret is the HMAC key from which the web-tab PREVIEW listener derives
 	// a PER-TAB credential (#1856 step 3): the origin label for (sessionID, tabID) is
@@ -97,6 +109,11 @@ type Manager struct {
 	// config swap alone would not reach it. Read lock-free by the poll loop via
 	// Load().
 	limitDetector atomic.Pointer[task.LimitDetector]
+	// accountLimitMu serializes limit publication with automated delivery
+	// admission, account-swap evidence, runtime teardown, and identity commit.
+	// Manager.mu protects roster shape; it cannot cover
+	// per-instance liveness writes without inverting existing lock order.
+	accountLimitMu sync.Mutex
 
 	// ready is closed once restored state is safe for state-dependent RPCs. For
 	// RunDaemon that includes the startup orphan sweep as well as instance restore,
@@ -121,6 +138,52 @@ type Manager struct {
 	taskTargetMu sync.Mutex
 	storage      *session.Storage
 	instances    map[string]*session.Instance
+	// skippedRepos names repos whose instances.json was corrupted/unreadable,
+	// or parsed but whose rows failed to load, and dropped at daemon startup
+	// (#603, #4783, #4998 follow-up), seeded by restoreInstances and trimmed by
+	// the polling refresh — only once it re-reads a repo AND re-materializes its
+	// rows — without ever adding one that fails mid-life. The startup orphan
+	// sweep reads it to defer the destructive docker pass until the
+	// protected-slug set is complete. The Snapshot RPC carries the
+	// corrupted/unreadable drop to clients instead of silently serving a partial
+	// list as complete (#730 extended to the wire surface #1029 PR 2), EXCEPT a
+	// fresh startup rows-failure, which startupRowsFailedRepos withholds. Guarded by m.mu.
+	skippedRepos []SkippedRepo
+	// startupRowsFailedRepos names repos whose instances.json PARSED at startup
+	// but whose rows failed to load. The sweep deferral still arms from
+	// skippedRepos, but the Snapshot RPC withholds these from the wire
+	// SkippedRepos so list/get/whoami serve the loadable rows plus a log warning
+	// instead of refusing — matching master, which never seeded a fresh startup
+	// rows-failure (the refusal names a count, not a session; restore/kill
+	// resolve titles against the in-memory set, which excludes the unloadable
+	// row). A previously-skipped repo is NOT in this set, so its rows-failed
+	// rewrite still surfaces on the wire (see seedStartupRowsFailedRepos).
+	startupRowsFailedRepos map[string]bool
+	// deferredOrphanSweepArmed is set at startup when the orphan-container sweep
+	// was deferred because skippedRepos was non-empty — the daemon's session view
+	// is known-incomplete (a corrupted/unreadable file OR a parses-but-unloadable
+	// one), so the sweep's protected-slug set cannot distinguish a skipped repo's
+	// live container from a genuine orphan. The poll loop runs the deferred sweep
+	// once the skip set drains to empty, by which point the protected set is
+	// complete again. Guarded by m.mu.
+	deferredOrphanSweepArmed bool
+	// deferredOrphanSweepInFlight tracks whether the deferred orphan sweep
+	// worker is currently running, so the poll loop does not launch a second
+	// worker while one is still mid-sweep — the sweep's Docker list/reap can
+	// take many seconds or stall on an unavailable engine, and the poll loop
+	// ticks on a fixed cadence. Guarded by m.mu.
+	deferredOrphanSweepInFlight bool
+	// createSweepMu is the create/sweep admission barrier: it serializes the
+	// deferred orphan sweep with CreateSession's pendingCreates publication so a
+	// create admitted after the protected-slug snapshot cannot publish a
+	// mid-sweep container whose slug is absent from the protected set (#2632). It
+	// is separate from m.mu because the deferred sweep's Docker list/reap can take
+	// many seconds (or stall on an unavailable engine), and holding m.mu through
+	// it would block Snapshot, RefreshInstances, and every other manager
+	// operation; createSweepMu blocks only CreateSession admission for that
+	// window, which is exactly the exclusion the race needs. Always taken before
+	// m.mu (createSweepMu -> m.mu) so the two never invert.
+	createSweepMu sync.Mutex
 	// pendingCreates is the daemon-owned projection of creates that have passed
 	// admission but have not finished provisioning. It is intentionally separate
 	// from instances: a docker/ssh/hook backend may block inside NewInstance before
@@ -165,6 +228,13 @@ type Manager struct {
 	// open until Start, after the worktree already exists. Keyed per repo by the
 	// exact sanitized tmux name; the value is the user-facing title for errors.
 	reservedTmuxNames map[string]string
+	// reservedArchiveTitles holds only creates of local, relocatable worktrees.
+	// Unlike tmux names, these exclude --here sessions. Keys are (repoID, title).
+	reservedArchiveTitles map[string]struct{}
+	// reservedArchiveDestinations holds active archive moves by (repoID, path).
+	// The owning instance identifies both the refusal and the release authority.
+	reservedArchiveDestinations map[string]*session.Instance
+	worktreeMissingUndurable    map[string]struct{} // owed flag writes (#5102); guarded by mu — see worktree_missing_poll.go
 	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
 	// the BARE slug — deliberately global, unlike every other name a session owns.
 	//
@@ -204,8 +274,8 @@ type Manager struct {
 	// cap's count — then behaves as if that session does not exist. Its agent may
 	// still be running, so the cap must keep counting it or a failed LOAD becomes a
 	// licence to exceed max_concurrent_runs after every restart.
-	ghostTaskRuns  map[string]int
-	repoStartLocks map[string]*sync.Mutex
+	ghostTaskRuns                          map[string]int
+	repoStartLocks, worktreeAdmissionLocks map[string]*sync.Mutex
 	// aliveObservations counts POSITIVE liveness observations per session (keyed by
 	// stableSessionKey, so a same-title successor never inherits its predecessor's).
 	// Incremented only where the poll actually gets an answer OUT of a runtime; read
@@ -222,6 +292,50 @@ type Manager struct {
 	// written in config.json) for a legacy entry, or by the registered project's
 	// resolved root path for a singleton-only candidate (#2216 Phase 6).
 	rootEnsureStates map[string]*rootEnsureState
+	// rootProgramDriftLogged deduplicates the adopted-command warning by resolved
+	// repository identity. Two legacy paths can share one repo while retaining
+	// independent retry states; they must still produce only one warning. Guarded
+	// by mu and retained for the Manager's lifetime.
+	rootProgramDriftLogged map[string]bool
+	// rootProgramDriftConfigEpoch invalidates configured-command resolutions on
+	// every ApplyConfig. That boundary covers global and project-scoped live
+	// writes alike; guarded by mu.
+	rootProgramDriftConfigEpoch uint64
+	// Async inspection state: consumers may join; shutdown abandons uncancellable reads.
+	rootProgramDriftInFlight map[string]int
+	rootProgramDriftWG       sync.WaitGroup
+	rootProgramDriftStopping bool
+	// Transcript probe overrides are manager-local and set only before the
+	// manager is used. Never restore them during cleanup: a timed-out filesystem
+	// inspection may outlive both its caller and the joined poll loop (#4212).
+	inspectClaudeProjectConversations func(string, string, session.AgentConversationData) (session.ClaudeProjectConversationState, error)
+	claudeTranscriptInspectBudget     time.Duration
+	// rootCreateRefusals holds each repo's standing create-boundary identity
+	// refusal (#3714): the outcome class of the most recent identity proof at
+	// a root create, and when it was taken. Keyed by REPO ID — the key
+	// rootAgentMaterializeVerdictFor asks with, and the one key two
+	// root_agents spellings of a single repository share — rather than by
+	// rootEnsureStates' candidate key. Guarded by mu, and written from the
+	// create boundary rather than from the poll goroutine as such, so #3721's
+	// off-poll create writes it unchanged.
+	rootCreateRefusals map[string]rootCreateRefusal
+	// rootCreatesInFlight marks the repos (by repo ID) whose root-agent create is
+	// running on its own goroutine right now (#3721), so the next ensure tick
+	// neither waits for it nor starts a second one. Keyed by REPO rather than by
+	// the state key above, because two root_agents spellings of one repository are
+	// two states and one repo — see launchRootCreate. Guarded by mu; set with the
+	// launch and cleared by the create's own deferred exit, whatever ends it. The
+	// value is that repo's workspace path, so the shutdown wait can name the
+	// checkout holding it rather than a repo-ID hash.
+	rootCreatesInFlight map[string]string
+	// rootCreateWG counts those goroutines, so shutdown can JOIN them instead of
+	// abandoning a half-provisioned session (waitRootAgentCreates). A WaitGroup is
+	// internally synchronized and needs no lock of its own; the Add nonetheless
+	// happens under mu beside the mark above, so a launch and its accounting are
+	// one decision rather than two. Every Add therefore precedes its Wait, which
+	// is the ordering a reused WaitGroup requires: the poll loop is the only
+	// launcher, and shutdown waits only once that loop has exited.
+	rootCreateWG sync.WaitGroup
 	// rootAgentLayers is the root-agent configuration snapshot every resolution
 	// reads (#2216 Phase 6): the global [root_agent] layer, each registered
 	// project's personal layer and resolved root, the fail-closed unknowns
@@ -235,22 +349,62 @@ type Manager struct {
 	// restart-to-apply; only a read that failed at daemon start heals mid-run,
 	// by being read successfully for the first time.
 	rootAgentLayers atomic.Pointer[rootAgentSnapshot]
-	// rootHealFailures/rootHealNextAttempt pace healRootAgentLayers on the
-	// shared ensure backoff (rootEnsureBackoffFor, on the injectable nowFunc
-	// clock): while every retried read keeps failing the pass backs off to
-	// rootEnsureBackoffMax instead of re-reading broken files every poll tick.
+	// rootHealFailures/rootHealNextAttempt pace the personal-config, reconcile,
+	// and legacy root_agents retries on the shared ensure backoff
+	// (rootEnsureBackoffFor, injectable nowFunc). The registry arm paces on
+	// its OWN clock, rootHealRegistryNextAttempt — NOT the shared one a legacy
+	// narrowing resets to now: its two-strike discipline (#3315) needs two
+	// reads SPACED by a cadence (the personal absence streak carries its own
+	// spacing, rootHealAbsenceLastStrike, for the same reason). Guarded by
+	// m.mu, like rootEnsureStates.
+	//
 	// rootHealRegistryStreak/rootHealRegistryProjects and
-	// rootHealAbsenceStreaks carry the two-strike counters for
-	// absence-classified observations (the applyHomeCheck discipline):
-	// registry recovery publishes on the second consecutive MATCHING
-	// present-and-listable snapshot, and an ENOENT personal config heals to
-	// "removed" on the second consecutive dir-present observation. All
-	// guarded by m.mu, like rootEnsureStates.
-	rootHealFailures         int
-	rootHealNextAttempt      time.Time
-	rootHealRegistryStreak   int
-	rootHealRegistryProjects []config.Project
-	rootHealAbsenceStreaks   map[string]int
+	// rootHealAbsenceStreaks are the two-strike counters: registry recovery
+	// publishes on the second consecutive MATCHING present-and-listable
+	// snapshot, and an ENOENT personal config heals to "removed" on the
+	// second consecutive dir-present observation.
+	rootHealFailures            int
+	rootHealNextAttempt         time.Time
+	rootHealRegistryFailures    int
+	rootHealRegistryNextAttempt time.Time
+	rootHealRegistryStreak      int
+	rootHealRegistryProjects    []config.Project
+	rootHealAbsenceStreaks      map[string]int
+	// rootHealAbsenceLastStrike stamps each project's most recent ENOENT
+	// strike. The two-strike release requires the strikes to be SPACED by at
+	// least one backoff base regardless of what the shared retry clock does —
+	// a sibling healing in the same pass resets that clock to now, and
+	// without per-project spacing the second strike could land one poll tick
+	// later (#3299 review round 9).
+	rootHealAbsenceLastStrike map[string]time.Time
+	// rootHealProbes holds the in-flight asynchronous re-attribution probes,
+	// keyed by the unresolved entry's derived repo ID (#3299 review): the
+	// probes fork git against recorded roots that were just absent — exactly
+	// the paths most likely to sit on a stalled network mount — so they run
+	// off the poll goroutine, and the heal pass consumes only completed
+	// results. Guarded by mu; each probe's fields are written solely by its
+	// goroutine before done is closed.
+	rootHealProbes map[string]*rootReattributionProbe
+	// rootHealProbeFailures counts consecutive negative probe outcomes per
+	// unresolved entry, driving that entry's OWN retry backoff: a stalled
+	// sibling keeps the heal pass on the hot per-tick cadence, and without
+	// per-entry pacing every completed-negative sibling would respawn its
+	// git probe on each of those ticks (#3299 review round 7). Poll
+	// goroutine only.
+	rootHealProbeFailures map[string]int
+	// rootHealPassSeq numbers the heal passes. A probe carries the pass that
+	// spawned it, and a result is only consumed by that same pass: a probe
+	// finishing after its pass's grace expired describes a filesystem from a
+	// previous cadence, and publishing it later would attribute a checkout
+	// nobody has re-verified (#3299 review round 4).
+	//
+	// It is also the CLOCK the snapshot's identity verdicts are dated against
+	// (#3611): each consumed probe result stamps its record with the pass that
+	// established it, and a consumer needing current evidence — the deletion
+	// tombstone's release rule — compares the two. Written only by the poll
+	// goroutine, but under mu, because that comparison is read from whatever
+	// goroutine is asking for a verdict.
+	rootHealPassSeq uint64
 	// rootKilledAt records repos (by repo ID) whose root agent was explicitly
 	// killed, and WHEN. The ensure loop honors the kill only for
 	// rootKillHealDelay, then self-heals a still-configured root (#1223): config
@@ -264,7 +418,16 @@ type Manager struct {
 	// the running daemon's life (matching the existing "root_agents changes take
 	// effect on the next daemon start" contract — a re-added project's root
 	// materializes on restart, not mid-run). Guarded by m.mu.
-	deletedRootRepos map[string]struct{}
+	// The value is the deleted claimant's project ID ("" when the delete
+	// targeted an unregistered repo, e.g. a path occupant): a later PROVEN
+	// mismatch releases the tombstone only when the disproven claimant IS
+	// the deleted one (#3299 review round 15), so an occupant's own deletion
+	// can never be released by a dead third party's mismatch. It is also what
+	// scopes an ALIAS tombstone to the record that owns the alias (#3299
+	// review id 3884615898). Since #3611 that mismatch must also be CURRENT:
+	// a verdict nobody has re-proved since the checkout could have changed is
+	// unknown rather than disproof, and unknown holds the tombstone.
+	deletedRootRepos map[string]string
 	// deferredTaskLifecycle parks a task's declared on_complete verb (#2595) for a
 	// session whose run finished while a TUI was attached, mapping the session's
 	// daemon key to the stable id of the session that finished. The paused poll
@@ -289,6 +452,15 @@ type Manager struct {
 	// after restart; this map prevents a second worker in the same daemon process.
 	// Values are stable IDs so title reuse cannot inherit an old fence.
 	ghostCleanupStalls map[string]string
+	// backgroundMutationWG owns detached writers spawned by otherwise-synchronous
+	// control/poll paths: conversation capture, task on-complete teardown, and
+	// late ghost cleanup. backgroundMutationMu makes launch-vs-shutdown admission
+	// atomic, so the terminal checkpoint can close the gate and join every writer
+	// without racing a WaitGroup.Add.
+	backgroundMutationMu       sync.Mutex
+	backgroundMutationWG       sync.WaitGroup
+	backgroundMutationStop     chan struct{}
+	backgroundMutationsStopped bool
 	// restoresInFlight identifies the subset of killsInFlight entries admitted
 	// by a manual restore. DeleteProject treats these as early blockers because
 	// an archived row has not necessarily changed lifecycle state yet. Keeping
@@ -301,6 +473,14 @@ type Manager struct {
 	// an episode describes one runtime's failures, so a later session that merely
 	// reuses the title must not inherit them (#2868).
 	lostRestoreStates map[string]*lostRestoreState
+	// lostRestoreConfirmations is the confirmed-restore flap history: the
+	// timestamps of CONFIRMED automatic lost-session restores for each session,
+	// keyed by stableSessionKey for the same reason as lostRestoreStates
+	// (#2868). It is a separate map rather than a field of lostRestoreState on
+	// purpose: the retry episode is retired at confirmation, while this is the
+	// memory that must survive that retirement so the confirmed-restore-then-
+	// died cycle can be bounded (#5238). Guarded by m.mu.
+	lostRestoreConfirmations map[string][]time.Time
 	// limitResumeStates tracks per-session retry state for the usage-limit
 	// auto-resume scheduler (#1146 PR3) — the opt-in sibling of lostRestoreStates,
 	// and keyed the same way for the same reason: by stableSessionKey (the stable
@@ -320,6 +500,18 @@ type Manager struct {
 	// one survives to the next daemon (#2781, #2883). flushOwedSettlements drains
 	// it on the poll. Guarded by m.mu.
 	settleOwed map[string]settleOwedEntry
+	// dischargeOwed holds stand-down discharges whose durable marker-CLEAR did not
+	// land, so the poll can re-run them (#4738). Keyed by stable instance identity
+	// like settleOwed, but in its OWN map: a generic settlement's
+	// recordSettlementWrite must NOT touch this obligation. The whole-row writes
+	// that retire a settleOwed entry (a status/churn checkpoint, a handoff, a
+	// recovery) re-write the restored marker along with the row, so retiring a
+	// discharge retry on one would lose the clear while disk still carries the
+	// marker and re-arm a teardown the stand-down decided against. The retry is
+	// re-run as a discharge on the poll rather than persisted as a stale snapshot,
+	// and carries the discharged marker so it only clears THAT marker. Guarded by
+	// m.mu; drained by FlushOwedSettlements alongside settleOwed.
+	dischargeOwed map[string]dischargeRetryEntry
 	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
 	// stableSessionKey — the stable instance ID, which is what every writer and
 	// every clearRemoteLoss call site actually passes. This said "daemon instance
@@ -385,6 +577,14 @@ type Manager struct {
 	// unbounded over the daemon's lifetime (#2015).
 	taskRunProbeDue map[string]time.Time
 
+	// taskRunTurnWatches holds each in-flight task run's pane-chrome watcher —
+	// the stateful detector that folds consecutive captures into "the agent's
+	// own in-turn row is ticking" evidence (#5219). Keyed by stableSessionKey,
+	// created lazily by the poll while a run is active, rebuilt when the
+	// resolved agent changes mid-run, and reclaimed by sweepTaskRunTurnWatches
+	// once the run ends or the row is gone. Guarded by pausedMu.
+	taskRunTurnWatches map[string]*taskRunTurnWatchEntry
+
 	// events is the WS events-plane fan-out (#1592 Phase 2 PR5): every session/
 	// task mutation the daemon owns publishes here, and GET /v1/events streams it
 	// to clients. On the Manager (not a controlServer) because both transports
@@ -392,21 +592,124 @@ type Manager struct {
 	// Immutable after construction; the hub is internally synchronized.
 	events *eventsHub
 
-	// vscode owns the daemon-spawned VS Code editors backing TabKindVSCode tabs
-	// (one code-server per session, see vscode_server.go). On the Manager because
-	// an editor's lifetime is a SESSION's lifetime — kill/archive/close-tab stop
-	// it, and the webtab proxy resolves a vscode tab's target through it.
-	// Immutable after construction; the supervisor carries its own mutex, so
-	// spawning (seconds) never touches m.mu.
+	// vscode owns the daemon-spawned VS Code editors behind TabKindVSCode tabs, one
+	// code-server per session (vscode_server.go): kill/archive/close-tab stop it and
+	// the webtab proxy resolves a vscode tab's target through it. Immutable after
+	// construction; its own mutex keeps spawning (seconds) off m.mu.
 	vscode *vscodeSupervisor
+	// relayTransports caches one workspace-loopback transport per off-box session
+	// (W5.3); see relayTransport.
+	relayTransports sync.Map
+	// proposals runs the proposal routes and the poll-time doc scan.
+	proposals proposalState
 	// configAgents owns the bare tmux sessions spawned for config agents. They
 	// have no Instance and so appear in no roster; this is the only thing that
 	// knows they exist, which is why its Stop() is wired into daemon teardown.
 	configAgents *configAgentSupervisor
+	// accountLogins owns the bare tmux sessions spawned for `af accounts login`
+	// (#3384) — the same shape and the same ownership argument as configAgents: a
+	// login pane has no Instance, so nothing else in this process knows it exists,
+	// and a daemon that exits without reaping one leaves an orphan no future
+	// daemon can find. Its Stop() is wired into daemon teardown beside
+	// configAgents.Stop(). Immutable after construction; it carries its own mutex.
+	accountLogins *accountlogin.Supervisor
 	// configAssistants owns the single web config-assistant stream (#2467): the
 	// spawn-or-reuse singleton, its bare-session broker, and the last-detach grace
 	// reaper. Its stop() is wired into daemon teardown alongside configAgents.Stop().
 	configAssistants *configAssistantHub
+
+	// warnLog is where THIS Manager's warnings go (#3787 part 2). Nil in
+	// production, which means the process-global log.WarningLog — see warn().
+	//
+	// It exists because "this Manager warned X" was not a checkable claim. Every
+	// warning went to a process-global logger, so a test asserting it read a sink
+	// that every OTHER Manager in the test binary — and every goroutine they had
+	// left running — wrote into too. Part 1 stopped that racing the reader; it
+	// could not stop a foreign Manager's warning from LANDING in the buffer and
+	// satisfying the assertion. A test that pins one to a Manager of its own is
+	// asserting about that Manager.
+	//
+	// Set once at construction and never mutated, so it is read lock-free from
+	// any goroutine — including the ones a Manager leaves running past the test
+	// that made it, which is the case that started #3787.
+	warnLog *stdlog.Logger
+
+	// infoLog and errorLog are the same seam at the other two levels (#3797).
+	// They are here because the contamination never had anything to do with the
+	// LEVEL: `contains(logs, "giving up")` reads a process-global sink whether
+	// the message was a warning, an info line or an error, and the strings these
+	// tests match on are emitted from more than one owner — "giving up" from both
+	// (*Manager).lostRestoreFailed and (*taskWatcher).run, "restored after" from
+	// both (*Manager).restoreLostSession and a package-level helper.
+	//
+	// Same lifetime rule as warnLog: set at construction, never mutated, read
+	// lock-free.
+	infoLog  *stdlog.Logger
+	errorLog *stdlog.Logger
+}
+
+// warn returns the logger this Manager's warnings go to. Nil-safe on both the
+// receiver and the field, so a Manager built by any path — including the shells
+// that predate managerOptions — logs to the process-global sink exactly as
+// before.
+func (m *Manager) warn() *stdlog.Logger {
+	if m == nil {
+		return log.WarningLog
+	}
+	return warnLoggerOr(m.warnLog)
+}
+
+// info returns the logger this Manager's INFO lines go to (#3797), nil-safe on
+// both the receiver and the field.
+func (m *Manager) info() *stdlog.Logger {
+	if m == nil {
+		return log.InfoLog
+	}
+	return infoLoggerOr(m.infoLog)
+}
+
+// err returns the logger this Manager's ERROR lines go to (#3797), nil-safe on
+// both the receiver and the field.
+func (m *Manager) err() *stdlog.Logger {
+	if m == nil {
+		return log.ErrorLog
+	}
+	return errorLoggerOr(m.errorLog)
+}
+
+// The three resolvers below exist separately from the accessors for the callers
+// that need them before a Manager exists: the root-agent snapshot is built
+// inside the constructor, and its diagnostics are the ones #3787's race report
+// actually names. loggerOr carries the nil rule once so the three cannot drift.
+func loggerOr(logger, fallback *stdlog.Logger) *stdlog.Logger {
+	if logger == nil {
+		return fallback
+	}
+	return logger
+}
+
+func warnLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
+	return loggerOr(logger, log.WarningLog)
+}
+
+func infoLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
+	return loggerOr(logger, log.InfoLog)
+}
+
+func errorLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
+	return loggerOr(logger, log.ErrorLog)
+}
+
+// managerOptions carries construction-time seams. Everything here has a
+// production default, and production passes the zero value: these exist so a
+// test can scope to one Manager what the daemon keeps process-global.
+type managerOptions struct {
+	// warnLog, infoLog and errorLog route this Manager's diagnostics away from
+	// the process-global sinks. Only tests set them; see
+	// newManagerCapturingWarnings and newManagerCapturingLogs.
+	warnLog  *stdlog.Logger
+	infoLog  *stdlog.Logger
+	errorLog *stdlog.Logger
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -415,7 +718,19 @@ type Manager struct {
 // binds the control socket, and only then runs RestoreInstances so rehydrating
 // persisted state cannot delay the bind (#829).
 func NewManager(cfg *config.Config) (*Manager, error) {
-	manager, err := newManagerShell(cfg)
+	return newManagerWithOptions(cfg, managerOptions{})
+}
+
+// newManagerWithOptions is NewManager with the construction seams exposed. It is
+// unexported because every option is a test seam: an external caller gets the
+// production defaults and nothing else.
+//
+// The options have to be applied by the CONSTRUCTOR rather than assigned to the
+// returned Manager, because warnings fire from the root-agent snapshot inside
+// this call — the fail-closed warning the singleton tests assert on is emitted
+// before NewManager returns, so a logger installed afterwards would miss it.
+func newManagerWithOptions(cfg *config.Config, opts managerOptions) (*Manager, error) {
+	manager, err := newManagerShellWithOptions(cfg, "", opts)
 	if err != nil {
 		return nil, err
 	}
@@ -441,6 +756,12 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 // an ordinary caller can construct only a normal shell, while runDaemon owns
 // the probation selection.
 func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manager, error) {
+	return newManagerShellWithOptions(cfg, transactionID, managerOptions{})
+}
+
+// newManagerShellWithOptions is the one place a Manager is actually built. The
+// two wrappers above pass the zero options, which is production.
+func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts managerOptions) (*Manager, error) {
 	lifecycle, err := newDaemonLifecycle(transactionID, cfg.ListenAddr, cfg.PreviewListenAddr)
 	if err != nil {
 		return nil, err
@@ -470,55 +791,72 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	}
 	vscode := newVSCodeSupervisor()
 	configAgents := newConfigAgentSupervisor()
-	rootAgentLayers := buildRootAgentSnapshot(cfg)
+	accountLogins := accountlogin.New()
+	rootAgentLayers := buildRootAgentSnapshot(warnLoggerOr(opts.warnLog), errorLoggerOr(opts.errorLog), cfg)
 	mgr := &Manager{
-		cfg:                    cfg,
-		previewSecret:          previewSecret,
-		previewOrigins:         newPreviewOriginRegistry(),
-		editorOriginSecret:     editorSecret,
-		editorLabels:           newEditorLabelIndex(),
-		pollReloadCh:           make(chan struct{}, 1),
-		ready:                  make(chan struct{}),
-		lifecycle:              lifecycle,
-		storage:                storage,
-		instances:              make(map[string]*session.Instance),
-		pendingCreates:         make(map[string]session.InstanceData),
-		reservedTitles:         make(map[string]struct{}),
-		projectDeletes:         make(map[string]struct{}),
-		projectDeleteLastSeq:   make(map[string]uint64),
-		reservedTmuxNames:      make(map[string]string),
-		reservedRemoteNames:    make(map[string]struct{}),
-		reservedTaskRuns:       make(map[string]int),
-		ghostTaskRuns:          make(map[string]int),
-		repoStartLocks:         make(map[string]*sync.Mutex),
-		aliveObservations:      make(map[string]uint64),
-		targetLocks:            make(map[string]*sync.Mutex),
-		rootEnsureStates:       make(map[string]*rootEnsureState),
-		rootKilledAt:           make(map[string]time.Time),
-		deletedRootRepos:       make(map[string]struct{}),
-		killsInFlight:          make(map[string]struct{}),
-		killRetries:            make(map[string]*session.CleanupRetry),
-		ghostCleanupStalls:     make(map[string]string),
-		restoresInFlight:       make(map[string]struct{}),
-		lostRestoreStates:      make(map[string]*lostRestoreState),
-		limitResumeStates:      make(map[string]*limitResumeState),
-		handoffRetryDue:        make(map[string]time.Time),
-		settleOwed:             make(map[string]settleOwedEntry),
-		remoteLossStates:       make(map[string]*remoteLossState),
-		instanceOpLocks:        make(map[string]*sync.Mutex),
-		pausedPolls:            make(map[string]map[string]time.Time),
-		taskRunProbeDue:        make(map[string]time.Time),
-		rootHealAbsenceStreaks: make(map[string]int),
-		events:                 newEventsHub(),
-		vscode:                 vscode,
-		configAgents:           configAgents,
+		cfg:                       cfg,
+		warnLog:                   opts.warnLog,
+		infoLog:                   opts.infoLog,
+		errorLog:                  opts.errorLog,
+		previewSecret:             previewSecret,
+		previewOrigins:            newPreviewOriginRegistry(),
+		editorOriginSecret:        editorSecret,
+		editorLabels:              newEditorLabelIndex(),
+		pollReloadCh:              make(chan struct{}, 1),
+		ready:                     make(chan struct{}),
+		lifecycle:                 lifecycle,
+		storage:                   storage,
+		instances:                 make(map[string]*session.Instance),
+		pendingCreates:            make(map[string]session.InstanceData),
+		reservedTitles:            make(map[string]struct{}),
+		projectDeletes:            make(map[string]struct{}),
+		projectDeleteLastSeq:      make(map[string]uint64),
+		reservedTmuxNames:         make(map[string]string),
+		reservedRemoteNames:       make(map[string]struct{}),
+		reservedTaskRuns:          make(map[string]int),
+		ghostTaskRuns:             make(map[string]int),
+		repoStartLocks:            make(map[string]*sync.Mutex),
+		worktreeAdmissionLocks:    make(map[string]*sync.Mutex),
+		aliveObservations:         make(map[string]uint64),
+		targetLocks:               make(map[string]*sync.Mutex),
+		rootEnsureStates:          make(map[string]*rootEnsureState),
+		rootProgramDriftLogged:    make(map[string]bool),
+		rootProgramDriftInFlight:  make(map[string]int),
+		rootCreateRefusals:        make(map[string]rootCreateRefusal),
+		rootCreatesInFlight:       make(map[string]string),
+		rootKilledAt:              make(map[string]time.Time),
+		deletedRootRepos:          make(map[string]string),
+		killsInFlight:             make(map[string]struct{}),
+		killRetries:               make(map[string]*session.CleanupRetry),
+		ghostCleanupStalls:        make(map[string]string),
+		backgroundMutationStop:    make(chan struct{}),
+		restoresInFlight:          make(map[string]struct{}),
+		lostRestoreStates:         make(map[string]*lostRestoreState),
+		lostRestoreConfirmations:  make(map[string][]time.Time),
+		limitResumeStates:         make(map[string]*limitResumeState),
+		handoffRetryDue:           make(map[string]time.Time),
+		settleOwed:                make(map[string]settleOwedEntry),
+		dischargeOwed:             make(map[string]dischargeRetryEntry),
+		remoteLossStates:          make(map[string]*remoteLossState),
+		taskRunTurnWatches:        make(map[string]*taskRunTurnWatchEntry),
+		instanceOpLocks:           make(map[string]*sync.Mutex),
+		pausedPolls:               make(map[string]map[string]time.Time),
+		taskRunProbeDue:           make(map[string]time.Time),
+		rootHealAbsenceStreaks:    make(map[string]int),
+		rootHealAbsenceLastStrike: make(map[string]time.Time),
+		rootHealProbes:            make(map[string]*rootReattributionProbe),
+		rootHealProbeFailures:     make(map[string]int),
+		events:                    newEventsHub(),
+		vscode:                    vscode,
+		configAgents:              configAgents,
+		accountLogins:             accountLogins,
 	}
 	// Publish the start-of-day root-agent snapshot; healRootAgentLayers is the
 	// only later writer, and it republishes wholesale (#3264).
 	mgr.rootAgentLayers.Store(&rootAgentLayers)
 	// Seed the hot-reloadable live config with the startup config (#2480). Config()
 	// reads it; ApplyConfig swaps it in place.
-	mgr.live.Store(cfg)
+	mgr.live.Store(&livePosturePublication{cfg: cfg})
 	// Build the usage-limit detector from the startup config; ApplyConfig rebuilds
 	// it in place when limit_patterns changes.
 	initialDetector := task.NewLimitDetector(cfg.LimitPatterns)
@@ -551,16 +889,42 @@ func (m *Manager) RestoreInstances() error {
 // RunDaemon binds its control socket first (#829), performs this load, then keeps
 // state RPCs gated until the startup orphan sweep is complete (#2632).
 func (m *Manager) restoreInstances() error {
-	instances, ghosts, err := refreshDaemonInstances(nil)
+	instances, ghosts, skipped, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}
 	owed := persistLoadRuntimeReplacements(instances)
 	m.attachCredentialsToAll(instances)
+	// A post-worktree hook started by the PREVIOUS daemon generation may still be
+	// running over an intact tree — #3658 keeps it alive on purpose, so a restart
+	// or an auto-upgrade does not kill an operator's build mid-pnpm. Adopt it
+	// here, before the instances are published, so the restored session reports
+	// hooks in flight through completion of the remaining list. The session
+	// adopter excludes terminal/tombstoned and external worktrees, and retires
+	// terminal journals before any resume can be scheduled.
+	//
+	// Restore only, not the refresh poll: the poll runs on a timer and would turn
+	// this into a manager round trip per tick, while a survivor by definition
+	// belongs to the generation this one replaced.
+	session.AdoptRunningHookRuns(daemonInstances(instances))
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
+	// Seed the startup-time skip set so the startup orphan sweep can defer the
+	// destructive docker pass for repos whose instances.json was
+	// corrupted/unreadable, or parsed but whose rows failed to load (their live
+	// containers are absent from the protected-slug set). The Snapshot RPC
+	// carries the corrupted/unreadable drops but withholds a fresh startup
+	// rows-failure (seedStartupRowsFailedRepos) so list/get/whoami serve the
+	// loadable rows plus a log warning, not a refusal with no working title. A
+	// restart recomputes the set from scratch (#603; #4998 follow-up).
+	m.skippedRepos = skipped
+	m.seedStartupRowsFailedRepos(skipped)
 	m.registerLoadRuntimeSettlementsLocked(owed)
+	// Re-park every on_complete obligation the previous generation left durable
+	// on its rows (#4162): the completion edge cannot re-fire, so without this a
+	// marked session would sit forever with nothing scheduled to reap it.
+	m.armOwedTaskLifecyclesLocked()
 	m.mu.Unlock()
 	return nil
 }
@@ -586,180 +950,23 @@ func (m *Manager) Ready() bool {
 	}
 }
 
-func (m *Manager) RefreshInstances() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.refreshLocked()
-}
-
-func (m *Manager) InstancesSnapshot() []*session.Instance {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return daemonInstances(m.instances)
-}
-
-func (m *Manager) SaveInstances() error {
-	return m.storage.SaveInstances(m.InstancesSnapshot())
-}
-
-// dockerReapProtectedSlugs returns the af.session label slugs of every session
-// the manager knows about — live instances AND still-provisioning pending creates
-// (the #2549 window where a container exists but no Instance does yet) — so the
-// orphan-container sweep (#2194) never reaps a container whose session is alive or
-// mid-create. Titles are collected under the lock; slugging happens after so the
-// lock stays short.
-func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
-	m.mu.Lock()
-	titles := make([]string, 0, len(m.instances)+len(m.pendingCreates))
-	for _, inst := range m.instances {
-		titles = append(titles, inst.Title)
-	}
-	for key, pending := range m.pendingCreates {
-		if _, settled := m.instances[key]; settled {
-			continue
-		}
-		titles = append(titles, pending.Title)
-	}
-	m.mu.Unlock()
-
-	slugs := make(map[string]bool, len(titles))
-	for _, t := range titles {
-		slugs[session.Slugify(t)] = true
-	}
-	return slugs
-}
-
 // Snapshot returns the authoritative InstanceData for every session the manager
 // owns, scoped to repoID (all repos when repoID is empty). It is the read side
 // of the single-writer model (#960 PR 3): the manager's settled instance map plus
 // its daemon-owned pending-create map ARE the source of truth, so clients mirror
 // this projection instead of re-reading instances.json or inventing optimistic
-// rows. Pure read — it copies the instance pointers/pending values under m.mu,
+// rows. It copies the instance pointers/pending values under m.mu,
 // then serializes each Instance via ToInstanceData (which takes its own lock)
 // OUTSIDE m.mu so a slow serialize never blocks a concurrent mutation. Results
 // are ordered by (repo, title) key for a stable diff, so the TUI reconcile does
-// not repaint on map-iteration jitter.
+// not repaint on map-iteration jitter. Each operation lock is probed without
+// waiting after its row is serialized; a free lock is released immediately.
+//
+// This is the instance-only view; the Snapshot RPC handler reads it together
+// with the skip set via SnapshotWithSkipped (see snapshot.go), which captures
+// both under one acquisition of m.mu so a polling refresh cannot leave the
+// response carrying the old instance list with a cleared skip set.
 func (m *Manager) Snapshot(repoID string) []session.InstanceData {
-	m.mu.Lock()
-	keys := make([]string, 0, len(m.instances)+len(m.pendingCreates))
-	for key := range m.instances {
-		if repoID != "" {
-			rid, _ := splitDaemonInstanceKey(key)
-			if rid != repoID {
-				continue
-			}
-		}
-		keys = append(keys, key)
-	}
-	for key := range m.pendingCreates {
-		if _, settled := m.instances[key]; settled {
-			continue
-		}
-		if repoID != "" {
-			rid, _ := splitDaemonInstanceKey(key)
-			if rid != repoID {
-				continue
-			}
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	type snapshotEntry struct {
-		instance *session.Instance
-		pending  session.InstanceData
-	}
-	entries := make([]snapshotEntry, 0, len(keys))
-	for _, key := range keys {
-		if inst := m.instances[key]; inst != nil {
-			entries = append(entries, snapshotEntry{instance: inst})
-			continue
-		}
-		if pending, ok := m.pendingCreates[key]; ok {
-			entries = append(entries, snapshotEntry{pending: pending})
-		}
-	}
-	m.mu.Unlock()
-
-	data := make([]session.InstanceData, 0, len(entries))
-	for _, entry := range entries {
-		if entry.instance != nil {
-			data = append(data, entry.instance.ToInstanceData())
-			continue
-		}
-		data = append(data, entry.pending)
-	}
-	return data
-}
-
-func (m *Manager) refreshLocked() error {
-	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
-	if err != nil {
-		return err
-	}
-	owed := persistLoadRuntimeReplacements(refreshed)
-	m.attachCredentialsToAll(refreshed)
-	m.instances = refreshed
-	// Replaced wholesale, never merged: the ghost set is a projection of what is on
-	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
-	// ghost, or its slot would be held twice — once by the ghost and once by the
-	// instance it became.
-	m.ghostTaskRuns = ghosts
-	m.registerLoadRuntimeSettlementsLocked(owed)
-	return nil
-}
-
-// startLockForRepo returns the per-repo lock serializing session/tab creation
-// against other mutations of that repo, lazily creating it.
-//
-// LOCK CONTRACT (#2106): it takes m.mu, so it must NEVER be called with m.mu
-// already held — sync.Mutex is not reentrant and the goroutine would deadlock on
-// the manager lock, stalling every other operation behind it. That rules out
-// calling it, m.persistInstance, or m.persistInstanceErr from any `...Locked`
-// helper or other code running under m.mu; persist from there with the lock-free
-// persistInstanceData instead, which takes only the instances.json file lock.
-//
-// Acquiring the returned lock while holding m.mu is likewise forbidden: the
-// established order is repoStartLock BEFORE m.mu (CreateSession holds the start
-// lock across its body and takes m.mu under it), so the reverse closes an ABBA
-// cycle — the #2006 lock-inversion class.
-func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.repoStartLocks[repoID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.repoStartLocks[repoID] = lock
-	}
-	return lock
-}
-
-// opLockFor returns the per-session operation lock serializing kill teardown
-// against Lost-recovery and prompt writes for one daemon instance key (#1108 PR
-// 2, #1473).
-func (m *Manager) opLockFor(key string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.instanceOpLocks[key]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.instanceOpLocks[key] = lock
-	}
-	return lock
-}
-
-// attachCredentialsToAll gives every instance the daemon holds its credential
-// minter (#3068).
-//
-// Applied at the two points where the daemon takes ownership of instances built
-// from DISK — the startup restore and every refresh — because that is the half a
-// per-call-site fix keeps missing: session.FromInstanceData cannot populate it,
-// so a session loaded after a daemon restart would provision its replacement
-// sandbox with no callback and no error. Idempotent and cheap; re-attaching to an
-// instance that already has one is a pointer write.
-func (m *Manager) attachCredentialsToAll(instances map[string]*session.Instance) {
-	for _, inst := range instances {
-		attachSandboxCredentials(m, inst)
-	}
+	instances, _ := m.SnapshotWithSkipped(repoID)
+	return instances
 }

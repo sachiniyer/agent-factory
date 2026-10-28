@@ -1,0 +1,866 @@
+// Package accountlogin runs an agent's OWN login flow in a bare tmux session
+// scoped to one registered account (#3384).
+//
+// af already held both halves of this and only printed them: internal/agentaccount
+// knows the agent's login invocation, internal/sessionenv knows which variable
+// relocates its credential root. What was missing is a place to RUN that
+// invocation with that variable set — and, since the flow is interactive, a
+// place for it to run that a human can reach.
+//
+// The shape is the config agent's (daemon/configagent.go), and deliberately so:
+// a BARE tmux session with no session.Instance behind it. An Instance is a row —
+// persisted, listed in the sidebar, restorable, killable — and a login pane must
+// be none of those. It is also, structurally, the only shape available: the
+// WebSocket PTY attach route resolves its byte source by looking the session up
+// in the daemon's instance map, so being attachable THAT way is the same thing
+// as being a row. A login pane is attached to the way a config agent is, with
+// `tmux attach-session` against a named session on a named socket.
+//
+// It needs no worktree and no repo, which is what makes that possible at all:
+// tmux.Start takes any directory, while every Instance provisioning path
+// hard-errors outside a git repo.
+//
+// THE DESIGN PRINCIPLE, unchanged from #3051/#2983 and what bounds everything
+// here: af never reads, stores, or forwards the credential. It sets one
+// variable, hands the terminal to the agent's own flow, and afterwards asks the
+// filesystem — by stat — whether the agent wrote its own artifact.
+package accountlogin
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+// Request is one login: which account, in which agent-factory home.
+type Request struct {
+	// Home is the agent-factory home whose accounts directory holds the account.
+	// Passed in rather than resolved here so this package stays free of config
+	// and a test can point it at a throwaway home without touching the real one.
+	Home  string
+	Agent string
+	Name  string
+	// Passthrough is the operator's session_env_passthrough list, applied to the
+	// login pane exactly as it is to a session.
+	//
+	// It matters more here than it looks: af's environment allowlist is
+	// subtractive and default-deny, and an interactive OAuth flow may need names
+	// af does not pass by default — DISPLAY and BROWSER, if the daemon host has a
+	// browser to open at all. Proxies and private CA roots are already allowed
+	// (sessionenv.commonNames), so the identity subtraction never costs an
+	// operator their network configuration; this is the escape hatch for the
+	// rest. The subtraction removes IDENTITY, not environment.
+	//
+	// Since #3854 it is also the OVERRIDE for af's browser-free login defaults.
+	// The pane sets BROWSER (claude) or NO_BROWSER (gemini) so the device-code
+	// path is the one that runs on a headless daemon host; naming either here
+	// keeps the operator's own value instead, for the host that really does have
+	// a browser worth opening.
+	Passthrough []string
+}
+
+// Session is a live login pane, described well enough for a caller to attach to
+// it and to report what it is.
+type Session struct {
+	Agent string
+	Name  string
+	// Dir is the account's credential directory: the value af pointed the
+	// agent's credential-root variable at, and the directory whose artifact
+	// answers LoggedIn. Never a credential.
+	Dir string
+	// Program is the exact invocation the pane runs — the agent's own login
+	// command. Reported so an operator can see what af is running rather than
+	// having to trust it.
+	Program string
+	// TmuxName is the session name to attach to, as tmux knows it.
+	TmuxName string
+	// SocketPath is the absolute tmux socket the pane lives on, queried from tmux
+	// itself. Empty when it could not be resolved, in which case an attach falls
+	// back to the default socket. It is returned because the daemon and whoever
+	// attaches are different processes that can resolve different TMUX_TMPDIRs,
+	// so "default" is not something the attaching side may assume (#2019).
+	SocketPath string
+	// Reused is true when this call joined a flow that was already open rather
+	// than starting a second one.
+	Reused bool
+	// Finished is true when the agent's login command ran to completion before af
+	// could hand a terminal over, leaving no pane to attach to. TmuxName is empty
+	// in that case, and a caller must report the outcome rather than attach.
+	//
+	// It is a real outcome, not an edge case: `codex login` against an account
+	// that already holds a credential prints and exits, and so does a flow that
+	// refuses without asking anything. Reporting it as a failed spawn would tell
+	// the operator their login broke when it did not.
+	Finished bool
+	// LoggedIn is the account's artifact state as observed at this call — before
+	// the flow this call opened has had a chance to change it. It is what lets a
+	// caller say "already logged in; this will replace it" instead of pretending
+	// the account was empty.
+	LoggedIn bool
+	// Notices are the things the operator must be told before they use the
+	// account, from agentaccount.CheckLoginPreconditions.
+	Notices []string
+}
+
+// Supervisor owns every login pane one daemon has spawned.
+//
+// The daemon owns them for the reason it owns config agents: a login pane has no
+// Instance, so NOTHING else knows it exists — not instances.json, not the
+// roster, not the restore loop. A daemon that exits without reaping them leaves
+// orphans no future daemon can find (#1093/#1104). Stop() belongs in the
+// daemon's teardown beside configAgents.Stop().
+type Supervisor struct {
+	// startMu serializes Start, so two clients asking for the same login at once
+	// cannot both miss the reuse check and race to create one tmux name. The
+	// loser of that race gets "tmux session already exists", which this package
+	// would then have to diagnose backwards from a string.
+	//
+	// It is deliberately a separate lock from mu, and deliberately coarse: logins
+	// are human-driven and rare, every tmux call under it is deadline-bounded, and
+	// serializing them costs nothing measurable — while Stop, Reap and Live keep
+	// taking only mu, so daemon teardown never waits behind a login that is
+	// starting.
+	startMu sync.Mutex
+
+	mu       sync.Mutex
+	sessions map[string]*tmux.TmuxSession
+	// streamers is the WebSocket data plane for a login pane, one per account,
+	// built on first subscribe and closed with the pane.
+	//
+	// It lives HERE rather than beside the routes that serve it because a streamer
+	// and the pane it reads are one lifetime: a capture goroutine left running
+	// against a torn-down pane is the #1632 leak, and the only way to be sure it
+	// cannot happen is for the thing that closes the pane to be the thing that
+	// closes the stream. Same map, same mutex, same Stop.
+	streamers map[string]*session.BareSessionStreamer
+	// stopped latches on teardown so a spawn racing shutdown cannot register a
+	// session nothing will ever reap.
+	stopped bool
+}
+
+// New builds an empty supervisor.
+func New() *Supervisor {
+	return &Supervisor{
+		sessions:  make(map[string]*tmux.TmuxSession),
+		streamers: make(map[string]*session.BareSessionStreamer),
+	}
+}
+
+// key namespaces a login pane by ACCOUNT, which is what makes reuse correct:
+// account names live in per-agent namespaces, so codex/work and claude/work are
+// different accounts and must not share a flow.
+func key(agent, name string) string { return agent + "/" + name }
+
+// collisionProbeSession is the post-Start re-probe in the collision verdict —
+// a seam because the scenario it decides (the blocker exiting between Start's
+// positive name-collision and this second probe) is a real-tmux race no test
+// can stage deterministically; the test stubs the probe's answer instead.
+var collisionProbeSession = func(pane *tmux.TmuxSession) (bool, bool) {
+	return pane.ProbeSession()
+}
+
+// Start opens (or rejoins) the login flow for one account.
+//
+// The order is load-bearing. Everything that can refuse runs BEFORE anything is
+// created: an agent with no verified login command, a missing binary, and the
+// codex keyring collapse are all decided while the only side effect would be the
+// account directory itself. A refusal must not leave a pane behind, and it must
+// not leave the operator staring at a pane that exited 127.
+func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if strings.TrimSpace(req.Home) == "" {
+		return Session{}, fmt.Errorf("cannot log in to an agent account without an agent-factory home")
+	}
+	// The agent's own invocation, or a refusal naming the agents that have one.
+	// This is the roster gate: amp, aider, opencode and devin have no verified
+	// credential root AND no verified login command, and af guesses neither.
+	program, err := agentaccount.LoginProgram(req.Agent)
+	if err != nil {
+		return Session{}, err
+	}
+	// PATH is resolved HERE rather than left to the pane, because a pane whose
+	// program does not exist exits 127 into a window the operator is about to be
+	// handed, and tmux reports that as a session that vanished.
+	//
+	// The BARE agent name, never config's program_overrides. An override is a
+	// SESSION launch command: it may carry session-only flags that make no sense
+	// in front of `auth login`, and it is reachable from a repository's checked-in
+	// config, which must not get to choose what af runs against a credential
+	// directory. The login flow is the agent's own documented invocation, so it
+	// resolves the way the agent's own documentation resolves it.
+	if _, err := exec.LookPath(req.Agent); err != nil {
+		return Session{}, fmt.Errorf(
+			"cannot run %s's login flow: %s was not found on PATH where the agent-factory daemon runs (%v). "+
+				"af runs the agent's own login command, so the agent has to be installed on this host",
+			req.Agent, req.Agent, err)
+	}
+
+	// Registration is idempotent and comes before the preconditions, because the
+	// preconditions read the account directory. Logging in to an account nobody
+	// has registered yet is the ordinary first use of this verb, not an error.
+	dir, err := agentaccount.Register(req.Home, req.Agent, req.Name)
+	if err != nil {
+		return Session{}, err
+	}
+	notices, err := agentaccount.CheckLoginPreconditions(req.Agent, dir)
+	if err != nil {
+		return Session{}, err
+	}
+	loggedIn, err := agentaccount.LoggedIn(req.Home, req.Agent, req.Name)
+	if err != nil {
+		return Session{}, err
+	}
+
+	base := Session{
+		Agent:    req.Agent,
+		Name:     req.Name,
+		Dir:      dir,
+		Program:  program,
+		LoggedIn: loggedIn,
+		Notices:  notices,
+	}
+
+	pane := tmux.NewTmuxSession(agentaccount.LoginSessionName(req.Agent, req.Name), program)
+
+	// An open flow is JOINED, never duplicated. Two logins into one directory race
+	// over the same auth.json, and the second pane would be invisible to the
+	// operator already sitting in the first.
+	//
+	// The question is asked of TMUX, not of this supervisor's map, and that is the
+	// difference between joining a flow and failing on it. A login pane can outlive
+	// the process that tracked it — a daemon killed with SIGKILL never runs its
+	// teardown — so the map says "no flow" while the tmux name is very much taken,
+	// and creating it would fail with "tmux session already exists" for a login
+	// that is sitting there waiting for its human. The name is derived from the
+	// account, so an existing one under it IS this account's flow.
+	existing, foreignBlocked := s.adopt(req.Home, req.Agent, req.Name, pane)
+	if existing != nil {
+		out := base
+		out.Reused = true
+		out.TmuxName = existing.SanitizedName()
+		out.SocketPath = socketPath(ctx, existing)
+		return out, nil
+	}
+	if foreignBlocked {
+		return Session{}, fmt.Errorf(
+			"cannot start the %s login flow for account %q: a pane named %s already exists on the shared tmux server "+
+				"and is owned by a different agent-factory home — stop the conflicting flow first or use a distinct {agent, name}",
+			req.Agent, req.Name, pane.SanitizedName())
+	}
+
+	// LEGACY-PANE MIGRATION: before starting a new pane, check whether a
+	// still-running pane from an older binary holds the legacy name for this
+	// account. The legacy format is "af-login-<agent>-<rawname>"; the new format
+	// is "af-loginx-<agent>-<hexname>". Making the namespaces disjoint (the P1
+	// fix) guarantees adopt cannot silently reuse the wrong pane — but it also
+	// means a live legacy pane is invisible to adopt, so a new pane would start
+	// against the same account directory, and both processes would race over
+	// auth.json. That breaks the single-login guarantee the name derivation exists
+	// to provide (#3384).
+	//
+	// The safe answer is to REFUSE when the legacy pane belongs to THIS home: a
+	// login is explicit and user-initiated, so a clear refusal costs the user one
+	// command (kill the legacy pane), while a silent second pane costs them a
+	// corrupted auth.json. The refusal names the legacy session so it is actionable.
+	//
+	// Ownership is decided by the AF_HOME session-environment marker, not by the
+	// sanitized title alone. Two account names that differ only in a sanitized-away
+	// character (e.g. `work.proj` and `work_proj`) produce the same legacy title,
+	// so an existence-only check would falsely refuse a login for one account
+	// because the OTHER account has a live legacy pane. The marker is set by the
+	// legacy binary at pane creation, so it carries the authoritative home.
+	//
+	// Absent marker (pane created by a binary predating env markers, or tmux < 3.2)
+	// means ownership cannot be proven: proceed rather than blocking the new login
+	// on a pane that may belong to an unrelated home. The new pane will either
+	// collide (tmux "session already exists") or start cleanly.
+	//
+	// Unknown probe (!legacyKnown): tmux did not answer — either a timeout or a
+	// non-timeout failure that did not carry tmux's definitive "can't find
+	// session" diagnostic (e.g. a socket-policy failure or transient wrapper
+	// error). We cannot tell whether a legacy pane exists. Proceeding risks
+	// starting a second pane if one is there; return a retryable error instead so
+	// the operator can try again once tmux has settled.
+	//
+	// ProbeSessionStrict is used here instead of ProbeSession so that only a
+	// positively confirmed absence permits starting the new flow. ProbeSession
+	// collapses every non-timeout failure into (false, true) — a known absence —
+	// which means a socket-policy failure would proceed as though no legacy pane
+	// exists. ProbeSessionStrict preserves the error so the caller can refuse
+	// safely rather than racing.
+	legacyPane := tmux.NewTmuxSession(agentaccount.LegacyLoginSessionName(req.Agent, req.Name), program)
+	legacyExists, legacyKnown, legacyProbeErr := legacyPane.ProbeSessionStrict()
+	if !legacyKnown {
+		return Session{}, fmt.Errorf(
+			"cannot start the %s login flow for account %q: tmux did not respond while probing for a legacy "+
+				"login pane — try again once the tmux server has settled: %w",
+			req.Agent, req.Name, legacyProbeErr)
+	}
+	if legacyExists {
+		// Verify ownership before refusing: read the AF_HOME marker set at pane
+		// creation. If it names a different home, the collision is in the sanitized
+		// title only — not a race risk for this home — so proceed.
+		//
+		// AF_HOME alone is not sufficient: two account names that sanitize to the
+		// same legacy title AND share a home (e.g. `work.proj` and `work_proj` in
+		// the same AF home) would both pass the home check, causing a false refusal
+		// for the second account. Verifying the agent's credential-root variable
+		// (e.g. CODEX_HOME) against THIS account's dir establishes account identity,
+		// not just home ownership — the legacy binary set it to the account's actual
+		// directory, so a different directory means a different account's title
+		// collision. Absent credential-root (pre-variable binary or variable not
+		// readable): account identity is unverifiable, so legacyPaneBelongsToAccount
+		// fails closed — a false refusal costs one kill command, while proceeding
+		// risks a second pane racing a live login over the same auth.json.
+		legacySName := legacyPane.SanitizedName()
+		legacyOwner, legacyOwnerPresent, legacyOwnerErr := tmux.SessionHomeMarker(cmd.MakeExecutor(), legacySName)
+		if legacyOwnerErr != nil {
+			// tmux didn't answer the marker query: treat as unknown, refuse to be safe.
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: tmux did not respond while checking the "+
+					"legacy login pane %s — try again once the tmux server has settled",
+				req.Agent, req.Name, legacySName)
+		}
+		if legacyOwnerPresent {
+			ownerCanon, err := canonicalHome(legacyOwner)
+			if err != nil {
+				return Session{}, fmt.Errorf(
+					"cannot start the %s login flow for account %q: could not resolve the legacy pane home %q: %w",
+					req.Agent, req.Name, legacyOwner, err)
+			}
+			homeCanon, err := canonicalHome(req.Home)
+			if err != nil {
+				return Session{}, fmt.Errorf(
+					"cannot start the %s login flow for account %q: could not resolve this home %q: %w",
+					req.Agent, req.Name, req.Home, err)
+			}
+			if ownerCanon == homeCanon {
+				// Confirmed same home: now verify the account identity via the agent's
+				// credential-root variable (e.g. CODEX_HOME). Two account names that
+				// differ only in a sanitized-away character produce the same legacy title
+				// AND the same AF_HOME — reading the directory that the pane was actually
+				// scoped to is the only way to tell them apart.
+				sameAccount, refuseErr := legacyPaneBelongsToAccount(req.Agent, req.Name, legacySName, dir)
+				if refuseErr != nil {
+					return Session{}, refuseErr
+				}
+				if sameAccount {
+					// Confirmed same home and same account: this is our pane, refuse to
+					// create a second one. The kill command uses the exact-match `=name:`
+					// form so it cannot resolve to a prefix-matching sibling (e.g.
+					// `work` matching `work-2` if work's pane exits first).
+					return Session{}, fmt.Errorf(
+						"cannot start the %s login flow for account %q: a login pane from an older agent-factory binary "+
+							"is still running under the legacy session name %s — finish or kill it first "+
+							"(tmux kill-session -t =%s:), then run this command again",
+						req.Agent, req.Name, legacySName, legacySName)
+				}
+				// Different account directory or absent credential-root: title collision
+				// only, not a race risk for this account — proceed.
+			}
+			// Confirmed different home: title collision, not a race risk for us.
+		}
+		// Absent marker: ownership unknown, proceed (see comment above).
+	}
+
+	if err := pane.SetEnvPassthrough(req.Passthrough); err != nil {
+		return Session{}, fmt.Errorf("invalid session environment pass-through for the login pane: %w", err)
+	}
+	// The ENVIRONMENT-ONLY form of the account boundary, which is the correct one
+	// here and not a weaker one. Its strict sibling (SetAccountForAgent) proves
+	// the pane command is the agent plus exactly the words af declared — a claim
+	// about an AGENT launch. This pane runs `claude auth login`, which is the
+	// agent's own subcommand rather than an af-authored argument, so the
+	// environment-only boundary is what matches the claim being made: scope this
+	// process to the account, and refuse a command that would set an identity
+	// variable itself. The child shim still applies the FULL boundary — inject the
+	// account's root, remove every other identity — immediately before exec.
+	//
+	// The LOGIN form of it, and the distinction is #3854's: this pane also gets
+	// the environment that makes the agent's own sign-in browser-free, which an
+	// account-scoped working session must not have. AFTER SetEnvPassthrough, so an
+	// operator who named one of those variables themselves keeps their value.
+	pane.SetAccountLoginForAgent(req.Agent, req.Name)
+
+	// The account directory is the working directory: it is a real, durable,
+	// 0700 directory af created, outside any temp dir (codex refuses to create
+	// helper binaries under /tmp), and it is the directory the flow is about.
+	if err := pane.Start(dir); err != nil {
+		// A same-named session that survives the launch failure is not "a flow
+		// that ended" — it is a pane blocking the launch entirely, so the flow
+		// never ran and the account's artifact must not be credited to it.
+		// Re-running adopt answers all three cases with the same ownership
+		// primitive the pre-Start check used: provably-ours is joined like any
+		// open flow, proven-foreign is refused by name, and anything left that
+		// still holds the name is the markerless collision adopt's contract
+		// warns finishedOrFailed about (#4217 review).
+		if existing, foreignBlocked := s.adopt(req.Home, req.Agent, req.Name, pane); existing != nil {
+			out := base
+			out.Reused = true
+			out.TmuxName = existing.SanitizedName()
+			out.SocketPath = socketPath(ctx, existing)
+			return out, nil
+		} else if foreignBlocked {
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: a pane named %s already exists on the shared tmux server "+
+					"and is owned by a different agent-factory home — stop the conflicting flow first or use a distinct {agent, name}",
+				req.Agent, req.Name, pane.SanitizedName())
+		} else if exists, known := collisionProbeSession(pane); known && exists {
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: a pane named %s already exists on the shared tmux server "+
+					"and its owning home cannot be proven — stop the conflicting flow first or use a distinct {agent, name} "+
+					"(underlying launch error: %w)",
+				req.Agent, req.Name, pane.SanitizedName(), err)
+		} else if errors.Is(err, tmux.ErrSessionNameTaken) {
+			// The blocker exited between Start's positive collision verdict and
+			// the re-diagnosis above: the name is free now, but no login command
+			// ever ran, so finishedOrFailed's artifact check would credit a
+			// stale credential to a flow that never started. The collision IS
+			// the launch failure; it survives the blocker's exit.
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: a pane named %s already existed on the shared tmux server "+
+					"at launch and exited before its owning home could be proven — stop conflicting flows first or use a "+
+					"distinct {agent, name} (underlying launch error: %w)",
+				req.Agent, req.Name, pane.SanitizedName(), err)
+		}
+		return finishedOrFailed(req, base, err)
+	}
+	// The name tmux actually knows — sanitized, with the af_ prefix — not the one
+	// handed to NewTmuxSession. Returning the latter is what made the config
+	// agent's attach fail with "can't find session" (#2019).
+	name := pane.SanitizedName()
+	if !s.track(req.Agent, req.Name, pane) {
+		// Shutting down: do not leak the pane we just made. No worktree exists, so
+		// pane state gates nothing destructive.
+		_, _ = pane.Close()
+		return Session{}, fmt.Errorf("the agent-factory daemon is shutting down")
+	}
+
+	// NOTHING IS SENT TO THIS PANE. Not a readiness probe's keystroke, not a
+	// trust-dialog dismissal, not a briefing. Every other spawn in af drives its
+	// pane, and this one must not: af cannot recognize an agent's login prompts,
+	// the keys it would send are the ones a login flow reads as answers, and
+	// af pressing Enter into a dialog it misread is exactly how #3579's trust
+	// dismissal killed the session it was trying to start. The human at the
+	// terminal drives this flow; af's job ends at the environment.
+	log.InfoLog.Printf("account login: started %s in %s for %s account %q",
+		name, dir, req.Agent, req.Name)
+
+	out := base
+	out.TmuxName = name
+	out.SocketPath = socketPath(ctx, pane)
+	return out, nil
+}
+
+// Live reports whether this account's login flow is still open.
+//
+// It PROBES tmux rather than trusting the map. A login pane exits on its own
+// when the agent's flow finishes — that is the signal that the login is over —
+// so a tracked entry is a claim about the past, not the present.
+func (s *Supervisor) Live(agent, name string) bool {
+	return s.live(agent, name) != nil
+}
+
+// live returns the tracked session only when tmux confirms it is still there,
+// forgetting it otherwise.
+//
+// The probe's answer must be POSITIVE to count. ProbeSession collapses several
+// failures into "absent", so a wedged or unreachable tmux server would read as
+// "the flow ended" — and the caller would start a second login into a directory
+// the first one is still writing. An unknown answer keeps the session tracked.
+func (s *Supervisor) live(agent, name string) *tmux.TmuxSession {
+	s.mu.Lock()
+	pane, tracked := s.sessions[key(agent, name)]
+	s.mu.Unlock()
+	if !tracked {
+		return nil
+	}
+	// Liveness of an EXISTING tracked pane: a socket unlinked under a still-running
+	// login must read unknown, not gone, or forget() drops the live pane (#4135).
+	exists, known := pane.ProbeSessionLiveness()
+	if known && !exists {
+		s.forget(agent, name, pane)
+		return nil
+	}
+	return pane
+}
+
+// adopt returns the live login pane for this account, tracking a pane this
+// supervisor did not spawn if tmux says one is there. The second return value
+// is true when a same-named pane was found but belongs to a different home —
+// the caller should surface a distinct ownership-collision error rather than
+// falling through to pane.Start, which would fail with "tmux session already
+// exists" and could then be misread by finishedOrFailed as a completed login.
+//
+// Both answers must be POSITIVE to act on. A tracked session is returned only
+// when live() confirms it with tmux, and an untracked NAME is adopted only on
+// tmux's determinate "this session exists" — ProbeSession's unknown answer means
+// the server did not answer, which is not evidence either way, and adopting on
+// it would hand a caller a name nothing is running behind.
+//
+// A same-named pane is adopted only when its AF_HOME session-environment marker
+// names THIS home, with both paths canonicalized to absolute, symlink-resolved
+// identities. The login-pane name is derived from {agent, name} and carries
+// no home component, so on the per-user (shared) tmux server two agent-factory
+// homes with the same {agent, name} both target one tmux session name. Reusing a
+// pane that belongs to another home would silently no-op this home's login — the
+// foreign flow keeps writing to its owner's account dir while THIS home reports
+// Reused — and let this home's Stop/Reap kill a pane it does not own, the
+// cross-home hazard CleanupSessions is already hardened against at
+// session/tmux/cleanup.go:658-702. The marker is the same ownership primitive
+// teardown uses; an absent or unresolvable marker means the pane's heritage
+// cannot be proven to be this home's, so it is left untouched — do not reuse
+// what you cannot prove you own. account-login itself refuses to spawn on tmux
+// < 3.2, so any pane this path creates carries a marker; an absent one is a pane
+// this home did not create.
+//
+// The AF_SESSION_GEN generation marker is read alongside the home marker and
+// re-checked after the session is tracked to close the TOCTOU window: if the
+// orphan exits and a foreign pane is created under the same name between the
+// marker read and the track call, the generation will differ and adoption fails
+// closed rather than silently handing a foreign pane to this home.
+func (s *Supervisor) adopt(home, agent, name string, candidate *tmux.TmuxSession) (*tmux.TmuxSession, bool) {
+	if existing := s.live(agent, name); existing != nil {
+		return existing, false
+	}
+	exists, known := candidate.ProbeSession()
+	if !known || !exists {
+		return nil, false
+	}
+	exec := cmd.MakeExecutor()
+	sName := candidate.SanitizedName()
+	owner, present, err := tmux.SessionHomeMarker(exec, sName)
+	if err != nil || !present {
+		// Marker absent or unreadable: cannot prove ownership — fail closed.
+		return nil, false
+	}
+	ownerCanon, err := canonicalHome(owner)
+	if err != nil {
+		return nil, false
+	}
+	homeCanon, err := canonicalHome(home)
+	if err != nil {
+		return nil, false
+	}
+	if ownerCanon != homeCanon {
+		// A pane exists but it belongs to a different home.
+		return nil, true
+	}
+	// Read the generation before tracking so we can detect a replacement pane
+	// that arrives in the verification-to-track window (TOCTOU). An error or
+	// absent marker (present=false) on either read is treated as unknown — fail
+	// closed rather than tracking a pane whose generation cannot be confirmed.
+	// This matches the home-marker check above, which also refuses on
+	// unreadable evidence ("do not reuse what you cannot prove you own").
+	gen, genPresent, genErr := tmux.SessionGenerationMarker(exec, sName)
+	if genErr != nil || !genPresent {
+		// Cannot read the generation marker — ownership unverifiable, fail closed.
+		return nil, false
+	}
+	if !s.track(agent, name, candidate) {
+		return nil, false
+	}
+	// Re-verify the generation. If the session was replaced between the marker
+	// read and the track call, the generation will have changed — another home's
+	// pane now sits behind the same name. Forget the entry and fail closed.
+	gen2, gen2Present, genErr2 := tmux.SessionGenerationMarker(cmd.MakeExecutor(), sName)
+	if genErr2 != nil || !gen2Present || gen2 != gen {
+		s.forget(agent, name, candidate)
+		return nil, false
+	}
+	return candidate, false
+}
+
+// canonicalHome resolves a home path to its absolute, symlink-resolved form for
+// identity comparison. Two paths that differ only lexically (relative vs
+// absolute, symlink vs target) resolve to the same canonical form.
+//
+// On error the caller must treat ownership as unknown and fail closed — do not
+// reuse a pane whose home cannot be verified.
+func canonicalHome(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize home %q: %w", path, err)
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		// The directory may not exist yet (first login to a new home). Treat the
+		// not-yet-created case as an unresolvable path — fail closed rather than
+		// comparing a mix of real and non-real paths.
+		return "", fmt.Errorf("canonicalize home %q: %w", path, err)
+	}
+	return real, nil
+}
+
+// legacyPaneBelongsToAccount reports whether a legacy pane was scoped to THIS
+// account. It reads the agent's credential-root environment variable (e.g.
+// CODEX_HOME) from the pane and compares its canonical path to dir.
+//
+// Returns (true, nil) when the pane provably belongs to this account.
+// Returns (false, nil) when the pane provably belongs to a different account —
+// the caller should proceed rather than refuse.
+// Returns (false, non-nil) when tmux did not answer — treat as unknown and
+// propagate the error as a retryable refusal.
+//
+// AF_HOME establishes installation ownership but not account identity. Two
+// account names that differ only in a character tmux's sanitizer folds away
+// (e.g. `.` → `_`) produce the same legacy title AND the same AF_HOME, so the
+// home check alone cannot distinguish them. The credential-root variable was set
+// by the legacy binary to the exact directory the pane was running against, so
+// it is the unforgeable per-account discriminator.
+//
+// When the credential-root variable is absent (pane created by an older binary
+// that did not set it), account identity is unknowable: another account whose
+// name sanitizes to the same legacy title (e.g. `work.proj` vs `work_proj`,
+// both `work_proj` after tmux sanitization) could own this pane. We fail closed
+// — refuse — for every such pane, including names that contain no sanitizable
+// characters: refusing an unverifiable pane costs the operator one kill
+// command, while starting a second pane against a live account's credential
+// directory corrupts auth.json.
+func legacyPaneBelongsToAccount(agent, name, legacySName, dir string) (sameAccount bool, refuseErr error) {
+	configVar, hasConfigVar := sessionenv.SupportsAccounts(agent)
+	if !hasConfigVar {
+		// Agent has no account-specific config variable: cannot verify account
+		// identity beyond the home. Treat as belonging to this account (i.e. refuse)
+		// to be conservative — this path only applies to agents without a credential
+		// root variable, which currently means the agent is not fully account-scoped
+		// anyway.
+		return true, nil
+	}
+	legacyDir, legacyDirPresent, legacyDirErr := tmux.SessionEnvVar(cmd.MakeExecutor(), legacySName, configVar)
+	if legacyDirErr != nil {
+		return false, fmt.Errorf(
+			"cannot start the %s login flow for account %q: tmux did not respond while "+
+				"checking the account directory of the legacy login pane %s — "+
+				"try again once the tmux server has settled",
+			agent, name, legacySName)
+	}
+	if !legacyDirPresent {
+		// Absent credential-root: the legacy pane was created by a binary that did
+		// not stamp the account's credential-root variable in the tmux environment.
+		// Identity is unknown: we cannot determine whether this pane belongs to THIS
+		// account or to a different account whose name sanitizes to the same legacy
+		// title (e.g. `work.proj` and `work_proj` both produce `work_proj` after
+		// tmux sanitization). We fail closed — refuse — to prevent the concurrent
+		// credential-write race that would result from starting a new pane against
+		// the same account directory as a live legacy pane. A false refusal here
+		// costs the operator one command (kill the suspect legacy pane); a silent
+		// second pane against the same credential directory corrupts auth.json.
+		return true, nil
+	}
+	legacyDirCanon, err := canonicalHome(legacyDir)
+	if err != nil {
+		// Unresolvable path in the pane's environment: cannot confirm — proceed.
+		return false, nil
+	}
+	dirCanon, err := canonicalHome(dir)
+	if err != nil {
+		return false, fmt.Errorf(
+			"cannot start the %s login flow for account %q: could not resolve account directory %q: %w",
+			agent, name, dir, err)
+	}
+	return legacyDirCanon == dirCanon, nil
+}
+
+func (s *Supervisor) track(agent, name string, pane *tmux.TmuxSession) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return false
+	}
+	s.sessions[key(agent, name)] = pane
+	return true
+}
+
+// forget drops a tracked entry only if it is STILL the one the caller observed.
+// A pane that ended while a second login was starting must not have the new
+// pane deleted out from under it by the old one's cleanup.
+func (s *Supervisor) forget(agent, name string, pane *tmux.TmuxSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if current, ok := s.sessions[key(agent, name)]; ok && current == pane {
+		delete(s.sessions, key(agent, name))
+		s.closeStreamerLocked(key(agent, name))
+	}
+}
+
+// Reap closes one account's login pane. An unknown account is a no-op success:
+// the desired end state is "no pane", and a flow that already finished has
+// reached it.
+func (s *Supervisor) Reap(agent, name string) error {
+	s.mu.Lock()
+	pane, tracked := s.sessions[key(agent, name)]
+	delete(s.sessions, key(agent, name))
+	s.closeStreamerLocked(key(agent, name))
+	s.mu.Unlock()
+	if !tracked {
+		return nil
+	}
+	// Pane state ignored: a login pane has no worktree, so there is nothing
+	// destructive for it to gate.
+	if _, err := pane.Close(); err != nil {
+		return fmt.Errorf("could not close the login pane for %s account %q: %w", agent, name, err)
+	}
+	return nil
+}
+
+// Stop closes every login pane this supervisor owns, and refuses to open more.
+// Wired into the daemon's teardown at construction, so a SIGTERM during warm-up
+// cannot skip it.
+func (s *Supervisor) Stop() {
+	s.mu.Lock()
+	s.stopped = true
+	panes := make([]*tmux.TmuxSession, 0, len(s.sessions))
+	for _, pane := range s.sessions {
+		panes = append(panes, pane)
+	}
+	s.sessions = make(map[string]*tmux.TmuxSession)
+	// The streams FIRST, and while still holding the lock: each is a tmux
+	// pipe-pane capture goroutine reading the pane about to be torn down, and one
+	// left running against a dead pane is the #1632 leak.
+	for account := range s.streamers {
+		s.closeStreamerLocked(account)
+	}
+	s.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, pane := range panes {
+		wg.Add(1)
+		go func(pane *tmux.TmuxSession) {
+			defer wg.Done()
+			if _, err := pane.Close(); err != nil {
+				log.WarningLog.Printf("account login: closing a login pane during shutdown failed: %v", err)
+			}
+		}(pane)
+	}
+	wg.Wait()
+}
+
+// finishedOrFailed decides what a pane that did not survive to the handover
+// MEANS, by asking the account rather than by reading the launch error.
+//
+// tmux.Start fails when the pane program exits within milliseconds of launch,
+// and for a login flow that is genuinely ambiguous: it is what `codex login`
+// does against an account that already holds a credential, and equally what a
+// flow that died on a bad install does. The launch error cannot tell those
+// apart, and it words itself for the second one ("check that it runs and accepts
+// its flags"), which is a confusing thing to say to someone whose login just
+// worked.
+//
+// So the artifact decides, which is the same evidence #3384 requires everywhere
+// else: a credential is there now, or it is not. When it is not, this is the
+// no-op login the issue requires be reported as a FAILURE rather than left as a
+// dead account that only fails later, at session start — so the error says that
+// in as many words instead of leaving the operator to infer it.
+func finishedOrFailed(req Request, base Session, startErr error) (Session, error) {
+	loggedIn, probeErr := agentaccount.LoggedIn(req.Home, req.Agent, req.Name)
+	if probeErr != nil {
+		return Session{}, fmt.Errorf(
+			"could not start the %s login pane for account %q: %w (and af could not then check whether the "+
+				"account holds a credential: %v)", req.Agent, req.Name, startErr, probeErr)
+	}
+	if loggedIn {
+		out := base
+		out.Finished = true
+		out.LoggedIn = true
+		out.Notices = append(out.Notices, fmt.Sprintf(
+			"%s's login command ended before af could hand over the terminal, and %s now holds a credential — "+
+				"nothing was left to attach to.", req.Agent, req.Name))
+		log.InfoLog.Printf("account login: %s flow for account %q ended before the handover; the account holds a credential",
+			req.Agent, req.Name)
+		return out, nil
+	}
+	return Session{}, fmt.Errorf(
+		"the %s login flow for account %q ended without leaving a credential in the account, so it is "+
+			"registered but not logged in — a session started with --account %s would run unauthenticated. "+
+			"Underlying launch error: %w",
+		req.Agent, req.Name, req.Name, startErr)
+}
+
+// socketPath asks tmux which socket the session lives on.
+//
+// A failure is NOT fatal. The attach can still resolve the session through its
+// own default socket when both sides share a TMUX_TMPDIR, which is the common
+// case, so this degrades to an empty path and lets that fall back rather than
+// failing a login that would otherwise attach fine (#2019).
+func socketPath(ctx context.Context, pane *tmux.TmuxSession) string {
+	path, err := pane.SocketPath(ctx)
+	if err != nil {
+		log.WarningLog.Printf(
+			"account login: could not resolve the tmux socket for %s (%v); an attach will fall back to the default socket",
+			pane.SanitizedName(), err)
+		return ""
+	}
+	return path
+}
+
+// Streamer returns the WebSocket data plane for this account's login pane,
+// building it on first use.
+//
+// It exists because the web cannot attach the way the CLI and the TUI do. A
+// login pane has no Instance, so the normal PTY stream route — which resolves
+// its byte source through the daemon's instance map — cannot reach it, and
+// `tmux attach-session` is not something a browser can run. session's
+// BareSessionStreamer is the answer the config assistant already found for the
+// same shape (#2467): the broker fans bytes from a `tmux pipe-pane` capture,
+// which needs a tmux session and nothing else.
+//
+// A pane that is not live gets no streamer. Building one for a dead pane would
+// start a capture against a session that is gone and hand the caller a stream
+// that never speaks.
+func (s *Supervisor) Streamer(agent, name string) (*session.BareSessionStreamer, error) {
+	pane := s.live(agent, name)
+	if pane == nil {
+		return nil, fmt.Errorf("%w: no login flow is running for %s account %q", ErrNoLoginPane, agent, name)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return nil, fmt.Errorf("%w: the agent-factory daemon is shutting down", ErrNoLoginPane)
+	}
+	// Re-checked under the lock: live() released it, so a reap could have landed
+	// in between and the entry it dropped must not be recreated here.
+	if _, tracked := s.sessions[key(agent, name)]; !tracked {
+		return nil, fmt.Errorf("%w: the login flow for %s account %q ended", ErrNoLoginPane, agent, name)
+	}
+	streamer, ok := s.streamers[key(agent, name)]
+	if !ok {
+		streamer = session.NewBareSessionStreamer(pane)
+		s.streamers[key(agent, name)] = streamer
+	}
+	return streamer, nil
+}
+
+// ErrNoLoginPane reports that no login flow is running for an account. The
+// stream route maps it to 404, which is the browser terminal's settle-and-stop
+// signal — a login that has ENDED is not a transient drop to reconnect through.
+var ErrNoLoginPane = errors.New("no login pane")
+
+// closeStreamerLocked tears down one account's stream. Callers hold mu.
+//
+// Closing is what stops the pipe-pane capture goroutine. It runs wherever the
+// pane stops being ours — reap, an observed death, and shutdown — because a
+// capture outliving its pane is a goroutine nothing will ever close (#1632).
+func (s *Supervisor) closeStreamerLocked(account string) {
+	streamer, ok := s.streamers[account]
+	if !ok {
+		return
+	}
+	delete(s.streamers, account)
+	streamer.Close()
+}

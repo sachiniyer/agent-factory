@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -59,26 +60,31 @@ const (
 var keyEffectClasses = map[string]EffectClass{
 	// Applied live — a running daemon honours these without a restart, either in its
 	// own behaviour or on the next session/worktree it creates.
-	"default_program":                EffectAppliedLive,
-	"program_overrides":              EffectAppliedLive,
+	"default_program":   EffectAppliedLive,
+	"program_overrides": EffectAppliedLive,
+	// default_accounts is read per create, from the daemon's live config snapshot
+	// and the per-repo resolution beside it, so a change reaches the next session
+	// with no restart (#3386).
+	"default_accounts":               EffectAppliedLive,
 	"session_env_passthrough":        EffectAppliedLive,
 	"on_archive_command":             EffectAppliedLive,
+	"move_cmd":                       EffectAppliedLive,
 	"worktree_root":                  EffectAppliedLive,
 	"vscode_server_binary":           EffectAppliedLive,
 	"daemon_poll_interval":           EffectAppliedLive,
 	"log_max_size_mb":                EffectAppliedLive,
 	"log_max_backups":                EffectAppliedLive,
 	"limit_auto_resume":              EffectAppliedLive,
+	"limit_account_candidates":       EffectAppliedLive,
 	"limit_retry_interval":           EffectAppliedLive,
 	"limit_patterns":                 EffectAppliedLive,
 	"global_agent_skills":            EffectAppliedLive,
 	"docker.mount_agent_credentials": EffectAppliedLive,
 	"ssh.host_key_verification":      EffectAppliedLive,
 	"sandbox.ssh":                    EffectAppliedLive,
-	// The daemon exposes theme to browser renderers from its live config. An
-	// ApplyConfig request makes it live immediately; a direct file edit gets that
-	// request when the next TUI launches against an already-running daemon.
-	"theme": EffectAppliedLive,
+	"sandbox.binary":                 EffectAppliedLive,
+	"hosts":                          EffectAppliedLive,
+	"default_host":                   EffectAppliedLive,
 	// The network listener keys apply live since #2480 PR2: require_token /
 	// require_loopback_token / cors_allowed_origins are read per request
 	// (livePosture), and listen_addr / preview_listen_addr rebind in place
@@ -89,18 +95,56 @@ var keyEffectClasses = map[string]EffectClass{
 	"network.preview_listen_addr":    EffectAppliedLive,
 	"network.require_token":          EffectAppliedLive,
 	"network.require_loopback_token": EffectAppliedLive,
-	"network.cors_allowed_origins":   EffectAppliedLive,
+	// The #5137 opt-in is posture, not an address, but reconcile consults it on
+	// every apply: flipping it true lets a refused non-loopback listen_addr bind
+	// in place, and withdrawing it retires a serving one — so live, like the
+	// other auth-posture keys.
+	"network.allow_unauthenticated_network": EffectAppliedLive,
+	"network.cors_allowed_origins":          EffectAppliedLive,
 	// Next daemon start — the daemon reads these once, at startup.
 	"root_agents":   EffectNextDaemonStart,
 	"root_agent":    EffectNextDaemonStart,
 	"branch_prefix": EffectNextDaemonStart,
+	// The watcher supervisor snapshots this cap when the daemon constructs it;
+	// existing supervisors are not rebuilt by ApplyConfig.
+	"watcher_events_per_minute": EffectNextDaemonStart,
+	// debug_pprof selects the daemon's route table, which is built once when the
+	// HTTP listeners bind (daemon/httpserver.go). Nothing re-reads it per request,
+	// so a save must say "next daemon start" rather than claim it took effect.
+	"debug_pprof": EffectNextDaemonStart,
 	// Next af launch — af's CLI/TUI owns what these control. The daemon's release
 	// check reads auto_update and update_channel (#2212), but it only reports a
 	// release; installing is still af's, at launch. See EffectNextAfLaunch.
+	"appearance":     EffectNextAfLaunch,
 	"auto_update":    EffectNextAfLaunch,
 	"update_channel": EffectNextAfLaunch,
-	"keys":           EffectNextAfLaunch,
-	"detach_keys":    EffectNextAfLaunch,
+	// Read at the moment an upgrade is attempted — by `af upgrade` from disk, and
+	// by the daemon from its live config on each activation — so a save is in
+	// force for the next upgrade either path tries, with nothing to restart.
+	"upgrade_clear_unverifiable_artifacts": EffectAppliedLive,
+	// The daemon serves GetConfig from a fresh config.toml read on every RPC, so
+	// a saved [web] value is what the running daemon answers the very next read —
+	// and the writing browser has already applied it locally (#5500).
+	"web":         EffectAppliedLive,
+	"keys":        EffectNextAfLaunch,
+	"detach_keys": EffectNextAfLaunch,
+}
+
+// AllEffectClassifiedKeys returns the canonical name of every key in
+// keyEffectClasses, sorted, so a caller can mirror the classifier's key set
+// without reaching into the unexported map. The daemon's keyDiff mirrors this
+// set (daemon/config_apply.go): every daemon-applied key — EffectAppliedLive or
+// EffectNextDaemonStart — MUST have a keyDiff entry, or ApplyConfig silently
+// drops changes to it from ApplyConfigResult.Applied/Pending. Client-only
+// (EffectNextAfLaunch) keys are returned too; callers that only care about
+// daemon-applied keys should filter by KeyEffectClass.
+func AllEffectClassifiedKeys() []string {
+	keys := make([]string, 0, len(keyEffectClasses))
+	for k := range keyEffectClasses {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // KeyEffectClass returns when a change to key takes effect. A dotted family leaf
@@ -118,37 +162,331 @@ func KeyEffectClass(key string) EffectClass {
 	return keyEffectClasses[base]
 }
 
-// EffectNotice is the one sentence a save surface shows after writing key, stating
-// WHEN the change takes effect. daemonApplied reports whether a running daemon just
-// applied the on-disk config (Manager.ApplyConfig succeeded); it only changes the
-// applied-live answer, because an applied-live key that no daemon was running to
-// apply waits for the next daemon start just like the deferred keys.
+// DaemonApply is the one mutually exclusive answer to "what did a running
+// daemon do with this save" — the fact #4482 pulled out of three bools, whose
+// two-bits-set combinations were representable in code and settled, where they
+// were settled at all, only by which rule happened to sit first.
+type DaemonApply int
+
+const (
+	// DaemonApplyUnset is the zero value: NO producer recorded an apply result.
+	// It is not an outcome and never means "no daemon" — a producer that
+	// genuinely reached no daemon records DaemonApplyNotReached instead. A save
+	// surface handed an unset outcome reports unknown rather than guessing, so
+	// a forgotten assignment cannot masquerade as a real answer.
+	DaemonApplyUnset DaemonApply = iota
+	// DaemonApplyNotReached means no daemon was reached to apply the save: the
+	// dial failed, or the in-daemon handler had no manager. The write is on
+	// disk and the next daemon start reads it.
+	DaemonApplyNotReached
+	// DaemonApplyApplied means a running daemon applied the on-disk config
+	// (daemon.Manager.ApplyConfig returned without error).
+	DaemonApplyApplied
+	// DaemonApplyFailed means the daemon returned a failure response instead of
+	// applying the saved config — ApplyConfig's one error return, the "reload
+	// config:" wrap of a file that did not load.
+	DaemonApplyFailed
+	// DaemonApplyUnconfirmed means this save cannot establish what the running
+	// daemon ended up serving. It has three causes, and they share one
+	// implication — the file was written, but the live value is unproven:
+	//
+	//   - a lost RPC response: the daemon may have applied the config before the
+	//     connection failed, so neither success nor failure may be claimed;
+	//   - an admission refusal (upgrade probation, quiescing), which says nothing
+	//     about whether the apply ran;
+	//   - a config DIGEST that does not match: the bytes the apply loaded are not
+	//     the bytes this save wrote, so a competing write — another client, or a
+	//     hand-edit — landed between the writer's file-lock release and the
+	//     apply's load, and the daemon may be serving that value instead. The
+	//     apply returned success here, and this state REPLACES DaemonApplyApplied
+	//     rather than sitting beside it.
+	//
+	// The digest cause DELIBERATELY over-reports, and that is not a defect to be
+	// fixed. It compares whole files, so it cannot tell "my key lost a race" from
+	// "an unrelated key changed in the same window", and it reports the second as
+	// unconfirmed too. That direction is the point: the error is always to
+	// WITHHOLD a claim, never to make a false one. Narrowing it to "my key moved"
+	// means reading the key's value back out of some store after the fact, which
+	// is exactly the mechanism this replaced (#4247) — it needed store selection,
+	// value normalisation, generation identity and file-readability handling, and
+	// produced nine review findings doing it. An unrelated concurrent write is
+	// rare; a save that falsely claims `applied` is not recoverable by the caller.
+	//
+	// So: do not "fix" an unrelated-key window into DaemonApplyApplied.
+	DaemonApplyUnconfirmed
+)
+
+// ApplyOutcome is what a running daemon actually DID with the write a save surface
+// is about to report — the WHOLE outcome, not the single "did the apply call
+// return nil" bit EffectNotice used to take.
 //
-// It deliberately never tells the user to run a command (#2479) and never claims a
-// running daemon acted on a key the daemon does not read (#2480). Sentence case,
-// one clause set off with an em dash, per the copy conventions.
-func EffectNotice(key string, daemonApplied bool) string {
-	switch KeyEffectClass(key) {
-	case EffectAppliedLive:
-		if daemonApplied {
-			return "Applied — the running daemon is using the new value now."
-		}
-		return "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
-	case EffectNextDaemonStart:
-		return "Saved — this setting takes effect on the next daemon start."
-	case EffectNextAfLaunch:
-		return "Saved — this setting takes effect the next time you launch af."
-	default:
-		return "Saved."
-	}
+// That bit was the defect behind #3397. A listener key has three outcomes, not two:
+// applied live, deferred because no daemon was running, and applied-on-disk but
+// NOT live because the socket rebind failed and the old listener is still serving.
+// The third one was inexpressible here, so each save surface had to reconstruct it
+// from daemon.ApplyConfigResult with its own branch — and a decision that lives at
+// the call site is a decision the next surface can be written without. Two of the
+// four surfaces were (set, server and client); two were not (unset, server and
+// client), and the unset pair printed "Applied — the running daemon is using the
+// new value now." over a warning saying the daemon was still serving the old
+// address. Carrying the outcome makes EffectNotice the one owner of the decision.
+//
+// The daemon's apply result is ONE mutually exclusive fact, so it is one
+// DaemonApply field rather than three bools (#4482). The bool form admitted
+// eight combinations for four answers. Of the ones with two bits set, only
+// applied+unconfirmed was reachable — the digest check set the unconfirmed bit
+// and left the applied one standing — and it read as unconfirmed only because
+// that row outranked the applied row; the rest were unreachable, yet code and
+// tests existed to settle them. The digest check now records
+// DaemonApplyUnconfirmed in place of DaemonApplyApplied, so the answer no
+// longer depends on row order.
+//
+// The zero value is DaemonApplyUnset: no producer recorded an apply result.
+// That is deliberately NOT an outcome — it is distinguishable from every real
+// answer, including DaemonApplyNotReached, and StatusForKey reports it as
+// unknown rather than letting "never set" pass for "no daemon". A zero value
+// standing for both an outcome and an absence is the shape that wrongly granted
+// #4224 and wrongly refused #4356.
+type ApplyOutcome struct {
+	// DaemonApply is what the running daemon did with the saved config. It does
+	// NOT report that every changed key took effect — FailedListenerKeys is the
+	// rest of that answer.
+	DaemonApply DaemonApply
+	// FailedListenerKeys names the socket keys (network.listen_addr /
+	// network.preview_listen_addr) whose live rebind failed, so bind-new-before-close
+	// left the OLD listener serving. Both daemon.ApplyConfigResult and
+	// daemon.ApplyConfigResponse carry this; config owns no daemon types and must not
+	// import daemon (daemon imports config), so it travels as the plain slice.
+	FailedListenerKeys []string
 }
 
-// ListenerRebindDeferredNotice is the honest notice when a listen_addr /
-// preview_listen_addr change could NOT be applied to the running daemon: the
-// bind-new-before-close rebind failed, so the OLD listener is still serving. The
+// ApplyStatus is the machine-readable result for the key a save wrote. A
+// completed ApplyConfig can still be deferred for one listener key whose rebind
+// failed, so this is deliberately key-specific rather than merely the RPC's
+// success bit.
+type ApplyStatus string
+
+const (
+	// ApplyStatusUnknown is what a newer client reports when an older daemon's
+	// response predates the additive apply_outcome field.
+	ApplyStatusUnknown     ApplyStatus = "unknown"
+	ApplyStatusApplied     ApplyStatus = "applied"
+	ApplyStatusNoDaemon    ApplyStatus = "no_daemon"
+	ApplyStatusFailed      ApplyStatus = "failed"
+	ApplyStatusUnconfirmed ApplyStatus = "unconfirmed"
+	ApplyStatusDeferred    ApplyStatus = "deferred"
+)
+
+// saveRule is one row of the ordering that turns a save's facts into what the
+// save surfaces report. A row carries BOTH projections — the wire status and the
+// sentence — so for any save StatusForKey and EffectNotice read the same row and
+// cannot disagree.
+//
+// That is the point of the shape. The two used to be separate hand-written
+// orderings, kept in step by a test that asserted they agreed, and review found
+// them out of step four times (#4247). A disagreement is now unrepresentable
+// rather than tested for: there is one ordering and two columns.
+type saveRule struct {
+	// applies reports whether this row describes the save; key is canonical.
+	applies func(key string, o ApplyOutcome) bool
+	status  ApplyStatus
+	// notice renders the sentence for the canonical key.
+	notice func(key string) string
+}
+
+// saveRules is the one precedence for a save's reported answer: the FIRST row
+// that applies decides both the status and the sentence. The order is the
+// substance, so each row records why it sits where it does. Several rows share a
+// status and differ only in their sentence; that is a difference of projection,
+// not of ordering, and it is why the rows are per meaning rather than per status.
+var saveRules = []saveRule{
+	// An unset apply result outranks everything else in the struct: it means the
+	// producer never recorded what the daemon did, so no other field is
+	// trustworthy enough to report on. The honest status is unknown — never the
+	// no-daemon row, which would let a forgotten assignment pass for a real
+	// "no daemon reached" (#4482).
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyUnset },
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved — the daemon's apply result was never recorded, which is an af bug; the file holds the new value."),
+	},
+	// Uncertainty about a LIVE key outranks every recorded answer below: once the
+	// apply's answer is lost, refused, or contradicted by the digest, nothing
+	// below may promise what the running daemon is serving.
+	//
+	// It deliberately does not reach a DEFERRED key. Every cause of this state
+	// leaves the file written — a lost reply and a refusal both do, and a digest
+	// mismatch says some file is there, just possibly not this one — so the next
+	// daemon start or af launch still reads a config.toml, and the class rows
+	// below stay true. A race at save time is also indistinguishable from a
+	// hand-edit a minute later, which no save could have reported either.
+	{
+		applies: func(key string, o ApplyOutcome) bool {
+			return o.DaemonApply == DaemonApplyUnconfirmed && !deferredEffectClass(key)
+		},
+		status: ApplyStatusUnconfirmed,
+		notice: staticNotice("Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason)."),
+	},
+	// A failed apply is evidence about the FILE: DaemonApplyFailed is recorded
+	// only for a "reload config" failure (Manager.ApplyConfig's one error
+	// return), so the file did not load — and the next start reads it. It
+	// therefore outranks the class rows, which would promise an effect that file
+	// cannot deliver.
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyFailed },
+		status:  ApplyStatusFailed,
+		notice:  staticNotice("Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."),
+	},
+	// The key's class. No apply can make these keys live, so an apply result that
+	// says nothing about the file does not change when the stored value is used.
+	{
+		applies: classIs(EffectNextDaemonStart),
+		status:  ApplyStatusDeferred,
+		notice: func(key string) string {
+			return WithRootAgentAdoptionNotice(key, "Saved — this setting takes effect on the next daemon start.")
+		},
+	},
+	{
+		applies: classIs(EffectNextAfLaunch),
+		status:  ApplyStatusDeferred,
+		notice:  staticNotice("Saved — this setting takes effect the next time you launch af."),
+	},
+	{
+		applies: classIs(EffectUnknown),
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved."),
+	},
+	// Only EffectAppliedLive reaches here. A failed rebind kept the old listener
+	// serving, so the value waits for the next daemon start.
+	{
+		applies: func(key string, o ApplyOutcome) bool { return o.ListenerRebindFailed(key) },
+		status:  ApplyStatusDeferred,
+		notice:  listenerRebindDeferredNotice,
+	},
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyApplied },
+		status:  ApplyStatusApplied,
+		notice:  staticNotice("Applied — the running daemon is using the new value now."),
+	},
+	// No daemon was reached — a recorded answer, distinct from the unset state
+	// the first row and the catch-all below report.
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyNotReached },
+		status:  ApplyStatusNoDaemon,
+		notice:  staticNotice("Saved — no daemon is running to apply it, so it takes effect on the next daemon start."),
+	},
+	// The total row: a DaemonApply value this table does not enumerate is no
+	// recorded outcome either, so it reports unknown exactly as unset does. It
+	// always applies, so the table is total and every save gets exactly one row.
+	{
+		applies: func(string, ApplyOutcome) bool { return true },
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved — the daemon's apply result was never recorded, which is an af bug; the file holds the new value."),
+	},
+}
+
+func staticNotice(sentence string) func(string) string {
+	return func(string) string { return sentence }
+}
+
+func classIs(class EffectClass) func(string, ApplyOutcome) bool {
+	return func(key string, _ ApplyOutcome) bool { return KeyEffectClass(key) == class }
+}
+
+// matchSaveRule returns the canonical key and the one row describing this save.
+func matchSaveRule(key string, o ApplyOutcome) (string, saveRule) {
+	key = canonicalConfigKey(key)
+	for _, rule := range saveRules {
+		if rule.applies(key, o) {
+			return key, rule
+		}
+	}
+	// Unreachable while the last row always applies; kept total rather than
+	// panicking on a save surface.
+	return key, saveRules[len(saveRules)-1]
+}
+
+// StatusForKey projects the whole apply onto one saved key's stable wire value.
+// It is a column of saveRules, never a separate decision.
+func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
+	_, rule := matchSaveRule(key, o)
+	return rule.status
+}
+
+// deferredEffectClass reports whether key's value is consumed at the next daemon
+// start or af launch rather than by the running daemon. It is what lets an
+// unconfirmed apply and a failed one rank differently against the class: an
+// unconfirmed apply still wrote the file that start will read, while a failed one
+// means that file did not load.
+func deferredEffectClass(key string) bool {
+	switch KeyEffectClass(key) {
+	case EffectNextDaemonStart, EffectNextAfLaunch:
+		return true
+	}
+	return false
+}
+
+// ListenerRebindFailed reports whether key is one of the socket keys whose live
+// rebind failed in this apply. A failed rebind defers the key dynamically: the
+// running daemon keeps the old listener and the value only reaches one at the
+// next start, which reads the file.
+//
+// Both sides are canonicalized, which today is belt and braces: every producer of
+// FailedListenerKeys is a hardcoded canonical literal in webListeners.reconcile,
+// and both config.SetResult.Key and config.UnsetResult.Key are canonicalConfigKey'd
+// before the result is built, so an `af config set listen_addr …` already arrives
+// here as "network.listen_addr". But "both sides happen to be canonical" is an
+// invariant spread across three files with nothing pinning it, and it is exactly
+// the invariant a raw comparison would fail silently — printing "Applied" over a
+// rebind warning, which is the bug this function exists to prevent. A map lookup is
+// cheaper than the standing risk.
+func (o ApplyOutcome) ListenerRebindFailed(key string) bool {
+	key = canonicalConfigKey(key)
+	for _, failed := range o.FailedListenerKeys {
+		if canonicalConfigKey(failed) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// EffectNotice is the one sentence a save surface shows after writing key, stating
+// WHEN the change takes effect. outcome is what the running daemon did with it (see
+// ApplyOutcome); it only changes the applied-live answer, because an applied-live
+// key that no daemon was running to apply waits for the next daemon start just like
+// the deferred keys.
+//
+// It deliberately never tells the user to run a command (#2479), never claims a
+// running daemon acted on a key the daemon does not read (#2480), and since #3397
+// never claims a key is live when the rebind that would have made it live failed.
+// Sentence case, one clause set off with an em dash, per the copy conventions.
+func EffectNotice(key string, outcome ApplyOutcome) string {
+	key, rule := matchSaveRule(key, outcome)
+	return rule.notice(key)
+}
+
+// WithRootAgentAdoptionNotice appends the half of restart guidance unique to
+// always-ensured roots. Global and per-project save surfaces use this one copy.
+func WithRootAgentAdoptionNotice(key, notice string) string {
+	key = canonicalConfigKey(key)
+	if key != "root_agent" && !strings.HasPrefix(key, "root_agent.") && key != "root_agents" {
+		return notice
+	}
+	return notice + " · An already-running root session is adopted as-is, so after changing its program, disabling it, or removing its enabling entry, restart the daemon first and then kill that session."
+}
+
+// listenerRebindDeferredNotice is the honest notice when a network.listen_addr /
+// network.preview_listen_addr change could NOT be applied to the running daemon:
+// the bind-new-before-close rebind failed, so the OLD listener is still serving. The
 // value is on disk and takes effect on the next daemon start; the actionable
 // reason (address + why) rides alongside in the save surface's warnings. Like every
 // #2480 notice it names no command to run.
-func ListenerRebindDeferredNotice(key string) string {
+//
+// Unexported since #3397. It was exported for the save surfaces to call directly,
+// which is precisely how two of them came to decide this correctly and two not at
+// all. EffectNotice above is now the only way to reach it, so no surface can pick
+// the wrong sentence — or forget that this sentence exists. The wording itself is
+// unchanged; it is user-visible.
+func listenerRebindDeferredNotice(key string) string {
 	return fmt.Sprintf("Saved — %s could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).", key)
 }

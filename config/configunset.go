@@ -22,6 +22,9 @@ type UnsetResult struct {
 // UnsetProjectConfigValue removes key's personal override for a project so the
 // value falls back to the lower layers again (#2216 Phase 5).
 func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
+	if err := RetiredThemeKeyError(key); err != nil {
+		return nil, err
+	}
 	if key == "auto_yes" {
 		return nil, RemovedAutoYesError()
 	}
@@ -29,7 +32,7 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	section, leaf, spec, err := resolveProjectSettable(key)
+	section, leaf, spec, err := resolveProjectSettable(selector, key)
 	if err != nil {
 		return nil, err
 	}
@@ -47,6 +50,11 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 	})
 	if writeErr != nil {
 		return nil, writeErr
+	}
+	// Removing a stored per-project branch_prefix needs no restart either: the
+	// value was never applied (#4539), so nothing a restart could do changes.
+	if result.Removed && canonicalConfigKey(key) == "branch_prefix" {
+		result.RequiresRestart = false
 	}
 	return result, nil
 }
@@ -82,8 +90,22 @@ func applyProjectUnset(path, prettyPath, section, leaf, key string, structured b
 		}
 		return &UnsetResult{Key: key, Path: path, Removed: true, RequiresRestart: true}, nil
 	}
-	if _, err := parseProjectConfig([]byte(updated), path); err != nil {
+	// Read after the no-op returns above, so an absent key on a file this loader
+	// would reject stays the clean no-op it has always been.
+	before, err := parseProjectConfig(current, path)
+	if err != nil {
+		return nil, fmt.Errorf("refusing to write: the current personal project config does not load: %w", err)
+	}
+	resulting, err := parseProjectConfig([]byte(updated), path)
+	if err != nil {
 		return nil, fmt.Errorf("internal error: edited personal project config would not load (no changes written): %w", err)
+	}
+	// The delete must have removed the target's line and nothing else. A parse
+	// gate cannot tell those apart — a line lifted out of somebody's multiline
+	// value leaves valid TOML behind (#3662) — so the values and the presence
+	// map are compared instead, and anything else that moved is named.
+	if drift := projectRewriteDrift(before, resulting, key); drift != "" {
+		return nil, fmt.Errorf("internal error: unsetting %s in %s would change %s (no changes written)", key, prettyPath, drift)
 	}
 	if err := AtomicWriteFile(path, []byte(updated), 0o644); err != nil {
 		return nil, err
@@ -107,49 +129,134 @@ func projectConfigHasNoTopLevelKeys(content string) bool {
 // resurrect a conflicting flat value, so an alias is one effective setting for
 // unset just as it is for get and set.
 func UnsetGlobalConfigValue(key string) (*UnsetResult, error) {
+	result, _, err := UnsetGlobalConfigValueWithDigest(key)
+	return result, err
+}
+
+// UnsetGlobalConfigValueWithDigest is UnsetGlobalConfigValue plus the digest of
+// the config.toml bytes this unset left on disk, for the same reason and with
+// the same placement rule as SetGlobalConfigValueWithDigest: it rides beside
+// UnsetResult, never on it (#4247).
+func UnsetGlobalConfigValueWithDigest(key string) (*UnsetResult, ConfigDigest, error) {
+	if err := RetiredThemeKeyError(key); err != nil {
+		return nil, ConfigDigest{}, err
+	}
 	if key == "auto_yes" {
-		return nil, RemovedAutoYesError()
+		return nil, ConfigDigest{}, RemovedAutoYesError()
 	}
 	canonicalKey := canonicalConfigKey(key)
 	alias, ok := configAliasForCanonical(canonicalKey)
 	if !ok {
-		return nil, fmt.Errorf("%q is not a globally unsettable migrated config key", key)
+		return nil, ConfigDigest{}, fmt.Errorf("%q is not a globally unsettable migrated config key", key)
 	}
 	if _, err := LoadConfig(); err != nil {
-		return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
+		return nil, ConfigDigest{}, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 	}
 	configDir, err := GetConfigDir()
 	if err != nil {
-		return nil, err
+		return nil, ConfigDigest{}, err
 	}
 	path := filepath.Join(configDir, TomlConfigFileName)
 	prettyPath := prettyHomePath(path)
 
 	var result *UnsetResult
-	writeErr := WithFileLock(path, func() error {
-		current, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("failed to read %s: %w", prettyPath, err)
-		}
-		current = stripUTF8BOM(current)
-		updated, groupedRemoved := deleteTOMLScalar(string(current), alias.section, alias.leaf)
-		updated, legacyRemoved := deleteTOMLScalar(updated, "", alias.legacy)
-		if !groupedRemoved && !legacyRemoved {
-			result = &UnsetResult{Key: canonicalKey, Path: path, Removed: false}
-			return nil
-		}
-		updated = setTOMLScalar(updated, "", SchemaVersionField, strconv.Itoa(GlobalConfigSchemaVersion))
-		if _, err := parseConfigTOML([]byte(updated), prettyPath); err != nil {
-			return fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
-		}
-		if err := AtomicWriteFile(path, []byte(updated), 0o644); err != nil {
-			return err
-		}
-		result = &UnsetResult{Key: canonicalKey, Path: path, Removed: true, RequiresRestart: true}
-		return nil
+	var digest ConfigDigest
+	writeErr := withFollowedFileLock(path, func(locked lockedTarget) error {
+		var err error
+		result, digest, err = applyGlobalUnset(locked, prettyPath, canonicalKey, alias)
+		return err
 	})
 	if writeErr != nil {
-		return nil, writeErr
+		return nil, ConfigDigest{}, writeErr
 	}
-	return result, nil
+	return result, digest, nil
+}
+
+// applyGlobalUnset removes both storage spellings of one alias from the global
+// config.toml under the caller-held lock. It is separate from its caller so the
+// value-drift guard below can be driven directly, with a canonicalKey and an
+// alias that name different settings — which is exactly the shape of the bug the
+// guard exists to catch: an edit that does not do what the command says it does.
+//
+// The second return is the digest of the bytes this unset left on disk, as
+// described on UnsetGlobalConfigValueWithDigest. A no-op unset reports the bytes
+// it READ rather than an unknown digest: nothing was written, so those bytes are
+// what the file holds, and they are a file in which the key is already absent —
+// exactly the state the no-op claims. A read that found no file at all reports
+// unknown, because then there are no bytes to stand behind.
+func applyGlobalUnset(locked lockedTarget, prettyPath, canonicalKey string, alias configKeyAlias) (*UnsetResult, ConfigDigest, error) {
+	// The read is of the locked file, and so is the write below: neither a
+	// config.toml that is a symlink nor an AF home that is one may be resolved a
+	// second time inside the lock (#3688, #3697).
+	raw, err := locked.read()
+	readOK := err == nil
+	if err != nil {
+		// A missing config.toml under the lock is an empty document, exactly
+		// as loadConfigLocked answers it: a zero-byte config.json can satisfy
+		// the pre-lock LoadConfig with in-memory defaults while this file
+		// stays absent (#4483 review), or the file was removed in the window
+		// between that load and acquisition. Either way there is no key to
+		// remove — the answer is "not set", not an ENOENT the user cannot act
+		// on. Materializing a file just to report that would write where a
+		// mid-flight rewrite may be landing.
+		if !os.IsNotExist(err) {
+			return nil, ConfigDigest{}, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+		}
+	}
+	// The digest is taken from raw, before the BOM is stripped: it must describe
+	// the file's actual bytes, which is what a later load reads.
+	current := stripUTF8BOM(raw)
+	updated, groupedRemoved := deleteTOMLScalar(string(current), alias.section, alias.leaf)
+	updated, legacyRemoved := deleteTOMLScalar(updated, "", alias.legacy)
+	if !groupedRemoved && !legacyRemoved {
+		// "Nothing to remove" is a claim about a file, so it has to be a claim
+		// about the RIGHT file. Only the write path confirms otherwise, and a
+		// no-op takes it: a link retargeted to a config that does have the key
+		// would leave the user told it was already absent, which is the same
+		// silent wrong answer in the shape of a report rather than a lost
+		// update (#3696 review).
+		if err := locked.confirm(); err != nil {
+			return nil, ConfigDigest{}, err
+		}
+		var digest ConfigDigest
+		if readOK {
+			digest = digestConfigBytes(raw)
+		}
+		return &UnsetResult{Key: canonicalKey, Path: locked.link, Removed: false}, digest, nil
+	}
+	// Read after the no-op return above, for the same reason as its personal
+	// twin: nothing is being written, so nothing needs vouching for.
+	before, err := parseConfigTOML(current, prettyPath)
+	if err != nil {
+		return nil, ConfigDigest{}, fmt.Errorf("refusing to write: the current config does not load: %w", err)
+	}
+	updated = setTOMLScalar(updated, "", SchemaVersionField, strconv.Itoa(GlobalConfigSchemaVersion))
+	resulting, err := parseConfigTOML([]byte(updated), prettyPath)
+	if err != nil {
+		return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+	}
+	// Removing a line that only LOOKED like the key leaves valid TOML behind
+	// (#3662), so the parse above cannot vouch for the delete. This can: the
+	// unset key and the machine-managed schema marker are the only values the
+	// rewrite may move.
+	if drift := configRewriteDrift(before, resulting, canonicalKey, SchemaVersionField); drift != "" {
+		return nil, ConfigDigest{}, fmt.Errorf("internal error: unsetting %s in %s would change %s (no changes written)", canonicalKey, prettyPath, drift)
+	}
+	// The #5137 refusal the set path enforces applies here too: unsetting
+	// network.require_token can leave exactly the posture the daemon refuses
+	// to bind, so the same resulting-config judgment runs before the file is
+	// written. Unsetting network.listen_addr falls back to the loopback
+	// default and is always safe — and unsetting
+	// network.allow_unauthenticated_network is the opt-in REVOCATION, which
+	// must land so the listener can be retired (see listenerWriteRefusal for
+	// why that key is exempt).
+	if refusal := listenerWriteRefusal(canonicalKey, resulting); refusal != "" {
+		return nil, ConfigDigest{}, fmt.Errorf("refusing to write: %s", refusal)
+	}
+	if err := locked.write([]byte(updated), 0o644); err != nil {
+		return nil, ConfigDigest{}, err
+	}
+	// Same rule as scalarWrite.apply: hashed from the committed bytes, never
+	// from a re-read.
+	return &UnsetResult{Key: canonicalKey, Path: locked.link, Removed: true, RequiresRestart: true}, digestConfigBytes([]byte(updated)), nil
 }

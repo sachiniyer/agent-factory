@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
@@ -70,11 +69,12 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 
 	// The SCANNING process is never an occupant of its own gate. The daemon is
 	// routinely auto-started by an `af` invocation whose cwd is a managed worktree
-	// and inherits it (startDaemonChild leaves cmd.Dir unset), so a later blind
-	// kill or archive would positively match the daemon itself and refuse — on
-	// every retry, forever, until the daemon happened to be restarted elsewhere.
-	// A guard whose failure mode is permanent is worse than the rare deletion it
-	// prevents.
+	// and inherits it (startDaemonChild leaves cmd.Dir unset); runDaemon chdirs
+	// to the AF home early, but a blind kill or archive landing in the spawn
+	// window before that chdir would positively match the daemon itself and
+	// refuse — on every retry, forever, until the daemon happened to be restarted
+	// elsewhere. A guard whose failure mode is permanent is worse than the rare
+	// deletion it prevents.
 	//
 	// ONLY this process, never its subtree. The daemon spawns the sessions, so its
 	// descendants include exactly the escapees this gate exists to find; skipping
@@ -90,10 +90,10 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 			// as either would be inventing a fact.
 			continue
 		}
-		if !dirContains(root, filepath.Clean(cwd)) {
+		if !pathutil.IsAtOrInside(filepath.Clean(cwd), root) {
 			continue
 		}
-		if IsTmuxServer(pid) {
+		if IsTmuxProcess(pid) {
 			// The tmux SERVER is shared infrastructure, not a session's descendant:
 			// one server backs every session on the box and outlives all of them, and
 			// it inherits its cwd from whichever client first started it. If that was
@@ -101,6 +101,14 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 			// retry until the entire server exits — taking every other session with
 			// it. Same permanent-failure shape as the daemon self-match, one process
 			// over.
+			//
+			// A tmux CLIENT is excluded too, and must stay excluded (#4678). A client
+			// is not a writer, and af's own short-lived clients inherit the daemon's
+			// cwd — the self-match above, one process down — so counting them would
+			// refuse a teardown whenever the daemon happened to be mid-command.
+			// IsTmuxServer cannot be used here: a server forked from its client
+			// carries the client's argv, and it now answers only what it can
+			// positively identify.
 			//
 			// Excluding is the safe direction: at worst this misses an occupant and
 			// behaves as it did before this gate existed, where including it wedges
@@ -158,32 +166,4 @@ func DescribeOccupants(occupants []Occupant) string {
 		out += fmt.Sprintf("pid %d (cwd %s)", o.Process.PID, o.WorkingDir)
 	}
 	return out
-}
-
-// dirContains reports whether p is root or lies beneath it. Path containment,
-// never a string prefix: /x/wt-backup starts with /x/wt and is not inside it.
-func dirContains(root, p string) bool {
-	if p == root {
-		return true
-	}
-	rel, err := filepath.Rel(root, p)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// IsTmuxServer reports whether pid is a tmux server, POSITIVELY — from its own
-// command line, not from anything it lacks.
-//
-// A server is `tmux` invoked without a client subcommand; an unreadable command
-// line reports false, so an unknown process is treated as an ordinary candidate
-// rather than quietly excluded.
-func IsTmuxServer(pid int) bool {
-	argv := Argv(pid)
-	if len(argv) == 0 {
-		return false
-	}
-	base := filepath.Base(argv[0])
-	return base == "tmux" || strings.HasPrefix(base, "tmux:")
 }

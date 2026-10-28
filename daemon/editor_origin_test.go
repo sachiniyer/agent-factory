@@ -242,7 +242,7 @@ func TestEditorOrigin_SurvivesTheRegisteringTabClosing(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, nameOf)
-	_, err = m.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: nameOf})
+	_, err = m.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: nameOf}, "internal daemon caller")
 	require.NoError(t, err)
 
 	// The first editor tab is still open, so the shared origin must still resolve.
@@ -318,7 +318,7 @@ func TestEditorOrigin_StabilityFollowsTheActiveListener(t *testing.T) {
 	// so the origin must still be offered — the guard must not follow the request.
 	next := *m.Config()
 	next.PreviewListenAddr = "127.0.0.1:0"
-	m.live.Store(&next)
+	m.storeLivePosture(&next)
 	require.Equal(t, "127.0.0.1:0", m.Config().PreviewListenAddr, "config now asks for an ephemeral port")
 	require.False(t, previewPortIsEphemeral(m.activePreviewConfigAddr()),
 		"the SERVING listener still has its fixed port — the guard reads that, not the request")
@@ -350,7 +350,7 @@ func TestEditorOrigin_RevokedWhenTheListenerBecomesUnsafe(t *testing.T) {
 	// which is exactly the condition that made minting-time-only gating insufficient.
 	next := *m.Config()
 	next.PreviewListenAddr = "0.0.0.0:8444"
-	m.live.Store(&next)
+	m.storeLivePosture(&next)
 	require.NoError(t, m.webListeners.bindPreviewLocked("0.0.0.0:0"))
 
 	// Bind-new-before-close means the OLD listener is gone, so the request has to go

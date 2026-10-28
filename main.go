@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/watchlifeline"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -17,11 +18,16 @@ var (
 	// stable releases also commit the new number here so dev builds report
 	// the latest stable base. Preview releases (vX.Y.Z-preview-N, #1041)
 	// never rewrite this value.
-	version     = "1.0.269"
+	version     = "1.0.329"
 	rootCommand = commands.NewRootCommand
 )
 
 func main() {
+	// The watch lifeline (#5329) runs first: the daemon execs this binary as
+	// `af __watch-lifeline …` for every watch command, so it must reach the
+	// shell with the daemon's environment untouched and without any of the
+	// setup below.
+	watchlifeline.HandleExec()
 	// Installed BEFORE HandleInternalExec, which is the only consumer: the pane
 	// shim resolves an account name against this machine's AF home, and
 	// internal/agentaccount cannot be reached from internal/sessionenv because the
@@ -31,14 +37,7 @@ func main() {
 		if err != nil {
 			return sessionenv.Account{}, err
 		}
-		executable, err := os.Executable()
-		if err != nil {
-			// Not fatal: TrustedWrapper only widens what the command guard accepts,
-			// so an unknown path means a bare `af` is still recognised and anything
-			// else is refused. Failing closed is the correct direction.
-			executable = ""
-		}
-		return agentaccount.Selected(home, agent, name, executable)
+		return agentaccount.Selected(home, agent, name)
 	}
 	sessionenv.HandleInternalExec()
 	sessiontmux.HandleDedicatedServerExec()

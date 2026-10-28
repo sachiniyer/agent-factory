@@ -377,8 +377,6 @@ func (f *observingCreatePtyFactory) Start(command *exec.Cmd) (*os.File, error) {
 	return f.base.Start(command)
 }
 
-func (f *observingCreatePtyFactory) Close() { f.base.Close() }
-
 func TestPreparedCreateLaunchSnapshotsBeforeAgentProcessStart(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoRoot := initInPlaceRepo(t, "ordered-create")
@@ -405,7 +403,9 @@ func TestPreparedCreateLaunchSnapshotsBeforeAgentProcessStart(t *testing.T) {
 
 	plan, err := inst.PrepareCreateLaunch()
 	require.NoError(t, err)
-	require.Empty(t, newCodexRolloutFiles(plan.ConversationCapture()),
+	newFiles, err := newCodexRolloutFiles(plan.ConversationCapture())
+	require.NoError(t, err)
+	require.Empty(t, newFiles,
 		"the rollout should not exist when the before-image is taken")
 	require.NoError(t, inst.LaunchPreparedCreate(plan))
 	t.Cleanup(func() { _ = inst.CloseAttachOnly() })
@@ -414,6 +414,38 @@ func TestPreparedCreateLaunchSnapshotsBeforeAgentProcessStart(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID,
 		"a rollout created at process start must be newer than the frozen before-image")
+}
+
+// TestLaunchPreparedCreateRecordsRuntimeProgram is the #5066 pin for the one
+// boundary every fresh local create funnels through — the daemon's session
+// create AND the root agent's reap-and-recreate (rootagent_create.go →
+// CreateSession → the task start helpers → this plan). Once launch succeeds,
+// the plan's resolved base command becomes durable runtime evidence: it is
+// what doctor and the daemon's drift checker compare the configured profile
+// against, and it must survive ToInstanceData.
+func TestLaunchPreparedCreateRecordsRuntimeProgram(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initInPlaceRepo(t, "records-create")
+
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "/opt/claude-resolved --flag"}
+	require.NoError(t, config.SaveConfig(cfg))
+	inst, err := NewInstance(InstanceOptions{
+		Title: "records-create", Path: repoRoot, Program: tmux.ProgramClaude, InPlace: true,
+	})
+	require.NoError(t, err)
+	world := newInPlaceTmuxWorld(t)
+	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps("records-create", tmux.ProgramClaude, world, world.exec()))
+
+	plan, err := inst.PrepareCreateLaunch()
+	require.NoError(t, err)
+	require.NoError(t, inst.LaunchPreparedCreate(plan))
+	t.Cleanup(func() { _ = inst.CloseAttachOnly() })
+
+	require.Equal(t, "/opt/claude-resolved --flag", inst.RuntimeProgram(),
+		"the launch boundary must record the resolved base command it spawned")
+	require.Equal(t, inst.RuntimeProgram(), inst.ToInstanceData().RuntimeProgram,
+		"the durable projection must carry the command launch recorded")
 }
 
 func TestPrepareCreateLaunchDoesNotGuessCodexStoreForOpaqueOverride(t *testing.T) {

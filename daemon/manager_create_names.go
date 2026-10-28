@@ -138,14 +138,18 @@ func (m *Manager) titlesCollide(a, b string) bool {
 // anything (#2415). Any new check belongs in one of the two halves rather than
 // inline here, so the pre-rename path picks it up automatically — a check added
 // only to this function is exactly how #2415 happened.
-func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData) error {
-	if err := m.validateTitleShapeLocked(title, namespace, allowReserved); err != nil {
+func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool, remedyPath ...string) error {
+	refusalPath := repoPath
+	if len(remedyPath) > 0 {
+		refusalPath = remedyPath[0]
+	}
+	if err := m.validateTitleShapeLocked(refusalPath, title, namespace, allowReserved); err != nil {
 		return err
 	}
 	if err := m.findTitleRecordConflictLocked(repoID, repoPath, title, namespace, diskData); err != nil {
 		return err
 	}
-	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, nil)
+	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, nil, inPlace)
 }
 
 // validateTitleClaimableLocked is every refusal that does NOT depend on af's own
@@ -153,21 +157,25 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 // a create that trips one is doomed no matter what the rename does.
 //
 // ignore is the archived instance the caller is about to rename out of the way.
-// It is excluded from the hook-slug scans, which would otherwise report the very
-// row being freed as the collision and refuse a reuse that would have succeeded.
+// It is excluded from the archive-directory and hook-slug scans, which would
+// otherwise report the row being freed and refuse a valid reuse.
 // It is not excluded from the tmux probe: archiving kills the session's pane, so
 // an archived row never owns a live tmux name, and anything the probe finds is a
 // genuine orphan the rename has no effect on.
-func (m *Manager) validateTitleClaimableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, ignore *session.Instance) error {
-	if err := m.validateTitleShapeLocked(title, namespace, allowReserved); err != nil {
+func (m *Manager) validateTitleClaimableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, ignore *session.Instance, inPlace bool, remedyPath ...string) error {
+	refusalPath := repoPath
+	if len(remedyPath) > 0 {
+		refusalPath = remedyPath[0]
+	}
+	if err := m.validateTitleShapeLocked(refusalPath, title, namespace, allowReserved); err != nil {
 		return err
 	}
-	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, ignore)
+	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, ignore, inPlace)
 }
 
 // validateTitleShapeLocked rejects titles that are malformed for the selected
 // runtime namespace or reserved, independent of any existing session.
-func (m *Manager) validateTitleShapeLocked(title string, namespace runtimeNameNamespace, allowReserved bool) error {
+func (m *Manager) validateTitleShapeLocked(repoPath, title string, namespace runtimeNameNamespace, allowReserved bool) error {
 	// Whitespace-only titles (e.g. "   ") are non-empty and so slip past a bare
 	// == "" check, creating sessions with effectively blank names (#973). Trim
 	// before the emptiness gate; the TUI naming flow applies the same check.
@@ -195,8 +203,20 @@ func (m *Manager) validateTitleShapeLocked(title string, namespace runtimeNameNa
 	// name everywhere. Only the daemon's own ensure loop passes
 	// allowReserved; title-base derivation (nextAvailableTitleLocked) never
 	// does, so a base of "root" skips to "root-2" instead of erroring.
-	if !allowReserved && session.IsReservedTitle(title) {
-		return fmt.Errorf("session title %q is reserved for the daemon-managed root agent; pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)", title)
+	//
+	// What is reserved is the NAME, not the spelling (#3732). The refusal asks
+	// session.ReservedTitleCollision, which also catches a title deriving the
+	// reserved tmux session name without looking like "root" — "ro ot", whose
+	// interior space toTmuxName deletes. That check belongs HERE, in the shape
+	// half, rather than in findTitleConflictLocked below: it compares against a
+	// constant rather than against any af record, so it is a refusal the
+	// archived-name-reuse rename can never clear, and validateTitleClaimableLocked
+	// must therefore see it too (#2415). The record scan still owns the other
+	// axis — a derived-name collision with an existing session, reserved or not.
+	if !allowReserved {
+		if err := session.ReservedTitleRefusalFor(title, repoPath); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -229,10 +249,10 @@ func (m *Manager) findTitleRecordConflictLocked(repoID, repoPath, title string, 
 }
 
 // validateTitleNamespacesLocked refuses a title whose EXTERNAL name claims are
-// already taken: the global hook-slug namespace external provisioners key on, and
-// a live tmux session of the same name. See validateTitleClaimableLocked for what
-// ignore excludes and why.
-func (m *Manager) validateTitleNamespacesLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, diskData []session.InstanceData, ignore *session.Instance) error {
+// already taken: the per-repo archive directory, the global hook-slug namespace
+// external provisioners key on, and a live tmux session of the same name.
+// See validateTitleClaimableLocked for what ignore excludes and why.
+func (m *Manager) validateTitleNamespacesLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, diskData []session.InstanceData, ignore *session.Instance, inPlace bool) error {
 	if namespace == runtimeNamespaceRemoteHook {
 		candidate := session.Slugify(title)
 		var ignoreTitle string
@@ -298,10 +318,12 @@ func (m *Manager) validateTitleNamespacesLocked(repoID, repoPath, title, program
 		if owner != "" {
 			return fmt.Errorf("remote session titled %q in project %s already maps to hook name %q; remote hook names are shared across projects because the hook scripts receive them verbatim as --name — pick another title for this remote session", owner, ownerRepo, candidate)
 		}
-		return nil
 	}
 	if namespace != runtimeNamespaceLocalTmux {
 		return nil
+	}
+	if err := m.validateArchiveTitleLocked(repoID, title, diskData, ignore, inPlace); err != nil {
+		return err
 	}
 	tmuxSession := tmux.NewTmuxSessionForRepo(title, repoPath, program)
 	// Existence gates the create here, so read the tri-state, not the lossy bool

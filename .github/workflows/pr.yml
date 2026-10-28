@@ -3,15 +3,76 @@ name: PR Validation
 on:
   pull_request:
     branches: [master]
+  # The post-merge verification lane. A master push runs EVERY job below —
+  # including the ones that never run on a pull_request any more (the macOS
+  # suite, the two systemd lanes, the web selftest and the performance
+  # baselines), which is what "verify on master" means here. A merge made with
+  # GITHUB_TOKEN suppresses push workflows (#3435); pr.yml is in the gate's
+  # MASTER_PUSH_WORKFLOWS list so the post-merge dispatch loop re-raises it,
+  # and the nightly schedule below is the backstop when nothing re-raises a
+  # suppressed or cancelled run at all. The concurrency group cancels a stale
+  # master run when a newer merge lands, so a burst of merges verifies the tip.
+  push:
+    branches: [master]
+  # Full suite on master once a day. The push lane verifies each landing tip;
+  # this is the catch-all for the lanes a push cannot reach — a GITHUB_TOKEN
+  # merge nobody re-raised, and any regression that only the heavy jobs see.
+  schedule:
+    - cron: '37 4 * * *'
   # A merge queue creates a temporary gh-readonly-queue/… ref and dispatches the
   # merge_group event. The required "Lint" and "Build" checks below MUST run on
   # that event and report against the merge_group ref, or the queue never gets a
-  # result and every merge stalls forever. The jobs are the SAME ones the PR runs
-  # (none is gated on github.event_name), so they report the identical "Lint" and
-  # "Build" check contexts on the merged-result ref. Do NOT filter merge_group by
-  # branch — the queue only ever targets master, and a base-branch filter here is
-  # an easy way to silently stop the checks from running.
+  # result and every merge stalls forever. The required checks are the SAME
+  # jobs the PR runs, so they report the identical "Lint" and "Build" check
+  # contexts on the merged-result ref; the heavy jobs the PR skips run here too,
+  # gated by the scope outputs rather than by github.event_name directly (see
+  # web-selftest-scope for why that indirection exists). Do NOT filter
+  # merge_group by branch — the queue only ever targets master, and a
+  # base-branch filter here is an easy way to silently stop the checks from
+  # running.
   merge_group:
+
+  # Auto Gate dispatches this when a head has no PR Validation run at all, so a
+  # decision cannot stall waiting for a run that will never exist: the head its
+  # own update-branch created (#3807), and any other head GitHub created no run
+  # for (#4581). A dispatch takes a REF, never a sha, so it runs at the branch
+  # tip. For #3807 that tip is the new head. For #4581 Auto Gate re-reads the tip
+  # first and skips the dispatch when it is no longer the head it evaluated.
+  #
+  # Both dispatches pass no inputs, so they get probe=false: the full run, exactly
+  # as before. probe=true is the fail-first probe (#4563, docs/dev/probe-runs.md):
+  # only the Linux Test job runs, on the packages and -run regex given, and every
+  # other job is skipped.
+  #
+  # A probe can be dispatched on a PR's head, and every job below still reports a
+  # check run there, skipped ones included. The gates read the required "Build"
+  # and "Lint" by exact name and take the newest (auto-gate.js
+  # latestRequiredState), and the ruleset counts a skipped check as passing. So a
+  # probe must never report under a name a PR run uses. That is why the jobs
+  # that still run on every pull_request carry a probe-aware `name:`. GitHub
+  # does not evaluate the name of a skipped job
+  # (github.com/orgs/community/discussions/13261), so a probe's skipped rows are
+  # named by the bare expression, such as
+  # `inputs.probe && 'Lint (skipped by probe)' || 'Lint'` (measured on #4565),
+  # and match no check. Were that ever fixed, they would read
+  # "… (skipped by probe)", which matches none either. The heavy jobs keep plain
+  # names: they now skip on ordinary PRs too, where an expression name would
+  # show raw, and no gate reads them. test-systemd skips as one row, still named
+  # `Test (systemd, ${{ matrix.os }})`.
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: "Fail-first probe: run only the Linux Test job (docs/dev/probe-runs.md)"
+        type: boolean
+        default: false
+      packages:
+        description: "Probe only: packages to test, space-separated, each starting with ./ (empty: the whole module)"
+        type: string
+        default: ""
+      run:
+        description: "Probe only: a -run regex (empty: every test in those packages)"
+        type: string
+        default: ""
 
 concurrency:
   # pull_request keys the group on the PR number so a new push cancels the stale
@@ -22,7 +83,16 @@ concurrency:
   # ref per merge_group entry (and refs/pull/N/merge for PRs, so PR runs never
   # collide with queue runs either). Mirrors how auto-gate.yml keys off a fallback
   # chain when the pull_request payload is null.
-  group: pr-${{ github.event.pull_request.number || github.ref }}
+  #
+  # A probe gets its own prefix. Otherwise a probe and Auto Gate's recovery
+  # dispatch on the same branch would share pr-refs/heads/<branch> and cancel
+  # each other, and Build, which runs always(), fails on a cancelled need.
+  # Every other event resolves to the same pr-… group as before.
+  #
+  # Auto Gate's dispatches, #3807's and #4581's, are not probes, so they land in
+  # pr-refs/heads/<branch>. Two #4581 dispatches that race on one branch
+  # therefore cancel down to one run, and a probe on that branch cancels neither.
+  group: ${{ inputs.probe && 'probe-' || 'pr-' }}${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 # Read-only: workflow only checks out source and runs lint/test/build; it never comments on or modifies the PR.
@@ -31,7 +101,8 @@ permissions:
 
 jobs:
   lint:
-    name: Lint
+    name: ${{ inputs.probe && 'Lint (skipped by probe)' || 'Lint' }}
+    if: ${{ !inputs.probe }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -55,6 +126,19 @@ jobs:
             gofmt -d .
             exit 1
           fi
+
+      - name: Check served design colors without a browser
+        run: go test ./internal/designtokens -run TestDesignWebChromeServedBytes -count=1
+
+      # copylocks and the rest of vet's passes (#3613). This cannot live in the
+      # golangci-lint step above: that runs with --fast, which disables govet
+      # outright (it is fast: false), so enabling govet in a config file would
+      # change nothing while --fast is on the command line. Until this step
+      # existed, `go vet` ran ONLY in the release workflows' preflight — so a
+      # vet-only finding blocked every preview release instead of failing the
+      # PR that introduced it.
+      - name: go vet
+        run: go vet ./...
 
       # REPORTS, does not block (#3014). The gate was right about the code and wrong
       # about the workflow: requiring every merged symbol to be reachable means a
@@ -139,6 +223,20 @@ jobs:
       - name: Check file lengths
         run: scripts/lint-file-length.sh
 
+      # Six workflow steps used to run `sudo apt-get update && sudo apt-get
+      # install …`, and `apt-get update` exits 100 when ANY configured source
+      # fails — so a 403 from packages.microsoft.com, which the runner image
+      # ships and nothing here installs from, reddened master's Build (#3774).
+      # They now all call scripts/ci-apt-install.sh, and this is the check that
+      # keeps a seventh from being written the old way: six copies is how the
+      # defect reached both release preflights in the first place. It lives in
+      # the required Lint job, which runs on every PR regardless of what the
+      # PR touched, and it needs nothing but the Go already set up above. The
+      # same tests also pin the script's two halves — a failed update is
+      # survived, a failed install is not.
+      - name: Lint CI package installs and test the installer wrapper
+        run: go test ./scripts/ -run Apt -count=1
+
       # The auto-gate helper decides what auto-merges, but nothing ran its tests
       # in CI — they only ever ran by hand (#1907). Lives in the Lint job because
       # Lint is a required check, so this gates from the moment it lands; a
@@ -146,7 +244,7 @@ jobs:
       # runner's preinstalled Node and the built-in node:test — no package.json,
       # no install step.
       - name: Test auto-gate helper
-        run: node --test .github/scripts/auto-gate.test.js
+        run: node --test .github/scripts/auto-gate.test.js .github/scripts/codex-outage.test.js .github/scripts/go-inert.test.js
 
       # Same rationale again, one layer up: this helper decides whether the web
       # selftest RUNS, and its tests also assert the wiring that gives a red run
@@ -156,6 +254,14 @@ jobs:
       # the teeth are asserted in the required job rather than assumed.
       - name: Test web-selftest scope helper and the gate wiring
         run: node --test .github/scripts/web-selftest-scope.test.js
+
+      # The probe mode above (#4563) is only safe while three things hold: a
+      # probe skips every job but Test, no probe row carries a name a PR run
+      # reports, and dispatch inputs reach a shell only through env. This pins
+      # all three, and runs the probe step against a stub go. A probe skips this
+      # job, so this step runs on every PR and never inside a probe.
+      - name: Test the probe-mode wiring
+        run: node --test .github/scripts/pr-probe.test.js
 
       # Same rationale as the auto-gate test above: the stale-external-pr helper
       # decides which fork PRs to auto-close, so its pure decision logic gates
@@ -171,8 +277,27 @@ jobs:
       - name: Test container-harness disk hygiene
         run: make testbox-selftest
 
+      # Twenty-six daemon test files pointed a PROCESS-GLOBAL logger
+      # (log.WarningLog / InfoLog / ErrorLog) at a local, unsynchronized
+      # bytes.Buffer and then read it. Every goroutine in the test binary writes
+      # into whichever sink is installed, so the read races any of them —
+      # `Test (macOS)` went red with a background goroutine from a Manager the
+      # failing test never created writing into that test's assertion buffer
+      # (#3787). They now share one mutex-guarded sink in
+      # daemon/logcapture_test.go, and this is the check that keeps a
+      # twenty-seventh from being written the old way; twenty-six copies is how
+      # the shape spread in the first place. It lives in the required Lint job,
+      # which runs on every PR regardless of what the PR touched, and it needs
+      # nothing but the Go already set up above — it reads the daemon test files
+      # as text and never builds or runs them, so it spawns no daemon and
+      # touches no tmux.
+      - name: Lint daemon log capture
+        run: go test ./scripts/ -run DaemonLogCapture -count=1
+
+  # The one job a probe runs. It runs, so its name is evaluated: a probe's
+  # verdict reads "Test (probe)" and cannot pass for a PR's "Test".
   test:
-    name: Test
+    name: ${{ inputs.probe && 'Test (probe)' || 'Test' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -192,8 +317,10 @@ jobs:
       # suite would cover two of the three shells it claims, and a zsh-only defect
       # would reach users with CI green — the same gap test-macos exists to close,
       # one layer down. The macOS runner already ships zsh, so this is Linux-only.
+      # Routed through scripts/ci-apt-install.sh so a third-party source in the
+      # runner image cannot fail this required check by failing the update (#3774).
       - name: Install zsh
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+        run: scripts/ci-apt-install.sh zsh
 
       # There is deliberately no "warm alpine:3.20" step here any more (#2521).
       # It used to live in this job alone, which was the whole problem: FOUR
@@ -205,8 +332,108 @@ jobs:
       # binary itself (integration/base_image_test.go), once, with retry, so
       # every lane and every developer machine gets the same guarantee and no
       # future workflow can forget it.
+
+      # -timeout is explicit rather than Go's default 10m per package (#3580).
+      # That default is a per-package wall the daemon package now sits right on:
+      # 355.666s here, 600.098s on the macOS job in the same run, where it hit
+      # the wall and panicked. A package timeout is not a test failure — Go kills
+      # the binary, names no slow test, and reports every remaining test in the
+      # package as not run — so the budget has to be far enough above the measured
+      # time that only a real wedge reaches it. The number is the macOS step's
+      # (see there for why it is 30m): the tighter of the two budgets picks it,
+      # and one number on both steps means they cannot drift onto different walls
+      # again. Here the daemon package measured 363-587s across nine runs on
+      # 2026-09-17, so 30m is ~3x the slowest. This job carries no
+      # timeout-minutes (GitHub's 360m default), so the Go-side panic and its
+      # goroutine dump always land first here regardless.
       - name: Run tests
-        run: go test -v -race -count=1 ./...
+        if: ${{ !inputs.probe }}
+        run: go test -v -race -count=1 -timeout 30m ./...
+
+      # A probe's go test (#4563, docs/dev/probe-runs.md). It uses the same flags
+      # as Run tests above, so a probe fails the way the real run would, and
+      # pr-probe.test.js keeps the two in step — including the -timeout, which
+      # #4556 has already moved once. Only the package list and -run come from
+      # the dispatch.
+      #
+      # The inputs reach the shell through env and are never spliced into this
+      # script. Each package must start with ./, so none can be read as a go flag
+      # such as -toolexec, and neither input may contain a line break.
+      #
+      # `go test -run` exits 0 when the regex matches nothing (#2916). A probe
+      # that ran nothing would then read as "the test did not catch the
+      # mutation", so a green result that ran no test is refused.
+      - name: Run probe tests
+        if: ${{ inputs.probe }}
+        env:
+          PROBE_PACKAGES: ${{ inputs.packages }}
+          PROBE_RUN: ${{ inputs.run }}
+        run: |
+          set -euo pipefail
+          case "$PROBE_PACKAGES$PROBE_RUN" in
+            *$'\n'* | *$'\r'*)
+              echo "::error::packages and run must each be one line; one of them contains a line break."
+              exit 1
+              ;;
+          esac
+
+          read -r -a packages <<< "$PROBE_PACKAGES"
+          if [ "${#packages[@]}" -eq 0 ]; then
+            packages=(./...)
+          fi
+          pkg_re='^\./[A-Za-z0-9._/-]*$'
+          for pkg in "${packages[@]}"; do
+            if [[ ! $pkg =~ $pkg_re ]] || [[ "/$pkg/" == */../* ]]; then
+              printf 'rejected package: %q\n' "$pkg"
+              echo "::error::each package must be a ./-relative pattern inside this module, such as ./daemon/ or ./session/..."
+              exit 1
+            fi
+          done
+          run_args=()
+          if [ -n "$PROBE_RUN" ]; then
+            run_args=(-run "$PROBE_RUN")
+          fi
+
+          log="$RUNNER_TEMP/probe-go-test.log"
+          status=0
+          go test -v -race -count=1 -timeout 30m "${run_args[@]}" "${packages[@]}" 2>&1 | tee "$log" || status=$?
+
+          # An unreadable log counts as zero tests run, which fails closed below.
+          ran=$(grep -c '^=== RUN' "$log" || true)
+          ran=${ran:-0}
+          skipped=$(grep -c -e '--- SKIP' "$log" || true)
+          skipped=${skipped:-0}
+          # A probe is read by the assertion line, not the test name. One run
+          # carries every mutation, so a red test is evidence only for the
+          # mutation whose assertion line failed. -v prints every t.Log too, so
+          # each file:line is filed under the test that go test last named
+          # (=== RUN/CONT/NAME), and it is printed only if that test fails.
+          failures=$(awk '
+            /^=== (RUN|CONT|NAME) / { cur = $3; next }
+            /^panic:/ { print; next }
+            /^[[:space:]]*--- FAIL: / { printf "%s", buf[$3]; print; next }
+            /^[[:space:]]+[^[:space:]]+_test\.go:[0-9]+:/ { buf[cur] = buf[cur] $0 "\n" }
+          ' "$log" || true)
+          {
+            echo "### Probe · go test exited $status · $ran run · $skipped skipped"
+            echo
+            echo "Packages: ${packages[*]}"
+            echo
+            echo 'Failures and the assertion lines that raised them:'
+            echo
+            echo '```'
+            sed -n '1,200p' <<< "${failures:-(none)}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$status" -eq 0 ] && [ "$ran" -eq 0 ]; then
+            echo "::error::the probe ran no tests: -run matched nothing in ${packages[*]}. go test exits 0 on that, so it is refused rather than read as green."
+            exit 1
+          fi
+          if [ "$skipped" -gt 0 ]; then
+            echo "::warning::$skipped test(s) skipped. A skipped test cannot fail, so read the log before taking green as 'not caught'."
+          fi
+          exit "$status"
 
   # The round-trip image builds must resolve NOTHING against a registry (#2521).
   #
@@ -223,7 +450,8 @@ jobs:
   # likely to reintroduce a registry fetch is a Dockerfile or workflow edit
   # nobody thought of as touching integration.
   registry-free:
-    name: Registry-free image build
+    name: ${{ inputs.probe && 'Registry-free image build (skipped by probe)' || 'Registry-free image build' }}
+    if: ${{ !inputs.probe }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -246,6 +474,13 @@ jobs:
   # while the exact tmux server and pane PIDs survive.
   test-systemd:
     name: Test (systemd, ${{ matrix.os }})
+    # Runs on the post-PR lanes only (master push, nightly, merge_group,
+    # dispatch) — never on pull_request. The event test is the scope job's
+    # `heavy` output rather than an `if:` on the event: see web-selftest-scope
+    # for why `if:` cannot carry it. The need also preserves the probe skip —
+    # a probe skips the scope job, so this never sees `heavy == 'true'`.
+    needs: [web-selftest-scope]
+    if: needs.web-selftest-scope.outputs.heavy == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -261,10 +496,10 @@ jobs:
           go-version: "1.25"
           cache: true
 
+      # Routed through scripts/ci-apt-install.sh so a third-party source in the
+      # runner image cannot fail this step by failing the update (#3774).
       - name: Install lifecycle dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tmux
+        run: scripts/ci-apt-install.sh tmux
 
       - name: Enable the systemd user manager
         run: |
@@ -278,6 +513,51 @@ jobs:
           done
           systemd --version | head -1
           systemctl --user show-environment >/dev/null
+
+      # #3650's two reds. They run FIRST because the survival red refuses to
+      # touch a pre-existing agent-factory-daemon.service, and the step below
+      # installs one. Same pin discipline as that step: `go test -run` exits 0
+      # when the pattern matches nothing, so a rename would silently retire the
+      # gate on the merge path (#2916).
+      - name: Test daemon-spawned hook scopes
+        env:
+          AF_SYSTEMD_LIFECYCLE_TEST: "1"
+        run: |
+          set -euo pipefail
+          run_pinned() {
+            pkg="$1"; pin="$2"; want="$3"
+            matched="$(go test "$pkg" -list "$pin" | grep -c '^Test' || true)"
+            if [ "$matched" != "$want" ]; then
+              echo "::error::the pinned tests do not resolve — $matched of $want for $pin in $pkg"
+              echo "This gate would have run less than it claims and gone green."
+              go test "$pkg" -list '.*' | grep '^Test' || echo "(no tests in $pkg)"
+              exit 1
+            fi
+            go test -v -count=1 "$pkg" -run "$pin"
+          }
+          # The production hook path FIRST: /proc/<pid>/cgroup of a real
+          # post_worktree_commands process, and its survival across the daemon
+          # unit stopping. These are the two reds, so nothing added later may
+          # come between them and a failing run — a pin that cannot resolve
+          # exits this step before they run, and the failure then reports the
+          # harness refusing rather than the defect.
+          run_pinned ./session/git \
+            '^(TestDaemonSpawnedPostWorktreeHookLeavesTheDaemonCgroup|TestDaemonSpawnedPostWorktreeHookSurvivesTheDaemonUnitStopping)$' 2
+          # Then the scope SHAPES: bound dies with its owner, unbound survives
+          # it, a scoped child leaves the spawning process's cgroup, the survivor
+          # sweep kills a TERM-ignoring hook inside its own bound, and the
+          # launcher oracle releases a scope once systemd-run has exec'd (#3667 —
+          # a stub cannot exec, so only a real launcher proves that handoff).
+          run_pinned ./internal/systemdunit \
+            '^(TestBoundScopeDiesWithItsOwnerWhileUnboundScopeSurvives|TestUnboundScopeIsASiblingOfTheDaemonUnit|TestStopHookScopesKillsATermIgnoringSurvivorWithinTheBound|TestTheLauncherOracleReleasesAScopeOnceItIsRegistered)$' 4
+          # Then the RESTORE leg (#3682): a successor daemon adopts a hook run
+          # still live in its real scope, and reports it finished only once that
+          # scope actually exits. Every other adoption test scripts systemctl,
+          # which answers whatever pattern it is handed — so only a real manager
+          # can show that the prefix a restored session carries actually names
+          # the unit systemd is holding.
+          run_pinned ./session/git \
+            '^TestRestoreAdoptsAHookRunStillLiveInItsRealScope$' 1
 
       - name: Test abrupt daemon failure ownership
         env:
@@ -323,7 +603,8 @@ jobs:
   # It uses the `make` targets rather than open-coding npm, so what CI runs is what
   # a developer runs. A CI-only copy of these steps is how the two quietly diverge.
   web:
-    name: Web
+    name: ${{ inputs.probe && 'Web (skipped by probe)' || 'Web' }}
+    if: ${{ !inputs.probe }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -393,55 +674,70 @@ jobs:
   # Every way of NOT knowing the diff answers "run it". A skipped expensive job is
   # a hole; a needlessly-run one is just slow.
   web-selftest-scope:
-    name: Web selftest scope
+    name: ${{ inputs.probe && 'Web and performance scope (skipped by probe)' || 'Web and performance scope' }}
+    if: ${{ !inputs.probe }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      run: ${{ steps.scope.outputs.run }}
+      heavy: ${{ steps.scope.outputs.heavy }}
+      selftest: ${{ steps.scope.outputs.selftest }}
+      perf: ${{ steps.scope.outputs.perf }}
+      tui: ${{ steps.scope.outputs.tui }}
     steps:
-      # depth 2 is exactly what the diff below needs and no more: on a
-      # pull_request event the checked-out HEAD is refs/pull/N/merge, whose first
-      # parent is the base tip and whose second is the PR head.
+      # depth 2 is exactly what the diff below needs: on a pull_request the
+      # checked-out HEAD is refs/pull/N/merge, whose first parent is the base tip.
       - uses: actions/checkout@v6
         with:
           fetch-depth: 2
 
-      - name: Decide whether the web selftest applies
+      - name: Decide which heavy jobs apply to this event
         id: scope
         run: |
           set -euo pipefail
-
-          # merge_group (and anything else that ever gains this workflow) has no
-          # merge commit to diff against here. Run the suite rather than guess:
-          # the queue only ever runs changes a PR already scoped.
-          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
-            echo "::notice::event is ${GITHUB_EVENT_NAME}, not pull_request — running the web selftest."
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          # The event gate. A pull_request runs the fast jobs plus any heavy job
+          # whose SURFACE the PR touches: `perf` (Performance and visual
+          # baselines) for web/**, app/**, ui/**, config/** and their harness,
+          # `tui` (TUI driver selftest) for ui/**, app/**, keys/** and the driver
+          # — each decided from the changed-file list by the tested helper
+          # .github/scripts/web-selftest-scope.js. Go-only PRs elsewhere run
+          # neither. macOS, systemd and the web selftest never run on a PR
+          # (owner decision 2026-10-27, merge throughput; master and the nightly
+          # verify them). Three master-only breaks a surface job would have
+          # caught on the PR: the TUI driver selftest vs a footer copy change
+          # (#5549 -> #5643), the config-page visual goldens (#4806 ->
+          # #5671/#5673), and the web bundle size budget (+2.3 KB gzip).
+          #
+          # A changed-files gate rather than workflow-level `paths:`, so Build
+          # still reports on every PR; a job this skips is `skipped`, which
+          # Build counts as success. Not knowing the diff runs the job.
+          #
+          # Every other event runs everything. `selftest` and `tui` are false on
+          # `push` only because web-selftest.yml and tui-driver-selftest.yml
+          # carry their own path-filtered push triggers for master.
+          heavy=false selftest=false perf=false tui=false
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            if base="$(git rev-parse --verify --quiet HEAD^1)"; then
+              # --no-renames: a rename must list the watched OLD path too.
+              git diff --no-renames --name-only "$base" HEAD > changed-paths.txt
+              perf="$(node .github/scripts/web-selftest-scope.js changed-paths.txt perf | sed 's/^perf_run=//')"
+              tui="$(node .github/scripts/web-selftest-scope.js changed-paths.txt tui | sed 's/^tui_run=//')"
+            else
+              echo "::warning::no base parent on HEAD — running the surface jobs rather than guessing."
+              perf=true tui=true
+            fi
+          else
+            heavy=true perf=true selftest=true tui=true
+            [ "${GITHUB_EVENT_NAME}" = "push" ] && selftest=false tui=false
           fi
+          echo "::notice::event=${GITHUB_EVENT_NAME} heavy=${heavy} selftest=${selftest} perf=${perf} tui=${tui}"
+          {
+            echo "heavy=${heavy}"
+            echo "selftest=${selftest}"
+            echo "perf=${perf}"
+            echo "tui=${tui}"
+          } >> "$GITHUB_OUTPUT"
 
-          # `git diff HEAD^1 HEAD` on the merge commit is the PR's effective change
-          # against the base — the same thing the workflow-level `paths:` filter
-          # would compute. If the parent is missing (a shallower clone than
-          # expected, a ref that is not a merge commit), that is a broken diff, not
-          # an empty one.
-          if ! base="$(git rev-parse --verify --quiet HEAD^1)"; then
-            echo "::warning::no base parent on HEAD — running the web selftest rather than guessing."
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # --no-renames is load-bearing, not stylistic. With rename detection on,
-          # `git diff --name-only` reports a rename as the NEW path ONLY — so
-          # moving scripts/container/web-selftest-entry.sh to an unwatched name
-          # would delete a harness entrypoint while the changed-path list never
-          # mentions it, and the suite would skip the PR that broke it. Disabling
-          # detection reports the rename as a delete plus an add, so the watched
-          # source path is present. Verified: `git diff --name-only` prints 1 path
-          # for a pure rename, `--no-renames` prints both.
-          git diff --no-renames --name-only "$base" HEAD > changed-paths.txt
-          node .github/scripts/web-selftest-scope.js changed-paths.txt >> "$GITHUB_OUTPUT"
-
-  # The web client's acceptance proof (#1592 Phase 5 PR6, docs/web-selftest.md),
+  # The web client's acceptance proof (#1592 Phase 5 PR6, docs/dev/web-selftest.md),
   # called as a reusable workflow so that Build can list it in `needs` — a job in
   # another workflow cannot be a `needs` dependency, and `needs` is the only way to
   # gate on anything but "Lint" and "Build" without a ruleset edit.
@@ -457,8 +753,49 @@ jobs:
   web-selftest:
     name: Web selftest
     needs: [web-selftest-scope]
-    if: needs.web-selftest-scope.outputs.run == 'true'
+    # `selftest` is scope's run-verdict AND the event gate: never on
+    # pull_request, and never on `push` — web-selftest.yml's own push trigger
+    # already runs this exact suite on master (path-filtered), so calling it
+    # here too would double the repo's most expensive job on the same commit
+    # and race it under one concurrency group. merge_group, schedule and
+    # dispatch still call it.
+    if: needs.web-selftest-scope.outputs.selftest == 'true'
     uses: ./.github/workflows/web-selftest.yml
+
+  # The TUI driver selftest (#4000), called as a reusable workflow so Build can
+  # list it in `needs`. On a PR it runs only when the diff touches the TUI
+  # surface (see the scope job); on master pushes tui-driver-selftest.yml's own
+  # path-filtered trigger runs it, so the push event skips this call.
+  tui-driver-selftest:
+    name: TUI driver selftest
+    needs: [web-selftest-scope]
+    if: needs.web-selftest-scope.outputs.tui == 'true'
+    uses: ./.github/workflows/tui-driver-selftest.yml
+
+  perf:
+    name: Performance and visual baselines
+    needs: [web-selftest-scope]
+    # `perf` is the scope verdict: on a PR it is true only when the diff touches
+    # the measured surface (web/**, app/**, ui/**, config/**, perf harness); on
+    # every non-PR event it is true. This job has no standalone workflow, so a
+    # master push runs it right here, on every landing tip the concurrency
+    # group leaves standing.
+    if: needs.web-selftest-scope.outputs.perf == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - name: Recompute budgets and pixel-diff demo stills
+        timeout-minutes: 35
+        run: make perf-container
+      - name: Upload samples and visual diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baselines
+          path: web/test-results/
+          if-no-files-found: warn
+          retention-days: 14
 
   # We cross-compile and ship darwin/arm64 and darwin/amd64 binaries from
   # stable-release.yml, but every job in this repo ran on ubuntu — so no test had
@@ -473,10 +810,14 @@ jobs:
   # a throwaway runner — the launchd paths live in that package and are the point.
   test-macos:
     name: Test (macOS)
+    # Post-PR lanes only, like test-systemd above: the event verdict arrives as
+    # an output, so a probe still skips this through the unmet need.
+    needs: [web-selftest-scope]
+    if: needs.web-selftest-scope.outputs.heavy == 'true'
     runs-on: macos-latest
     # macOS runner minutes bill at 10x Linux; a hung PTY/daemon test must not burn
-    # a six-hour default. The Linux suite finishes well inside this.
-    timeout-minutes: 30
+    # a six-hour default. Sized from the go test budget below: see there.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
@@ -506,11 +847,35 @@ jobs:
           command -v dd sh git
           dd --version 2>&1 | head -1 || echo "dd: BSD (no --version)"
 
+      # Same budget as the Linux Test job, and this is the step that sets it
+      # (#3580): the daemon package hit Go's default 10m per-package timeout here
+      # and panicked at 600.098s, on a head where the Linux job ran the same
+      # package in 355.666s — macOS is uniformly ~1.4–2x slower per test.
+      #
+      # The number is bounded on both sides. Below, by the measured time: across
+      # nine runs on 2026-09-17 the daemon package took 627-805s here, and a slow
+      # runner multiplies that — run 35205849014 measured the same package 1.5x
+      # slower on one Build cell than on its three siblings, and 805s x 1.5 is
+      # ~1208s, past the 20m this step used to carry. 30m is 2.2x the slowest
+      # measured run and still 1.5x its slow-runner projection, so only a real
+      # wedge reaches it. Above, by this job's timeout-minutes — and the quantity
+      # that matters there is not the job's start but the package binary's,
+      # because -timeout is per test binary and its clock starts when that binary
+      # starts: after the setup steps, and after `go test` has built the tree
+      # with -race and scheduled its way to that package. Both were measured on
+      # an earlier failing job (100083920043): the setup steps cost 22s (`brew
+      # install tmux` 5s of it), and the panic landed at 600.098s inside a 765s
+      # step, so build and scheduling cost at most ~165s — an upper bound, since
+      # that slice also contains the post-panic tail. Worst case a wedged package
+      # therefore panics near 33m, and timeout-minutes: 45 leaves ~12m of margin,
+      # enough to absorb a build phase four times the measured one. Go has to win
+      # that race with room to spare: its panic names the stuck goroutines, and
+      # the runner kill this would otherwise become names nothing.
       - name: Run tests
-        run: go test -v -race -count=1 ./...
+        run: go test -v -race -count=1 -timeout 30m ./...
 
   build:
-    name: Build
+    name: ${{ inputs.probe && 'Build (skipped by probe)' || 'Build' }}
     runs-on: ubuntu-latest
     # "Build" and "Lint" are this repo's only required checks (ruleset 14851503),
     # so Build is where Test and Test (macOS) get their teeth — a new standalone
@@ -525,12 +890,19 @@ jobs:
     # would not.) So: run ALWAYS, and fail loudly on any unsuccessful need. Now a
     # red macOS job turns the REQUIRED check red instead of quietly skipping it.
     #
-    # `skipped` is deliberately NOT a failure here: web-selftest skips whenever its
-    # scope job says the PR cannot reach the web client, and that is the normal
-    # answer on most PRs. A skipped *scope* job would be a different matter, but it
-    # has no `if:` and so only skips when the run itself is going away.
-    needs: [lint, test, test-systemd, test-macos, web, registry-free, web-selftest-scope, web-selftest]
-    if: always()
+    # `skipped` is deliberately NOT a failure on a pull_request: macOS, systemd,
+    # web-selftest and perf never run there (master and the nightly run them).
+    # Off-PR the step below demands they succeed, so a skip cannot impersonate
+    # a pass on master. A skipped *scope* job would be a different matter, but its
+    # only `if:` is the probe skip, and a probe skips Build too. Otherwise it skips
+    # only when the run itself is going away.
+    #
+    # `&& !inputs.probe` keeps always() in force on every other event: `inputs`
+    # is empty there, so the clause is true. A probe gates nothing, so Build has
+    # nothing to stand in for, and running it would only spend a runner on
+    # `go build` and repeat the probe's red Test as a second red row.
+    needs: [lint, test, test-systemd, test-macos, web, registry-free, web-selftest-scope, web-selftest, tui-driver-selftest, perf]
+    if: always() && !inputs.probe
     steps:
       - name: Gate on the jobs this check stands in for
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
@@ -539,7 +911,17 @@ jobs:
           # needs['test-macos'], not needs.test-macos: a hyphen in a property path is
           # parsed as subtraction, so the dotted form silently yields an empty string.
           echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-systemd=${{ needs['test-systemd'].result }} test-macos=${{ needs['test-macos'].result }} web=${{ needs.web.result }} registry-free=${{ needs['registry-free'].result }}"
-          echo "web-selftest-scope=${{ needs['web-selftest-scope'].result }} web-selftest=${{ needs['web-selftest'].result }}"
+          echo "web-selftest-scope=${{ needs['web-selftest-scope'].result }} web-selftest=${{ needs['web-selftest'].result }} tui-driver-selftest=${{ needs['tui-driver-selftest'].result }} perf=${{ needs.perf.result }}"
+          exit 1
+
+      # A skipped heavy job is fine on a pull_request (they verify master) but
+      # must never pass for a verdict anywhere else: if the scope job said
+      # "heavy" and a job still ended skipped, something upstream broke.
+      - name: Heavy jobs must have run off-PR
+        if: needs.web-selftest-scope.outputs.heavy == 'true' && (needs.test-macos.result != 'success' || needs.test-systemd.result != 'success' || needs.perf.result != 'success')
+        run: |
+          echo "::error::A heavy job did not succeed on ${{ github.event_name }} — failing Build rather than letting a skip stand in for a pass."
+          echo "test-macos=${{ needs['test-macos'].result }} test-systemd=${{ needs['test-systemd'].result }} perf=${{ needs.perf.result }}"
           exit 1
 
       - uses: actions/checkout@v6
@@ -552,3 +934,63 @@ jobs:
 
       - name: Verify compilation
         run: go build ./...
+
+  # Auto Gate's wakeup for this workflow's terminal state is the workflow_run
+  # subscription — which GitHub has intermittently dropped under load (#5179:
+  # 64 of 381 completions over Oct 1–7 had no gate run within ten minutes) —
+  # and behind it the */5 schedule, delivered every two to five hours measured.
+  # Neither is a dependable net, so the run whose completion is at risk asks
+  # for the reconciliation pass itself: a synchronous dispatch POST, not an
+  # event delivery the platform can silently drop — and a failed POST is a
+  # warning in this run's log, never a silent skip. needs:[build] lands this
+  # at run end (build requires every other job and runs always()), and a burst
+  # of completions coalesces inside the shared required-check-reconciliation
+  # concurrency group — one running pass plus one pending — so no chain or
+  # fan-out is possible; the five-minute request window in auto-gate.js is
+  # untouched. One job, no checkout, no repo scripts, and a payload with no
+  # PR-controlled fields: the pass re-derives everything from the API. A
+  # fork's pull_request token is read-only and could never POST — and neither
+  # could Dependabot's, whose same-repo runs are downgraded the same way — so
+  # the job skips both outright and workflow_run stays their wakeup.
+  gate-reconcile:
+    name: ${{ inputs.probe && 'Request Auto Gate reconciliation (skipped by probe)' || 'Request Auto Gate reconciliation' }}
+    needs: [build]
+    # AUTO_GATE_ENABLED (repository variable): 'true' turns this dispatch on;
+    # unset or anything else skips it, matching the disabled Auto Gate. It uses
+    # !cancelled() rather than always() so a superseded (cancelled) run ends at
+    # once instead of queueing this job for a runner and holding the pr-<N>
+    # concurrency group against the next push. Build keeps its own always(): that
+    # one only aggregates needs.
+    # Forks and Dependabot have read-only tokens, so the dispatch could never
+    # land: the step below returns early for them rather than the job's `if:`
+    # (keeping event checks out of the condition keeps this workflow admissible
+    # to the gate's workflow_dispatch re-raise scan). actor is the trigger of
+    # THIS run — a maintainer pushing to a Dependabot branch gets a writable
+    # token and runs the job.
+    if: ${{ !cancelled() && vars.AUTO_GATE_ENABLED == 'true' && !inputs.probe }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    # The only write permission in this workflow, and only for the dispatch
+    # POST.
+    permissions:
+      contents: write
+    steps:
+      - name: Dispatch auto-gate-reconcile
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [ "$FORK" = "true" ] || [ "$ACTOR" = "dependabot[bot]" ]; then
+            echo "::notice::Read-only token (fork or Dependabot); the workflow_run subscription remains."
+            exit 0
+          fi
+          payload=$(printf \
+            '{"event_type":"auto-gate-reconcile","client_payload":{"source_run_id":"%s","source_event":"%s","head_sha":"%s"}}' \
+            "$GITHUB_RUN_ID" "$GITHUB_EVENT_NAME" "$HEAD_SHA")
+          if echo "$payload" | gh api "repos/$GITHUB_REPOSITORY/dispatches" --method POST --input -; then
+            echo "::notice::Requested an Auto Gate required-check reconciliation pass."
+          else
+            echo "::warning::Could not request the Auto Gate reconciliation pass; the workflow_run subscription and the schedule remain."
+          fi

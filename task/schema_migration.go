@@ -26,6 +26,20 @@ func newTasksSchemaMigrationPlan(path string) config.SchemaMigrationPlan {
 		Migrators:      registry,
 		Validate:       validateTasksEnvelope,
 		Perm:           0644,
+		// Same shape as the instances plan: DetectJSONSchemaVersion plus a
+		// "null" -> legacy pre-case the probe declines to answer for.
+		ProveCurrentVersion: config.ProveJSONSchemaVersion,
+		// tasks.json is user-authored content a user may keep in dotfiles, so
+		// its ordinary writes FOLLOW a symlink (#3672). The legacy-v0 write-back
+		// is a write to the same file, by a helper the store does not otherwise
+		// call, and it has to give the same answer: without this it replaced the
+		// link with a regular file and left the dotfiles copy holding the
+		// pre-migration content (#3718).
+		//
+		// The write-back is the ONLY write this plan performs. Everything else
+		// here — detection, migration, validation — is pure, and MigrateSchemaBytes
+		// touches no disk at all, so the policy is inert on those paths.
+		LinkPolicy: config.SchemaWriteFollowLink,
 	}
 }
 

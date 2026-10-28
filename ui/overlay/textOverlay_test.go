@@ -96,7 +96,7 @@ func TestTextOverlayHeightWindowsContent(t *testing.T) {
 	overlay.SetWidth(30)
 	overlay.SetHeight(6)
 
-	rendered := overlay.Render()
+	rendered := renderedText(overlay.Render())
 	assert.Equal(t, 6, strings.Count(rendered, "\n")+1,
 		"rendered overlay should fit the requested outer height")
 	assert.Contains(t, rendered, "title", "initial viewport starts at the top")
@@ -118,12 +118,12 @@ func TestTextOverlayScrollsContent(t *testing.T) {
 	overlay.SetHeight(6)
 
 	overlay.ScrollDown()
-	rendered := overlay.Render()
+	rendered := renderedText(overlay.Render())
 	assert.NotContains(t, rendered, "title", "scrolling down moves the viewport")
 	assert.Contains(t, rendered, "↑ more", "overflow above is visible")
 
 	overlay.ScrollUp()
-	rendered = overlay.Render()
+	rendered = renderedText(overlay.Render())
 	assert.Contains(t, rendered, "title", "scrolling up returns toward the top")
 }
 
@@ -213,15 +213,59 @@ func TestTextOverlayHeightWindowsWrappedContent(t *testing.T) {
 	overlay.SetWidth(24)
 	overlay.SetHeight(8)
 
-	rendered := overlay.Render()
+	rendered := renderedText(overlay.Render())
 	assert.Equal(t, 8, strings.Count(rendered, "\n")+1,
 		"wrapped content should still fit the requested outer height")
 	assert.Contains(t, rendered, "title")
 	assert.Contains(t, rendered, "↓ more")
 
 	overlay.ScrollDown()
-	rendered = overlay.Render()
+	rendered = renderedText(overlay.Render())
 	assert.Equal(t, 8, strings.Count(rendered, "\n")+1,
 		"scrolled wrapped content should still fit the requested outer height")
 	assert.Contains(t, rendered, "↑ more")
+}
+
+// TestTextOverlayScrollableTracksTheMarkerItPaints is the #3628 contract: the
+// "↓ more" marker is drawn by every overflowing TextOverlay, but only the
+// general `?` help had scroll keys wired up, so the one-shot "Session created"
+// screen advertised a `↓` that dismissed it. Scrollable() is the single
+// predicate hosts gate their key policy on, so it must agree with the marker
+// exactly — in both directions, at every height.
+func TestTextOverlayScrollableTracksTheMarkerItPaints(t *testing.T) {
+	lines := []string{"title", "line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7"}
+
+	// Heights straddling the fit/overflow boundary. Outer height 6 windows 2
+	// inner rows (border + 1 row of vertical padding each side); height 12
+	// windows all 8.
+	for _, height := range []int{4, 6, 8, 10, 11, 12, 20} {
+		ov := NewTextOverlay(strings.Join(lines, "\n"))
+		ov.SetWidth(30)
+		ov.SetHeight(height)
+
+		rendered := renderedText(ov.Render())
+		marked := strings.Contains(rendered, "↓ more") || strings.Contains(rendered, "↑ more")
+		require.Equalf(t, marked, ov.Scrollable(),
+			"height %d: Scrollable()=%v but the rendered overlay %s a scroll marker:\n%s",
+			height, ov.Scrollable(), map[bool]string{true: "paints", false: "paints no"}[marked], rendered)
+	}
+}
+
+// A scrollable overlay must actually be able to reach its last line — the tail
+// of the "Session created" screen is where "esc close" lives (#3628).
+func TestTextOverlayScrollReachesTheTail(t *testing.T) {
+	ov := NewTextOverlay(strings.Join([]string{
+		"title", "line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "tail",
+	}, "\n"))
+	ov.SetWidth(30)
+	ov.SetHeight(6)
+
+	require.True(t, ov.Scrollable(), "precondition: the content overflows")
+	require.NotContains(t, renderedText(ov.Render()), "tail", "precondition: the tail starts below the fold")
+
+	for i := 0; i < 20 && !strings.Contains(renderedText(ov.Render()), "tail"); i++ {
+		ov.ScrollDown()
+	}
+	require.Contains(t, renderedText(ov.Render()), "tail", "line-scrolling must reach the last line")
+	require.NotContains(t, renderedText(ov.Render()), "↓ more", "the bottom must stop advertising more content")
 }

@@ -92,7 +92,7 @@ func TestTCPListener_NetworkBindDeniesLoopbackWithoutToken(t *testing.T) {
 
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, policy, withWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 	require.NotEmpty(t, info.Token)
 
 	// Connect over loopback to the network-bound socket — exactly what a same-host
@@ -152,7 +152,7 @@ func TestTCPListener_LoopbackBindStillExemptViaPolicy(t *testing.T) {
 
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, policy, withWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get("http://" + info.Addr + "/v1/health")
@@ -183,7 +183,7 @@ func TestTCPListener_DefaultConfigIsTokenless(t *testing.T) {
 
 	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, policy, withWebShell, nil, nil)
 	require.NoError(t, err)
-	defer func() { _ = closeTCP() }()
+	defer func() { _ = closeTCP.close() }()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
@@ -204,12 +204,15 @@ func TestTCPListener_DefaultConfigIsTokenless(t *testing.T) {
 	require.False(t, env.Data.AuthRequired, "the default daemon must report auth_required=false so the SPA skips its login")
 }
 
-// TestTCPListener_DefaultConfigServesNetworkPeersTokenless documents the security
-// trade-off of the tokenless default explicitly, so it is a decision on the record
-// rather than an accident: on a NETWORK bind, the default config serves a peer that
-// is not loopback with no token. The loopback-only default listen_addr is what keeps
-// this off the network in practice; an operator who opts into a network bind must
-// set require_token=true or front the listener with a private network/proxy.
+// TestTCPListener_DefaultConfigServesNetworkPeersTokenless pins the gate-level
+// posture of the tokenless default explicitly: IF a tokenless listener serves on
+// a network bind, a peer that is not loopback needs no token. Since #5137 the
+// daemon refuses to bind that posture at all unless the operator sets
+// network.allow_unauthenticated_network — so this test exercises the authGate
+// semantics that posture would have, not a bind the daemon will make by
+// default. The loopback-only default listen_addr keeps the gate unreachable
+// from off-box either way; an operator who wants a network bind must set
+// require_token=true or the explicit opt-in.
 func TestTCPListener_DefaultConfigServesNetworkPeersTokenless(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 

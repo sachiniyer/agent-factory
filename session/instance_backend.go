@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -31,6 +32,23 @@ func (i *Instance) currentBackend() Backend {
 	return i.backend
 }
 
+// StreamsViaAgentServer reports whether this instance runs in a provisioned
+// sandbox (docker/ssh/sandbox) whose PTY the daemon streams over its WS by
+// stable tab id (#5571 W4.4, W4.8). The remote hook backend is also
+// WorkspaceRemote and shares the agent-server base, but it attaches through its
+// own terminal_cmd, so Workspace alone cannot answer this.
+func (i *Instance) StreamsViaAgentServer() bool {
+	b := i.currentBackend()
+	if b == nil {
+		return false
+	}
+	switch b.Type() {
+	case "docker", "ssh", "sandbox":
+		return true
+	}
+	return false
+}
+
 // firstTimeSetup is true if this is a new instance. Otherwise, it's one loaded from storage.
 func (i *Instance) Start(firstTimeSetup bool) error {
 	return i.currentBackend().Start(i, firstTimeSetup)
@@ -43,7 +61,45 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 // leaking the capture goroutine when a session is killed with a live stream open
 // (#1632). The agent-server then kills the underlying session.
 func (i *Instance) Kill() error {
-	return i.AgentServer().Kill()
+	return i.AgentServer().Kill(false)
+}
+
+// CleanupFailedCreate tears down resources a failed create may have started.
+// Setup's ownership refusal is the exception: it occurs before Setup mutates
+// the selected path, so there is no candidate workspace to reap. Following it
+// with ordinary Kill would reinterpret "that occupant is not ours" as explicit
+// deletion authority and destroy the worktree the setup guard protected
+// (#4342/#4352). The error identity, rather than process-local instance state,
+// carries that fact through both failed-create cleanup attempts.
+func (i *Instance) CleanupFailedCreate(startErr error) error {
+	if errors.Is(startErr, git.ErrSetupRemovalOwnershipUnproven) {
+		return nil
+	}
+	return i.Kill()
+}
+
+// KillTrustingOwnLifecycleLock is Kill for the callers that hold this session's
+// exclusive lifecycle lock for their ENTIRE call: daemon's KillSession (#3413),
+// finishUserKill's tombstone retry (#3583), and reapDeadRoot's root-agent
+// teardown (#3699). What licenses the trust is the per-session op-lock held
+// unbroken across the teardown, a killsInFlight claim registered for its whole
+// duration, and the instance keeping its (repo, title) map slot until the
+// teardown settles — together those rule out a same-name replacement appearing
+// mid-sweep. All three parts are load-bearing: the map slot alone is not
+// enough, because the archived-name-reuse rename re-keys it, and killsInFlight
+// is that path's own fence (Codex on #3700). Each call site carries its own
+// version of the argument; do not add a fourth without writing one.
+//
+// Every other Kill caller (create-failure cleanup of a not-yet-registered
+// instance is the standing example, and any future one) must keep calling Kill
+// and get the strict #3309 default: none of them can make the same claim. See
+// tmux.TmuxSession.CloseAndWaitForPaneExitTrustingOwnGeneration.
+//
+// This stays a second method (rather than exposing the bool on Instance
+// itself) because Instance has no subtypes to lose an override on — the
+// Go-embedding hazard Backend.Kill's doc explains does not apply here.
+func (i *Instance) KillTrustingOwnLifecycleLock() error {
+	return i.AgentServer().Kill(true)
 }
 
 // runtimeLiveBoundary lets the daemon settle predecessor-owned evidence at the
@@ -58,42 +114,125 @@ type runtimeLiveBoundary struct {
 
 // Recover re-establishes a Lost instance's backing session (#1108).
 func (i *Instance) Recover() error {
-	return i.RecoverWithLiveBoundary(nil)
+	return i.RecoverFencedWithLiveBoundary(nil)
 }
 
-// RecoverWithLiveBoundary is Recover with a callback at the replacement's
-// ConfirmLive edge. It exists for lifecycle facts that must be settled after a
-// backend has successfully created the runtime but before the restore fence is
-// dropped. The callback cannot veto recovery: settlement failures remain owed
-// for retry, and a full disk must not turn a running replacement back into Lost.
-func (i *Instance) RecoverWithLiveBoundary(beforeLive func()) error {
-	if err := i.ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
+// RecoverFencedWithLiveBoundary re-establishes a Lost instance's backing session
+// under an OpRestoring fence, with an optional callback at the replacement's
+// ConfirmLive edge.
+//
+// The callback exists for lifecycle facts that must be settled after a backend
+// has successfully created the runtime but before the restore fence is dropped.
+// It cannot veto recovery: settlement failures remain owed for retry, and a full
+// disk must not turn a running replacement back into Lost.
+//
+// The fence is raised for the whole backend call so clients see the operation
+// and hide Kill, and so the status poll — which skips any session with an op in
+// flight — cannot read the teardown this call is performing as an independent
+// death. ConfirmLive clears it on success; the failure path lowers it with
+// ClearOp. It closes the asymmetry where the archived-restore path projects
+// OpRestoring via BeginRestore but the lost-restore path did not.
+//
+// There is deliberately no unfenced variant (#3555). Both entry points — the
+// manual Lost/Dead restore RPC and the daemon's automatic Lost-restore loop —
+// come through here, because neither caller raises a lifecycle fence of its own
+// and the automatic loop's only other protection is that it happens to run on
+// the poll goroutine. A precondition that holds because of where its caller runs
+// is not a precondition the next caller inherits.
+func (i *Instance) RecoverFencedWithLiveBoundary(beforeLive func()) error {
+	if err := i.BeginRecoverFence(); err != nil {
+		return err
+	}
+	err := i.recoverUnderHeldFence(beforeLive)
+	if err != nil {
+		// ConfirmLive clears OpRestoring on success; lower it here on failure so
+		// the row does not stay permanently busy. This method raised the fence, so
+		// this method owns lowering it — the held variant below leaves that to the
+		// caller that raised it, exactly as Respawn leaves it to EndLimitResume.
+		i.EndRecoverFence()
+	}
+	return err
+}
+
+// RecoverHeldFencedWithLiveBoundary is RecoverFencedWithLiveBoundary for a caller
+// that already holds the restore fence over a LONGER interval than the backend
+// call — the manual Lost/Dead restore RPC, whose two network phases (a liveness
+// probe and a pre-reap push bounded at 3m30s) run in front of it (#3586).
+//
+// It is a separate method rather than a re-entrant flag for the reason
+// BeginLimitResume/Respawn are separate next door: the two legal orderings are
+// made explicit instead of folded into one call that silently does different
+// things depending on state it did not establish.
+//
+// The precondition is validated, not assumed, and it is validated through the
+// SHARED ledger (RuntimeActionRecoverFenced) rather than a bare op comparison, so
+// the pending-kill and startup-unknown vetoes that fence every other runtime entry
+// point cover this one too. The caller owns the release: on failure the fence
+// stays up for EndRecoverFence, and on success ConfirmLive clears it.
+func (i *Instance) RecoverHeldFencedWithLiveBoundary(beforeLive func()) error {
+	if err := i.ValidateRuntimeAction(RuntimeActionRecoverFenced); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
+	return i.recoverUnderHeldFence(beforeLive)
+}
+
+func (i *Instance) recoverUnderHeldFence(beforeLive func()) error {
 	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Recover(i) })
 }
 
-// RecoverFencedWithLiveBoundary is RecoverWithLiveBoundary with an
-// OpRestoring fence for the duration of the recovery. It validates first
-// (requires OpNone), then raises MarkRestoring so clients see the operation
-// and hide Kill, runs the backend, and lowers the fence with ClearOp on
-// failure (ConfirmLive clears it on success). The manual Lost/Dead restore
-// path uses this to close the asymmetry where the archived-restore path
-// projects OpRestoring via BeginRestore but the lost-restore path did not.
-func (i *Instance) RecoverFencedWithLiveBoundary(beforeLive func()) error {
-	if err := i.ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
+// EndRecoverFence lowers the fence BeginRecoverFence raised, and reports whether
+// it actually lowered one. Safe to defer unconditionally: it is a no-op once
+// ConfirmLive has cleared the op on the success path, and it never disturbs an op
+// some other owner raised.
+//
+// Deferring it is how the manual restore covers EVERY early return between the
+// raise and the backend call — the probe-alive heal, the indeterminate refusal,
+// the two durable-branch refusals, the failed pre-reap push — without each one
+// having to remember. A missed path would leave the row permanently busy: the poll
+// skips any session with an op in flight and every runtime action refuses it, which
+// is strictly worse than the advertised-Kill bug the fence exists to fix.
+//
+// ClearOp is unconditionally legal, so the OpRestoring check is not about legality:
+// it makes sure a kill or archive overlay that SUPERSEDED this fence is not cleared
+// out from under its own owner — which is why the check and the clear share one
+// critical section in clearOpIfHeld rather than being read-then-write.
+func (i *Instance) EndRecoverFence() bool {
+	return i.clearOpIfHeld(OpRestoring, "restore", nil)
+}
+
+// BeginRecoverFence validates the recover precondition and raises the restore
+// fence in ONE critical section (#3555, the same defect #2997 fixed in
+// BeginLimitResume next door).
+//
+// It is exported because the fence's owner is not always the backend call: the
+// manual restore RPC raises it at the top of the operation so the fence is
+// COEXTENSIVE with the claim that already refuses Kill at the admission gate
+// (#3586), then continues through RecoverHeldFencedWithLiveBoundary. Raising and
+// validating stay welded together here whichever caller does it, which is the
+// property #3555 established and the reason there is still no way to raise this
+// fence without validating, or to validate without raising.
+//
+// Splitting them is its own race, and the epoch guard cannot cover it: an
+// observation landing in the gap is CURRENT, not stale, so nothing drops it, and
+// tkMarkRestoring is keyed on the op axis alone — it would happily fence a
+// liveness that had just been clobbered. Recovery would then run against a
+// session that is no longer lost, which on a remote backend means replacing a
+// sandbox that had just become reachable again and stranding its unpushed work.
+//
+// Under one lock there are only two arrivals: an observation applied before the
+// critical section, which validation sees and refuses, and one blocked until
+// after the raise, which the epoch guard drops as superseded. See
+// lifecycleViewLocked, which documents this as the pattern.
+func (i *Instance) BeginRecoverFence() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
-	if err := i.Transition(MarkRestoring()); err != nil {
+	if err := i.transitionLocked(MarkRestoring()); err != nil {
 		return fmt.Errorf("recover: raise restore fence: %w", err)
 	}
-	err := i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Recover(i) })
-	if err != nil {
-		// ConfirmLive clears OpRestoring on success; lower it here on failure so
-		// the row does not stay permanently busy.
-		_ = i.Transition(ClearOp())
-	}
-	return err
+	return nil
 }
 
 func (i *Instance) withLiveBoundary(beforeLive func(), run func() error) error {
@@ -129,7 +268,7 @@ func (i *Instance) runLiveBoundary() {
 
 // Respawn re-establishes the instance's backing session in place without a
 // liveness precondition — the guard-free core of Recover. The usage-limit
-// manual-retry (#1146, resumeFromLimit) uses it to re-spawn an agent that exited
+// manual-retry (#1146, resumeFromLimitOutcome) uses it to re-spawn an agent that exited
 // while blocked at a limit wall: that session is LiveLimitReached, which Recover's
 // !Lost guard rejects, but the re-spawn mechanics are identical. The caller owns
 // the precondition, enforced here before the guard-free backend core runs.
@@ -158,7 +297,19 @@ func (i *Instance) runLiveBoundary() {
 func (i *Instance) BeginLimitResume() error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionResumeLimit); err != nil {
+	view := i.lifecycleViewLocked()
+	if pending := i.pendingAccountSwap; pending != nil && pending.To == i.Account {
+		// A committed account swap whose post-commit respawn went blind
+		// (ErrAccountSwapAgentTeardownBlind) is recoverable through the
+		// alreadySet branches of resumeFromLimitLockedOutcome. That error path
+		// marks StartupStateUnknown and clears Started while preserving the
+		// committed swap; the explicit Retry RPC is the inspection the marker
+		// waits for, so the gates that suppress automatic retries until
+		// inspection must not block re-entering the recovery branches.
+		view.StartupStateUnknown = false
+		view.Started = true
+	}
+	if err := view.ValidateRuntimeAction(RuntimeActionResumeLimit); err != nil {
 		return err
 	}
 	return i.transitionLocked(BeginRespawn())
@@ -180,12 +331,46 @@ func (i *Instance) BeginLimitResume() error {
 // released state to its clients can tell an effective release from a no-op and not
 // publish a duplicate settled event on the path that already published one.
 func (i *Instance) EndLimitResume() bool {
-	if i.GetInFlightOp() != OpRespawning {
+	return i.clearOpIfHeld(OpRespawning, "limit resume", func() {
+		// A preflighted account replacement also fences lazy sibling starts. If the
+		// identity was never committed, releasing the resume owns and retires that
+		// provisional plan; a committed replacement keeps it until delivery clears
+		// pendingAccountSwap. This runs inside clearOpIfHeld's lock rather than
+		// after it, so a second admission cannot raise the fence and install a new
+		// plan in the gap and have this retire THAT one.
+		if i.pendingAccountSwap == nil {
+			i.accountSwapLaunch = nil
+		}
+	})
+}
+
+// clearOpIfHeld lowers the in-flight fence ONLY while it is still the op the caller
+// raised, deciding and clearing in ONE critical section.
+//
+// The two halves cannot be split (Codex on #3597), and the reason is the very case
+// the comparison exists for. tkBeginKill is allowed-from-always — a kill supersedes
+// any in-flight op — so a BeginKill landing after a released read lock and before
+// the write lock would install OpKilling, and the fence owner's release would then
+// clear a teardown overlay it was supposed to leave alone: Kill and Archive back on
+// offer for a session whose teardown is already running. Read-then-write made that
+// window real; one write lock removes it.
+//
+// It is shared rather than written twice because both fence owners want the identical
+// rule, and a second copy is the one that would keep the split.
+// cleared, when non-nil, runs under the same write lock right after the fence
+// comes down, for state a fence owner must retire indivisibly with it.
+func (i *Instance) clearOpIfHeld(held InFlightOp, operation string, cleared func()) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != held {
 		return false
 	}
-	if err := i.Transition(ClearOp()); err != nil {
-		log.WarningLog.Printf("limit resume: clearing the in-flight fence for %q: %v", i.Title, err)
+	if err := i.transitionLocked(ClearOp()); err != nil {
+		log.WarningLog.Printf("%s: clearing the in-flight fence for %q: %v", operation, i.Title, err)
 		return false
+	}
+	if cleared != nil {
+		cleared()
 	}
 	return true
 }
@@ -202,13 +387,41 @@ func (i *Instance) Respawn() error {
 }
 
 // RespawnWithLiveBoundary is Respawn with the same pre-ConfirmLive callback as
-// RecoverWithLiveBoundary. Limit recovery uses it to retire facts owned by the
+// RecoverFencedWithLiveBoundary. Limit recovery uses it to retire facts owned by the
 // exited, limit-blocked process before its replacement becomes visible.
 func (i *Instance) RespawnWithLiveBoundary(beforeLive func()) error {
 	if op := i.GetInFlightOp(); op != OpRespawning {
 		return fmt.Errorf("respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
 	}
 	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Respawn(i) })
+}
+
+// RespawnForAccountSwap starts the replacement identity in a fresh provider
+// conversation. Local recovery normally resumes the prior conversation, which
+// belongs to the previous account's separate home; Docker already provisions a
+// fresh sandbox and launch through its ordinary Respawn implementation.
+func (i *Instance) RespawnForAccountSwap() error {
+	return i.RespawnForAccountSwapWithLiveBoundary(nil)
+}
+
+// RespawnForAccountSwapWithLiveBoundary is the fresh-conversation account
+// replacement with the same pre-ConfirmLive callback used by ordinary respawn.
+// The idle-evidence mechanism owns that boundary; account swapping only routes
+// its distinct launch through it.
+func (i *Instance) RespawnForAccountSwapWithLiveBoundary(beforeLive func()) error {
+	if op := i.GetInFlightOp(); op != OpRespawning {
+		return fmt.Errorf("account respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
+	}
+	if err := i.withLiveBoundary(beforeLive, func() error {
+		backend := i.currentBackend()
+		if local, ok := backend.(*LocalBackend); ok {
+			return local.respawnFresh(i)
+		}
+		return backend.Respawn(i)
+	}); err != nil {
+		return err
+	}
+	return i.markAccountSwapReplacementPanesStarted()
 }
 
 // PrepareAgentSwap resolves and validates the incoming launch while the outgoing
@@ -242,6 +455,11 @@ func (i *Instance) SwapAgent(plan AgentSwapPlan) (InstanceData, error) {
 	if target := i.AgentProgram(); target != plan.target || strings.TrimSpace(plan.program) == "" {
 		return InstanceData{}, fmt.Errorf("session %q handoff plan no longer matches its recorded target", i.Title)
 	}
+	// A record still carrying an account at this boundary skipped the handoff
+	// transaction's scope decision (#4428); refuse before any pane is touched.
+	if err := i.handoffUnsettledAccountError(plan); err != nil {
+		return InstanceData{}, err
+	}
 	if plan.conversation.HasID() {
 		i.SetAgentConversation(plan.conversation)
 	}
@@ -254,199 +472,17 @@ func (i *Instance) SwapAgent(plan AgentSwapPlan) (InstanceData, error) {
 	return i.handoffStorageCheckpoint(), nil
 }
 
-// ArchiveTeardown tears down every tab's tmux session for an archive AND
-// relocates the worktree to dest in one operation (#1028) — the tmux half of
-// Kill, but it PRESERVES the record and MOVES the worktree instead of deleting
-// it. It routes through the shared teardownTabs core in the archive mode, so the
-// #802 "wait for every pane to exit before touching the worktree" ordering is
-// shared code with Kill rather than the duplicated prose it was when the move
-// lived in a separate daemon step (#1195 Phase 2b). It is deliberately
-// best-effort for tmux (a stuck session only logs, mirroring Kill) and:
-//   - keeps the AGENT tab's tmux binding (its session name) so a failed archive
-//     can re-spawn it in place via the Lost-restore loop;
-//   - drops the shell/process tabs entirely — their tmux sessions were just torn
-//     down, so only the agent session is brought back for them (Sachin's #1028
-//     requirement);
-//   - KEEPS the web tabs (#1809): a web tab has no tmux session and no process —
-//     it is just a URL — so nothing was torn down and it round-trips through the
-//     archived record to render again on un-archive;
-//   - leaves gitWorktree and started untouched, so the daemon caller controls
-//     the final state (started=false + Archived on success; Lost on a failed
-//     move — returned here — where started stays true so the loop re-spawns the
-//     agent).
-//
-// Returns the worktree-move error (nil on success). Local instances only —
-// remote sessions have no local tmux/worktree and the daemon rejects archiving
-// them before reaching here.
-func (i *Instance) ArchiveTeardown(dest string) error {
-	_, err := i.ArchiveTeardownWithHook(dest, nil)
-	return err
-}
-
-// ClaimWorktreeRelocationForRetry atomically consumes any durable recovery record
-// and returns the point-in-time directory claim later archive steps must
-// revalidate. Resolution never leaves a settled record behind for another reader
-// to reinterpret.
-func (i *Instance) ClaimWorktreeRelocationForRetry() (git.RelocationClaim, error) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.gitWorktree == nil {
-		return git.RelocationClaim{}, fmt.Errorf("cannot resolve worktree relocation for %q: instance has no worktree", i.Title)
-	}
-	return i.gitWorktree.ClaimRelocationSource()
-}
-
-// PreserveWorktreeRelocationClaimForRetry returns ownership of a consumed
-// recovery claim when an earlier archive gate aborts before the worktree use
-// boundary. Claims made from record-free state are no-ops.
-func (i *Instance) PreserveWorktreeRelocationClaimForRetry(claim git.RelocationClaim) {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw != nil {
-		gw.PreserveRelocationClaim(claim)
-	}
-}
-
-// PreserveWorktreeRelocationClaimAsUnresolved fences a resolved archive when a
-// later read-only gate cannot answer. Unlike the ordinary abort helper, it also
-// materializes record-free claims so kill cannot read absence as permission.
-func (i *Instance) PreserveWorktreeRelocationClaimAsUnresolved(claim git.RelocationClaim) {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw != nil {
-		gw.PreserveRelocationClaimAsUnresolved(claim)
-	}
-}
-
-// PrepareWorktreeRelocationClaimForCleanup persists a resolved archived-path
-// identity as a cleanup-only obligation. It is the non-relocating completion
-// path used when the origin repo is gone.
-func (i *Instance) PrepareWorktreeRelocationClaimForCleanup(claim git.RelocationClaim) error {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return fmt.Errorf("cannot prepare worktree cleanup for %q: instance has no worktree", i.Title)
-	}
-	return gw.PrepareRelocationClaimForCleanup(claim)
-}
-
-// SetRepoGoneFinalizationCheckpoint installs the daemon's durable writer for
-// the post-content, pre-root cleanup boundary. Kill runs backend teardown outside
-// i.mu, so the callback may safely snapshot this instance for persistence.
-func (i *Instance) SetRepoGoneFinalizationCheckpoint(checkpoint func() error) func() {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return func() {}
-	}
-	return gw.SetRepoGoneFinalizationCheckpoint(checkpoint)
-}
-
-// WorktreeRelocationRecovery snapshots the durable relocation lifecycle — a
-// recovery record or an active consumed claim, projected to record form — for
-// this instance's worktree. Deliberately not gated on started: destruction
-// admission runs against archived instances, whose runtime is inert.
-func (i *Instance) WorktreeRelocationRecovery() (git.RelocationRecovery, bool) {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return git.RelocationRecovery{}, false
-	}
-	return gw.GetRelocationRecovery()
-}
-
-// SettleStalledWorktreeRelocationForAbsentPath clears an identity-unknown
-// stalled relocation record once its pathname conclusively answers ENOENT.
-// See GitWorktree.SettleStalledRelocationForAbsentPath.
-func (i *Instance) SettleStalledWorktreeRelocationForAbsentPath() error {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return fmt.Errorf("cannot settle stalled worktree relocation for %q: instance has no worktree", i.Title)
-	}
-	return gw.SettleStalledRelocationForAbsentPath()
-}
-
-// RestoreStalledWorktreeFenceAfterFailedSettle re-materializes the reclaimable
-// stalled fence after a failed settle. See
-// GitWorktree.RestoreStalledFenceAfterFailedSettle.
-func (i *Instance) RestoreStalledWorktreeFenceAfterFailedSettle() error {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return fmt.Errorf("cannot restore stalled worktree fence for %q: instance has no worktree", i.Title)
-	}
-	return gw.RestoreStalledFenceAfterFailedSettle()
-}
-
-// SettleWorktreeRelocationClaim revalidates a consumed recovery claim and
-// releases its ownership without relocating anything. The kill admission
-// producer uses it when a reclaimed stalled record turns out to need no
-// cleanup authority because the origin repository answered present.
-func (i *Instance) SettleWorktreeRelocationClaim(claim git.RelocationClaim) error {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return fmt.Errorf("cannot settle worktree relocation for %q: instance has no worktree", i.Title)
-	}
-	return gw.SettleRelocationClaim(claim)
-}
-
-// ValidateWorktreeDestructionAdmission is the pre-commit guard. The local
-// backend separately consumes and revalidates the exact cleanup identity before
-// pane teardown; it must not repeat the origin-path admission after the durable
-// kill has committed.
-func (i *Instance) ValidateWorktreeDestructionAdmission() error {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return nil
-	}
-	path, recovery, unresolved := gw.RelocationSnapshot()
-	if !unresolved || recovery.State == git.RelocationRecoveryCleanupStalled {
-		return nil
-	}
-	if recovery.State == git.RelocationRecoveryCleanupReady ||
-		recovery.State == git.RelocationRecoveryCleanupFinalizing {
-		if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
-			return fmt.Errorf("cleanup worktree in state %s at %s is not admissible for repo-gone kill: %w", recovery.State, path, err)
-		}
-		return nil
-	}
-	return fmt.Errorf(
-		"worktree recovery state %s is unresolved at %s; retry archive or restore before destructive cleanup",
-		recovery.State, path,
-	)
-}
-
-// ArchiveTeardownWithHook is ArchiveTeardown with one additional operator
-// callback at the only safe cleanup point: every pane has been confirmed dead,
-// but the worktree still occupies its live path. A callback failure is returned
-// separately from the relocation result and never prevents the move.
-func (i *Instance) ArchiveTeardownWithHook(dest string, beforeMove func() error) (hookErr, archiveErr error) {
-	claim, err := i.ClaimWorktreeRelocationForRetry()
-	if err != nil {
-		return nil, err
-	}
-	return i.ArchiveTeardownWithClaim(dest, claim, beforeMove)
-}
-
 // ArchiveTeardownWithClaim carries the source claim obtained before teardown to
 // the hook and move use boundaries. Each boundary revalidates it independently.
-func (i *Instance) ArchiveTeardownWithClaim(dest string, claim git.RelocationClaim, beforeMove func() error) (hookErr, archiveErr error) {
+//
+// trustLiveGeneration must come from the caller — only daemon/archive.go's
+// archiveTeardown, which holds this session's exclusive lifecycle lock for the
+// whole call, may pass true (#3413); see closeTabForDestructiveTeardown.
+func (i *Instance) ArchiveTeardownWithClaim(dest string, claim git.RelocationClaim, beforeMove func() error, trustLiveGeneration bool) (hookErr, archiveErr error) {
 	claimHandled := false
 	mode := teardownArchive{
 		dest: dest, claim: &claim, claimHandled: &claimHandled,
-		beforeMove: beforeMove, hookErr: &hookErr,
+		beforeMove: beforeMove, hookErr: &hookErr, trustLiveGeneration: trustLiveGeneration,
 	}
 	archiveErr = i.teardownTabs(mode)
 	if !claimHandled {
@@ -462,8 +498,11 @@ func (i *Instance) SetArchived() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	lv, op, resetAt := i.lifecycleStateLocked()
-	i.started = false
-	i.liveness = LiveArchived
+	if i.started {
+		i.started = false
+		i.touchLocked()
+	}
+	i.assignLivenessLocked(LiveArchived)
 	i.inFlightOp = OpNone
 	i.clearAgentModelChangeLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)
@@ -484,8 +523,21 @@ func (i *Instance) RestoreArchivedWorktree(dest string) error {
 // restore admission through to the relocation boundary, avoiding a second
 // reader between source resolution and use.
 func (i *Instance) RestoreArchivedWorktreeWithClaim(dest string, claim git.RelocationClaim) error {
+	return i.restoreArchivedWorktree(dest, claim, RuntimeActionRestoreArchived)
+}
+
+// RestoreArchivedWorktreeHeldFencedWithClaim is the move for a caller that already
+// holds the restore fence (BeginArchivedRestoreFence). The daemon's local archived
+// route raises it before this, so the fence covers the relocate rather than
+// starting after it (#3596), and re-validating RuntimeActionRestoreArchived here
+// would refuse the operation's own fence.
+func (i *Instance) RestoreArchivedWorktreeHeldFencedWithClaim(dest string, claim git.RelocationClaim) error {
+	return i.restoreArchivedWorktree(dest, claim, RuntimeActionRestoreArchivedFenced)
+}
+
+func (i *Instance) restoreArchivedWorktree(dest string, claim git.RelocationClaim, action RuntimeAction) error {
 	i.mu.RLock()
-	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRestoreArchived); err != nil {
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(action); err != nil {
 		i.mu.RUnlock()
 		i.PreserveWorktreeRelocationClaimForRetry(claim)
 		return err
@@ -601,18 +653,135 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	}
 	gw := i.gitWorktree
 	if gw == nil {
-		return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
+		// An off-box archive has no daemon-side checkout: its workspace lives on
+		// its host and the record's restore pointer is keyed by identity, not by
+		// the title. Freeing the title is then a pure record rename, as it is
+		// for a local archive after its worktree has moved (#2127, W8.4). A
+		// local row with no worktree is still anomalous and still refuses.
+		if i.capabilitiesLocked().Workspace == WorkspaceLocalWorktree {
+			return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
+		}
+		i.stateEpoch++
+		i.Title = newTitle
+		i.touchLocked()
+		return nil
+	}
+	// Retire any worktree-missing probe that is out while this rename runs
+	// (#5102). The move below empties the recorded path, so a probe whose lstat
+	// lands inside it reads ENOENT for af's own move. When the title reuse that
+	// called this cannot persist, it calls back in to move the worktree home, and
+	// that ABA leaves the gw pointer, the recorded path and OpNone matching the
+	// probe's snapshot again over a directory that is present — and a rename moves
+	// neither lifecycle axis, so nothing else bumps the epoch the probe's
+	// re-qualification compares. Without this bump that stale absence is accepted
+	// and stamps a sticky Missing=true on a live archive. One bump per call is
+	// enough: i.mu is held for the whole body, so a probe re-qualifies either
+	// before this starts (and its lstat preceded the move) or after it ends (and
+	// sees the epoch moved). It is bumped before the first step that can touch
+	// the worktree rather than after a successful move, because a move that fails
+	// partway still had the path empty for a while.
+	i.stateEpoch++
+	i.touchLocked()
+	// Decide how the record follows the rename BEFORE renaming the branch, so a
+	// refusal leaves the branch and any checkout of it exactly as they were.
+	//
+	// MoveWorktree relocates the bytes + repairs git's registration and, on success,
+	// updates gw's stored worktree path — all under i.mu here, matching how
+	// ToInstanceData reads the worktree path under i.mu.RLock.
+	//
+	// An archived row whose worktree was deleted outside af has no bytes to move,
+	// and MoveWorktree would fail ENOENT — blocking reuse of its own title forever
+	// (#5102). Re-aim the record at the new title-keyed path instead, so its
+	// basename keeps claiming the renamed title exactly as a moved archive's does;
+	// restore then rebuilds there from the kept branch. Only a conclusive Absent
+	// takes this route: Unknown falls through to the move, which refuses on its
+	// own terms rather than letting a guess discard a worktree that may exist.
+	//
+	// Absent is also what a user's own `git worktree move` of the archive looks
+	// like from the recorded path, and that checkout is intact where git now
+	// registers the branch. Re-aiming the record (and renaming the branch under
+	// it) would orphan it, and restore would later refuse it as a foreign
+	// placement. So the repoint is taken only when git has the branch live
+	// nowhere; a live checkout, or a listing that cannot be read, refuses.
+	//
+	// And a row already flagged worktree-missing recorded that the directory af
+	// tracked is gone, so whatever answers at the path now is unverified by
+	// default: moving it would carry a stranger's bytes under the renamed title.
+	// Same invariant as archive's sticky-flag guard, and the same one way out
+	// (#5102): a directory git proves is the session's own checkout — the user
+	// put the archive back where it was recorded — is claimed, verified against
+	// that claim and moved with it, and the flag clears once it has landed.
+	// Without that, the refusal's own advice ("move it back and retry") never
+	// terminated. Anything else — a path that is not conclusively present, or a
+	// directory the proof does not hold for — refuses, and a consumed record
+	// goes back to the fence it came from.
+	var relocate func(string) error = gw.MoveWorktree
+	var unverified func()
+	presence := gw.ProbeWorktreePresence()
+	if i.worktreeMissing && presence != git.WorktreePresenceAbsent {
+		refusal := fmt.Errorf("cannot rename archived session %q: its worktree %s was recorded as deleted outside af, and the path is not conclusively absent now, so whatever is there is unverified — af will not move it; inspect %s, remove it or move it aside if it is not the session's work, then retry", i.Title, gw.GetWorktreePath(), gw.GetWorktreePath())
+		if presence != git.WorktreePresencePresent {
+			return refusal
+		}
+		claim, err := gw.ClaimRelocationSource()
+		if err != nil {
+			return fmt.Errorf("%w: %w", refusal, err)
+		}
+		if err := gw.VerifyClaimedWorktree(claim); err != nil {
+			gw.ReturnClaimUnverified(claim)
+			return fmt.Errorf("cannot rename archived session %q: its worktree %s was recorded as deleted outside af, and the directory there now is not one git proves is the session's checkout (%v) — af will not move it; inspect %s, remove it or move it aside if it is not the session's work, then retry", i.Title, gw.GetWorktreePath(), err, gw.GetWorktreePath())
+		}
+		unverified = func() { gw.ReturnClaimUnverified(claim) }
+		relocate = func(dest string) error {
+			if err := gw.MoveWorktreeWithClaim(dest, claim); err != nil {
+				return err
+			}
+			// The proven directory now sits at dest under the claim's identity:
+			// af placed it, which is the one thing that clears the flag.
+			i.worktreeMissing = false
+			i.worktreeMissingReason = ""
+			i.touchLocked()
+			return nil
+		}
+	}
+	if presence == git.WorktreePresenceAbsent {
+		moved, live, err := liveBranchCheckout(gw)
+		if err != nil {
+			return fmt.Errorf("cannot rename archived session %q: its archived worktree %s is gone, and af could not read where git has its branch checked out, so it cannot tell a deletion from a move: %w", i.Title, gw.GetWorktreePath(), err)
+		}
+		if live {
+			return fmt.Errorf("cannot rename archived session %q: its archived worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s and retry, or remove it with 'git worktree remove' and retry", i.Title, moved, gw.GetWorktreePath())
+		}
+		relocate = func(dest string) error {
+			if err := gw.RepointAbsentWorktreePath(dest); err != nil {
+				return fmt.Errorf("cannot rename archived session %q: its missing worktree path could not be repointed: %w", i.Title, err)
+			}
+			// The repoint is af recording a deletion it just proved, so it stamps
+			// the flag itself rather than leaving it to a poll that may never run
+			// first. The directory can vanish between polls; unstamped, the row
+			// would name a fresh path nothing has ever held, and the probe at that
+			// path answers about whatever appears there next — a later directory
+			// at dest would read Present, the sticky flag would never set, and a
+			// restore would move an unrelated directory in as the session's
+			// worktree. The reason names dest, the path the record now points at,
+			// so the fence follows the pointer; a row that was already flagged has
+			// its reason re-aimed for the same reason (#5102).
+			i.worktreeMissing = true
+			i.worktreeMissingReason = WorktreeMissingRepointedReason(dest)
+			i.touchLocked()
+			return nil
+		}
 	}
 	oldBranch := gw.GetBranchName()
 	if newBranch != "" && newBranch != oldBranch {
 		if err := gw.RenameBranch(newBranch); err != nil {
+			if unverified != nil {
+				unverified()
+			}
 			return fmt.Errorf("cannot free the archived branch of %q: %w", i.Title, err)
 		}
 	}
-	// MoveWorktree relocates the bytes + repairs git's registration and, on success,
-	// updates gw's stored worktree path — all under i.mu here, matching how
-	// ToInstanceData reads the worktree path under i.mu.RLock.
-	if err := gw.MoveWorktree(dest); err != nil {
+	if err := relocate(dest); err != nil {
 		if newBranch != "" && newBranch != oldBranch {
 			// Best-effort: the move already failed, so this is recovery, and a
 			// second failure must not mask the first. It is reported with it —
@@ -625,8 +794,14 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 		}
 		return err
 	}
-	i.Title = newTitle
-	i.Branch = gw.GetBranchName()
+	if i.Title != newTitle {
+		i.Title = newTitle
+		i.touchLocked()
+	}
+	if i.Branch != gw.GetBranchName() {
+		i.Branch = gw.GetBranchName()
+		i.touchLocked()
+	}
 	return nil
 }
 
@@ -648,14 +823,36 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 // out from under the restore. This replaces the old "park it in Lost purely to
 // trigger the re-spawn loop" overload (#1195).
 func (i *Instance) RestoreFromArchive() error {
-	if err := i.ValidateRuntimeAction(RuntimeActionRestoreArchived); err != nil {
-		return err
-	}
 	// Enter the restore fence through the chokepoint (#1195 Phase 2d): BeginRestore
 	// is legal only from Archived and sets started=true + Lost + OpRestoring — the
 	// exact head this used to write by hand, now enforcing I3 (a restore may begin
 	// only from an archived session; no double-restore).
-	if err := i.Transition(BeginRestore()); err != nil {
+	return i.restoreFromArchive(RuntimeActionRestoreArchived, BeginRestore())
+}
+
+// RestoreFromArchiveHeldFenced is RestoreFromArchive for a caller that already
+// holds the restore fence over the worktree relocate in front of it (#3596).
+//
+// It differs in the two places the held fence shows: the precondition is
+// RuntimeActionRestoreArchivedFenced (OpRestoring rather than OpNone) and the edge
+// is BeginRestoreUnderHeldFence rather than BeginRestore, whose `op == OpNone`
+// guard is deliberately left strict — that guard is what makes a double-restore
+// impossible, and widening it would admit any restore in flight rather than this
+// operation's own fence.
+//
+// Everything after is identical, including the failure edge: AbortRestoreToLost
+// drops {LiveLost, OpRestoring} to a plain Lost, so a re-spawn that fails still
+// hands the row to the #1108 loop against the now-restored worktree, and the
+// caller's own deferred release then finds no fence to lower.
+func (i *Instance) RestoreFromArchiveHeldFenced() error {
+	return i.restoreFromArchive(RuntimeActionRestoreArchivedFenced, BeginRestoreUnderHeldFence())
+}
+
+func (i *Instance) restoreFromArchive(action RuntimeAction, enter TransitionEvent) error {
+	if err := i.ValidateRuntimeAction(action); err != nil {
+		return err
+	}
+	if err := i.Transition(enter); err != nil {
 		return err
 	}
 	if err := i.currentBackend().Recover(i); err != nil {
@@ -665,6 +862,41 @@ func (i *Instance) RestoreFromArchive() error {
 		return err
 	}
 	return nil
+}
+
+// BeginArchivedRestoreFence validates the archived-restore precondition and raises
+// the restore fence in ONE critical section, for a caller that owns it across more
+// than the re-spawn — the daemon's local archived route, whose worktree relocate
+// runs in front of RestoreFromArchive (#3596). It is the sibling of
+// BeginRecoverFence (#3555/#3586), and welded together for the same reason: a
+// validation that released the lock before the raise could fence a liveness an
+// observation had just moved.
+//
+// The fence is MarkRestoring — the op axis alone. Leaving liveness at LiveArchived
+// is the whole design (#3596 triage): the snapshot reconcile keys its Archived->live
+// REBUILD on seeing that exact transition, so flipping liveness early would make it
+// see live->live and skip the rebuild, stranding the row live-but-not-started
+// (#1203). The visible effect is ShownArchived, which yields the row to the live
+// Instances section the moment a restore starts — the eager feedback #1210 asked
+// for, now beginning when the restore actually begins.
+func (i *Instance) BeginArchivedRestoreFence() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRestoreArchived); err != nil {
+		return fmt.Errorf("restore: %w", err)
+	}
+	if err := i.transitionLocked(MarkRestoring()); err != nil {
+		return fmt.Errorf("restore: raise restore fence: %w", err)
+	}
+	return nil
+}
+
+// EndArchivedRestoreFence lowers the fence BeginArchivedRestoreFence raised, and
+// reports whether it actually lowered one. Safe to defer unconditionally: it is a
+// no-op once the re-spawn has moved the row off OpRestoring, and it never disturbs
+// an op some other owner raised (see clearOpIfHeld).
+func (i *Instance) EndArchivedRestoreFence() bool {
+	return i.clearOpIfHeld(OpRestoring, "archive restore", nil)
 }
 
 // CloseAttachOnly releases resources this instance opened to view or drive its
@@ -705,7 +937,20 @@ func (i *Instance) capabilitiesLocked() Capabilities {
 	if i.backend == nil {
 		return (&LocalBackend{}).Capabilities()
 	}
-	return i.backend.Capabilities()
+	caps := i.backend.Capabilities()
+	// A sandbox whose agent-server advertises the tab API serves shell and
+	// process tabs off-box (#5571 W4.5): the static backend declaration is the
+	// floor, the cached advertisement lifts it. Cache read only — no network
+	// under i.mu.
+	if caps.Workspace == WorkspaceRemote && i.offBoxTabAPILocked() {
+		caps.TabManagement = true
+	}
+	// A sandbox whose agent-server advertises the swap route can hand its agent
+	// off in place (#5571 W7.5), by the same cached-advertisement rule.
+	if caps.Workspace == WorkspaceRemote && handoffInPlaceBackend(i.backend.Type()) && i.offBoxSwapAPILocked() {
+		caps.Handoff = true
+	}
+	return caps
 }
 
 // GetBackend returns the backend for the instance (mainly for testing).
@@ -720,4 +965,5 @@ func (i *Instance) SetBackend(b Backend) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.backend = b
+	i.touchLocked()
 }

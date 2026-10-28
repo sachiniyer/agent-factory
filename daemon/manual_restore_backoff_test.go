@@ -1,9 +1,7 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
-	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -101,8 +98,9 @@ func TestRestoreSession_LongLivedThenDied_ResetsBackoff(t *testing.T) {
 		t.Fatalf("RestoreSession: %v", err)
 	}
 
-	// A poll ANSWERS: the runtime is confirmed alive, so the episode is forgotten.
-	observeAlive(manager, repoID, inst)
+	// Polls ANSWER, sustained: the runtime is confirmed alive, so the episode is
+	// forgotten.
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, tracked := manager.lostRestoreStates[key]
@@ -135,7 +133,7 @@ func TestRestoreSession_LongLivedThenDied_ResetsBackoff(t *testing.T) {
 // episode exactly once, arm the automatic loop's backoff, and emit the same
 // one-shot missing-worktree diagnostic as an automatic attempt.
 func TestRestoreSession_FailedManualRestoresShareDiagnosticsAndBackoff(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	worktreePath := filepath.Join(testguard.CanonicalTempDir(t), "missing-manual-restore")
 	restoreErr := &session.WorktreeUnavailableError{
 		Title:        "manual-failure",
@@ -147,17 +145,12 @@ func TestRestoreSession_FailedManualRestoresShareDiagnosticsAndBackoff(t *testin
 
 	key := stableSessionKey(repoID, inst)
 	manager.mu.Lock()
-	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 2}
+	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 2, totalAttempts: 2}
 	manager.mu.Unlock()
 
-	var warnings, diagnostics bytes.Buffer
-	previousWarning, previousError := aflog.WarningLog, aflog.ErrorLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	aflog.ErrorLog = stdlog.New(&diagnostics, "ERROR: ", 0)
-	t.Cleanup(func() {
-		aflog.WarningLog = previousWarning
-		aflog.ErrorLog = previousError
-	})
+	// This Manager's own log (#3797): a shared sink is written by every Manager
+	// in the binary, so an assertion on it can pass on another's output.
+	warnings, diagnostics := ownLogs.warnings, ownLogs.errors
 
 	for attempt := 0; attempt < 2; attempt++ {
 		if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual-failure", RepoID: repoID}); !errors.Is(err, os.ErrNotExist) {

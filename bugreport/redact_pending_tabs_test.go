@@ -32,16 +32,19 @@ func TestRedactInstanceDataRedactsPendingTabsLikeLiveTabs(t *testing.T) {
 		},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	external := d.PendingTabs[0]
-	if external.Command != redactedMarker || external.TmuxName != redactedMarker || external.URL != redactedMarker {
+	if external.Command != redactedMarker || external.TmuxName != redactedMarker ||
+		external.URL != redactedMarker || external.Name != redactedMarker {
 		t.Fatalf("pending tab free text was not fully redacted: %+v", external)
 	}
 	if external.Conversation == nil || external.Conversation.ID != "" {
 		t.Fatalf("pending tab conversation id was not redacted: %+v", external.Conversation)
 	}
-	if external.ID != "pending-external" || external.Name != "docs" || external.Kind != session.TabKindWeb {
+	// The name is user-chosen, so it is redacted above with the rest of the free
+	// text (#3588); the minted id and the kind are what carry "a tab existed".
+	if external.ID != "pending-external" || external.Kind != session.TabKindWeb {
 		t.Fatalf("pending tab structural fields were mutated: %+v", external)
 	}
 	if d.PendingTabs[1].URL != loopbackOrigin {
@@ -66,7 +69,7 @@ func TestRedactInstanceDataStripsSecretsFromLoopbackTabURL(t *testing.T) {
 		URL:  "http://admin:private-password@localhost:3000/private/path?token=secret#fragment",
 	}}}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	const want = "http://localhost:3000"
 	if d.Tabs[0].URL != want {

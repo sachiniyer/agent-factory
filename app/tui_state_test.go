@@ -23,11 +23,11 @@ func TestNewHomeRegistryModeSkipsRepoScopedTUIViewState(t *testing.T) {
 	// refreshSidebarProjects and the real cross-repo fetcher, so without a stub it
 	// spends the daemon HTTP timeout dialing a daemon no unit test has. Stub
 	// BEFORE newHome: the fetch happens during construction.
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil
 	}))
 
-	h := newHome(context.Background(), "bash", nil)
+	h := newHome(context.Background(), "bash", "", nil)
 
 	require.Empty(t, h.repoID, "a nil repo must exercise registry mode")
 	require.NotContains(t, warnings.String(), "invalid repo id: empty",
@@ -243,7 +243,6 @@ func TestTUIViewStatePreviewTickDoesNotWriteUnchangedState(t *testing.T) {
 	_, statErr = os.Stat(path)
 	require.True(t, os.IsNotExist(statErr), "unchanged preview tick must not write TUI state")
 
-	h.keySent = true
 	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err, "a structural pane-open action must save TUI state")

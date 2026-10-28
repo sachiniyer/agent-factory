@@ -27,8 +27,10 @@ import (
 //
 // Layout: <AF home>/events/<taskID>.jsonl holds one JSON event per line;
 // <taskID>.cursor holds the byte offset of the first undelivered event, so a
-// pop is a cursor advance, not a file rewrite. Both files are removed whenever
-// the queue fully drains. The cursor is written AFTER the delivery it
+// pop is a cursor advance, not a file rewrite. A <taskID>.limit-parked marker
+// protects a backlog held by a known usage-limit wall from ordinary outage
+// expiry. All three files are removed whenever the queue fully drains. The
+// cursor is written AFTER the delivery it
 // acknowledges, so a daemon crash mid-replay redelivers at most one event —
 // at-least-once by design; exactly-once machinery is not worth building for a
 // prompt-delivery system.
@@ -93,10 +95,11 @@ type eventQueueCursor struct {
 // eventQueue is one task's durable backlog. Zero pending events is the steady
 // state: no files on disk, every field zero.
 type eventQueue struct {
-	taskID  string
-	path    string // <dir>/<taskID>.jsonl
-	curPath string // <dir>/<taskID>.cursor
-	remove  func(string) error
+	taskID    string
+	path      string // <dir>/<taskID>.jsonl
+	curPath   string // <dir>/<taskID>.cursor
+	limitPath string // <dir>/<taskID>.limit-parked
+	remove    func(string) error
 
 	// appendRecord/appendBoundary/truncate are the write seams. Production wires
 	// both appends to a real O_APPEND write and truncate to os.Truncate; tests
@@ -106,6 +109,9 @@ type eventQueue struct {
 	appendBoundary func(path string, rec []byte) (int, error)
 	truncate       func(path string, size int64) error
 	syncDirectory  func(string) error
+	// writeMarker is the .limit-parked write seam (nil means the production
+	// config.AtomicWriteFileRefusingLink).
+	writeMarker func(path string, data []byte, perm os.FileMode) error
 
 	mu      sync.Mutex
 	offset  int64 // byte offset of the first undelivered event
@@ -124,6 +130,28 @@ type eventQueue struct {
 	// lastLoadRetry throttles re-attempts to eventQueueLoadRetryInterval.
 	loadErr       error
 	lastLoadRetry time.Time
+	// limitParked is recovered from limitPath and remains set until the backlog
+	// drains. While set, age/cap eviction is disabled and the stdout reader
+	// backpressures at the ordinary cap instead, preserving distinct watch events
+	// across a multi-day limit window without unbounded AF-managed disk growth.
+	limitParked bool
+	// parkedStatusSeq identifies the queue head whose one parked occurrence was
+	// already written to the task store. It lives with the durable queue cursor,
+	// not LastRunStatus: watcher lifecycle reporting may legitimately replace the
+	// display status without turning a retry of this head into a new occurrence.
+	parkedStatusSeq int64
+	// limitParkedErr records a usage-limit marker the queue could not make
+	// durable while the backlog file stayed appendable. It is only ever set
+	// while limitParked is false: a failed rewrite of a durable marker leaves
+	// that marker in place. Protection is then as unverifiable as an unreadable
+	// queue, so the stdout reader blocks fail-closed while any backlog the
+	// failed write would guard remains, retrying the write at most once per
+	// eventQueueLoadRetryInterval (lastLimitMarkerRetry), and that backlog is
+	// held against age and cap eviction as the marker would have held it
+	// (#4226 review). Cleared when a marker lands durably, when the protection
+	// state is deliberately torn down, or once the backlog drains.
+	limitParkedErr       error
+	lastLimitMarkerRetry time.Time
 
 	dropped     int // events dropped to the overflow caps, for the drop log
 	lastDropLog time.Time
@@ -141,7 +169,11 @@ func eventQueueDir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(configDir, "events")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// The residue #3845 was filed on: a watcher reload re-created the whole home
+	// through this one MkdirAll, and the home came back holding nothing but
+	// events/. Guarded, so an abandoned daemon loses its queue instead of its
+	// self-check.
+	if err := config.MkdirAllUnderAFHome(dir, 0755); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -157,11 +189,13 @@ func newEventQueue(dir, taskID string) *eventQueue {
 		taskID:         taskID,
 		path:           filepath.Join(dir, taskID+".jsonl"),
 		curPath:        filepath.Join(dir, taskID+".cursor"),
+		limitPath:      filepath.Join(dir, taskID+".limit-parked"),
 		remove:         os.Remove,
 		appendRecord:   appendRecordToFile,
 		appendBoundary: appendRecordToFile,
 		truncate:       os.Truncate,
 		syncDirectory:  syncEventQueueDirectory,
+		writeMarker:    config.AtomicWriteFileRefusingLink,
 		now:            time.Now,
 	}
 	q.load()
@@ -203,6 +237,9 @@ func (q *eventQueue) loadLocked() {
 	q.offset, q.size, q.pending, q.loadErr = 0, 0, 0, nil
 	var warns []string
 	err := q.scanDiskStateLocked(&warns)
+	if err == nil {
+		err = q.loadLimitParkedLocked()
+	}
 	if err != nil {
 		q.offset, q.size, q.pending = 0, 0, 0
 		q.loadErr = err
@@ -415,9 +452,32 @@ func (q *eventQueue) loadFailed() bool {
 	return q.loadErr != nil
 }
 
+// loadFailedFresh is loadFailed behind an unthrottled recovery attempt, for
+// one-time terminal decisions that must not route on a stale outage: a healed
+// queue observed through the throttle would still answer "unknown" for up to
+// eventQueueLoadRetryInterval and divert its events to the run tail.
+func (q *eventQueue) loadFailedFresh() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.retryLoadNowLocked() != nil
+}
+
 // enqueue appends one event and enforces the overflow caps by dropping oldest
-// pending events past them.
-func (q *eventQueue) enqueue(line string) error {
+// pending events past them. The optional flag marks a usage-limit-held event;
+// callers that have also recorded this exact occurrence use
+// enqueueWithParkedStatus so the queue persists both facts together.
+func (q *eventQueue) enqueue(line string, limitParked ...bool) error {
+	parkThisEvent := len(limitParked) > 0 && limitParked[0]
+	_, err := q.enqueueWithParkedStatus(line, parkThisEvent, false)
+	return err
+}
+
+// enqueueWithParkedStatus reports retained alongside err because an error here
+// is not proof of loss: the append can fail AFTER the record landed in full
+// (a close/flush fault), or after the record was already counted into the
+// backlog (cap enforcement). Callers that account for dropped events must not
+// count a retained record — the queue will still replay it.
+func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusRecorded bool) (retained bool, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -427,15 +487,38 @@ func (q *eventQueue) enqueue(line string) error {
 	// boundary. Retry the load; refuse (caller drops the event, logged) only
 	// while the state stays unknown.
 	if err := q.retryLoadNowLocked(); err != nil {
-		return fmt.Errorf("%w; refusing to append: %w", errEventQueueLoadFailed, err)
+		return false, fmt.Errorf("%w; refusing to append: %w", errEventQueueLoadFailed, err)
+	}
+	if q.pending == 0 && !parkThisEvent {
+		if err := q.clearStaleProtectionLocked(); err != nil {
+			return false, err
+		}
+	}
+	// A direct delivery can discover the limit before the event has a queue
+	// sequence. The queue is empty on that path, so the next sequence is the
+	// durable identity of the occurrence whose task status was just recorded.
+	// Never attach that fact to a tail behind an existing head.
+	parkedStatusSeq := q.parkedStatusSeq
+	if parkThisEvent && statusRecorded && q.pending == 0 {
+		parkedStatusSeq = q.seq + 1
+	}
+	var markerErr error
+	if parkThisEvent {
+		var undoMarker func()
+		markerErr, undoMarker = q.protectParkedEnqueueLocked(parkedStatusSeq)
+		defer func() {
+			if !retained {
+				undoMarker()
+			}
+		}()
 	}
 	if err := q.resetCursorBeforeFreshAppendLocked(); err != nil {
-		return err
+		return false, err
 	}
 	q.seq++
 	rec, err := json.Marshal(queuedEvent{Seq: q.seq, TS: q.now(), Line: line})
 	if err != nil {
-		return err
+		return false, err
 	}
 	rec = append(rec, '\n')
 	n, err := q.appendRecord(q.path, rec)
@@ -457,10 +540,10 @@ func (q *eventQueue) enqueue(line string) error {
 			// Enforce the caps as the success path does: a persistently failing
 			// close must not let the backlog outgrow its bounds. The close error is
 			// the one worth returning, so a cap failure only gets logged.
-			if capErr := q.dropOldestOverCapsLocked(); capErr != nil {
+			if capErr := q.enforceCapsLocked(); capErr != nil {
 				log.WarningLog.Printf("watch task %s: failed to enforce event-queue caps after a close failure: %v", q.taskID, capErr)
 			}
-			return err
+			return true, errors.Join(markerErr, err)
 		}
 		// A short write leaves a torn record that would corrupt the NEXT append:
 		// O_APPEND writes at the real end of file, so the next record glues onto
@@ -472,11 +555,18 @@ func (q *eventQueue) enqueue(line string) error {
 				q.recoverTornRecordLocked(n, terr, false)
 			}
 		}
-		return err
+		return false, err
 	}
 	q.size += int64(n)
 	q.pending++
 
+	return true, errors.Join(markerErr, q.enforceCapsLocked())
+}
+
+func (q *eventQueue) enforceCapsLocked() error {
+	if q.limitProtectedLocked() {
+		return nil
+	}
 	return q.dropOldestOverCapsLocked()
 }
 
@@ -541,8 +631,18 @@ func (q *eventQueue) resetCursorBeforeFreshAppendLocked() error {
 	if q.pending != 0 || q.offset != 0 || q.size != 0 {
 		return nil
 	}
+	// Refuse a symlinked cursor BEFORE the removal seam, not inside the write
+	// fallback below (#3672 review). This path runs with no prior cursor write,
+	// so the remove SUCCEEDS on a link — unlinking the very arrangement
+	// persistCursorValueLocked refuses to write through, and never reaching the
+	// refusing writer at all. The check cannot live in q.remove: production
+	// wires that to os.Remove and tests replace it wholesale.
+	if err := config.RefuseManagedFileSymlink(q.curPath); err != nil {
+		return err
+	}
 	if err := q.remove(q.curPath); err != nil && !os.IsNotExist(err) {
-		if resetErr := config.AtomicWriteFile(q.curPath, []byte("0"), 0644); resetErr != nil {
+		// Refuses a link, like persistCursorValueLocked (#3672).
+		if resetErr := config.AtomicWriteFileRefusingLink(q.curPath, []byte("0"), 0644); resetErr != nil {
 			return fmt.Errorf("failed to reset stale event-queue cursor before enqueue: remove failed: %v; reset failed: %w", err, resetErr)
 		}
 		log.WarningLog.Printf("watch task %s: failed to remove stale event-queue cursor before enqueue; reset it to 0: %v", q.taskID, err)
@@ -686,15 +786,33 @@ func (q *eventQueue) advance(cursor eventQueueCursor) (bool, error) {
 // jsonl file is gone; otherwise a later append can make already-delivered bytes
 // look pending and silently lose the appended event (#1433).
 func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
+	// Same refusal as the fresh-append reset, and checked before ANY removal so
+	// a refused teardown does not drop the jsonl and then stop (#3672 review).
+	// Draining the last event reaches here whether or not a cursor write
+	// happened first, so the removal seam would otherwise unlink a link the
+	// cursor or limit-marker writer refuses to write through.
+	if err := config.RefuseManagedFileSymlink(q.curPath); err != nil {
+		return false, err
+	}
+	if err := config.RefuseManagedFileSymlink(q.limitPath); err != nil {
+		return false, err
+	}
 	if err := q.remove(q.path); err != nil && !os.IsNotExist(err) {
 		return false, err
 	}
 	if err := q.remove(q.curPath); err != nil && !os.IsNotExist(err) {
-		if resetErr := config.AtomicWriteFile(q.curPath, []byte("0"), 0644); resetErr != nil {
+		// Refuses a link, like persistCursorValueLocked (#3672).
+		if resetErr := config.AtomicWriteFileRefusingLink(q.curPath, []byte("0"), 0644); resetErr != nil {
 			q.offset, q.size = 0, 0
 			return false, fmt.Errorf("failed to reset drained event-queue cursor: remove failed: %v; reset failed: %w", err, resetErr)
 		}
 		log.WarningLog.Printf("watch task %s: failed to remove drained event-queue cursor; reset it to 0: %v", q.taskID, err)
+	}
+	if err := q.clearLimitParkedLocked(); err != nil {
+		// The queue itself is already gone and the delivered event must not be
+		// resurrected. Leave the marker recorded in memory; the next append or
+		// daemon load retries its safe removal before trusting it.
+		log.WarningLog.Printf("watch task %s: failed to remove drained usage-limit queue marker: %v", q.taskID, err)
 	}
 	q.offset, q.size = 0, 0
 	return true, nil
@@ -732,8 +850,8 @@ func (q *eventQueue) compactLocked() error {
 	if err := q.persistCursorValueLocked(0); err != nil {
 		return err
 	}
-	// AtomicWriteFile's directory sync is intentionally best-effort for its
-	// general callers. Compaction needs a stronger cross-file guarantee: cursor
+	// The shared atomic writer's directory sync is intentionally best-effort for
+	// its general callers. Compaction needs a stronger cross-file guarantee: cursor
 	// 0 must be durable before the shortened queue can become durable, or a
 	// crash could pair the new queue with the old nonzero cursor and skip events.
 	// Fence it before creating the compact temp so this sync cannot also persist
@@ -851,6 +969,13 @@ func (q *eventQueue) persistCursorLocked() error {
 // persistCursorValueLocked durably writes an explicit cursor value. Compaction
 // uses it to record the post-rewrite offset (0) BEFORE the rename that shrinks
 // the file (#1537). Callers hold q.mu.
+//
+// The cursor REFUSES a symlinked path (#3672). It is a byte offset into the
+// jsonl file beside it — a pair af creates, advances and deletes together — so
+// the two must stay in the same directory: following a link would leave the
+// queue's own compaction (which fsyncs the cursor's directory before renaming
+// the queue file) fencing the wrong directory, and replacing one would discard
+// an arrangement nobody has a reason to have made.
 func (q *eventQueue) persistCursorValueLocked(off int64) error {
-	return config.AtomicWriteFile(q.curPath, []byte(strconv.FormatInt(off, 10)), 0644)
+	return config.AtomicWriteFileRefusingLink(q.curPath, []byte(strconv.FormatInt(off, 10)), 0644)
 }

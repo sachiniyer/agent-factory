@@ -164,16 +164,18 @@ func TestOccupantsOfDir_ReportsEachProcessOnce(t *testing.T) {
 	}
 }
 
-// The tmux SERVER must never be reported. One server backs every session on the
-// box and outlives all of them, inheriting its cwd from whichever client first
-// started it — so matching it refuses that workspace on every retry until the
-// whole server exits, taking unrelated sessions with it.
+// Neither tmux predicate may claim a process that is not tmux: IsTmuxServer
+// chooses what receives SIGUSR1, and IsTmuxProcess chooses what the occupancy
+// gate and the worktree reaper leave alone, so a false positive in either blinds
+// a gate or signals a stranger. The tmux-shaped cases live in
+// tmuxidentity_test.go.
 //
-// Driven through the real predicate rather than a stub: identification is from
-// the process's own argv, so a stub would test the stub.
-func TestIsTmuxServer_IdentifiesPositivelyFromArgv(t *testing.T) {
+// Driven through the real predicates rather than a stub: identification reads
+// the process's own table entry, so a stub would test the stub.
+func TestTmuxPredicates_RefuseNonTmuxProcesses(t *testing.T) {
 	require.False(t, IsTmuxServer(os.Getpid()),
 		"the test binary is not a tmux server and must not be excluded")
+	require.False(t, IsTmuxProcess(os.Getpid()))
 
 	cmd := exec.Command("sleep", "300")
 	require.NoError(t, cmd.Start())
@@ -183,7 +185,9 @@ func TestIsTmuxServer_IdentifiesPositivelyFromArgv(t *testing.T) {
 	})
 	require.False(t, IsTmuxServer(cmd.Process.Pid),
 		"an ordinary process must stay a candidate: excluding on anything but a positive match would blind the gate")
+	require.False(t, IsTmuxProcess(cmd.Process.Pid))
 
 	// An unreadable/absent pid reports false rather than excluding silently.
 	require.False(t, IsTmuxServer(-1))
+	require.False(t, IsTmuxProcess(-1))
 }

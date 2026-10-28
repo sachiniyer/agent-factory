@@ -153,9 +153,11 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 
 	bin := buildBinary(t)
 
+	// Registered after SocketTempDir's RemoveAll, so LIFO stops the daemon before
+	// the home is deleted (#3842).
 	t.Cleanup(func() {
 		_, _ = runAFWithin(30*time.Second, bin, repo, home, "sessions", "kill", "codex-ready")
-		killDaemonFromHome(home)
+		stopDaemons(t, bin, home)
 	})
 
 	// A hang guard, NOT an expectation. Its only job is to stop CI hanging if af
@@ -282,9 +284,11 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 
 	bin := buildBinary(t)
 
+	// Registered after SocketTempDir's RemoveAll, so LIFO stops the daemon before
+	// the home is deleted (#3842).
 	t.Cleanup(func() {
 		_, _ = runAFWithin(30*time.Second, bin, repo, home, "sessions", "kill", "codex-trust")
-		killDaemonFromHome(home)
+		stopDaemons(t, bin, home)
 	})
 
 	// A hang guard, not an expectation — see the sibling test.

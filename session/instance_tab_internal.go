@@ -16,6 +16,9 @@ import "github.com/sachiniyer/agent-factory/session/tmux"
 func (i *Instance) replaceTabFieldLocked(idx int, f func(*Tab)) {
 	cp := *i.Tabs[idx]
 	f(&cp)
+	if cp.ID != i.Tabs[idx].ID || cp.Name != i.Tabs[idx].Name || cp.tmux != i.Tabs[idx].tmux {
+		i.touchLocked()
+	}
 	i.Tabs[idx] = &cp
 }
 
@@ -29,7 +32,11 @@ func (i *Instance) setTmuxLocked(ts *tmux.TmuxSession) {
 			return
 		}
 		i.Tabs = []*Tab{newAgentTab(ts)}
+		i.touchLocked()
 		return
 	}
-	i.Tabs[0].tmux = ts
+	if i.Tabs[0].tmux != ts {
+		i.Tabs[0].tmux = ts
+		i.touchLocked()
+	}
 }

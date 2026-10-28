@@ -36,11 +36,10 @@ type AlarmBanner struct {
 	alarms []AlarmInfo
 }
 
-// alarmStyle is rebuilt from the active theme so alerts remain distinct under
-// user-configured palettes.
+// alarmStyle uses failure text on the fixed surface.
 var alarmStyle = lipgloss.NewStyle().
-	Background(activeTheme.Error).
-	Foreground(activeTheme.SelectionForeground).
+	Background(activeTheme.Surface).
+	Foreground(activeTheme.Dead).
 	Bold(true)
 
 func NewAlarmBanner() *AlarmBanner { return &AlarmBanner{} }

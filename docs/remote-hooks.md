@@ -1,4 +1,8 @@
-# Remote Hooks (bring-your-own-provisioner backend)
+# Remote hooks (bring-your-own-provisioner backend)
+
+For operators whose infrastructure the built-in backends do not model. After this
+page you will be able to write the two scripts that let `af` run a session on
+anything you can provision.
 
 Agent Factory ships first-class off-box backends — [`docker`, `ssh`, and `sandbox`](backends.md) — that need zero scripting. The **remote-hook backend** is the escape hatch for infrastructure those don't model (Kubernetes, Modal, Daytona, a bespoke orchestrator): you provide two shell scripts and `af` runs your session on whatever you provision.
 
@@ -44,7 +48,7 @@ Progress goes on **stderr**; anything else on stdout fails the provision the sam
 
 A machine created seconds ago has no `known_hosts` entry, and the resulting prompt is precisely what an unattended provision cannot answer. None of af's host-key postures solves it: `strict` refuses an unknown host, `accept-new` is trust-on-first-use where **every** session is a first contact (and its store later refuses a legitimate VM once an address is recycled), and `insecure` invites the man-in-the-middle who would then see the bearer token.
 
-Your script is the only party with an **authentic** channel to that key — it is talking to the provider's control plane, which af cannot reach. So it returns the key, and af writes a **per-session** `known_hosts` containing exactly it, then connects with `StrictHostKeyChecking=yes`, `GlobalKnownHostsFile=/dev/null` and `KnownHostsCommand=none`. That is a real verification rather than trust on sight, and it is stronger than what `backend = "ssh"` can do.
+Your script is the only party with an **authentic** channel to that key — it is talking to the provider's control plane, which af cannot reach. So it returns the key, and af writes a **per-session** `known_hosts` containing exactly it, then connects with `StrictHostKeyChecking=yes`, `GlobalKnownHostsFile=/dev/null`, `KnownHostsCommand=none` and `RemoteCommand=none`. That is a real verification rather than trust on sight, and it is stronger than what `backend = "ssh"` can do.
 
 > **This path needs OpenSSH 8.5 or newer on the daemon host** — a higher floor than
 > the 7.6 that `backend = "ssh"` asks for. `KnownHostsCommand` arrived in 8.5, and an
@@ -55,6 +59,16 @@ Your script is the only party with an **authentic** channel to that key — it i
 > OpenSSH a different key and satisfy verification without af's per-session pin ever
 > deciding anything. Dropping it would trade a version floor for a key-substitution
 > hole, which is the worse bargain.
+>
+> `RemoteCommand=none` is pinned for a different reason than the host-key options:
+> af always supplies its own one-shot remote script (every step — `mktemp`, `git clone`,
+> `cat > file`, `nohup af …` — is passed as ssh's command-line remote command), and a
+> `Host` block's `RemoteCommand` would make ssh refuse outright — "Cannot execute
+> command-line and remote command." — so every provision step and the live-teardown
+> sandbox re-entry would fail before any af command reached the remote. It is the
+> documented default (no command), no hook workflow depends on a config-injected one,
+> and it arrived in OpenSSH 7.6 — beneath the `KnownHostsCommand` 8.5 floor — so it
+> costs no version.
 
 Two ways to get the key, both ordinary practice:
 
@@ -88,7 +102,7 @@ delete_cmd = "./.agent-factory/hooks/delete.sh"
 
 `delete_cmd` is **required**, and so is exactly one of `provision_cmd` / `launch_cmd`. An empty or missing value is rejected when the backend is resolved, with an error naming the missing field (e.g. `remote_hooks.provision_cmd or remote_hooks.launch_cmd is required`, `remote_hooks.delete_cmd is required`) rather than a cryptic `exec: no command` at operation time. Setting **both** provisioning keys is rejected too — they are alternatives, not layers.
 
-`remote_hooks` is an in-repo-only setting — it describes the repository, so it is not accepted in the global `~/.agent-factory/config.toml`. Configuring `backend = "hook"` selects the backend for that repo; you can also create a one-off hook session with `af sessions create --backend hook` or, in the TUI, press `N` for a remote session.
+`remote_hooks` is an in-repo-only setting — it describes the repository, so it is not accepted in the global `~/.agent-factory/config.toml`. Configuring `backend = "hook"` selects the backend for that repo; you can also create a one-off hook session with `af sessions create --backend hook` or, in the TUI, press `n` for the creation form, then `ctrl+r` to open the backend picker and select `hook`.
 
 ### Command path resolution
 
@@ -101,6 +115,14 @@ Each command value is the path of one executable — it is run directly, not thr
 ### Validating your setup
 
 Run `af doctor` from inside the repository to check the remote-hook setup: it validates that your provisioning command (`provision_cmd` or `launch_cmd`) and `delete_cmd` are configured (and that no removed key lingers), and that each configured script exists and is executable. There is no read-only connectivity probe — neither contract has a dry-run verb (running either provisioning script provisions real infrastructure), so the live wire round-trip is exercised by actually creating a session.
+
+### Collecting orphaned host-key pins
+
+A `provision_cmd` session pins one host key under `$AGENT_FACTORY_HOME/hook-hosts/<name>` and owns that directory until its `delete_cmd` succeeds. A few situations leave one behind with no owner — a `delete_cmd` that answers with an **error** keeps the pin on purpose, so a later retry can still verify the machine, and the record may go away before the retry does.
+
+`af doctor` reports those, and `af doctor --fix` removes them. It removes a directory only when it can PROVE nothing owns it: it asks the running daemon for every session on the machine — every project, not just this repository, since hook names are one namespace for the whole box — and reads every project's records from disk. If any part of that cannot be read (the daemon is unreachable or does not answer, a project's records are unreadable), the directories are reported as undetermined and **nothing is removed**. A live, archived, mid-kill or killed-but-not-yet-reaped session all count as owners: removing a live session's pin would make every later teardown fail host-key verification, stranding the machine it was supposed to destroy.
+
+This check is silent on a machine with no `hook-hosts` directory, so a local-only setup never sees it.
 
 ## Script protocol
 

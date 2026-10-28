@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -173,6 +172,18 @@ func (m *Manager) WebTabTarget(sessionID, tabID string) (webTabTarget, error) {
 		if strings.TrimSpace(tabURL) == "" {
 			return webTabTarget{Kind: kind}, fmt.Errorf("web tab %q of session %q has no target URL", tabID, sessionID)
 		}
+		// An off-box session's loopback is the WORKSPACE's, not the daemon host's:
+		// dial it through the agent-server relay (W5.1). It never falls back to the
+		// daemon's own TCP stack — a relay that cannot be had is an error, because
+		// serving the daemon's 127.0.0.1:N under this session's tab would surface an
+		// unrelated daemon-local service (#3062).
+		if instance.Capabilities().Workspace == session.WorkspaceRemote && session.IsLoopbackWebTarget(tabURL) {
+			tr, terr := m.relayTransport(instance, repoID, title)
+			if terr != nil {
+				return webTabTarget{Kind: kind}, terr
+			}
+			return webTabTarget{URL: tabURL, Transport: tr, Kind: kind}, nil
+		}
 		return webTabTarget{URL: tabURL, Kind: kind}, nil
 	case session.TabKindVSCode:
 		endpoint, err := m.ensureVSCodeServer(instance, repoID, title)
@@ -226,7 +237,8 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	if strings.TrimSpace(worktree) == "" {
 		return vscodeEndpoint{}, fmt.Errorf("session %q has no worktree to open in VS Code", title)
 	}
-	endpoint, err := m.vscode.ensureServerForInstance(key, instance.ID, worktree)
+	endpoint, err := m.vscode.ensureServerForInstanceInScope(
+		key, instance.ID, worktree, vscodeAccountScopeForInstance(instance))
 	// The post-spawn recheck below must run on errVSCodeStarting too, NOT just on
 	// success. ensureServer REGISTERS the server in v.servers before returning that
 	// sentinel, so a cold spawn that merely outran the start grace has left a LIVE,
@@ -265,7 +277,7 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 //
 //   - TabSpawnBlocked: archive raises its fence (BeginArchive) and then MOVES the
 //     worktree. An editor started against the old path now serves bytes that are
-//     gone. ArchiveTeardown keeps the vscode tab (it is metadata-only, #1817), so
+//     gone. ArchiveTeardownWithClaim keeps the vscode tab (it is metadata-only, #1817), so
 //     the tab check alone says "still wanted" and cannot catch this. That was
 //     masked while archive still (wrongly) stripped the tab — the tab check
 //     returned false and stopped the editor BY ACCIDENT — so fixing the archive
@@ -321,9 +333,13 @@ func (m *Manager) requireCurrentVSCodeInstance(instance *session.Instance, key, 
 }
 
 func (m *Manager) stopVSCodeForInstance(key, instanceID string) error {
+	// Kill, archive and account swap all pass through here under the session's
+	// daemonInstanceKey; drop the session's cached relay transport with the
+	// editor so removed sessions do not accumulate them. It is rebuilt on demand.
+	m.evictRelayTransport(key)
 	err := m.vscode.stopForInstance(key, instanceID)
 	if err != nil {
-		log.WarningLog.Printf("vscode: could not determine or complete teardown for session id %q: %v", instanceID, err)
+		m.warn().Printf("vscode: could not determine or complete teardown for session id %q: %v", instanceID, err)
 	}
 	return err
 }

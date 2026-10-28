@@ -2,6 +2,7 @@ package overlay
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -10,12 +11,15 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"golang.org/x/text/unicode/norm"
 )
 
 // SearchResult holds a matched instance.
 type SearchResult struct {
 	Instance *session.Instance
+	rank     searchTier
 }
 
 // SearchOverlay provides fuzzy search across sessions.
@@ -96,18 +100,11 @@ func (s *SearchOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 		if s.selectedIdx < len(s.results)-1 {
 			s.selectedIdx++
 		}
-	case tea.KeyBackspace:
-		if len(s.query) > 0 {
-			runes := []rune(s.query)
-			s.query = string(runes[:len(runes)-1])
+	default:
+		if query, ok := ui.EditLine(s.query, msg); ok && query != s.query {
+			s.query = query
 			s.updateResults()
 		}
-	case tea.KeySpace:
-		s.query += " "
-		s.updateResults()
-	case tea.KeyRunes:
-		s.query += string(msg.Runes)
-		s.updateResults()
 	}
 	return false
 }
@@ -116,10 +113,15 @@ func (s *SearchOverlay) updateResults() {
 	s.results = nil
 
 	for _, inst := range s.all {
-		if s.matches(inst, s.query) {
-			s.results = append(s.results, SearchResult{Instance: inst})
+		if rank := s.matchRank(inst); rank != tierNone {
+			s.results = append(s.results, SearchResult{Instance: inst, rank: rank})
 		}
 	}
+	// Reorder only: the match set is unchanged, and SliceStable keeps the
+	// incoming (sidebar) order inside a tier (#5299).
+	sort.SliceStable(s.results, func(i, j int) bool {
+		return s.results[i].rank < s.results[j].rank
+	})
 
 	// Clamp selection
 	if s.selectedIdx >= len(s.results) {
@@ -130,13 +132,102 @@ func (s *SearchOverlay) updateResults() {
 	}
 }
 
-func (s *SearchOverlay) matches(inst *session.Instance, query string) bool {
-	if query == "" {
+// matchRank returns the strongest tier inst earns against the query on either
+// its title or its branch, or tierNone when neither matches at all.
+func (s *SearchOverlay) matchRank(inst *session.Instance) searchTier {
+	rank := searchTierOf(s.query, inst.Title)
+	if branchRank := searchTierOf(s.query, inst.GetBranch()); branchRank < rank {
+		rank = branchRank
+	}
+	return rank
+}
+
+// searchTier orders matches by how the query sits inside the candidate: an
+// exact match outranks a prefix, which outranks a contiguous substring (at a
+// word boundary or mid-word), which outranks a scattered subsequence (#5299).
+type searchTier int
+
+const (
+	tierExact searchTier = iota
+	tierPrefix
+	tierSubstring
+	tierScattered
+	tierNone
+)
+
+// searchTierOf classifies the match between pattern and str, using the same
+// NFC normalization and per-rune case folding as fuzzyMatch so ranking never
+// disagrees with the match test. An empty pattern returns one tier for every
+// candidate — including the empty string — so an empty query can never
+// reorder the list: uniform tiers plus the stable sort preserve the old
+// "empty query lists everything in sidebar order" behaviour.
+func searchTierOf(pattern, str string) searchTier {
+	patternRunes := []rune(norm.NFC.String(pattern))
+	if len(patternRunes) == 0 {
+		return tierPrefix
+	}
+	strRunes := []rune(norm.NFC.String(str))
+	switch {
+	case foldEqual(strRunes, patternRunes):
+		return tierExact
+	case foldHasPrefix(strRunes, patternRunes):
+		return tierPrefix
+	case foldContains(strRunes, patternRunes):
+		return tierSubstring
+	case subsequenceMatch(patternRunes, strRunes):
+		return tierScattered
+	default:
+		return tierNone
+	}
+}
+
+// foldEqual reports whether two rune slices are equal under per-rune case
+// folding.
+func foldEqual(a, b []rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !runeEqualFold(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// foldHasPrefix reports whether str starts with prefix under per-rune case
+// folding.
+func foldHasPrefix(str, prefix []rune) bool {
+	return len(prefix) <= len(str) && foldEqual(str[:len(prefix)], prefix)
+}
+
+// foldContains reports whether sub appears contiguously in str under per-rune
+// case folding.
+func foldContains(str, sub []rune) bool {
+	for i := 0; i+len(sub) <= len(str); i++ {
+		if foldEqual(str[i:i+len(sub)], sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// subsequenceMatch reports whether all runes in pattern appear in str in
+// order, under per-rune case folding.
+func subsequenceMatch(pattern, str []rune) bool {
+	if len(pattern) == 0 {
 		return true
 	}
-
-	// Simple fuzzy: check if all query chars appear in order in the title or branch
-	return fuzzyMatch(query, inst.Title) || fuzzyMatch(query, inst.GetBranch())
+	pIdx := 0
+	for _, r := range str {
+		if runeEqualFold(r, pattern[pIdx]) {
+			pIdx++
+			if pIdx == len(pattern) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // fuzzyMatch returns true if all runes in pattern appear in str in order,
@@ -144,20 +235,7 @@ func (s *SearchOverlay) matches(inst *session.Instance, query string) bool {
 // equivalent input (e.g. a decomposed "é" typed on macOS vs a composed one
 // from copy-paste) still matches.
 func fuzzyMatch(pattern, str string) bool {
-	patternRunes := []rune(norm.NFC.String(pattern))
-	if len(patternRunes) == 0 {
-		return true
-	}
-	pIdx := 0
-	for _, r := range norm.NFC.String(str) {
-		if runeEqualFold(r, patternRunes[pIdx]) {
-			pIdx++
-			if pIdx == len(patternRunes) {
-				return true
-			}
-		}
-	}
-	return false
+	return subsequenceMatch([]rune(norm.NFC.String(pattern)), []rune(norm.NFC.String(str)))
 }
 
 // runeEqualFold reports whether two runes are equal under Unicode simple
@@ -195,10 +273,7 @@ type searchRenderPlan struct {
 }
 
 func searchOverlayStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.CurrentTheme().Accent).
-		Padding(1, 2)
+	return ui.DialogStyle()
 }
 
 func (s *SearchOverlay) renderPlan(style lipgloss.Style) searchRenderPlan {
@@ -253,18 +328,20 @@ func (s *SearchOverlay) renderPlan(style lipgloss.Style) searchRenderPlan {
 
 // Render renders the search overlay.
 func (s *SearchOverlay) Render() string {
+	frame, _, _ := s.renderFrame()
+	return frame
+}
+
+// renderFrame returns the exact first result row along with the same plan that
+// painted it; pointer zones never infer row identity from user-controlled text.
+func (s *SearchOverlay) renderFrame() (string, int, searchRenderPlan) {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Purple)
-	statusRunning := lipgloss.NewStyle().Foreground(t.Success)
-	statusReady := lipgloss.NewStyle().Foreground(t.Warning)
-	statusLoading := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	// statusLimit marks a usage-limit-blocked result (#1146) with a distinct
-	// warning red + diamond glyph so it never reads as a live Running/Ready dot.
-	statusLimit := lipgloss.NewStyle().Foreground(t.Error)
+	titleStyle := ui.DialogTitleStyle()
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := ui.DialogHintStyle()
+	overflowStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
 
 	style := searchOverlayStyle()
 	plan := s.renderPlan(style)
@@ -283,81 +360,78 @@ func (s *SearchOverlay) Render() string {
 		if s.query == "" {
 			lines = append(lines, truncateOverlayLine(normalStyle.Render("  type to search…"), plan.contentWidth))
 		} else {
-			lines = append(lines, truncateOverlayLine(normalStyle.Render("  no matches found"), plan.contentWidth))
+			lines = append(lines, truncateOverlayLine(normalStyle.Render("  No matches found"), plan.contentWidth))
 		}
 	}
 
 	if plan.showAbove {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(
+		lines = append(lines, truncateOverlayLine(overflowStyle.Render(
 			fmt.Sprintf("    … %d more above", plan.startIdx)), plan.contentWidth))
 	}
 
+	firstResultLine := len(lines)
 	for i := plan.startIdx; i < plan.endIdx; i++ {
 		r := s.results[i]
 
-		// Status indicator. Two axes (#1195): a create in flight reads as loading;
-		// otherwise a total switch over the liveness — every value explicit (incl.
-		// LimitReached, #1146, which gets its own red diamond so it never reads as a
-		// live dot), no silent default. Running/Ready get the filled dot; every
-		// other liveness gets the hollow ○.
-		var statusStr string
-		switch {
-		case r.Instance.GetInFlightOp() == session.OpCreating:
-			statusStr = statusLoading.Render("○")
-		case r.Instance.GetInFlightOp() != session.OpNone:
-			// A kill/archive teardown in flight — going away.
-			statusStr = normalStyle.Render("○")
-		default:
+		// Working, in-flight and unset states reserve a blank status cell.
+		// Otherwise use the fixed liveness glyph, independent of colour.
+		statusStyle := lipgloss.NewStyle().Foreground(t.Ink)
+		glyph := " "
+		if r.Instance.GetInFlightOp() == session.OpNone {
 			switch r.Instance.GetLiveness() {
-			case session.LiveRunning:
-				statusStr = statusRunning.Render("●")
+			case session.LiveRunning, session.LivenessUnset:
 			case session.LiveReady:
-				statusStr = statusReady.Render("●")
+				glyph, statusStyle = "●", statusStyle.Foreground(t.Ready)
 			case session.LiveLimitReached:
-				// A usage-limit-blocked session (#1146) gets a distinct red diamond
-				// so "blocked on limit" never reads as a live/gone dot.
-				statusStr = statusLimit.Render("◆")
-			case session.LiveLost, session.LiveDead, session.LiveArchived,
-				session.LivenessUnset:
-				statusStr = normalStyle.Render("○")
+				glyph, statusStyle = "◆", statusStyle.Foreground(t.LimitReached)
+			case session.LiveLost:
+				glyph, statusStyle = "◌", statusStyle.Foreground(t.Lost)
+			case session.LiveDead:
+				glyph, statusStyle = "○", statusStyle.Foreground(t.Dead)
+			case session.LiveArchived:
+				glyph, statusStyle = "▧", statusStyle.Foreground(t.Archived)
 			}
 		}
+		if i == s.selectedIdx {
+			statusStyle = statusStyle.Background(t.SurfaceRaised)
+		}
+		statusStr := statusStyle.Render(glyph + " ")
 
 		label := r.Instance.Title
 		branch := r.Instance.GetBranch()
 		if branch != "" {
-			label += normalStyle.Render(" (" + branch + ")")
+			label += hintStyle.Render(" (" + branch + ")")
 		}
 
 		if i == s.selectedIdx {
-			line := "  " + statusStr + " " + selectedStyle.Render("▸ "+r.Instance.Title)
+			line := "  " + statusStr + ui.SelectionMarker("▸ ") + selectedStyle.Render(r.Instance.Title)
 			if branch != "" {
-				line += normalStyle.Render(" (" + branch + ")")
+				line += selectedStyle.Render(" (" + branch + ")")
 			}
 			lines = append(lines, truncateOverlayLine(line, plan.contentWidth))
 		} else {
-			lines = append(lines, truncateOverlayLine("  "+statusStr+" "+normalStyle.Render("  "+label), plan.contentWidth))
+			lines = append(lines, truncateOverlayLine("  "+statusStr+normalStyle.Render("  "+label), plan.contentWidth))
 		}
 	}
 
 	if plan.showBelow {
 		remaining := len(s.results) - plan.endIdx
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(
+		lines = append(lines, truncateOverlayLine(overflowStyle.Render(
 			fmt.Sprintf("    … and %d more below", remaining)), plan.contentWidth))
 	}
 
 	if !plan.compact {
 		lines = append(lines, "")
 	}
-	hint := "↑/↓ navigate · enter select · esc close"
-	if plan.compact || lipgloss.Width(hint) > plan.contentWidth {
+	hint := "↑/↓ select · enter select · esc close"
+	if plan.compact || layout.Cells(hint) > plan.contentWidth {
 		hint = "↑/↓ nav · enter · esc close"
 	}
-	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), plan.contentWidth))
+	lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), plan.contentWidth))
 
 	style = style.Width(plan.styleWidth)
 	if plan.styleHeight > 0 && len(lines) >= plan.contentHeight {
 		style = style.Height(plan.styleHeight)
 	}
-	return style.Render(strings.Join(lines, "\n"))
+	return ui.RenderDialog(style, strings.Join(lines, "\n")), style.GetBorderTopSize() + style.GetPaddingTop() + firstResultLine, plan
 }

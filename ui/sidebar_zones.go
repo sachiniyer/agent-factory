@@ -51,7 +51,7 @@ func (s *Sidebar) registerZones(heights []int, start, end int, topIndicator bool
 				// expand/collapse arrow — only live, expandable rows do.
 				s.zones.Register(zones.TreeInstance(inst.Title), row)
 				if item.Kind == SectionInstances {
-					if ax, ay, ok := tree.ArrowCell(s.contentWidth()); ok && tree.Expandable(inst) && ay < h {
+					if ax, ay, ok := tree.ArrowCell(s.contentWidth(), i == s.selectedIdx || s.instanceExpanded(inst)); ok && tree.Expandable(inst) && ay < h {
 						s.zones.Register(zones.TreeArrow(inst.Title),
 							layout.Rect{X: s.rect.X + ax, Y: y + ay, W: 1, H: 1})
 					}

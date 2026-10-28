@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -44,17 +46,36 @@ type ProjectConfig struct {
 	// ProgramOverrides entries merge key-wise over the lower layers: a key set
 	// here wins for that agent, other agents' entries still apply.
 	ProgramOverrides map[string]string `toml:"program_overrides,omitempty"`
-	// BranchPrefix overrides the git branch prefix for this project's sessions.
+	// DefaultAccounts names, per agent, the credential account this project's
+	// sessions run as when the create names none (#3386). Entries merge key-wise
+	// over the global map exactly as ProgramOverrides does, so scoping one agent
+	// here leaves the others on whatever the global layer said.
+	//
+	// This is the layer the feature exists for: an account is a personal identity,
+	// so "this project runs as my work codex" is a statement about one machine and
+	// one person, never about the repository.
+	DefaultAccounts map[string]string `toml:"default_accounts,omitempty"`
+	// BranchPrefix stays decodable so a stored per-project value keeps this
+	// file valid, but it is NOT applied (#4539): the manifest gives
+	// branch_prefix global-only precedence, so the field never wins resolution
+	// and branch names always come from the global prefix.
 	BranchPrefix string `toml:"branch_prefix,omitempty"`
 	// OnArchiveCommand overrides the operator-authored archive hook for this
 	// project. This file is machine-local under the AF home, never checked in.
 	OnArchiveCommand string `toml:"on_archive_command,omitempty"`
+	// LimitAccountCandidates replaces the global account-swap candidate list for
+	// this project. It is machine-local identity policy, never checked in.
+	LimitAccountCandidates []string `toml:"limit_account_candidates,omitempty"`
 	// RootAgent is the personal per-project root-agent profile (#2216 Phase 6):
 	// whether THIS project keeps an always-ensured root session on this machine,
 	// and the command it runs. It is the highest-precedence root-agent layer, so
 	// it can enable, disable, or reprogram a root the global default or a legacy
 	// root_agents entry set — see config.ResolveRootAgent.
 	RootAgent RootAgent `toml:"root_agent,omitempty"`
+
+	// unknownLeaves lists the [root_agent] leaves the typed decode dropped
+	// because no RootAgent field matches them; see UnknownLeaves.
+	unknownLeaves []InRepoUnknownLeaf
 
 	// setKeys records which top-level keys were present in the file so the
 	// resolver can distinguish "set to an empty value" from "absent", exactly as
@@ -83,11 +104,42 @@ func (c *ProjectConfig) RootAgentLayer() *RootAgentLayer {
 	return rootAgentLayerFromShape(c.RootAgent, shape)
 }
 
+// UnknownLeaves reports the [root_agent] leaves the personal config's typed
+// decode dropped because no RootAgent field matches them, sorted by table then
+// key. Empty for a clean file. Mirrors InRepoConfig.UnknownLeaves so af doctor
+// and tests can list personal unknown leaves the same way they list in-repo
+// [docker]/[ssh] ones; unlike the warning, which is emitted once per process,
+// this is reported on every load.
+func (c *ProjectConfig) UnknownLeaves() []InRepoUnknownLeaf {
+	if c == nil {
+		return nil
+	}
+	return append([]InRepoUnknownLeaf(nil), c.unknownLeaves...)
+}
+
 // projectPersonalAllowedKeys is the manifest-derived allowlist of keys a
 // personal project file may declare — the single source of truth, exactly like
 // inRepoAllowedKeys. Adding SourceProjectPersonal to a manifest entry admits its
 // key here with no second list to maintain.
 var projectPersonalAllowedKeys = manifestKeysForSource(SourceProjectPersonal)
+
+// projectPersonalAllowedTableLeaves mirrors inRepoAllowedTableLeaves for the
+// structured [root_agent] table this loader admits. root_agent is the only
+// structured (struct-typed) table whose Sources admit SourceProjectPersonal —
+// program_overrides and default_accounts are free-form maps keyed by agent
+// name, so their leaves are dynamic, not struct fields — so this map has one
+// entry. The set is derived from RootAgent's struct tags the same way
+// inRepoAllowedTableLeaves derives DockerConfig/SSHConfig leaves, so adding a
+// field to RootAgent automatically admits it here. An unknown/typo'd leaf
+// (e.g. "enabld" for "enabled") earns a loud warn-only warning in
+// parseProjectConfig via the shared #4599 warnUnknownTableLeaf machinery,
+// matching the in-repo [docker]/[ssh] surface and the global strict probe —
+// before this map existed a typo'd leaf was silently dropped with no
+// diagnostic on the one root-agent surface (personal) that has no other
+// leaf-validation path.
+var projectPersonalAllowedTableLeaves = map[string]map[string]bool{
+	"root_agent": tableLeavesForType(reflect.TypeOf(RootAgent{})),
+}
 
 // projectDir returns the per-project directory <AF home>/<registry>/<id>,
 // validating the id first so it is always safe as a path component.
@@ -130,7 +182,21 @@ func LoadProjectConfig(id string) (*ProjectConfig, error) {
 		}
 		return nil, fmt.Errorf("failed to read personal project config %s: %w", prettyHomePath(path), err)
 	}
-	return parseProjectConfig(data, path)
+	cfg, err := parseProjectConfig(data, path)
+	if err != nil {
+		return nil, err
+	}
+	// A stored per-project branch_prefix is inert until #4539 — say so once per
+	// file per process rather than on every daemon-driven reload. Not every
+	// consumer resolves (the daemon's root-agent snapshot reads this file
+	// directly), so the warning lives at the load itself; the global value it
+	// names comes from a strictly read-only load, never a materializing one.
+	// The resolver is passed lazily so the once-per-file memo answers before a
+	// repeated load re-reads the global config (#5026).
+	if cfg.IsSet("branch_prefix") {
+		warnProjectBranchPrefixIgnored(path, globalBranchPrefixForLoadWarning)
+	}
+	return cfg, nil
 }
 
 // parseProjectConfig decodes and validates personal-project TOML bytes. It is
@@ -163,6 +229,42 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 		}
 	}
 
+	// Warn on unknown/typo'd leaves under the personal [root_agent] table —
+	// the same #4599 machinery the in-repo loader uses for [docker]/[ssh].
+	// The top-level allowlist above admits [root_agent], but the typed decode
+	// below uses Go's non-strict unmarshalling, which silently discards any
+	// leaf not on RootAgent. A hand-edited `enabld = true` or
+	// `prograam = 'claude'` would otherwise parse with err = nil and yield a
+	// present-but-contributing-nothing layer (EnabledSet=false, zero-value
+	// profile) with no diagnostic: the global root-agent surface already
+	// warns via its strict DisallowUnknownFields probe, and root_agent admits
+	// no in-repo layer, so the personal layer was the only root-agent surface
+	// with no leaf-level check. Walk the shape's [root_agent] sub-table and
+	// warn via warnUnknownTableLeaf for any leaf not in the struct-tag-derived
+	// allowlist. Per the owner's "warn now, reject later" decision the config
+	// still loads; only the silent drop of genuine typos is removed. The
+	// memoized one-per-(file,table,leaf) warning avoids repeating on the
+	// daemon's repeated loads. Case folding matches the typed decoder: the
+	// shape key's casing is preserved from the file, the lookup lowercases
+	// it so a spelling the decode accepts (e.g. Enabled) loads cleanly and
+	// the warning lands on genuine typos (e.g. "enabld", "prograam").
+	var unknownLeaves []InRepoUnknownLeaf
+	for table, allowed := range projectPersonalAllowedTableLeaves {
+		raw, present := metadata.shape[table]
+		if !present {
+			continue
+		}
+		sub, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		for leaf := range sub {
+			if !allowed[strings.ToLower(leaf)] {
+				unknownLeaves = append(unknownLeaves, warnUnknownTableLeaf("personal project config", "personal", prettyPath, table, leaf, allowed))
+			}
+		}
+	}
+
 	var cfg ProjectConfig
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return nil, tomlParseError("personal project config "+prettyPath, err)
@@ -173,6 +275,7 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 	}
 	cfg.setKeys = presentKeys
 	cfg.source = metadata
+	cfg.unknownLeaves = sortInRepoUnknownLeaves(unknownLeaves)
 
 	if cfg.IsSet("default_program") {
 		if err := ValidateProgramEnum(
@@ -194,6 +297,27 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 			return nil, err
 		}
 	}
+
+	if err := validateDefaultAccounts(
+		fmt.Sprintf("Config issue in %s", prettyPath), cfg.DefaultAccounts); err != nil {
+		return nil, err
+	}
+
+	// The same shape warning (#3566), beside the same key check above. This layer
+	// admits program_overrides and its own on_archive_command, and sits ABOVE the
+	// in-repo file in precedence — so when it sets a key, its value is the one
+	// that actually runs, and this is the warning the operator needs.
+	shellValues := shellValueSet{}
+	shellValues.addMap("program_overrides", cfg.ProgramOverrides, nil, "")
+	shellValues.add("on_archive_command", cfg.OnArchiveCommand)
+	shellValues.add("root_agent.program", cfg.RootAgent.Program)
+	shellValues.warnExecSeparator(prettyPath)
+
+	normalizedCandidates, err := normalizeLimitAccountCandidates(cfg.LimitAccountCandidates)
+	if err != nil {
+		return nil, fmt.Errorf("Config issue in %s: %w", prettyPath, err)
+	}
+	cfg.LimitAccountCandidates = normalizedCandidates
 	return &cfg, nil
 }
 
@@ -217,23 +341,111 @@ func projectForRoot(root string) (Project, bool, error) {
 // checkout marker. Bare linked worktrees share the common directory that owns
 // that marker, while two clones at the same path have different markers.
 func projectForRepo(repo *RepoContext) (Project, bool, error) {
+	return projectForRepoContext(context.Background(), repo)
+}
+
+func projectForRepoContext(ctx context.Context, repo *RepoContext) (Project, bool, error) {
 	if repo == nil {
 		return Project{}, false, nil
 	}
-	return projectForWorkspace(repo.WorkspacePath())
+	return projectForWorkspaceContext(ctx, repo.WorkspacePath())
+}
+
+// projectRegistryReadError distinguishes an unreadable registry (which ordinary
+// config resolution may degrade for compatibility) from a checkout-identity
+// probe that failed. The latter is an unknown answer and must propagate.
+type projectRegistryReadError struct {
+	err error
+}
+
+func (e *projectRegistryReadError) Error() string { return "read project registry: " + e.err.Error() }
+func (e *projectRegistryReadError) Unwrap() error { return e.err }
+
+func isProjectRegistryReadError(err error) bool {
+	var target *projectRegistryReadError
+	return errors.As(err, &target)
+}
+
+// checkoutMarkerProbeError preserves an UNKNOWN checkout-identity observation
+// through the project lookup instead of collapsing it into marker absence.
+type checkoutMarkerProbeError struct {
+	err        error
+	completion <-chan struct{}
+}
+
+func (e *checkoutMarkerProbeError) Error() string { return e.err.Error() }
+func (e *checkoutMarkerProbeError) Unwrap() error { return e.err }
+
+// CheckoutMarkerProbeCompletion returns the completion of an uncancellable
+// checkout-marker read that outlived its caller's deadline. A long-lived
+// caller can retain its own single-flight until this closes; nil means no read
+// remains in flight.
+func CheckoutMarkerProbeCompletion(err error) <-chan struct{} {
+	var target *checkoutMarkerProbeError
+	if errors.As(err, &target) {
+		return target.completion
+	}
+	return nil
+}
+
+type checkoutMarkerReadResult struct {
+	id     string
+	exists bool
+	err    error
+}
+
+type checkoutMarkerReadFlight struct {
+	done              chan struct{}
+	result            checkoutMarkerReadResult
+	beforeWakeForTest func()
+}
+
+// checkoutMarkerReadFlights bounds an unavailable marker path to one
+// uncancellable os.ReadFile. Callers may time out independently, but a later
+// probe joins the parked read instead of stranding another goroutine.
+var checkoutMarkerReadFlights sync.Map
+
+func checkoutMarkerRead(path string) *checkoutMarkerReadFlight {
+	flight := &checkoutMarkerReadFlight{done: make(chan struct{})}
+	actual, loaded := checkoutMarkerReadFlights.LoadOrStore(path, flight)
+	if loaded {
+		return actual.(*checkoutMarkerReadFlight)
+	}
+	go completeCheckoutMarkerRead(path, flight)
+	return flight
+}
+
+func completeCheckoutMarkerRead(path string, flight *checkoutMarkerReadFlight) {
+	flight.result.id, flight.result.exists, flight.result.err = readCheckoutID(path)
+	// Remove the completed result before publishing it. A waiter awakened by
+	// done may immediately re-probe after a checkout replacement; leaving this
+	// flight discoverable until after close would let that revalidation consume
+	// the old checkout's marker result.
+	checkoutMarkerReadFlights.CompareAndDelete(path, flight)
+	if flight.beforeWakeForTest != nil {
+		flight.beforeWakeForTest()
+	}
+	close(flight.done)
 }
 
 func projectForWorkspace(root string) (Project, bool, error) {
+	return projectForWorkspaceContext(context.Background(), root)
+}
+
+func projectForWorkspaceContext(parent context.Context, root string) (Project, bool, error) {
 	if root == "" {
 		return Project{}, false, nil
 	}
 	projects, err := listProjectsWithoutRootProbes()
 	if err != nil {
+		return Project{}, false, &projectRegistryReadError{err: err}
+	}
+	ctx, cancel := context.WithTimeout(parent, registeredProjectScanTimeout)
+	defer cancel()
+	checkoutID, ok, err := checkoutIDForWorkspaceContext(ctx, root)
+	if err != nil {
 		return Project{}, false, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
-	defer cancel()
-	checkoutID, ok := checkoutIDForWorkspaceContext(ctx, root)
 	if !ok {
 		return Project{}, false, nil
 	}
@@ -269,41 +481,60 @@ func listProjectsWithoutRootProbes() ([]Project, error) {
 	return projects, nil
 }
 
-func checkoutIDForWorkspaceContext(parent context.Context, root string) (string, bool) {
+func checkoutIDForWorkspaceContext(parent context.Context, root string) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--git-common-dir")
-	cmd.WaitDelay = repoGitWaitDelay
+	// This probe runs under registeredProjectProbeTimeout inside the scan's own
+	// budget, so its drain allowance is derived from that deadline rather than
+	// from the unbounded default (#3503).
+	cmd.WaitDelay = repoProbeWaitDelay(ctx)
 	out, err := cmd.Output()
 	if err != nil {
-		return "", false
+		return "", false, checkoutMarkerProbeFailure(ctx, root, err)
 	}
 	commonDir := trimGitOutputLine(out)
 	if commonDir == "" || strings.Contains(commonDir, "\n") {
-		return "", false
+		return "", false, nil
 	}
 	if !filepath.IsAbs(commonDir) {
 		commonDir = filepath.Join(root, commonDir)
 	}
 	markerName, err := checkoutMarkerName()
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
-	type markerResult struct {
-		id     string
-		exists bool
-		err    error
-	}
-	result := make(chan markerResult, 1)
-	go func() {
-		id, exists, err := readCheckoutID(filepath.Join(commonDir, checkoutMarkerDirName, markerName))
-		result <- markerResult{id: id, exists: exists, err: err}
-	}()
+	flight := checkoutMarkerRead(filepath.Join(commonDir, checkoutMarkerDirName, markerName))
 	select {
-	case marker := <-result:
-		return marker.id, marker.exists && marker.err == nil
+	case <-flight.done:
+		marker := flight.result
+		if marker.err != nil {
+			return "", false, &checkoutMarkerProbeError{err: marker.err}
+		}
+		return marker.id, marker.exists, nil
 	case <-ctx.Done():
-		return "", false
+		// Prefer a completed read when it raced the deadline. Only a reader that
+		// is still alive belongs in the error's completion handle.
+		select {
+		case <-flight.done:
+			marker := flight.result
+			if marker.err != nil {
+				return "", false, &checkoutMarkerProbeError{err: marker.err}
+			}
+			return marker.id, marker.exists, nil
+		default:
+			return "", false, &checkoutMarkerProbeError{
+				err:        fmt.Errorf("read checkout marker for %s: %w", root, ctx.Err()),
+				completion: flight.done,
+			}
+		}
+	}
+}
+
+func checkoutMarkerProbeFailure(ctx context.Context, root string, err error) error {
+	classified := markUnansweredProbe(ctx, err)
+	return &checkoutMarkerProbeError{
+		err: fmt.Errorf("inspect checkout marker location for %s: %w", root, classified),
 	}
 }
 
@@ -312,32 +543,73 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 // checkout marker still matches. It rejects upward resolution after a nested
 // checkout disappears and replacement checkouts at a reused path.
 func ResolveRegisteredProjectRepoID(parent context.Context, project Project) (string, bool) {
+	repo, ok := ResolveRegisteredProjectRepo(parent, project)
+	if !ok {
+		return "", false
+	}
+	return repo.ID, true
+}
+
+// ResolveRegisteredProjectRepo returns the complete repository context for a
+// durable project only when the exact registered workspace and checkout marker
+// still agree. Keeping the identity root with the ID matters for bare
+// repositories addressed through linked worktrees.
+func ResolveRegisteredProjectRepo(parent context.Context, project Project) (*RepoContext, bool) {
+	if registeredProjectProofRaceHookForTest != nil {
+		registeredProjectProofRaceHookForTest()
+	}
 	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
 	defer cancel()
 	root := project.Root
 	repo, err := RepoFromPathContext(ctx, root)
 	if err != nil {
-		return "", false
+		return nil, false
 	}
 	// A registered root is identity evidence only when Git still recognizes that
 	// exact workspace. If a nested checkout disappears, resolving its old path
 	// may discover an enclosing repository; never lend the nested registration's
 	// personal config to that ancestor.
 	if filepath.Clean(repo.WorkspacePath()) != filepath.Clean(root) {
-		return "", false
+		return nil, false
 	}
-	checkoutID, ok := checkoutIDForWorkspaceContext(ctx, root)
+	checkoutID, ok, err := checkoutIDForWorkspaceContext(ctx, root)
+	if err != nil {
+		return nil, false
+	}
 	if !ok || checkoutID != project.CheckoutID {
-		return "", false
+		return nil, false
 	}
-	return repo.ID, true
+	return repo, true
+}
+
+// WithProjectConfigLockForRoot runs fn while holding the personal config file
+// lock for the registered project rooted at root. An unregistered root has no
+// supported personal-project writer, so fn runs without a lock. Registry,
+// checkout-identity, and lock failures are returned before fn runs.
+//
+// Identity-changing operations use this to keep their final personal-policy
+// read and durable identity checkpoint atomic with af config set/unset
+// --project. The ordinary resolver intentionally remains a point-in-time read.
+func WithProjectConfigLockForRoot(root string, fn func() error) error {
+	project, found, err := projectForRoot(root)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fn()
+	}
+	path, err := ProjectConfigTomlPath(project.ID)
+	if err != nil {
+		return err
+	}
+	return WithFileLock(path, fn)
 }
 
 // ResolveProjectSelector resolves a `--project` selector — a prj_ id or a
 // filesystem path — to a registered project. It never registers or mutates: a
 // path is normalized to its canonical checkout root (so any subdirectory selects
 // the whole project) and matched against the registry read-only. An unregistered
-// or unknown target is an actionable error naming `af projects register`, never
+// or unknown target is an actionable error naming `af projects add`, never
 // a silent fall-through to the global value.
 func ResolveProjectSelector(selector string) (Project, error) {
 	if strings.TrimSpace(selector) == "" {
@@ -357,6 +629,9 @@ func ResolveProjectSelector(selector string) (Project, error) {
 	}
 	binding, err := resolveProjectBinding(selector)
 	if err != nil {
+		if RepoProbeUnanswered(err) {
+			return Project{}, fmt.Errorf("%q is not a registered project, and %s: %w", selector, RepoProbeUnansweredClaim("the path", selector), err)
+		}
 		return Project{}, fmt.Errorf("%q is not a registered project and is not inside a git repository: %w", selector, err)
 	}
 	for _, p := range projects {
@@ -364,6 +639,35 @@ func ResolveProjectSelector(selector string) (Project, error) {
 			return p, nil
 		}
 	}
-	return Project{}, fmt.Errorf("%s is not a registered project — run `af projects register %s` first, then set per-project config",
+	checkoutID, markerExists, err := readCheckoutID(binding.checkoutMarkerPath)
+	if err != nil {
+		return Project{}, err
+	}
+	if markerExists {
+		for _, p := range projects {
+			if sameProjectIdentity(checkoutID, binding.relativeRoot, p.CheckoutID, p.RelativeRoot) {
+				if !projectRootUsesGitCommonDir(p.Root, binding.gitCommonDir) {
+					return Project{}, fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, p.Root, binding.root)
+				}
+				return p, nil
+			}
+		}
+	}
+	return Project{}, fmt.Errorf("%s is not a registered project — run `af projects add %s` first, then set per-project config",
 		binding.root, selector)
+}
+
+// registeredProjectProofRaceHookForTest, when non-nil, runs at the top of
+// ResolveRegisteredProjectRepoID. Its callers resolve the same path a moment
+// earlier, and the window between those two probes is where the same MARKED
+// checkout can come to resolve under a different identity — its common
+// directory moved (#3530 review id 3919604357). Nothing else can hold that
+// window open.
+var registeredProjectProofRaceHookForTest func()
+
+// SetRegisteredProjectProofRaceHookForTest installs hook for the duration of a
+// test in another package, and clears it afterwards.
+func SetRegisteredProjectProofRaceHookForTest(t interface{ Cleanup(func()) }, hook func()) {
+	registeredProjectProofRaceHookForTest = hook
+	t.Cleanup(func() { registeredProjectProofRaceHookForTest = nil })
 }

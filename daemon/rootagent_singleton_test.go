@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -99,7 +97,7 @@ func TestEnsureRootAgentsSingletonOnlyProjectMaterializes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("a singleton-only project must materialize a root, got %d creates", len(*seen))
@@ -133,7 +131,7 @@ func TestEnsureRootAgentsGlobalEnablesRegisteredProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("a global enabled=true must fan out to the registered project, got %d creates", len(*seen))
@@ -165,7 +163,7 @@ func TestEnsureRootAgentsPersonalDisablesLegacyRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 0 {
 		t.Fatalf("a personal enabled=false must disable a legacy-enabled root, got %d creates", len(*seen))
@@ -281,18 +279,13 @@ func TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed(t *testing.T) {
 			writePersonalRootAgent(t, project.ID, "enabled = false")
 			tc.corrupt(t, project.ID)
 
-			// The fail-closed WARNING fires from the snapshot inside NewManager,
-			// so the capture goes in first (httpserver_test.go idiom).
-			var warnings bytes.Buffer
-			prevWarning := log.WarningLog.Writer()
-			log.WarningLog.SetOutput(&warnings)
-			t.Cleanup(func() { log.WarningLog.SetOutput(prevWarning) })
-
-			manager, err := NewManager(tc.managerConfig(t, repoPath))
-			if err != nil {
-				t.Fatalf("NewManager: %v", err)
-			}
-			manager.EnsureRootAgents()
+			// The fail-closed WARNING fires from the snapshot inside NewManager, so
+			// the logger is installed by the CONSTRUCTOR rather than captured around
+			// it — and it is this Manager's own, not the process-global one, so the
+			// assertion below cannot be satisfied by a warning another test's
+			// Manager emitted (#3787 part 2).
+			manager, warnings := newManagerCapturingWarnings(t, tc.managerConfig(t, repoPath))
+			manager.ensureRootAgentsAndWait()
 
 			if len(*seen) != 0 {
 				t.Fatalf("an unloadable personal config must fail closed, got %d creates — a failed load is not an absent enabled=false", len(*seen))
@@ -395,18 +388,14 @@ func TestEnsureRootAgentsUnlistableRegistryFailsClosed(t *testing.T) {
 			cfg := tc.setup(t, repoPath)
 			breakProjectRegistryEnumeration(t)
 
-			// The fail-closed ERROR fires from the snapshot inside NewManager,
-			// so the capture goes in first (httpserver_test.go idiom).
-			var errorLog bytes.Buffer
-			prevError := log.ErrorLog.Writer()
-			log.ErrorLog.SetOutput(&errorLog)
-			t.Cleanup(func() { log.ErrorLog.SetOutput(prevError) })
-
-			manager, err := NewManager(cfg)
-			if err != nil {
-				t.Fatalf("NewManager: %v", err)
-			}
-			manager.EnsureRootAgents()
+			// The fail-closed ERROR fires from the snapshot inside NewManager, so
+			// the logger is installed by the CONSTRUCTOR rather than captured
+			// around it — and it is this Manager's own, so the assertion below
+			// cannot be satisfied by an error another test's Manager emitted
+			// (#3797).
+			manager, ownLogs := newManagerCapturingLogs(t, cfg)
+			errorLog := ownLogs.errors
+			manager.ensureRootAgentsAndWait()
 
 			if len(*seen) != 0 {
 				t.Fatalf("an unlistable project registry must fail every root agent closed, got %d creates — the registry is the only index of personal disables", len(*seen))
@@ -497,7 +486,7 @@ func TestEnsureRootAgentsUnresolvableProjectRootKeepsPersonalLayer(t *testing.T)
 			if err := os.Rename(hidden, repoPath); err != nil {
 				t.Fatalf("restore repo dir: %v", err)
 			}
-			manager.EnsureRootAgents()
+			manager.ensureRootAgentsAndWait()
 
 			if len(*seen) != tc.wantCreates {
 				t.Fatalf("want %d creates, got %d — a project unresolvable at snapshot time must keep its personal layer by recorded path", tc.wantCreates, len(*seen))
@@ -530,7 +519,7 @@ func TestEnsureRootAgentsLegacyOnlyUnchangedThroughResolver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("a legacy entry must still ensure a root through the resolver, got %d creates", len(*seen))
@@ -573,7 +562,7 @@ func TestRootAgentEnsureAndWillMaterializeAgree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	cases := []struct {
 		name        string

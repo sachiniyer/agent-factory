@@ -1,0 +1,24 @@
+                      ┌────────────────────────────────────────────────────────┐
+ Agent Factory        │                                                        │
+ ▼ Sessions (1)       │                                                        │
+  ▸  pending-sess… ●  │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │        No panes open — s opens the selected tab        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      │                                                        │
+                      └────────────────────────────────────────────────────────┘
+enter submit name · tab change program · shift+tab initial prompt ✓ · esc cancel
+

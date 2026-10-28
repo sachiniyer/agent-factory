@@ -36,10 +36,11 @@
 // 'unsafe-inline'` to permit them while keeping every FETCH same-origin — see
 // daemon/webserve.go.)
 
+import { TerminalKeybar } from "./terminal-keybar.js";
 import { FitAddon } from "@xterm/addon-fit";
 import { type IMarker, type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { handleClipboardKeydown, handleTerminalCopy } from "./clipboard.js";
+import { copyText, handleClipboardKeydown, handleTerminalCopy } from "./clipboard.js";
 import { decode, encode, inputFrame, Op, resizeFrame } from "./frame.js";
 import { MidLineHold, type HoldAction } from "./delivery_hold.js";
 import { PendingInput } from "./pending_input.js";
@@ -63,14 +64,20 @@ import {
   type TerminalWordRange,
   textFromCells,
   TOUCH_LONG_PRESS_MS,
-  touchHistoryScrollPlan,
   touchPressStillHeld,
   touchScrollClaimsGesture,
   wordRangeAtColumn,
   wrappedCellPosition,
 } from "./terminal-mouse.js";
+import { TouchScroll } from "./touch-scroll.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
+import { terminalSurface } from "./components.js";
 import { currentXtermTheme } from "./theme.js";
+import {
+  stepTerminalFontSize,
+  subscribeTerminalFontSizes,
+  terminalFontSizeFor,
+} from "./terminal-font.js";
 
 /** The attach terminal's connection state, surfaced for a small status line. */
 export type TerminalStatus = "connecting" | "open" | "reconnecting" | "exited";
@@ -110,9 +117,40 @@ const BACKOFF_MAX_MS = 10_000;
 // Debounce the fit→OpResize send so dragging a window edge sends one resize on
 // settle, not one per animation frame. The server echoes the winning size back.
 const RESIZE_DEBOUNCE_MS = 120;
+
+/** The timer twin every scheduled activation fit arms alongside its rAF. rAF
+ *  callbacks starve outright on a page the compositor has parked — exactly the
+ *  state a multi-client strand needs repair during — while timers still fire
+ *  (throttled, not dropped), so the reclaim cannot be lost with the frame. */
+const VISIBLE_FIT_TIMER_MS = 250;
+
+/** Bound on how many delivered attempts a scheduled fit may retry when xterm
+ *  cannot yet measure the host (metrics mid-invalidation, element mid-move).
+ *  The no-polling design still holds: a genuinely hidden pane reports settled
+ *  and the intersection observer owns its retry — this covers only a host that
+ *  HAS geometry whose measurement failed transiently. */
+const VISIBLE_FIT_MAX_ATTEMPTS = 60;
 // How many wrapped rows either side of the pressed one a long press will read. It
 // bounds work done synchronously in touchstart for EVERY touch; see snapshotPress.
 const TOUCH_PRESS_MAX_ROWS = 32;
+
+// The default cell pitch halves at the phone breakpoint (#5492): 13px gives a
+// ~390px viewport only ~50 columns, so agent TUIs wrap or truncate; at phone
+// pixel densities 6.5px stays legible. The breakpoint is the ONE the mobile
+// layout already uses — (max-width: 768px), the same media query ui.ts,
+// terminal-keybar.ts, and appbarControls() hold — so the terminal crosses
+// with the rest of the shell rather than on a width of its own.
+//
+// Since #5500 those defaults are only the fallback: the persisted
+// web.terminal_font_size_* config values (already landed by the time a
+// terminal is constructed — connect() awaits the config read) are what this
+// returns, and terminal-font.ts holds them and the shared subscription.
+
+/** The xterm font size for a viewport's device class — the persisted value,
+ *  or the #5492 defaults when the config carries none. */
+export function terminalFontSize(phone: boolean): number {
+  return terminalFontSizeFor(phone);
+}
 
 /** A long press resolved at touchstart: the flattened wrapped block, the index the
  *  finger landed on, and the grid it was all read against. */
@@ -133,6 +171,67 @@ interface PendingViewportAnchor {
   atBottom: boolean;
 }
 
+// Pointer-input design notes. The bundle is built unminified and ships comments
+// inside class bodies against the perf gzip budget (events.ts documents the same
+// convention), so the long explanations for the pointer handlers live here at
+// module level, where the bundler drops them; the members keep one-line
+// pointers.
+//
+// Touch scrolling (#2681/#2682/#4982): application mouse mode switches xterm's
+// OWN touch scrolling off — both of its touch listeners return early while
+// mouse events are active — and nothing takes over: the finger is on the
+// screen, and the .xterm-viewport holding the scrollback is that screen's
+// SIBLING, so the browser has no ancestor to pan. A phone loses scrollback
+// entirely the moment an agent enables mouse tracking, and unlike the wheel
+// (#2681) it has no modifier to escape with. So af scrolls history itself: on
+// the NORMAL buffer a claimed one-finger drag moves xterm's scrollback
+// (touchScrollClaimsGesture, sub-row travel carried in
+// scrollRem). The drag is terminal-owned, the tap still reaches the
+// application — only the move is ever cancelled, never the touchstart a tap's
+// compatibility mouse events depend on.
+//
+// On the ALTERNATE buffer there is no scrollback for that path to move, so when
+// the application owns the wheel — applicationOwnsWheel: VT200, drag, or
+// any-event, never DECSET 9/X10 which cannot report wheel — the claimed drag is
+// delivered to the application as wheel reports instead, one report per whole
+// line of travel (#4982). The reports are NOT encoded here: reportTouchWheel
+// dispatches one synthetic WheelEvent per line — deltaMode DOM_DELTA_LINE,
+// coordinates at the finger — on term.element, where xterm bound its reporting
+// wheel listener for the active protocol. The bytes therefore travel the same
+// sendEvent → CoreMouseService.triggerMouseEvent chain a real wheel takes:
+// protocol gating, encoding (SGR 1006, the X10/UTF-8 legacy form, pixel
+// coords), and the reported cell are whatever xterm resolves — button 64 up /
+// 65 down by construction, indistinguishable from a wheel since one DOM event
+// per line is the wheel's own cadence. The plan's sign convention is already
+// the wheel's: a finger moving UP the screen (positive lines) is wheel-down, a
+// downward finger wheel-up. onWheel ignores the untrusted synthetics so the
+// bridge is never read as a user scroll (no viewport reconcile, no escape-hint
+// flash).
+//
+// Click-vs-selection modifier inversion (#2787): the inversion runs in the
+// CAPTURE phase on the pane host, so it lands before both of xterm's mousedown
+// listeners — they sit on xterm's own element, a descendant — and therefore
+// before either reads the modifier. Mousedown ONLY: mouseup carries xterm's
+// alt-click-moves-cursor gesture, which reads the same altKey, so a synthetic
+// Option there would fire cursor-movement sequences into the PTY on every plain
+// click — and it is unnecessary besides, since xterm registers its PTY
+// mouseup/mousedrag forwarders inside the mousedown branch the inversion
+// already diverts, and the selection drag that replaces it is driven by
+// document listeners that read no modifier at all. Mouse pointers ONLY: the
+// inversion trades a plain click for a selection and hands the click back
+// behind a modifier — a trade a touch device cannot take, because it has no
+// modifier to hold, so inverting a tap would leave a phone with NO way to click
+// a mouse-driven TUI at all; touch does not need the trade either, its drag
+// (scroll) and tap (click) already separating without one. Once a mouse drag is
+// handed off, onHandedOffDragModifier keeps stripping the modifier from
+// move/release — xterm forwards those from document-level listeners and encodes
+// each event's OWN modifiers into the report, so stripping only the mousedown
+// would hand a mouse-aware TUI an incoherent sequence: an unmodified press
+// followed by a Shift/Alt-flagged drag and release. The modifier is af's escape
+// hatch, not input the user aimed at the application, so it must not arrive as
+// a modified-click binding — and it strips only while a handed-off drag is in
+// flight, because with the modifier NOT held the drag is a selection whose
+// mouseup must keep its true altKey for alt-click-moves-cursor.
 
 /**
  * One live attach terminal bound to a container element. Construct it with the
@@ -147,6 +246,7 @@ interface PendingViewportAnchor {
 export class AttachTerminal {
   private readonly term: Terminal;
   private readonly fit: FitAddon;
+  private readonly keybar: TerminalKeybar;
   private readonly enc = new TextEncoder();
   // Type-ahead: what was typed while the socket was down, replayed on open
   // (#2811). Held here rather than dropped in send().
@@ -157,6 +257,10 @@ export class AttachTerminal {
   private midLineTimer: number | null = null;
   private readonly ro: ResizeObserver;
   private readonly io: IntersectionObserver;
+  // The app's one phone breakpoint — ui.ts, terminal-keybar.ts, and
+  // appbarControls() hold the same query. It picks the halved default pitch
+  // (#5492) at construction, and its "change" listener re-fits across it.
+  private readonly phone = window.matchMedia("(max-width: 768px)");
 
   private ws: WebSocket | null = null;
   private stopped = false;
@@ -166,6 +270,26 @@ export class AttachTerminal {
   private reconnectTimer: number | null = null;
   private resizeTimer: number | null = null;
   private visibleFitFrame: number | null = null;
+  private visibleFitTimer: number | null = null;
+  private visibleFitAttempts = 0;
+  /** Whether this page is currently unpaintable, detected the only way the
+   *  platform exposes it: a scheduled fit whose armed rAF never ran and whose
+   *  250ms timer had to deliver instead. An occluded page keeps
+   *  visibilityState='visible' while its frames starve — document.hidden is
+   *  not a sufficient probe — so the starved frame IS the parked signal. A
+   *  parked page must never write the shared PTY grid: with no user present its
+   *  resizes cannot be activations, and a parked client stealing the grid is
+   *  the multi-window hazard the reclaim semantics exist to prevent. Cleared by
+   *  any genuinely page-coupled signal — a delivered frame, an observer
+   *  callback, window focus, or a TRUSTED input event.
+   *
+   *  Null until the first probe delivery classifies the page — UNKNOWN, not
+   *  "not parked": a socket that opens inside the probe window (the onopen
+   *  force-resize included) must not let a write through on the default, or a
+   *  terminal constructed on an occluded page would stamp its grid onto the
+   *  shared PTY before its frames had a chance to starve. Every signal that
+   *  writes a boolean here IS itself a classification. */
+  private parked: boolean | null = null;
   private viewportRestoreFrame: number | null = null;
   private readonly mouseOverride: TerminalMouseOverride;
   private readonly mouseCaptureHint: HTMLDivElement;
@@ -175,18 +299,25 @@ export class AttachTerminal {
   private mouseOverrideKeyHeld = false;
   private handedOffDrag = false;
   private historyWheelRemainder = 0;
-  // The screen position the current one-finger drag last scrolled from, plus its
-  // sub-row carry. Null whenever no gesture is af's to scroll: none is down, or a
-  // second finger arrived and the browser owns the pinch.
-  private touchScrollY: number | null = null;
-  private touchScrollRemainder = 0;
+  private scrollRem = 0;
+  private readonly fling = TouchScroll(holdClockMs);
+  // Coast ticks that applied scroll px, mirrored onto the host as
+  // data-af-coast-applied, with the count at the last stop beside it as
+  // data-af-coast-stop-count. The selftest's mid-coast press asserts the stop
+  // against these rather than scrollTop: xterm flushes scrollLines to the DOM a
+  // painted frame after the buffer moves, so a press-time DOM read sits a whole
+  // coast tick stale — the master sighting measured 68px, exactly one tick that
+  // was applied BEFORE the stop landed (#5020).
+  private coastApplied = 0;
+  private coastStopCount = 0;
+  private coastLiveStops = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
   // point the finger went down on, by the same threshold.
   private touchOriginX = 0;
   private touchOriginY = 0;
-  private touchScrollClaimed = false;
+  private scrollClaimed = false;
   // The pending long press, and whether it has already acted on this gesture — a copy
   // has to swallow the compatibility click the same touch would otherwise fire.
   private touchLongPressTimer: number | null = null;
@@ -236,12 +367,16 @@ export class AttachTerminal {
   // client is inactive. Null means no peer-owned grid is pending reconciliation.
   private pendingViewport: PendingViewportAnchor | null = null;
   private exited = false;
+  private unsubscribeFontSizes: (() => void) | null = null;
 
   // A peer is allowed to resize the one shared PTY and every client obeys that
   // authoritative echo. When this window becomes active again, its visible host
   // becomes the local writer: refit once instead of leaving a peer-sized emulator in
   // an unchanged container until the user physically resizes the window (#2347).
-  private readonly onWindowFocus = (): void => this.scheduleVisibleFit();
+  private readonly onWindowFocus = (): void => {
+    this.parked = false;
+    this.scheduleVisibleFit();
+  };
   private readonly onWindowBlur = (): void => {
     // A modifier released in another tab/window never sends this terminal keyup.
     this.mouseOverrideKeyHeld = false;
@@ -251,20 +386,40 @@ export class AttachTerminal {
   };
   private readonly onVisibilityChange = (): void => {
     if (document.visibilityState === "visible") {
+      this.parked = false;
       this.scheduleVisibleFit();
     } else {
       this.mouseOverrideKeyHeld = false;
     }
   };
+  // A crossing of the phone boundary re-picks the default pitch (#5492) —
+  // rotation past 768px, or a desktop window dragged narrow and back.
+  private readonly onPhoneChange = (): void => {
+    // A media-query change cannot evaluate without layout — the page is awake.
+    this.parked = false;
+    this.applyDeviceFontSize();
+  };
   // Entering a pane is the earliest reliable activation signal for side-by-side
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
-  private readonly onPointerEnter = (): void => this.fitVisibleHost();
+  private readonly onPointerEnter = (event: PointerEvent): void => {
+    if (event.isTrusted) {
+      this.parked = false;
+    }
+    this.fitVisibleHost();
+  };
   // A scroll can target an already-focused window after another client resized the
   // PTY without the pointer ever leaving this pane. Capture repairs that less-common
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
   // gate makes every ordinary input a no-op before even measuring layout.
   private readonly onWheel = (event: WheelEvent): void => {
+    if (!event.isTrusted) {
+      // The touch→wheel bridge's synthetics are not a user scroll (#4982).
+      return;
+    }
+    this.parked = false;
+    // A real wheel is a new scroll intent — the coast must not fight it.
+    this.stopCoast();
     this.handleUserScroll("wheel");
     if (
       !terminalMouseOverrideHeld(event, this.mouseOverride) &&
@@ -274,15 +429,6 @@ export class AttachTerminal {
       this.showMouseCaptureHint(this.wheelHint);
     }
   };
-  // Application mouse mode switches xterm's OWN touch scrolling off — both of its
-  // touch listeners return early while mouse events are active — and nothing takes
-  // over: the finger is on the screen, and the .xterm-viewport holding the scrollback
-  // is that screen's SIBLING, so the browser has no ancestor to pan. A phone
-  // therefore loses scrollback entirely the moment an agent enables mouse tracking,
-  // and unlike the wheel (#2681) it has no modifier to escape with. So af scrolls
-  // history itself here (#2682): the DRAG is terminal-owned, the TAP still reaches
-  // the application — which is why only the move is ever cancelled, never the
-  // touchstart that a tap's compatibility mouse events depend on.
   private readonly onTouchStart = (event: TouchEvent): void => {
     // Eligibility is settled once, at the start of the gesture. A touch whose target
     // is the viewport itself is a scrollbar drag the browser already handles — the
@@ -290,11 +436,13 @@ export class AttachTerminal {
     // BACKWARDS, since a thumb follows the finger while the content opposes it.
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
-    this.touchScrollY = press?.clientY ?? null;
+    // Finger-down is tap-to-stop (#5020).
+    this.stopCoast();
     this.touchOriginX = press?.clientX ?? 0;
     this.touchOriginY = press?.clientY ?? 0;
-    this.touchScrollRemainder = 0;
-    this.touchScrollClaimed = false;
+    this.scrollRem = 0;
+    this.scrollClaimed = false;
+    if (press) this.fling.push(press.clientY);
     // Through the shared discard, so a press the timer already staged loses its
     // SELECTION too. A second finger arriving on a held press lands here, and a
     // pinch that left the highlight behind would be claiming a copy that never
@@ -316,6 +464,8 @@ export class AttachTerminal {
     // with a compatibility click instead have already copied there. Whichever runs
     // first consumes the pending text, so the copy happens exactly once.
     this.flushTouchCopy();
+    // Only claimed drags coast; a stale frame is harmless — tick() reads real dt.
+    if (this.scrollClaimed && this.fling.release()) window.requestAnimationFrame(this.onCoastFrame);
   };
   /**
    * The browser taking the gesture away — and the ONLY signal it gives when it does.
@@ -327,6 +477,9 @@ export class AttachTerminal {
    * a takeover drops both the copy and the selection that promised it.
    */
   private readonly onTouchCancel = (): void => {
+    // The browser owns the gesture now; its samples must not seed a later one.
+    this.stopCoast();
+    this.scrollClaimed = false;
     this.cancelTouchLongPress();
     this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
@@ -359,9 +512,13 @@ export class AttachTerminal {
     event.preventDefault();
   };
   private readonly onTouchMove = (event: TouchEvent): void => {
+    if (event.isTrusted) {
+      this.parked = false;
+    }
     this.handleUserScroll("touch");
+    const touch = event.touches[0];
     const moved = event.touches.length !== 1 ||
-      !touchPressStillHeld(this.touchOriginX, this.touchOriginY, event.touches[0].clientX, event.touches[0].clientY);
+      !touchPressStillHeld(this.touchOriginX, this.touchOriginY, touch?.clientX, touch?.clientY);
     if (moved) {
       // The finger left the spot it pressed on, so this gesture is a scroll (or a
       // pinch) rather than a press. Both readings cannot be live at once — and that
@@ -371,24 +528,21 @@ export class AttachTerminal {
       this.cancelTouchLongPress();
       this.discardPendingTouchCopy();
     }
-    if (this.touchScrollY === null) {
+    if (!this.fling.active) {
       return;
     }
     if (event.touches.length !== 1) {
       // A second finger arrived: hand the REST of this gesture to the browser rather
       // than scrolling by a pinch's motion or by the distance it covered untracked.
-      this.touchScrollY = null;
+      // Unclaiming it also keeps its lift from starting a coast it never drove.
+      this.stopCoast();
+      this.scrollClaimed = false;
       return;
     }
-    const last = this.touchScrollY;
-    const y = event.touches[0].clientY;
-    this.touchScrollY = y;
-    if (!this.applicationOwnsMouse()) {
-      // xterm's own touch scrolling is live here; tracking the position anyway keeps
-      // a mode change mid-drag from scrolling by everything travelled before it.
-      return;
-    }
-    if (!this.touchScrollClaimed) {
+    const y = touch.clientY;
+    // Sample every move, claimed or not: the estimator needs the approach in the slop.
+    const px = this.fling.push(y);
+    if (!this.scrollClaimed) {
       if (!touchScrollClaimsGesture(this.touchOriginY, y)) {
         // Still within a tap's wobble. Leaving the event ALONE is the point: claiming
         // it would cancel the touch, and a cancelled touch fires no compatibility
@@ -396,18 +550,21 @@ export class AttachTerminal {
         // a perfectly still one kept working.
         return;
       }
-      this.touchScrollClaimed = true;
+      this.scrollClaimed = true;
     }
-    const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
-    this.touchScrollRemainder = plan.remainder;
-    if (plan.lines !== 0) {
-      this.term.scrollLines(plan.lines);
-    }
+    // Once claimed, the origin fields track the live finger — reports carry the
+    // cell under it, and at lift they hold the release cell for the coast.
+    this.touchOriginX = touch.clientX;
+    this.touchOriginY = y;
+    this.applyTouchScrollPx(px);
     // Claim the pan. Left to the browser it chains out to the document, which toggles
     // the URL bar, resizes .af-app and refits the terminal mid-gesture (#2493) — and
     // an uncancelled drag can still synthesize the compatibility mouse events the
-    // application would read as a drag it never got the button press for.
+    // application would read as a drag it never got the button press for. The stop
+    // also hides the move from xterm's own touch listener, whose 1:1 native scroll
+    // would double ours whenever no application owns the mouse.
     event.preventDefault();
+    event.stopPropagation();
   };
   /** Every browser-initiated copy over the terminal (#2831) — the chord, macOS
    *  Edit → Copy, right-click → Copy, assistive tech. The decision is in
@@ -425,11 +582,17 @@ export class AttachTerminal {
     // lifts — so this is what tells onMouseDownCapture below whether the click it is
     // about to rewrite came from a finger.
     this.lastPointerWasTouch = event.pointerType === "touch";
+    // Any fresh pointer press is new scroll intent: a mouse/pen down on a hybrid
+    // device, or a second finger, must not fight a touch flick still coasting.
+    this.stopCoast();
     // The xterm screen is a sibling of its scrollable viewport. A pointer whose
     // target is the viewport itself is therefore a scrollbar/track gesture, while
     // an ordinary terminal click targets the screen and keeps the saved anchor.
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
+      if (event.isTrusted) {
+        this.parked = false;
+      }
       this.handleUserScroll("scrollbar");
       return;
     }
@@ -443,23 +606,7 @@ export class AttachTerminal {
       this.showMouseCaptureHint(this.pointerHint);
     }
   };
-  // The inversion itself (#2787). It runs in the CAPTURE phase on the pane host, so
-  // it lands before both of xterm's mousedown listeners — they sit on xterm's own
-  // element, a descendant — and therefore before either reads the modifier.
-  //
-  // mousedown ONLY. mouseup carries xterm's alt-click-moves-cursor gesture, which
-  // reads the same altKey: a synthetic Option there would fire cursor-movement
-  // sequences into the PTY on every plain click. It is also unnecessary — xterm only
-  // registers its PTY mouseup/mousedrag forwarders inside the mousedown branch this
-  // inversion already diverts, and the selection drag that replaces it is driven by
-  // document listeners that read no modifier at all.
-  //
-  // Mouse pointers ONLY. The inversion trades a plain click for a selection and hands
-  // the click back behind a modifier — a trade a touch device cannot take, because it
-  // has no modifier to hold, so inverting a tap would leave a phone with NO way to
-  // click a mouse-driven TUI at all. Touch does not need the trade either: its two
-  // gestures already separate without one, the drag scrolling history (#2682) and the
-  // tap staying the click.
+  // Click/selection modifier inversion (#2787) — the module note above the class.
   private readonly onMouseDownCapture = (event: MouseEvent): void => {
     if (this.lastPointerWasTouch && this.touchCopyFired) {
       // The compatibility click the press still owed. Two things happen here.
@@ -500,17 +647,7 @@ export class AttachTerminal {
       this.beginHandedOffDrag();
     }
   };
-  // The rest of a handed-off drag. xterm forwards move/release from DOCUMENT-level
-  // listeners and encodes each event's OWN modifiers into the report, so stripping
-  // only the mousedown would hand a mouse-aware TUI an incoherent sequence: an
-  // unmodified press followed by a Shift/Alt-flagged drag and release. The modifier
-  // is af's escape hatch, not input the user aimed at the application, so it must
-  // not arrive as a modified-click binding.
-  //
-  // STRIPS only, and only while a handed-off drag is in flight. With the modifier
-  // NOT held the drag is a selection, and mouseup must keep its true altKey there:
-  // xterm's alt-click-moves-cursor reads exactly that flag and would otherwise fire
-  // cursor-movement sequences into the PTY on every plain click.
+  // Strips the escape modifier from a handed-off drag (#2787) — module note above.
   private readonly onHandedOffDragModifier = (event: MouseEvent): void => {
     if (terminalMouseOverrideHeld(event, this.mouseOverride)) {
       invertTerminalMouseOverride(event, this.mouseOverride);
@@ -524,11 +661,12 @@ export class AttachTerminal {
     if (this.pendingViewport === null) {
       return;
     }
-    const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
+    const plan = terminalUserScrollPlan(source,
+      this.visibleFitFrame !== null || this.visibleFitTimer !== null);
     if (plan.cancelScheduledVisibleFit) {
       this.cancelTouchLongPress();
-    this.disposeTouchPressMarker();
-    this.cancelVisibleFitFrame();
+      this.disposeTouchPressMarker();
+      this.cancelVisibleFitFrame();
     }
     this.fitVisibleHost();
     // fitVisibleHost schedules from the pre-input revision. xterm consumes the
@@ -548,10 +686,12 @@ export class AttachTerminal {
       allowProposedApi: true,
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-      fontSize: 13,
+      // Half the desktop pitch at phone width (#5492); the "change" listener
+      // below re-picks it if the viewport crosses the breakpoint.
+      fontSize: terminalFontSize(this.phone.matches),
       // Born in the active theme (theme.ts derives the xterm palette from the same
       // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
-      theme: currentXtermTheme(),
+      theme: terminalSurface(container, currentXtermTheme()),
       // The stream is the source of truth; local echo/scrollback beyond the ring is
       // fine but the server never sees our convert-eol, so leave it raw.
       scrollback: 5000,
@@ -564,6 +704,20 @@ export class AttachTerminal {
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(container);
+    this.keybar = new TerminalKeybar(container,
+      (data) => (this.stopCoast(), this.term.input(data, true)),
+      // The Paste keybar key (#5380): term.paste, not a bare input write, so an
+      // app that enabled bracketed paste sees the same ESC[200~ … ESC[201~
+      // block a desktop Ctrl+V produces — and the delivery hold reads the
+      // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
+      (data) => (this.stopCoast(), this.term.paste(data)),
+      () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode,
+      // The keybar's A−/A+ keys step the device class's shared size (#5500) —
+      // this terminal is one subscriber among the panes that pick it up.
+      stepTerminalFontSize);
+    // A stepped or re-read font size refits through the same path a breakpoint
+    // crossing takes: new metrics → fit → OpResize, so the PTY's grid follows.
+    this.unsubscribeFontSizes = subscribeTerminalFontSizes(() => this.applyDeviceFontSize());
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
     this.mouseCaptureHint.setAttribute("role", "status");
@@ -593,21 +747,37 @@ export class AttachTerminal {
     if (textarea) {
       textarea.addEventListener("focus", () => {
         if (!this.stopped) {
+          this.keybar.setFocused(true);
           this.cb.onFocusChange(true);
         }
       });
       textarea.addEventListener("blur", () => {
         this.mouseOverrideKeyHeld = false;
         if (!this.stopped) {
+          this.keybar.setFocused(false);
           this.cb.onFocusChange(false);
         }
       });
+      // Phone soft-keyboard and IME input arrive as beforeinput on xterm's helper
+      // textarea — keydown-less, so the key handler above never sees it. Synthetic
+      // wheel reports are DOM WheelEvents and can never fire this (#5020).
+      textarea.addEventListener("beforeinput", () => this.stopCoast());
     }
 
     // Keystrokes → OpInput. xterm hands us the terminal's outgoing byte string
     // (regular chars and key escape sequences alike); UTF-8 encode it so a typed
     // multibyte char reaches the PTY as the same bytes a real terminal would send.
-    this.term.onData((data) => this.sendInput(data));
+    this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
+    this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
+    // Mouse reports in xterm's DEFAULT encoding (wheel/click without SGR 1006)
+    // leave on the binary channel — a byte string, one char per byte.
+    this.term.onBinary((data) => this.sendBinary(data));
+    // An app can leave the alternate screen mid-coast — possibly ANSWERING our
+    // own wheel reports: the ?1049l parses inside a write() frame whenever it
+    // does, and the momentum must die with the buffer it was emitted on rather
+    // than keep scrolling the restored normal buffer. The event fires with the
+    // switch itself, so the write queue's timing is not the question.
+    this.term.buffer.onBufferChange(() => this.stopCoast());
 
     // Modified input + clipboard decisions (see clipboard.ts): intercept the key
     // BEFORE xterm turns it into input. Bare Shift+Enter emits LF only for the
@@ -617,26 +787,42 @@ export class AttachTerminal {
     // never an interrupt — #2787), and Ctrl+V defers to native paste. False
     // suppresses xterm's own handling.
     this.term.attachCustomKeyEventHandler((ev) => {
+      // A key press interrupts a coast — and the on-screen key bar is a key press a
+      // DOM keydown never sees, so it stops the same way at its own site. onData
+      // cannot serve: it also fires for synthetic mouse reports (#5020).
+      if (ev.type === "keydown") {
+        this.stopCoast();
+      }
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
       }
-      return handleClipboardKeydown(ev, {
+      const accepted = handleClipboardKeydown(ev, {
         composerNewline: this.endpoint.composerNewline,
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.sendInput(text),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
-        sendUserInput: (text) => this.term.input(text, true),
+        // The keybar holds ordinary bytes behind a pending IME commit and sends
+        // signal bytes such as the interrupt at once (#4151).
+        sendUserInput: (text) => this.keybar.sendCustomUserInput(text, ev),
       });
+      // Xterm runs this handler before CompositionHelper.keydown. Its later
+      // capture listener must not infer that a rejected key finalized the IME.
+      if (!accepted) this.keybar.markKeydownSuppressed(ev);
+      return accepted;
     });
 
     // Re-fit + re-announce size whenever the container changes (window resize,
     // rail collapse, devtools). Debounced; the server echo reconciles multi-writer.
-    this.ro = new ResizeObserver(() => this.scheduleFit());
+    // An observer delivery cannot happen on a page that is not being painted —
+    // both are rendering-step signals, so either one clears the parked flag.
+    this.ro = new ResizeObserver(() => {
+      this.parked = false;
+      this.scheduleFit();
+    });
     this.ro.observe(container);
 
     // ResizeObserver alone cannot express two important transitions:
@@ -644,10 +830,12 @@ export class AttachTerminal {
     //     host already has its final border-box; and
     //   * a peer's authoritative resize changes xterm's grid, not this host's box.
     // Intersection/activation schedule a one-frame-later fit at those boundaries.
-    // A zero-size hidden pane is rejected by fitVisibleHost and retried when it
-    // intersects; there is no polling timer.
+    // A zero-size hidden pane is rejected by fitVisibleHost and refit when it
+    // intersects; the scheduled attempt retries only a measurable host that
+    // still cannot be read, never a hidden one — it is not a poller.
     this.io = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.parked = false;
         this.scheduleVisibleFit();
       }
     });
@@ -655,6 +843,7 @@ export class AttachTerminal {
     window.addEventListener("focus", this.onWindowFocus);
     window.addEventListener("blur", this.onWindowBlur);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
+    this.phone.addEventListener("change", this.onPhoneChange);
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
     container.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
@@ -672,6 +861,9 @@ export class AttachTerminal {
     // Bubbles from xterm's focused helper textarea, so this one listener catches
     // the copy chord AND every menu/context-menu copy aimed at the terminal (#2831).
     container.addEventListener("copy", this.onCopy);
+    // A mounted host often already has cell metrics. Start its attach without
+    // waiting for another animation frame; unmeasurable hosts still retry below.
+    this.fitVisibleHost();
     this.scheduleVisibleFit();
   }
 
@@ -679,6 +871,7 @@ export class AttachTerminal {
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose(): void {
     this.stopped = true;
+    this.keybar.dispose();
     // Hand the lease back before this pane stops existing (#3024).
     this.releaseMidLine();
     this.pendingInput.clear();
@@ -696,11 +889,13 @@ export class AttachTerminal {
     }
     this.cancelVisibleFitFrame();
     this.clearPendingViewport();
+    this.stopCoast();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
     window.removeEventListener("blur", this.onWindowBlur);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.phone.removeEventListener("change", this.onPhoneChange);
     this.container.removeEventListener("pointerenter", this.onPointerEnter);
     this.container.removeEventListener("wheel", this.onWheel, true);
     this.container.removeEventListener("touchstart", this.onTouchStart, true);
@@ -713,6 +908,8 @@ export class AttachTerminal {
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.container.removeEventListener("copy", this.onCopy);
     this.endHandedOffDrag();
+    this.unsubscribeFontSizes?.();
+    this.unsubscribeFontSizes = null;
     this.closeSocket();
     this.term.dispose();
   }
@@ -727,6 +924,75 @@ export class AttachTerminal {
     // scrollback there; VT200, drag, and any-event modes report wheel input.
     return mode !== "none" && mode !== "x10";
   }
+
+  private applyTouchScrollPx(px: number): void {
+    // px -> rows: scrollLines, or app-owned wheel reports targeted at the cell the
+    // finger currently holds — touchOrigin tracks the live touch once claimed, so
+    // at lift it already carries the release cell for the coast (#5020).
+    const plan = historyWheelPlan(
+      { deltaMode: 0, deltaY: px },
+      this.term.rows,
+      this.rowHeight(),
+      this.scrollRem,
+    );
+    this.scrollRem = plan.remainder;
+    if (plan.lines === 0) return;
+    if (this.term.buffer.active.type !== "alternate" || !this.applicationOwnsWheel()) {
+      this.term.scrollLines(plan.lines);
+      return;
+    }
+    const element = this.term.element;
+    if (!element) {
+      return;
+    }
+    // Plan sign is the wheel's: finger up is wheel-down (65), down is up (64).
+    // One WheelEvent per line; see the module note.
+    const deltaY = Math.sign(plan.lines);
+    for (let i = Math.abs(plan.lines); i > 0; i -= 1) {
+      element.dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: this.touchOriginX,
+          clientY: this.touchOriginY,
+          deltaMode: WheelEvent.DOM_DELTA_LINE,
+          deltaY,
+        }),
+      );
+    }
+  }
+
+  /** Every way a coast dies — a fresh wheel or key, a press, a second finger,
+   *  output on a followed tail, a buffer switch, dispose — funnels through here
+   *  so the stop records how many coast ticks had applied when it landed. The
+   *  frame the coast already queued still fires, but tick() reads the cleared
+   *  velocity and returns null: nothing applies past the recorded count. */
+  private stopCoast(): void {
+    // Read before stop() clears it: whether momentum was still live when THIS
+    // stop landed, so a press arriving after natural decay is not mistaken for
+    // one that interrupted a coast.
+    const live = this.fling.coasting;
+    this.fling.stop();
+    if (live) {
+      this.coastLiveStops += 1;
+      this.container.dataset.afCoastLiveStops = String(this.coastLiveStops);
+    }
+    // onMessage calls this for every PTY frame on a followed tail, so the
+    // attribute write happens only when a coast actually applied since the
+    // last recorded stop — an unchanged dataset write still costs a DOM
+    // mutation per output frame.
+    if (this.coastStopCount === this.coastApplied) return;
+    this.coastStopCount = this.coastApplied;
+    this.container.dataset.afCoastStopCount = String(this.coastStopCount);
+  }
+
+  private readonly onCoastFrame = (): void => {
+    const px = this.fling.tick();
+    if (px === null) return;
+    this.applyTouchScrollPx(px);
+    this.container.dataset.afCoastApplied = String(++this.coastApplied);
+    window.requestAnimationFrame(this.onCoastFrame);
+  };
 
   /** Tracks the modifier strip on the document for exactly the life of one
    *  handed-off drag — xterm registers its own forwarders the same way, and events
@@ -1050,7 +1316,7 @@ export class AttachTerminal {
    *  into rows. Falls back to a font-size estimate before the first row exists. */
   private rowHeight(): number {
     const renderedRow = this.container.querySelector<HTMLElement>(".xterm-rows > div");
-    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? 13) * 1.2;
+    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? terminalFontSizeFor(this.phone.matches)) * 1.2;
   }
 
   private handleHistoryWheel(event: WheelEvent): boolean {
@@ -1097,7 +1363,7 @@ export class AttachTerminal {
    *  from the new ITheme, so an open terminal switches light/dark without a
    *  reconnect or losing scrollback. */
   setTheme(theme: ITheme): void {
-    this.term.options.theme = theme;
+    this.term.options.theme = terminalSurface(this.container, theme);
   }
 
   // --- socket lifecycle ------------------------------------------------------
@@ -1155,7 +1421,9 @@ export class AttachTerminal {
       return;
     }
     this.initialConnectStarted = true;
-    this.connect();
+    // Let SplitView finish assigning this terminal before onStatus can re-enter
+    // its store subscriber. This still starts the socket before the next paint.
+    queueMicrotask(() => this.connect());
   }
 
   private onMessage(data: unknown): void {
@@ -1180,10 +1448,18 @@ export class AttachTerminal {
         this.cursor = frame.seq;
         this.seeded = true;
         break;
-      case Op.PTYOut:
+      case Op.PTYOut: {
+        // Followed-tail output interrupts the coast; alt repaints are exempt.
+        // !active is the coast: coasting means the gesture's samples are gone —
+        // and stopping an idle fling is free either way.
+        const buf = this.term.buffer.active;
+        if (!this.fling.active && buf.type === "normal" && buf.viewportY >= buf.baseY) {
+          this.stopCoast();
+        }
         this.term.write(frame.data);
         this.cursor += BigInt(frame.data.length);
         break;
+      }
       case Op.Repaint:
         // Rendered like output but NOT counted toward the cursor — a repaint is a
         // per-subscriber screen snapshot, outside the ring's monotonic seq.
@@ -1257,23 +1533,128 @@ export class AttachTerminal {
 
   // --- resize ----------------------------------------------------------------
 
-  /** Fits on the next painted frame, after visibility/layout changes have settled.
-   *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
-   *  this is not a time guess and never repeats on its own. */
-  private scheduleVisibleFit(): void {
-    if (this.stopped || this.visibleFitFrame !== null) {
+  /** Re-derives the default pitch from the phone breakpoint (#5492). A real
+   *  crossing re-assigns xterm's fontSize — its option setter re-measures cell
+   *  metrics synchronously — then refits on the next painted frame, where the
+   *  changed grid goes out as an ordinary OpResize. The size guard keeps a
+   *  repeated call from scheduling a no-op fit. */
+  private applyDeviceFontSize(): void {
+    const size = terminalFontSize(this.phone.matches);
+    if (this.term.options.fontSize === size) {
       return;
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => {
+    this.term.options.fontSize = size;
+    this.scheduleVisibleFit();
+  }
+
+  /** Fits on the next painted frame, after visibility/layout changes have settled.
+   *  Repeated activation signals coalesce into one scheduled attempt; unlike the
+   *  resize debounce, this is not a time guess and never repeats on its own.
+   *
+   *  The attempt is delivered two ways: the frame, and a timer armed beside it.
+   *  A page the compositor has parked — exactly what a stranded multi-client pane
+   *  looks like, with a peer's tab holding the screen — starves rAF outright, and
+   *  a frame that never fires would leave visibleFitFrame set forever, coalescing
+   *  every later activation into a no-op. The timer still fires on that page, so
+   *  the reclaim cannot be lost with the frame. */
+  private scheduleVisibleFit(): void {
+    if (this.stopped) {
+      return;
+    }
+    this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
+    this.queueVisibleFit();
+  }
+
+  /** Arms the delivery pair. The frame side is RE-armed, not trusted: an armed
+   *  handle is only a promise — the callback can already have been eaten by a
+   *  parked epoch, leaving a latched handle that would suppress every later
+   *  trigger — the strand. cancelAnimationFrame on a dead handle is a no-op,
+   *  and re-requesting a live one just moves the fit to the next frame. The
+   *  timer side coalesces: one live timer is enough to verify the frame. */
+  private queueVisibleFit(): void {
+    if (this.stopped) {
+      return;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    if (this.visibleFitTimer === null) {
+      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
+    }
+  }
+
+  /** Arms ONLY the frame probe — the wake detector for a resize this page is
+   *  not allowed to write yet. A parked or hidden page defers rAF until it
+   *  paints again, so a queued frame costs nothing while withheld and its
+   *  delivery IS the reactivation. The timer twin is never armed here: on a
+   *  withheld write its delivery can change nothing — it would fit, suppress,
+   *  and re-arm forever, a perpetual 250ms poll on a dormant page.
+   *
+   *  The probe carries a fit budget too: a transient measurement bail on the
+   *  wake frame must retry through the delivery pair like any scheduled fit.
+   *  Seeding here covers the arms that happen outside a fit — a suppressed
+   *  force-send on a parked page — where no budget is running; a fit that
+   *  withholds mid-flight instead preserves its own, because onVisibleFit no
+   *  longer zeroes the attempts while a probe is armed. Without either, the
+   *  first wake bail decremented below zero and stranded the owed write until
+   *  an unrelated activation signal. A live budget is left alone: the probe
+   *  borrows it rather than extending it. */
+  private armWakeProbe(): void {
+    if (this.stopped) {
+      return;
+    }
+    if (this.visibleFitAttempts <= 0) {
+      this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+  }
+
+  /** Whichever of the twin triggers delivers first runs the fit and drops the
+   *  other. The channel the delivery arrived on is the parked detector: the
+   *  timer only wins when the frame armed beside it starved, so a timer
+   *  delivery marks the page parked and this fit writes nothing. A fit that
+   *  still cannot measure the host retries within the attempt budget — a
+   *  transient bail used to be FINAL, which is how one bad instant could strand
+   *  the pane on a peer's grid permanently. */
+  private onVisibleFit(deliveredByFrame: boolean): void {
+    this.parked = !deliveredByFrame;
+    if (this.visibleFitTimer !== null) {
+      window.clearTimeout(this.visibleFitTimer);
+      this.visibleFitTimer = null;
+    }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
       this.visibleFitFrame = null;
-      this.fitVisibleHost();
-    });
+    }
+    if (this.stopped) {
+      return;
+    }
+    if (this.fitVisibleHost() || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
+      // A frame still armed is the wake probe a withheld write queued inside
+      // this fit — its delivery retries a transient bail through the delivery
+      // pair like any scheduled fit, so the budget it runs on is preserved
+      // rather than zeroed with this fit's. Nothing armed means truly done.
+      if (this.visibleFitFrame === null) {
+        this.visibleFitAttempts = 0;
+      }
+      return;
+    }
+    this.queueVisibleFit();
   }
 
   /** Drops activation work queued before a direct user scroll. Leaving that frame
    * alive lets it run after the input fit and rebase the restore onto the new user
    * revision, which makes the first gesture appear inert. */
   private cancelVisibleFitFrame(): void {
+    this.visibleFitAttempts = 0;
+    if (this.visibleFitTimer !== null) {
+      window.clearTimeout(this.visibleFitTimer);
+      this.visibleFitTimer = null;
+    }
     if (this.visibleFitFrame === null) {
       return;
     }
@@ -1284,34 +1665,51 @@ export class AttachTerminal {
   /** Reconciles xterm's grid with this host only when the host is measurable and the
    *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
    *  while this client is inactive; activation/wheel makes this client the newest
-   *  writer once, without a resize-echo ping-pong between visible clients. */
-  private fitVisibleHost(): void {
+   *  writer once, without a resize-echo ping-pong between visible clients.
+   *
+   *  Returns whether the pane reached a settled answer — measured the host and
+   *  either fit or decided no fit was due. False means the measurement itself
+   *  failed (xterm metrics mid-invalidation, the element mid-move, a detach
+   *  between proposal and fit): a transient the scheduled path retries within
+   *  its attempt budget. A zero-size pane reports settled — it is genuinely
+   *  hidden, and the intersection observer already owns refitting it when it
+   *  comes back. */
+  private fitVisibleHost(): boolean {
     if (this.stopped) {
-      return;
+      return true;
+    }
+    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    if (host.width <= 0 || host.height <= 0) {
+      return true;
     }
     let proposed;
     try {
       proposed = this.fit.proposeDimensions();
     } catch {
-      return; // xterm has not painted metrics yet, or the container detached
+      return false; // xterm has not painted metrics yet, or the element detached
     }
-    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
-    if (!hasVisibleTerminalGeometry(host, proposed)) {
-      return;
+    if (proposed === undefined) {
+      return false;
     }
     const needsFit = shouldRefitVisibleTerminal(host, { rows: this.term.rows, cols: this.term.cols }, proposed);
     if (needsFit) {
       try {
         this.fit.fit();
       } catch {
-        return; // container detached between proposal and fit
+        return false; // detached between proposal and fit
       }
-      this.sendResize(this.term.rows, this.term.cols, false);
     }
+    // Deduped internally: a no-op when the PTY already knows this grid. The
+    // important case is a grid that diverged while this page was parked — a
+    // parked fit is local-only (sendResize refuses the wire write), so the
+    // first fit after an unpark must flush the owed resize even when xterm
+    // itself needed no refit.
+    this.sendResize(this.term.rows, this.term.cols, false);
     // A second peer can already have returned xterm to this host's local grid. No
     // fit is needed in that case, but its reflow still displaced the saved line.
     this.scheduleViewportRestore(this.term.rows, this.term.cols);
     this.connectAfterInitialFit();
+    return true;
   }
 
   /** Restores the pre-peer reading position after xterm has rendered its new grid.
@@ -1384,17 +1782,63 @@ export class AttachTerminal {
   }
 
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
-   *  even an unchanged size (used on connect to (re)assert our size to the server). */
+   *  even an unchanged size (used on connect to (re)assert our size to the server).
+   *  A parked page never writes the shared grid: its fit still runs so xterm's
+   *  DOM stays honest, but no OpResize may leave — an unpainted page's resize
+   *  cannot be an activation, and it must not steal a live visible peer's grid.
+   *  document.visibilityState covers hidden pages; `parked` covers occluded
+   *  pages that still report 'visible' while their frames starve.
+   *
+   *  An owed write re-arms only a channel that can change its outcome.
+   *  Withheld on a parked/hidden page, that is the frame probe alone — its
+   *  delivery IS the reactivation, and it costs nothing while queued. The
+   *  timer twin is never armed for a withheld write (each tick would just
+   *  fit-and-withhold again — a perpetual poll), and a dead socket arms
+   *  nothing at all: the connect path force-sends the current size on open.
+   *  lastRows/lastCols are only credited once send() reports the frame
+   *  actually left — crediting a dropped write would erase the divergence
+   *  marker and silence every later attempt (the phantom-sent strand). */
   private sendResize(rows: number, cols: number, force: boolean): void {
     if (rows <= 0 || cols <= 0) {
+      return;
+    }
+    // Before the first probe delivery, parked is UNKNOWN — this may be an
+    // occluded page still reporting visibilityState='visible'. The write
+    // defers to whichever twin delivers first: that fit carries or withholds
+    // the size. Nothing extra is armed (the constructor's pair already is),
+    // and lastRows/lastCols stay un-credited so the classified fit converges
+    // on its own.
+    if (this.parked === null) {
+      return;
+    }
+    if (this.parked ||
+        (typeof document !== "undefined" && document.visibilityState !== "visible")) {
+      this.retryOwedResize(rows, cols);
       return;
     }
     if (!force && rows === this.lastRows && cols === this.lastCols) {
       return;
     }
-    this.lastRows = rows;
-    this.lastCols = cols;
-    this.send(encode(resizeFrame(rows, cols)));
+    if (this.send(encode(resizeFrame(rows, cols)))) {
+      this.lastRows = rows;
+      this.lastCols = cols;
+      return;
+    }
+    // The socket could not carry the frame. It stays owed — lastSent is
+    // deliberately NOT touched — and the connect path force-sends the current
+    // size on open: socket-open is the only channel that can change this
+    // outcome, so nothing here is armed — a dead socket never polls.
+  }
+
+  /** Keeps the wake probe armed while a resize is owed — withheld by a
+   *  parked/hidden page. Self-limiting: the check re-reads the divergence,
+   *  so a converged grid stops re-arming. Re-arms ONLY the frame probe —
+   *  the channel whose delivery can change the outcome; arming the timer
+   *  would just fit-and-withhold again on every tick. */
+  private retryOwedResize(rows: number, cols: number): void {
+    if (rows !== this.lastRows || cols !== this.lastCols) {
+      this.armWakeProbe();
+    }
   }
 
   /** Applies the server's authoritative size to xterm without echoing it back out
@@ -1494,6 +1938,24 @@ export class AttachTerminal {
       return;
     }
     this.noteQueuedInput(text);
+  }
+
+  // The byte twin of sendInput for xterm's onBinary channel: the report string
+  // carries one char per byte (DEFAULT mouse encoding), so it encodes latin-1 —
+  // a UTF-8 pass would split every byte ≥ 0x80. Same held-not-dropped contract,
+  // minus the draft bookkeeping, which reads text.
+  private sendBinary(data: string): void {
+    const bytes = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i += 1) {
+      bytes[i] = data.charCodeAt(i);
+    }
+    const frame = encode(inputFrame(bytes));
+    if (this.send(frame) || this.stopped || this.exited) {
+      return;
+    }
+    if (!this.pendingInput.push(frame)) {
+      this.flashNotice("Terminal disconnected — typing was not delivered");
+    }
   }
 
   /** Hands the PTY everything typed while the socket was down, in order, then
@@ -1601,41 +2063,9 @@ export class AttachTerminal {
     if (text === "") {
       return; // nothing selected — an explicit copy of nothing is a no-op
     }
-    const clip = navigator.clipboard;
-    if (clip && typeof clip.writeText === "function") {
-      // The .catch fallback runs after the async rejection, i.e. outside the key
-      // gesture, so execCommand may itself fail there; the hint is the backstop.
-      clip.writeText(text).catch(() => {
-        if (!this.execCommandCopy(text)) {
-          this.flashCopyHint();
-        }
-      });
-      return;
-    }
-    if (!this.execCommandCopy(text)) {
-      this.flashCopyHint();
-    }
-  }
-
-  /** Legacy clipboard write via a throwaway off-screen textarea. Returns whether the
-   *  copy reported success. Requires a user gesture, which the key handler provides. */
-  private execCommandCopy(text: string): boolean {
-    try {
-      const ta = document.createElement("textarea");
-      ta.className = "af-clipboard-fallback";
-      ta.value = text;
-      // Off-screen but still selectable; readonly stops a mobile keyboard popping up.
-      ta.setAttribute("readonly", "");
-      document.body.appendChild(ta);
-      ta.select();
-      ta.setSelectionRange(0, text.length);
-      const ok = document.execCommand("copy");
-      ta.remove();
-      this.term.focus(); // the temp textarea stole focus; hand it back to the terminal
-      return ok;
-    } catch {
-      return false;
-    }
+    void copyText(text).then((ok) => {
+      if (!ok) this.flashCopyHint();
+    });
   }
 
   /** Last-resort visible cue when BOTH clipboard paths fail, so the copy is never

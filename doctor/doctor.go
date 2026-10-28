@@ -42,6 +42,8 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // Finding is one visible diagnostic observation.
@@ -75,6 +77,7 @@ type CheckStatus string
 
 const (
 	StatusPass  CheckStatus = "PASS"
+	StatusInfo  CheckStatus = "INFO"
 	StatusWarn  CheckStatus = "WARN"
 	StatusFail  CheckStatus = "FAIL"
 	StatusFixed CheckStatus = "FIXED"
@@ -100,12 +103,41 @@ type CheckResult struct {
 type Report struct {
 	// Header holds the key environment facts printed before the sections.
 	Header []HeaderItem
-	// Checks holds sectioned PASS/WARN/FAIL rows that are not Finding-backed.
+	// Checks holds sectioned PASS/INFO/WARN/FAIL rows that are not Finding-backed.
 	Checks []CheckResult
 	// OK holds informational healthy lines, grouped by section.
 	OK []string
 	// Findings holds detected problems in detection order.
 	Findings []Finding
+	// Incomplete names the checks that did NOT finish looking, in the order
+	// they gave up.
+	//
+	// It exists because the alternative is the failure mode #3466 was filed
+	// for: a sweep that stopped early prints a SMALLER problem count than a
+	// sweep that finished, and nothing in the output distinguishes the two. A
+	// reader — including one who is looking straight at it — reads the shorter
+	// list as the healthier machine. Whatever is in here must reach the
+	// summary line, because that is the part people actually read.
+	//
+	// Deliberately NOT part of UnresolvedCount: "I did not finish looking" is
+	// an unknown, not a proven unhealthy condition, and this package keeps
+	// those axes apart everywhere else (see the Finding.Actionable contract).
+	// The command exits 1 for either unresolved issues or incomplete checks.
+	// Scripts distinguish those cases through summary.unresolved and
+	// summary.incomplete in --json.
+	Incomplete []string
+}
+
+// markIncomplete records that a check stopped before it had seen everything.
+// Naming the check is the point: "something was skipped" is not usable, and
+// the summary prints these names.
+func (r *Report) markIncomplete(check string) {
+	for _, existing := range r.Incomplete {
+		if existing == check {
+			return
+		}
+	}
+	r.Incomplete = append(r.Incomplete, check)
 }
 
 // addActionableFinding records a condition doctor established is unhealthy.
@@ -166,11 +198,30 @@ type Options struct {
 	// test or debug run is still coming back for it).
 	MinTempHomeAge time.Duration
 
+	// MaxTempHomeCandidates bounds how many candidate directories one temp-home
+	// sweep will inspect; defaults to defaultMaxTempHomeCandidates. A sweep that
+	// hits the bound reports how far it got rather than returning a short list
+	// as if it were the whole picture.
+	//
+	// Zero means "use the default". Tests set it low to exercise truncation
+	// deterministically, and a caller may set it negative to disable the bound
+	// and accept an unbounded sweep.
+	MaxTempHomeCandidates int
+
 	// remoteConfig resolves the remote-hook backend to validate and the repo
 	// root it was loaded from; nil hooks mean no remote is configured and the
 	// remote checks skip cleanly. Defaults to resolving the repo of the current
 	// working directory (defaultRemoteConfig); tests inject a hermetic resolver.
 	remoteConfig func() (*config.RemoteHooks, string, error)
+
+	// checkHosts asks the daemon to probe the listed hosts; defaults to
+	// daemon.CheckHost. Tests inject a fake: doctor's tests never dial a host.
+	checkHosts func(daemon.CheckHostRequest) (daemon.CheckHostResponse, error)
+
+	// inRepoUnknownLeaves lists the unknown [docker]/[ssh] leaves in the
+	// current repo's in-repo config (#4599). Defaults to loading the repo of
+	// the current working directory; tests inject a hermetic list.
+	inRepoUnknownLeaves func() []config.InRepoUnknownLeaf
 
 	// The skew checks' injection points (#1044). Every one of them reaches for
 	// real daemon/system state, so each is a func field the tests replace with
@@ -209,15 +260,40 @@ type Options struct {
 	// spawned fixtures represent already-durable leaks.
 	minProcessLeakAge time.Duration
 
+	// minLeakedDaemonAge is how long a daemon running from a temp-dir binary
+	// must have been up before --fix offers to stop it. Production uses
+	// leakedDaemonMinAge; tests shorten it, since a fixture spawned a
+	// millisecond ago stands for a daemon that has been up for eleven days.
+	minLeakedDaemonAge time.Duration
+
 	// snapshot overrides the process-table scan; tests inject a snapshot
 	// containing only their own spawned processes so a --fix run can never act
 	// on anything outside the test.
 	snapshot func() (map[int]proctree.Process, error)
+
+	// sessionInventory returns the running daemon's GLOBAL session list — every
+	// project on the box, not the cwd's repo — and defaults to
+	// daemonSessionInventory. It is the preferred half of the owner set the
+	// orphaned-pin check computes: a session whose pin exists may not be
+	// checkpointed to disk yet, so an inventory that reads only disk would call
+	// a live session's directory an orphan (#3560).
+	sessionInventory func() ([]session.InstanceData, error)
+
+	// taskInventory returns every task on the box, each carrying whether its
+	// arming was actually observed (task.ArmingUnknown when it was not). Defaults
+	// to daemonTaskInventory; see there for why there is deliberately no
+	// run-level "a daemon answered" flag alongside it.
+	taskInventory func() ([]task.Task, error)
 }
 
 // scanContext carries the shared, immutable inputs of one run.
 type scanContext struct {
 	opts Options
+	// globalConfigMissing distinguishes the normal pre-first-write posture from
+	// a config load failure. Most checks keep treating a missing file as
+	// unconfigured; responding-daemon diagnostics alone compare against the
+	// defaults a subsequent daemon start would materialize.
+	globalConfigMissing bool
 	// snap is the process-table snapshot, or nil when it could not be read.
 	//
 	// nil means BLIND, not healthy. Every check that consumes it must say so
@@ -255,6 +331,32 @@ type scanContext struct {
 	// distinguishes "scanned, found none" from "not scanned yet".
 	daemons        []daemonProc
 	daemonsScanned bool
+	// The run's ONE listing of the temp dir, memoized by tempHomeCandidates.
+	// Both temp-dir checks read it (#3845), and a temp dir with thousands of
+	// entries must be listed once — and must present ONE picture to both.
+	tempSweep     tempHomeSweep
+	tempSweepDone bool
+	// The run's ONE index of live working directories, memoized by
+	// liveWorkingDirs (#3845). Read per candidate directory, so it must not be
+	// a process-table scan per candidate.
+	cwds        map[int]string
+	cwdsScanned bool
+	// The FIX pass's rechecks, taken once for the pass rather than once per
+	// removal (#3845). See fixTimeTmuxHomes for why once-per-pass keeps what the
+	// recheck is for while 626 removals × 16 tmux shell-outs does not.
+	fixTmuxHomes   map[string]bool
+	fixTmuxErr     error
+	fixTmuxScanned bool
+	fixCwds        map[int]string
+	fixCwdsScanned bool
+	// The test-residue check's reading of what holds a harness directory open
+	// or names it (#4170): once for detection, once for the fix pass, for the
+	// reasons liveWorkingDirs and fixTimeTmuxHomes give.
+	residueRefs        residueRefs
+	residueRefsScanned bool
+	fixResidueRefs     residueRefs
+	fixResidueErr      error
+	fixResidueScanned  bool
 	// autostart scope memo (see autostartScope): whether the installed unit is
 	// this home's at all.
 	autostartServes    bool
@@ -284,6 +386,9 @@ func (o *Options) applyDefaults() error {
 	if o.MinTempHomeAge == 0 {
 		o.MinTempHomeAge = 7 * 24 * time.Hour
 	}
+	if o.MaxTempHomeCandidates == 0 {
+		o.MaxTempHomeCandidates = defaultMaxTempHomeCandidates
+	}
 	if o.killGrace == 0 {
 		o.killGrace = 2 * time.Second
 	}
@@ -293,8 +398,17 @@ func (o *Options) applyDefaults() error {
 	if o.minProcessLeakAge == 0 {
 		o.minProcessLeakAge = processLeakMinAge
 	}
+	if o.minLeakedDaemonAge == 0 {
+		o.minLeakedDaemonAge = leakedDaemonMinAge
+	}
 	if o.snapshot == nil {
 		o.snapshot = proctree.Snapshot
+	}
+	if o.sessionInventory == nil {
+		o.sessionInventory = daemonSessionInventory
+	}
+	if o.taskInventory == nil {
+		o.taskInventory = daemonTaskInventory
 	}
 	if o.daemonHealth == nil {
 		o.daemonHealth = daemon.Health
@@ -348,6 +462,7 @@ func Run(opts Options) (*Report, error) {
 	}
 
 	cfg := checkConfigAndStorage(ctx, report)
+	checkInRepoUnknownLeaves(ctx, report)
 	checkEnvironment(ctx, report, cfg)
 
 	// A failed snapshot is recorded, never discarded: checkProcessInspection
@@ -388,7 +503,21 @@ func Run(opts Options) (*Report, error) {
 	checkLeakedTmuxSessions(ctx, report)
 	checkStaleTempHomes(ctx, report)
 	checkForeignDaemons(ctx, report)
+	// After checkForeignDaemons, which owns the daemon whose HOME is gone; these
+	// two own the daemon whose BINARY is not an install, and the directory a
+	// dead one left behind (#3845). Both read the temp-dir sweep the
+	// stale-temp-home check has already taken, through the same memo.
+	checkLeakedDaemonBinaries(ctx, report)
+	checkStrandedPlaytestSandboxes(report)
+	checkDeadSocketHomes(ctx, report)
+	// Reads the same memoized sweep, but its ROOT listing rather than the
+	// budgeted candidates: the directories af's own test harness leaves behind
+	// sit directly under the temp dir by construction (#4170).
+	checkTestResidue(ctx, report)
+	checkTaskSchedules(ctx, report)
 	checkRemoteSetup(ctx, report)
+	checkOrphanedHookHosts(ctx, report)
+	checkListedHosts(ctx, report, cfg, health)
 
 	if ctx.opts.Fix {
 		for i := range report.Findings {

@@ -136,7 +136,7 @@ func adoptAfterUpgradeCommit(expectedTransactionID, canonicalExecPath string) er
 		if _, err := stopDaemonFn(); err != nil {
 			return fmt.Errorf("stop the committed candidate before handing it off: %w", err)
 		}
-		if err := waitForShutdownFn(); err != nil {
+		if err := waitForShutdownFn(ShutdownTarget{}); err != nil {
 			return fmt.Errorf("the committed candidate did not release the control socket: %w", err)
 		}
 	case candidateAbsent:
@@ -240,8 +240,11 @@ func startCandidateDaemon(ctx context.Context, journal upgradetxn.Journal) error
 // validateCandidateDaemon (ValidateCandidate) is the mirror of
 // validatePreviousDaemon: it REQUIRES the responder carry this transaction's id
 // (a probation candidate — the opposite polarity from the previous daemon) at the
-// exact ToVersion with every recorded listener. Requiring the id is what keeps a
-// from==to rebuild from validating a surviving previous daemon as the candidate.
+// exact ToVersion with every recorded listener, AND that it has finished
+// restoring its instances (#5693) — Commit follows a pass immediately and
+// ApproveCandidate right after it, so validating mid-restore let the release race
+// the restore. Requiring the id is what keeps a from==to rebuild from validating
+// a surviving previous daemon as the candidate.
 func validateCandidateDaemon(ctx context.Context, journal upgradetxn.Journal) error {
 	return awaitDaemonIdentity(ctx, journal, daemonIdentity{
 		role:                 "candidate",

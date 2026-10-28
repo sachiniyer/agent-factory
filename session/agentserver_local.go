@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"fmt"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"sync"
 )
 
@@ -45,6 +47,11 @@ type localAgentServer struct {
 	// capture goroutine on a session that is already being torn down and never gets
 	// closed — the #1632 leak). ensureBroker refuses once closed.
 	closed bool
+	// relaunch collapses overlapping Relaunch requests onto one attempt (W7.1).
+	relaunch relaunchFlight
+	// agentOpMu serializes the operations that replace the agent process — a
+	// relaunch and an agent swap — so two of them never interleave (W7.1/W7.5).
+	agentOpMu sync.Mutex
 }
 
 // AgentServer returns the cached agent-server for this instance's runtime (#1592
@@ -98,7 +105,7 @@ func (i *Instance) agentServerLocked() AgentServer {
 			// out-of-process case (no sandbox to reap), set for a docker session.
 			i.agentSrv = &remoteAgentServer{rc: i.remoteClient, inst: i, teardown: i.runtimeTeardown}
 		case backendIsRemoteWorkspace(i.backend):
-			// A remote-workspace backend (docker/ssh/hook) with NO live client:
+			// A remote-workspace backend (docker/ssh/sandbox/hook) with NO live client:
 			// remoteClient is nil because the runtime wiring was torn down — a
 			// sandbox session loaded inert from disk, or one left Lost by a FAILED
 			// lost-recovery (reprovisionRemote succeeded, Start failed, then
@@ -120,7 +127,7 @@ func (i *Instance) agentServerLocked() AgentServer {
 }
 
 // backendIsRemoteWorkspace reports whether b drives an off-box workspace
-// (docker/ssh/hook) — the backends whose data-plane methods delegate back to
+// (docker/ssh/sandbox/hook) — the backends whose data-plane methods delegate back to
 // i.AgentServer() (they embed remoteAgentBackend), and which therefore must never
 // be wrapped in a localAgentServer (#2005). A nil backend is treated as local
 // (the not-yet-initialised default, matching Instance.Capabilities).
@@ -132,6 +139,14 @@ var _ AgentServer = (*localAgentServer)(nil)
 
 type baselineUpdateBackend interface {
 	HasUpdatedWithBaseline(*Instance) (updated bool, hasPrompt bool, content string, baseline bool)
+}
+
+// captureAwareUpdateBackend additionally reports whether its probe actually
+// captured the pane. Only the tmux implementation can distinguish "unchanged
+// or empty" from "capture-pane failed"; every other backend's narrower
+// contract already asserts the observation ran (#5221 review).
+type captureAwareUpdateBackend interface {
+	HasUpdatedObserved(*Instance) (updated bool, hasPrompt bool, content string, baseline bool, captured bool)
 }
 
 func (s *localAgentServer) Provision(firstTimeSetup bool) error {
@@ -160,9 +175,16 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 	b.CheckAndHandleTrustPrompt(s.inst)
 	var updated, hasPrompt, baseline bool
 	var content string
-	if aware, ok := b.(baselineUpdateBackend); ok {
+	// Capture success defaults to true: a backend without the distinction
+	// reports the narrower contract, which already asserts its observation
+	// ran. Only the tmux path can prove a probe returned nothing.
+	captured := true
+	switch aware := b.(type) {
+	case captureAwareUpdateBackend:
+		updated, hasPrompt, content, baseline, captured = aware.HasUpdatedObserved(s.inst)
+	case baselineUpdateBackend:
 		updated, hasPrompt, content, baseline = aware.HasUpdatedWithBaseline(s.inst)
-	} else {
+	default:
 		updated, hasPrompt, content = b.HasUpdated(s.inst)
 	}
 	return Observation{
@@ -171,6 +193,7 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 		HasPrompt:   hasPrompt,
 		Content:     content,
 		ModelChange: b.AgentModelChange(s.inst),
+		Captured:    captured,
 	}, nil
 }
 
@@ -182,6 +205,23 @@ func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) 
 		return s.inst.PreviewTabSnapshot(tab, full)
 	}
 	b := s.inst.currentBackend()
+	// A tmux-backed agent tab measures the lines above its visible capture (#3169)
+	// in the same command as the content, so a remote client can tell a complete
+	// capture from a partial one (#5571 W4.2). Fall through to the backend path
+	// on any miss; the count is an enhancement, never a requirement.
+	if !full {
+		s.inst.mu.RLock()
+		ts := s.inst.tmuxLocked()
+		started := s.inst.started
+		s.inst.mu.RUnlock()
+		if ts != nil && started {
+			if content, above, known, cerr := captureVisibleWithCount(ts); cerr == nil {
+				snap := previewSnapshotWithModes(content, ts)
+				snap.LinesAbove, snap.LinesAboveKnown = above, known
+				return snap, nil
+			}
+		}
+	}
 	var (
 		content string
 		err     error
@@ -198,6 +238,48 @@ func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) 
 	ts := s.inst.tmuxLocked()
 	s.inst.mu.RUnlock()
 	return previewSnapshotWithModes(content, ts), nil
+}
+
+// PreviewGrid captures tab `tab`'s pane through the same code the local
+// clientless channel repaints from, so a remote subscriber gets the exact grid,
+// cursor, modes and size a local one does (#5571 W4.2). A tab with no tmux pane
+// has no grid to give.
+func (s *localAgentServer) PreviewGrid(tab int) (PaneSnapshot, error) {
+	s.inst.mu.RLock()
+	var ts *tmux.TmuxSession
+	if tab == 0 {
+		ts = s.inst.tmuxLocked()
+	} else {
+		ts = s.inst.tabTmuxAtLocked(tab)
+	}
+	s.inst.mu.RUnlock()
+	if ts == nil {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab %d: no tmux pane to capture a grid from", s.inst.Title, tab)
+	}
+	return tmuxPaneSnapshot(ts)
+}
+
+// PreviewGridByID is PreviewGrid bound to one stable tab identity: the pane is
+// selected under the roster lock, so no ordinal crosses it (#2200).
+func (s *localAgentServer) PreviewGridByID(tabID string) (PaneSnapshot, error) {
+	s.inst.mu.RLock()
+	idx, ok := s.inst.tabIndexByIDLocked(tabID)
+	var ts *tmux.TmuxSession
+	if ok {
+		if idx == 0 {
+			ts = s.inst.tmuxLocked()
+		} else {
+			ts = s.inst.Tabs[idx].tmux
+		}
+	}
+	s.inst.mu.RUnlock()
+	if !ok {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab id %q: %w", s.inst.Title, tabID, ErrTabGone)
+	}
+	if ts == nil {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab id %q: no tmux pane to capture a grid from", s.inst.Title, tabID)
+	}
+	return tmuxPaneSnapshot(ts)
 }
 
 // PreviewByID binds directly to the tmux/backend target selected under the
@@ -246,6 +328,14 @@ func (s *localAgentServer) SendPrompt(prompt string) error {
 }
 
 func (s *localAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error) {
+	// Adoption, counted before the write (#3865). SendPrompt above routes through
+	// here, so this is the one bump for both.
+	if err := s.inst.refuseInputWhileRebuildTeardownPending(); err != nil {
+		return PromptNotDelivered, err
+	}
+	if err := s.inst.NoteAdoptionDelivery(); err != nil {
+		return PromptNotDelivered, err
+	}
 	// The reliable command path (tmux send-keys), which is what automated/scheduled
 	// deliveries need — it lands whether or not a PTY is currently attached.
 	backend := s.inst.currentBackend()
@@ -326,7 +416,7 @@ func (s *localAgentServer) resetBrokerCaptures() {
 
 // ensureBrokerByID is ensureBroker addressed by a tab's STABLE id (#1738) — the
 // id-native binding path (TabAddressableServer). It resolves the id to the tmux it
-// currently backs ATOMICALLY (TabTmuxByID, one lock), so unlike the ordinal path
+// currently backs ATOMICALLY (tabTmuxByIDLocked, one lock), so unlike the ordinal path
 // there is no window in which a concurrent close/reorder can shift a different tab
 // under the caller's address (#1779). The broker map is already id-keyed, so this
 // is the direct route: no ordinal is involved at any point. A stale/unknown id is
@@ -414,6 +504,15 @@ func (s *localAgentServer) SubscribeTab(tabID string, since Seq) (PTYSubscriptio
 }
 
 func (s *localAgentServer) InputTab(tabID string, b []byte) error {
+	// The browser terminal's path (daemon/ws_pty.go idTabBinding.input), which
+	// takes no manager lock — so this bump, and the fence it consults, are the
+	// whole of its serialization against a teardown (#3865).
+	if err := s.inst.refuseInputWhileRebuildTeardownPending(); err != nil {
+		return err
+	}
+	if err := s.inst.NoteAdoptionDelivery(); err != nil {
+		return err
+	}
 	br, err := s.ensureBrokerByID(tabID)
 	if err != nil {
 		return err
@@ -438,6 +537,13 @@ func (s *localAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, error
 }
 
 func (s *localAgentServer) Input(tab int, b []byte) error {
+	// The legacy ordinal PTY path, same reason as InputTab (#3865).
+	if err := s.inst.refuseInputWhileRebuildTeardownPending(); err != nil {
+		return err
+	}
+	if err := s.inst.NoteAdoptionDelivery(); err != nil {
+		return err
+	}
 	br, err := s.ensureBroker(tab)
 	if err != nil {
 		return err
@@ -462,7 +568,23 @@ func (s *localAgentServer) Archive() (string, error) {
 	return s.inst.pushBranchForArchive()
 }
 
-func (s *localAgentServer) Kill() error {
+// trustLiveGeneration is threaded straight to Backend.Kill (#3413).
+// StopPreservingWorkspace stops the agent and every tab and leaves the workspace
+// in place (#5571 W8.5): the same data-plane teardown as Kill, then a tab
+// teardown that keeps the worktree.
+func (s *localAgentServer) StopPreservingWorkspace() error {
+	s.mu.Lock()
+	s.closed = true
+	brokers := s.brokers
+	s.brokers = nil
+	s.mu.Unlock()
+	for _, br := range brokers {
+		br.close()
+	}
+	return s.inst.teardownTabs(teardownKill{keepWorkspace: true})
+}
+
+func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	// Tear every tab's data plane down first so the clientless captures stop and
 	// each subscriber's NextEvent returns io.EOF, then kill the underlying session.
 	// Latch closed under the same lock that snapshots the brokers so a Subscribe
@@ -477,5 +599,5 @@ func (s *localAgentServer) Kill() error {
 	for _, br := range brokers {
 		br.close()
 	}
-	return s.inst.currentBackend().Kill(s.inst)
+	return s.inst.currentBackend().Kill(s.inst, trustLiveGeneration)
 }

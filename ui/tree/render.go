@@ -8,9 +8,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
-	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/theme"
 )
 
 const readyIcon = "● "
@@ -30,9 +30,10 @@ type Theme struct {
 	ForegroundDim       lipgloss.TerminalColor
 	SelectionBackground lipgloss.TerminalColor
 	SelectionForeground lipgloss.TerminalColor
-	Success             lipgloss.TerminalColor
-	Warning             lipgloss.TerminalColor
-	Error               lipgloss.TerminalColor
+	Ready               lipgloss.TerminalColor
+	Lost                lipgloss.TerminalColor
+	Dead                lipgloss.TerminalColor
+	ArchiveWarning      lipgloss.TerminalColor
 }
 
 // deadIcon is hollow (not the filled readyIcon) so a dead session differs from
@@ -94,12 +95,12 @@ var limitStyle = lipgloss.NewStyle()
 // session (#1146): "[limit] resets <t> " when a reset time is known, else a bare
 // "[limit] ". Kept a helper (not inlined) so the tab pane / search overlay could
 // reuse the exact same wording if they later surface it.
-func limitBadgePrefix(i *session.Instance) string {
+func limitBadgePrefix(i *session.Instance, now time.Time) string {
 	resetAt, ok := i.LimitResetAt()
 	if !ok {
 		return "[limit] "
 	}
-	return fmt.Sprintf("[limit] resets %s ", formatLimitReset(resetAt, time.Now()))
+	return fmt.Sprintf("[limit] resets %s ", formatLimitReset(resetAt, now))
 }
 
 // formatLimitReset renders a usage-limit reset time for the sidebar badge in the
@@ -139,7 +140,7 @@ var selectedDescStyle = lipgloss.NewStyle()
 // Agent/active tab label (#1456). Selection still supplies the row highlight.
 var tabRowStyle = lipgloss.NewStyle()
 
-// tabRowActiveStyle keeps tab rows in the same foreground; the tmux-style "*"
+// tabRowActiveStyle keeps tab rows in the same foreground; the " · open"
 // marker carries the active cue.
 var tabRowActiveStyle = lipgloss.NewStyle()
 
@@ -163,27 +164,28 @@ var placeholderTitleColor lipgloss.TerminalColor
 var archiveWarningColor lipgloss.TerminalColor
 
 func init() {
-	t := config.DefaultThemeConfig()
+	t := theme.Colors()
 	ApplyTheme(Theme{
-		Foreground:          lipgloss.Color(t.Foreground),
-		ForegroundStrong:    lipgloss.Color(t.ForegroundStrong),
-		ForegroundMuted:     lipgloss.Color(t.ForegroundMuted),
-		ForegroundDim:       lipgloss.Color(t.ForegroundDim),
-		SelectionBackground: lipgloss.Color(t.SelectionBackground),
-		SelectionForeground: lipgloss.Color(t.SelectionForeground),
-		Success:             lipgloss.Color(t.Success),
-		Warning:             lipgloss.Color(t.Warning),
-		Error:               lipgloss.Color(t.Error),
+		Foreground:          t["ink"],
+		ForegroundStrong:    t["ink"],
+		ForegroundMuted:     t["ink-muted"],
+		ForegroundDim:       t["ink-muted"],
+		SelectionBackground: t["surface-raised"],
+		SelectionForeground: t["ink"],
+		Ready:               t["ready"],
+		Lost:                t["lost"],
+		Dead:                t["dead"],
+		ArchiveWarning:      t["dead"],
 	})
 }
 
 // ApplyTheme rebuilds package-level tree styles after the TUI palette changes.
 func ApplyTheme(t Theme) {
-	readyStyle = lipgloss.NewStyle().Foreground(t.Success)
-	deadStyle = lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	lostStyle = lipgloss.NewStyle().Foreground(t.Warning)
-	archivedStyle = lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	limitStyle = lipgloss.NewStyle().Foreground(t.Error)
+	readyStyle = lipgloss.NewStyle().Foreground(t.Ready)
+	deadStyle = lipgloss.NewStyle().Foreground(t.Dead)
+	lostStyle = lipgloss.NewStyle().Foreground(t.Lost)
+	archivedStyle = lipgloss.NewStyle().Foreground(theme.Colors()["archived"])
+	limitStyle = lipgloss.NewStyle().Foreground(theme.Colors()["limit-reached"])
 
 	InstanceTitleColor = t.Foreground
 	titleStyle = lipgloss.NewStyle().
@@ -209,7 +211,7 @@ func ApplyTheme(t Theme) {
 		Foreground(t.SelectionForeground)
 	deletingTitleColor = t.ForegroundMuted
 	placeholderTitleColor = t.ForegroundMuted
-	archiveWarningColor = t.Warning
+	archiveWarningColor = t.ArchiveWarning
 }
 
 // InstanceRenderer renders the tree's rows: session.Instance rows (absorbed
@@ -228,11 +230,21 @@ type InstanceRenderer struct {
 	// caller (and every existing test) renders exactly as before.
 	namingInstance  *session.Instance
 	namePlaceholder string
+
+	// now supplies wall time for limit-reset and idle-age labels. Production uses
+	// time.Now; deterministic app-model stills replace it through SetNowForTest.
+	now func() time.Time
 }
 
 // NewInstanceRenderer creates a renderer.
 func NewInstanceRenderer() *InstanceRenderer {
-	return &InstanceRenderer{}
+	return &InstanceRenderer{now: time.Now}
+}
+
+// SetNowForTest replaces the wall clock used by rendered relative-time labels.
+// Production leaves the clock installed by NewInstanceRenderer intact.
+func (r *InstanceRenderer) SetNowForTest(now func() time.Time) {
+	r.now = now
 }
 
 // SetWidth sets the effective content width rows render into.
@@ -255,18 +267,21 @@ const branchIcon = "⎇"
 
 // ArrowCell returns the (x, y) cell of the ▾/▸ expand/collapse arrow within
 // an instance row block rendered at content width w, for mouse hit-testing
-// (#1024 R4): block line 0 is the title style's top-padding line, so the
-// arrow sits on line 1, one cell after the row's left padding + the prefix's
+// (#1024 R4): detailed blocks retain top padding; collapsed rows have none.
+// The arrow follows that row offset, one cell after left padding + the prefix's
 // leading space. ok is false at ultra-narrow widths, where Render drops the
 // arrow from the prefix entirely (the #646 fallback) — the sidebar registers
 // no arrow zone then. Kept next to Render so the prefix layout and the hit
 // target can't drift apart; the render test pins them together against actual
 // output.
-func ArrowCell(w int) (x, y int, ok bool) {
+func ArrowCell(w int, detailed bool) (x, y int, ok bool) {
 	if w <= 9 {
 		return 0, 0, false
 	}
-	return 2, 1, true
+	if detailed {
+		return 2, 1, true
+	}
+	return 2, 0, true
 }
 
 // instancePrefix renders the display-only tree prefix on instance rows. It
@@ -299,6 +314,7 @@ func retainedArchiveLocation(warning string) string {
 // title stays aligned with its siblings.
 func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, hasMultipleRepos bool, expanded bool) string {
 	archiveWarning := i.ArchiveWarning()
+	callbackWarning := i.CallbackUnavailable()
 	arrow := nonExpandableArrow
 	if Expandable(i) {
 		if expanded {
@@ -316,6 +332,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if !selected {
 		titleS = titleStyle
 		descS = listDescStyle
+	}
+
+	// Unexpanded, unselected sessions start with one row. The selected group
+	// retains its branch and operation details; failures remain visible below.
+	if !selected && !expanded {
+		titleS = titleS.PaddingTop(0)
 	}
 
 	// Status glyph. Read the two axes directly (#1195): a row with ANY in-flight op
@@ -371,7 +393,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	placeholder := i == r.namingInstance && i.Title == "" && r.namePlaceholder != ""
 	if placeholder {
 		titleText = r.namePlaceholder
-		titleS = titleS.Foreground(placeholderTitleColor)
+		if !selected {
+			titleS = titleS.Foreground(placeholderTitleColor)
+		}
 	}
 	if i.Capabilities().Workspace == session.WorkspaceRemote {
 		titleText = "[remote] " + titleText
@@ -388,11 +412,13 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	}
 	if op == session.OpKilling || op == session.OpArchiving {
 		titleText = "[deleting] " + titleText
-		titleS = titleS.Foreground(deletingTitleColor)
-		// Dim the branch line too: on a selected row descS is the
-		// high-contrast selectedDescStyle, and leaving it bright makes the
-		// secondary line stand out more than the dimmed title (#853).
-		descS = descS.Foreground(deletingTitleColor)
+		if !selected {
+			titleS = titleS.Foreground(InstanceTitleColor)
+		}
+		// Unselected deleting rows recede together; selection retains ink.
+		if !selected {
+			descS = descS.Foreground(deletingTitleColor)
+		}
 	}
 	// An archived row (#1028) is dimmed and carries the ▧ archived glyph so it
 	// reads as "filed away, restartable" rather than a live session. It
@@ -403,8 +429,8 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// "[archived]..." (#1225). The state is already conveyed three other ways on
 	// the same row — the ▧ glyph, the dimming below, and the "▼ Archived (n)"
 	// section header — so the name stays full-width like a live row's.
-	if liveness == session.LiveArchived {
-		titleS = titleS.Foreground(deletingTitleColor)
+	if liveness == session.LiveArchived && !selected {
+		titleS = titleS.Foreground(InstanceTitleColor)
 		descS = descS.Foreground(deletingTitleColor)
 	}
 	// A usage-limit-blocked row (#1146) is prefixed with a [limit] marker and its
@@ -412,7 +438,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// session is stalled and roughly when it frees up — retry now with c. The title
 	// keeps full contrast (like [lost]): the session is blocked, not gone.
 	if liveness == session.LiveLimitReached {
-		titleText = limitBadgePrefix(i) + titleText
+		titleText = limitBadgePrefix(i, r.now()) + titleText
 	}
 	// A re-created root that did not come back on its prior conversation (#2629)
 	// is orthogonal to liveness too — the row is Ready and looks exactly like one
@@ -428,6 +454,14 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// are derived on every render from the live snapshot, so they cannot expire.
 	if archiveWarning != "" {
 		titleText = "[archive incomplete] " + titleText
+	}
+	// An unreachable row (#5571 W1.3) keeps full contrast like [lost]: the
+	// session is expected back, and the marker — deliberately STATIC text, not
+	// an animated indicator — says only that af's view of it is unverified.
+	// It sits just inside [model changed]: the outage explains why every other
+	// prefix on the row may be stale.
+	if i.UnreachableSnapshot() != nil {
+		titleText = "[unreachable] " + titleText
 	}
 	// A verified post-safety-dialog model change is orthogonal to liveness: the
 	// session can keep working and otherwise look healthy. Add it LAST so it is
@@ -473,40 +507,96 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if prefix != "" {
 		titleContent = fmt.Sprintf("%s %s", prefix, titleText)
 	}
-	title := titleS.Render(lipgloss.JoinHorizontal(
-		lipgloss.Left,
-		lipgloss.Place(r.width-3, 1, lipgloss.Left, lipgloss.Center, titleContent),
-		" ",
-		join,
-	))
-
-	remainingWidth := r.width
-	remainingWidth -= prefixWidth
-	remainingWidth -= runewidth.StringWidth(branchIcon)
-	remainingWidth -= 2 // for the literal " " and "-" in the branchLine format string
+	// The status glyph is laid out FROM THE RIGHT EDGE, and the title fills what
+	// is left (#3614). It reserved its width before too — the title went into
+	// width-3 and the glyph was joined after — but by lipgloss.Width, which
+	// under-counts clustered content: a title carrying a ZWJ family produced a row
+	// the sidebar's own ClampToRect then measured as over-wide, and what a
+	// right-to-left clamp cuts off such a row is its TAIL, which is where this
+	// glyph lives. RowWithRightAffix does the same reservation in the measure the
+	// clamp enforces, so the over-estimate costs a shorter title and the ● stays.
+	title := titleS.Render(layout.RowWithRightAffix(titleContent, " "+join, r.width))
 
 	// Use the mutex-guarded accessor so this read (on the renderer
 	// goroutine) doesn't race with LocalBackend.Start's write on the
 	// instance-creation tea.Cmd goroutine.
 	branch := i.GetBranch()
-	if i.Started() && hasMultipleRepos {
-		repoName, err := i.RepoName()
-		if err != nil {
-			log.ErrorLog.Printf("could not get repo name in instance renderer: %v", err)
-		} else {
+	hasBranch := branch != ""
+	// An unstarted local row has no repo yet; an off-box snapshot row never
+	// starts on this side but does carry its project (W8.8). An unknown repo
+	// just leaves the row unlabelled — it is not an error worth logging on
+	// every render.
+	offBox := i.Capabilities().Workspace != session.WorkspaceLocalWorktree
+	if (i.Started() || offBox) && hasMultipleRepos {
+		if repoName, err := i.RepoName(); err == nil && hasBranch {
 			branch += fmt.Sprintf(" (%s)", repoName)
+		} else if err == nil {
+			// No branch to attach the context to; the repo name still
+			// disambiguates, but the row must not pick up the branch glyph.
+			branch = fmt.Sprintf("(%s)", repoName)
 		}
 	}
+
+	// The ⎇ labels the row's branch, so it only leads a row that names one:
+	// in front of a bare idle detail or a repo name it would mark a phrase
+	// that is not a branch (#4174).
+	branchMarker := ""
+	if hasBranch {
+		branchMarker = branchIcon + "-"
+	}
+
+	remainingWidth := r.width
+	remainingWidth -= prefixWidth
+	remainingWidth -= runewidth.StringWidth(branchMarker)
+	remainingWidth-- // for the literal " " in the branchLine format string
+
 	description := branch
-	if reason, restoreFailure, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
-		detail := idleReasonDetail(reason, churnAt, time.Now())
+	restoreFailed := false
+	restoreWaiting := false
+	unreachableRow := false
+	if u := i.UnreachableSnapshot(); u != nil {
+		// The outage detail outranks branch and idle detail alike: it explains
+		// why every other fact on the row may be stale, so it leads like a
+		// restore outcome does and the branch trails it (#5571 W1.3).
+		detail := fmt.Sprintf("unreachable %s · %s", formatPaneChurnAge(u.Since, r.now())+" ago", u.Error)
+		if branch != "" {
+			description = detail + " · " + branch
+		} else {
+			description = detail
+		}
+		unreachableRow = true
+		descS = descS.Foreground(archiveWarningColor)
+	}
+	if reason, restoreFailure, restoreWait, churnAt := i.IdleReasonDetailSnapshot(); !unreachableRow && reason != session.IdleReasonNone {
+		detail := idleReasonDetail(reason, churnAt, r.now())
 		if reason == session.IdleReasonRestoreGaveUp && restoreFailure != nil {
 			detail = restoreFailure.Detail()
+			restoreFailed = true
+			descS = descS.Foreground(archiveWarningColor)
+		}
+		if reason == session.IdleReasonRestoreWaitingOnEnvironment && restoreWait != nil {
+			// A waiting row is not terminal — it keeps the plain color and
+			// clears itself the moment a restore attempt goes through or the
+			// failure turns structural — but its detail is as long as the
+			// gave-up one, so it takes the same detail-first layout: trailed
+			// behind the branch it would never fit at real rail widths.
+			detail = restoreWait.Detail()
+			restoreWaiting = true
 		}
 		if branch == "" {
 			description = detail
-		} else {
+		} else if restoreFailed || restoreWaiting {
+			// A restore-outcome row exists to report that outcome — the
+			// gave-up row warning-colored and permanent, the waiting row in
+			// the plain color until it resolves — so the actionable detail
+			// leads and the branch trails it, the exception to the
+			// branch-first order.
 			description = detail + " · " + branch
+		} else {
+			// The branch leads so right-truncation eats the idle detail
+			// first: this row exists to name the branch, and a leading
+			// detail truncated the branch away entirely (#4174).
+			description = fitIdleDetail(branch, detail, remainingWidth)
 		}
 	}
 	// Don't show the branch if there's no space for it; otherwise fit it into
@@ -515,6 +605,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
 	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
 	// widths (#1772 review).
+	if !selected && !expanded && archiveWarning == "" && callbackWarning == "" && !restoreFailed && !restoreWaiting && !unreachableRow {
+		description = ""
+	}
 	branchWidth := runewidth.StringWidth(description)
 	if remainingWidth <= 0 {
 		description = ""
@@ -529,21 +622,34 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		spaces = strings.Repeat(" ", remainingWidth)
 	}
 
-	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, description, spaces)
+	branchLine := fmt.Sprintf("%s %s%s%s", strings.Repeat(" ", prefixWidth), branchMarker, description, spaces)
 
 	lines := []string{title}
-	if archiveWarning == "" {
-		lines = append(lines, descS.Render(branchLine))
-	} else {
-		// Move the ordinary description's bottom padding to the warning so the
-		// notice is part of the same row block rather than separated by whitespace.
-		lines = append(lines, descS.PaddingBottom(0).Render(branchLine))
-		warningTexts := []string{archiveWarning}
+	var warningTexts []string
+	if archiveWarning != "" {
 		if location := retainedArchiveLocation(archiveWarning); location != "" {
 			// Put the recovery location before the prose-heavy warning. A typical
 			// sidebar cannot fit the full bounded report on one line, but it must
 			// still show where the complete bytes remain.
-			warningTexts = append([]string{location}, warningTexts...)
+			warningTexts = append(warningTexts, location)
+		}
+		warningTexts = append(warningTexts, archiveWarning)
+	}
+	if callbackWarning != "" {
+		// The cross-surface phrase, verbatim — the picker's JSON, the web banner
+		// and this row all name it identically so the user greps one string and
+		// finds every place af said it (#5571 W3.1).
+		warningTexts = append(warningTexts, session.CallbackUnavailablePrefix+callbackWarning)
+	}
+	if len(warningTexts) == 0 {
+		if description != "" {
+			lines = append(lines, descS.Render(branchLine))
+		}
+	} else {
+		// Move the ordinary description's bottom padding to the warning so the
+		// notice is part of the same row block rather than separated by whitespace.
+		if description != "" {
+			lines = append(lines, descS.PaddingBottom(0).Render(branchLine))
 		}
 		for index, warningText := range warningTexts {
 			glyph := "  "
@@ -565,8 +671,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		}
 	}
 
-	// join title and subtitle
-	text := lipgloss.JoinVertical(lipgloss.Left, lines...)
+	// Join title and subtitle in the CONTRACT measure. lipgloss pads every line of
+	// a stacked block out to its widest by lipgloss.Width, which would put back
+	// exactly the cells RowWithRightAffix just took off the clustered title row —
+	// and the clamp downstream would then cut the tail, and the glyph with it
+	// (#3614).
+	text := layout.JoinVertical(lines...)
 
 	return text
 }
@@ -574,6 +684,32 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 // idleReasonDetail renders only the mechanically established vocabulary from
 // session.IdleReason. The elapsed suffix is explicitly since the last OBSERVED
 // pane churn; it does not claim the agent answered, finished, or became wedged.
+// idleDetailSeparator joins the branch to its idle detail, and the idle
+// detail's own segments to each other (see idleReasonDetail).
+const idleDetailSeparator = " · "
+
+// fitIdleDetail composes the branch-led row "branch · detail" within width
+// cells, but trims the idle detail by whole " · "-separated segments rather
+// than by rune: the reason label ("pane changed") is the smallest unit that
+// still says something, and cutting inside one produced a bare "· …" or a
+// one-word "pane …" that reads as a rendering glitch (#4956). The longest run
+// of leading segments that fits is kept; when not even the label fits, the
+// detail is dropped and the branch renders alone, left to the caller's
+// ordinary truncation.
+func fitIdleDetail(branch, detail string, width int) string {
+	if detail == "" {
+		return branch
+	}
+	segments := strings.Split(detail, idleDetailSeparator)
+	for keep := len(segments); keep > 0; keep-- {
+		candidate := branch + idleDetailSeparator + strings.Join(segments[:keep], idleDetailSeparator)
+		if runewidth.StringWidth(candidate) <= width {
+			return candidate
+		}
+	}
+	return branch
+}
+
 func idleReasonDetail(reason session.IdleReason, churnAt, now time.Time) string {
 	label := reason.Label()
 	if label == "" {
@@ -605,17 +741,9 @@ func formatPaneChurnAge(churnAt, now time.Time) string {
 	return fmt.Sprintf("%dd", int(age/(24*time.Hour)))
 }
 
-// activeTabMarker is the tmux-style cue RenderTab appends to the tab row the
-// content pane is showing. It is the ONLY thing that marks a tab active —
-// tabRowActiveStyle is deliberately the same as tabRowStyle — which is why
-// RenderTab reserves its width before truncating rather than letting it be
-// truncated away (#1983).
-//
-// The reservation became load-bearing when #1813 gave every tab label a kind
-// glyph: labelForTab returned "Agent" and now returns "◆ Agent", so every label
-// is 2 cells wider and the truncation that drops this marker bites 2 columns
-// earlier on every row. The renderer's arithmetic did not change; its input did.
-const activeTabMarker = " *"
+// activeTabMarker names the tab shown in the pane even when the rail cursor
+// previews another tab. Reserve it before truncating the label.
+const activeTabMarker = " · open"
 
 // RenderTab renders one tab child row of an expanded instance: an indented
 // ├/└ connector, the 1-based slot number (matching the 1-9 jump keys), the
@@ -637,18 +765,17 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 	prefix := fmt.Sprintf("%s%s %d ",
 		strings.Repeat(" ", runewidth.StringWidth(instancePrefix(expandedArrow, r.width))),
 		connector, oneBased)
-	text := prefix + label + marker
-	if r.width > 0 && runewidth.StringWidth(text) > r.width {
+	body := prefix + label
+	if r.width > 0 && runewidth.StringWidth(body+marker) > r.width {
 		// Same narrow-width handling as the instance rows: drop the "…" tail
-		// when it would itself overflow, since lipgloss.Place won't clip
-		// oversize content.
+		// when it would itself overflow, since the row is placed, not clipped.
 		tail := "…"
 		if r.width < runewidth.StringWidth(tail) {
 			tail = ""
 		}
 		// Spend the overflow on the NAME, not on the marker (#1983): content
 		// elides, indicators don't. Truncating the whole row right-to-left dropped
-		// the trailing " *" first, and that marker is the only thing distinguishing
+		// the trailing " · open" first, and that marker is the only thing distinguishing
 		// an active tab — tabRowActiveStyle is deliberately identical to
 		// tabRowStyle — so an active tab with a long name rendered byte-identically
 		// to an inactive one while the tab bar's header still called it active. The
@@ -667,13 +794,10 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 		// process tab is named after its command, a web tab after a session title;
 		// neither is guaranteed ASCII).
 		if avail := r.width - runewidth.StringWidth(prefix) - runewidth.StringWidth(marker); avail > 0 {
-			text = prefix + runewidth.Truncate(label, avail, tail) + marker
-		}
-		// Below that the row is narrower than its own connector and marker, so
-		// there is no name left to spend and the marker goes too: clamp the row to
-		// the container and let it degrade, exactly as it did before.
-		if runewidth.StringWidth(text) > r.width {
-			text = runewidth.Truncate(text, r.width, tail)
+			body = prefix + runewidth.Truncate(label, avail, tail)
+		} else {
+			// At tight widths the connector yields before the named state cue.
+			body = runewidth.Truncate(prefix, max(0, r.width-runewidth.StringWidth(marker)), "")
 		}
 	}
 	style := tabRowStyle
@@ -689,6 +813,14 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 		// stays inside the sidebar container.
 		pad = 0
 	}
+	// The marker's width is reserved in the measure the sidebar's clamp enforces
+	// (#3614), for the same reason the instance row's ● status glyph is — but the
+	// marker stays NEXT TO the name, which is where a tmux-style active cue
+	// belongs. lipgloss.Place used to pad this row out in lipgloss's measure, which
+	// under-counts a clustered label — a tab is named after a session title or a
+	// process command, neither guaranteed ASCII — so the row reached the clamp
+	// looking over-wide and the clamp took its tail, which is exactly the marker
+	// the reservation above exists to protect.
 	return style.Padding(0, pad).Render(
-		lipgloss.Place(r.width, 1, lipgloss.Left, lipgloss.Center, text))
+		layout.RowKeepingTail(body, marker, r.width))
 }

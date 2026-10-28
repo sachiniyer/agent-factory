@@ -2,10 +2,9 @@ package app
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -22,7 +21,44 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if shouldClose {
 		if m.selectionOverlay.IsSubmitted() {
 			idx := m.selectionOverlay.GetSelectedIndex()
-			m.pendingProgram = tmux.SupportedPrograms[idx]
+			// The rows are what the open picker actually showed — for a remote
+			// target that is the daemon's catalog, not the local enum (#4889
+			// review).
+			picks := m.programPickerChoices
+			if len(picks) == 0 {
+				picks = tmux.SupportedPrograms
+			}
+			picked := picks[idx]
+			m.programPickerChoices = nil
+			changed := picked != m.pendingProgram
+			// A picker submit is an explicit choice even when it re-picks the
+			// value already shown: it submits the concrete program on the wire
+			// rather than "" (#4889 review). String equality cannot tell this
+			// pick apart from an untouched field — this flag is what can.
+			m.pendingProgramChosen = true
+			if changed {
+				// An account belongs to ONE agent — claude's "work" and codex's "work"
+				// are different identities in different registries — so a program change
+				// invalidates whatever the account field holds (#3844). Dropping it is
+				// the only safe answer: keeping it would send a name the new agent's
+				// registry does not have (a failed create, at best), and silently
+				// re-resolving it against that registry would put the session on an
+				// identity the user never picked, which is the outcome this whole field
+				// exists to prevent.
+				m.clearPendingAccount()
+			}
+			m.pendingProgram = picked
+			m.selectionOverlay = nil
+			m.state = stateNew
+			m.menu.SetState(ui.StateNewInstance)
+			if changed {
+				// The new agent has its own registry and its own project default, so
+				// ask again rather than leaving the field on the ambient identity
+				// (#3386). clearPendingAccount above already dropped the old agent's
+				// pick AND its chosen flag, so the answer is free to land.
+				return m, m.fetchAccountDefault(m.namingInstance, sessionenv.AgentForCommand(picked))
+			}
+			return m, nil
 		}
 		m.selectionOverlay = nil
 		m.state = stateNew
@@ -32,12 +68,9 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleStateInitialPrompt handles key events while the naming form's
-// initial-prompt field is open (#1936). Closing keeps the text — the field is
-// part of the create form, so Tab/Esc back out of it rather than discarding it
-// — and returns to naming, mirroring handleStateSelectProgram. ctrl+c is the
-// exception: it means "cancel this create", so it is replayed into the naming
-// handler, which owns the kill-and-clean-up path (#717).
+// handleStateInitialPrompt returns to naming when the nested prompt field closes.
+// Tab/Esc keep the edit; Ctrl+C discards this edit and preserves the prior prompt
+// and every other pending form value. Canceling the create belongs to naming.
 func (m *home) handleStateInitialPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	shouldClose := m.promptOverlay.HandleKeyPress(msg)
 	if !shouldClose {
@@ -49,9 +82,6 @@ func (m *home) handleStateInitialPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.promptOverlay = nil
 	m.state = stateNew
-	if canceled {
-		return m.handleStateNew(tea.KeyMsg{Type: tea.KeyCtrlC})
-	}
 	m.menu.SetNamingHasPrompt(strings.TrimSpace(m.pendingPrompt) != "")
 	m.menu.SetState(ui.StateNewInstance)
 	return m, nil
@@ -70,6 +100,11 @@ func (m *home) handleStateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// so its handler can run.
 		if pending := m.pendingConfirmMsg; pending != nil {
 			m.pendingConfirmMsg = nil
+			if cmd, ok := pending.(tea.Cmd); ok {
+				// Schedule follow-up work (including notice timers), never run it
+				// inside the key/mouse handler that accepted the confirmation.
+				return m, cmd
+			}
 			return m, func() tea.Msg { return pending }
 		}
 		return m, nil
@@ -116,11 +151,23 @@ func (m *home) showSearchOverlay() (tea.Model, tea.Cmd) {
 // full manager lives in the tasks overlay. Cursor keys move the section's
 // selection, Enter opens the manager overlay on it, Esc returns focus to the
 // tree. Advertised global bindings (Tab/Shift-Tab focus ring, task manager,
-// hooks, ? help, q quit) keep working, while pane-management verbs are
-// consumed here so hidden `s`/`S`/`x`/pane-switch keys cannot mutate workspace
-// panes from Automations focus (#1417).
+// hooks, ? help, q quit) keep working, while pane-management and tab-mutation
+// verbs are consumed here so hidden `s`/`S`/`x`/pane-switch/`</>`/`w`/`t` keys
+// cannot mutate workspace panes or the roster from Automations focus (#1417).
 func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if m.ring.Active() != layout.RegionAutomations {
+		return m, nil, false
+	}
+	// A configured section-navigation key takes priority over the rail's
+	// hardcoded vim/cursor aliases — same rule as handleProjectsFocus. For
+	// example, next_section = "j" suppresses the global down binding, so
+	// Automations must not reclaim j as a cursor move before the global
+	// dispatcher can honor the override (#2295 left the peer Projects handler
+	// guarded; this closes the identical gap here).
+	if key.Matches(msg,
+		keys.GlobalKeyBindings[keys.KeyNextSection],
+		keys.GlobalKeyBindings[keys.KeyPrevSection],
+	) {
 		return m, nil, false
 	}
 	if _, consumed := m.automations.HandleKey(msg); consumed {
@@ -134,7 +181,7 @@ func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 		m.focusRegion(layout.RegionTree)
 		return m, nil, true
 	}
-	if automationsConsumesPaneVerb(msg) {
+	if automationsConsumesMutationVerb(msg) {
 		return m, nil, true
 	}
 	return m, nil, false
@@ -236,13 +283,27 @@ func projectsChromeFallthroughKey(msg tea.KeyMsg) bool {
 	return false
 }
 
-func automationsConsumesPaneVerb(msg tea.KeyMsg) bool {
+// automationsConsumesMutationVerb reports whether msg is a binding that must
+// stay inert while the Automations rail owns focus: pane management, the </>
+// tab move, and the close/new tab lifecycle pair (w/t). The rail's footer does
+// not advertise these verbs, and a key that fell through to the global
+// dispatcher would mutate a session or pane the user is not looking at (#1417).
+// Named for what it protects, not the key list it started with.
+func automationsConsumesMutationVerb(msg tea.KeyMsg) bool {
 	for _, name := range []keys.KeyName{
 		keys.KeyOpenPane,
 		keys.KeySplitPane,
 		keys.KeyHidePane,
 		keys.KeyPanePrev,
 		keys.KeyPaneNext,
+		keys.KeyMoveTabLeft,
+		keys.KeyMoveTabRight,
+		// w closes the store's sticky last tree selection and t spawns a tab
+		// on the sidebar cursor's row — neither of which the rail displays.
+		// The handlers gate on workspace focus too (#3067); this keeps the
+		// pair captive at the rail so the key never falls through.
+		keys.KeyCloseTab,
+		keys.KeyNewTab,
 	} {
 		if key.Matches(msg, keys.GlobalKeyBindings[name]) {
 			return true
@@ -274,8 +335,7 @@ func (m *home) showTasksOverlay() (tea.Model, tea.Cmd) {
 // handleStateTasks routes key events to the task manager overlay and
 // processes its pending actions. Esc in list mode drops the manager's own
 // focus: the overlay closes and any dirty edits are saved — a failed save
-// reloads both views to match disk and is surfaced inline so the dropped
-// edit isn't silent. The configured quit key is root-routed before the task
+// retains the edited task and surfaces a recovery screen for retry. The configured quit key is root-routed before the task
 // form can type it into an input, and ctrl+c still quits from normal mode.
 func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	sp := m.automations.TaskPane()
@@ -294,6 +354,29 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleQuit()
 	}
 
+	// D deletes the selected task after confirmation. The gate mirrors list
+	// mode for the edit form too, but only at a selector/button stop: when a
+	// text field is focused D is an ordinary character (a capital D the user
+	// is typing into Name, the prompt, the path, …) and must fall through to
+	// the form. A create-mode D never deletes (there is no task yet) and is
+	// left to the form to type or ignore. Confirming cancels back to the form
+	// (or list); on confirm the pane deletes and returns to list mode.
+	if msg.String() == "D" && !sp.IsCreating() && !sp.IsTextFieldFocused() {
+		if selected, ok := sp.SelectedTask(); ok {
+			m.confirmActionWithDetail("Delete task "+selected.Name+"? Future runs will stop.", "Keep existing sessions.", nil)
+			m.confirmationOverlay.OnConfirm = func() {
+				// DeleteTask rechecks availability: a failed async refresh while
+				// confirming returns to the retained recovery notice unchanged.
+				// It also exits an open edit form so the deleted task's stale
+				// editor is not left standing.
+				sp.DeleteTask(selected.ID)
+				m.state = stateTasks
+			}
+			m.confirmationOverlay.OnCancel = func() { m.state = stateTasks }
+		}
+		return m, nil
+	}
+
 	consumed := sp.HandleKeyPress(msg)
 
 	if !sp.HasFocus() {
@@ -307,14 +390,13 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if sp.HasPendingCreate() {
 		// Submitting the create form sets pendingCreate without releasing
 		// focus, so the save-on-close branch above doesn't run.
-		// handleTaskCreate writes the new task to disk and then reloads
-		// every task via SetTasks, which clears the dirty flag and any
-		// unsaved toggle/edit/delete. Flush those changes first so the
-		// reload picks them up (#578). If that flush fails, surface it and
-		// skip the create: the pending toggle/edit didn't persist, so we
-		// don't want handleTaskCreate's reload to silently discard it (#934).
+		// Flush unsaved toggles/edits/deletes first so they land with the
+		// create (#578). If that flush fails, surface it and leave the
+		// create unsubmitted with its input kept (#934); the failed change
+		// itself survives the flush's reload as a held draft (#4487).
 		if err := m.saveContentPaneState(); err != nil {
-			return m, m.handleError(err)
+			sp.RestoreCreateMode()
+			return m, m.showRecovery("Cannot save task", "Your input is retained. "+err.Error(), "Press any key to return to the form.", err)
 		}
 		return m, m.handleTaskCreate()
 	}
@@ -347,29 +429,41 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// showConfigEditor opens the global config editor overlay, reading config.toml
-// fresh so the form shows the file as it is NOW — including a hand-edit or an
-// `af config set` made since the TUI started. The pane must never render the
-// TUI's own startup snapshot: config.toml is hand-editable by design, and an
-// editor showing a stale copy would silently overwrite the newer file.
+// showConfigEditor opens the global config editor overlay, reading config fresh
+// so the form shows it as it is NOW — including a hand-edit or an `af config
+// set` made since the TUI started. The pane must never render the TUI's own
+// startup snapshot: config.toml is hand-editable by design, and an editor
+// showing a stale copy would silently overwrite the newer file.
 //
-// A config that will not load is surfaced rather than swallowed: opening an
-// editor onto a broken file and letting the user "fix" one key would write the
-// rest of the broken state back.
+// The read goes through ui.ReadConfigForEditor, which answers from whichever
+// daemon this session is attached to (#3708) — the same daemon the pane's save
+// writes to. Both halves move together or the editor writes values it never
+// read; see ui/config_target.go. A read that fails — a config that will not
+// load, or a remote daemon that refuses — is surfaced rather than swallowed:
+// opening an editor onto a broken or absent config and letting the user "fix"
+// one key would write the rest of that state back.
 func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		return m, m.handleError(fmt.Errorf("cannot open the config editor: %w", err))
-	}
-	configDir, err := config.GetConfigDir()
+	m.accountGeneration++ // discard account results from an earlier opening
+	m.quotaGeneration++   // discard usage results from an earlier opening
+	entries, location, err := ui.ReadConfigForEditor()
 	if err != nil {
 		return m, m.handleError(err)
 	}
-	m.configPane.SetEntries(config.ManifestWithValues(cfg), filepath.Join(configDir, config.TomlConfigFileName))
+	m.configPane.SetEntries(entries, location)
+	// The Accounts section (#3385), read on every open for the same reason the
+	// config is: an account registered from the CLI, or logged in from the web,
+	// since this TUI started must show as it is now rather than as af remembers.
+	accountsCmd := m.loadAccountsIntoPane()
+	// The Usage section (#2983) for the same reason: a session parked at a limit
+	// since the TUI started is exactly the signal the report exists to show. On
+	// a remote target its read is fired by the accounts read's completion, so
+	// the returned cmd stays the accounts one.
+	m.loadQuotaIntoPane()
+	m.showAccountRegisterPending()
 	m.configPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateConfigEditor
-	return m, nil
+	return m, accountsCmd
 }
 
 // handleStateConfigEditor routes key events to the config editor overlay. Esc
@@ -394,6 +488,17 @@ func (m *home) handleStateConfigEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.configPane.HandleKeyPress(msg)
+	// The Accounts section's verbs (#3385), taken BEFORE the focus check: a login
+	// drops focus as it asks — the overlay is closing so the takeover has a clean
+	// terminal — while a register keeps it, and reading the request first is what
+	// lets one branch serve both. Taking it consumes it, so one keypress is one
+	// login.
+	if cmd := m.handleAccountRequest(m.configPane.TakeAccountRequest()); cmd != nil {
+		if !m.configPane.HasFocus() {
+			m.state = stateDefault
+		}
+		return m, cmd
+	}
 	if !m.configPane.HasFocus() {
 		m.state = stateDefault
 		// The pane released focus. If that was the assistant button (C), open the

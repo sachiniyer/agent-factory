@@ -60,10 +60,14 @@ Working style:
   accumulate.
 - Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
 - Before opening a PR run the **cheap local checks** — `gofmt -l .`,
-  `go build ./...`, `golangci-lint run --timeout=3m --fast`,
-  `scripts/lint-file-length.sh` — plus `go test` on **only the non-daemon,
-  non-app package you changed**. Then push and let CI run the rest, and fix what
-  CI reports on your PR head.
+  `go build ./...`, `go vet ./...`, `golangci-lint run --timeout=3m --fast`,
+  `scripts/lint-file-length.sh` — and, when the diff touches a generated-docs
+  input (a Cobra command in `commands/` or `api/`, `daemon/httproutes.go`,
+  the plugin usage text in `session/`, `design/`, the `web/src` shells, or
+  recovery goldens in `app/testdata/recovery/`), `scripts/gen-docs.sh` with a
+  clean `git status --porcelain` on the generated paths — plus `go test` on
+  **only the non-daemon, non-app package you changed**. Then push and let CI
+  run the rest, and fix what CI reports on your PR head.
 - **`deadcode` is not a local check, and no longer blocks.** It is whole-program
   reachability analysis, not a lint: it builds and walks the entire call graph,
   and ~15 sessions running it at once was the largest CPU consumer on this box —
@@ -91,12 +95,23 @@ Working style:
   production sessions rather than merely burning CPU. `app/` is the same deal —
   its tests drive real tmux. Never bare `go test ./...`; use
   `go test $(go list ./... | grep -vE '/(daemon|app)')` if you need breadth.
+  To prove such a test fails without its fix, dispatch a probe run
+  (`-f probe=true`, docs/dev/probe-runs.md), not a full PR Validation run.
 - Captain Claude is fully autonomous: ship without waiting for greenlight,
-  merge own PRs once the `gate-pr` gates pass, close issues that aren't worth
-  doing. Green CI is the floor, not the bar — the Codex review lands after it.
-  Whoever wrote the PR gates and merges it; that is not a root queue. The
-  audit trail is in PR descriptions and issue close-out comments, not
-  pre-approval.
+  close issues that aren't worth doing. **Throughput mode (owner decision
+  2026-10-27):** optimize for merge throughput and fix forward on master. A PR
+  lands on green `Build` + `Lint` for its current head — `.github/workflows/
+  auto-merge.yml` squash-merges it (see `.github/auto-merge.md`); nothing waits
+  on Codex, play-tests or a maintainer. P1 Codex findings must be fixed (reply
+  `RESOLVED in <sha>`); P2/P3 are advisory — fix if cheap, else reply
+  `ACCEPTED: <reason>`. Play-tests and the wider suites verify on master, not
+  before merge, and a regression they find is fixed forward on master as the
+  highest-priority work. The nightly stable release preflight (full `go vet`
+  plus the `-race` suite) remains the hard gate between master and users. To
+  keep a PR from merging, label it `no-auto-merge` (or `hold`). The audit trail
+  is in PR descriptions and issue close-out comments, not pre-approval. The old
+  Auto Gate and the hand procedure in `.claude/skills/gate-pr.md` apply only if
+  the gate is re-enabled.
 
 ## Build & Development
 
@@ -113,14 +128,16 @@ go test $(go list ./... | grep -vE '/(daemon|app)')   # only if you need breadth
 # The containerized suites below are NOT routine pre-PR gates — CI runs
 # `go test -race ./...` on every push, and ~20 concurrent container runs took
 # this box to load 160. Reach for one ONLY to reproduce a CI failure you
-# cannot diagnose from the logs, then stop. See docs/container-testing.md.
+# cannot diagnose from the logs, then stop. See docs/dev/container-testing.md.
 make test-container                # full suite, isolated tmux + AF home
 make remote-roundtrip-container    # mock remote round-trip
 make playtest-container            # TUI sandbox (throwaway home, mock repo)
 
 # Reclaim the docker disk the container harness holds — and only that (#2133).
-# Every target above already cleans up after itself on the way out; this one
-# also empties the Go cache volumes, which reach tens of GB on a busy box.
+# Containers use --rm on exit. Detached play-tests also exit after six hours
+# by default (AF_PLAYTEST_MAX_LIFETIME in seconds), even if their driver dies.
+# New starts reap expired labelled play-test sandboxes. This target also empties
+# the Go cache volumes, which reach tens of GB on a busy box.
 make testbox-clean
 
 # Install locally
@@ -138,6 +155,35 @@ golangci-lint run --timeout=3m --fast
 gofmt -l .   # should produce no output
 scripts/lint-file-length.sh   # or: make lint-file-length
 
+# Generated-artifact drift — the same gate CI's Docs job runs
+# (docs/reference, plugins/**, the two marketplaces, design tokens, recovery
+# stills). ~3s warm; up to ~35s cold — the cost is two `go run` builds, no
+# daemon, no tmux, no containers. Needed when the diff touches a generator
+# input: a Cobra command in commands/ or api/ (cli.md), daemon/httproutes.go
+# (api.md), the af usage/skill text in session/systemprompt.go or
+# session/agentskill.go (plugins/**, .agents/.claude-plugin marketplaces),
+# design/tokens.json or design/style-guide.tmpl (web/src, ui/theme,
+# docs/stylesheets, docs/design), the recovery goldens
+# app/testdata/recovery/*.{svg,ansi} (docs/assets/recovery/tui-model-driver),
+# or a generator (commands/docs_gen.go, commands/plugins_gen.go,
+# internal/designtokens/, scripts/gen-docs.sh). The porcelain check is the
+# gate — porcelain, not diff, because a new untracked artifact must count
+# (same reason docs.yml uses it).
+scripts/gen-docs.sh
+git status --porcelain -- docs/reference plugins .agents .claude-plugin \
+    web/src/tokens.css web/src/index.html web/src/manifest.webmanifest \
+    ui/theme docs/stylesheets/tokens.css docs/design/style-guide.md \
+    docs/design/interface-design.md \
+    docs/assets/recovery/tui-model-driver   # must be empty
+
+# copylocks and the rest of vet's passes (#3613). golangci-lint runs with
+# --fast, which disables govet outright (fast: false), so vet findings are
+# invisible to the line above no matter what a config file says. This IS a
+# routine local check — unlike deadcode it walks no whole-program call graph,
+# and unlike the suites below it compiles the tests without running them, so it
+# spawns no daemon and touches no tmux. PR Validation's Lint job blocks on it.
+go vet ./...
+
 # NOT a routine local check — whole-program analysis, and the fleet running it
 # concurrently buries the box. CI runs it on every push and REPORTS rather than
 # fails (#3014), so it will not block a merge. Reach for it locally only to
@@ -145,33 +191,47 @@ scripts/lint-file-length.sh   # or: make lint-file-length
 deadcode -test ./...   # empty output = nothing unreachable
 ```
 
-Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.48.0`; CI pins the same version. Its findings are advisory (#3014) — an unreachable symbol is worth fixing or explaining in the PR, but it does not hold the merge, and it must never be silenced with a per-symbol allowlist. This project's Go floor is 1.25 (raised from 1.24 in #1592 Phase 4 PR5 to pull in the CVE-patched `golang.org/x/crypto` ≥ v0.52.0, which requires Go 1.25); deadcode must be ≥ v0.45.0 to analyze go1.25 source (older x/tools cannot).
+Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.48.0`; CI pins the same version. Its findings are advisory (#3014) — an unreachable symbol is worth fixing or explaining in the PR, but it does not hold the merge, and it must never be silenced with a per-symbol allowlist. Remove unreachable exported symbols instead of preserving them for Go 1 compatibility: this repository ships `af` as an application and does not promise a stable Go import API. Dead-code cleanup must still satisfy the compatibility rule under Conventions — whatever this project publishes to its users as a contract, which the examples there illustrate rather than bound. This project's Go floor is 1.25 (raised from 1.24 in #1592 Phase 4 PR5 to pull in the CVE-patched `golang.org/x/crypto` ≥ v0.52.0, which requires Go 1.25); deadcode must be ≥ v0.45.0 to analyze go1.25 source (older x/tools cannot).
 
 **File-length lint (#1145):** `scripts/lint-file-length.sh` fails if any Go
 file exceeds its line limit — 1000 lines for production code, 1500 for
 `*_test.go` — unless it's grandfathered in `scripts/file-length-allowlist.txt`.
 Grandfathered files carry a ceiling that ratchets (they can only shrink, and
 their entry must be removed once decomposed under the limit). Don't grandfather
-new files to dodge the limit — split them. See `docs/file-length-lint.md`.
+new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 
 ## Project Structure
 
-- `main.go` — entry point, CLI commands via Cobra
+- `main.go` — entry point (version fallback, internal exec hooks); the Cobra tree is built in `commands/`
+- `commands/` — Cobra CLI commands (the `sessions`/`tasks`/`projects`/`api` trees live in `api/`)
 - `app/` — main TUI application (bubbletea)
 - `ui/` — terminal UI components (sidebar, overlays, panes)
+- `web/` — browser client source (TypeScript SPA, embedded in the daemon binary)
 - `keys/` — key binding definitions
 - `session/` — session management, backend, plugins
 - `session/git/` — git worktree operations, GitHub integration
 - `session/tmux/` — tmux PTY integration
+- `terminal/` — terminal modes shared by PTY producers and clients
 - `config/` — configuration and state management
-- `api/` — REST/JSON API for sessions and tasks
-- `apiproto/` — API envelope types (leaf package, no daemon/client imports)
+- `configagent/` — the spawned config-walkthrough agent (a daemon-owned bare tmux session, no worktree or session row)
+- `api/` — `af sessions`/`tasks`/`projects`/`api` command implementations (mixed transports: `apiclient` HTTP, the `daemon/` control client, and direct `config` access depending on the operation)
+- `apiproto/` — API envelope types and marker interfaces (leaf package, no daemon/client imports)
 - `apiclient/` — HTTP API client used by TUI/CLI to talk to daemon
 - `agentproto/` — WebSocket wire protocol for PTY stream and events
 - `task/` — task store, cron/watch validation/parsing, session-start helpers
+- `schedule/` — UI-agnostic schedule model behind the task pickers (preset shapes ↔ cron expressions)
+- `quota/` — usage-limit evidence and account selection for limited sessions
 - `daemon/` — always-on background daemon: task scheduler, watcher supervisor, session monitor, control-socket RPCs, autostart unit
-- `cmd/` — CLI command utilities
+- `preflight/` — pre-launch checks (tmux presence, agent command executables)
+- `doctor/` — `af doctor` diagnostics and verified `--fix` remediations
+- `bugreport/` — `af bug-report` diagnostics bundle and its best-effort redactor
+- `parity/` — cross-surface (TUI/web/CLI) capability inventory and drift test
+- `integration/` — out-of-process integration suites (agent-server round-trip, backend capability matrix)
+- `cmd/` — `exec.Cmd` `Executor` seam (test injection; nothing to do with CLI commands)
 - `log/` — logging
+- `internal/` — implementation-only helper packages (af home, autoupdate, ssh relay, program privacy, redaction, test guards, …)
+- `design/` — design tokens and the style-guide template (generator inputs for web/ui/doc CSS)
+- `scripts/` — dev/CI scripts (gen-docs.sh, lint-file-length.sh, container harnesses, tmux scenario drivers)
 - `docs/` — documentation (remote hooks, etc.)
 - `examples/` — example configurations
 
@@ -401,8 +461,18 @@ stack, revert the foreign paths out of your tree, and say so in the PR.
 - All Go files must be `gofmt`-formatted
 - PRs target `master` branch
 - Keep PRs focused and small
-- Run the full gate suite above before submitting
+- Run the local checks above before submitting
 - Version is stored in `main.go` (`version` var) and auto-bumped by CI
+- Treat exported Go identifiers as repository-internal implementation, not a
+  supported import API; removing one is not a breaking change and does not
+  require a major version. The supported compatibility surface is the `af`
+  project's user-visible behavior — whatever it publishes to users as a
+  contract, with the list below as illustration rather than boundary: CLI
+  behavior and output, config keys, the public HTTP surface wherever the docs
+  specify it (including authentication and CORS guarantees documented outside
+  the route catalogue, and excluding the routes `docs/http-api.md` lists as not
+  public), durable on-disk state af owns, the documented install path and the
+  plugin and skill distribution, and behavior user scripts depend on.
 
 ## Copy & glyph conventions
 

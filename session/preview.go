@@ -77,24 +77,12 @@ func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnaps
 	}
 	snapshot.Modes = state.Modes
 	snapshot.HasModes = true
-	// Deliberately NOT setting LinesAbove from state.HistorySize. This
-	// display-message is a SEPARATE command from the capture, so its count does not
-	// describe the returned bytes — see CaptureVisibleWithScrollback, which is where
-	// a completeness claim can honestly come from (#3169 review).
 	return snapshot
 }
 
-// PreviewTab captures the detached content of the tab currently at idx. The
-// ordinal form exists for legacy callers that never supplied a stable tab id.
-// An out-of-range ordinal is an explicit error: returning ("", nil) would claim
-// that a nonexistent pane was merely blank (#2200).
-func (i *Instance) PreviewTab(idx int) (string, error) {
-	snapshot, err := i.PreviewTabSnapshot(idx, false)
-	return snapshot.Content, err
-}
-
-// PreviewTabSnapshot is PreviewTab with an authoritative terminal-mode
-// observation when the selected runtime exposes a tmux pane.
+// PreviewTabSnapshot captures the detached content of the tab currently at idx
+// along with an authoritative terminal-mode observation when the selected runtime
+// exposes a tmux pane.
 func (i *Instance) PreviewTabSnapshot(idx int, full bool) (PreviewSnapshot, error) {
 	i.mu.RLock()
 	if idx < 0 || idx >= len(i.Tabs) {
@@ -122,13 +110,6 @@ func (i *Instance) PreviewTabSnapshot(idx int, full bool) (PreviewSnapshot, erro
 		return PreviewSnapshot{}, err
 	}
 	return previewSnapshotWithModes(content, ts), nil
-}
-
-// PreviewTabFullHistory is PreviewTab's full-scrollback counterpart. It keeps
-// the same explicit out-of-range refusal.
-func (i *Instance) PreviewTabFullHistory(idx int) (string, error) {
-	snapshot, err := i.PreviewTabSnapshot(idx, true)
-	return snapshot.Content, err
 }
 
 // PreviewTabSnapshotByID binds content and terminal modes to one stable tab
@@ -222,11 +203,31 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 // Local capture must not use this helper: its capture path re-enters i.mu. It has
 // PreviewTabSnapshotByID above, which selects the tmux pointer directly instead.
 func (i *Instance) previewByIDAsOrdinal(tabID string, capture func(int) (string, error)) (string, error) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	idx, exists := i.tabIndexByIDLocked(tabID)
-	if !exists {
-		return "", fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
+	// The roster lock is NOT held across the capture: a REST capture against a
+	// wedged host can take its whole budget, and an RLock held that long queues
+	// every writer (and, through Go's writer preference, every reader) behind it
+	// (W4.1). Instead the ordinal is resolved before and re-verified after, and a
+	// capture that raced a close or reorder is discarded and retried.
+	for attempt := 0; attempt < previewOrdinalAttempts; attempt++ {
+		i.mu.RLock()
+		idx, exists := i.tabIndexByIDLocked(tabID)
+		i.mu.RUnlock()
+		if !exists {
+			return "", fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
+		}
+		content, err := capture(idx)
+		i.mu.RLock()
+		now, stillThere := i.tabIndexByIDLocked(tabID)
+		i.mu.RUnlock()
+		if !stillThere {
+			return "", fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
+		}
+		if now == idx {
+			return content, err
+		}
 	}
-	return capture(idx)
+	return "", fmt.Errorf("session %q tab id %q: roster kept changing during capture: %w", i.Title, tabID, ErrTabGone)
 }
+
+// previewOrdinalAttempts bounds the resolve-capture-verify retry above.
+const previewOrdinalAttempts = 3

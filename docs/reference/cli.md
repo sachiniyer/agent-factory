@@ -12,6 +12,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af accounts`](#af-accounts) — Manage per-session agent credential directories
 - [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
 - [`af accounts list`](#af-accounts-list) — List registered agent accounts
+- [`af accounts login`](#af-accounts-login) — Log in to an agent account by running the agent's own login flow
 - [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the web UI — that is 'af daemon')
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
@@ -23,6 +24,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af config`](#af-config) — Read global or project-effective config and write global config
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
+- [`af config migrate`](#af-config-migrate) — Rewrite deprecated config keys to their current spelling
 - [`af config set`](#af-config-set) — Set one global config key
 - [`af config unset`](#af-config-unset) — Clear a config override or migrated global setting
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
@@ -34,12 +36,31 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af daemon uninstall`](#af-daemon-uninstall) — Remove the daemon autostart unit
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
+- [`af hosts`](#af-hosts) — Add, list, check and remove sandbox hosts
+- [`af hosts add`](#af-hosts-add) — Save a host and check that it can run a session
+- [`af hosts check`](#af-hosts-check) — Probe a host (or every saved host) for what a session needs
+- [`af hosts list`](#af-hosts-list) — Show the saved hosts
+- [`af hosts remove`](#af-hosts-remove) — Drop a host from the list
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
 - [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
+- [`af projects color`](#af-projects-color) — Set the display color of a registered project
 - [`af projects delete`](#af-projects-delete) — Delete a project, archiving its restorable sessions
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
+- [`af proposal`](#af-proposal) — Write proposals together with agents
+- [`af proposal add-doc`](#af-proposal-add-doc) — Add a doc to a proposal from a template, or blank
+- [`af proposal attach`](#af-proposal-attach) — Attach this session to a proposal and print the rules
+- [`af proposal cat`](#af-proposal-cat) — Print a doc of a proposal
+- [`af proposal changes`](#af-proposal-changes) — Print what others changed since this session's cursor, then move the cursor
+- [`af proposal checkpoint`](#af-proposal-checkpoint) — Commit this session's edits to its proposal and move its cursor
+- [`af proposal detach`](#af-proposal-detach) — Remove this session's proposal attachment and cursor
+- [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
+- [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
+- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
+- [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
+- [`af proposal write`](#af-proposal-write) — Replace a doc with stdin and commit it
 - [`af quota`](#af-quota) — Show usage-limit status for each agent CLI
 - [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
@@ -49,11 +70,12 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
 - [`af sessions handoff`](#af-sessions-handoff) — Continue a session under a different agent, in place
-- [`af sessions kill`](#af-sessions-kill) — Permanently destroy a session and prune its worktree branch
+- [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
+- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
-- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a session blocked at a usage limit
+- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -64,14 +86,19 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 - [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
 - [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
-- [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle, or until any session in the fleet changes state
+- [`af sessions watch`](#af-sessions-watch) — Wait for idle, or a fleet stop-state change or disappearance
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
+- [`af target`](#af-target) — Point this client at a remote daemon once
+- [`af target clear`](#af-target-clear) — Forget the saved target
+- [`af target set`](#af-target-set) — Save a remote daemon target
+- [`af target show`](#af-target-show) — Show which daemon this invocation targets, and why
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af tasks add`](#af-tasks-add) — Add a new task bound to the current project
-- [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID
+- [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID or name
 - [`af tasks list`](#af-tasks-list) — List tasks in the current project
 - [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
 - [`af tasks restart`](#af-tasks-restart) — Restart an enabled watch task without process overlap
+- [`af tasks show`](#af-tasks-show) — Show one task's schedule health and audit trail
 - [`af tasks trigger`](#af-tasks-trigger) — Trigger a task in the current project to run immediately
 - [`af tasks update`](#af-tasks-update) — Update a task in the current project
 - [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
@@ -108,11 +135,14 @@ af [flags]
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
+- [`af hosts`](#af-hosts) — Add, list, check and remove sandbox hosts
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
+- [`af proposal`](#af-proposal) — Write proposals together with agents
 - [`af quota`](#af-quota) — Show usage-limit status for each agent CLI
 - [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
+- [`af target`](#af-target) — Point this client at a remote daemon once
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
 - [`af upgrade`](#af-upgrade) — Upgrade agent-factory to the latest release on the configured channel
@@ -122,7 +152,7 @@ af [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `-p`, `--program` | `string` | Program to run in new sessions (one of: claude, codex, aider, gemini, amp, opencode, devin) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 | `-v`, `--version` |  | version for af |
@@ -138,11 +168,33 @@ agent CLI treats as its home. af never reads, stores, or forwards the credential
 itself — it decides which directory a session sees, and the agent's own login
 flow puts the material there.
 
-add creates that directory and prints its path · list shows what is registered.
-Register an account, then log in with the agent pointed at that directory:
+add creates that directory and prints its path · login runs the agent's own login
+flow against it · list shows what is registered.
 
-  af accounts add codex work
-  CODEX_HOME=$(af accounts add codex work) codex login
+  af accounts login codex work
+
+That one command registers the account if needed, starts codex's own login in a
+tmux session scoped to it, hands you the terminal for the device-code step, and
+afterwards reports whether the account holds a credential — read from the agent's
+own credential file, by checking that it exists.
+
+Every login af runs is browser-free. The pane is on the daemon's host, which is
+usually headless and remote, so the flow that fits is the device code: the CLI
+prints a URL and a code, you sign in from whatever device you are holding, and
+the CLI polls. af selects it per agent — see af accounts login --help.
+
+You can still do it by hand, and af runs exactly these:
+
+  CODEX_HOME=$(af accounts add codex work) codex login --device-auth
+  CLAUDE_CONFIG_DIR=$(af accounts add claude work) BROWSER=true claude auth login
+  GEMINI_CLI_HOME=$(af accounts add gemini work) NO_BROWSER=true gemini
+
+Those variables do not all have the same shape, and mixing them up is the easy
+mistake. CODEX_HOME and CLAUDE_CONFIG_DIR name the config directory itself.
+GEMINI_CLI_HOME is a HOME-like root: gemini appends .gemini/ to it, so the account
+directory af prints holds the credential at <dir>/.gemini/oauth_creds.json or
+<dir>/.gemini/gemini-credentials.json.
+Point the variable at the printed directory, never at a .gemini path inside it.
 
 Select an account for a session with:
 
@@ -161,8 +213,14 @@ account while reporting the one you asked for.
 ssh, sandbox and hook refuse by design, not because the work is pending. docker
 bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
 
-af never switches accounts on its own — not on a rate limit, not on a failure.
-A session runs as the account it was started with.
+By default af never switches accounts on its own. With limit_auto_resume enabled,
+an explicit limit_account_candidates list may opt an unpinned local session into
+switching after a usage limit. af skips registered candidates with a current
+limit observation, says which identity changed in the session, and waits normally
+when none is usable. Docker account-scoped creates remain supported, but
+automatic Docker replacement is disabled until af can durably identify and reap a
+crash-surviving container and freeze its complete provision plan. An explicit
+--account is a pin that automatic switching never overrides.
 
 ```
 af accounts
@@ -172,12 +230,13 @@ af accounts
 
 - [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
 - [`af accounts list`](#af-accounts-list) — List registered agent accounts
+- [`af accounts login`](#af-accounts-login) — Log in to an agent account by running the agent's own login flow
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af accounts add
@@ -190,7 +249,8 @@ This makes a place; it does not log in. Run the agent's own login flow against
 the printed directory to put credentials there.
 
 Registration is idempotent — running it again on an existing account reports the
-same directory and touches nothing inside it.
+same directory and preserves existing settings. Missing non-credential runtime
+settings may be seeded; notices explaining them are printed to stderr.
 
 ```
 af accounts add <agent> <name> [flags]
@@ -206,7 +266,7 @@ af accounts add <agent> <name> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af accounts list
@@ -234,7 +294,78 @@ af accounts list [agent] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts login
+
+Log in to an agent account by running the agent's own login flow
+
+Run the agent's own login command against an account's credential directory.
+
+af registers the account if it does not exist yet, asks the daemon to start the
+agent's login flow in a tmux session scoped to that account, and hands you the
+terminal so you can complete the device-code step. When the flow ends, af reports
+whether the account holds a credential — read from the agent's own credential
+file, by checking that it exists, never by reading it.
+
+  af accounts login codex work
+  af accounts login claude personal
+
+af never reads, stores, or forwards the credential. It sets one variable and runs
+the agent's own flow:
+
+  claude → claude auth login · codex → codex login --device-auth · gemini → gemini
+
+The login is browser-free. The pane runs on the daemon's host, which is usually
+headless and remote, so a browser-callback sign-in there opens a browser nobody
+is sitting in front of, or waits for a redirect to that host's own localhost that
+your machine cannot reach. Every flow above prints a URL and waits for a code you
+paste back, and af selects that path per agent:
+
+  codex   codex login --device-auth prints a verification URL and a device code
+  gemini  the pane sets NO_BROWSER=true · gemini prints the URL and prompts
+          "Enter the authorization code: "
+  claude  claude has no such flag, so the pane sets BROWSER=true — a no-op opener
+          the CLI honours — and claude prints "If the browser didn't open, visit:"
+          with the URL, then "Paste code here if prompted > "
+
+Sign in on whatever device you are actually holding, then paste the code into the
+pane.
+
+The login pane gets exactly the environment an account-scoped session gets: the
+account's directory injected, and every other identity-bearing variable for that
+agent REMOVED. The removal is what makes the login land in the account you asked
+for — an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the config
+directory, so without it the CLI could report success against that key's identity
+while the account directory stayed empty.
+
+It removes identity, not environment: proxies, private CA roots and your git and
+SSH configuration are passed through as always. If the login needs something else
+— DISPLAY or BROWSER, on a host with a browser to open — add it to
+session_env_passthrough. Naming BROWSER or NO_BROWSER there also overrides the
+browser-free defaults above; your value wins.
+
+The flow runs on the daemon's host, where the credential directory is. With
+--no-attach af prints the tmux session to attach to instead of taking your
+terminal.
+
+```
+af accounts login <agent> <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Output the {data,error} JSON envelope |
+| `--no-attach` |  | Start the login flow and print how to attach instead of taking this terminal |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af agent-server
@@ -274,7 +405,9 @@ af agent-server [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--branch` | `string` | Exact git branch for the workspace's worktree (default: derived from branch_prefix and the title) |
 | `--listen` | `string` | HTTP TCP bind address (host:port); :0 lets the kernel pick a free port (default `127.0.0.1:0`) |
+| `--policy-file` | `string` | Operator policy file written by the provisioning daemon; when set, this server reads no config from the host's af home |
 | `--program` | `string` | Agent program to run (default: the configured default_program) |
 | `--program-resolved` |  | Treat --program as an already-resolved runtime command |
 | `--repo` | `string` | Repository path the workspace runs against (default: current directory) |
@@ -285,7 +418,7 @@ af agent-server [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af api
@@ -317,7 +450,7 @@ af api [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af bug-report
@@ -350,10 +483,17 @@ file and printing where it is so you can attach it to an issue by hand.
 Use -o/--output <path> or --file to skip GitHub and only write the bundle file.
 
 REDACTION IS BEST-EFFORT. Free-text and secret-bearing fields (session titles,
-session prompts, task prompts, tab commands, remote metadata) are dropped; $HOME and your
-username are collapsed to ~ / [user]; and known credential shapes are scrubbed
-wherever they appear. Perfect redaction is impossible — open the file and
-review it before sharing it publicly.
+session prompts, task prompts, tab and session commands, tab names, account
+labels, remote metadata) are dropped. A registered account label is replaced by
+the same marker everywhere it appears — the session records, and the daemon log
+and config sections that name it as text — so the report is no less private
+through its log than through its records; if the accounts registry cannot be
+read, the bundle says so in its collection errors instead of looking redacted
+when it is not. Every directory the bundle names is replaced by the role it plays
+([repo:N], [worktree:N], [af-home], ~) rather than by its own name, and your
+username by [user]; and known credential shapes are scrubbed wherever they
+appear. Perfect redaction is impossible — open the file
+and review it before sharing it publicly.
 
 Use --json to emit the structured manifest (wrapped in the shared {data,error}
 envelope) to stdout instead of writing a file or opening a draft.
@@ -374,7 +514,7 @@ af bug-report [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af completion
@@ -399,7 +539,7 @@ af completion
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af completion bash
@@ -441,7 +581,7 @@ af completion bash
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af completion fish
@@ -474,7 +614,7 @@ af completion fish [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af completion powershell
@@ -504,7 +644,7 @@ af completion powershell [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af completion zsh
@@ -548,7 +688,7 @@ af completion zsh [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af config
@@ -580,6 +720,7 @@ af config
 
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
+- [`af config migrate`](#af-config-migrate) — Rewrite deprecated config keys to their current spelling
 - [`af config set`](#af-config-set) — Set one global config key
 - [`af config unset`](#af-config-unset) — Clear a config override or migrated global setting
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
@@ -588,7 +729,7 @@ af config
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af config get
@@ -607,6 +748,9 @@ only; this command does not register a project or write identity state.
 --project remains accepted as a deprecated alias. --explain prints the same
 resolved value with the complete source trace.
 
+Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_URL
+is refused rather than ignored. Run it on the daemon host to ask about that host.
+
 ```
 af config get <key> [flags]
 ```
@@ -623,7 +767,7 @@ af config get <key> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af config list
@@ -638,6 +782,9 @@ every source candidate and the reason it won, was shadowed, was absent, or is
 disallowed for that key. Human output renders an empty built-in value as
 "(unset)"; an explicitly configured empty value remains visible as "", [], {},
 or null. JSON output preserves the typed effective values.
+
+Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_URL
+is refused rather than ignored. Run it on the daemon host to ask about that host.
 
 ```
 af config list [flags]
@@ -655,7 +802,73 @@ af config list [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af config migrate
+
+Rewrite deprecated config keys to their current spelling
+
+Rewrite the deprecated keys in the global config to their current spelling, in
+place, and print the diff. This is the command the deprecated-key warnings name.
+
+It changes spelling, never meaning. A value written on one line is carried over
+exactly as its own bytes, quoting and all; a value spread over several lines (an
+array, typically) is re-encoded compactly rather than relocated as raw text, so
+its formatting can change even though its contents do not. Either way the
+rewritten file is re-parsed before anything is saved, and a rewrite that would
+change even one effective value is refused rather than written. The
+readers of the old spellings stay, so an older config keeps loading and nothing
+about your running configuration changes.
+
+One thing to know before you DOWNGRADE. The grouped spellings have only been
+read since 2026-08-14 (#3354); an af older than that does not know them and
+falls back to the built-in default for a migrated key. For most keys that
+default is the conservative one (strict host-key checking, no credential
+mount). Two cases are not, both because the listener defaults to a LIVE 127.0.0.1:8443:
+migrating network.require_token = true loses the token an older binary could
+read (network.require_loopback_token only matters alongside it, being inert on
+its own), and migrating an empty network.listen_addr hides the fact that the web
+server was turned OFF, so an older binary starts one. Migrate compares what such
+a binary saw before and after, and says so explicitly when a migration costs you
+either. Restore the backup before such a downgrade.
+
+The previous file is kept beside it as config.toml.bak (an existing backup is
+never overwritten; the copy is numbered instead). A legacy config.json is
+converted to config.toml on the way in, exactly as any af start would convert it.
+
+Running it twice is safe: the second run finds nothing to migrate.
+
+Two things it will not do:
+
+  A key written in BOTH spellings with different values is refused, naming the
+  key. af has a documented winner at load time — the grouped value — but no
+  migration should make that tie-break permanent on your behalf.
+
+  root_agents is reported and left exactly where it is. Its successor is a
+  registered project's personal [root_agent], so migrating it would mean
+  registering projects for you: durable state outside this file. The keys that
+  can move still move.
+
+Local-only: it rewrites the file on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to migrate that host.
+
+```
+af config migrate [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Emit the migration result wrapped in the {data,error} envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af config set
@@ -673,25 +886,38 @@ Settable keys:
   default_program            agent enum (claude, codex, aider, gemini, amp, opencode, devin)
   program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
-  theme                      nord | zenburn | compact JSON object of #RRGGBB color slots
   session_env_passthrough    compact JSON array of exact environment variable names
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
+  root_agent.enabled         true | false
+  root_agent.program         full command string for the singleton root agent
   keys                       compact JSON object of TUI action-to-key rebinds
+  web                        compact JSON object of browser-terminal display preferences
+  web.terminal_font_size_phone   number in [4, 32] — xterm font size at the phone breakpoint (default 6.5)
+  web.terminal_font_size_desktop number in [4, 32] — xterm font size at desktop width (default 13)
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to FALSE —
-                             set network.require_token = true in the same breath, or anyone who can reach the
-                             address controls this machine. af serves plain HTTP, so front a routable
-                             listener with a TLS-terminating proxy or a private network.
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) with
+                             network.require_token off is refused by default — the daemon still starts and
+                             the unix socket still works, but the TCP listener stays unbound until
+                             network.require_token = true, a loopback address, or
+                             network.allow_unauthenticated_network = true lands. af serves plain HTTP, so
+                             front a routable listener with a TLS-terminating proxy or a private network.
   network.require_token      true | false  (default false: the web UI needs no token; set true to require one from network peers)
   network.require_loopback_token  true | false  (default false: also require the token from same-machine browsers; only has an effect with network.require_token = true)
+  network.allow_unauthenticated_network  true | false  (default false: explicit opt-in that lets a non-loopback
+                             listen_addr bind with the token off — the full control API, DeliverPrompt included,
+                             is then served unauthenticated to anyone who can reach the address)
   network.preview_listen_addr  host:port for a separate per-tab web-tab preview origin (and, on a loopback
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
+  watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
+  debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
+                             unix control socket only, never on the web address. A profile dumps live daemon
+                             memory — session titles, worktree paths, prompt text — so turn it off again.
+                             AF_DEBUG_PPROF=1 overrides it for one daemon process. Next daemon start.)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
   branch_prefix              string
@@ -701,6 +927,7 @@ Settable keys:
   update_channel             stable | preview
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
   limit_auto_resume          true | false
+  limit_account_candidates   comma-separated registered account names, or "" to disable account switching
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent
@@ -709,11 +936,13 @@ Settable keys:
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root} (global-only)
+  default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
-require_loopback_token, cors_allowed_origins, docker_mount_agent_credentials,
-ssh_host_key_verification, and sandbox_ssh remain accepted and edit the same
-canonical grouped values.
+require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
+docker_mount_agent_credentials, ssh_host_key_verification, and sandbox_ssh
+remain accepted and edit the same canonical grouped values.
 
 Structured values must be shell-quoted so the JSON remains one argument. A write
 uses the same apply-on-save path as the TUI and web config panes (#2480). Most
@@ -724,19 +953,35 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
-is rejected with the location it actually belongs to. Clear an override with
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, limit_account_candidates); a global-only key
+is rejected with the location it actually belongs to. One caveat: a
+per-project branch_prefix is accepted and stored but ignored for now — the
+global prefix applies to every project until #4539 lands the real feature.
+Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
 Examples:
   af config set default_program codex
   af config set auto_update false
-  af config set theme zenburn
+  af config set appearance dark
   af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
+  af config set root_agent.enabled true --project .
+  af config set root_agent.program "codex --profile work" --project .
   af config set keys '{"quit":"Q"}'
+  af config set web.terminal_font_size_phone 8
+  af config set web.terminal_font_size_desktop 14
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
+  af config set default_accounts.codex work --project ~/work/myrepo
   af config unset default_program --project ~/work/myrepo
+
+With --daemon-url/AF_DAEMON_URL naming a remote daemon, the global write is sent
+to THAT daemon's admission-gated write — the same one the web config form posts
+to — and the success line names the daemon it landed on. It is never silently
+applied to this machine instead: a daemon too old to serve the route is refused,
+not written around. --project is the exception and stays local-only, because it
+writes a registered project's machine-local override file, which no remote daemon
+owns.
 
 ```
 af config set <key> <value> [flags]
@@ -753,7 +998,7 @@ af config set <key> <value> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af config unset
@@ -767,12 +1012,20 @@ still a present, winning override.
 
 With --project, unset targets a project's machine-local config (a prj_ id from
 'af projects list', or a path inside a registered repository). Without
---project, it clears one migrated global backend setting: docker.mount_agent_credentials,
-ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
+--project, it clears one migrated global setting — a network.* key
+(listen_addr, preview_listen_addr, require_token, require_loopback_token,
+cors_allowed_origins) or a backend key (docker.mount_agent_credentials,
+ssh.host_key_verification, sandbox.ssh). Their legacy flat CLI names are
 accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when
 there is nothing to clear.
+
+With --daemon-url/AF_DAEMON_URL naming a remote daemon, the global form is sent
+to THAT daemon's admission-gated write, like 'af config set'; a daemon too old to
+serve the route is refused rather than written around, so a remote unset never
+quietly clears a key on this machine instead. --project stays local-only — the
+override file it clears is this machine's.
 
 ```
 af config unset <key> [flags]
@@ -789,7 +1042,7 @@ af config unset <key> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af config validate
@@ -802,8 +1055,12 @@ materializes nothing — a read-only check.
 
 This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
-edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
-names what must be fixed before the next launch.
+edit bypasses that protection: exit 0 means no config defect was found, while a
+non-zero exit names what must be fixed before the next launch.
+
+Local-only: it checks the config on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to check that host.
 
 ```
 af config validate [flags]
@@ -819,7 +1076,7 @@ af config validate [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af daemon
@@ -852,10 +1109,13 @@ per-workspace backend a daemon drives on a remote machine.
 Clients reach the daemon over a local Unix socket by default. To drive one from
 another machine, either ssh to that host and run 'af' there, or give network.listen_addr
 a routable address and point a client at it with the persistent --daemon-url and
---token flags. A routable listener is allowed with the token off, but af warns
-once at daemon start: with network.require_token = false anyone who can reach the
-address drives your agents, so set network.require_token = true unless you trust the
-network. That listener speaks plain HTTP either way, so put it behind a reverse
+--token flags. A routable listener with the token off is REFUSED: with
+network.require_token = false anyone who can reach the address drives your agents,
+so af declines to bind it unless you opt in with
+network.allow_unauthenticated_network = true. Set network.require_token = true
+instead unless you trust the network (turn it on BEFORE moving the address — the
+write guard refuses the tokenless-network posture). That listener speaks plain
+HTTP either way, so put it behind a reverse
 proxy or a private network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
 
@@ -881,7 +1141,7 @@ af daemon
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af daemon adopt
@@ -915,7 +1175,7 @@ af daemon adopt [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af daemon install
@@ -930,7 +1190,7 @@ af daemon install
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af daemon restart
@@ -955,12 +1215,16 @@ af daemon restart [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af daemon status
 
 Report daemon liveness, config freshness, and supervision
+
+With --daemon-url (or AF_DAEMON_URL, or a saved target) this reads the TARGET's
+health route and reports whether it responds, its version, phase and boot
+identity — never this machine's sockets or autostart unit.
 
 Print a read-only snapshot of the background daemon: whether it is responding
 on the control socket, the control and HTTP socket paths (and whether their
@@ -986,7 +1250,7 @@ af daemon status [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af daemon uninstall
@@ -1001,7 +1265,7 @@ af daemon uninstall
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af debug
@@ -1016,7 +1280,7 @@ af debug
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af doctor
@@ -1041,6 +1305,24 @@ accumulate silently on a machine running agent-factory:
   - processes that escaped a live session's pane, or peg a CPU core for hours
   - af_ tmux sessions with no backing session record
   - abandoned agent-factory homes under the temp dir (leaked by tests/debug runs)
+  - af daemons running a binary no install owns — one under the temp dir, or one
+    whose file is gone from disk. A temp-dir binary is debris a test or debug run
+    left behind; --fix stops it once it is old enough that no test run can still
+    own it, and never when it serves this home or when which home it serves
+    cannot be read. A missing binary is reported, not stopped: af upgrade
+    replaces it in place, so every healthy daemon looks that way until it restarts
+  - temp directories holding nothing but a daemon socket nobody answers on — the
+    residue an abandoned daemon's bind left behind. --fix removes one with
+    os.Remove rather than a recursive delete, so a directory that has gained
+    anything since the scan fails instead of being swept up with it
+  - directories af's own test harness left under the temp dir when a test run
+    ended before its cleanup (af-test-home-*, af-test-user-home-*,
+    af-tmux-pkg-*, af-tmux-*, ...). --fix removes one only when it holds
+    nothing but that run's leftover harness content, has not changed for a
+    week, and no live process has a file open in it, names it, or works
+    inside it — entry by entry with os.Remove, never a recursive delete.
+    Anything else in one is reported, and a tmux server still answering in
+    one is named rather than stopped
   - daemon health: control socket, autostart unit, pid file, binary freshness
   - client/daemon version skew, and the ways a stale daemon survives an
     upgrade: a second daemon on this home, an autostart unit launching a
@@ -1050,6 +1332,13 @@ accumulate silently on a machine running agent-factory:
   - remote-hook setup for the current repo: config completeness and
     launch_cmd/delete_cmd script presence/executability
     (skipped cleanly when no remote backend is configured)
+  - pinned remote host-key directories under hook-hosts/ that no session owns.
+    Hook names are one namespace for the whole machine, so this one spans every
+    project rather than the current repo, and it runs whether or not this repo
+    configures a remote backend. --fix removes a directory only on proof that
+    no session owns it — live, archived, mid-kill and awaiting-teardown
+    sessions all count — and removes nothing at all when any part of that
+    inventory cannot be read
 
 The version-skew check exists because a skewed daemon fails quietly: it keeps
 answering while rejecting fields a newer client sends, which surfaces as
@@ -1065,21 +1354,42 @@ and remain actionable even though --fix does not perform them.
 UNKNOWN observations stay visible as advisory warnings with inspection
 guidance, but they are not actionable: "inspect it and decide" is not a finding
 that the run is unhealthy. A CI step or health probe should fail on the command
-exit code (equivalently, JSON summary.unresolved > 0), which includes only
-actionable rows.
+exit code: 1 means unresolved actionable issues remain or a check did not finish
+looking. Advisory warnings alone do not fail the run.
 
-High-volume process findings are summarized by default so the actionable
-problem is visible first. Use --verbose to show each process behind those
-summaries.
+Rows can also carry INFO: a deliberate unknown — something visible but not
+comparable, like a root session the daemon adopted rather than launched, whose
+resolved runtime command therefore was never recorded. An INFO row is neither a
+problem nor an unfinished check; it appears in the report and in summary.info
+in --json output, and never contributes to the exit code.
+
+A check that stops early — for example, the temp-home sweep hits a candidate
+budget on a machine with a very large temp dir — now exits 1 even if it found
+no unhealthy condition. The summary line ends with "INCOMPLETE" naming the
+checks that gave up, and summary.incomplete lists them in --json. The exit code
+already covers incomplete checks, so a plain-exit-code probe needs no extra
+JSON check. To distinguish the exit-1 cases, read summary.unresolved and
+summary.incomplete under data in the JSON envelope: exit status -eq 1 with
+unresolved == 0 means incomplete; unresolved > 0 means actionable issues remain
+(and summary.incomplete may also be non-empty).
+
+High-volume findings are summarized by default so the actionable problem is
+visible first — process findings, abandoned temp homes, dead-socket
+directories, and test-harness directories, all of which run to hundreds or
+thousands on a busy machine. Use --verbose to show each item behind those
+summaries. A summary from a check that did not finish reads "at least N … a
+lower bound" in its own row, so its count is never mistaken for the total.
 
 Read-only by default. With --fix, applies the safe remediations — killing
-orphans whose ancestry markers prove they came from a dead af session, and
-removing stale temp homes — logging each action. Ambiguous cases are always
-reported rather than acted on, and remain advisory unless another check
-establishes a specific unhealthy condition.
+orphans whose ancestry markers prove they came from a dead af session, removing
+stale temp homes, stopping daemons proven to be running a temp-dir binary,
+removing directories holding nothing but a dead daemon socket, and removing the
+test-harness directories described above — logging each action. Ambiguous cases are always reported rather than acted on, and remain
+advisory unless another check establishes a specific unhealthy condition.
 
-Exits 1 when unresolved actionable issues remain, 0 when doctor established no
-unhealthy condition (advisory warnings may still be present).
+Exits 1 when unresolved actionable issues remain or summary.incomplete is
+non-empty. Exits 0 when no actionable issues remain and no checks are incomplete
+(advisory warnings may still be present).
 
 ```
 af doctor [flags]
@@ -1089,7 +1399,7 @@ af doctor [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--fix` |  | apply safe remediations (kill verified orphans, remove stale temp homes) |
+| `--fix` |  | apply safe remediations (kill verified orphans and leaked daemons, remove stale temp homes and dead-socket dirs) |
 | `--json` |  | emit each check as JSON in the {data,error} envelope |
 | `--setup` |  | run the first-run setup profile (prerequisites, config, agent commands) |
 | `--verbose` |  | show per-process doctor findings instead of collapsed summaries |
@@ -1098,7 +1408,142 @@ af doctor [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts
+
+Add, list, check and remove sandbox hosts
+
+Manage the global host list that sandbox sessions run on.
+
+  af hosts add box1 ubuntu@box1.tailnet.ts.net   save the host, then check it
+  af hosts check [box1]                          probe git, tmux and gh on the host
+  af hosts list                                  show the saved hosts
+  af hosts remove box1                           drop the host from the list
+
+You own connectivity (a tailnet, a VPN, a key in your agent): af opens no tunnel
+and edits no ssh config. If the host cannot be reached or is missing a tool, the
+entry is still saved and the command says what to fix; rerun 'af hosts check'.
+
+```
+af hosts
+```
+
+**Subcommands**
+
+- [`af hosts add`](#af-hosts-add) — Save a host and check that it can run a session
+- [`af hosts check`](#af-hosts-check) — Probe a host (or every saved host) for what a session needs
+- [`af hosts list`](#af-hosts-list) — Show the saved hosts
+- [`af hosts remove`](#af-hosts-remove) — Drop a host from the list
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Print the result as a JSON envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts add
+
+Save a host and check that it can run a session
+
+Save <name> as a sandbox host and probe it.
+
+<ssh-destination> is [user@]host[:port], for example ubuntu@box1.tailnet.ts.net.
+The name is what 'af sessions create --host <name>' takes. The host is probed
+for git, tmux (3.2 or newer) and gh, and every missing tool is reported with
+its fix. The entry is kept either way; use --no-check to skip the probe.
+
+```
+af hosts add <name> <ssh-destination> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--default` |  | Make this the default host |
+| `--host-key-verification` | `string` | strict \| accept-new \| insecure (default: the global ssh.host_key_verification) |
+| `--identity-file` | `string` | Absolute path of the ssh key for this host |
+| `--no-check` |  | Save the host without probing it |
+| `--workspace-root` | `string` | Absolute directory on the host under which each session's dir is created (default ~/.af-sessions) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts check
+
+Probe a host (or every saved host) for what a session needs
+
+Ask the daemon to probe a saved host for git, tmux (3.2 or newer) and gh, and
+record the answer so the host pickers show it. With no name every saved host is
+probed. Exits non-zero when a host is not ready or could not be reached.
+
+```
+af hosts check [name]
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts list
+
+Show the saved hosts
+
+```
+af hosts list
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts remove
+
+Drop a host from the list
+
+Remove <name> from the saved hosts. Sessions already running on it keep
+running: each one carries its own connection settings, so a tunnel re-dial or a
+daemon restart does not need the entry; only new sessions can no longer pick it. A host that is the default is
+refused unless you pass --clear-default.
+
+```
+af hosts remove <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--clear-default` |  | Also clear default_host when it names this host |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af keys
@@ -1111,15 +1556,28 @@ structural keys config cannot touch — are listed last. Contextual pane
 actions such as pane_prev/pane_next are included; their default arrow keys
 apply only while a workspace pane has focus.
 
+Every default key removed by a user rebind is named in SOURCE with its taker.
+The affected row keeps any remaining keys; when none remain, it shows an em
+dash instead. JSON appends the same key/taker pairs in suppressed_by.
+
+Key values use config spellings you can paste into [keys]. With --json,
+bindings are wrapped in {data,error}; keys/default keep those spellings.
+
 ```
-af keys
+af keys [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Wrap output in the {data,error} JSON envelope |
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af projects
@@ -1133,6 +1591,7 @@ af projects
 **Subcommands**
 
 - [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
+- [`af projects color`](#af-projects-color) — Set the display color of a registered project
 - [`af projects delete`](#af-projects-delete) — Delete a project, archiving its restorable sessions
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
@@ -1147,7 +1606,7 @@ af projects
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af projects add
@@ -1172,6 +1631,10 @@ agent-factory/checkout-id-<home-id> marker under the Git common directory, so
 one AF home's reset cannot remove another home's identity. No working-tree file
 is created, and adding a project does NOT start an always-on agent for it.
 
+With --daemon-url (or AF_DAEMON_URL) the registration goes to that daemon and the
+path is a path ON ITS HOST, sent as typed: absolute or starting with ~, never
+relative.
+
 'register' is a deprecated alias for 'add'.
 
 ```
@@ -1184,7 +1647,34 @@ af projects add <path>
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af projects color
+
+Set the display color of a registered project
+
+Set the display color of a registered project.
+
+<project> is a prj_ id or a path inside the project's checkout. <color> is a hex
+color such as '#2f5fd8' or '2f5fd8'. Pass "" to clear the color.
+
+The web client paints the frame around the session and the browser tab's
+favicon with this color, so you can find the project's tab or window quickly.
+
+Against a remote daemon (--daemon-url) <project> is a prj_ id or an absolute
+checkout path on the daemon's host, resolved by that daemon's registry.
+
+```
+af projects color <project> <color>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
@@ -1221,7 +1711,7 @@ af projects delete [repo]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
@@ -1230,6 +1720,7 @@ af projects delete [repo]
 List registered projects
 
 List durable machine-local project bindings.
+With --daemon-url this is the targeted daemon's registry, not this machine's.
 
 path_exists reports only whether the last-known path is present. It does not
 claim that a new checkout at a reused path has the registered identity.
@@ -1242,7 +1733,7 @@ af projects list
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
@@ -1255,6 +1746,14 @@ Rebind a stable project id to a new checkout path.
 The project id is preserved. Rebinding refuses to take a path already owned by
 another registered project.
 
+The path may be relative (including '.'), absolute, or start with ~. A relative
+path or '~' is resolved against YOUR shell's working directory before the
+request is sent — the daemon, which owns the registry write, then resolves the
+checkout it lands on.
+
+Against a remote daemon (--daemon-url) the path is on the daemon's host and is
+sent as typed (absolute or ~/…).
+
 ```
 af projects rebind <project-id> <path>
 ```
@@ -1263,8 +1762,326 @@ af projects rebind <project-id> <path>
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal
+
+Write proposals together with agents
+
+A proposal is a folder of markdown docs that belongs to the project. The user and agent sessions edit the docs with their normal tools; af records each edit, and "af proposal changes" shows a session what others changed since it last looked.
+
+Commands that need a session use the calling af session, or --session <title>. The others follow the shared project contract: --repo names a project, otherwise the current directory's project is used.
+
+```
+af proposal
+```
+
+**Subcommands**
+
+- [`af proposal add-doc`](#af-proposal-add-doc) — Add a doc to a proposal from a template, or blank
+- [`af proposal attach`](#af-proposal-attach) — Attach this session to a proposal and print the rules
+- [`af proposal cat`](#af-proposal-cat) — Print a doc of a proposal
+- [`af proposal changes`](#af-proposal-changes) — Print what others changed since this session's cursor, then move the cursor
+- [`af proposal checkpoint`](#af-proposal-checkpoint) — Commit this session's edits to its proposal and move its cursor
+- [`af proposal detach`](#af-proposal-detach) — Remove this session's proposal attachment and cursor
+- [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
+- [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
+- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
+- [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
+- [`af proposal write`](#af-proposal-write) — Replace a doc with stdin and commit it
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal add-doc
+
+Add a doc to a proposal from a template, or blank
+
+```
+af proposal add-doc <slug> <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal attach
+
+Attach this session to a proposal and print the rules
+
+Attach the session to an existing proposal and print the rules. A session holds one proposal at a time, so this detaches it from any other. With no slug, print the current proposal and the rules again. The session gets a Docs tab for the proposal when it has none, and "tab" names it.
+
+```
+af proposal attach [<slug>] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal cat
+
+Print a doc of a proposal
+
+```
+af proposal cat <slug> <doc>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal changes
+
+Print what others changed since this session's cursor, then move the cursor
+
+Print every edit to this session's proposal since its cursor that the session did not checkpoint itself — edits by the user, by other editors, and by other sessions — then move the cursor. An empty edits array means nobody else changed the proposal.
+
+```
+af proposal changes [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal checkpoint
+
+Commit this session's edits to its proposal and move its cursor
+
+Commit the uncommitted edits in this session's proposal as the session's own, so "af proposal changes" does not show them back to it. The cursor does not move past edits by others that changes has not shown yet; unseen counts them.
+
+```
+af proposal checkpoint [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal detach
+
+Remove this session's proposal attachment and cursor
+
+Remove the session's proposal attachment and cursor, and close its Docs tab for the proposal.
+
+```
+af proposal detach [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal list
+
+List the project's proposals, newest edit first
+
+```
+af proposal list
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal path
+
+Print the absolute folder path of a proposal
+
+Print the absolute folder path of a proposal. With --daemon-url, the path is on the daemon host.
+
+```
+af proposal path <slug>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal push-mode
+
+Set whether the Docs tab sends the user's edits to this session by itself
+
+Set the push mode of this session's Docs tab. In auto mode, af sends the user's edits to the agent as a prompt 10 s after the last save, when the agent is idle. In manual mode, af sends them only on "af proposal send" or the tab's Send now button. Prints the push status.
+
+```
+af proposal push-mode auto|manual [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal send
+
+Send the user's unsent edits to this session now
+
+Send this session the edits to its proposal that it has not seen, as one prompt, the same as the Docs tab's Send now button. When the agent is busy, af sends them when it is next idle. Prints the push status.
+
+```
+af proposal send [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal start
+
+Create a proposal from templates, attach this session, and print the rules
+
+Create a proposal from templates, attach the session to it, and print the rules the agent follows. Fails when the slug exists. A slug is 1-63 lowercase letters, digits and dashes. A doc with no template starts blank; user templates in <AF_HOME>/templates/proposal/<name>.md override the built-in ones. The session gets a Docs tab for the proposal, and "tab" names it.
+
+```
+af proposal start <slug> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--docs` | `stringSlice` | Docs to create, comma-separated (default `[goals,technical,api,ui,future]`) |
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af proposal write
+
+Replace a doc with stdin and commit it
+
+Replace an existing doc with stdin and commit it: as this session's own edit inside an af session or with --session, otherwise as an external edit.
+
+```
+af proposal write <slug> <doc> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af quota
@@ -1283,7 +2100,9 @@ Two different things, kept apart on purpose:
             wall, and the reset time recorded with it. Real signal even where the
             provider exposes nothing.
 
-Read-only: it reads local session records and starts nothing.
+Read-only: it reads session records and starts nothing. With --daemon-url (or
+AF_DAEMON_URL) the report comes from the targeted daemon's host — the daemon
+serves the same records read, so the answer describes that machine, not yours.
 
 ```
 af quota
@@ -1293,7 +2112,7 @@ af quota
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af reset
@@ -1339,7 +2158,7 @@ af reset [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions
@@ -1358,18 +2177,19 @@ af sessions
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
 - [`af sessions handoff`](#af-sessions-handoff) — Continue a session under a different agent, in place
-- [`af sessions kill`](#af-sessions-kill) — Permanently destroy a session and prune its worktree branch
+- [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
+- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
-- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a session blocked at a usage limit
+- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
 - [`af sessions tab-reorder`](#af-sessions-tab-reorder) — Move a tab within a session's tab order
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's tabs (create/delete/rename/reorder)
-- [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle, or until any session in the fleet changes state
+- [`af sessions watch`](#af-sessions-watch) — Wait for idle, or a fleet stop-state change or disappearance
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 
 **Flags**
@@ -1383,15 +2203,15 @@ af sessions
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions archive
 
 Finish with a session by archiving it for later restore
 
-Archive is the default way to finish with a session: tear down its tmux
-and move its git worktree out to the global archive directory
+Archive keeps a session restorable. Locally, stop its terminals
+and move its owned git worktree to the global archive directory
 (<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/), preserving the branch and any
 uncommitted changes. The session is not deleted — it becomes a quiescent
 "archived" row that survives restarts and can be brought back later with
@@ -1407,9 +2227,12 @@ With --self, archive the current session (resolved via whoami) instead of a
 named one — use it from inside a session when your work is done. --self and a
 <title> argument are mutually exclusive.
 
-Not available for remote or in-place (--here) sessions: archive relocates the
-worktree, which those don't own. The relocated worktree path is printed on
-success.
+An ssh or sandbox session publishes nothing by default: the agent stops and the
+workspace stays on its host, owned by the archived row, and the output names where
+(archived_workspace). Pass --push to push the branch to origin first; docker and
+hook sessions always push. Restoring a session archived without a push is not
+available yet (#5571 W8.6) — the work is untouched on the host. In-place (--here) sessions cannot be archived because af does not own
+their worktree. Local archives print the relocated worktree path on success.
 
 ```
 af sessions archive [title] [flags]
@@ -1419,13 +2242,14 @@ af sessions archive [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--push` |  | Push an ssh/sandbox session's branch to origin before archiving. Without it nothing is published: the agent stops and the workspace stays on its host (docker and hook sessions always push) |
 | `--self` |  | Archive the current session (resolved via whoami); use from inside a session when your work is done |
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1434,7 +2258,7 @@ af sessions archive [title] [flags]
 
 Attach to a session's terminal
 
-Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-w).
+Attach to a running session's tmux terminal. Detach with the configured detach key (default: ctrl+w).
 
 ```
 af sessions attach <title>
@@ -1444,7 +2268,7 @@ af sessions attach <title>
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1478,6 +2302,11 @@ names the offending value.
 The reasons are the same text a create prints when it refuses, because both come
 from the same precondition checks.
 
+An available backend may also carry "callback_unavailable_reason": a create on
+it succeeds but the session gets no af callback, because the daemon cannot mint
+a credential under its current listener/auth posture. It is advisory, not a
+precondition — the session still works, it just cannot call back into af.
+
 Example:
   af sessions backends
   af sessions backends --repo ~/src/myproject
@@ -1490,7 +2319,7 @@ af sessions backends
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1500,6 +2329,12 @@ af sessions backends
 Create a new session
 
 Create a new session running an agent in its own git worktree.
+
+With --prompt, unconfirmed or incomplete delivery adds a warning field to the
+JSON session result. Outside --json mode, it also prints the warning on stderr.
+The session remains created;
+inspect its pane before retrying, since an unverified prompt may already have
+run. Creation still exits successfully and does not automatically resend.
 
 With --here (alias --in-place) the session instead attaches to the repo's
 existing working tree at its current branch: no worktree or branch is created,
@@ -1515,9 +2350,10 @@ af sessions create [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--account` | `string` | Credential account `name` to run the agent as (register it with af accounts add; defaults to the ambient identity) |
+| `--account` | `string` | Credential account `name` to run the agent as (register it with af accounts add; defaults to this project's default_accounts entry for the agent, else the ambient identity) |
 | `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, sandbox, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run "af sessions backends" for which of these this project can actually use, and why not |
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
+| `--host` | `string` | Listed host to run the session on, by name from the global host list (af config set hosts …); implies --backend ssh. Run "af sessions backends" to see each host and whether it is usable |
 | `--in-place` |  | Alias for --here |
 | `--name` | `string` | Session title (alternative to positional <title>) |
 | `--program` | `string` | Program to run (one of: claude, codex, aider, gemini, amp, opencode, devin; defaults to config default) |
@@ -1527,7 +2363,7 @@ af sessions create [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1552,7 +2388,7 @@ af sessions get <title>
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1561,27 +2397,56 @@ af sessions get <title>
 
 Continue a session under a different agent, in place
 
-Hand a session's work over to a different agent without losing it.
+Hand a session's work over to another agent or account without losing it.
+
+Use --account to choose a registered account. Omit --to to keep the same
+agent and stored prompt, or combine both flags to change agent and account.
+A manual handoff moves an explicit account pin; automatic rotation still
+respects it. Targets with current usage-limit evidence are refused.
+
+An account belongs to one agent, so a scoped session that changes agents
+must name the incoming agent's account with --account — unless the target
+has no account support at all, which drops the scope instead and reports
+it on from_account. What decides capability is the command the target
+resolves to, not the enum: program_overrides can make aider launch codex
+(a codex account is then required) or codex launch something unscopable
+(the scope is dropped). A resolved command af cannot classify as an agent
+at all — a wrapper like "npx codex" may launch an account-capable agent
+underneath — refuses rather than drop the pin on an unproven answer. The
+drop is one-way: handing back to an account-capable agent later does not
+restore it, so name the account again with --account. Dropping the scope
+restarts only the agent pane, so a session with shell, process, or VS Code
+sibling tabs is refused until those tabs are closed — they would keep
+running under the dropped account's environment.
 
 The session keeps its identity, its git worktree, and its branch — only the
-agent process changes. The incoming agent starts a fresh conversation and is
+agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
+
+A same-agent account handoff (--account alone, or --to naming the current
+agent) keeps the conversation for claude and codex: af copies the transcript
+into the new account's home and resumes it. If that copy cannot be made, the
+new account starts a fresh conversation, and its brief says why.
 
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
 the window to reset (see 'af sessions list' for a [limit] badge, and
 docs/usage-limits.md for the waiting path).
 
-Agent conversations are not portable between providers: the incoming agent
-cannot read what its predecessor was thinking, only the working tree and the git
-history. The brief points it at both. Because of that, a handoff is recorded —
-the swap and the branch tip at the moment it happened — so a reviewer reading
-the resulting diff can tell which agent wrote which part.
+Agent conversations are not portable between providers: after a cross-agent
+handoff the incoming agent cannot read what its predecessor was thinking, only
+the working tree and the git history. The brief points it at both. Because of
+that, a handoff is recorded — the swap and the branch tip at the moment it
+happened — so a reviewer reading the resulting diff can tell which agent wrote
+which part.
 
-Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
-sandbox is a different lifecycle and is not supported yet.
+Local-worktree sessions and ssh/sandbox sessions whose agent-server supports it
+can be handed off in place: the sandbox's agent-server swaps the agent in the same
+workspace and resolves the new agent's program on its own host. An account-scoped
+sandbox session, and docker or hook sessions, cannot be handed off yet.
 
 Examples:
+  af sessions handoff fix-auth --account personal
   af sessions handoff fix-auth --to claude
   af sessions handoff fix-auth --to gemini --brief "finish the retry test, skip the docs"
 
@@ -1593,6 +2458,7 @@ af sessions handoff <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--account` | `string` | Registered target account; omit --to to keep the same agent |
 | `--brief` | `string` | Mission for the incoming agent, replacing the session's stored prompt |
 | `--to` | `string` | Agent to hand the session off to (one of claude, codex, aider, gemini, amp, opencode, devin) |
 
@@ -1600,24 +2466,23 @@ af sessions handoff <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions kill
 
-Permanently destroy a session and prune its worktree branch
+Permanently delete a session and af-owned resources
 
-Permanently destroy a session: tear down tmux, remove the worktree,
-delete the stored session record, and prune the session branch when Agent
-Factory owns it.
+Permanently delete the session record and stop its terminals. Remove only
+worktrees and branches owned by af; user-owned resources stay.
 
 For normal "done with this session" cleanup, prefer:
   af sessions archive <title>
 
-Kill always destroys the session, including any uncommitted or unmerged work on
-its branch — there is no undo. To keep a session restorable instead, archive it.
+Deletion is permanent. Uncommitted or unmerged work in af-owned resources may
+be lost. Archive instead to keep the session restorable.
 --force is accepted but has no effect (kept for backward compatibility).
 
 ```
@@ -1634,7 +2499,7 @@ af sessions kill <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1646,6 +2511,8 @@ List sessions in the current project
 List sessions in the current project.
 
 Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's sessions are listed. Lifecycle, age, and limit filters compose and are applied by the daemon before transfer. With no filter flags, the complete list and its existing order are unchanged.
+
+Every row names its own integers. liveness_name is the one --status matches, and it round-trips exactly; status_name only names the legacy status integer and is not a filter value. tabs[].kind_name uses the tab_kinds[].kind words.
 
 ```
 af sessions list [flags]
@@ -1659,13 +2526,13 @@ af sessions list [flags]
 | `--limit` | `int` | Return at most N sessions after filtering (must be greater than 0 when set; omitted is unbounded) (default `0`) |
 | `--live` |  | Exclude archived sessions |
 | `--max-age` | `duration` | Only list sessions created within this duration (for example 24h) (default `0s`) |
-| `--status` | `stringArray` | Filter by lifecycle status; repeat for more than one (running, ready, lost, dead, archived, limit-reached) |
+| `--status` | `stringArray` | Filter by lifecycle status; repeat for more than one (running, ready, lost, dead, archived, limit-reached). Matches each row's liveness_name; status_name names the legacy status integer and is not a filter value |
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1718,7 +2585,55 @@ af sessions preview <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions prune
+
+List disk reclaimable from old archived sessions (dry run)
+
+Report archived sessions older than --older-than, measured from each
+session's archive time.
+
+This is a dry run: it lists each archived session a reclaim would remove
+(title, archive time, allocated bytes) plus a total, and the reasons every
+other session was skipped. af writes nothing — no deletion, no record
+update, no git mutation — so it is safe to run at any time.
+
+Only archived sessions are eligible; live, lost, dead or in-flight sessions,
+archives whose move is incomplete, and worktrees still holding uncommitted or
+ignored files are skipped with their reasons. A session whose origin
+repository is gone is refused too: the archived tree may be the work's last
+copy, so it is reported, not counted reclaimable.
+
+Bytes are ALLOCATED disk space, not apparent file size — sparse holes and
+hard links whose other end lives outside the tree are not counted. It is an
+upper bound on what a reclaim frees: extents shared with a copy-on-write
+reflink clone outside the tree are still counted, so on Btrfs/XFS the free
+space recovered can be less than the total.
+
+The listing reads the running daemon's in-flight claims and will not spawn
+one — a read must not write even a socket or a log. With no daemon up it
+refuses with guidance; pass --daemon-url or start af first.
+
+```
+af sessions prune --older-than <duration> [--repo <path> | --all] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--all` |  | Span every project instead of only the current/--repo one |
+| `--older-than` | `string` | Report sessions archived longer than this duration ago (required, for example 720h for thirty days) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1761,37 +2676,53 @@ af sessions restore <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions retry-limit
 
-Retry a session blocked at a usage limit
+Retry a usage-limit resume or inspected handoff
 
-Retry a session that is parked at a provider usage-limit wall.
+Retry a session parked at a provider usage-limit wall, or explicitly retry
+a handoff whose mission delivery could not be confirmed.
 
 The daemon runs the same recovery action as the TUI's c key and the web's Retry
 button: it re-spawns an exited agent when necessary, re-delivers the pending
 prompt (or "continue" for an interactive session with no stored prompt), and
 clears the limit state after delivery succeeds.
 
-The command fails if the session is not currently blocked on a usage limit.
-Use 'af sessions list' to find sessions carrying the [limit] badge.
+Before retrying an unconfirmed handoff, inspect its pane: the first submission
+may already have landed, and this command is the operator's explicit decision to
+send the pending mission again. When the pane shows the incoming agent ALREADY
+acting on its mission, use --delivered instead: it retires the pending
+obligation and clears the leftover operation/startup flags WITHOUT sending the
+mission a second time.
+
+The command fails when neither recovery obligation exists. Use 'af sessions
+list' to find sessions carrying the [limit] badge; the TUI and web expose
+Retry handoff and Mark delivered for an unconfirmed handoff.
 
 Example:
   af sessions retry-limit fix-auth
+  af sessions retry-limit fix-auth --delivered
 
 ```
-af sessions retry-limit <title>
+af sessions retry-limit <title> [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--delivered` |  | Mark the pending handoff mission as delivered and retire it WITHOUT resending — use after inspecting the pane and confirming the incoming agent already received it |
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1809,7 +2740,15 @@ For one target, the JSON acknowledgement includes status: delivered,
 not-delivered, sent-unverified, or could-not-confirm. sent-unverified means tmux
 accepted the paste and Enter while a readable pane did not render exact content
 proof; could-not-confirm means the pane observer itself was unavailable. Neither
-status claims delivery, and the command adds no second confirmation wait.
+status claims delivery. A draft still staged in the composer shortly after Enter
+gets one more Enter only when it is exactly the single paste chip bound to this
+delivery and nothing in the composer changed; every other staged shape is
+reported sent-unverified. It is never re-pasted.
+
+If --create made the session but could not confirm its start, the command still
+exits 0: the JSON carries a warning, the status stays could-not-confirm, and
+stderr says the session was created. Do not retry; inspect it with
+'af sessions list'.
 
 With --all, broadcast a single prompt to every live session in scope:
 
@@ -1835,6 +2774,7 @@ af sessions send-prompt <title> <prompt> [flags]
 | `--all` |  | Broadcast the prompt to every live session in scope (current repo by default; excludes the reserved root session) |
 | `--all-repos` |  | With --all, broadcast across every repo instead of only the current/--repo one |
 | `--create` |  | Auto-create the session if it doesn't exist |
+| `--host` | `string` | With --create: place a NEWLY created session on a host from your global `hosts` list, over ssh (see `af sessions backends`). If the session already exists the prompt is sent to it unchanged |
 | `--include-root` |  | With --all, also deliver to the reserved root session (excluded by default) |
 | `--program` | `string` | Program to run when creating a new session (one of: claude, codex, aider, gemini, amp, opencode, devin; defaults to config default) |
 | `--prompt` | `string` | The prompt to send (alias for the positional <prompt>, matching 'sessions create --prompt') |
@@ -1843,7 +2783,7 @@ af sessions send-prompt <title> <prompt> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1860,7 +2800,19 @@ canonical kind and name, while "Terminal" is only the label those UIs display.
 
 Process tab (default): runs --command in the session's git worktree (e.g. a data
 explorer TUI or a test watcher). If --name is omitted, a name is derived from the
-command's basename.
+command's basename. The command runs once, at creation, and af never runs it
+again. If it exits non-zero immediately (a mistyped command, for example),
+tab-create fails with the exit status and the command's last output, and no tab
+is added. Across a daemon/af restart, af reattaches to the pane: a running
+command keeps running, and a finished one keeps its output and records its exit
+status in the tab's "exit" field. A process tab whose tmux session is gone
+entirely restores inert.
+
+In an account-scoped session, af stops a running process tab it did not start
+under the session's account, once, at restart; an account swap stops every
+running process tab. Neither runs the command again, and the tab's exit.stopped_by
+says why ("account-scope" or "account-swap"). A finished process tab with nothing
+left running is kept as it is.
 
 Web tab (--kind web): a URL/iframe tab with NO process — an agent injects a live
 browser view into the user's screen. Point it at a local dev server with --port
@@ -1870,9 +2822,16 @@ preview works even when the web UI is viewed remotely (Tailscale/SSH); an extern
 URL is iframed directly (best-effort — many sites block embedding). The web tab
 renders as an iframe in the web UI and as a placeholder in the TUI.
 
-The tab persists and reconnects across a daemon/af restart like every other tab.
+Docs tab (--kind docs --proposal <slug>): the web UI's editor for a proposal of
+the session's project (see af proposal). It has no process. The TUI shows a
+placeholder, because the editor is web only. af proposal start and attach create
+this tab for you.
 
---name sets a process, web, or VS Code tab's name — the handle every other tab
+The tab persists and reconnects across a daemon/af restart like every other
+tab — for a process tab "reconnect" means reattach-only, never re-running the
+command (see above).
+
+--name sets a process, web, VS Code, or docs tab's name — the handle every other tab
 verb addresses it by. A shell tab does not accept --name: its canonical name is
 "shell" (auto-suffixed on collision), while the TUI renders the
 presentation-only label "Terminal". Other names are sanitized before use:
@@ -1881,11 +2840,13 @@ the session (auto-suffixed -2, -3, …). So the name you pass is not always the
 name you get — the resolved tab name is printed on success, and that is the one
 the other tab verbs address.
 
-For remote sessions, only external HTTPS web tabs are admitted. That kind is
-metadata-only: it needs no PTY and spawns no process in the missing daemon-side
-worktree. Shell, process, and VS Code tabs still require local runtime/worktree
-resources, while loopback web targets still need a relay through the off-box
-agent and plain HTTP cannot be framed by an HTTPS Agent Factory UI.
+For remote sessions, web tabs are admitted. That kind is metadata-only: it needs
+no PTY and spawns no process. An external HTTPS URL is iframed
+directly, and a loopback target (including --port) is served from the session's
+own workspace through the agent-server's port relay, so it shows what listens on
+that port in the sandbox rather than on the daemon host. Plain-HTTP external URLs
+cannot be framed by an HTTPS Agent Factory UI. Shell, process, and VS Code tabs
+still require local runtime/worktree resources.
 
 ```
 af sessions tab-create <title> [flags]
@@ -1896,16 +2857,17 @@ af sessions tab-create <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
-| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, or "vscode" for VS Code |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a proposal's Docs tab |
 | `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
+| `--proposal` | `string` | Proposal `slug` the Docs tab edits (required with --kind docs) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1943,7 +2905,7 @@ af sessions tab-delete <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -1988,7 +2950,7 @@ af sessions tab-rename <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2028,7 +2990,7 @@ af sessions tab-reorder <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2059,7 +3021,7 @@ af sessions tabs
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2079,16 +3041,17 @@ af sessions tabs create <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
-| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, or "vscode" for VS Code |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a proposal's Docs tab |
 | `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
+| `--proposal` | `string` | Proposal `slug` the Docs tab edits (required with --kind docs) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2113,7 +3076,7 @@ af sessions tabs delete <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2139,7 +3102,7 @@ af sessions tabs rename <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2165,19 +3128,17 @@ af sessions tabs reorder <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions watch
 
-Block until a session goes idle, or until any session in the fleet changes state
+Wait for idle, or a fleet stop-state change or disappearance
 
-Watch a session and return when its agent finishes working: exit 0 the moment
-the session goes IDLE (the agent stopped working and is awaiting input), so an
-operator or root agent can dispatch a session and be notified on completion
-instead of polling 'af sessions preview'.
+Watch a session and exit 0 when its agent is idle and awaiting input.
+Idle does not mean the work is complete.
 
 Polls the daemon's snapshot (the same read path as 'af sessions get') every
 --interval (default 2s). Exits non-zero if the session reaches a terminal state
@@ -2189,8 +3150,8 @@ keep the watch waiting.
 By default prints a concise line on transition; with --json emits the final
 session record. Honors --repo to scope the title lookup to one repository.
 
-With NO title (or --all) it watches every session in scope and returns when the
-first one CHANGES STATE, printing which and why. That form is edge-triggered: the
+With NO title (or --all) it watches every session in scope and returns on the
+first stop-state change or disappearance, printing which session and why. It is edge-triggered: the
 first poll establishes a baseline and reports nothing, so a session that was
 already idle before you called does not fire. Pass --include-current to report
 those too, for a driver that wants a starting snapshot; that snapshot omits
@@ -2221,7 +3182,7 @@ af sessions watch [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2231,6 +3192,8 @@ af sessions watch [title] [flags]
 Identify the current Agent Factory session
 
 Returns the session info for the current tmux session by matching the tmux session name against stored sessions.
+
+Requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error.
 
 Identity is not scoped: you are the session you are, in whatever project it belongs to. --repo therefore acts as an assertion — it checks that the resolved session really is in that project, and errors if it is not.
 
@@ -2242,9 +3205,101 @@ af sessions whoami
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af target
+
+Point this client at a remote daemon once
+
+Save, show or clear the remote daemon this machine's af talks to.
+
+A saved target is the lowest-precedence source: --daemon-url / --token win, then
+AF_DAEMON_URL / AF_DAEMON_TOKEN, then the saved target. It is stored in this
+machine's af home with 0600 permissions. The saved token is sent only to the
+saved URL, never to a host named by a flag or environment variable.
+
+Run 'af target show' to see which target an invocation will use and why.
+
+```
+af target
+```
+
+**Subcommands**
+
+- [`af target clear`](#af-target-clear) — Forget the saved target
+- [`af target set`](#af-target-set) — Save a remote daemon target
+- [`af target show`](#af-target-show) — Show which daemon this invocation targets, and why
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af target clear
+
+Forget the saved target
+
+```
+af target clear
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af target set
+
+Save a remote daemon target
+
+Save <url> (http://, ws://, https:// or wss://) as this client's target.
+
+Pass the bearer token on stdin with --token-stdin so it never appears in argv or
+shell history:
+
+    af token show | ssh box ...      # on the daemon host
+    printf '%s' "$TOKEN" | af target set https://box.tailnet.ts.net --token-stdin
+
+Without --token-stdin no token is saved (the daemon may be unauthenticated, or
+you can still pass --token / AF_DAEMON_TOKEN per invocation).
+
+```
+af target set <url> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--token-stdin` |  | Read the bearer token from stdin (first line) and save it with the target |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af target show
+
+Show which daemon this invocation targets, and why
+
+```
+af target show
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks
@@ -2258,10 +3313,11 @@ af tasks
 **Subcommands**
 
 - [`af tasks add`](#af-tasks-add) — Add a new task bound to the current project
-- [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID
+- [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID or name
 - [`af tasks list`](#af-tasks-list) — List tasks in the current project
 - [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
 - [`af tasks restart`](#af-tasks-restart) — Restart an enabled watch task without process overlap
+- [`af tasks show`](#af-tasks-show) — Show one task's schedule health and audit trail
 - [`af tasks trigger`](#af-tasks-trigger) — Trigger a task in the current project to run immediately
 - [`af tasks update`](#af-tasks-update) — Update a task in the current project
 
@@ -2276,7 +3332,7 @@ af tasks
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks add
@@ -2289,6 +3345,8 @@ A task is bound to exactly one project, and every run's worktree is created insi
 
 Outside a git repository, --repo is required — the binding is never guessed. A current directory that resolves to a clone inside af's own home is refused as a stray checkout (#1891); pass --repo to name the intended project.
 
+With --daemon-url/AF_DAEMON_URL set, the task is added to that daemon and --repo is required, naming a path on the DAEMON's host: it is sent as typed and resolved there, since a path on this machine says nothing about the daemon's filesystem. The success line names the daemon URL beside the path. An omitted --program is left to the daemon's own default_program rather than resolved from this machine's config.
+
 ```
 af tasks add [flags]
 ```
@@ -2298,6 +3356,7 @@ af tasks add [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--cron` | `string` | Cron expression (exactly one of --cron / --watch-cmd) |
+| `--host` | `string` | Place each session this task creates on a host from your global `hosts` list, over ssh (see `af sessions backends`); empty uses the repo's backend. A name that is not in the list is refused |
 | `--max-concurrent-runs` | `int` | Cap how many sessions this watch task may have in flight at once; excess events are queued in order instead of spawning runs, subject to the durable queue's retention limits (0 = unlimited; --watch-cmd tasks without --target-session only) (default `0`) |
 | `--name` | `string` | Task name (required) |
 | `--on-complete` | `string` | What happens to the session a run spawns once it finishes: keep (default, leaves it in place), archive (restorable, but retains its whole worktree), or kill (reclaims the worktree and prunes the session's branch). Not for --target-session tasks, whose session is meant to be reused |
@@ -2310,28 +3369,32 @@ af tasks add [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks get
 
-Get a task in the current project by ID
+Get a task in the current project by ID or name
 
-Get a task in the current project by ID.
+Get a task in the current project by ID or name.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Inspecting another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Inspecting another project's task requires naming it with --repo. Outside a git repository there is no project context and the id or name resolves globally.
+
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
+
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused.
 
 ```
-af tasks get <id>
+af tasks get <id-or-name>
 ```
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2345,6 +3408,8 @@ List tasks in the current project.
 Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's tasks are listed.
 
 This default changed in #1893: `af tasks list` inside a repository used to list every project's tasks. Pass --all for the old behavior.
+
+With --daemon-url/AF_DAEMON_URL set, the list comes from that daemon and never from this machine's task store — a daemon that cannot be reached is an error, not a fall back to local rows. There is no project context against a remote daemon: your current directory names a repository here, which says nothing about the daemon's projects, so every project's tasks are listed and --repo is refused rather than silently matching nothing.
 
 ```
 af tasks list [flags]
@@ -2360,7 +3425,7 @@ af tasks list [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2371,17 +3436,21 @@ Remove a task in the current project
 
 Remove a task in the current project.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Removing another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Removing another project's task requires naming it with --repo. Outside a git repository there is no project context and the id or name resolves globally.
+
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
+
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused.
 
 ```
-af tasks remove <id>
+af tasks remove <id-or-name>
 ```
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2392,17 +3461,52 @@ Restart an enabled watch task without process overlap
 
 Restart an enabled watch task in the current project. The command waits for the old process tree to exit before starting one replacement, so an edited script is re-read without double-emitting events.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id or name resolves globally.
+
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
+
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused.
 
 ```
-af tasks restart <id>
+af tasks restart <id-or-name>
 ```
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af tasks show
+
+Show one task's schedule health and audit trail
+
+Show one task in the current project: its trigger, whether the running daemon has it armed, when it will next fire, whether it has missed scheduled runs, and the bounded audit trail of who created, updated, enabled, or disabled it.
+
+Overdue is derived, never stored: a cron task is overdue when it has gone more than one period (or five minutes, whichever is larger) past its most recent scheduled occurrence, measured from the latest of its last run, its last enable, and its creation — so a task paused and switched back on does not report the occurrences it missed while it was off. Watch tasks have no schedule and are never overdue — their arming state is the signal.
+
+"Enabled but not armed" means the task is enabled on disk and the running daemon is not holding it: it will not fire until that is fixed. When nothing has reported on it — no daemon running, or one still starting up — the arming state is reported as unknown rather than guessed.
+
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id or name resolves globally.
+
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
+
+Pass --json for the same record `af tasks get` returns, in the {data,error} envelope.
+
+With --daemon-url/AF_DAEMON_URL set, the task is read from that daemon, a Daemon row names it beside the project path, and the schedule verdict is the one the DAEMON derived — a cron expression is evaluated in the scheduler's timezone, and re-deriving it here would answer in this terminal's. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused.
+
+```
+af tasks show <id-or-name>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2413,17 +3517,21 @@ Trigger a task in the current project to run immediately
 
 Trigger a task in the current project to run immediately.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Triggering another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Triggering another project's task requires naming it with --repo. Outside a git repository there is no project context and the id or name resolves globally.
+
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
+
+With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon and never in this machine's store. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused.
 
 ```
-af tasks trigger <id>
+af tasks trigger <id-or-name>
 ```
 
 **Global flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2434,12 +3542,16 @@ Update a task in the current project
 
 Update a task in the current project.
 
-The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Updating another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Updating another project's task requires naming it with --repo. Outside a git repository there is no project context and the id or name resolves globally.
+
+The argument may be the task's id or its exact name. An exact id match always wins — a name that collides with another task's id still resolves to that id. Otherwise an exact name match resolves only when exactly one task in scope has it: a name shared by several tasks is refused with their ids rather than acted on at random, and a name held only by other projects is refused with the --repo that would reach it.
 
 --repo scopes which task may be updated; it never re-binds one. Pass --project-path to move that task to another existing git repository. The new path becomes the task's working directory and project binding.
 
+With --daemon-url/AF_DAEMON_URL set, the patch is applied on that daemon and never to this machine's store. There is no project context against a remote daemon, so the id or name resolves across its projects and --repo is refused; --project-path names a path on the DAEMON's host and is sent as typed for it to resolve.
+
 ```
-af tasks update <id> [flags]
+af tasks update <id-or-name> [flags]
 ```
 
 **Flags**
@@ -2448,12 +3560,14 @@ af tasks update <id> [flags]
 |------|------|-------------|
 | `--cron` | `string` | New cron expression (clears watch-cmd) |
 | `--enabled` | `string` | Enable or disable the task (true/false) |
+| `--host` | `string` | New host for the sessions this task creates (a name from your global `hosts` list); pass an empty value (--host "") to clear it |
 | `--max-concurrent-runs` | `int` | New in-flight session cap for this watch task; pass 0 to revert to unlimited (default `0`) |
 | `--name` | `string` | New task name |
 | `--on-complete` | `string` | New spawned-session lifecycle: keep, archive, or kill; pass keep to revert to leaving sessions in place |
 | `--program` | `string` | New program to run (one of: claude, codex, aider, gemini, amp, opencode, devin; leave unset to keep the current one) |
 | `--project-path` | `string` | Move the task to this git repository (distinct from --repo, which scopes its current project) |
 | `--prompt` | `string` | New prompt |
+| `--prompt-file` | `string` | Read the new prompt verbatim from a local file (mutually exclusive with --prompt) |
 | `--target-session` | `string` | New target session; pass an empty value to revert to a new session per run |
 | `--watch-cmd` | `string` | New watch command (clears cron) |
 
@@ -2461,7 +3575,7 @@ af tasks update <id> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -2494,7 +3608,7 @@ af token
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af token rotate
@@ -2521,7 +3635,7 @@ af token rotate [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af token show
@@ -2548,7 +3662,7 @@ af token show [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af upgrade
@@ -2600,7 +3714,7 @@ af upgrade [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af version
@@ -2615,6 +3729,6 @@ af version
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 

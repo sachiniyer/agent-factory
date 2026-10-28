@@ -1,5 +1,9 @@
 # Agent plugins
 
+For anyone who runs Codex, Claude Code, Gemini, or amp directly and wants it to be
+able to drive `af`. After this page you will have the `agent-factory` skill
+installed in your agent, so "run this in a background af session" works.
+
 `af` teaches every agent it launches how to drive the `af` CLI. Agent plugins
 hand that same knowledge to an agent `af` did **not** launch — a Codex or Claude
 Code session you started yourself, in any repo — so you can say "run this in a
@@ -90,11 +94,13 @@ convenient it would be. Detect and instruct instead.
 ## Relationship to `global_agent_skills`
 
 `af` can also *push* this skill into an agent's global config
-(`~/.codex/skills`, `~/.gemini/skills`, `~/.config/amp/skills`) when it launches
-a session, behind the `global_agent_skills` opt-in, which defaults to off. That
-is the same text by a different route. If you install the plugin you do not need
-the push, and you can leave `global_agent_skills` off — the plugin reaches
-sessions `af` never launched, which the push never did.
+(`~/.codex/skills`, `~/.gemini/skills`, `~/.config/amp/skills`,
+`~/.config/devin/skills`) when it launches a session, behind the
+`global_agent_skills` opt-in, which defaults to off. That is the same text by a
+different route. For an agent with an installable plugin, installing it means
+you do not need the push and can leave `global_agent_skills` off — the plugin
+reaches sessions `af` never launched, which the push never did. Devin has no
+installable plugin, so for Devin the push is the only route `af` provides.
 
 ## What is not here
 

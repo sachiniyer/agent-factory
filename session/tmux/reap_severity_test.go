@@ -1,40 +1,15 @@
 package tmux
 
 import (
-	"bytes"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
-
-// reapLogBuffer is a mutex-guarded log sink. Close reaps in its OWN goroutine,
-// so the poll below reads these buffers while the reaper writes them through the
-// logger. log.Logger serializes its own writes but nothing guards a concurrent
-// READ, and a bytes.Buffer touched from two goroutines is a data race — caught
-// by -race on the macOS gate, not by an ordinary local run. Same shape as the
-// syncBuffer helpers in apiclient and daemon.
-type reapLogBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *reapLogBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *reapLogBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
 
 // captureReapLogs redirects the WARNING and INFO loggers into buffers for the
 // duration of the test and returns readers for both. Severity is the whole
@@ -42,7 +17,7 @@ func (b *reapLogBuffer) String() string {
 // moved from one that vanished.
 func captureReapLogs(t *testing.T) (warnings, infos func() string) {
 	t.Helper()
-	var warnBuf, infoBuf reapLogBuffer
+	var warnBuf, infoBuf logtest.Buffer
 	oldWarnOut, oldWarnFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
 	oldInfoOut, oldInfoFlags := log.InfoLog.Writer(), log.InfoLog.Flags()
 	log.WarningLog.SetOutput(&warnBuf)
@@ -86,22 +61,14 @@ func TestCloseDoesNotReportRequestedTeardownAsALeak(t *testing.T) {
 	warnings, infos := captureReapLogs(t)
 
 	session := NewTmuxSessionFromSanitizedName(name, "sh")
+	waitForReap := awaitCloseReap(t, session)
 	_, closeErr := session.Close()
 	require.NoError(t, closeErr)
 
-	// Close reaps asynchronously, so wait for the reap to actually happen before
-	// reading the logs — otherwise an empty WARNING buffer would pass for the
-	// wrong reason (nothing was reaped yet).
-	require.Eventually(t, func() bool { return !proctree.AliveSame(escapee) },
-		5*time.Second, 25*time.Millisecond,
+	waitForReap()
+	require.False(t, proctree.AliveSame(escapee),
 		"SIGHUP-immune pane child survived Close — nothing was reaped, so this test proves nothing")
-	// Wait on EITHER buffer, not just INFO: the reap signals before it logs, so
-	// the escapee can be dead a moment before the line lands. Gating on INFO alone
-	// would make the pre-fix behaviour — a line written at WARNING — time out here
-	// reporting "nothing was logged", which is not what went wrong. Waiting for a
-	// line at any severity lets the assertions below name the real defect.
-	require.Eventually(t, func() bool { return infos() != "" || warnings() != "" },
-		5*time.Second, 25*time.Millisecond,
+	require.True(t, infos() != "" || warnings() != "",
 		"the reap logged nothing at all, at either severity")
 
 	require.NotContains(t, warnings(), "leaked",

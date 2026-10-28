@@ -15,12 +15,46 @@ import (
 )
 
 func accountRecoverRefusingSiblingExec(shellName string, commands *[]string) cmd_test.MockCmdExec {
-	inner := nameKeyedExec(map[string]bool{shellName: true})
+	return accountRecoverRefusingSiblingKillExec(shellName, commands, true)
+}
+
+// accountRecoverRefusingSiblingKillExec refuses kill-session on the sibling
+// name. staleAlive controls whether the sibling's tmux session still exists at
+// teardown time — the stale-pane teardown now runs BEFORE the rebuild, so a
+// live sibling's refused kill fails there, before the checkout is recreated;
+// a test that wants the refusal to land after the rebuild (the committed
+// marker path) leaves the sibling dead at teardown so only its respawn-time
+// scope stop can hit the refusal (#5371 review).
+func accountRecoverRefusingSiblingKillExec(shellName string, commands *[]string, staleAlive bool) cmd_test.MockCmdExec {
+	inner := nameKeyedExec(map[string]bool{shellName: staleAlive})
 	return cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			text := cmd.String()
 			*commands = append(*commands, text)
 			if strings.Contains(text, "kill-session") && strings.Contains(text, shellName) {
+				return errors.New("persisted sibling did not stop")
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+}
+
+// accountRecoverRefusingSiblingSpawnExec refuses the sibling's respawn
+// (new-session/new-window), and its kill-session too — the stale-pane teardown
+// runs before the rebuild now, so this is how a tab failure lands AFTER the
+// committed rebuild: the dead sibling closes blind at teardown, the rebuild
+// recreates the checkout, and only then does the sibling's restore hit the
+// refusal (#5371 review).
+func accountRecoverRefusingSiblingSpawnExec(shellName string, commands *[]string) cmd_test.MockCmdExec {
+	inner := nameKeyedExec(map[string]bool{})
+	return cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			text := cmd.String()
+			*commands = append(*commands, text)
+			if strings.Contains(text, shellName) &&
+				(strings.Contains(text, "new-session") || strings.Contains(text, "new-window") ||
+					strings.Contains(text, "kill-session")) {
 				return errors.New("persisted sibling did not stop")
 			}
 			return inner.Run(cmd)
@@ -69,6 +103,8 @@ func accountLostInstanceForRecover(
 	}
 	instance, err := FromInstanceData(data)
 	require.NoError(t, err)
+	instance.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	instance.SetRebuildTeardownRuntimesStop(func(*Instance) error { return nil })
 	return instance
 }
 
@@ -110,7 +146,11 @@ func TestRecover_AccountTabFailureAfterRebuildKeepsCommittedMarker(t *testing.T)
 	shellName := agentName + tmuxTabSeparator + shellTabName
 	worktreePath := filepath.Join(t.TempDir(), "missing-worktree")
 	var commands []string
-	cmdExec := accountRecoverRefusingSiblingExec(shellName, &commands)
+	// The stale-pane teardown runs before the rebuild now, so a post-rebuild
+	// tab failure is staged by refusing the dead sibling's RESPAWN — the
+	// teardown's blind close passes, the rebuild commits, and only the tab
+	// restore hits the refusal, where the committed marker can cover it.
+	cmdExec := accountRecoverRefusingSiblingSpawnExec(shellName, &commands)
 	instance := accountLostInstanceForRecover(
 		t, repoRoot, worktreePath, branch, agentName, shellName, cmdExec,
 	)
@@ -239,7 +279,7 @@ func TestLoad_AccountShellPreparationFailureStopsPreScopeSibling(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	t.Setenv("SHELL", "/bin/zsh")
+	t.Setenv("SHELL", "/bin/fish")
 	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
 
 	const agentName = "af_account_shell_prepare_failure"

@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 const (
@@ -29,10 +29,10 @@ const (
 // captureLogs redirects InfoLog and ErrorLog to in-memory buffers for the
 // duration of the test. Returns the buffers; output collected reflects every
 // Printf call routed through those loggers after the swap.
-func captureLogs(t *testing.T) (info, errLog *bytes.Buffer) {
+func captureLogs(t *testing.T) (info, errLog *logtest.Buffer) {
 	t.Helper()
-	info = &bytes.Buffer{}
-	errLog = &bytes.Buffer{}
+	info = &logtest.Buffer{}
+	errLog = &logtest.Buffer{}
 	prevInfoOut := aflog.InfoLog.Writer()
 	prevErrOut := aflog.ErrorLog.Writer()
 	aflog.InfoLog.SetOutput(info)
@@ -52,6 +52,11 @@ func TestMain(m *testing.M) {
 	// developer's real one. Sandbox AFTER the tripwire snapshots the real
 	// environment, BEFORE logging resolves its file path.
 	restoreHome := testguard.SandboxHome()
+	// #3661: the local-only `af config` guard reads the remote-daemon target, so a
+	// developer with AF_DAEMON_URL exported would otherwise get the refusal in
+	// place of dozens of unrelated config assertions. SandboxHome isolates the AF
+	// home, not this. See forceLocalDaemonTarget in config_local_only_test.go.
+	restoreDaemonTarget := forceLocalDaemonTarget()
 	// Upgrade tests replace binaries in temp dirs and must never inspect or
 	// rewrite the developer's real autostart unit. Individual migration tests
 	// override this seam explicitly.
@@ -60,7 +65,12 @@ func TestMain(m *testing.M) {
 	// been initialized. Initialize once for the whole package test binary.
 	aflog.Initialize(false)
 	code := m.Run()
+	// The ssh-relay tests build af once for the whole package (afTestBinary), so
+	// its temp directory is a package-lifetime resource and this is the only
+	// place that can remove it (#3842).
+	removeAFTestBinary()
 	aflog.Close()
+	restoreDaemonTarget()
 	restoreHome()
 	if err := verifyRealConfig(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -398,7 +408,7 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
 	var respawnPath string
-	respawnDaemonFn = func(path string) (respawnResult, error) {
+	respawnDaemonFn = func(path string, _ daemon.ShutdownTarget) (respawnResult, error) {
 		respawnCalls++
 		respawnPath = path
 		return respawnResult{}, nil
@@ -412,9 +422,9 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	shutdownCalls := 0
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		shutdownCalls++
-		return daemon.ShutdownViaRPC, nil
+		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
 
 	if _, err := runAutoUpdate(); err != nil {
@@ -488,11 +498,11 @@ func TestAutoUpdateRefreshFailureSkipsDaemonRestart(t *testing.T) {
 	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	shutdownCalls := 0
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		shutdownCalls++
-		return daemon.ShutdownViaRPC, nil
+		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
-	respawnDaemonFn = func(string) (respawnResult, error) {
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) {
 		t.Fatal("respawn must not run when systemd may still hold the destructive legacy unit")
 		return respawnResult{}, nil
 	}
@@ -544,7 +554,7 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func(string) (respawnResult, error) {
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) {
 		respawnCalls++
 		return respawnResult{}, nil
 	}
@@ -555,8 +565,8 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) { return "v1.0.1", nil }
 	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
-		return daemon.ShutdownNoDaemon, errors.New("simulated rpc failure")
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, errors.New("simulated rpc failure")
 	}
 
 	if _, err := runAutoUpdate(); err != nil {
@@ -1122,10 +1132,10 @@ func TestAutoUpdateDownloadsByTag(t *testing.T) {
 		return []byte("new-binary"), nil
 	}
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
-		return daemon.ShutdownNoDaemon, nil
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, nil
 	}
-	respawnDaemonFn = func(string) (respawnResult, error) { return respawnResult{}, nil }
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) { return respawnResult{}, nil }
 
 	if _, err := runAutoUpdate(); err != nil {
 		t.Fatalf("autoUpdate: %v", err)

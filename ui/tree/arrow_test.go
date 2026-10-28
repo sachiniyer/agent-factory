@@ -35,9 +35,6 @@ func TestArrowCellMatchesRenderedArrow(t *testing.T) {
 	r := NewInstanceRenderer()
 	r.SetWidth(30)
 
-	x, y, ok := ArrowCell(30)
-	require.True(t, ok)
-
 	for _, tc := range []struct {
 		name     string
 		expanded bool
@@ -46,6 +43,8 @@ func TestArrowCellMatchesRenderedArrow(t *testing.T) {
 		{"expanded", true, '▾'},
 		{"collapsed", false, '▸'},
 	} {
+		x, y, ok := ArrowCell(30, tc.expanded)
+		require.True(t, ok)
 		out := r.Render(inst, 1, false, false, tc.expanded)
 		lines := strings.Split(ansiEscape.ReplaceAllString(out, ""), "\n")
 		require.Greater(t, len(lines), y)
@@ -55,6 +54,6 @@ func TestArrowCellMatchesRenderedArrow(t *testing.T) {
 
 	// Ultra-narrow widths drop the arrow from the prefix, and ArrowCell must
 	// report that (the sidebar registers no arrow zone then).
-	_, _, ok = ArrowCell(9)
+	_, _, ok := ArrowCell(9, false)
 	assert.False(t, ok, "no arrow cell at the narrow-width fallback")
 }

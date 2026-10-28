@@ -204,7 +204,7 @@ func vscodeSocketDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(sockDir, 0o700); err != nil {
+	if err := config.MkdirAllUnderAFHome(sockDir, 0o700); err != nil {
 		return "", fmt.Errorf("creating the VS Code socket directory failed: %w", err)
 	}
 	if err := os.Chmod(sockDir, 0o700); err != nil {

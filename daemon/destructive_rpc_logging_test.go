@@ -8,17 +8,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/sachiniyer/agent-factory/log"
 )
 
-func captureDestructiveRPCInfoLog(t *testing.T) *bytes.Buffer {
+func captureDestructiveRPCInfoLog(t *testing.T) *logCapture {
 	t.Helper()
-	var buf bytes.Buffer
-	previous := log.InfoLog.Writer()
-	log.InfoLog.SetOutput(&buf)
-	t.Cleanup(func() { log.InfoLog.SetOutput(previous) })
-	return &buf
+	return captureInfo(t)
 }
 
 func TestKillSessionRPCLogNamesResolvedTargetAndControlSocket(t *testing.T) {
@@ -26,7 +20,7 @@ func TestKillSessionRPCLogNamesResolvedTargetAndControlSocket(t *testing.T) {
 	info := captureDestructiveRPCInfoLog(t)
 
 	var resp KillSessionResponse
-	if err := (&controlServer{manager: manager}).KillSession(KillSessionRequest{
+	if err := (&controlServer{manager: manager}).KillSession(&KillSessionRequest{
 		ID: dataB.ID, Title: "stale-display-title",
 	}, &resp); err != nil {
 		t.Fatalf("KillSession: %v", err)

@@ -23,7 +23,7 @@ func TestRedactInstanceDataRedactsPendingHandoffMission(t *testing.T) {
 		PendingHandoffMission: "continue the internal codename Kingfisher migration; secret runbook step 3",
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	if d.PendingHandoffMission != redactedMarker {
 		t.Errorf("pending handoff mission not redacted: %q", d.PendingHandoffMission)

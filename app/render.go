@@ -15,10 +15,7 @@ import (
 
 // hooksOverlayStyle frames the hooks editor when it is hosted as an overlay
 // (#1024 PR 4: hooks lost their persistent sidebar slot).
-var hooksOverlayStyle = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(ui.AccentColor).
-	Padding(1, 2)
+var hooksOverlayStyle = ui.DialogStyle()
 
 func (m *home) renderHooksOverlay() string {
 	return m.renderFittedPaneOverlay(
@@ -57,10 +54,12 @@ func (m *home) renderFittedPaneOverlay(r layout.Rect, setSize func(int, int), re
 		r.H = 1
 	}
 	for {
+		before := r
 		contentRect := paneOverlayContentRect(r)
 		setSize(contentRect.W, contentRect.H)
-		fg := sizedOverlayStyle(hooksOverlayStyle, r).Render(renderContent())
-		fgW, fgH := lipgloss.Width(fg), lipgloss.Height(fg)
+		fg := ui.RenderDialog(sizedOverlayStyle(hooksOverlayStyle, r), renderContent())
+		// Same question the compositor asks, so the same measure (#3585).
+		fgW, fgH := layout.BlockWidth(fg), lipgloss.Height(fg)
 		tooWide := m.termWidth > 0 && fgW > m.termWidth
 		tooTall := m.termHeight > 0 && fgH > m.termHeight
 		if (!tooWide && !tooTall) || (r.W == 1 && r.H == 1) {
@@ -80,6 +79,19 @@ func (m *home) renderFittedPaneOverlay(r layout.Rect, setSize func(int, int), re
 			if r.H < 1 {
 				r.H = 1
 			}
+		}
+		if r == before && !(r.W == 1 && r.H == 1) {
+			if tooWide || tooTall {
+				cw, ch := m.termWidth, m.termHeight
+				if !tooWide {
+					cw = fgW
+				}
+				if !tooTall {
+					ch = fgH
+				}
+				return layout.ClampToRect(fg, layout.Rect{W: cw, H: ch})
+			}
+			return fg
 		}
 	}
 }
@@ -268,23 +280,20 @@ func paneOverlayContentRect(styleRect layout.Rect) layout.Rect {
 	return r
 }
 
-// splitDividerStyle recedes the 1-col dividers between panes so the focused
-// pane's frame stays the strongest line on screen.
+// splitDividerStyle recedes the rules inside the rail so the focused pane's
+// frame stays the strongest line on screen.
 var splitDividerStyle = lipgloss.NewStyle().
-	Foreground(ui.CurrentTheme().BackgroundSubtle)
+	Foreground(ui.CurrentTheme().Border)
 
-// renderDivider renders the 1-col divider right of pane i (§2.6: "N panes
-// divide the workspace width evenly with 1-col dividers").
+// renderDivider renders the 1-col divider column right of pane i (§2.6: "N
+// panes divide the workspace width evenly with 1-col dividers"). The column is
+// a blank gap (#5279): each pane frames itself, so a drawn │ stacked a third
+// bar between the two pane borders and every seam read "│││".
 func (m *home) renderDivider(i int) string {
 	if i < 0 || i >= len(m.lastLayout.Dividers) {
 		return ""
 	}
-	r := m.lastLayout.Dividers[i]
-	if r.Empty() {
-		return ""
-	}
-	col := strings.TrimSuffix(strings.Repeat("│\n", r.H), "\n")
-	return splitDividerStyle.Render(col)
+	return ui.PaneGap(m.lastLayout.Dividers[i])
 }
 
 // renderRailRule renders the full-rail-width horizontal rule separating the
@@ -326,8 +335,16 @@ func (m *home) renderProjectsRule() string {
 // exact position it has always had, so the fix costs nothing anywhere it was not
 // needed.
 func overlayOrigin(fg, bg string) layout.Point {
-	fgW, fgH := lipgloss.Width(fg), lipgloss.Height(fg)
-	bgW, bgH := lipgloss.Width(bg), lipgloss.Height(bg)
+	// layout.BlockWidth, not lipgloss.Width: this origin is what places the modal
+	// AND what every RegisterZones call registers its buttons against, so measuring
+	// it differently from the compositor put the zones where the modal was not
+	// drawn (#3585). BlockWidth says these are whole multi-line blocks and the
+	// widest row is the answer wanted — it is Cells itself since #3614, which took
+	// the widest line there too so no caller can reach the summed answer that
+	// reported a 120-column frame as ~188 and pushed every zone off the modal.
+	// Heights are line counts and need no such agreement.
+	fgW, fgH := layout.BlockWidth(fg), lipgloss.Height(fg)
+	bgW, bgH := layout.BlockWidth(bg), lipgloss.Height(bg)
 	y := centerOffset(bgH - fgH)
 	// A modal too tall to clear the bar even at the top of the frame keeps the
 	// old centering: showing it matters more than the hint row, and PlaceOverlay

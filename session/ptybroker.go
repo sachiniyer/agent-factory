@@ -1,15 +1,14 @@
 package session
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/terminal"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The WS PTY broker's server-side data plane (#1592 Phase 2 PR5). A ptyBroker
@@ -69,39 +68,12 @@ type clientlessChannel interface {
 	// artifact). HasCursor is false when the channel cannot report a position (the
 	// remote REST-preview snapshot), in which case the repaint omits cursor restore.
 	Snapshot() (PaneSnapshot, error)
-}
-
-// PaneSnapshot is a fresh-subscriber repaint source: the pane's current visible
-// screen (with escapes) plus the pane cursor position. CursorRow/CursorCol are
-// 0-based; they are meaningful only when HasCursor is true.
-//
-// Screen MUST be GRID-form — one line per PHYSICAL pane row, NOT -J-joined logical
-// lines. buildRepaint places each line at its own absolute row, so line index i is
-// taken to be pane row i; feeding it -J-joined lines (where one logical line spans
-// several pane rows) would mis-map the rows. The local tmux channel captures grid
-// form (CaptureVisiblePaneGrid). The remote channel's REST preview is -J-joined and
-// carries no cursor (HasCursor=false) — a known screen-only best-effort limitation,
-// see remoteClientlessChannel.Snapshot.
-type PaneSnapshot struct {
-	Screen    []byte
-	CursorRow int
-	CursorCol int
-	HasCursor bool
-	// Modes are the ownership-affecting terminal modes that were already active
-	// before this subscriber existed. HasModes distinguishes a truthful all-off
-	// primary-screen snapshot from a source that cannot report modes.
-	Modes    terminal.Modes
-	HasModes bool
-}
-
-// repaintSnapshot is one atomic broker event: the grid repaint plus the terminal
-// modes captured with it. The daemon emits the modes immediately before Data,
-// and Data also restores them as DEC sequences for terminal-only clients.
-type repaintSnapshot struct {
-	data       []byte
-	modes      terminal.Modes
-	hasModes   bool
-	provenance PTYRepaintProvenance
+	// PaneDead reports whether the pane's terminal is gone and tmux holds it
+	// dead (remain-on-exit). pipe-pane refuses such a pane FOREVER — it can
+	// never produce another byte — so a dead pane is a terminal stream state,
+	// not a recoverable outage (#5330). A channel that cannot answer reports
+	// false and the ordinary capture/retry paths apply.
+	PaneDead() bool
 }
 
 // ptyBroker is the per-session data plane. Guarded by mu; the ring buffer, the
@@ -123,9 +95,28 @@ type ptyBroker struct {
 	// reverse.
 	captureMu sync.Mutex
 
+	// paneDeathPoll is the pane-death watcher's tick; set at construction.
+	paneDeathPoll time.Duration
+	// watchers tracks live pane-death watchers so close/closeTab can wait for
+	// them: none may outlive its broker. The wait happens AFTER shutdown drops
+	// captureMu, because a watcher mid-recovery needs that lock.
+	watchers sync.WaitGroup
+
 	mu   sync.Mutex
 	buf  []byte // ring: recent output bytes, buf[0] is at seq `base`
 	base Seq    // seq of buf[0]; head == base + len(buf)
+	// recoveryDiscardAt marks that the CURRENT base was set by a recovery discard
+	// that emptied the ring (recoverCapture's `b.base = b.headLocked(); b.buf = nil`),
+	// replacing the pane behind the cursor. subscribe() repaints a reconnect whose
+	// `since` lands at EXACTLY this base — a caught-up client whose cursor the discard
+	// stranded with no replay (the recovered pane's first emit would otherwise arrive
+	// as bare PTYData on the dead pane's last screen, stale-changed rather than reset)
+	// — while a same-pane eviction clamp that leaves a reconnect at `since == base`
+	// stays seamless (no clear-and-redraw flicker). The mark is tied to the CURRENT
+	// base: any later advance of base (an eviction's `b.base += drop`, or a second
+	// discard's `b.base = head`) invalidates it, so it cannot fire for a base the
+	// discard did not set. Read and written under mu.
+	recoveryDiscardAt Seq
 
 	subs      map[uint64]*ptySub
 	nextSubID uint64
@@ -133,6 +124,12 @@ type ptyBroker struct {
 	rows, cols uint16
 	hasSize    bool
 	resizeGen  uint64 // bumped on each resize; a subscriber echoes when it lags
+	// warnedSessionGone latches the ONE warning a gone tmux session earns (#3862).
+	// Cleared by recoverCapture, and ONLY there: a broker outlives a session
+	// recovery that re-spawns tmux (resetBrokerCaptures preserves it, #1682), so
+	// that respawn is the one seam at which "the pane's session is gone" stops
+	// being terminal and a later death is news again.
+	warnedSessionGone bool
 
 	capturing   bool
 	stopCapture func() // tears down the capture goroutine + clientless channel
@@ -213,6 +210,8 @@ func newPTYBroker(ch clientlessChannel) *ptyBroker {
 		maxBytes: ptyRingMaxBytes,
 		subs:     make(map[uint64]*ptySub),
 		closedCh: make(chan struct{}),
+
+		paneDeathPoll: defaultPaneDeathPollInterval,
 	}
 }
 
@@ -242,25 +241,45 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// clamps (down, to the live tail), but that client is not missing any byte the
 	// broker holds, and repainting it would add flicker to the documented
 	// clamp-to-tail path. Only a cursor below base means bytes are missing.
-	needRepaint := since == 0 || since < b.base
+	//
+	// The caught-up recovery reconnect is the one shape the strict `<` misses: a client
+	// that was caught up at the live tail when it dropped, while the pane stayed idle
+	// through the no-subscriber discard, reconnects with cursor == post-discard base ==
+	// head — the replay is empty, but `since < b.base` is false. The pane behind the
+	// cursor was still REPLACED (the recovery discard emptied the ring), so leaving it
+	// seamless renders the recovered pane's next emit as bare PTYData on the dead pane's
+	// frozen screen. recoveryDiscardAt marks that the current base came from such a
+	// discard (not a same-pane eviction clamp), and asks for the same repaint the behind
+	// reconnect gets. The mark is tied to base, so a same-pane eviction clamp reconnect
+	// at `since == base` (no discard) stays seamless — the `<=` regression the strict `<`
+	// exists to avoid.
+	needRepaint := since == 0 || since < b.base ||
+		(since == b.base && b.recoveryDiscardAt == b.base)
+	// Where the replay STARTS is a separate decision from whether a repaint is owed
+	// (#4615). The repaint below is best-effort, so this is the cursor the subscriber
+	// keeps when none arrives; only a repaint actually built moves it to the tail, in the
+	// same section that queues it (repaintTail) — which is what keeps the retained ring
+	// from being replayed on top of a screen that already shows it (#1872). So it is keyed
+	// on whether `since` can be replayed, not on needRepaint.
+	//
+	// since == 0 has no history and since < base asked for bytes that are gone; replaying
+	// the retained ring onto a screen missing everything below it rebuilds nothing, so
+	// both start at the live tail. Every other since is inside [base, head] — including
+	// the caught-up reconnect after a recovery discard, which needRepaint repaints but
+	// whose [base, head) is the recovered pane's output, all of it still retained.
+	// Starting that one at the tail (cc0ff9a5 shared the tail with the two triggers
+	// above) meant a failed snapshot delivered neither the repaint nor those bytes.
+	//
+	// Nothing tells the client this cursor until subscribe returns: the daemon reads Seq()
+	// for X-Af-Stream-Seq and the opening OpHello afterwards, when the repaint has either
+	// been built or failed, so the client always learns the settled value.
 	var cursor Seq
-	if needRepaint {
-		// Start at the live tail, NOT at base. The repaint below reconstructs the WHOLE
-		// current screen, so every retained ring byte [base, head) is ALREADY baked into
-		// it. Starting the replay at base would make NextEvent send the repaint and THEN
-		// replay those same bytes on top of it — duplicating output: a command/prompt
-		// appended twice, up to the entire retained ring on an eviction or post-recovery
-		// reconnect (#1872 P1). The tail cursor is exactly what a since == 0 fresh
-		// subscriber already gets; the two paths now share it. Bytes fed between this head
-		// read and the snapshot below land in both the snapshot and the replayed tail —
-		// the same tiny, bounded double-render a fresh subscribe already accepts — never
-		// dropped. The client learns this cursor from the handshake seq / OpHello, so its
-		// ?since stays consistent.
+	if since == 0 || since < b.base {
 		cursor = head
 	} else {
-		// A seamless reconnect: since is inside the retained window, so the client's
-		// screen is current up to `since` and replaying [since, head) brings it forward
-		// with no repaint flicker. A since past head clamps down to the live tail.
+		// since is inside the retained window, so replaying [since, head) brings the
+		// client's screen forward from where it left off. A since past head clamps down
+		// to the live tail.
 		cursor = since
 		if cursor > head {
 			cursor = head
@@ -274,6 +293,16 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 		resizeSeen: b.resizeGen,
 		notify:     make(chan struct{}, 1),
 	}
+	// A subscriber that has never seen a size echo is owed the authoritative one
+	// before its first repaint: NextEvent emits the echo ahead of screen content,
+	// so a viewer sizes its emulator to the pane's REAL size before the reflowed
+	// screen lands in it — painting first would wrap the snapshot at whatever
+	// geometry the client happened to start with (#4480). A seamless reconnect is
+	// owed it too: the client's emulator may have moved while it was gone.
+	// resizeGen >= 1 whenever hasSize holds, so the decrement cannot underflow.
+	if b.hasSize {
+		sub.resizeSeen = b.resizeGen - 1
+	}
 	b.subs[sub.id] = sub
 	b.mu.Unlock()
 
@@ -283,8 +312,39 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// concurrent last-leaver teardown re-checking the count won't tear down the
 	// capture this subscriber needs.
 	if err := b.ensureCaptureStarted(); err != nil {
-		b.remove(sub.id)
-		return nil, err
+		// A held dead pane can never produce output again — pipe-pane refuses
+		// it — so the ordinary bring-up fails and the pane renders blank
+		// (#5330). Serve a repaint-only subscription instead: the channel's
+		// dead-pane snapshot carries the buffer's bottom-anchored tail and the
+		// "Pane is dead" marker through the same pendingRepaint a live pane's
+		// snapshot uses. The subscription then has no bytes, which is correct:
+		// a dead pane emits none.
+		if !b.ch.PaneDead() {
+			b.remove(sub.id)
+			return nil, err
+		}
+		b.mu.Lock()
+		genBefore := b.resizeGen
+		b.mu.Unlock()
+		snap, snapErr := b.ch.Snapshot()
+		if snapErr != nil {
+			// With no snapshot there is no repaint source AND no capture to
+			// retry it — a subscription kept here sits blank forever (unlike a
+			// live bring-up, where ring bytes still arrive). Fail like the
+			// non-dead path so the caller can retry.
+			b.remove(sub.id)
+			return nil, snapErr
+		}
+		b.adoptSnapshotSize(snap, genBefore)
+		if snapshotHasRepaintState(snap) {
+			rp := buildRepaintSnapshot(snap)
+			b.mu.Lock()
+			sub.cursor = b.headLocked()
+			sub.pendingRepaint = &rp
+			b.mu.Unlock()
+			sub.wake()
+		}
+		return sub, nil
 	}
 
 	// Re-evaluate the repaint decision after ensureCaptureStarted() unblocks.
@@ -293,16 +353,36 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// A subscriber that registered while recovery was blocked in stop() computed
 	// needRepaint against the PRE-recovery base; by the time captureMu is released
 	// and we get here, recovery has advanced base past this subscriber's cursor,
-	// making the decision stale. Re-check against the post-recovery base, and when a
-	// repaint is now owed, move the cursor to the live tail: the repaint reconstructs
-	// the whole screen, so the retained ring must not be replayed on top of it (see
-	// the needRepaint comment above). base is monotonic, so the decision can only
-	// flip false→true here, never back.
+	// making the decision stale.
+	//
+	// The re-check PRESERVES the earlier decision and can only strengthen it, and it
+	// asks about the subscriber's CURSOR rather than the raw `since` (#3731). Both
+	// halves are load-bearing:
+	//
+	//   - `since` is not the cursor. A `since` past head clamped DOWN to the tail (see
+	//     above), so a discard that advances base past that clamped cursor while
+	//     staying below the large `since` leaves bytes provably missing that
+	//     `since < b.base` cannot see. That subscriber would get a bare cursor jump
+	//     for a pane whose whole screen was replaced — the frozen-stale-screen symptom
+	//     this block exists to prevent.
+	//   - Re-deriving from the cursor ALONE regresses the other direction: a reconnect
+	//     whose `since` was below the pre-recovery base is owed a repaint and already
+	//     had its cursor moved to the tail, so `sub.cursor < b.base` answers "no
+	//     repaint" and leaves it rendering its pre-death screen.
+	//
+	// base is monotonic and the cursor only moves forward, so the decision can only
+	// flip false→true here, never back. The recovery-discard watermark is re-read
+	// here too: a subscriber that registered BEFORE a no-subscriber discard (with
+	// cursor == the pre-discard base and the mark unset) is stranded at ==base by
+	// the discard the same way a post-discard reconnect is, and the re-check must
+	// catch it just as the initial decision catches the post-discard reconnect.
 	b.mu.Lock()
-	needRepaint = since == 0 || since < b.base
-	if needRepaint {
-		sub.cursor = b.headLocked()
-	}
+	needRepaint = needRepaint || sub.cursor < b.base ||
+		(sub.cursor == b.base && b.recoveryDiscardAt == b.base)
+	// Where a repainted subscriber resumes — read HERE, before the snapshot below, so
+	// bytes the pane produces during the capture-pane exec land above it and are
+	// replayed rather than dropped. Committed only if a repaint is actually built.
+	repaintTail := b.headLocked()
 	b.mu.Unlock()
 
 	// Paint the current screen for a subscriber the replay stream can't reconstruct
@@ -313,81 +393,40 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// Captured AFTER registration (register-first) so no output can slip in between
 	// the snapshot and the cursor: bytes in that tiny window are simply in both the
 	// snapshot and the replayed tail (a harmless double-render), never dropped.
+	//
+	// The cursor moves to the live tail HERE, with the repaint, and not a moment
+	// earlier (#3731). The two are ONE decision: the repaint reconstructs the whole
+	// screen, so the retained ring must not be replayed on top of it (#1872) — but
+	// this snapshot is best-effort, and one that fails or carries no repaint state
+	// delivers no screen at all, leaving the ring as the only thing that can render
+	// the pane. Advancing regardless discarded those bytes in precisely the case they
+	// were needed: everything the capture emitted while ensureCaptureStarted was in
+	// flight, skipped for a repaint that never arrived, so the new terminal renders
+	// blank or truncated until unrelated output happens along.
 	if needRepaint {
-		if snap, err := b.ch.Snapshot(); err == nil && snapshotHasRepaintState(snap) {
-			rp := buildRepaintSnapshot(snap)
-			b.mu.Lock()
-			sub.pendingRepaint = &rp
-			b.mu.Unlock()
-			sub.wake()
+		// resizeGen sampled BEFORE the capture so adoptSnapshotSize can tell a
+		// resize frame that landed while tmux was being queried from dims the
+		// capture measured first — the frame is the newer authority.
+		b.mu.Lock()
+		genBefore := b.resizeGen
+		b.mu.Unlock()
+		if snap, err := b.ch.Snapshot(); err == nil {
+			// The measured pane size is authoritative even when nobody has ever
+			// driven a resize: a pane spawned under a custom default-size (e.g.
+			// 200x60) otherwise keeps every viewer at a guessed size for as long
+			// as it is only watched (#4480).
+			b.adoptSnapshotSize(snap, genBefore)
+			if snapshotHasRepaintState(snap) {
+				rp := buildRepaintSnapshot(snap)
+				b.mu.Lock()
+				sub.cursor = repaintTail
+				sub.pendingRepaint = &rp
+				b.mu.Unlock()
+				sub.wake()
+			}
 		}
 	}
 	return sub, nil
-}
-
-// buildRepaint turns a GRID-form pane snapshot (see PaneSnapshot) into bytes that
-// reconstruct the screen when written to the emulator: clear the screen, then place
-// each captured row at its OWN absolute line — CSI row;1 H, erase-to-EOL, then the
-// row's content — and finally restore the cursor to the pane's real position (1-based
-// CSI H) when the snapshot carries one.
-//
-// The explicit per-row positioning is the #1688 fix. The old form wrote the whole
-// screen as one CRLF-joined blob and let the emulator RE-WRAP it by the emulator's
-// OWN width, then issued an absolute cursor move to the pane's cursor_y. That is only
-// correct when the client width == pane width: under a mismatch (multi-writer
-// last-resize-wins — e.g. a browser subscriber opening at a different size than the
-// pane) the re-wrap shifts the rows, so the absolute cursor row named the wrong line
-// and Claude's relative-cursor status-block redraw corrupted the frame. Pinning each
-// pane row at its own absolute line decouples the layout from the emulator's width:
-// row i lands on line i whether the emulator is wider or narrower than the pane, so
-// cursor_y names the same row it named in the pane. A row that overflows a narrower
-// emulator wraps, but the next row's absolute CSI H + erase overwrites the overflow,
-// so rows never accumulate a drift — correct by construction at any width.
-//
-// The cursor restore also fixes the earlier duplicated-prompt artifact (#1676):
-// writing the screen leaves the emulator cursor at the bottom (past the trailing
-// blank rows), but the pane program's cursor is wherever it really is (row 0 for a
-// just-started shell). Without the restore, the pane's next relative-positioned
-// redraw (a shell's SIGWINCH prompt redraw, which uses CR to return to the current
-// line) renders at the bottom while a stale copy sits at the top. The restore lands
-// the emulator cursor on the real position so that redraw overwrites in place.
-func buildRepaint(snap PaneSnapshot) []byte {
-	var out []byte
-	if snap.HasModes {
-		out = append(out, snap.Modes.RestoreSequence()...)
-	}
-	out = append(out, []byte("\x1b[2J")...)
-	// capture-pane emits ONE trailing "\n" after the last row and strips trailing
-	// blank rows, so that final "\n" is a row SEPARATOR, not a real empty row.
-	// Splitting without trimming it would yield a phantom trailing "" element and emit
-	// an out-of-range CSI (N+1);1 H + erase — which, in an emulator clamped to the pane
-	// height, clamps onto the real bottom row and WIPES it (Claude's input/status
-	// line). Trim exactly that one separator; a genuinely-blank last row is impossible
-	// here because capture-pane strips it. TrimSuffix is a no-op when there is none.
-	screen := strings.TrimSuffix(string(snap.Screen), "\n")
-	for i, line := range strings.Split(screen, "\n") {
-		out = append(out, []byte(fmt.Sprintf("\x1b[%d;1H\x1b[K", i+1))...)
-		out = append(out, line...)
-	}
-	if snap.HasCursor {
-		out = append(out, []byte(fmt.Sprintf("\x1b[%d;%dH", snap.CursorRow+1, snap.CursorCol+1))...)
-	}
-	return out
-}
-
-func buildRepaintSnapshot(snap PaneSnapshot) repaintSnapshot {
-	return repaintSnapshot{
-		data:     buildRepaint(snap),
-		modes:    snap.Modes,
-		hasModes: snap.HasModes,
-	}
-}
-
-// snapshotHasRepaintState keeps authoritative metadata from disappearing merely
-// because the grid is blank. A fresh primary-screen pane can have no printable
-// cells while its all-false mode snapshot is exactly what resolves ownership.
-func snapshotHasRepaintState(snap PaneSnapshot) bool {
-	return len(snap.Screen) > 0 || snap.HasCursor || snap.HasModes
 }
 
 // ensureCaptureStarted brings the clientless output capture up if it is not
@@ -446,10 +485,12 @@ func (b *ptyBroker) ensureCaptureStartedLocked() error {
 		return fmt.Errorf("start clientless pty capture: %w", err)
 	}
 	done := make(chan struct{})
+	quit := make(chan struct{})
 	b.mu.Lock()
 	b.capturing = true
 	b.captureStarted = time.Now()
 	b.stopCapture = func() {
+		close(quit) // ends this capture's pane-death watcher
 		if err := b.ch.StopCapture(); err != nil {
 			// A stop that is RELEASING an already-dead capture is expected to fail
 			// to close cleanly: remoteClientlessChannel does
@@ -477,6 +518,8 @@ func (b *ptyBroker) ensureCaptureStartedLocked() error {
 	}
 	b.mu.Unlock()
 	go b.readLoop(r, done)
+	b.watchers.Add(1) // under captureMu, which shutdown holds to latch closed
+	go b.watchPaneDeath(quit)
 	return nil
 }
 
@@ -542,14 +585,20 @@ func (b *ptyBroker) readLoop(r io.Reader, done chan struct{}) {
 		// `capturing` still true here means nothing asked us to stop: the socket
 		// dropped on its own, and this is the #2450 case where nobody else will
 		// ever notice.
+		//
+		// A capture that ran a long time is a fresh incident, not a rung on the
+		// current ladder — reset before any hand-off OR teardown reads the
+		// position. Runs for BOTH exits: a spontaneous upstream death (which then
+		// hands off to redialLoop) AND a client-side teardown (maybeStopCapture
+		// clears `capturing` before stop()), so a span-surviving capture torn down
+		// by the last subscriber leaving does not leave a stale ladder for the
+		// next incident on a broker that persists across the idle gap (#2461).
+		if !b.captureStarted.IsZero() && time.Since(b.captureStarted) >= redialHealthySpan {
+			b.redialAttempts = 0
+		}
 		spontaneous := b.capturing && !b.closed
 		var start bool
 		if spontaneous {
-			// A capture that ran a long time is a fresh incident, not a rung on the
-			// current ladder — reset before the hand-off reads the position.
-			if !b.captureStarted.IsZero() && time.Since(b.captureStarted) >= redialHealthySpan {
-				b.redialAttempts = 0
-			}
 			if !b.redialing {
 				b.redialing = true
 				start = true
@@ -607,6 +656,11 @@ func (b *ptyBroker) input(p []byte) error {
 // failed resize-window (an old tmux, a vanished pane) must not swallow the echo
 // clients depend on to reflow; the apply error is logged, not propagated as a
 // missing echo.
+//
+// Which failures are logged is shouldWarnResizeFailure's call (#3862); nothing
+// else about the contract above moves. The apply is still attempted on every
+// frame and the error is still returned, so a caller that cares still learns of
+// it — only the log line is rationed.
 func (b *ptyBroker) resize(rows, cols uint16) error {
 	b.mu.Lock()
 	b.rows, b.cols = rows, cols
@@ -616,7 +670,9 @@ func (b *ptyBroker) resize(rows, cols uint16) error {
 	b.mu.Unlock()
 
 	if err := b.ch.Resize(rows, cols); err != nil {
-		log.WarningLog.Printf("pty broker: apply resize %dx%d to pane: %v", rows, cols, err)
+		if b.shouldWarnResizeFailure(err) {
+			log.WarningLog.Printf("pty broker: apply resize %dx%d to pane: %v", rows, cols, err)
+		}
 		return err
 	}
 	// Deliberately NO capture-pane repaint on resize: resize-window sends the pane's
@@ -628,6 +684,42 @@ func (b *ptyBroker) resize(rows, cols uint16) error {
 	// SIGWINCH redraw lands, so the pane never blanks. The initial-subscribe repaint
 	// (which has no concurrent output to race) remains the fix for a fresh pane.
 	return nil
+}
+
+// shouldWarnResizeFailure reports whether a failed apply is worth a log line, and
+// latches the gone-session case as it answers (#3862).
+//
+// A tmux session that is GONE fails every later resize-window identically, for as
+// long as that pane stays dead, so a per-frame warning turns a single drag into a
+// burst of the same line: five inside one second in the log that prompted this,
+// one per frame of one gesture. The first line is the news; the rest are the same
+// news re-reported. This says it once and then stops.
+//
+// Everything else stays as noisy as it was, and the exclusions are the point:
+//
+//   - A plain failure (an old tmux — resize-window predates 2.9 — or a one-off
+//     exec error) may not recur, so each occurrence is genuinely new information.
+//   - ErrTmuxTimeout is NOT a death certificate and must never be folded in here.
+//     ResizeWindow returns it precisely when the server is WEDGED and the
+//     session's state is UNKNOWN, and it takes deliberate care not to report that
+//     as ErrSessionGone. Silencing it after one line would hide a wedged server.
+//
+// The latch lives under b.mu with the rest of the size state, so two clients
+// resizing a dead pane concurrently still produce exactly one line between them.
+// It is "once per DEAD PANE", not once per process: recoverCapture clears it when
+// the upstream is re-established, so a session that dies, recovers and dies again
+// reports both deaths.
+func (b *ptyBroker) shouldWarnResizeFailure(err error) bool {
+	if !errors.Is(err, tmux.ErrSessionGone) {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.warnedSessionGone {
+		return false
+	}
+	b.warnedSessionGone = true
+	return true
 }
 
 // wakeAllLocked signals every subscriber that state changed. The notify channel
@@ -642,11 +734,14 @@ func (b *ptyBroker) wakeAllLocked() {
 	}
 }
 
-// remove drops a subscriber and stops the clientless capture once the last one
-// leaves — never touching the PTY/session itself. The stop goes through
-// maybeStopCapture, which re-checks the subscriber count under captureMu so a
-// subscriber that connects while this teardown is deciding is not stranded on a
-// disabled pipe (#1661).
+// remove drops a subscriber and requests an asynchronous clientless-capture stop
+// once the last one leaves — never touching the PTY/session itself. A capture
+// reader may be parked indefinitely in a blocking syscall while its pane is idle,
+// so subscription Close must not join that reader (#4319). The asynchronous stop
+// still goes through maybeStopCapture, which holds captureMu through the join and
+// re-checks the subscriber count there: a reconnect cannot be stranded on a
+// disabled pipe, and a fresh capture cannot be started until the old read loop is
+// fully gone (#1661).
 func (b *ptyBroker) remove(id uint64) {
 	b.mu.Lock()
 	if _, ok := b.subs[id]; !ok {
@@ -670,20 +765,20 @@ func (b *ptyBroker) remove(id uint64) {
 	lastLeft := len(b.subs) == 0
 	b.mu.Unlock()
 	if lastLeft {
-		b.maybeStopCapture()
+		go b.maybeStopCapture()
 	}
 }
 
 // close tears down the broker: every subscriber's NextEvent returns io.EOF and
 // the clientless capture is stopped. Called when the session is killed.
-func (b *ptyBroker) close() { b.shutdown(false) }
+func (b *ptyBroker) close() { b.shutdown(false); b.watchers.Wait() }
 
 // closeTab is close for a broker whose TAB was closed (#2136) — the same
 // teardown, but each subscriber's NextEvent reports ErrTabClosed so the WS writer
 // can tell the client its tab went away rather than leaving it to time out on the
 // keepalive. Only the closed tab's broker is shut down; a sibling tab of the same
 // session has its own broker and keeps streaming.
-func (b *ptyBroker) closeTab() { b.shutdown(true) }
+func (b *ptyBroker) closeTab() { b.shutdown(true); b.watchers.Wait() }
 
 // shutdown is the shared teardown behind close/closeTab. Holds captureMu
 // (captureMu-then-mu ordering) so it cannot race a concurrent
@@ -716,145 +811,4 @@ func (b *ptyBroker) shutdown(tabClosed bool) {
 	if stop != nil {
 		stop()
 	}
-}
-
-// ptySub is one subscriber's cursor into the broker's ring plus a resize-echo
-// watermark. All state is read/written under br.mu; notify is the wake doorbell.
-type ptySub struct {
-	br         *ptyBroker
-	id         uint64
-	cursor     Seq    // next output byte to deliver
-	resizeSeen uint64 // last resizeGen echoed to this subscriber
-	// pendingRepaint is a one-shot initial screen repaint delivered before any
-	// other event to a fresh subscriber (set by subscribe). Read/written under br.mu.
-	pendingRepaint *repaintSnapshot
-	// repaintArmed marks this subscriber as held at a recovery boundary: a repaint of
-	// the recovered screen is being captured for it, so NextEvent must emit NOTHING
-	// until it lands (#1975). Set/cleared under br.mu by resetCapture's arm/release
-	// pair, which is the only thing that may set it.
-	repaintArmed bool
-	notify       chan struct{}
-	closeOnce    sync.Once
-}
-
-// wake signals this subscriber's doorbell (coalescing, cap-1). Safe to call
-// without br.mu held.
-func (s *ptySub) wake() {
-	select {
-	case s.notify <- struct{}{}:
-	default:
-	}
-}
-
-var _ PTYSubscription = (*ptySub)(nil)
-
-// NextEvent blocks for the next event for this subscriber: a pending resize echo
-// (delivered before bytes so the emulator resizes before the reflow bytes land),
-// then any output bytes from the cursor, else it waits. Returns io.EOF when the
-// broker closes.
-func (s *ptySub) NextEvent(ctx context.Context) (PTYEvent, error) {
-	for {
-		s.br.mu.Lock()
-		if s.br.closed {
-			tabClosed := s.br.tabClosed
-			s.br.mu.Unlock()
-			if tabClosed {
-				// ErrTabClosed wraps io.EOF, so a consumer that only asks "is the stream
-				// over" is unaffected; the daemon's WS writer asks the narrower question
-				// and turns it into an exit with a tab_closed reason (#2136).
-				return PTYEvent{}, ErrTabClosed
-			}
-			return PTYEvent{}, io.EOF
-		}
-		// The initial screen repaint is delivered before anything else, so a fresh
-		// subscriber paints the current screen before the first live byte lands. It
-		// is a PTYRepaint (not PTYData) so the client renders it without advancing its
-		// replay cursor — the repaint is per-subscriber and not part of the ring seq.
-		if s.pendingRepaint != nil {
-			rp := s.pendingRepaint
-			s.pendingRepaint = nil
-			s.br.mu.Unlock()
-			return PTYEvent{
-				Kind:              PTYRepaint,
-				Data:              rp.data,
-				Modes:             rp.modes,
-				HasModes:          rp.hasModes,
-				RepaintProvenance: rp.provenance,
-			}, nil
-		}
-		// A recovery is in flight and this subscriber's repaint of the recovered screen
-		// is still being captured: emit NOTHING until it lands (#1975). Everything this
-		// subscriber could send right now paints the WRONG screen — the dead pane's
-		// buffered tail, the cursor jump the discard is about to make, or the re-spawned
-		// pane's first bytes rendered onto the pre-death frame — and the repaint wipes it
-		// a moment later, which is the flicker. Held, not dropped: nothing is consumed
-		// here, so after the release the repaint goes first and the same cursor/data
-		// events follow it in order.
-		if s.repaintArmed {
-			if err := s.awaitWake(ctx); err != nil {
-				return PTYEvent{}, err
-			}
-			continue
-		}
-		if s.br.hasSize && s.resizeSeen != s.br.resizeGen {
-			s.resizeSeen = s.br.resizeGen
-			ev := PTYEvent{Kind: PTYResize, Rows: s.br.rows, Cols: s.br.cols}
-			s.br.mu.Unlock()
-			return ev, nil
-		}
-		head := s.br.headLocked()
-		if s.cursor < s.br.base {
-			// Fell behind eviction, or the #1840 recovery discard dropped the dead pane's
-			// ring: the bytes between the cursor and base provably no longer exist, so
-			// skip the lost gap. TELL the client where its cursor landed (#1845
-			// follow-up) — the jump is the SERVER's, and a client that derives its cursor
-			// as start + bytes-received cannot see it. Left silent, the client keeps
-			// counting from its stale cursor, and its next reconnect asks for a ?since
-			// below base, gets clamped back up, and is re-sent bytes it already rendered
-			// — duplicated output on a screen that was correct. Delivered as its own
-			// event (rather than riding the next PTYData) so the re-seed reaches the
-			// client even when the recovered pane stays silent afterward. The clamp is
-			// idempotent — cursor == base now, so this fires once per jump.
-			s.cursor = s.br.base
-			ev := PTYEvent{Kind: PTYCursor, Seq: s.cursor}
-			s.br.mu.Unlock()
-			return ev, nil
-		}
-		if s.cursor < head {
-			off := int(s.cursor - s.br.base)
-			data := append([]byte(nil), s.br.buf[off:]...)
-			s.cursor = head
-			s.br.mu.Unlock()
-			return PTYEvent{Kind: PTYData, Data: data}, nil
-		}
-		if err := s.awaitWake(ctx); err != nil {
-			return PTYEvent{}, err
-		}
-	}
-}
-
-// awaitWake RELEASES br.mu (which the caller must hold) and blocks until this
-// subscriber's doorbell rings or ctx ends. NextEvent re-takes the lock and re-reads all
-// state on the next iteration, so the doorbell only has to say "something changed".
-func (s *ptySub) awaitWake(ctx context.Context) error {
-	s.br.mu.Unlock()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.notify:
-		return nil
-	}
-}
-
-// Seq reports the cursor of the next output byte this subscriber will read.
-func (s *ptySub) Seq() Seq {
-	s.br.mu.Lock()
-	defer s.br.mu.Unlock()
-	return s.cursor
-}
-
-// Close removes the subscriber from the broker's fan-out. Idempotent.
-func (s *ptySub) Close() error {
-	s.closeOnce.Do(func() { s.br.remove(s.id) })
-	return nil
 }

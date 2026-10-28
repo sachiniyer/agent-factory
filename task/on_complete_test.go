@@ -135,7 +135,7 @@ func TestAddTaskStoresKeepAsAbsent(t *testing.T) {
 				Program:     "claude",
 				Enabled:     false,
 				OnComplete:  in,
-			}, nil)
+			}, ActorCLI, nil)
 			require.NoError(t, err)
 			assert.Empty(t, created.OnComplete, "keep must be stored as the zero value")
 
@@ -161,7 +161,7 @@ func TestAddTaskStoresAnExplicitVerbCanonically(t *testing.T) {
 		Program:     "claude",
 		Enabled:     false,
 		OnComplete:  "  Archive ",
-	}, nil)
+	}, ActorCLI, nil)
 	require.NoError(t, err)
 	assert.Equal(t, OnCompleteArchive, created.OnComplete)
 
@@ -287,4 +287,10 @@ func TestUpdateTaskExplicitVerbWithATargetSessionStillErrors(t *testing.T) {
 	_, err := UpdateTask("abc", TaskUpdate{TargetSession: &target, OnComplete: &verb}, ProjectExpectation{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "target_session")
+}
+
+func TestOnCompleteHint(t *testing.T) {
+	assert.Equal(t, "leaves the run's session in place", OnCompleteHint(OnCompleteKeep))
+	assert.Equal(t, "archives the run's session — restorable", OnCompleteHint(OnCompleteArchive))
+	assert.Equal(t, "deletes the run's session and its branch — permanent", OnCompleteHint(OnCompleteKill))
 }

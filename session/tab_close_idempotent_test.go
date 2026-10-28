@@ -85,7 +85,7 @@ func TestCloseTab_StaleSessionAlreadyDead(t *testing.T) {
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 
 	gw, err := git.NewGitWorktreeFromStorage(
-		"/tmp/stale-close-"+agentName, filepath.Join(t.TempDir(), "wt"),
+		"/tmp/stale-close-"+agentName, existingDir(t, filepath.Join(t.TempDir(), "wt")),
 		agentName, agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -102,7 +102,7 @@ func TestCloseTab_StaleSessionAlreadyDead(t *testing.T) {
 	}
 	require.Equal(t, 2, inst.TabCount())
 
-	require.NoError(t, inst.CloseTab(1),
+	require.NoError(t, inst.CloseTabByID(inst.GetTabs()[1].ID),
 		"closing a tab whose tmux already died must succeed, not error (#967)")
 	require.Equal(t, 1, inst.TabCount(), "the stale tab must be removed")
 }

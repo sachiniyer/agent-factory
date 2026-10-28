@@ -5,23 +5,30 @@
 // must change with it — the two clients cannot diverge in status semantics (§3).
 
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 
 import type { IconName } from "./icon.js";
 import {
   archiveWarningText,
+  callbackUnavailableText,
   canHandoff,
   type DotKind,
   idleReasonDetail,
   isArchived,
   isCreating,
   isLimitReached,
+  isPendingAgentHandoffDeliveryUnconfirmed,
+  isPendingAgentHandoffDeliveryConfirmable,
+  isPendingManualHandoffDeliveryUnconfirmed,
+  isPendingManualSwapDeliveryConfirmable,
   isWorking,
   type OperatorKind,
   operatorKind,
   rowStatus,
   rowTitle,
-  prBadgeContent,
+  unreachableDetail,
+  sessionWarningText,
 } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
@@ -55,6 +62,17 @@ test("idle detail renders only mechanical reason values and observed churn age",
       now,
     ),
     "restore gave up after 6 attempts: agent exited at startup",
+  );
+  assert.equal(
+    idleReasonDetail(
+      sess({
+        liveness: Liveness.Lost,
+        idle_reason: "restore-waiting-on-environment",
+        lost_restore_wait: { attempts: 3, error: "no space left on device" },
+      }),
+      now,
+    ),
+    "restore is waiting on the environment (3 environmental failures): no space left on device",
   );
 });
 
@@ -150,10 +168,10 @@ test("liveness absent falls back to the legacy status int", () => {
 test("title prefixes match render.go precedence", () => {
   // [lost] on a Lost row (render.go:315).
   assert.equal(rowTitle(sess({ title: "w", liveness: Liveness.Lost })), "[lost] w");
-  // [deleting] while killing/archiving, and it beats the [lost] marker.
+  // [deleting] while killing/archiving preserves the independent [lost] marker.
   assert.equal(
     rowTitle(sess({ title: "w", liveness: Liveness.Lost, in_flight_op: InFlightOp.Killing })),
-    "[deleting] w",
+    "[deleting] [lost] w",
   );
   assert.equal(rowTitle(sess({ title: "w", in_flight_op: InFlightOp.Archiving })), "[deleting] w");
   // Archived carries NO word prefix (render.go:326-338) — the icon + dimming say it.
@@ -163,10 +181,10 @@ test("title prefixes match render.go precedence", () => {
     "[archive incomplete] w",
     "a recovered incomplete session must remain visibly exceptional in the web rail",
   );
-  // [remote] is outermost.
+  // [remote] is applied first, inside lifecycle prefixes.
   assert.equal(
     rowTitle(sess({ title: "w", liveness: Liveness.Lost, backend_type: "remote" })),
-    "[remote] [lost] w",
+    "[lost] [remote] w",
   );
   assert.equal(
     rowTitle(
@@ -187,15 +205,107 @@ test("title prefixes match render.go precedence", () => {
         model_change: { before: "gpt-5.6-sol max", after: "gpt-5.6-luna low" },
       }),
     ),
-    "[model changed] [remote] [lost] w",
+    "[model changed] [lost] [remote] w",
     "the diagnostic remains outermost when state and backend prefixes coexist",
   );
+  // [unreachable] is a complete-pair-only, static marker — it sits just inside
+  // [model changed], mirroring render.go (#5571 W1.3).
+  assert.equal(
+    rowTitle(sess({
+      title: "w", liveness: Liveness.Lost, backend_type: "remote",
+      unreachable: { since: "2026-08-10T12:00:00Z", error: "dial tcp: i/o timeout" },
+    })),
+    "[unreachable] [lost] [remote] w",
+  );
+  assert.equal(
+    rowTitle(sess({ title: "w", unreachable: { error: "no since" } })),
+    "w",
+    "a half-formed projection earns no marker",
+  );
 });
+
+test("unreachable detail mirrors the TUI outage line", () => {
+  const now = new Date("2026-08-10T15:00:00Z");
+  assert.equal(
+    unreachableDetail(
+      sess({ unreachable: { since: "2026-08-10T14:57:00Z", error: "ssh: connection reset" } }),
+      now,
+    ),
+    "unreachable 3m ago · ssh: connection reset",
+  );
+  assert.equal(unreachableDetail(sess({}), now), "");
+  assert.equal(
+    unreachableDetail(sess({ unreachable: { since: "bad", error: "down" } }), now),
+    "",
+    "an unparseable since renders nothing rather than half a claim",
+  );
+});
+
+// The Go renderer reads the same issue fixtures: changing either surface's
+// prefix semantics alone fails its tests.
+const titleFixtures: (Partial<SessionData> & { name: string; expected: string })[] = JSON.parse(
+  readFileSync(new URL("../../ui/tree/testdata/title_prefixes.json", import.meta.url), "utf8"),
+);
+for (const { name, expected, ...state } of titleFixtures) {
+  test(`shared TUI title fixture: ${name}`, () => {
+    assert.equal(rowTitle(sess({ title: "alpha", ...state })), expected);
+  });
+}
+
+// Cross both axes and backend kind: single-axis checks missed #4038.
+// Expected prefix pairs follow ui/tree/render.go's independent prepend order.
+for (const [liveness, titles] of [
+  [Liveness.Ready, ["alpha", "[deleting] alpha", "[deleting] alpha"]],
+  [Liveness.Lost, ["[lost] alpha", "[deleting] [lost] alpha", "[deleting] [lost] alpha"]],
+  [Liveness.LimitReached, ["[limit] alpha", "[limit] [deleting] alpha", "[limit] [deleting] alpha"]],
+] as const) {
+  for (const [index, in_flight_op] of [InFlightOp.None, InFlightOp.Killing, InFlightOp.Archiving].entries()) {
+    for (const backend_type of ["local", "remote"] as const) {
+      test(`render.go title parity: liveness=${liveness}, op=${in_flight_op}, backend=${backend_type}`, () => {
+        const expected = titles[index].replace("alpha", backend_type === "remote" ? "[remote] alpha" : "alpha");
+        assert.equal(rowTitle(sess({ title: "alpha", liveness, in_flight_op, backend_type })), expected);
+        assert.equal(
+          rowTitle(sess({
+            title: "alpha", liveness, in_flight_op, backend_type,
+            root_recreate_context: "fresh", archive_warning: "retained source",
+            model_change: { before: "old", after: "new" },
+          })),
+          `[model changed] [archive incomplete] [fresh context] ${expected}`,
+        );
+      });
+    }
+  }
+}
 
 test("archive warning retains the daemon's source location for the persistent banner", () => {
   const warning = "restore completed with an incomplete archive: complete original tree retained at /retained/source";
   assert.equal(archiveWarningText(sess({ archive_warning: warning })), warning);
   assert.equal(archiveWarningText(sess({ archive_warning: "   " })), "");
+});
+
+test("callback warning renders under the shared prefix (#5571 W3.1)", () => {
+  const reason = "the listener moved while the sandbox was being provisioned";
+  assert.equal(
+    callbackUnavailableText(sess({ callback_unavailable: reason })),
+    `af callback unavailable: ${reason}`,
+  );
+  assert.equal(callbackUnavailableText(sess({ callback_unavailable: "   " })), "");
+  assert.equal(callbackUnavailableText(sess({})), "");
+});
+
+test("the persistent banner joins archive and callback warnings without dropping either", () => {
+  const session = sess({
+    archive_warning: "restore completed with an incomplete archive",
+    callback_unavailable: "require_token is false",
+  });
+  assert.equal(
+    sessionWarningText(session),
+    "restore completed with an incomplete archive · af callback unavailable: require_token is false",
+  );
+  // One notice alone renders bare — no dangling separator.
+  assert.equal(sessionWarningText(sess({ callback_unavailable: "x" })), "af callback unavailable: x");
+  assert.equal(sessionWarningText(sess({ archive_warning: "y" })), "y");
+  assert.equal(sessionWarningText(sess({})), "");
 });
 
 test("[fresh context] note mirrors session.RootRecreateContext.Note (#2629)", () => {
@@ -276,6 +386,179 @@ test("isLimitReached ignores limit_reset_at, which outlives the state it describ
   );
 });
 
+test("pending manual handoff retry reads mission-scoped delivery evidence", () => {
+  const pending = {
+    manual: true,
+    replacement_panes_started: true,
+    mission_delivery_status: "could-not-confirm" as const,
+  };
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Running,
+      pending_account_swap: pending,
+      last_prompt_delivery_status: "not-delivered",
+    })),
+    true,
+    "an unrelated prompt verdict must not withdraw the handoff retry",
+  );
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Ready,
+      pending_account_swap: { ...pending, mission_delivery_status: "not-delivered" },
+    })),
+    false,
+  );
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Ready,
+      pending_account_swap: { manual: true, replacement_panes_started: true },
+    })),
+    false,
+    "an unattempted mission stays on the automatic recovery path",
+  );
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Ready,
+      startup_state_unknown: true,
+      pending_account_swap: pending,
+    })),
+    false,
+    "an unknown replacement runtime must remain inert instead of offering Retry",
+  );
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Running,
+      user_killed: true,
+      pending_account_swap: pending,
+    })),
+    false,
+    "a retained kill tombstone must hide the manual handoff Retry action",
+  );
+});
+
+test("pending agent handoff retry is hidden by a retained kill tombstone", () => {
+  assert.equal(
+    isPendingAgentHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Ready,
+      user_killed: true,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "could-not-confirm",
+    })),
+    false,
+  );
+});
+
+// #4429: a startup-unknown row is the wedge this issue reported — previously
+// inert, now the explicit retry's own readiness wait re-proves the binding.
+// Dead liveness still refuses: restore owns a runtime that no longer exists.
+test("pending agent handoff retry admits startup-unknown rows but not dead ones", () => {
+  assert.equal(
+    isPendingAgentHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Replacing,
+      startup_state_unknown: true,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    true,
+    "the wedge's own shape must offer its exit",
+  );
+  assert.equal(
+    isPendingAgentHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Lost,
+      startup_state_unknown: true,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    false,
+    "a lost runtime has no pane to resend into",
+  );
+  assert.equal(
+    isPendingAgentHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Running,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "not-delivered",
+    })),
+    false,
+    "positive non-delivery stays owned by automatic recovery",
+  );
+});
+
+test("confirmable pending deliveries mirror the session predicates", () => {
+  const mission = {
+    pending_handoff_mission: "continue the inherited work",
+  };
+  // Ambiguous and delivered verdicts confirm; delivered covers the crash window
+  // between a confirmed send and its clearing settle.
+  for (const status of ["sent-unverified", "could-not-confirm", "delivered"] as const) {
+    assert.equal(
+      isPendingAgentHandoffDeliveryConfirmable(sess({
+        ...mission,
+        liveness: Liveness.Running,
+        pending_handoff_delivery_status: status,
+      })),
+      true,
+      `${status} is confirmable`,
+    );
+  }
+  assert.equal(
+    isPendingAgentHandoffDeliveryConfirmable(sess({
+      ...mission,
+      liveness: Liveness.Running,
+      pending_handoff_delivery_status: "not-delivered",
+    })),
+    false,
+    "automatic recovery owns a mission proven absent",
+  );
+  assert.equal(
+    isPendingAgentHandoffDeliveryConfirmable(sess({
+      ...mission,
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Archiving,
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    false,
+    "an unrelated in-flight op owns the row",
+  );
+  // The account-swap half: an orphaned OpRespawning fence does not block it.
+  assert.equal(
+    isPendingManualSwapDeliveryConfirmable(sess({
+      liveness: Liveness.Ready,
+      in_flight_op: InFlightOp.Respawning,
+      pending_account_swap: {
+        manual: true,
+        replacement_panes_started: true,
+        mission_delivery_status: "sent-unverified",
+      },
+    })),
+    true,
+  );
+  assert.equal(
+    isPendingManualSwapDeliveryConfirmable(sess({
+      liveness: Liveness.Ready,
+      pending_account_swap: {
+        manual: true,
+        replacement_panes_started: true,
+        mission_delivery_status: "not-delivered",
+      },
+    })),
+    false,
+    "not-delivered belongs to the resend path",
+  );
+  assert.equal(
+    isPendingManualSwapDeliveryConfirmable(sess({
+      liveness: Liveness.Ready,
+      pending_account_swap: {
+        manual: false,
+        replacement_panes_started: true,
+        mission_delivery_status: "sent-unverified",
+      },
+    })),
+    false,
+    "an automatic swap is not the operator's to attest",
+  );
+});
+
 // canHandoff gates the web's Handoff action (#2013). It reads the daemon-projected
 // can_handoff decision rather than re-deriving the handoff rule from
 // backend_type/liveness — a second copy of that rule in the browser is how the
@@ -305,43 +588,10 @@ function isoTodayAt(hour: number, min: number): string {
   return d.toISOString();
 }
 
-// The PR badge (#3285) CONSUMES the daemon-discovered pr_info projection
-// (#3232/#3287) — number, state, url — never deriving anything in the browser.
-test("prBadgeContent renders number + lowercased state as a sentence-case label with the repo separator", () => {
-  const badge = prBadgeContent(
-    sess({ pr_info: { number: 12, state: "OPEN", url: "https://github.com/o/r/pull/12", title: "Fix the thing" } }),
-  );
-  assert.ok(badge, "a discovered PR with a number and url must render");
-  assert.equal(badge.label, "PR #12 · open");
-  assert.equal(badge.url, "https://github.com/o/r/pull/12");
-  assert.ok(badge.tooltip.includes("Fix the thing"), "the projected PR title rides in the tooltip");
-});
-
-test("prBadgeContent keeps an unknown future state honest instead of hiding it", () => {
-  const badge = prBadgeContent(
-    sess({ pr_info: { number: 7, state: "MERGED", url: "https://github.com/o/r/pull/7" } }),
-  );
-  assert.ok(badge);
-  assert.equal(badge.label, "PR #7 · merged");
-  const stateless = prBadgeContent(sess({ pr_info: { number: 7, url: "https://github.com/o/r/pull/7" } }));
-  assert.ok(stateless);
-  assert.equal(stateless.label, "PR #7", "no state → number alone, no dangling separator");
-});
-
-// Go's omitempty cannot drop a struct field, so a session with no discovered PR
-// arrives as pr_info: {} — the badge must fail CLOSED on it, and on any record
-// missing the link target the badge exists to be followed to.
-test("prBadgeContent fails closed on empty or linkless projections", () => {
-  assert.equal(prBadgeContent(sess()), null, "absent pr_info renders nothing");
-  assert.equal(prBadgeContent(sess({ pr_info: {} })), null, "the wire's empty struct renders nothing");
-  assert.equal(
-    prBadgeContent(sess({ pr_info: { number: 3, state: "OPEN" } })),
-    null,
-    "a PR without a url has nowhere to go — no badge",
-  );
-  assert.equal(
-    prBadgeContent(sess({ pr_info: { url: "https://github.com/o/r/pull/9" } })),
-    null,
-    "a url without a number is not a renderable PR identity",
-  );
+test("rowTitle prefixes [remote] for every off-box backend like the TUI (#4336)", () => {
+  for (const b of ["docker", "ssh", "sandbox", "remote"]) {
+    assert.equal(rowTitle(sess({ title: "w", backend_type: b })), "[remote] w", b);
+  }
+  assert.equal(rowTitle(sess({ title: "w", backend_type: "local" })), "w");
+  assert.equal(rowTitle(sess({ title: "w" })), "w");
 });

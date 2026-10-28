@@ -8,7 +8,7 @@ import (
 
 // This file holds the config package's pure path/shell string helpers,
 // extracted from config.go (#1146) to keep that file under its length ceiling
-// (docs/file-length-lint.md). They are behavior-identical to their previous
+// (docs/dev/file-length-lint.md). They are behavior-identical to their previous
 // in-config.go definitions — same package, no call-site changes.
 
 // prettyHomePath returns absPath with the user's home directory prefix
@@ -43,4 +43,14 @@ func ShellQuotePath(path string) string {
 		return path
 	}
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+}
+
+// GlobalConfigFileForDisplay names the canonical global TOML file in remedies,
+// honoring AGENT_FACTORY_HOME and abbreviating the user's home directory.
+func GlobalConfigFileForDisplay() string {
+	dir, err := GetConfigDir()
+	if err != nil {
+		return "the global config file"
+	}
+	return prettyHomePath(filepath.Join(dir, TomlConfigFileName))
 }

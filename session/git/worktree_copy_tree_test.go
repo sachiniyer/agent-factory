@@ -87,6 +87,34 @@ func TestCopyTree_RejectsNamedPipeWithoutBlocking(t *testing.T) {
 	})
 }
 
+// copyFile is the path-based test entrypoint for the regular-file copier. It
+// opens the parent directories itself and routes into copyRegularFileAtWithIdentity
+// so the three TestCopyFile_* regressions below exercise the live primitive
+// directly. The production tree walker never calls this: it opens each parent
+// once and walks descriptor pairs via copyDirectoryLevel, which is why this
+// lives here in the test file rather than next to the primitive it tests.
+func copyFile(src, dst string) error {
+	sourceParent, _, err := openDirectoryPath(filepath.Dir(src), "source parent")
+	if err != nil {
+		return err
+	}
+	defer sourceParent.Close()
+	destinationParent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(dst), "destination parent")
+	if err != nil {
+		return err
+	}
+	defer destinationParent.Close()
+	return copyRegularFileAt(sourceParent, destinationParent, filepath.Base(src), src, dst)
+}
+
+// copyRegularFileAt is a test-only thin wrapper over copyRegularFileAtWithIdentity
+// used by copyFile. The production walker calls copyRegularFileAtWithIdentity
+// directly via copyDirectoryLevel; this helper has no production callers.
+func copyRegularFileAt(source, destination *os.File, name, sourcePath, destinationPath string) error {
+	_, err := copyRegularFileAtWithIdentity(source, destination, name, sourcePath, destinationPath, nil, &xattrDestination{}, nil)
+	return err
+}
+
 // TestCopyFile_RejectsNamedPipeRaceWithoutBlocking closes the Lstat/open race in
 // #2689's first fix. A worktree process can replace a path after copyTree sees a
 // regular file but before copyFile opens it; copyFile must validate the object it
@@ -511,4 +539,44 @@ func TestLinkCopiedFile_RefusesALinkThatLandedOnAnotherInode(t *testing.T) {
 	_, err = linkCopiedFile(root, root, copiedFileLink{path: "first.txt", identity: actual},
 		"third.txt", filepath.Join(staging, "third.txt"), actual)
 	require.NoError(t, err, "a link onto the recorded inode must be accepted")
+}
+
+// TestLinkCopiedFile_IdentityFailureAfterLinkCreateOmitsEntry verifies the fix
+// for the identity-failure branch: when identityAt fails after Linkat succeeds,
+// linkCopiedFile must return copiedEntry{} (no name) so the caller does not
+// record a manifest entry with a zero destination identity — matching the
+// sibling helpers (copyDirectoryEntry, copySymlinkEntry, copyRegularFileAtWithIdentity),
+// which all return copiedEntry{} on their post-create identity failures.
+//
+// The copyTreeAfterLinkCreate seam (the only pre-identity seam in the suite)
+// removes the freshly-linked node between Linkat and identityAt, manufacturing
+// the ENOENT racer subcase: the link is gone from disk, and the entry must be
+// gone from the manifest so the name-set check in validateCopiedDirectoryLevel
+// passes and the staging root can be cleaned up.
+func TestLinkCopiedFile_IdentityFailureAfterLinkCreateOmitsEntry(t *testing.T) {
+	staging := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(staging, "first.txt"), []byte("first"), 0644))
+
+	root, _, err := openDirectoryPath(staging, "destination")
+	require.NoError(t, err)
+	defer root.Close()
+
+	actual, err := identityAt(root, "first.txt")
+	require.NoError(t, err)
+
+	// The seam simulates a racer that unlinks the freshly-linked node inside
+	// the microsecond window between Linkat and the following identityAt.
+	originalHook := copyTreeAfterLinkCreate
+	copyTreeAfterLinkCreate = func(path string) error {
+		return os.Remove(path)
+	}
+	t.Cleanup(func() { copyTreeAfterLinkCreate = originalHook })
+
+	entry, err := linkCopiedFile(root, root, copiedFileLink{path: "first.txt", identity: actual},
+		"second.txt", filepath.Join(staging, "second.txt"), actual)
+	require.Error(t, err, "identityAt must fail when the linked node was removed")
+	assert.Contains(t, err.Error(), "failed to identify hard link")
+	assert.Empty(t, entry.name,
+		"the entry must be omitted when the destination identity cannot be learned, "+
+			"matching the sibling helpers so the manifest stays consistent with the on-disk tree")
 }

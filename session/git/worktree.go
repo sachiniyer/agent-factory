@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -37,6 +38,23 @@ func getWorktreeDirectoryForRepoWithConfig(cfg *config.Config, repoPath string) 
 	return filepath.Dir(repoRoot), nil
 }
 
+// ensureWorktreeParent creates the directory a session worktree is provisioned
+// into, for every path that provisions one.
+//
+// MkdirAllUnderAFHome, not os.MkdirAll: under worktree_root=subdirectory the
+// worktree root is <af-home>/worktrees (see worktree.go), so a bare MkdirAll
+// re-creates the whole AF home as an ancestor on every provision — and it does
+// so on the SESSION-LAUNCH path, ahead of the create's persist, which is the
+// only write the #3845 latch would otherwise refuse. By the time that persist
+// runs the home is already back, applyHomeCheck's consecutive-miss counter is
+// cleared, and the abandoned daemon keeps firing schedules forever (#3850).
+//
+// It is an exact os.MkdirAll for the default sibling root, which is outside the
+// home, and for any other worktree_root a user configures there.
+func ensureWorktreeParent(worktreePath string) error {
+	return config.MkdirAllUnderAFHome(filepath.Dir(worktreePath), 0755)
+}
+
 // GitWorktree manages git worktree operations for a session
 type GitWorktree struct {
 	// relocationMu makes the persisted recovery record and the pathname it
@@ -50,6 +68,17 @@ type GitWorktree struct {
 	// ownership until use completes; only absence from both means no unresolved
 	// operation is known.
 	relocationRecovery *RelocationRecovery
+	// relocationRecoveryOrigin snapshots the durable recovery record a claim
+	// consumed, so a failed settle can restore the pre-claim fence rather than
+	// inferring it from the claim's freshly observed identity. A claim over an
+	// identity-unknown stalled record may resolve a fresh identity from the
+	// recorded path; the claim_stale fence a failed settle then leaves carries
+	// that identity, and restoring it would diverge from the durable record and
+	// close the identity-unknown ENOENT discharge the next same-process retry
+	// needs when the archived path disappeared between claim and settle (#5555).
+	// Process-local: only a same-process failed settle reads it; a restart
+	// reloads the durable record directly. Guarded by relocationMu.
+	relocationRecoveryOrigin *RelocationRecovery
 	// activeRelocationClaim keeps ownership visible after a durable record is
 	// resolved and consumed. It is not itself serialized; RelocationSnapshot
 	// projects it as a stale-claim record so a concurrent checkpoint can never
@@ -61,6 +90,24 @@ type GitWorktree struct {
 	// is unlinked. The daemon installs it only for an explicit kill transaction;
 	// it is process-local and never part of the persisted worktree shape.
 	repoGoneFinalizationCheckpoint func() error
+	// adoptedWorktree is the directory identity AdoptLandedWorktreeMove proved
+	// at the path it adopted (#5102), kept so the archive can re-confirm that
+	// the same directory is still there after teardown. Process-local; it names
+	// a point-in-time proof, not durable state. Cleared whenever the recorded
+	// path changes. Guarded by relocationMu.
+	adoptedWorktree *adoptedWorktreeIdentity
+	// absentStallSettled records that this process discharged an identity-unknown
+	// stall because the recorded path conclusively answered ENOENT (#5102). The
+	// row then carries no record and, unless the worktree-missing poll got there
+	// first, no flag either, yet whatever appears at the path afterwards is as
+	// unverified as an occupant of a flagged row; kill teardown reads it to keep
+	// the deletion-boundary recheck armed. Process-local and never persisted: a
+	// restarted daemon has only the durable record, which the discharge already
+	// removed, and re-derives absence at teardown entry instead. Cleared whenever
+	// af itself places a worktree at the recorded path or moves the record to
+	// another one, because the proof was about the path's previous occupant.
+	// Guarded by relocationMu.
+	absentStallSettled bool
 	// archiveReport is durable metadata for every archive copy that deliberately
 	// omitted unreadable files. It shares relocationMu with the
 	// worktree path so persistence cannot pair a report with the wrong location.
@@ -106,6 +153,23 @@ type GitWorktree struct {
 	// outlive the worktree itself.
 	hooksCtx    context.Context
 	hooksCancel context.CancelFunc
+	// hookScopeSessionID names the transient scopes a DAEMON-spawned hook run
+	// enters. It is set from the session's stable id at creation and restore;
+	// empty means no scope is ever derived, which is the TUI/CLI path.
+	hookScopeSessionID  string
+	hooksResumeDisabled bool
+	hookCreatePending   bool
+	hookCreateRelease   func()
+	// hookScopeUnitPrefix is the durable handle: the prefix of every scope unit
+	// this session's hooks have entered. Written by the hook goroutine the first
+	// time a scope is actually created and by the storage restore, read by the
+	// snapshot projection and by cleanup — concurrently, hence the atomic.
+	//
+	// Its ABSENCE is meaningful and is the rollback contract: a record written by
+	// a build that knows nothing about scopes, or by this build on a path that
+	// never entered one, comes back with an empty prefix and takes exactly the
+	// behaviour that shipped before #3650.
+	hookScopeUnitPrefix atomic.Pointer[string]
 	// hooksDone is closed when the most recent post-worktree hook run finishes
 	// (completion or cancellation). Set by Setup/Rebuild* right before they
 	// return, read by the readiness wait after Start returns — a strict
@@ -113,6 +177,9 @@ type GitWorktree struct {
 	// until the first hook run is launched (e.g. external worktrees that skip
 	// hooks entirely), which HooksDone reports as "no hooks in flight".
 	hooksDone <-chan struct{}
+	// Lifecycle-owned join handle for bounded deferred journal terminalization
+	// or reclamation.
+	hooksRetirementDone <-chan struct{}
 }
 
 // RelocationRecovery is the durable, non-authoritative second handle retained
@@ -145,11 +212,45 @@ func (g *GitWorktree) SetHookEnvironment(names []string) error {
 	return nil
 }
 
+// SetHookScopeSessionID records the session identity that daemon-spawned hook
+// scopes are named after. Call it before Setup or a rebuild; an empty id (the
+// default) means hooks are spawned exactly as they were before #3650.
+func (g *GitWorktree) SetHookScopeSessionID(id string) {
+	g.hookScopeSessionID = id
+}
+
+// HookScopeUnitPrefix returns the recorded scope handle, or "" when this
+// worktree's hooks have never entered a scope.
+func (g *GitWorktree) HookScopeUnitPrefix() string {
+	if prefix := g.hookScopeUnitPrefix.Load(); prefix != nil {
+		return *prefix
+	}
+	return ""
+}
+
+// SetHookScopeUnitPrefix records the durable handle. Both producers land here:
+// the hook runner when it creates the session's first scope, and storage when a
+// record that already carries one is loaded.
+func (g *GitWorktree) SetHookScopeUnitPrefix(prefix string) {
+	if strings.TrimSpace(prefix) == "" {
+		return
+	}
+	g.hookScopeUnitPrefix.Store(&prefix)
+}
+
 // HooksDone returns a channel that is closed once the worktree's post-worktree
 // hooks have finished (completion or cancellation), or nil if no hook run has
 // been launched for this worktree. Callers treat nil as "nothing in flight".
 func (g *GitWorktree) HooksDone() <-chan struct{} {
 	return g.hooksDone
+}
+
+// SetHooksDoneForTest installs an in-flight hook-completion channel without
+// launching a real hook run — the test-side analogue of adoptRunningHooks,
+// which is how a restored worktree reports a survivor from a previous daemon
+// (#4162's restart tests need exactly that shape without systemd).
+func (g *GitWorktree) SetHooksDoneForTest(done chan struct{}) {
+	g.hooksDone = done
 }
 
 // IsExternalWorktree returns true if this worktree was not created by agent-factory
@@ -195,11 +296,17 @@ func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName
 // naming must not independently reload a restart-required value after its caller
 // has already performed collision checks against a frozen snapshot.
 func NewGitWorktree(repoPath string, sessionName string, branchPrefix string) (tree *GitWorktree, branchname string, err error) {
+	return NewGitWorktreeNamed(repoPath, sessionName, BranchForTitle(branchPrefix, sessionName))
+}
+
+// NewGitWorktreeNamed is NewGitWorktree for a caller that has already chosen the
+// exact branch name — the daemon naming it for an off-box session so the
+// sandbox does not re-derive it from its own host's config (#5571 W2.4).
+func NewGitWorktreeNamed(repoPath string, sessionName string, branchName string) (tree *GitWorktree, branchname string, err error) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load config: %w", err)
 	}
-	branchName := BranchForTitle(branchPrefix, sessionName)
 
 	// Convert repoPath to absolute path
 	absPath, err := filepath.Abs(repoPath)
@@ -244,6 +351,17 @@ func NewGitWorktree(repoPath string, sessionName string, branchPrefix string) (t
 // repo. The base path is validated to sit strictly inside worktreeDir (#461) and
 // a numeric suffix is appended when it is already occupied.
 func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, sessionName, branchName string) (string, error) {
+	basePath, err := preferredWorktreePlacement(cfg, repoRoot, worktreeDir, sessionName, branchName)
+	if err != nil {
+		return "", err
+	}
+	return firstFreeWorktreePath(basePath)
+}
+
+// preferredWorktreePlacement is resolveWorktreePlacement before the collision
+// suffix: the validated base path the placement mode derives, whether or not
+// something already occupies it. It is a pure function of its inputs.
+func preferredWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, sessionName, branchName string) (string, error) {
 	var basePath string
 	if cfg != nil && cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
 		// Subdirectory mode nests the branch name under the worktrees root. A
@@ -257,7 +375,10 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 			// The fallback leaf is a standalone component (no repo-name prefix), so
 			// bound it against NAME_MAX on its own. Branch-derived leaves are already
 			// bounded per component by SanitizeBranchName.
-			leaf = boundWorktreeComponent("", sanitizeWorktreePathSegment(sessionName))
+			leaf = DerivedWorktreeSubdirectoryTitleSegment(sessionName)
+			if leaf == "" {
+				leaf = "session"
+			}
 		}
 		basePath = filepath.Join(worktreeDir, leaf)
 	} else {
@@ -268,7 +389,10 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 		// the join site; a fixed cap on the segment alone silently overruns once the
 		// repo name is long (#2528).
 		repoBase := filepath.Base(repoRoot)
-		segment := boundWorktreeComponent(repoBase, sanitizeWorktreePathSegment(sessionName))
+		segment := DerivedWorktreePathTitleSegment(repoRoot, sessionName)
+		if segment == "" {
+			segment = boundWorktreeComponent(repoBase, "session")
+		}
 		basePath = filepath.Join(worktreeDir, repoBase+"-"+segment)
 	}
 
@@ -281,7 +405,33 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 	if !pathutil.IsStrictlyInside(absBase, absDir) {
 		return "", fmt.Errorf("invalid session name %q: would place worktree outside %s", sessionName, worktreeDir)
 	}
-	return firstFreeWorktreePath(basePath)
+	return basePath, nil
+}
+
+// DerivedWorktreePathTitleSegment returns the user-title-derived part of the
+// default sibling worktree directory name, after the same sanitizing and
+// repo-name-dependent length bound used by resolveWorktreePlacement. It returns
+// empty when the title contributes no safe bytes: in that case placement uses
+// the fixed, AF-authored "session" fallback, which is not a representation of
+// the user's title.
+func DerivedWorktreePathTitleSegment(repoRoot, title string) string {
+	segment := worktreePathTitleSegment(title)
+	if segment == "" {
+		return ""
+	}
+	return boundWorktreeComponent(filepath.Base(repoRoot), segment)
+}
+
+// DerivedWorktreeSubdirectoryTitleSegment returns the user-title-derived leaf
+// used when a legacy subdirectory-mode restore has no persisted branch. The
+// component has no repo-name prefix, so it receives the standalone NAME_MAX
+// bound. An empty result means placement uses AF's fixed "session" fallback.
+func DerivedWorktreeSubdirectoryTitleSegment(title string) string {
+	segment := worktreePathTitleSegment(title)
+	if segment == "" {
+		return ""
+	}
+	return boundWorktreeComponent("", segment)
 }
 
 const (
@@ -306,7 +456,7 @@ const (
 // repoBase is itself a real directory name and therefore already <= NAME_MAX; when
 // it is long enough to crowd the segment out, the segment collapses to a one-byte
 // floor and the collision suffix still disambiguates. segment is ASCII
-// (sanitizeWorktreePathSegment), so a byte truncation is rune-safe.
+// (worktreePathTitleSegment), so a byte truncation is rune-safe.
 func boundWorktreeComponent(repoBase, segment string) string {
 	allow := nameMax - worktreeCollisionSuffixReserve
 	if repoBase != "" {

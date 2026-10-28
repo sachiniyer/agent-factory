@@ -46,6 +46,7 @@ type handoffBackend struct {
 	events          []string
 	noHandoff       bool
 	sendErr         error
+	deliveryStatus  session.PromptDeliveryStatus
 }
 
 func (b *handoffBackend) Capabilities() session.Capabilities {
@@ -56,7 +57,7 @@ func (b *handoffBackend) Capabilities() session.Capabilities {
 	return caps
 }
 
-func (b *handoffBackend) SwapAgent(i *session.Instance, _ session.AgentSwapPlan) error {
+func (b *handoffBackend) SwapAgent(i *session.Instance, plan session.AgentSwapPlan) error {
 	b.mu.Lock()
 	b.swapCalls++
 	b.events = append(b.events, "swap")
@@ -65,19 +66,27 @@ func (b *handoffBackend) SwapAgent(i *session.Instance, _ session.AgentSwapPlan)
 	if err != nil {
 		return err
 	}
+	if err := plan.CaptureAfterStop(); err != nil {
+		return err
+	}
 	// Mirror the local backend's SetProgram: readiness and conversation capture
 	// must identify the incoming agent from the pane command, not stale tmux state.
 	i.SetTmuxSession(tmux.NewTmuxSession(i.Title, i.AgentProgram()))
 	return nil
 }
 
-func (b *handoffBackend) Preview(*session.Instance) (string, error) {
+func (b *handoffBackend) Preview(i *session.Instance) (string, error) {
 	// One fixture containing each simple agent's ready glyph keeps these daemon
 	// orchestration tests independent of which supported target they choose.
 	b.mu.Lock()
 	b.previewCalls++
 	b.events = append(b.events, "ready")
 	b.mu.Unlock()
+	// Mirror LocalBackend.Preview: a row whose `started` bit is down captures
+	// nothing, so readiness can never pass on it (#4429).
+	if !i.Started() {
+		return "", nil
+	}
 	return "ready\n❯\n›\n> \n╰", nil
 }
 
@@ -88,7 +97,14 @@ func (b *handoffBackend) HasUpdated(*session.Instance) (bool, bool, string) {
 	return false, false, ""
 }
 
-func (b *handoffBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
+func (b *handoffBackend) SendPromptCommand(i *session.Instance, prompt string) error {
+	// Mirror LocalBackend.SendPromptCommandWithStatus: it refuses a row whose
+	// `started` bit is down before touching the pane. A fixture that ignored the
+	// bit let a startup-unknown retry pass here and fail on every real session
+	// (#4429).
+	if !i.Started() {
+		return errors.New("instance not started")
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.events = append(b.events, "send")
@@ -99,9 +115,24 @@ func (b *handoffBackend) SendPromptCommand(_ *session.Instance, prompt string) e
 	return nil
 }
 
-func (b *handoffBackend) setSendErr(err error) {
+func (b *handoffBackend) SendPromptCommandWithStatus(
+	i *session.Instance, prompt string,
+) (session.PromptDeliveryStatus, error) {
+	err := b.SendPromptCommand(i, prompt)
+	if err != nil {
+		return session.PromptCouldNotConfirm, err
+	}
 	b.mu.Lock()
-	b.sendErr = err
+	defer b.mu.Unlock()
+	if b.deliveryStatus.Valid() {
+		return b.deliveryStatus, nil
+	}
+	return session.PromptDelivered, nil
+}
+
+func (b *handoffBackend) setDeliveryStatus(status session.PromptDeliveryStatus) {
+	b.mu.Lock()
+	b.deliveryStatus = status
 	b.mu.Unlock()
 }
 
@@ -273,7 +304,7 @@ func TestHandoffSession_DeliversMissionBriefNotTheStoredPrompt(t *testing.T) {
 		t.Fatal("limit state still set after a handoff; it belonged to the agent that was just replaced")
 	}
 
-	ledger := inst.Handoffs()
+	ledger := inst.Tabs[0].Handoffs
 	if len(ledger) != 1 {
 		t.Fatalf("ledger has %d entries, want 1", len(ledger))
 	}
@@ -296,7 +327,7 @@ func TestHandoffSession_RecordsManualReasonWhenNotLimited(t *testing.T) {
 		t.Fatalf("HandoffSession: %v", err)
 	}
 
-	ledger := inst.Handoffs()
+	ledger := inst.Tabs[0].Handoffs
 	if len(ledger) != 1 || ledger[0].Reason != session.HandoffReasonManual {
 		t.Fatalf("ledger = %+v, want a single entry with reason %q", ledger, session.HandoffReasonManual)
 	}
@@ -325,7 +356,7 @@ func TestHandoffSession_RollsBackTheRecordWhenTheSwapFails(t *testing.T) {
 	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
 		t.Fatalf("Program = %q after a failed swap, want %q — the pane still runs the outgoing agent", got, tmux.ProgramClaude)
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 0 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 0 {
 		t.Fatalf("ledger has %d entries after a failed swap, want 0 — a swap that did not happen must not be recorded", len(ledger))
 	}
 	if _, prompts := backend.snapshot(); len(prompts) != 0 {
@@ -403,7 +434,7 @@ func TestHandoffSession_RefusesArchivedSession(t *testing.T) {
 	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
 		t.Fatalf("Program = %q after refused handoff, want %q", got, tmux.ProgramClaude)
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 0 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 0 {
 		t.Fatalf("refused archived handoff wrote %d ledger entries, want 0", len(ledger))
 	}
 	if got := inst.GetLiveness(); got != session.LiveArchived {
@@ -441,7 +472,7 @@ func TestHandoffSession_RefusesTheReservedRootSession(t *testing.T) {
 	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
 		t.Fatalf("Program = %q after refused handoff, want %q", got, tmux.ProgramClaude)
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 0 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 0 {
 		t.Fatalf("refused root handoff wrote %d ledger entries, want 0", len(ledger))
 	}
 }
@@ -461,9 +492,9 @@ func TestHandoffSession_PreflightFailureLeavesOutgoingAgentUntouched(t *testing.
 	if swaps, prompts := base.snapshot(); swaps != 0 || len(prompts) != 0 {
 		t.Fatalf("failed preflight touched runtime: swaps=%d prompts=%d", swaps, len(prompts))
 	}
-	if inst.AgentProgram() != tmux.ProgramClaude || len(inst.Handoffs()) != 0 || inst.GetInFlightOp() != session.OpNone {
+	if inst.AgentProgram() != tmux.ProgramClaude || len(inst.Tabs[0].Handoffs) != 0 || inst.GetInFlightOp() != session.OpNone {
 		t.Fatalf("failed preflight mutated record: program=%q handoffs=%d op=%v",
-			inst.AgentProgram(), len(inst.Handoffs()), inst.GetInFlightOp())
+			inst.AgentProgram(), len(inst.Tabs[0].Handoffs), inst.GetInFlightOp())
 	}
 }
 
@@ -598,27 +629,26 @@ func TestHandoffSession_ReadinessFailureRetainsStartupUnknown(t *testing.T) {
 	}
 }
 
-// A post-ready paste failure keeps a durable pending marker. Once a later poll
-// positively observes Ready, the recovery path sends that exact rendered brief
-// and clears the marker in memory and on disk.
-func TestResumePendingHandoffs_DeliversPostReadyFailure(t *testing.T) {
+// Positive mission-scoped non-delivery keeps a durable retry authorization.
+// Once a later poll observes Ready, recovery sends that exact rendered brief and
+// clears the marker in memory and on disk.
+func TestResumePendingHandoffs_DeliversObservedNonDelivery(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	sendErr := errors.New("paste transport failed")
-	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), sendErr: sendErr}
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), deliveryStatus: session.PromptNotDelivered}
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "retry-mission", backend)
 
 	_, err := manager.HandoffSession(HandoffSessionRequest{
 		Title: "retry-mission", RepoID: repoID, To: tmux.ProgramGemini,
 	})
-	if !errors.Is(err, task.ErrPromptDelivery) || !errors.Is(err, sendErr) {
-		t.Fatalf("HandoffSession error = %v, want post-ready prompt-delivery failure", err)
+	if !errors.Is(err, task.ErrPromptDelivery) {
+		t.Fatalf("HandoffSession error = %v, want observed non-delivery", err)
 	}
 	mission := inst.PendingHandoffMission()
 	if mission == "" || inst.StartupStateUnknown() || inst.GetInFlightOp() != session.OpReplacing {
 		t.Fatalf("post-ready failure state = pending:%q startupUnknown:%v op:%v", mission, inst.StartupStateUnknown(), inst.GetInFlightOp())
 	}
 
-	backend.setSendErr(nil)
+	backend.setDeliveryStatus(session.PromptDelivered)
 	manager.ResumePendingHandoffs()
 
 	if got := inst.PendingHandoffMission(); got != "" {
@@ -628,8 +658,8 @@ func TestResumePendingHandoffs_DeliversPostReadyFailure(t *testing.T) {
 		t.Fatalf("delivered recovery mission retained replacement fence %v", got)
 	}
 	_, prompts := backend.snapshot()
-	if len(prompts) != 1 || prompts[0] != mission {
-		t.Fatalf("recovery prompts = %q, want exactly the pending rendered mission", prompts)
+	if len(prompts) != 2 || prompts[0] != mission || prompts[1] != mission {
+		t.Fatalf("handoff prompt attempts = %q, want one observed-absent attempt and one delivered recovery", prompts)
 	}
 	rec := recordFor(t, repoID, "retry-mission")
 	if rec == nil || rec.PendingHandoffMission != "" {
@@ -662,16 +692,15 @@ func TestResumePendingHandoffs_SkipsUserKilled(t *testing.T) {
 
 func TestResumePendingHandoffs_PostReadyFailureClearsOutgoingLimit(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	sendErr := errors.New("paste transport failed")
-	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), sendErr: sendErr}
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), deliveryStatus: session.PromptNotDelivered}
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "retry-after-outgoing-limit", backend)
 	inst.SetLimitReached(time.Now().Add(time.Hour))
 
 	_, err := manager.HandoffSession(HandoffSessionRequest{
 		Title: "retry-after-outgoing-limit", RepoID: repoID, To: tmux.ProgramGemini,
 	})
-	if !errors.Is(err, task.ErrPromptDelivery) || !errors.Is(err, sendErr) {
-		t.Fatalf("HandoffSession error = %v, want post-ready prompt-delivery failure", err)
+	if !errors.Is(err, task.ErrPromptDelivery) {
+		t.Fatalf("HandoffSession error = %v, want observed non-delivery", err)
 	}
 	if inst.LimitReached() {
 		t.Fatal("post-ready failure retained the outgoing provider's limit on the incoming runtime")
@@ -681,12 +710,12 @@ func TestResumePendingHandoffs_PostReadyFailureClearsOutgoingLimit(t *testing.T)
 		t.Fatalf("retry state = pending:%q op:%v, want mission behind replacement fence", mission, inst.GetInFlightOp())
 	}
 
-	backend.setSendErr(nil)
+	backend.setDeliveryStatus(session.PromptDelivered)
 	manager.ResumePendingHandoffs()
 
 	_, prompts := backend.snapshot()
-	if len(prompts) != 1 || prompts[0] != mission {
-		t.Fatalf("recovery prompts = %q, want exact pending mission; stale limit state must not divert it to limit resume", prompts)
+	if len(prompts) != 2 || prompts[1] != mission {
+		t.Fatalf("handoff prompt attempts = %q, want the observed-absent mission retried after outgoing limit state cleared", prompts)
 	}
 }
 

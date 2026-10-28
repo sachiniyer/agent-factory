@@ -1,46 +1,87 @@
 package config
 
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
+)
+
 // DeregisterRootAgentsForRepo removes every root_agents opt-in that resolves to
-// repoID and persists the result, returning the config keys it removed. It is
-// the durable half of "delete a project" (#1735), so an emptied project does not
-// linger in the picker as a zero-session opt-in after its sessions are
+// ANY of repoIDs and persists the result, returning the config keys it removed.
+// It is the durable half of "delete a project" (#1735), so an emptied project
+// does not linger in the picker as a zero-session opt-in after its sessions are
 // archived, and does not respawn an always-on root on the next daemon start.
 //
 // A root_agents key is a repo path "as written" (a leading ~ is expanded), which
 // may be a subdirectory or a non-canonical spelling of the repo root, so a key
-// matches when its RESOLVED main-repo id equals repoID; when the path no longer
-// resolves to a git repo (moved/removed), it falls back to hashing the expanded,
-// cleaned path so a stale entry for a gone repo can still be swept. The write is
-// load-modify-persist over the whole global config (no other key clobbered) and
-// idempotent: no matching key is a clean no-op returning nil, nil.
+// matches when its RESOLVED main-repo id equals one of repoIDs; when the path no
+// longer resolves to a git repo (moved/removed), it falls back to hashing the
+// expanded, cleaned path so a stale entry for a gone repo can still be swept.
+// The write is load-modify-persist over the whole global config (no other key
+// clobbered) and idempotent: no matching key is a clean no-op returning nil, nil.
 //
 // The whole sequence runs under the config file lock (#1838) so a concurrent
 // config writer cannot be reverted by our snapshot. The key→repo resolution
 // runs under the lock too: it decides which keys the write drops, so resolving
 // it against a pre-lock snapshot could drop an entry a racing writer had just
 // added.
-func DeregisterRootAgentsForRepo(repoID string) ([]string, error) {
+func DeregisterRootAgentsForRepo(repoIDs ...string) ([]string, error) {
 	var removed []string
-	err := withGlobalConfigLock(func() error {
-		cfg, err := loadConfigLocked()
-		if err != nil {
-			return err
-		}
-		removed = nil
-		for key := range cfg.RootAgents {
-			if rootAgentKeyMatchesRepo(key, repoID) {
-				removed = append(removed, key)
-			}
-		}
-		if len(removed) == 0 {
-			return nil
-		}
-		for _, key := range removed {
-			delete(cfg.RootAgents, key)
-		}
-		return saveConfigLocked(cfg)
+	err := withGlobalConfigLock(func(locked lockedTarget) error {
+		var err error
+		removed, err = deregisterRootAgentsLocked(locked, repoIDs)
+		return err
 	})
 	if err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+// deregisterRootAgentsLocked is the body above minus the lock, so it can be
+// driven against a pinned target directly — the shape applyGlobalUnset and
+// migrateConfigFile already have. Callers must hold the config file lock.
+func deregisterRootAgentsLocked(locked lockedTarget, repoIDs []string) ([]string, error) {
+	cfg, err := loadConfigLocked(locked)
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	// One read-modify-write for EVERY identity: a re-attributed project
+	// carries two (real and derived recorded-path), and sweeping them as
+	// separate writes could remove one opt-in and then fail, breaking the
+	// caller's nothing-was-changed guarantee (#3299 review round 7).
+	for key := range cfg.RootAgents {
+		for _, repoID := range repoIDs {
+			if rootAgentKeyMatchesRepo(key, repoID) {
+				removed = append(removed, key)
+				break
+			}
+		}
+	}
+	if len(removed) == 0 {
+		// The nothing-to-remove answer has to be about the file this lock
+		// covers, and it is the one answer that never reaches the write that
+		// would say so. It is also the costliest to get wrong: DeleteProject
+		// reads nil here as "the durable cleanup succeeded" and goes on to
+		// delete the project, so an opt-in surviving in the config the link now
+		// names respawns that project on the next daemon start — the exact
+		// outcome its own error message promises cannot happen
+		// (daemon/deleteproject.go, #3696 review).
+		if err := locked.confirm(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	for _, key := range removed {
+		delete(cfg.RootAgents, key)
+	}
+	if err := saveConfigLocked(locked, cfg); err != nil {
 		return nil, err
 	}
 	return removed, nil
@@ -52,8 +93,140 @@ func DeregisterRootAgentsForRepo(repoID string) ([]string, error) {
 // hashing the expanded/cleaned path when the repo no longer resolves.
 func rootAgentKeyMatchesRepo(key, repoID string) bool {
 	expanded := ExpandTilde(key)
-	if repo, err := RepoFromPath(expanded); err == nil {
+	repo, probeErr := RepoFromPath(expanded)
+	if probeErr == nil {
 		return repo.ID == repoID
 	}
-	return RepoIDForRecordedRoot(expanded) == repoID
+	// CANONICAL role (#3530): the question is "does this key name that
+	// repository", so an unresolvable key is compared by hashing the path the
+	// same way a real identity is derived. Inventing a namespaced id here would
+	// make a stale entry for a gone repo unsweepable.
+	cleaned := filepath.Clean(expanded)
+	if RepoIDFromRoot(cleaned) == repoID {
+		return true
+	}
+	// The CANONICAL fallback is gated on a determinate verdict (#3530 review id
+	// 3919604362), unlike the lexical one above it, which is master's rule and
+	// stays as it was. A symlink-spelled key may name a live repository through
+	// an operational git failure, and hashing its canonical spelling can then
+	// match a DIFFERENT repository's old path-derived id — sweeping the live
+	// one's opt-in on that project's behalf. Uncertainty declines the extra
+	// match rather than making it.
+	if !PathIsDeterminatelyFree(cleaned, probeErr) {
+		return false
+	}
+	// …and again through the key's CANONICAL spelling (#3530 review id
+	// 3918120733). The caller derives its id from a path the registry
+	// resolved, while this key was written by a human through whatever symlink
+	// they had — `/private/var/...` against `/var/...` on macOS — so the
+	// lexical hashes differ and a stale opt-in survives a delete that reported
+	// success. Additive: a key that matched before still matches, and identity
+	// DERIVATION is untouched, because an id is defined by the exact recorded
+	// string and canonicalizing there would re-key durable state.
+	return RepoIDFromRoot(pathutil.ResolveForCompare(cleaned)) == repoID
+}
+
+// LegacyRootAgentForRecordedRoot returns the root_agents entry spelled as a
+// registered project's RECORDED root (and the matched key), while that root
+// does not resolve (#3530 review ids 3916912933, 3917294309, 3917756780).
+//
+// A root_agents key is a path, and rootAgentKeyMatchesRepo falls back to
+// hashing one it cannot resolve — which is nobody's identity once a registered
+// project is addressed by the identity it RECORDED rather than by its path.
+// Master matched such an entry by accident, because it addressed that project
+// BY the path hash; both the daemon's verdict and `af config get --explain`
+// have to ask for it deliberately now, and they share this so the running
+// daemon and the explanation of the next start cannot disagree.
+//
+// Two steps, and neither may be collapsed into the other. The key is found by
+// its SPELLING, with no resolver involved: hashing the path and asking a
+// resolver matches a repository main-rooted there, whose identity IS that hash,
+// so the occupant's opt-in would be returned for this project. Then the
+// recorded root is resolved ONCE: if it resolves, the entry belongs to whatever
+// is there now — the ensure sweep will create under that identity, not this
+// one — so it is not this project's answer.
+func LegacyRootAgentForRecordedRoot(global *Config, recordedRoot string) (*RootAgentConfig, string) {
+	entry, key, _ := LegacyRootAgentForRecordedRootContext(context.Background(), global, recordedRoot)
+	return entry, key
+}
+
+// LegacyRootAgentForRecordedRootContext is LegacyRootAgentForRecordedRoot under
+// a caller-owned deadline, with the same third return and for the same reason
+// (#3782 item 4): its nil is conservative — it declines to hand a stale
+// project's opt-in to whatever occupies the path — but a nil produced because
+// the probe never answered is not that judgement, it is the absence of one.
+//
+// It matters because this is the LAST chance the verdict has to find an entry.
+// A nil here with a nil from LegacyRootAgentForRepoContext becomes "no root
+// agent is configured for this repo — add a root_agents entry", said to a user
+// whose entry is already there.
+func LegacyRootAgentForRecordedRootContext(ctx context.Context, global *Config, recordedRoot string) (*RootAgentConfig, string, error) {
+	if global == nil || recordedRoot == "" {
+		return nil, "", nil
+	}
+	cleaned := filepath.Clean(recordedRoot)
+	// Both sides go through ResolveForCompare, because the spellings genuinely
+	// differ: a root_agents key is written by a human — through whatever
+	// symlink they had — while the record stores the path registration
+	// resolved. Comparing Clean-ed strings makes those unequal wherever the
+	// temp or working root is itself a symlink, which is macOS `/var` ->
+	// `/private/var` every time (#2110's rule; caught by CI's darwin job on
+	// #3530). The recorded root does not exist in the case this function is
+	// FOR, so plain EvalSymlinks cannot be used on either side.
+	target := pathutil.ResolveForCompare(cleaned)
+	// Sorted for the same reason LegacyRootAgentForRepo sorts: inspection, the
+	// daemon lookup and the ensure pass must agree on one winner when two
+	// spellings name the same root.
+	keys := make([]string, 0, len(global.RootAgents))
+	for key := range global.RootAgents {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	matched := ""
+	for _, key := range keys {
+		if pathutil.ResolveForCompare(filepath.Clean(ExpandTilde(key))) == target {
+			matched = key
+			break
+		}
+	}
+	if matched == "" {
+		return nil, "", nil
+	}
+	// A DETERMINATE verdict is required before the fallback may be returned
+	// (#3530 review ids 3918379034, 3919346216). "git failed" is not one: a
+	// killed probe establishes nothing, and neither does dubious ownership, an
+	// unreadable .git or a permission error — a repository occupying this path
+	// owns the key through any of them, and reporting the stale project's
+	// opt-in would promise a root the ensure sweep creates only for the
+	// occupant. Two outcomes qualify: git answered that the path is not inside
+	// a repository, or the path is provably gone.
+	_, probeErr := RepoFromPathContext(ctx, cleaned)
+	if probeErr != nil && RepoProbeUnanswered(probeErr) {
+		// Same nil, different meaning. The determinacy gate below ALREADY
+		// declines an unanswered probe — correctly, since a repository may own
+		// this path through one — but the caller cannot tell that decline from
+		// "the key does not apply", and only one of them entitles it to tell a
+		// user the repo is unconfigured.
+		return nil, "", fmt.Errorf("could not establish whether the root_agents entry %q applies to recorded root %q: %w", matched, cleaned, ErrRepoProbeUnanswered)
+	}
+	if probeErr == nil || !PathIsDeterminatelyFree(cleaned, probeErr) {
+		return nil, "", nil
+	}
+	entry := global.RootAgents[matched]
+	return &entry, matched, nil
+}
+
+// PathIsDeterminatelyFree reports that no repository owns path, on evidence
+// rather than on a failure: git answered that it is not inside a repository, or
+// the path itself is provably gone. Every other failure leaves the question
+// open — see LegacyRootAgentForRecordedRoot and normalizeDeleteProjectPath,
+// which both refuse to act on one.
+func PathIsDeterminatelyFree(path string, probeErr error) bool {
+	if errors.Is(probeErr, ErrNotGitRepository) {
+		return true
+	}
+	if _, err := os.Stat(path); err != nil && PathDeterminatelyAbsent(err) {
+		return true
+	}
+	return false
 }

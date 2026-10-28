@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { getConfig, setConfigValue } from "./api.js";
-import { canCommit, controlKind, createKeyedQueue } from "./config.js";
-import type { ConfigEntry } from "./types.js";
+import { explainConfig, getConfig, setConfigValue } from "./api.js";
+import {
+  type ConfigStatus,
+  canCommit,
+  controlKind,
+  createKeyedQueue,
+  explainValueText,
+  saveNotice,
+  shouldCloseSavedField,
+} from "./config.js";
+import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 
 // These are the web client's config-editor contracts. They are pure logic +
 // stubbed fetch, matching the rest of web/src/*.test.ts (no DOM, no jsdom): the
@@ -94,6 +102,114 @@ test("setConfigValue posts the key and the RAW value for the daemon to validate"
   assert.doesNotMatch(resp.restart_notice, /daemon restart|run `/, "the notice must not tell the user to run a command (#2479)");
 });
 
+// --- saveNotice: what the form says after a write (#2480 notice, #3722 address) ---
+
+const setResp = (over: Partial<ConfigSetResponse> = {}): ConfigSetResponse => ({
+  result: { key: "network.listen_addr", value: "127.0.0.1:9443", path: "/tmp/config.toml", requires_restart: false },
+  restart_notice: "Applied — the running daemon is using the new value now.",
+  ...over,
+});
+
+test("saveNotice names where the daemon is listening after a listener move", () => {
+  // The whole point of #3722 on this surface: saving network.listen_addr moves the
+  // listener this page is talking over, so the address it moved TO has to reach the
+  // operator — the next request from this page goes nowhere.
+  const notice = saveNotice(setResp({ listener_addr: "127.0.0.1:9443" }));
+  assert.match(notice, /Daemon now listening at 127\.0\.0\.1:9443/);
+});
+
+test("saveNotice reports the address the DAEMON named, not the value that was sent", () => {
+  // A rebind that failed leaves the daemon on its previous address and says so.
+  // Echoing the typed value here would name an address nothing answers, in the one
+  // case where the operator most needs the real one.
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: "127.0.0.1:9443", path: "/tmp/config.toml", requires_restart: false },
+      restart_notice: "Saved — network.listen_addr could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).",
+      listener_addr: "127.0.0.1:8443",
+    }),
+  );
+  assert.match(notice, /Daemon now listening at 127\.0\.0\.1:8443/);
+  assert.doesNotMatch(notice, /9443/, "the form must not echo the requested address as if it were bound");
+});
+
+test("saveNotice says nothing for an ordinary key that needs no restart", () => {
+  assert.equal(
+    saveNotice(
+      setResp({
+        result: { key: "default_program", value: "codex", path: "/tmp/config.toml", requires_restart: false },
+      }),
+    ),
+    "",
+    "an \"Applied\" line under every field is noise — that gate is unchanged",
+  );
+});
+
+test("saveNotice keeps the restart notice for a key that requires one", () => {
+  const notice = saveNotice(
+    setResp({
+      result: { key: "update_channel", value: "preview", path: "/tmp/config.toml", requires_restart: true },
+      restart_notice: "Saved — this setting takes effect the next time you launch af.",
+    }),
+  );
+  assert.equal(notice, "Saved — this setting takes effect the next time you launch af.");
+});
+
+test("saveNotice surfaces a failed live apply and its error", () => {
+  const restartNotice =
+    "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value.";
+  const warning =
+    "saved config, but live apply failed: reload config: expected a top-level item to end with a newline";
+  const writeWarning = "saved value exposes a tokenless network listener";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false },
+      restart_notice: restartNotice,
+      warnings: [writeWarning, warning],
+      apply_outcome: "failed",
+    }),
+  );
+  assert.equal(notice, `${restartNotice} · ${writeWarning} · ${warning}`);
+});
+
+test("saveNotice tolerates an older daemon that sends no address", () => {
+  // listener_addr is additive: a daemon predating #3722 omits it entirely, and the
+  // form must not render "undefined" at the user.
+  const notice = saveNotice(setResp({ result: { key: "update_channel", value: "preview", path: "/tmp/config.toml", requires_restart: true } }));
+  assert.doesNotMatch(notice, /undefined/);
+});
+
+test("saveNotice surfaces a write-only warning the daemon applied silently (default_accounts)", () => {
+  // #5266: for an applied-live write the only warning is per-write — it lands on
+  // resp.result.warnings while resp.warnings stays empty. The TUI falls back to
+  // the result channel (ui/config_target.go); the web form must too, or the one
+  // place that tells the operator the account is unregistered disappears.
+  const warning =
+    'no claude account named "missing" is registered on this machine, so a session using this default will be refused rather than started. Register it with `af accounts add claude missing` and log in';
+  const notice = saveNotice(
+    setResp({
+      result: { key: "default_accounts.claude", value: "missing", path: "/tmp/config.toml", requires_restart: false, warnings: [warning] },
+      // warnings absent: the apply channel is silent for an applied
+      // default_accounts write
+    }),
+  );
+  assert.equal(notice, `Applied — the running daemon is using the new value now. · ${warning}`);
+});
+
+test("saveNotice prefers the apply-time warnings when both channels speak", () => {
+  // The fallback is not a union: a daemon-running edit can carry differently
+  // worded versions of the same notice on both channels, and the TUI shows
+  // exactly the apply-time one. The surfaces must agree.
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: "0.0.0.0:8443", path: "/tmp/config.toml", requires_restart: false, warnings: ["write-time phrasing"] },
+      warnings: ["apply-time phrasing"],
+    }),
+  );
+  assert.doesNotMatch(notice, /write-time phrasing/);
+  assert.match(notice, /apply-time phrasing/);
+});
+
 test("setConfigValue surfaces the validator's own message on a rejected value", async () => {
   // The daemon returns the validator's error verbatim; a 500 is how this API
   // reports a handler error (daemon/httpserver.go). The browser must not rewrite
@@ -119,6 +235,63 @@ test("setConfigValue sends no Authorization header for the tokenless credential"
   });
   await setConfigValue("auto_update", "true", "");
   assert.equal(cap.auth, undefined);
+});
+
+// --- ExplainConfig (#4803): the daemon's provenance, not a browser recompute ---
+
+test("explainConfig posts only the key — the daemon owns resolution", async () => {
+  const cap = stubFetch({
+    explanation: {
+      key: "default_program",
+      value: "codex",
+      default: "claude",
+      merge: "replace",
+      precedence: ["global"],
+      winner: { layer: "global", path: "/home/u/.agent-factory/config.toml", key_path: "default_program" },
+      candidates: [
+        { layer: "built-in", present: true, allowed: true, value: "claude", result: "shadowed", reason: "overridden by higher-precedence global" },
+        { layer: "global", path: "/home/u/.agent-factory/config.toml", key_path: "default_program", present: true, allowed: true, value: "codex", result: "winner", reason: "highest-precedence present allowed source" },
+      ],
+    },
+    scope: "global",
+    running_value_checked: false,
+  });
+  const resp = await explainConfig("default_program", "tok");
+
+  assert.equal(cap.url, "/v1/ExplainConfig");
+  assert.deepEqual(cap.body, { key: "default_program" }, "no scope flag: the route is global-only");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.equal(resp.explanation.candidates.length, 2);
+  assert.equal(resp.explanation.candidates[1].result, "winner");
+  assert.equal(resp.running_value_checked, false, "the trace describes on-disk sources");
+});
+
+test("explainConfig surfaces the daemon's own refusal on an unknown key", async () => {
+  // The answer a user who typed a retired or misspelled key needs is the
+  // resolver's, not the browser's — show it verbatim rather than substituting
+  // a generic "not found".
+  stubFetch(null, { ok: false, status: 500, error: "unknown config key \"no.such.key\"" });
+
+  await assert.rejects(
+    () => explainConfig("no.such.key", "tok"),
+    (err: Error) => {
+      assert.match(err.message, /unknown config key/);
+      return true;
+    },
+  );
+});
+
+test("explainValueText spells values the way the CLI's explanation does", () => {
+  // The web half of one renderer: config.FormatExplainValue prints an
+  // explicitly configured empty string as `""` (a bare blank would read as
+  // absent), scalars bare, composites as compact JSON.
+  assert.equal(explainValueText("codex"), "codex");
+  assert.equal(explainValueText(""), '""');
+  assert.equal(explainValueText(true), "true");
+  assert.equal(explainValueText(42), "42");
+  assert.equal(explainValueText(null), "null");
+  assert.equal(explainValueText({ claude: "/usr/bin/claude" }), '{"claude":"/usr/bin/claude"}');
+  assert.equal(explainValueText(["a", "b"]), '["a","b"]');
 });
 
 // The web half of the anti-drift guarantee.
@@ -233,4 +406,49 @@ test("different keys are not queued behind each other", async () => {
   await Promise.all([slow, fast]);
 
   assert.deepEqual(finished, ["auto_update", "listen_addr"], "keys have no ordering relationship; they must not block each other");
+});
+
+// shouldCloseSavedField (#4383). The close-on-save rule reads a status that the
+// store holds as a LEVEL, and the post-save refetch re-delivers it. These pin the
+// edge requirement, because the cost of getting it wrong is the user's typing.
+const okStatus = (key: string): ConfigStatus => ({ key, value: "v", notice: "", error: "" });
+
+test("a save's success status closes the field it came from", () => {
+  assert.equal(
+    shouldCloseSavedField(okStatus("network.listen_addr"), "network.listen_addr", true),
+    true,
+    "the edge that commits a value must close the field, or the user is invited to write it twice",
+  );
+});
+
+test("the post-save refetch re-delivers the same status and must not close a newer edit", () => {
+  const status = okStatus("network.listen_addr");
+  // Delivery 1 is the save landing; delivery 2 is refreshConfig() committing fresh
+  // entries while configStatus is untouched. The user has typed again by then, so
+  // `editing` names the same key — the shape that silently discarded their text.
+  assert.equal(shouldCloseSavedField(status, "network.listen_addr", true), true);
+  assert.equal(
+    shouldCloseSavedField(status, "network.listen_addr", false),
+    false,
+    "a re-delivered status must not close an edit the user opened after the save",
+  );
+});
+
+test("a refused value leaves its field open to be corrected", () => {
+  const refused: ConfigStatus = { key: "update_channel", value: "", notice: "", error: "must be one of [stable, preview]" };
+  assert.equal(
+    shouldCloseSavedField(refused, "update_channel", true),
+    false,
+    "closing on an error would discard the text the validator is complaining about",
+  );
+});
+
+test("a save for another key never closes the field being edited", () => {
+  assert.equal(
+    shouldCloseSavedField(okStatus("auto_update"), "network.listen_addr", true),
+    false,
+    "saves are queued per key and can land in any order; only the field's OWN save closes it",
+  );
+  assert.equal(shouldCloseSavedField(okStatus("auto_update"), null, true), false);
+  assert.equal(shouldCloseSavedField(null, "network.listen_addr", true), false);
 });

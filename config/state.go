@@ -69,8 +69,9 @@ type State struct {
 	// side effect (config_load.go, materializeDefaultConfig) and the TUI calls it
 	// during boot, so "no config.toml yet" has already stopped being true by the
 	// time anything could ask. "Config looks default" is no better —
-	// DefaultConfig() shells out to detect the claude command, so its content
-	// varies by machine. Positive evidence is the only thing that survives.
+	// DefaultConfig() uses environment-cached claude command detection, so its
+	// content still varies by machine. Positive evidence is the only thing that
+	// survives.
 	//
 	// Additive: a new field needs no schema bump (an older af ignores it, a newer
 	// one defaults it to false and re-offers once).
@@ -143,7 +144,10 @@ func SaveState(state *State) error {
 		return fmt.Errorf("failed to get config directory: %w", err)
 	}
 
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	// MkdirAllUnderAFHome, not os.MkdirAll: this runs BEFORE the lock, so on a
+	// plain MkdirAll it was the first thing to re-create a deleted home and the
+	// ensureStorageParent guard behind it never got a say (#3845).
+	if err := MkdirAllUnderAFHome(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -180,7 +184,8 @@ func TrySaveState(state *State) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to get config directory: %w", err)
 	}
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	// See SaveState: ahead of the lock, so it needs the #3845 guard itself.
+	if err := MkdirAllUnderAFHome(configDir, 0755); err != nil {
 		return false, fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -242,13 +247,24 @@ func refuseStateDowngrade(statePath string) error {
 	}
 }
 
-// onDiskStateSchemaVersion reports whether a state.json blob carries a
-// schema_version field and, if so, how it parses. present is false for a
-// structurally-corrupt blob (not a JSON object), a JSON array (legacy), or an
-// object lacking the field — with verr carrying the parse failure for the
-// corrupt case. present is true when the field exists; verr is then non-nil iff
-// the value could not be interpreted as a version integer.
-func onDiskStateSchemaVersion(data []byte) (present bool, version int, verr error) {
+// OnDiskSchemaVersion reports whether a JSON store blob carries a schema_version
+// field and, if so, how it parses. It is the generic form of the schema-version
+// probe refuseStateDowngrade uses for state.json: the same field name
+// (SchemaVersionField) and the same interpretation rules every versioned store
+// in the tree shares.
+//
+// present is false for a structurally-corrupt blob (not a JSON object), a JSON
+// array (legacy), or an object lacking the field — with verr carrying the parse
+// failure for the corrupt case. present is true when the field exists; verr is
+// then non-nil iff the value could not be interpreted as a version integer
+// (null, a string, a negative, an overflowing number, or any non-integer
+// type). Callers that must not clobber a file a newer binary may have written
+// — e.g. a shutdown checkpoint that rewrites instances.json wholesale — use
+// present && verr != nil as the "possibly newer, refuse to overwrite" signal,
+// mirroring refuseStateDowngrade's present-but-uninterpretable rule: a value
+// this binary cannot interpret may come from a newer af, so the remedy is to
+// upgrade rather than to repair from memory.
+func OnDiskSchemaVersion(data []byte) (present bool, version int, verr error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	var root any
@@ -273,6 +289,16 @@ func onDiskStateSchemaVersion(data []byte) (present bool, version int, verr erro
 	}
 	version, verr = schemaVersionFromValue(value)
 	return true, version, verr
+}
+
+// onDiskStateSchemaVersion reports whether a state.json blob carries a
+// schema_version field and, if so, how it parses. present is false for a
+// structurally-corrupt blob (not a JSON object), a JSON array (legacy), or an
+// object lacking the field — with verr carrying the parse failure for the
+// corrupt case. present is true when the field exists; verr is then non-nil iff
+// the value could not be interpreted as a version integer.
+func onDiskStateSchemaVersion(data []byte) (present bool, version int, verr error) {
+	return OnDiskSchemaVersion(data)
 }
 
 // Per-repo instance file functions
@@ -307,11 +333,17 @@ func repoInstancesPath(repoID string) (string, error) {
 
 // LoadRepoInstances loads instances for a specific repo.
 func LoadRepoInstances(repoID string) (json.RawMessage, error) {
+	return LoadRepoInstancesWithReader(repoID, os.ReadFile)
+}
+
+// LoadRepoInstancesWithReader preserves the storage envelope and empty-file
+// semantics while allowing lifecycle callers to impose a filesystem deadline.
+func LoadRepoInstancesWithReader(repoID string, readFile func(string) ([]byte, error)) (json.RawMessage, error) {
 	path, err := repoInstancesPath(repoID)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return json.RawMessage("[]"), nil
@@ -502,25 +534,54 @@ func LoadAllRepoInstancesReportingSkips() (map[string]json.RawMessage, []string,
 	return result, ids, nil
 }
 
-// LoadAllRepoInstancesReportingSkipDetails is the primitive the two forms above
-// narrow: the records it could load, plus a RepoInstancesSkip per repo it could
+// LoadAllRepoInstancesReportingSkipDetails is what the two forms above narrow
+// (it narrows LoadAllRepoInstancesReportingMissing in turn): the records it could load, plus a RepoInstancesSkip per repo it could
 // not, carrying the file path and the underlying I/O error.
 //
 // Skips arrive in repoID order (os.ReadDir sorts), so a message built from them
 // is stable across runs.
 func LoadAllRepoInstancesReportingSkipDetails() (map[string]json.RawMessage, []RepoInstancesSkip, error) {
+	result, skipped, _, err := LoadAllRepoInstancesReportingMissing()
+	return result, skipped, err
+}
+
+// LoadAllRepoInstancesReportingSkipDetailsSilent is the no-log form of
+// LoadAllRepoInstancesReportingSkipDetails for read paths whose contract is
+// that af writes nothing: inside the daemon, WarningLog.Printf appends to
+// agent-factory.log, which is still an AF-home write attributable to the read
+// (#5136 Codex round 12). Skips carry the same detail through the caller's
+// warnings instead.
+func LoadAllRepoInstancesReportingSkipDetailsSilent() (map[string]json.RawMessage, []RepoInstancesSkip, error) {
+	result, skipped, _, err := loadAllRepoInstancesReportingMissing(nil)
+	return result, skipped, err
+}
+
+// LoadAllRepoInstancesReportingMissing is LoadAllRepoInstancesReportingSkipDetails
+// plus the repos whose directory exists but whose instances.json does not. Those
+// load as an empty "[]" like every other form reports them, and missing is the
+// only way to tell that apart from a file that was read and held no sessions.
+// The daemon needs the difference: only a real read may clear a repo it skipped
+// at startup, and a deleted file is an omission, not a repair (#4783).
+func LoadAllRepoInstancesReportingMissing() (map[string]json.RawMessage, []RepoInstancesSkip, map[string]bool, error) {
+	return loadAllRepoInstancesReportingMissing(log.WarningLog.Printf)
+}
+
+// loadAllRepoInstancesReportingMissing is the shared body; warnf reports a
+// per-repo load failure (nil = silent — see the Silent variant above).
+func loadAllRepoInstancesReportingMissing(warnf func(string, ...any)) (map[string]json.RawMessage, []RepoInstancesSkip, map[string]bool, error) {
 	dir, err := instancesDirPath()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	result := make(map[string]json.RawMessage)
 	var skipped []RepoInstancesSkip
+	missing := make(map[string]bool)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return result, nil, nil
+			return result, nil, missing, nil
 		}
-		return nil, nil, fmt.Errorf("failed to read instances directory: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to read instances directory: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -528,18 +589,23 @@ func LoadAllRepoInstancesReportingSkipDetails() (map[string]json.RawMessage, []R
 			continue
 		}
 		repoID := entry.Name()
-		data, err := loadRepoInstancesForAll(repoID)
+		data, fileMissing, err := loadRepoInstancesForAll(repoID)
 		if err != nil {
-			log.WarningLog.Printf("failed to load instances for repo %s: %v", repoID, err)
+			if warnf != nil {
+				warnf("failed to load instances for repo %s: %v", repoID, err)
+			}
 			// Best-effort: repoInstancesPath only fails on a repoID that is not
 			// a legal directory name, and String() falls back to the id then.
 			path, _ := repoInstancesPath(repoID)
 			skipped = append(skipped, RepoInstancesSkip{RepoID: repoID, Path: path, Err: err})
 			continue
 		}
+		if fileMissing {
+			missing[repoID] = true
+		}
 		result[repoID] = data
 	}
-	return result, skipped, nil
+	return result, skipped, missing, nil
 }
 
 // DeleteAllRepoInstances deletes all per-repo instance files.

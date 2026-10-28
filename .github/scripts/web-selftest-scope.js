@@ -1,7 +1,7 @@
 // Decides whether a change needs the Playwright web-driver selftest (#2762).
 //
 // The suite is a REQUIRED gate — pr.yml's Build job lists it in `needs`, which is
-// what gives a red run teeth (docs/web-selftest.md, and the header on
+// what gives a red run teeth (docs/dev/web-selftest.md, and the header on
 // .github/workflows/web-selftest.yml). But it is also the most expensive thing in
 // CI: a Go+Node+Chromium image, then a real daemon and a real browser. Running it
 // on every PR would tax every docs typo with that; running it on none of them is
@@ -73,6 +73,49 @@ const SELFTEST_PATHS = [
   ".github/scripts/web-selftest-scope.js",
 ];
 
+// The narrower client-performance scope requested in #3908 review. web/**
+// includes the Playwright configs, committed bundle, and per-theme goldens.
+// Docs-only and CI-gate-only edits do not pay for a second container job.
+//
+// config/** is on the list because the Config view renders the daemon's
+// manifest — keys, purposes, tiers — verbatim: a schema change there moves
+// pixels (the "Config N" count and the advanced fold) without touching web/**.
+// #4358 added watcher_events_per_minute under exactly that shape, the perf
+// job never ran, and the committed goldens drifted until the next web PR ate
+// the failure.
+const PERF_PATHS = ["web/**", "app/**", "ui/**", "config/**", "scripts/perf/**", "scripts/container/**"];
+
+function scopePerf(changedPaths) {
+  const matched = changedPaths.filter((path) =>
+    PERF_PATHS.some((pattern) => matchesPattern(pattern, path)),
+  );
+  return { run: matched.length > 0, matched };
+}
+
+// The surface the TUI driver selftest measures (#4000): the Bubble Tea app, its
+// widgets and key bindings, the tmux integration it drives, and the driver and
+// container harness itself. A footer copy change in ui/** broke it on master
+// once (#5549 -> #5643); on a PR touching these paths it runs before merge.
+// Exact paths and `dir/**` only — scripts/tui-driver*.sh is the two files it names.
+const TUI_PATHS = [
+  "ui/**",
+  "app/**",
+  "keys/**",
+  "session/tmux/**",
+  "scripts/tui-driver.sh",
+  "scripts/tui-driver-selftest.sh",
+  "scripts/testbox.sh",
+  "scripts/container/**",
+  ".github/workflows/tui-driver-selftest.yml",
+];
+
+function scopeTui(changedPaths) {
+  const matched = changedPaths.filter((path) =>
+    TUI_PATHS.some((pattern) => matchesPattern(pattern, path)),
+  );
+  return { run: matched.length > 0, matched };
+}
+
 // A deliberately tiny subset of GitHub's `paths:` globbing, matching what the
 // trigger filter does for the three shapes actually used:
 //
@@ -112,23 +155,29 @@ function scopeWebSelftest(changedPaths) {
 // CLI: `node web-selftest-scope.js <file-of-changed-paths>` prints `run=true` or
 // `run=false` on stdout for `>> "$GITHUB_OUTPUT"`, and the reasoning on stderr so
 // the job log says why it did what it did. A missing/unreadable file is not an
-// empty diff — it is a broken diff, so it prints run=true.
+// empty diff — it is a broken diff, so it prints run=true. A third argument
+// `perf` uses PERF_PATHS and prints perf_run=… into the same scope job.
 if (require.main === module) {
   const fs = require("node:fs");
   const file = process.argv[2];
+  const mode = process.argv[3];
+  const perf = mode === "perf";
+  const tui = mode === "tui";
+  const output = perf ? "perf_run" : tui ? "tui_run" : "run";
+  const label = perf ? "perf-scope" : tui ? "tui-scope" : "web-selftest-scope";
   let changed;
   try {
     changed = fs.readFileSync(file, "utf8").split("\n");
   } catch (error) {
-    process.stderr.write(`web-selftest-scope: cannot read ${file} (${error.message}) — running the suite\n`);
-    process.stdout.write("run=true\n");
+    process.stderr.write(`${label}: cannot read ${file} (${error.message}) — running the suite\n`);
+    process.stdout.write(`${output}=true\n`);
     process.exit(0);
   }
   const paths = changed.map((line) => line.trim()).filter((line) => line.length > 0);
-  const { run, matched } = scopeWebSelftest(paths);
+  const { run, matched } = (perf ? scopePerf : tui ? scopeTui : scopeWebSelftest)(paths);
   if (run) {
     process.stderr.write(
-      `web-selftest-scope: ${matched.length} of ${paths.length} changed path(s) are in scope, e.g.\n` +
+      `${label}: ${matched.length} of ${paths.length} changed path(s) are in scope, e.g.\n` +
         matched
           .slice(0, 10)
           .map((path) => `  ${path}\n`)
@@ -136,10 +185,10 @@ if (require.main === module) {
     );
   } else {
     process.stderr.write(
-      `web-selftest-scope: none of ${paths.length} changed path(s) can reach the web selftest — skipping it.\n`,
+      `${label}: none of ${paths.length} changed path(s) are in scope — skipping.\n`,
     );
   }
-  process.stdout.write(`run=${run}\n`);
+  process.stdout.write(`${output}=${run}\n`);
 }
 
-module.exports = { SELFTEST_PATHS, scopeWebSelftest, matchesPattern };
+module.exports = { SELFTEST_PATHS, PERF_PATHS, TUI_PATHS, scopeWebSelftest, scopePerf, scopeTui, matchesPattern };

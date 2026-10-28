@@ -3,7 +3,6 @@ package session
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -35,7 +34,8 @@ import (
 // Contract (docs/remote-hooks.md):
 //
 //	launch_cmd --name <slug> --title <title> --repo <cloneURL> \
-//	           [--branch <branch>] [--program <p>]
+//	           [--branch <branch>] [--program <p> --program-resolved] \
+//	           [--session-env <name>…]
 //	    clones <cloneURL> (repo@branch on RESTORE) on the user's infra, starts
 //	    `af agent-server --listen :PORT --repo <clonedir> --title <title> …`
 //	    there, and echoes ONE JSON object on stdout:
@@ -87,6 +87,31 @@ var (
 // credentials.
 const hookNoAgentEnvironmentProgram = "__af_no_agent_environment__"
 
+// The three seams below are how a test arranges os/exec's exit-vs-deadline
+// splice deterministically rather than on a wall-clock race; production always
+// leaves them nil. They mirror the archive hook's set (#4284), which guards the
+// same defect the guard in runHookScriptWithResolvedEnvironment fixes (#4411).
+
+// hookScriptMakeContext, if non-nil, supplies the run context for one hook
+// script. Tests inject a deadline that fires on demand — after the script's
+// own exit is kernel-observed — so the error watchCtx splices is
+// context.DeadlineExceeded rather than whatever a wall clock produced.
+var hookScriptMakeContext func(timeout time.Duration) (context.Context, context.CancelFunc)
+
+// hookScriptBeforeStart, if non-nil, is called with the fully configured hook
+// command immediately before cmd.Start(). Tests use it to attach an
+// exit-observation pipe through cmd.ExtraFiles: the hook shell inherits the
+// write end and the kernel closes it only when the process image is destroyed,
+// so an EOF on the read side proves the shell terminated rather than guessing
+// it has had time to.
+var hookScriptBeforeStart func(cmd *exec.Cmd)
+
+// hookScriptAfterStart, if non-nil, is called after cmd.Start() succeeds and
+// before cmd.Wait() is called. Tests use it to observe the script's exit, to
+// wrap cmd.Cancel — whose run is what proves os/exec's watchCtx took its
+// ctx.Done() arm — and to fire the injected deadline between the two.
+var hookScriptAfterStart func(cmd *exec.Cmd, cancel context.CancelFunc)
+
 // hookRuntime provisions a session on user-provided infrastructure via the
 // remote_hooks scripts (#1592 Phase 4 PR7). Declared in runtime.go's registry;
 // its Provision lives here (it replaces the pre-Phase-4 ForceRemote HookBackend
@@ -106,10 +131,16 @@ func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	hooks := *resolved.RemoteHooks
 	p := &hookProvisioner{
-		hooks:   hooks,
-		spec:    spec,
-		slug:    Slugify(spec.Title),
-		program: config.ResolveProgram(&resolved.Config, spec.Program),
+		hooks: hooks,
+		spec:  spec,
+		slug:  Slugify(spec.Title),
+		// The wire program is the configured name and flags — never af's
+		// auto-detected daemon path. The hook's agent-server resolves it on
+		// the host's login PATH (#5571).
+		program: remoteProgramForHost(resolved, spec.Program),
+		// sandbox.binary reaches the provision_cmd path, which provisions over
+		// the sandbox transport (#5571 W2.2).
+		sandboxBinary: strings.TrimSpace(resolved.Config.SandboxBinary),
 	}
 	if hooks.UsesProvisionCmd() {
 		// The ssh-host contract (#2847): the script makes a machine and says how
@@ -192,9 +223,34 @@ func (p *hookProvisioner) manualReapCommand() string {
 	return shellsuggest.Command(p.hooks.DeleteCmd, "--name", p.slug)
 }
 
-// runHookScriptWithEnvironment runs one hook script under a timeout and returns
-// its combined output. It exists to answer a question the obvious CombinedOutput() gets wrong:
-// WHICH CHILDREN ARE OURS TO KILL?
+// hookScriptOutput is one hook script's captured output, kept per-stream because
+// the endpoint contract is a STDOUT contract (docs/remote-hooks.md). Combined is
+// only for diagnostics, where both streams are worth showing.
+type hookScriptOutput struct {
+	Stdout []byte
+	Stderr []byte
+}
+
+// Combined renders both streams for an error message. Interleaving is not
+// recoverable from two files and is not worth a pipe to regain: stderr carries
+// the script's narrative and stdout carries at most the endpoint line, so
+// concatenating them loses nothing a reader was relying on.
+func (o hookScriptOutput) Combined() []byte {
+	switch {
+	case len(o.Stderr) == 0:
+		return o.Stdout
+	case len(o.Stdout) == 0:
+		return o.Stderr
+	}
+	combined := make([]byte, 0, len(o.Stderr)+len(o.Stdout)+1)
+	combined = append(combined, bytes.TrimRight(o.Stderr, "\n")...)
+	combined = append(combined, '\n')
+	return append(combined, o.Stdout...)
+}
+
+// runHookScriptWithResolvedEnvironment runs one hook script under a timeout and
+// returns its combined output. It exists to answer a question the obvious
+// CombinedOutput() gets wrong: WHICH CHILDREN ARE OURS TO KILL?
 //
 // Answer: only the script itself. A launch_cmd is DOCUMENTED to leave a tunnel or
 // port-forward running — that background process is not a leak, it is the product,
@@ -228,42 +284,14 @@ func (p *hookProvisioner) manualReapCommand() string {
 // endpoint (#2637). Two regular files keep every property the comment above is
 // about — still no pipe, still nothing a surviving tunnel can hold open — while
 // letting launch read the stream the docs actually promise.
-func runHookScriptWithEnvironment(timeout time.Duration, name, program string, passthrough []string, args ...string) (hookScriptOutput, *exec.Cmd, error) {
-	agentName := sessionenv.AgentForCommand(program)
-	if agentName == "" && strings.TrimSpace(program) == "" {
-		agentName = tmux.ProgramClaude
-	}
-	authSelectors := sessionenv.ResolveAuthSelectors(os.Environ(), agentName, program)
-	return runHookScriptWithResolvedEnvironment(timeout, name, agentName, authSelectors, passthrough, args...)
-}
-
-// hookScriptOutput is one hook script's captured output, kept per-stream because
-// the endpoint contract is a STDOUT contract (docs/remote-hooks.md). Combined is
-// only for diagnostics, where both streams are worth showing.
-type hookScriptOutput struct {
-	Stdout []byte
-	Stderr []byte
-}
-
-// Combined renders both streams for an error message. Interleaving is not
-// recoverable from two files and is not worth a pipe to regain: stderr carries
-// the script's narrative and stdout carries at most the endpoint line, so
-// concatenating them loses nothing a reader was relying on.
-func (o hookScriptOutput) Combined() []byte {
-	switch {
-	case len(o.Stderr) == 0:
-		return o.Stdout
-	case len(o.Stdout) == 0:
-		return o.Stderr
-	}
-	combined := make([]byte, 0, len(o.Stderr)+len(o.Stdout)+1)
-	combined = append(combined, bytes.TrimRight(o.Stderr, "\n")...)
-	combined = append(combined, '\n')
-	return append(combined, o.Stdout...)
-}
-
 func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent string, authSelectors, passthrough []string, args ...string) (hookScriptOutput, *exec.Cmd, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	makeContext := hookScriptMakeContext
+	if makeContext == nil {
+		makeContext = func(timeout time.Duration) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), timeout)
+		}
+	}
+	ctx, cancel := makeContext(timeout)
 	defer cancel()
 
 	// Regular files, not pipes: see the doc comment. Unlinked immediately on
@@ -288,14 +316,49 @@ func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent str
 	// group signals nothing by itself: a successful launch_cmd's tunnel is never
 	// killed, so the guarantee above is untouched.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	runErr := cmd.Run()
-	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		// The context deadline killed the script mid-run, so whatever it was doing
-		// to the remote workspace is UNKNOWN. exec surfaces this as a bare
-		// "signal: killed" that does NOT wrap context.DeadlineExceeded, so wrap it
-		// here — that is the only place the ctx is in scope — letting callers (reap
-		// in particular) tell a timeout from a script that answered, and retain the
-		// record instead of trusting a success that never happened (#2529).
+	if hookScriptBeforeStart != nil {
+		hookScriptBeforeStart(cmd)
+	}
+	// Start and Wait stay separate only so the afterStart seam can sit between
+	// them — cmd.Run() is exactly this pair with no seam.
+	runErr := cmd.Start()
+	if runErr == nil {
+		if hookScriptAfterStart != nil {
+			hookScriptAfterStart(cmd, cancel)
+		}
+		runErr = cmd.Wait()
+	}
+	// A process that exited 0 exited 0, whatever the context did afterwards.
+	// os/exec's watchCtx can splice ctx.Err() over a nil exit-0 result when the
+	// deadline fires in the same instant the script exits on its own — the
+	// <-ctx.Done() arm runs Cancel (Process.Kill answers nil on a zombie),
+	// records watch.err, and Wait returns it in place of the nil result
+	// (#4411 — the same splice #4284 fixed for the archive hook). Each clause
+	// of the guard is load-bearing: runErr must BE the context error, so an
+	// unrelated non-nil error beside a clean exit still surfaces; and
+	// Exited()+ExitCode()==0 is the kernel's proof the script terminated on its
+	// own terms — a SIGKILL'd script reports "signal: killed" with Exited()
+	// false and still takes the timeout wrap below. A real nonzero *ExitError
+	// does NOT take it: the script answered, so the wrap is gated on
+	// !Exited() below and the failure surfaces as itself (#4411 review).
+	if runErr != nil && cmd.ProcessState != nil && cmd.ProcessState.Exited() &&
+		cmd.ProcessState.ExitCode() == 0 &&
+		(errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, context.Canceled)) {
+		runErr = nil
+	}
+	// The context deadline killing a STILL-RUNNING script is a timeout:
+	// whatever it was doing to the remote workspace is UNKNOWN. exec surfaces
+	// this as a bare "signal: killed" that does NOT wrap context.DeadlineExceeded,
+	// so wrap it here — that is the only place the ctx is in scope — letting
+	// callers (reap in particular) tell a timeout from a script that answered,
+	// and retain the record instead of trusting a success that never happened
+	// (#2529). ProcessState gates the wrap: a script that reached its own exit
+	// ANSWERED, deadline or no — a clean exit was cleared above, and a nonzero
+	// one is a real failure to report, not an unproven timeout (#4411: an
+	// exit-23 wrapped here would route a clean answered reap into
+	// ErrWorkspaceStateUnknown, retaining the record and re-running delete_cmd).
+	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) &&
+		(cmd.ProcessState == nil || !cmd.ProcessState.Exited()) {
 		runErr = fmt.Errorf("%w: %w", context.DeadlineExceeded, runErr)
 	}
 
@@ -336,6 +399,9 @@ type hookProvisioner struct {
 	hooks config.RemoteHooks
 	spec  ProvisionSpec
 	slug  string
+	// sandboxBinary is the operator's sandbox.binary override, forwarded to the
+	// sandboxProvisioner that provision_cmd's ssh transport builds (#5571 W2.2).
+	sandboxBinary string
 	// program is the resolved command used to select the environment allowlist
 	// and as the command handed to the remote agent-server.
 	program string
@@ -371,21 +437,6 @@ type hookProvisioner struct {
 	reapErr error
 }
 
-// hookEndpointJSON is the object launch_cmd echoes: the authed `af agent-server`
-// endpoint the daemon dials — the same {url,token} docker/ssh read from their
-// in-sandbox agent-server banner, here handed back by the user's script instead.
-//
-// TLSFingerprint is accepted but IGNORED: af removed TLS, so a fingerprint is
-// meaningless now. It stays in the struct only so a launch_cmd written against
-// the old TLS contract (which echoed "tls_fingerprint") still parses without
-// error — the field is dropped, not honored. New scripts should omit it and echo
-// an http:// URL.
-type hookEndpointJSON struct {
-	URL            string `json:"url"`
-	Token          string `json:"token"`
-	TLSFingerprint string `json:"tls_fingerprint"`
-}
-
 // provision runs launch_cmd, parses the endpoint it echoes, and returns the
 // wiring a hook session needs: an inert HookBackend (its one local job is the
 // delete_cmd reap), the authed endpoint the daemon dials, and the teardown.
@@ -398,8 +449,12 @@ func (p *hookProvisioner) provision() (ProvisionResult, error) {
 	log.InfoLog.Printf("hook runtime: session %q provisioned via launch_cmd, agent-server at %s", p.spec.Title, ep.URL)
 	return ProvisionResult{
 		Backend: &HookBackend{
-			provisioner: p,
-			cleanup:     p.cleanupData(),
+			// The command launch_cmd was handed via --program (#5108) — the
+			// hook contract is to run the agent-server bound to it, and the
+			// launch RPC records it as runtime evidence.
+			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.environmentProgram()},
+			provisioner:        p,
+			cleanup:            p.cleanupData(),
 		},
 		Endpoint: ep,
 		Teardown: teardown,
@@ -416,78 +471,6 @@ func (p *hookProvisioner) cleanupData() *HookRuntimeCleanupData {
 		AuthSelectorsResolved: true,
 		SessionEnvPassthrough: append([]string(nil), p.spec.SessionEnvPassthrough...),
 	}
-}
-
-// hookOutputSuffix renders a hook script's combined output for an error message.
-// One complete JSON value can be reported with its token fields redacted
-// precisely. An unparseable payload is replaced wholesale because none of its
-// apparent field boundaries are trustworthy.
-//
-// Empty output gets named rather than left to inference: "launch_cmd failed:
-// exit status 1" with nothing after it reads like af truncated something. Saying
-// the script printed nothing points the reader at their script's own error
-// handling rather than at af. (The timeout case is carried by the wrapped error
-// from runHookScript — "signal: killed" — so it is not re-derived here.)
-func hookOutputSuffix(out []byte) string {
-	trimmed := strings.TrimSpace(redactHookOutputTokens(string(out)))
-	if trimmed == "" {
-		return "; it printed nothing — a hook script must report its own errors, " +
-			"or the cause reaches nobody (see docs/remote-hooks.md)"
-	}
-	return fmt.Sprintf("; its output was:\n%s", trimmed)
-}
-
-func decodeHookEndpointJSON(candidate string) (hookEndpointJSON, bool) {
-	decoder := json.NewDecoder(strings.NewReader(candidate))
-	opening, err := decoder.Token()
-	if err != nil || opening != json.Delim('{') {
-		return hookEndpointJSON{}, false
-	}
-
-	fields := make(map[string]struct{}, 3)
-	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return hookEndpointJSON{}, false
-		}
-		key, ok := token.(string)
-		if !ok {
-			return hookEndpointJSON{}, false
-		}
-		switch key {
-		case "url", "token", "tls_fingerprint":
-		default:
-			return hookEndpointJSON{}, false
-		}
-		if _, duplicate := fields[key]; duplicate {
-			return hookEndpointJSON{}, false
-		}
-		fields[key] = struct{}{}
-
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return hookEndpointJSON{}, false
-		}
-	}
-	closing, err := decoder.Token()
-	if err != nil || closing != json.Delim('}') {
-		return hookEndpointJSON{}, false
-	}
-	if _, ok := fields["url"]; !ok {
-		return hookEndpointJSON{}, false
-	}
-	if _, ok := fields["token"]; !ok {
-		return hookEndpointJSON{}, false
-	}
-
-	var endpoint hookEndpointJSON
-	if err := json.Unmarshal([]byte(candidate), &endpoint); err != nil {
-		return hookEndpointJSON{}, false
-	}
-	if strings.TrimSpace(endpoint.URL) == "" || strings.TrimSpace(endpoint.Token) == "" {
-		return hookEndpointJSON{}, false
-	}
-	return endpoint, true
 }
 
 // launch runs the user's launch_cmd with the provision spec as flags, then
@@ -581,116 +564,6 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 		"it must echo the af agent-server's {\"url\",\"token\"} with both non-empty "+
 		"(see docs/remote-hooks.md for the recipe)%s",
 		p.hooks.LaunchCmd, hookOutputSuffix(out.Combined()))
-}
-
-// hookStdoutViolation carries the stdout bytes that were not the endpoint
-// record. launch_cmd's stdout is reserved for the {"url","token"} JSON, so
-// anything else on it breaks the contract — offending is the text quoted back to
-// the operator, redacted and bounded by hookStdoutExcerpt before it is shown.
-type hookStdoutViolation struct {
-	offending string
-}
-
-// hookStdoutExcerptRunes bounds the offending text in the error's first line. A
-// flooding tunnel must not paste megabytes into a headline whose job is to name
-// one thing to go fix; the script's whole output is attached below it anyway.
-const hookStdoutExcerptRunes = 200
-
-// hookStdoutExcerptScanBytes bounds what the excerpt reads to find that line.
-// The offending text can be the whole of a flooded stdout, and rendering one
-// line of it must not cost a redaction pass over all of it.
-const hookStdoutExcerptScanBytes = 8 << 10
-
-// parseHookEndpoint reads launch_cmd's stdout, which by contract holds the
-// {"url","token"} endpoint record and nothing else. It returns the endpoint,
-// whether stdout held JSON at all (which separates "printed nothing" from
-// "printed the wrong shape" in the error), and any content that was not the
-// record.
-//
-// This is a parse, not a classification, and that is the whole point of the
-// schema change. While docs/remote-hooks.md let a background tunnel inherit
-// stdout, "is this line the endpoint or a log?" was UNDECIDABLE: #2845 exhibits
-// two input pairs identical on every inspectable property that require opposite
-// handling, and seven successive rules each closed one counterexample and
-// admitted the next. Reserving the stream removes the question rather than
-// answering it — one JSON value, of the documented shape, surrounded by nothing
-// but whitespace.
-//
-// Whitespace is not content: a trailing newline from `echo`, an indent, a blank
-// line, and a CRLF ending are all what a shell normally produces and none of
-// them is another writer on the stream.
-func parseHookEndpoint(stdout string) (*AgentServerEndpoint, bool, *hookStdoutViolation) {
-	open := 0
-	for open < len(stdout) && isJSONSpace(stdout[open]) {
-		open++
-	}
-	if open >= len(stdout) {
-		// Nothing at all on stdout. That is a different diagnosis from "it also
-		// printed something else", and gets its own error.
-		return nil, false, nil
-	}
-
-	decoder := json.NewDecoder(strings.NewReader(stdout[open:]))
-	var raw json.RawMessage
-	if err := decoder.Decode(&raw); err != nil {
-		// stdout does not begin with a JSON value, so all of it is the other output
-		// the contract forbids — a tunnel that logged first, or a status line.
-		return nil, false, &hookStdoutViolation{offending: stdout[open:]}
-	}
-
-	valueEnd := open + int(decoder.InputOffset())
-	tail := valueEnd
-	for tail < len(stdout) && isJSONSpace(stdout[tail]) {
-		tail++
-	}
-	endpoint, isEndpoint := decodeHookEndpointJSON(string(raw))
-	if tail >= len(stdout) {
-		if isEndpoint {
-			// endpoint.TLSFingerprint is intentionally not read — TLS was removed; an
-			// old script that still echoes it parses fine and the value is dropped.
-			return &AgentServerEndpoint{URL: endpoint.URL, Token: endpoint.Token}, true, nil
-		}
-		// One value, wrong shape. That is a different diagnosis from a shared
-		// stream, and the operator needs to hear about the schema, not a redirect.
-		return nil, true, nil
-	}
-
-	// More than one thing on stdout, so quote the FIRST of them that is not the
-	// endpoint record — the leading value when it is not one, otherwise whatever
-	// follows the record. This chooses what to SHOW, never what to dial: both
-	// halves are refused either way, so no guess is smuggled back in. A second
-	// endpoint-shaped object is refused too, because picking between them is
-	// exactly the guess this contract exists to delete.
-	if !isEndpoint {
-		return nil, true, &hookStdoutViolation{offending: stdout[open:valueEnd]}
-	}
-	return nil, true, &hookStdoutViolation{offending: stdout[tail:]}
-}
-
-// hookStdoutExcerpt renders a safe, bounded summary of non-endpoint stdout for
-// the error's first line. A complete JSON value is structurally sanitized; an
-// unparseable value collapses to the redaction marker before any line is chosen.
-func hookStdoutExcerpt(offending string) string {
-	if len(offending) > hookStdoutExcerptScanBytes {
-		offending = offending[:hookStdoutExcerptScanBytes]
-	}
-	for rest := redactHookOutputTokens(offending); rest != ""; {
-		line, remainder, _ := strings.Cut(rest, "\n")
-		rest = remainder
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if runes := []rune(trimmed); len(runes) > hookStdoutExcerptRunes {
-			return strings.TrimRight(string(runes[:hookStdoutExcerptRunes]), " \t") + "…"
-		}
-		return trimmed
-	}
-	return ""
-}
-
-func isJSONSpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
 
 // reap runs delete_cmd to tear down whatever launch_cmd provisioned, idempotently
@@ -834,7 +707,13 @@ func (p *hookProvisioner) environmentProgram() string {
 }
 
 func (p *hookProvisioner) environmentAgent() string {
-	agent := sessionenv.AgentForCommand(p.environmentProgram())
+	// The grant predicate filters the environment repo-controlled hook scripts
+	// receive, so it must not be satisfied by a relative or resolution-mutating
+	// program (#5265). The remote variant — the hook runs on a host af cannot
+	// stat, and its remote working directory is equally unknowable, so ""
+	// leaves the absolute-path containment check open while every
+	// non-absolute spelling still earns no grant.
+	agent := sessionenv.GrantAgentForRemoteCommand(p.environmentProgram(), "")
 	if agent == "" && strings.TrimSpace(p.environmentProgram()) == "" {
 		return tmux.ProgramClaude
 	}

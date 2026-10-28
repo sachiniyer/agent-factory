@@ -1,0 +1,62 @@
+# File-length lint (#1145)
+
+For contributors whose Go changes hit the file-length gate, and reviewers
+deciding where code should live. This page explains the limits and how the
+allowlist ratchets down.
+
+Read the [contributor overview](index.md) first for the pull request checks.
+Then use the limits below to decide whether to split a file or remove an
+obsolete allowlist entry.
+
+A structural-health guard that keeps Go source files from silently growing
+into 2000-line monsters. Large files are decomposition candidates and a
+recurring source of merge pain and gotchas, so CI now bounds them.
+
+## What it checks
+
+`scripts/lint-file-length.sh` counts the **total physical lines** (`wc -l`) of
+every tracked Go file and fails if a file is over its limit:
+
+| File kind      | Limit       |
+| -------------- | ----------- |
+| production `.go` | 1000 lines |
+| `*_test.go`      | 1500 lines |
+
+Total lines — not non-blank/non-comment lines — is what a reader scrolls
+through and what your editor's gutter shows; it needs no Go parsing and is
+unambiguous. Test files get a higher ceiling because table-driven tests run
+legitimately longer, but they're still bounded.
+
+## The allowlist (grandfathering + ratchet)
+
+Several files already exceeded these limits when the lint landed. They're
+grandfathered in `scripts/file-length-allowlist.txt`, one `path ceiling` per
+line, where `ceiling` is the file's line count at grandfathering time.
+
+The ceiling is a **ratchet**: a grandfathered file may not grow past it, so
+the big files can only shrink. When a file is decomposed back under the base
+limit, remove its entry — the lint fails if a grandfathered file has already
+dropped to/under the limit (a dead entry), so the allowlist can't rot.
+
+Do **not** add new entries to dodge the limit. A brand-new file over the limit
+should be split, not grandfathered.
+
+There are currently no grandfathered files.
+
+## Running it
+
+```bash
+scripts/lint-file-length.sh      # or: make lint-file-length
+```
+
+It runs in CI as the **Check file lengths** step of the lint job in both
+`.github/workflows/pr.yml` (PR gate) and `.github/workflows/lint.yml` (master
+push).
+
+## When CI fails on this
+
+- **New file over the limit** → split it into focused files.
+- **Grandfathered file grew past its ceiling** → you added to a file that's
+  already too big; move the new code elsewhere or decompose the file.
+- **Dead allowlist entry** → you shrank a file under its limit; delete its
+  line from the allowlist.

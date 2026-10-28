@@ -21,7 +21,7 @@ judge what a human would think of it.
 container sandbox** — it satisfies every isolation rule below structurally
 (the container has its own tmux server, a throwaway AF home, a pre-built
 mock repo, pids/memory caps, and teardown is one `docker rm -f`). See
-[docs/container-testing.md](../../docs/container-testing.md).
+[docs/dev/container-testing.md](../../docs/dev/container-testing.md).
 
 ```bash
 WORK="/tmp/af-playtest-$(date +%Y%m%d-%H%M%S)" && mkdir -p "$WORK"
@@ -58,7 +58,7 @@ a `$TMUX` collision in #1155. Source
 self-synchronizing (waits on a screen marker, never a blind sleep),
 `af_ensure_nav` forces a known focus state, and `af_expect_selected` /
 `af_assert_no_orphan_clients` give real assertions. See
-[docs/tui-manual-testing.md](../../docs/tui-manual-testing.md) for the
+[docs/dev/tui-manual-testing.md](../../docs/dev/tui-manual-testing.md) for the
 interaction model and a gate-recipe library.
 
 ```bash
@@ -242,7 +242,7 @@ to cross-check the help view against reality):
 2. **Attach & drive** — `enter`/`o` to open, `tab`/`shift+tab` to move
    focus, type real shell work into the instance pane, detach. Does focus
    go where you expect? Is it obvious how to get back out?
-3. **Tabs** — `t` new tab, `1`–`9` jump, `w` close. Also
+3. **Tabs** — `t` new tab, `1`–`9` jump, `w` delete tab (asks first; `y` confirms). Also
    `"$AF" sessions tab-create` from the CLI and confirm the TUI reflects it.
 4. **Panes** — `s` open the selected tab as a pane (or focus its pane), `S`
    commit the current preview as another pane, `x` hide the focused pane.
@@ -261,10 +261,6 @@ to cross-check the help view against reality):
    reattach.
 10. **CLI parity** — `"$AF" sessions list/get/preview/send-prompt/kill`
     against the same sandbox; confirm CLI and TUI agree.
-
-Things that don't apply in the sandbox (e.g. `p` open-PR with no GitHub
-remote) are still worth one press: a graceful, well-worded error is a pass;
-a panic or silent nothing is a finding.
 
 Keep a running findings log (`$WORK/findings.md`): one line per
 observation, with the exact repro (keys pressed, screen state, expected vs

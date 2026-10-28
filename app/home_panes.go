@@ -35,13 +35,13 @@ func (m *home) selectionChanged() tea.Cmd {
 
 	// While attached, the workspace is hidden behind the tmux client and the
 	// panes will be repainted by repaintAfterDetachMsg as soon as the user
-	// detaches. Skip the refresh + PR fetch dispatches so they don't queue
+	// detaches. Skip the refresh dispatches so they don't queue
 	// capture-pane / gh pr view work behind the user's detach key (#598). The
 	// synchronous mutations (binding, menu state) still run so sidebar nav
 	// that happens between attach failures is consistent.
 	attachedNow := m.attached.Load()
 
-	var prFetch, previewCmd tea.Cmd
+	var previewCmd tea.Cmd
 	if sel.Kind == ui.SectionInstances && !sel.IsHeader {
 		selected := m.sidebar.GetSelectedInstance()
 		// Track the cursor's instance in the store's display selection — what
@@ -59,12 +59,6 @@ func (m *home) selectionChanged() tea.Cmd {
 		}
 		previewCmd = m.updatePanePreview(selected, previewTab, previewTabSpecific, attachedNow)
 		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
-		// Lazily poke daemon-owned PR discovery when the user lands on an
-		// instance. refreshPRInfoCmd throttles this window's repeated selection
-		// events; the daemon owns eligibility and the cross-client debounce.
-		if !attachedNow && selected != nil && selected.Started() {
-			prFetch = refreshPRInfoCmd(selected, m.repoID, false)
-		}
 	} else {
 		// Header row: the menu drops the instance-specific hints; the open
 		// panes are untouched (they are explicit bindings, not
@@ -76,16 +70,15 @@ func (m *home) selectionChanged() tea.Cmd {
 		m.maybeAutoOpenInitialPane(nil)
 		m.cancelPanePreview(false)
 		m.panePreviewSuppression = nil
-		// An archived row still drives the footer menu so the dedicated restore
-		// key (`r`) is discoverable on it (#1605); a section header clears the
-		// menu as before. Archived sessions own no live tmux, so the pane
-		// preview/auto-open path above deliberately stays in its nil-instance
-		// form — only the menu learns the selection.
-		if sel.Kind == ui.SectionArchived && !sel.IsHeader {
-			m.menu.SetInstance(m.sidebar.GetSelectedInstance())
-		} else {
-			m.menu.SetInstance(nil)
-		}
+		// The footer must name the verbs that work on the row the user sees as
+		// selected: the cursor's own row, or — while the cursor rests on a
+		// section header — the resting (archived/lost/dead) row the store's
+		// display binding still marks with ▾ (#4755). Archived sessions own no
+		// live tmux, so the pane preview/auto-open path above deliberately stays
+		// in its nil-instance form — only the menu learns the selection. A live
+		// binding is NOT adopted onto a header: the panes legitimately keep
+		// showing it, and headers carry no live-row verbs.
+		m.menu.SetInstance(m.sidebar.RowVerbTarget())
 		if selected := m.store.GetSelectedInstance(); selected != nil && !m.store.ContainsInstance(selected) {
 			// The sticky binding dangles — its instance was removed (e.g. the
 			// last instance killed while attached). Drop it so the pane verbs
@@ -94,7 +87,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		}
 	}
 
-	return tea.Batch(prFetch, previewCmd, m.panesRefresh(attachedNow))
+	return tea.Batch(previewCmd, m.panesRefresh(attachedNow))
 }
 
 // clampSelectionTab bounds the selection's active tab index against the

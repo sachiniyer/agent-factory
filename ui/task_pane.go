@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/schedule"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -18,25 +19,25 @@ import (
 
 // programDefaultLabel is the selector option that resolves to an empty Program
 // string (the daemon then falls back to the user's configured default_program).
-const programDefaultLabel = "(use config default)"
+const programDefaultLabel = "Use config default"
 
 // watchRunNowRefusal explains why "run now" is unavailable on a watch task.
 // Both surfaces that accept r (the list and the editor) report it, so it lives
 // in one place rather than drifting between them.
-const watchRunNowRefusal = "watch tasks run on their watch command's output, not on manual trigger"
+const watchRunNowRefusal = "Watch tasks run on output, not manually."
 
 // taskPlaceholderStyle renders form placeholders faint so an example (the
 // cron "e.g. 0 9 * * 1-5") can never be mistaken for a typed value.
 var taskPlaceholderStyle = lipgloss.NewStyle().
-	Faint(true).
-	Foreground(activeTheme.ForegroundDim)
+	Foreground(activeTheme.InkMuted)
 
 // taskFormMoreStyle dims the ↑/↓ markers flagging fields scrolled out of a
 // height-clamped edit form (#1098).
-var taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundDim)
+var taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
 
 // Edit-form focus stops, in tab order. The form is grouped: Essentials
-// (name, trigger, prompt) then Delivery (target session, path, program).
+// (name, trigger, prompt) then Delivery (target session, on-complete, path,
+// program).
 // The trigger is a two-step stop: a cron|watch type selector followed by the
 // matching value input — only the selected trigger's field is shown, which
 // makes the exactly-one-trigger contract (#782) structural instead of a
@@ -47,6 +48,7 @@ const (
 	taskFocusTriggerValue // cron expression or watch command, per the selector
 	taskFocusPrompt
 	taskFocusTarget
+	taskFocusOnComplete // spawned-session lifecycle: keep | archive | kill (#2595)
 	taskFocusPath
 	taskFocusProgram
 	taskFocusSave
@@ -55,6 +57,8 @@ const (
 
 // TaskPane renders an inline task editor in the right pane.
 type TaskPane struct {
+	showActions bool
+	unavailable string
 	tasks       []task.Task
 	selectedIdx int
 
@@ -80,8 +84,15 @@ type TaskPane struct {
 	// enum (#658); per-task paths-with-flags are out of scope.
 	editProgramOptions []string
 	editProgramIdx     int
-	editError          string // last validation error shown to the user
-	editErrorField     int    // focus stop the error is rendered under (-1 = none)
+	// Spawned-session lifecycle selector state (#2595). editOnCompleteOptions
+	// is task.OnCompleteValues() verbatim — the SERVED order, least destructive
+	// first — rather than a copy, so a verb added there reaches this picker with
+	// no change here (the #1970 rule: a surface must not carry its own copy of an
+	// enum the daemon owns).
+	editOnCompleteOptions []string
+	editOnCompleteIdx     int
+	editError             string // last validation error shown to the user
+	editErrorField        int    // focus stop the error is rendered under (-1 = none)
 	// listNotice is the list-mode counterpart of editError: edit mode hangs a
 	// validation message under the offending field, but list mode has no
 	// fields, so a refused action (r on a watch task) reported nothing and the
@@ -117,13 +128,43 @@ type TaskPane struct {
 	// the whole task — means a save of one field can never clobber a field
 	// another writer changed out-of-band while the editor was open (#1700).
 	originals map[string]task.Task
-	deleted   []task.Task
-	hasFocus  bool
+	// discardedDrafts names the drafts DiscardDeletedDraft dropped because a
+	// save proved their task deleted (#4798), until the app takes them as one
+	// notice with TakeDiscardedDraftNotice.
+	discardedDrafts []string
+	// unconfirmedIDs marks held edits whose save may have landed with only its
+	// reply lost (#4824). They stay in dirtyIDs, so the draft is kept and shown,
+	// but ConsumeDirty skips them: an automatic save must not re-send a patch
+	// the daemon may already hold. A new edit to the task clears the mark.
+	// settledDrafts and unconfirmedQuitWarned carry their notices; see
+	// task_pane_unconfirmed.go.
+	unconfirmedIDs        map[string]bool
+	settledDrafts         []string
+	unconfirmedQuitWarned bool
+	// crossRepoRetargets names edits that a save retargeted out of the active
+	// project — the task landed in another repo, so the active-scope reload
+	// below drops its row from the pane. draining via
+	// TakeCrossRepoRetargetNotice surfaces where it landed instead of the silent
+	// drop that invites a re-edit (#1836). See task_pane_crossrepo.go.
+	crossRepoRetargets []crossRepoRetarget
+	deleted            []task.Task
+	hasFocus           bool
+
+	// now is inherited from the owning AutomationsPane and passed to each
+	// schedule picker for its custom-cron next-run preview.
+	now func() time.Time
 }
 
 // NewTaskPane creates a new task pane.
 func NewTaskPane() *TaskPane {
-	return &TaskPane{}
+	return &TaskPane{now: time.Now}
+}
+
+func (s *TaskPane) setNowForTest(now func() time.Time) {
+	s.now = now
+	if s.schedule != nil {
+		s.schedule.now = now
+	}
 }
 
 // SetSize sets the display dimensions.
@@ -161,9 +202,10 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	// rather than a raw-cron field; the picker generates the cron the store
 	// still persists. It is seeded below from the task's existing cron.
 	picker := newSchedulePicker()
+	picker.now = s.now
 
 	watch := textinput.New()
-	watch.Placeholder = "long-running cmd; 1 stdout line = 1 event"
+	watch.Placeholder = "Long-running command · one output line triggers one run"
 	watch.PlaceholderStyle = taskPlaceholderStyle
 	watch.CharLimit = 256
 	watch.Blur()
@@ -187,6 +229,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 		path.SetValue(tsk.ProjectPath)
 		s.editTriggerIsWatch = tsk.IsWatch()
 		s.setProgramFromValue(tsk.Program)
+		s.setOnCompleteFromValue(tsk.OnComplete)
 		// Re-open an existing time trigger on its matching preset when the cron
 		// maps cleanly; otherwise ParseCron falls back to Custom with the raw
 		// expression shown, so nothing is lost (#2057).
@@ -198,6 +241,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 		path.SetValue(defaultPath)
 		s.editTriggerIsWatch = false
 		s.setProgramFromValue("")
+		s.setOnCompleteFromValue("")
 	}
 
 	s.editName = name
@@ -266,6 +310,63 @@ func (s *TaskPane) programValue() string {
 	return s.editProgramOptions[s.editProgramIdx]
 }
 
+// setOnCompleteFromValue initializes the spawned-session lifecycle selector
+// from a stored OnComplete verb (#2595). The stored form is lowercase, and
+// EMPTY means keep — task.CanonicalOnComplete is the one function that says so,
+// and it is asked here rather than re-implemented, so a legacy row written
+// before the field existed seeds the same option as an explicit "keep".
+//
+// An unrecognized verb seeds keep. That is the safe direction and matches
+// setProgramFromValue: the alternative is an out-of-range index, which would
+// render nothing and save a value the user never saw. It cannot arise from the
+// daemon — task.ValidateTrigger rejects an unknown verb on the way in — so it
+// only covers a hand-edited tasks.json.
+func (s *TaskPane) setOnCompleteFromValue(value string) {
+	s.editOnCompleteOptions = task.OnCompleteValues()
+	canonical := task.CanonicalOnComplete(value)
+	for i, v := range s.editOnCompleteOptions {
+		if v == canonical {
+			s.editOnCompleteIdx = i
+			return
+		}
+	}
+	s.editOnCompleteIdx = 0
+}
+
+// onCompleteApplies reports whether the form's CURRENT target-session value
+// leaves room for a spawned-session lifecycle. It asks
+// task.CanonicalTargetSession — the same function task.onCompleteApplies,
+// ValidateTrigger and deliverTaskPrompt ask — because a form that answered
+// "does this task have a target session?" its own way would offer a verb the
+// daemon then refuses, which is the two-answers defect CanonicalTargetSession
+// exists to remove.
+func (s *TaskPane) onCompleteApplies() bool {
+	return task.CanonicalTargetSession(s.editTarget.Value()) == ""
+}
+
+// onCompleteValue returns the OnComplete verb to save for the current selector
+// state, in the STORED form: "" for keep, so an untouched task's record is
+// byte-identical to what it was before the field existed (task.canonicalizeOnComplete).
+//
+// A task with a target session saves "" whatever the selector shows. That is not
+// the selector being ignored — the selector is rendered inapplicable in that
+// state and refuses input — it is the save agreeing with what the daemon would
+// do anyway (task.clearInapplicableOnComplete), so the patch task.DiffTask emits
+// cannot carry a verb ValidateTrigger would reject.
+func (s *TaskPane) onCompleteValue() string {
+	if !s.onCompleteApplies() {
+		return ""
+	}
+	if s.editOnCompleteIdx <= 0 || s.editOnCompleteIdx >= len(s.editOnCompleteOptions) {
+		return ""
+	}
+	verb := s.editOnCompleteOptions[s.editOnCompleteIdx]
+	if verb == task.OnCompleteKeep {
+		return ""
+	}
+	return verb
+}
+
 // triggerValues resolves the two trigger buffers to the exactly-one contract:
 // only the selected trigger type's value is returned; the inactive buffer is
 // discarded regardless of content, so a save can never produce both.
@@ -281,14 +382,44 @@ func (s *TaskPane) HasPendingCreate() bool {
 	return s.pendingCreate
 }
 
+// TaskDraft is the create form's submitted content, handed to the app layer to
+// finish into a task.Task (it supplies the id, creation time, and the program
+// default the form leaves empty).
+//
+// A struct rather than the tuple this used to return. Eight same-typed strings
+// in a row is a transposition the compiler cannot see, and the form only grows:
+// the seventh (program) and eighth (on-complete) both arrived after the shape
+// was chosen, and a ninth would arrive the same way.
+type TaskDraft struct {
+	Name          string
+	Prompt        string
+	Cron          string
+	WatchCmd      string
+	TargetSession string
+	Path          string
+	// Program is the user-supplied agent override; empty means "use the
+	// caller's default".
+	Program string
+	// OnComplete is the spawned-session lifecycle verb in its STORED form
+	// (#2595): "" for keep, and "" as well when the draft names a target
+	// session, which cannot carry one. See TaskPane.onCompleteValue.
+	OnComplete string
+}
+
 // ConsumePendingCreate returns the submitted create data and clears the pending flag.
-// program is the user-supplied program override; empty means "use the caller's default".
-func (s *TaskPane) ConsumePendingCreate() (name, prompt, cron, watchCmd, targetSession, path, program string) {
+func (s *TaskPane) ConsumePendingCreate() TaskDraft {
 	s.pendingCreate = false
 	cronVal, watchVal := s.triggerValues()
-	return s.editName.Value(), s.editPrompt.Value(),
-		cronVal, watchVal,
-		s.editTarget.Value(), s.editPath.Value(), s.programValue()
+	return TaskDraft{
+		Name:          s.editName.Value(),
+		Prompt:        s.editPrompt.Value(),
+		Cron:          cronVal,
+		WatchCmd:      watchVal,
+		TargetSession: s.editTarget.Value(),
+		Path:          s.editPath.Value(),
+		Program:       s.programValue(),
+		OnComplete:    s.onCompleteValue(),
+	}
 }
 
 // HasPendingTrigger returns true if a task was triggered to run immediately.
@@ -341,9 +472,29 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 	if msg.String() == "ctrl+c" || configuredQuitKey(msg) {
 		return false
 	}
+	// A failed refresh retains the last tasks internally so a later successful
+	// sync can reconcile them, but recovery mode deliberately renders no
+	// selection. Keep every selection-dependent key inert until the data is
+	// available again; `n` and Esc remain live affordances in the recovery
+	// footer.
+	if s.unavailable != "" {
+		switch msg.String() {
+		case "up", "k", "down", "j", "x", "D", "enter", "r":
+			return true
+		}
+	}
 	switch msg.String() {
+	case "?":
+		s.showActions = !s.showActions
+		return true
 	case "esc":
-		s.hasFocus = false
+		// Route the close through SetFocus(false) so the pendingCreate /
+		// pendingTrigger / pendingTriggerID clears the #1531 contract relies on
+		// actually run. Writing hasFocus directly bypasses them, so a pending
+		// run-now whose pre-trigger flush failed survives the close and fires on
+		// the first keypress after reopen (SetTasks preserves it deliberately for
+		// the mid-flush reload, #1474, so the close is the only drop).
+		s.SetFocus(false)
 		return true
 	case "up", "k":
 		if s.selectedIdx > 0 {
@@ -389,15 +540,55 @@ func (s *TaskPane) selectedTaskIsWatch() bool {
 }
 
 func (s *TaskPane) toggleSelectedTask() {
-	if !s.selectedTaskInRange() {
+	if s.unavailable != "" || !s.selectedTaskInRange() {
 		return
 	}
 	s.tasks[s.selectedIdx].Enabled = !s.tasks[s.selectedIdx].Enabled
 	s.markTaskDirty(s.tasks[s.selectedIdx].ID)
 }
 
-func (s *TaskPane) deleteSelectedTask() {
+// SelectedTask returns the selected identity for target-specific confirmations.
+func (s *TaskPane) SelectedTask() (task.Task, bool) {
+	if s.unavailable != "" {
+		// Recovery mode retains tasks internally for the next successful sync,
+		// but renders no selection and must not hand that hidden identity to
+		// root-routed actions such as the task delete confirmation.
+		return task.Task{}, false
+	}
 	if !s.selectedTaskInRange() {
+		return task.Task{}, false
+	}
+	return s.tasks[s.selectedIdx], true
+}
+
+// DeleteTask removes the confirmed identity even if a refresh moved the cursor.
+// It refuses stale confirmations after a failed refresh without changing selection.
+func (s *TaskPane) DeleteTask(id string) bool {
+	if s.unavailable != "" {
+		return false
+	}
+	for i := range s.tasks {
+		if s.tasks[i].ID == id {
+			s.selectedIdx = i
+			s.deleteSelectedTask()
+			// A delete confirmed from inside the edit form (the app layer
+			// routes edit-mode D through the same confirmation as list mode)
+			// returns the pane to list mode — mirroring Esc without dropping
+			// overlay focus — so the removed task's stale form is not left
+			// open over a shifted selection.
+			if s.editing {
+				s.editing = false
+				s.editError = ""
+				s.editErrorField = -1
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func (s *TaskPane) deleteSelectedTask() {
+	if s.unavailable != "" || !s.selectedTaskInRange() {
 		return
 	}
 	deleted := s.tasks[s.selectedIdx]
@@ -422,6 +613,9 @@ func (s *TaskPane) deleteSelectedTask() {
 }
 
 func (s *TaskPane) runSelectedTask() {
+	if s.unavailable != "" {
+		return
+	}
 	if !s.selectedTaskInRange() {
 		s.pendingTrigger = true
 		s.pendingTriggerID = ""
@@ -444,13 +638,16 @@ func (s *TaskPane) runSelectedTask() {
 }
 
 func (s *TaskPane) enterEditMode() {
+	if s.unavailable != "" {
+		return
+	}
 	tsk := s.tasks[s.selectedIdx]
 	s.initForm(&tsk, "")
 	s.editing = true
 }
 
 // EnterEditSelected drops straight into the edit form for the currently
-// selected task, no-op'ing when the list is empty (so an empty overlay stays
+// selected task, no-op'ing when tasks are unavailable or the list is empty (so it stays
 // in list mode where `n` creates the first task). It bounds-guards the
 // selected index that the unexported enterEditMode assumes, letting the
 // overlay open a task directly into its config in a single action (#1249).
@@ -496,7 +693,7 @@ func taskTriggerSummary(tsk task.Task) string {
 		return fmt.Sprintf("watch: %s [%s]", tsk.WatchCmd, watchTaskStatus(tsk))
 	}
 	if tsk.CronExpr == "" {
-		return "(no trigger)"
+		return "No trigger"
 	}
 	return tsk.CronExpr
 }
@@ -510,23 +707,23 @@ func taskDeliverySummary(tsk task.Task) string {
 }
 
 func (s *TaskPane) renderListMode() string {
+	if s.unavailable != "" {
+		return s.renderListRecovery("Cannot load tasks", "The last loaded tasks are retained. "+s.unavailable, "Check the task file.", true)
+	}
+	if len(s.tasks) == 0 {
+		return s.renderListRecovery("No tasks", "", "Press n to create one.", false)
+	}
 	t := CurrentTheme()
-	tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	enabledStyle := lipgloss.NewStyle().Foreground(t.Info)
-	disabledStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	detailStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	erroredStyle := lipgloss.NewStyle().Foreground(t.Error)
+	tStyle := DialogTitleStyle()
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	enabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	disabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	detailStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	erroredStyle := lipgloss.NewStyle().Foreground(t.Dead)
 
 	var b strings.Builder
 	b.WriteString(tStyle.Render("Tasks"))
 	b.WriteString("\n\n")
-
-	if len(s.tasks) == 0 {
-		b.WriteString(disabledStyle.Render("  No tasks. Press n to create one."))
-		b.WriteString("\n")
-	}
 
 	// Width available to the indented detail lines under the selected row.
 	detailWidth := s.width - 8
@@ -534,7 +731,11 @@ func (s *TaskPane) renderListMode() string {
 		detailWidth = 1
 	}
 
+	selectedStart, selectedEnd := 2, 2
 	for i, tsk := range s.tasks {
+		if i == s.selectedIdx {
+			selectedStart = strings.Count(b.String(), "\n")
+		}
 		status := "[✓]"
 		style := enabledStyle
 		if !tsk.Enabled {
@@ -542,21 +743,22 @@ func (s *TaskPane) renderListMode() string {
 			style = disabledStyle
 		}
 
-		// One line per task: status, name, trigger, delivery — ellipsized to
-		// the pane width so a long name/cron column marks its cut instead of
-		// being hard-clamped.
+		// Names and the next occurrence lead; mechanical details expand only
+		// beneath the selected task.
 		parts := []string{status}
 		if tsk.Name != "" {
 			parts = append(parts, tsk.Name)
 		}
-		parts = append(parts, taskTriggerSummary(tsk), taskDeliverySummary(tsk))
+		if tsk.Enabled && tsk.NextRunAt != nil {
+			parts = append(parts, "next "+nextRunLabel(tsk, s.now()))
+		}
 		header := strings.Join(parts, "  ")
 
 		isSelected := i == s.selectedIdx
 		if isSelected && s.hasFocus {
-			b.WriteString(selectedStyle.Render(fitLine("▸ "+header, s.width)))
+			b.WriteString(fitLine(SelectionMarker("▸ ")+selectedStyle.Render(header), s.width))
 		} else {
-			b.WriteString(style.Render(fitLine("  "+header, s.width)))
+			b.WriteString(fitLine(style.Render("  "+header), s.width))
 		}
 		b.WriteString("\n")
 
@@ -573,6 +775,9 @@ func (s *TaskPane) renderListMode() string {
 
 		// The selected row expands with prompt + agent + last-run detail.
 		if isSelected {
+			for _, detail := range []string{taskTriggerSummary(tsk), taskDeliverySummary(tsk)} {
+				b.WriteString(detailStyle.Render(fitLine("      "+detail, s.width)) + "\n")
+			}
 			if snippet := promptSnippet(tsk.Prompt, detailWidth); snippet != "" {
 				b.WriteString(detailStyle.Render("      " + snippet))
 				b.WriteString("\n")
@@ -593,14 +798,16 @@ func (s *TaskPane) renderListMode() string {
 				if strings.HasPrefix(statusLabel, "errored:") {
 					statusLabel = "errored"
 				}
-				detail += " (" + statusLabel + ")"
+				detail += " · " + statusLabel
 			}
 			b.WriteString(detailStyle.Render(fitLine(detail, s.width)))
 			b.WriteString("\n")
 		}
+		b.WriteString("\n")
+		if isSelected {
+			selectedEnd = strings.Count(b.String(), "\n")
+		}
 	}
-
-	b.WriteString("\n")
 
 	// A refused action reports directly above the hint row, styled like the
 	// editor's inline field error so the two surfaces read the same. It is
@@ -610,7 +817,7 @@ func (s *TaskPane) renderListMode() string {
 	// long task list would otherwise scroll it off.
 	pinnedFooter := 1
 	if s.listNotice != "" {
-		noticeStyle := lipgloss.NewStyle().Foreground(t.Error).Bold(true)
+		noticeStyle := lipgloss.NewStyle().Foreground(t.Dead).Bold(true)
 		noticeWidth := s.width - 4
 		if noticeWidth < 1 {
 			noticeWidth = 1
@@ -628,24 +835,9 @@ func (s *TaskPane) renderListMode() string {
 		}
 	}
 
-	if s.hasFocus {
-		hint := "↑/↓ select · n new · enter edit · r run now · x toggle · D delete · esc back"
-		short := "r run now · ↑/↓ · n new · enter · esc"
-		// A watch task can't be manually run (#1758): drop "r run now" so the
-		// hint never advertises an action that always fails.
-		if s.selectedTaskIsWatch() {
-			hint = "↑/↓ select · n new · enter edit · x toggle · D delete · esc back"
-			short = "↑/↓ · n new · enter · esc"
-		}
-		if s.width > 0 && lipgloss.Width(hint) > s.width {
-			hint = short
-		}
-		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
-	} else {
-		b.WriteString(hintStyle.Render(fitLine("enter to focus and edit tasks", s.width)))
-	}
+	b.WriteString(ActionHint(fitLine(s.listModeHint(), s.width)))
 
-	return fitBlockToSize(b.String(), s.width, s.height, pinnedFooter)
+	return fitTaskList(b.String(), s.width, s.height, pinnedFooter, selectedStart, selectedEnd)
 }
 
 // promptSnippet collapses a prompt to a single line truncated to maxWidth,

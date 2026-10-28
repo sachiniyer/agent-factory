@@ -39,6 +39,9 @@ export const TabKind = {
    *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
    *  lockstep with the Go enum. */
   VSCode: 4,
+  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
+   *  Mirrors session.TabKindDocs (session/tab.go). */
+  Docs: 5,
 } as const;
 
 /** session.InFlightOp (session/liveness.go): the transient client-op axis. */
@@ -63,6 +66,7 @@ export type IdleReason =
   | "usage-limit"
   | "process-exited"
   | "restore-gave-up"
+  | "restore-waiting-on-environment"
   | "recreate-pending"
   | "prompt-not-delivered"
   | "delivery-unconfirmed"
@@ -81,6 +85,30 @@ export interface LostRestoreFailure {
   error: string;
 }
 
+/** Durable non-terminal state while the restore loop waits on the environment
+ * — the last failure was a resource limit external to the session (#5295). */
+export interface LostRestoreWait {
+  attempts: number;
+  error: string;
+}
+
+export type PromptDeliveryStatus = "delivered" | "not-delivered" | "sent-unverified" | "could-not-confirm";
+
+/** Live remote-probe outage projection (#5571 W1.3): `since` (RFC3339) anchors
+ *  the first unanswered probe of the episode, `error` is the last transport
+ *  failure — already collapsed, bounded, and token-redacted by the daemon. */
+export interface UnreachableData {
+  since?: string;
+  error?: string;
+}
+
+/** Durable identity transaction retained until its replacement mission settles. */
+export interface AccountSwapData {
+  manual?: boolean;
+  replacement_panes_started?: boolean;
+  mission_delivery_status?: PromptDeliveryStatus;
+}
+
 /** session.Status (session/instance.go) — the legacy single-axis int, read ONLY
  *  as a defensive fallback when a projection somehow omits `liveness` (never
  *  expected from the daemon's live Snapshot, which always emits it). */
@@ -97,9 +125,10 @@ export const Status = {
 /**
  * The subset of session.InstanceData (session/storage.go) the sidebar renders.
  * Field names and JSON tags match the Go struct exactly so this decodes the
- * daemon projection as-is. Optional fields carry Go's `omitempty` semantics:
- * `liveness`/`in_flight_op` are dropped when zero, `limit_reset_at` only present
- * for a LimitReached row.
+ * daemon projection as-is. Optional fields carry Go's `omitempty`/`omitzero`
+ * semantics: `liveness`/`in_flight_op` are dropped when zero, `limit_reset_at`
+ * only present for a LimitReached row with a known reset time (omitzero on a
+ * time.Time, mirroring the TabExitData.at precedent).
  */
 export interface SessionData {
   id?: string;
@@ -130,6 +159,20 @@ export interface SessionData {
    *  handoff picker excludes it, matching the daemon's same-agent guard. Absent
    *  when unknowable. */
   current_agent?: string;
+  /** The recorded program enum (session's Program): the handoff picker's
+   *  opaque-command sameness check compares it against the requested enum —
+   *  for an unprovable override the enum is the only evidence that the request
+   *  would relaunch the same command (#4430 review round 6). */
+  program?: string;
+  /** The credential account this session's agent runs as (#3051), or absent for
+   *  the ambient identity. It is a DIRECTORY NAME in the daemon host's account
+   *  registry and never carries credential material.
+   *
+   *  The create path reads it back to check that the daemon applied the account
+   *  that was picked (#3844): a daemon predating account support drops the field
+   *  silently, and a UI reporting an identity the session does not have is the
+   *  exact failure the feature exists to prevent. */
+  account?: string;
   /** Daemon-owned reserved-root decision (#2513): true for the always-on root
    *  agent. The web pins root to the top of the rail and draws the demarcation rule
    *  by CONSUMING this decision (session.IsReservedTitle, projected) rather than
@@ -141,15 +184,27 @@ export interface SessionData {
    *  It remains on restored rows so an automatic Lost recovery cannot make the
    *  omitted files disappear from subsequent snapshots. */
   archive_warning?: string;
+  /** Why this session has no af callback — the mint refusal recorded when its
+   *  sandbox provisioned without one (#5571 W3.1). Surfaces render it under the
+   *  "af callback unavailable:" prefix; absent means callback was delivered or
+   *  the backend never injects one. */
+  callback_unavailable?: string;
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
   idle_reason?: IdleReason;
   /** Present while a Lost row has exhausted automatic restore attempts. */
   lost_restore_failure?: LostRestoreFailure;
+  /** Present while the restore loop defers a retry on the environment (#5295). */
+  lost_restore_wait?: LostRestoreWait;
+  /** Daemon-projected remote-probe outage (#5571 W1.3). An observation flag,
+   *  not a liveness: it coexists with running/ready/lost and says af's view of
+   *  this row cannot currently be re-confirmed. The daemon already bounds and
+   *  token-redacts `error`; clients render it verbatim. */
+  unreachable?: UnreachableData;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */
-  last_prompt_delivery_status?: "delivered" | "not-delivered" | "sent-unverified" | "could-not-confirm";
+  last_prompt_delivery_status?: PromptDeliveryStatus;
   /** RFC3339 time when the daemon most recently observed pane bytes change. */
   last_pane_churn_at?: string;
   /** One-shot note on a re-created root agent that did not demonstrably come back
@@ -161,6 +216,16 @@ export interface SessionData {
   root_recreate_context?: "fresh" | "unknown";
   /** Usage-limit reset time (RFC3339), present only for a LimitReached row. */
   limit_reset_at?: string;
+  /** Present while a committed identity change still owes its replacement mission. */
+  pending_account_swap?: AccountSwapData;
+  /** Agent-only takeover brief awaiting confirmed delivery. */
+  pending_handoff_mission?: string;
+  /** Mission-scoped delivery verdict for pending_handoff_mission. */
+  pending_handoff_delivery_status?: PromptDeliveryStatus;
+  /** The replacement runtime may exist, but its identity/liveness was not confirmed. */
+  startup_state_unknown?: boolean;
+  /** Durable kill intent; surviving rows must expose no runtime retry actions. */
+  user_killed?: boolean;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */
   backend_type?: string;
   /** The daemon's OWN answer, per tab kind, to "may this session gain one of
@@ -184,12 +249,6 @@ export interface SessionData {
    *  derive the new-session modal's project picker, exactly as the TUI does from
    *  InstanceData.Worktree.RepoPath (app/switch_project.go buildProjectListFrom). */
   worktree?: WorktreeData;
-  /** The daemon-discovered PR projection (session/storage.go PRInfoData; #3232
-   *  made discovery daemon-side, so every surface receives it). Go's `omitempty`
-   *  cannot drop a struct field, so a session with no discovered PR arrives as
-   *  `pr_info: {}` — consumers treat a record without a number and url as "no
-   *  PR" (fail closed) rather than keying on the field's presence. */
-  pr_info?: PRInfoData;
   /** The session's tabs (session/storage.go InstanceData.Tabs): index 0 is the
    *  agent tab, followed by up to 9 user-created shell/process tabs (#930). The
    *  web tab bar renders these and streams a selected tab via /stream?tab=<idx>.
@@ -197,20 +256,6 @@ export interface SessionData {
   tabs?: TabData[];
 }
 
-/** The wire shape of session/storage.go PRInfoData: the daemon's cached answer to
- *  "which PR belongs to this session's branch". Field names match the Go JSON tags
- *  (all `omitempty`), and `state` carries gh's uppercase vocabulary (OPEN / MERGED /
- *  CLOSED) verbatim — display code lowercases it rather than mapping through a
- *  table, so an unrecognized future state still renders honestly. */
-export interface PRInfoData {
-  number?: number;
-  title?: string;
-  url?: string;
-  state?: string;
-  /** The exact ref the lookup ran against; consumers making destructive decisions
-   *  must match it, but display code does not read it. */
-  branch?: string;
-}
 
 /** The subset of session.TabData (session/storage.go) the web tab bar reads: the
  *  display name and the kind (index 0 / TabKind.Agent is the unclosable agent
@@ -229,13 +274,18 @@ export interface TabData {
    *  loopback URL is rendered through the same-origin daemon proxy, an external
    *  URL directly. Mirrors session.TabData.URL (session/storage.go). */
   url?: string;
+  /** The proposal slug of a docs tab (TabKind.Docs); absent for other kinds.
+   *  Mirrors session.TabData.Proposal (session/storage.go). */
+  proposal?: string;
+  /** Daemon proxy decision; absent only on older daemon records. */
+  web_proxied?: boolean;
 }
 
 /** The subset of session.GitWorktreeData (session/storage.go) the web reads: the
  *  repo root the session belongs to, used to group/pick projects. */
 /** One creatable tab kind and whether this session may gain one. */
 export interface TabKindAllowance {
-  /** The `--kind` spelling the CLI accepts: "shell", "process", "web", "vscode". */
+  /** The `--kind` spelling the CLI accepts: "shell", "process", "web", "vscode", "docs". */
   kind: string;
   allowed: boolean;
   /** The daemon's own refusal text, empty when allowed. Rendered verbatim: it
@@ -245,42 +295,58 @@ export interface TabKindAllowance {
 
 export interface WorktreeData {
   repo_path?: string;
+  /** Daemon IsExternalWorktree: in-place/user-owned checkout, torn down rather than archived. */
+  external_worktree?: boolean;
+  /** Daemon branch ownership; absent legacy flags preserve the branch. */
+  branch_created_by_us?: boolean;
 }
 
 /** The Snapshot RPC response (daemon/snapshot.go: SnapshotResponse). */
 export interface SnapshotResponse {
 	instances: SessionData[] | null;
 	delivery_alarms?: unknown[];
+	/** Unique identity of the daemon process that produced this Snapshot. */
+	boot_id?: string;
+	/** Daemon lifecycle-operation admission bound, projected from its live value. */
+	operation_lock_timeout_ms?: number;
+	/** Process-local monotonic reading used to measure that admission bound. */
+	operation_clock_ms?: number;
+	/** Repos the daemon dropped at startup (corrupt/unreadable/newer-schema/unloadable
+	 *  instances.json), so this snapshot may be MISSING their sessions (#4742). The
+	 *  daemon reports the set explicitly so a client can tell "repo has no sessions"
+	 *  apart from "the daemon dropped this repo's sessions at startup" — the same
+	 *  contract the CLI's list/get/whoami reads honor by refusing or caveating. The
+	 *  web mirrors the field and surfaces it as a persistent incompleteness notice
+	 *  rather than rendering the truncated `instances` as a complete list. Omitted
+	 *  (omitempty on the Go side) when no repo was skipped, which is every healthy
+	 *  startup, so the rail renders nothing extra in the steady state. */
+	skipped_repos?: SkippedRepo[];
 }
 
-/** apiproto.Theme: the daemon-resolved semantic palette. Browser light/dark is
- * deliberately absent; theme.ts derives both modes from these source slots. */
-export interface DaemonTheme {
-  name?: string;
-  foreground: string;
-  foreground_strong: string;
-  foreground_muted: string;
-  foreground_dim: string;
-  background: string;
-  background_subtle: string;
-  background_panel: string;
-  accent: string;
-  success: string;
-  warning: string;
-  error: string;
-  info: string;
-  purple: string;
-  selection_background: string;
-  selection_foreground: string;
-  pane_border_default: string;
-  pane_border_selected: string;
-  pane_border_interactive: string;
-  pane_border_preview: string;
+/** One repo the daemon could not load sessions for at startup
+ *  (daemon/snapshot.go SkippedRepo), reported on SnapshotResponse.skipped_repos so
+ *  the web can name the affected repo and reason instead of silently hiding its
+ *  sessions. Field names and JSON tags match the Go struct exactly. */
+export interface SkippedRepo {
+	/** The repo's stable id (config.RepoIDFromRoot — a short hex hash, not a path).
+	 *  The web maps it to a project root via registeredProjects when the repo is
+	 *  registered, falling back to the bare id. */
+	repo_id: string;
+	/** Stable machine-readable reason code (daemon/snapshot.go): one of
+	 *  "corrupted-instances-json", "unreadable-instances-json",
+	 *  "newer-schema-instances-json", "rows-failed-to-load". An empty or unknown
+	 *  value is treated as corrupted, which is all an older daemon ever sent. */
+	reason?: string;
+	/** Count of sessions that failed to load when reason is
+	 *  "rows-failed-to-load" (their worktree or tmux is gone); zero for the
+	 *  read/parse reasons, under which a row never reached the materializer. */
+	failed_rows?: number;
 }
 
-/** GetThemeResponse (daemon/control_types.go). */
-export interface ThemeResponse {
-  theme: DaemonTheme;
+/** One lifecycle choice served by the daemon, including its consequence. */
+export interface OnCompleteOption {
+  value: string;
+  hint: string;
 }
 
 /**
@@ -294,6 +360,7 @@ export interface ThemeResponse {
  * `last_run_*` fields are absent until the task first runs.
  */
 export interface TaskData {
+  on_complete?: string;
   id: string;
   name?: string;
   prompt: string;
@@ -315,6 +382,46 @@ export interface TaskData {
   last_run_at?: string;
   /** The outcome of the last run (scheduler-owned; absent until first run). */
   last_run_status?: string;
+
+  // Schedule health (#3623). Every field below is DERIVED BY THE DAEMON at read
+  // time and never stored, so a client renders them and never sends them —
+  // AddTask/UpdateTask ignore them, and the store strips them on both sides.
+  // They arrive on the records ListTasks returns, which is why showing them here
+  // is rendering rather than plumbing (#3626).
+
+  /** The task's last run precedes its most recent scheduled occurrence by more
+   *  than one slack window: it has stopped firing. */
+  overdue?: boolean;
+  /** How many scheduled fires it has missed since. */
+  missed_occurrences?: number;
+  /** The count above hit the derivation's cap and is a FLOOR, not an exact
+   *  number — render it as "N+" rather than as N. */
+  missed_occurrences_capped?: boolean;
+  /** The scheduler cannot derive a next run from this task's expression: it has
+   *  no trigger, the expression does not parse, or nothing matches inside the
+   *  scheduler's search horizon. Not overdue (nothing was ever due) and not
+   *  healthy either. */
+  unschedulable?: boolean;
+  /** WHICH shape of unschedulable, straight from the daemon's own classifier
+   *  (task.UnschedulableReason). Present only when `unschedulable` is set.
+   *  Re-deriving this from `cron_expr` here is what had other surfaces calling an
+   *  ABSENT expression invalid, so read it rather than reclassify. */
+  unschedulable_reason?: "no-trigger" | "invalid-expression" | "no-occurrence";
+  /** No lateness verdict could be reached — nothing to measure from, or nothing
+   *  the schedule can be evaluated against. UNKNOWN, not healthy. */
+  unassessable?: boolean;
+  /** RFC3339 time the LIVE scheduler entry will next fire, read off what is
+   *  armed rather than recomputed from the expression. Absent when the task is
+   *  not armed, and that absence is itself the signal. */
+  next_run_at?: string;
+  /** The task is enabled and `next_run_at` is more than 60 days out — usually a
+   *  dated cron re-armed for next year (#4843). Decided by the daemon's
+   *  task.NextRunFarOut; read it rather than re-derive the threshold here. */
+  next_run_far?: boolean;
+  /** The live arming observation: "armed", "not-armed", or ABSENT when no daemon
+   *  has reported on it (none running, or one still starting). Absent must never
+   *  be read as "not armed". */
+  arming?: string;
 }
 
 /**
@@ -326,6 +433,7 @@ export interface TaskData {
  * match the Go TaskUpdate struct EXACTLY (the daemon rejects unknown keys).
  */
 export interface TaskUpdate {
+  on_complete?: string;
   name?: string;
   prompt?: string;
   cron_expr?: string;
@@ -381,7 +489,6 @@ export type EventType =
   | "session.killed"
   | "session.archived"
   | "session.restored"
-  | "theme.changed"
   | "projects.changed"
   | "task.created"
   | "task.updated"
@@ -448,6 +555,11 @@ export interface ConfigSetResult {
   value: string;
   path: string;
   requires_restart: boolean;
+  /** Per-write warnings from the writer itself (e.g. an unregistered
+   *  default_accounts.<agent> name). A channel distinct from the response's
+   *  apply-time `warnings`: the daemon fills this even when the live apply
+   *  produced none (#5266). */
+  warnings?: string[];
 }
 
 /** SetConfigValueResponse (daemon/control_types.go). The restart notice rides
@@ -456,4 +568,164 @@ export interface ConfigSetResult {
 export interface ConfigSetResponse {
   result: ConfigSetResult;
   restart_notice: string;
+  /** Save-time warnings, including a live-apply error whose details the
+   *  restart notice tells the operator to resolve. Optional for older daemons. */
+  warnings?: string[];
+  /** Machine-readable live-apply result. Optional for older daemons; the form
+   * renders the notice and warnings rather than re-deriving their policy. */
+  apply_outcome?: "applied" | "deferred" | "no_daemon" | "failed" | "unconfirmed" | "unknown";
+  /** Where the daemon is ACCEPTING now, when the written key moved one of its
+   *  listeners (#3722) — absent for every other key. Saving network.listen_addr
+   *  from this form moves the very listener the form is talking over, so the
+   *  daemon names the new address in the reply it flushes on the old connection;
+   *  without it the operator is told where they are NOT and left to guess where
+   *  they are. Optional: an older daemon does not send it. */
+  listener_addr?: string;
+}
+
+/** config.SourceRef (config/provenance.go) — the exact configuration location
+ *  that supplied an effective scalar or composite leaf. */
+export interface SourceRef {
+  layer: string;
+  path?: string;
+  format?: string;
+  key_path: string;
+}
+
+/** config.CandidateTrace (config/provenance.go) — one source considered while
+ *  resolving a key. `value` is the configured value at that source; absent and
+ *  disallowed candidates carry null. */
+export interface CandidateTrace {
+  layer: string;
+  path?: string;
+  format?: string;
+  key_path: string;
+  allowed: boolean;
+  present: boolean;
+  value: unknown;
+  result: string;
+  reason: string;
+}
+
+/** config.ResolvedValue (config/provenance.go) — an effective config value and
+ *  the complete trace that produced it. Replace/list keys name one `winner`;
+ *  composite keys instead carry a source per leaf in `origins`, so a composite
+ *  is never assigned a fake winner. */
+export interface ResolvedValue {
+  key: string;
+  value: unknown;
+  default?: string;
+  merge: string;
+  precedence: string[];
+  winner?: SourceRef;
+  origins?: Record<string, SourceRef>;
+  candidates: CandidateTrace[];
+}
+
+/** daemon.ExplainConfigResponse (daemon/control_types.go, #4803) — the shared
+ *  provenance explanation the CLI renders from `af config get --explain`,
+ *  served to clients that cannot resolve in-process. Global scope only; the
+ *  daemon deliberately does not consult its running config snapshot
+ *  (`running_value_checked`), so the trace describes on-disk sources. */
+export interface ExplainConfigResponse {
+  explanation: ResolvedValue;
+  scope: string;
+  running_value_checked: boolean;
+}
+
+/** daemon.AccountEntry — one registered agent account (#3384/#3385).
+ *
+ *  It never carries credential material. `dir` is the DIRECTORY af points the
+ *  agent's credential-root variable at, and `logged_in` is the presence of the
+ *  agent's own credential file inside it, read by stat. So `logged_in` means
+ *  "this account has an identity", not "this identity still works": only the
+ *  agent can say the latter, and af never opens the file to ask. */
+export interface AccountEntry {
+  agent: string;
+  name: string;
+  dir: string;
+  /** True while a session cannot yet be scoped to this agent's accounts —
+   *  registering and logging in still work. */
+  registration_only: boolean;
+  logged_in: boolean;
+}
+
+/** ListAccountsResponse (daemon/control_types_accounts.go).
+ *
+ *  `agents` is not derivable from `entries`: a fresh install has no accounts and
+ *  the register form still has to offer the agents one can be made for. */
+export interface AccountsResponse {
+  entries: AccountEntry[];
+  agents: string[];
+  /** Per agent, the account a create with NO explicit account would run as for
+   *  the project this was fetched for — the `default_accounts` config key,
+   *  resolved by the daemon through the precedence the create applies (#3386).
+   *  An agent with no configured default is absent, meaning the ambient identity.
+   *
+   *  Optional because the daemon omits it when empty, and because a daemon older
+   *  than this client does not send it at all — in which case the picker simply
+   *  offers no preselection, which is what it did before this field existed. */
+  defaults?: Record<string, string>;
+  /** Per agent name, the agent its resolved program_overrides command actually
+   *  launches for this repo. A handoff picker classifies a target's account
+   *  capability by this value, not the enum: codex→aider drops the scope rather
+   *  than needing an account no Aider registry could honor (#4430 review).
+   *
+   *  Optional for the same reason as defaults — an older daemon does not send
+   *  it, and the enum fallback restores the old classification. */
+  resolved_agents?: Record<string, string>;
+}
+
+/** RegisterAccountResponse (daemon/control_types_accounts.go). */
+export interface RegisterAccountResponse {
+  entry: AccountEntry;
+  /** What the agent's credential-root variable relocates, and anything af could
+   *  not verify about the directory. Never about a credential's contents. */
+  notices?: string[];
+}
+
+/** One agent's line of the QuotaReport (daemon/control_types_quota.go): the
+ *  four columns `af quota` prints, rendered server-side so every surface shows
+ *  the daemon's own words (#2983). The strings are the content — no client
+ *  re-derives them from codes. */
+export interface QuotaAgentRow {
+  program: string;
+  quota: string;
+  observed: string;
+  sessions: number;
+  limited_sessions: number;
+  /** RFC3339; absent when the parked limit carried no reset time. */
+  reset_at?: string;
+  /** The row's sentence — reset times included — rendered at serve time. */
+  detail: string;
+}
+
+/** QuotaReportResponse (daemon/control_types_quota.go). */
+export interface QuotaReportResponse {
+  agents: QuotaAgentRow[];
+  /** Completeness caveats (record files that could not be read or parsed).
+   *  Shown when present — an incomplete report that hides them reads as
+   *  authoritative. */
+  warnings?: string[];
+}
+
+/** AccountLoginResponse (daemon/control_types_accounts.go). */
+export interface AccountLoginResponse {
+  agent: string;
+  name: string;
+  dir: string;
+  /** The exact invocation the pane runs — the agent's own login command — so the
+   *  UI can show what af is running rather than assert it. */
+  program: string;
+  /** The tmux session to attach to. EMPTY when `finished` is true: the flow ended
+   *  before af could hand over a terminal and there is nothing to watch. */
+  session_name: string;
+  socket_path: string;
+  /** True when this call joined a login flow that was already open. */
+  reused: boolean;
+  /** True when the agent's login command ran to completion before af could hand
+   *  over the terminal. */
+  finished: boolean;
+  logged_in: boolean;
+  notices?: string[];
 }

@@ -58,14 +58,18 @@ var (
 	// "reset at <tail>" phrase, symmetric with the codex detect/parse split.
 	claudeLimitDetect = regexp.MustCompile(`Claude usage limit reached\.`)
 
-	// codexLimitDetect matches Codex's stall banner. The reset phrase ("try
-	// again at <ts>" / "try again in <duration>") is often on a later line, so
-	// detection keys only on the invariant lead clause and reset extraction is
-	// a separate scan (parseCodexReset) over the whole capture. The trailing
-	// punctuation varies — "…usage limit." (weekly) vs "…usage limit, try
-	// again in…" (relative, openai/codex#3031) — so it is intentionally not
-	// anchored here.
-	codexLimitDetect = regexp.MustCompile(`You've hit your usage limit`)
+	// codexLimitDetect matches Codex's stall banner. Keep the full leading
+	// sentence: captured panes can contain ordinary prose using "hit your usage
+	// limit", and treating that fragment alone as a banner would park a healthy
+	// session. Codex has rendered the contraction's apostrophe as both ASCII '
+	// and typographic U+2019, so only that rune is flexible. The reset phrase
+	// ("try again at <ts>" / "try again in <duration>") is often on a later line,
+	// so reset extraction is a separate scan (parseCodexReset) over the whole
+	// capture. The trailing punctuation varies — "…usage limit." (weekly) vs
+	// "…usage limit, try again in…" (relative, openai/codex#3031) — so it is
+	// intentionally not anchored here. Healthy prose containing the shorter
+	// fragment is pinned as a non-match in the tests.
+	codexLimitDetect = regexp.MustCompile(`You['’]ve hit your usage limit`)
 
 	// devinLimitDetect matches devin's usage-quota exhaustion banner (#2411).
 	//
@@ -223,9 +227,10 @@ func isLimitContent(content, agent string, matchers map[string]agentLimitMatcher
 var (
 	// clockTime matches a 12-hour clock token like "2pm", "2:30 PM", "11am".
 	clockTime = regexp.MustCompile(`(?i)\b(\d{1,2})(?::(\d{2}))?\s*([ap])m\b`)
-	// parenTZ captures an IANA timezone inside parentheses, e.g.
-	// "(America/New_York)".
-	parenTZ = regexp.MustCompile(`\(([A-Za-z]+(?:/[A-Za-z_+\-]+)+)\)`)
+	// parenTZ captures a timezone candidate, including single-component names
+	// and numeric offsets. LoadLocation validates it; capturing non-zones too
+	// makes the fallback explicit instead of silently ignoring unknown text.
+	parenTZ = regexp.MustCompile(`\(([^()\r\n]+)\)`)
 	// monthDay matches an optional-year calendar date like "Jul 25th, 2026",
 	// "Nov 6", "November 6 2026". The ordinal suffix and year are optional.
 	monthDay = regexp.MustCompile(`(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?`)
@@ -256,7 +261,7 @@ var claudeResetAnchor = regexp.MustCompile(`(?i)reset\s+(?:at\s+)?([^\r\n]+)`)
 
 // parseClaudeReset scans the detector-matched tail for Claude's "reset at
 // <tail>" clause and resolves the tail, in order: an optional timezone in parens
-// (falling back to now's location when absent — Claude renders in the account
+// (falling back to now's location when absent or invalid — Claude renders in the account
 // tz, which we cannot know without the paren, so the injected clock's zone is
 // the deterministic stand-in), a required 12-hour clock time, and an optional
 // calendar date or weekday (the weekly variant). Without any date it mints the
@@ -271,15 +276,21 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 	reset := anchor[1]
 
 	loc := now.Location()
-	if m := parenTZ.FindStringSubmatch(reset); m != nil {
+	candidates := parenTZ.FindAllStringSubmatch(reset, -1)
+	var rejected []string
+	for _, m := range candidates {
 		if l, err := time.LoadLocation(m[1]); err == nil {
 			loc = l
+			break
 		}
+		rejected = append(rejected, m[1])
 	}
-
 	hour, minute, ok := parseClockTime(reset)
 	if !ok {
 		return time.Time{}, false
+	}
+	if len(rejected) > 0 && len(rejected) == len(candidates) {
+		warnClaudeTimezoneOnce(content, rejected, loc)
 	}
 
 	// Explicit calendar date wins (weekly variant that carries a date).

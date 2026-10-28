@@ -1,0 +1,49 @@
+Running 5 tests using 1 worker
+
+  ✓  1 [demo] › selftest/web-demo.spec.ts:625:1 › web demo · default theme (18.1s)
+  ✓  2 [demo] › selftest/web-demo.spec.ts:635:1 › web demo · dark (13.9s)
+3981 chrome heights {"width":360,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":360,"closed":{"x":2,"y":50,"width":356,"height":760},"opened":{"x":2,"y":50,"width":356,"height":760}}
+3981 terminal alignment {"width":360,"left":2,"right":340,"contentLeft":2,"hostRight":358,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":390,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":390,"closed":{"x":2,"y":50,"width":386,"height":760},"opened":{"x":2,"y":50,"width":386,"height":760}}
+  ✘  3 [demo] › selftest/web-demo.spec.ts:649:1 › web chrome · both themes (1.5m)
+  ✓  4 [demo] › selftest/web-demo.spec.ts:794:1 › task completion hints follow the selected consequence (1.3s)
+  ✓  5 [demo] › selftest/web-demo.spec.ts:815:1 › task completion catalog failure is visible and preserves the seed (1.1s)
+
+
+  1) [demo] › selftest/web-demo.spec.ts:649:1 › web chrome · both themes ───────────────────────────
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: "[1;5Als[1;3Dls[1;5A	z[A[1;5Als"
+    Received: "[1;5Als[1;3Dls[1;5A	z[A[1;5A"
+
+    Call Log:
+    - Timeout 30000ms exceeded while waiting on the predicate
+
+       at phone-keybar.ts:112
+
+      110 |     await expect(button).toHaveAttribute("aria-description", "Double tap to lock");
+      111 |     await page.keyboard.insertText("ls");
+    > 112 |     await expect.poll(stream).toBe(before + bytes + "ls");
+          |     ^
+      113 |   }
+      114 |   const ctrl = bar.getByRole("button", { name: "Ctrl", exact: true });
+      115 |   await ctrl.dblclick({ delay: 80 });
+        at assertPhoneBarModifiers (/work/web/selftest/phone-keybar.ts:112:5)
+        at assertPhoneKeybar (/work/web/selftest/phone-keybar.ts:30:3)
+        at recordChrome (/work/web/selftest/web-demo.spec.ts:577:7)
+        at /work/web/selftest/web-demo.spec.ts:651:5
+
+    attachment #1: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/visual/web-demo-web-chrome-·-both-themes-demo/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/visual/web-demo-web-chrome-·-both-themes-demo/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [demo] › selftest/web-demo.spec.ts:649:1 › web chrome · both themes ────────────────────────────
+  4 passed (2.2m)

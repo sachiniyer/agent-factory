@@ -49,8 +49,6 @@ func (w *renamedTmuxWorld) Start(c *exec.Cmd) (*os.File, error) {
 	return os.OpenFile(filepath.Join(w.t.TempDir(), "pty"), os.O_CREATE|os.O_RDWR, 0o600)
 }
 
-func (w *renamedTmuxWorld) Close() {}
-
 func (w *renamedTmuxWorld) exec() cmd_test.MockCmdExec {
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {

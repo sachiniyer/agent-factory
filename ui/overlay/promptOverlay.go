@@ -7,6 +7,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/sachiniyer/agent-factory/ui/layout"
+
 	"github.com/sachiniyer/agent-factory/ui"
 )
 
@@ -31,8 +33,8 @@ const promptOverlayDefaultHeight = 6
 // prompt field (ui/task_pane_edit.go), the other multi-line prompt input in the
 // TUI. Tab and Esc both close the overlay KEEPING the text: this is a field of
 // the create form, not a dialog, so backing out of it must not destroy what was
-// typed. Cancelling the whole create stays on ctrl+c, exactly as in the naming
-// flow the overlay returns to.
+// typed. Ctrl+C cancels this field edit; the enclosing form decides where to
+// return and retains its previously saved value.
 //
 // Switching on msg.Type (not msg.String()) is load-bearing for paste: Bubble
 // Tea delivers a bracketed paste as one KeyRunes message whose contents are
@@ -45,6 +47,21 @@ type PromptOverlay struct {
 	width     int
 	maxWidth  int
 	maxHeight int
+	// hint/shortHint let a caller that re-owns this overlay's keys describe its
+	// OWN semantics. Empty means the composer's, which is what the naming form
+	// wants; handleStateJumpTab does not, and inherited a hint that told the
+	// operator enter made a newline while it actually submitted (#4172).
+	hint      string
+	shortHint string
+	// compact keeps the textarea at the height of its content instead of
+	// filling the frame the fit gives it. The naming form wants a big box for
+	// prose; a one-line prompt (the jump field, #5587) rendered at that size
+	// is a screen of blank lines around a single input row.
+	compact bool
+	// status is a one-line live answer to what the current input would do —
+	// for the jump field, the tab it would land on or "no match" (#5587).
+	// Rendered between the field and the hint, only when set.
+	status string
 }
 
 // NewPromptOverlay creates a prompt overlay seeded with value, so reopening it
@@ -54,7 +71,7 @@ func NewPromptOverlay(title, value string) *PromptOverlay {
 	ta := textarea.New()
 	ta.ShowLineNumbers = false
 	ta.Prompt = ""
-	ta.Placeholder = "Sent to the agent as soon as it is ready…"
+	ta.Placeholder = "Prompt for the agent…"
 	// No cap: the daemon delivers this verbatim to the agent, and an initial
 	// prompt is legitimately a paragraph or a pasted spec.
 	ta.CharLimit = 0
@@ -91,8 +108,7 @@ func (p *PromptOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 	return false
 }
 
-// IsCanceled reports whether the overlay closed on ctrl+c, which cancels the
-// whole session create rather than just this field.
+// IsCanceled reports whether Ctrl+C discarded this field edit.
 func (p *PromptOverlay) IsCanceled() bool {
 	return p.canceled
 }
@@ -116,18 +132,14 @@ func (p *PromptOverlay) SetMaxSize(width, height int) {
 // Render renders the prompt overlay.
 func (p *PromptOverlay) Render() string {
 	t := ui.CurrentTheme()
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	titleStyle := ui.DialogTitleStyle()
 	// Themed styles are resolved per render, like every sibling overlay, so a
 	// theme change lands without rebuilding the overlay.
-	placeholder := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	placeholder := lipgloss.NewStyle().Foreground(t.InkMuted)
 	p.textarea.FocusedStyle.Placeholder = placeholder
 	p.textarea.BlurredStyle.Placeholder = placeholder
 
-	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Accent).
-		Padding(1, 2)
+	style := ui.DialogStyle()
 	fit := fitOverlayContent(p.width, 0, p.maxWidth, p.maxHeight, style)
 	if fit.W <= 0 {
 		fit.W = p.width
@@ -138,8 +150,27 @@ func (p *PromptOverlay) Render() string {
 	textRect := overlayTextRect(fit, style)
 
 	rows := promptOverlayDefaultHeight
-	if textRect.H > 0 {
-		rows = textRect.H - promptOverlayChrome
+	chrome := promptOverlayChrome
+	if p.status != "" {
+		chrome++ // the status line is a content row of its own
+	}
+	if p.compact {
+		if n := p.textarea.LineCount(); n > 0 {
+			rows = n
+		}
+		// Compact still answers to the frame: a pasted multi-line blob sizes
+		// the textarea to its content and would otherwise push the dialog
+		// past maxHeight — the fit's leftover after chrome is the cap.
+		if textRect.H > 0 {
+			if budget := textRect.H - chrome; rows > budget {
+				rows = budget
+			}
+			if rows < 1 {
+				rows = 1
+			}
+		}
+	} else if textRect.H > 0 {
+		rows = textRect.H - chrome
 		if rows < 1 {
 			rows = 1
 		}
@@ -149,17 +180,53 @@ func (p *PromptOverlay) Render() string {
 
 	lines := []string{truncateOverlayLine(titleStyle.Render(p.title), textRect.W), ""}
 	lines = append(lines, strings.Split(p.textarea.View(), "\n")...)
+	if p.status != "" {
+		statusStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+		lines = append(lines, truncateOverlayLine(statusStyle.Render(p.status), textRect.W))
+	}
 	lines = append(lines, "")
 
-	hint := "enter newline · tab done · ctrl+c cancel"
-	if lipgloss.Width(hint) > textRect.W {
-		hint = "tab done · ctrl+c cancel"
+	hint, shortHint := p.hint, p.shortHint
+	if hint == "" {
+		hint, shortHint = "enter newline · tab done · ctrl+c cancel", "tab done · ctrl+c cancel"
 	}
-	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), textRect.W))
+	if shortHint != "" && layout.Cells(hint) > textRect.W {
+		hint = shortHint
+	}
+	lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), textRect.W))
 
 	style = style.Width(fit.W)
 	if fit.H > 0 && len(lines) >= textRect.H {
 		style = style.Height(fit.H)
 	}
-	return style.Render(strings.Join(lines, "\n"))
+	return ui.RenderDialog(style, strings.Join(lines, "\n"))
+}
+
+// SetPlaceholder replaces the empty-state text. The default invites a prompt
+// for the agent, which is wrong for any caller that is not the naming form.
+func (p *PromptOverlay) SetPlaceholder(placeholder string) {
+	p.textarea.Placeholder = placeholder
+}
+
+// SetHints replaces the key hints. full is shown when it fits the overlay,
+// short is the narrow fallback; pass short == full when there is nothing to
+// shed. A caller that re-owns Enter/Esc/Tab must call this — the default
+// describes the naming form's semantics, not its own.
+func (p *PromptOverlay) SetHints(full, short string) {
+	p.hint, p.shortHint = full, short
+}
+
+// SetCompact makes the textarea take only the rows its content needs, so the
+// dialog sizes to a short answer instead of filling the screen around it
+// (#5587). The naming form leaves this off: a prompt is prose and earns the
+// big box.
+func (p *PromptOverlay) SetCompact() {
+	p.compact = true
+}
+
+// SetStatus sets the live status line rendered between the field and the hint
+// (#5587). The caller owns the text — for the jump field it is the tab the
+// current query would land on, or why it lands nowhere. Empty clears it.
+func (p *PromptOverlay) SetStatus(status string) {
+	p.status = status
 }

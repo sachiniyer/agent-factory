@@ -74,6 +74,23 @@ var pluginReleaseDigests = []string{
 	"eb82ea0bd7020c61fc0affb73decaf448c95464f979494445758bf5bd4a62caa", // 3.9 — name the per-kind remote tab boundary after external web tabs became admissible (#3062)
 	"3b2dcc3fde22b1d9c63f9c00110f810531b04b70e7d4ff302d7ac82b586e16ea", // 3.10 — require HTTPS for directly framed off-box web tabs (#3062)
 	"828a01a7b3f3e3e14bdbe4dc864067040c4f260251d029dad422e65f5ce24e7e", // 3.11 — advertise bounded daemon-side session listing (#3362)
+	"264d561342f5d009e7ce52826ced4c640ee55227e1a43367e96c2a681ef7192b", // 3.12 — idle awaits input; deletion respects resource ownership (#4057)
+	"e25deafc97b6ced4c97d6b6d4c1c3396bc06c58e69b2bc06c3fc123602bf114c", // 3.13 — deletion labels and work-loss disclosure (#4033)
+	"d3fc6b5bf86c271996caf9391ac9be5a62787451dc949c84ee503909ace268e4", // 3.14 — account-aware handoff and explicit ambiguous-delivery retry (#4018)
+	"a7f642df5fed58f13fe5f0504e26695541183caafe32671e721b3d14f43f2865", // 3.15 — forbid bypassing Git's live-worktree branch guard (#4092)
+	"ae2b7057ea8fc398586676ae3dc4e34240e9a24c9e4f4ab8569c62a7bb41a768", // 3.16 — root-agent config forms and adopted-session remediation (#4087)
+	"3a9901060da8792f1540a636f7bc853acda06dcd0f54fa60abf03fbf1b9515ec", // 3.17 — retry-limit --delivered: the mark-delivered exit for ambiguous handoff delivery (#4429)
+	"77fa36ac207b2370db0c505c9503930610bed63e52af1d4601b7ac1d6405418f", // 3.18 — task verbs accept <id-or-name>; name resolution and ambiguity rules (#4676)
+	"afd97508371edfb2165341fd2d902be3dd24a948c579baae10c9a3c6732286ba", // 3.19 — document af sessions prune for old archived sessions (#5136)
+	"514bf82ab28f806a7b0756dbc915cedc8a994291ad0cb958e97df93b53b3f54b", // 3.20 — prune reclaims only af-owned worktrees; provider transcripts are never touched (#5136)
+	"acae86681aa0448958ad9e9cd4a6c7ffe06e59c5e6331aad52d6606e125daa3a", // 3.21 — prune ships its strictly read-only dry run first; no --apply yet (#5136)
+	"8d6e2863cbfc360a858b43c07376b0c7fa82dd6ecb9dc917dec21c39d505ff96", // 3.22 — prune's dry-run claim narrows to "af writes nothing" (#5136)
+	"787978c996f9632b42e5bfd4dfc78a2adabcbd0b81c77f122e83154ec38edea1", // 3.23 — shared scope rule names both cross-project opt-ins (#5136)
+	"c0820d9b3cef409f0807375d581bac487a74ca66f96be761d307c9598215dba6", // 3.24 — Codex SessionStart preflight reports a present-but-unexecutable af instead of aborting silently (no stdout/stderr) before any echo
+	"338d85ab38d72bffdb161020f6110f118965535f33266c90564cbd5273bbee0e", // 3.25 — Codex preflight capture: run af version to completion and take the first line via parameter expansion, so a real (non-zero) af version failure is reported as broken instead of masked by || true
+	"9f9af14485acb7d9f3c385d2bce7d4d56fb4fd190ddc9b8dcd297c8ae65b89b4", // 3.26 — Codex preflight: bound the af version capture with a 10s timeout so a hanging/flooding wrapper cannot stall SessionStart, and exit 0 on the broken-CLI branch so Codex surfaces the reinstall report instead of discarding it on a non-zero exit
+	"e8e2c27752e1ef7b6bd6580f31de8a9a91a417ed61a7ee3b8e00af10e9c94a70", // 3.27 — Codex SessionStart af probe: child bash for exported-function wrappers, timeout --kill-after (#5648)
+	"5f477942a9e0dea27318416fa1a3ea33f29a9b7d23eac3ba5f2ec24b45eb6c12", // 3.28 — web tabs on remote sessions: loopback targets are served from the workspace through the agent-server port relay (W5.3)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it
@@ -334,21 +351,80 @@ func codexHooks() map[string]any {
 // against corruption rather than a compromised publisher or channel.
 // Fetch-and-execute from inside an agent session remains the wrong shape at any
 // convenience — see #2172 and #2174. Detect and instruct.
+//
+// The hook has three branches, so it reports in every state: af missing → print
+// the install command; af healthy → print its version; af on PATH but failing
+// to exec (corrupt/wrong-architecture binary, missing shebang interpreter, or a
+// wrapper that emits a line then exits non-zero) → print the reinstall command.
+// All three branches exit 0: this is an informational SessionStart hook, and
+// Codex surfaces a hook's stdout to the session only on a zero exit — a non-zero
+// exit makes Codex record "hook exited with code N" and discard the stdout, so
+// the broken-CLI branch's reinstall guidance would never reach the session.
+// Reporting the broken state (the whole point of this hook) requires the zero
+// exit; the report text itself names the broken state, so the model still learns
+// af is unusable without a non-zero exit hiding it.
+//
+// set -e is intentionally absent: the version capture runs under pipefail, and
+// a present-but-unexecutable af makes it exit non-zero. With set -e the
+// assignment would abort the script before the report echo, and the 2>/dev/null
+// on the capture would also swallow bash's own exec-failure diagnostic —
+// leaving the hook with no stdout, no stderr, and only an opaque non-zero exit,
+// which is not a report. The capture sits inside an elif condition, so a failing
+// capture just falls through to the else branch instead.
+//
+// The whole `af version` output is captured into a variable first, then the
+// first line is selected with a parameter expansion rather than piping into
+// `head -n 1`: `af version` then runs to completion (no `head` to send it
+// SIGPIPE under pipefail), so its real exit status decides the branch, and a
+// wrapper that prints a version-looking line then exits non-zero is reported as
+// broken instead of masked as healthy by a `|| true`.
+//
+// The capture is wall-clock bounded so a wrapper that hangs or floods output
+// cannot stall session startup for the 600s Codex applies when a hook declares
+// no timeout: af_version_bounded wraps `af version` in `timeout -k 2s 10s`
+// (SIGKILL after a 2s grace, so a wrapper that traps TERM still dies) where
+// timeout(1) is available (Linux, macOS-with-coreutils), and falls back to the
+// unbounded capture where it is missing rather than misreport a healthy af as
+// broken. The probe runs through a child `bash -c` because timeout(1) can only
+// exec a file: a child bash inherits an exported `af` shell function (`export
+// -f`), so function wrappers and file commands take the same branch. A timeout (exit 124) or any non-zero exit is a failure that routes to
+// the broken branch.
 func afPreflightHook() string {
 	return "#!/usr/bin/env bash\n" +
 		"# " + pluginGenBanner + "\n" +
 		"#\n" +
 		"# Report whether the af CLI is on PATH. Read-only on purpose: this hook never\n" +
 		"# downloads or installs anything (see docs/agent-plugins.md).\n" +
-		"set -euo pipefail\n" +
+		"set -uo pipefail\n" +
 		"\n" +
-		"if command -v af >/dev/null 2>&1; then\n" +
-		"\t# `af version` can print a second \"an upgrade is available\" line; the\n" +
-		"\t# hook only wants the version itself.\n" +
-		"\tversion=$(af version 2>/dev/null | head -n 1)\n" +
-		"\techo \"${version:-af (version unknown)} is available.\"\n" +
-		"else\n" +
+		"# af_version_bounded runs `af version` with a short wall-clock bound so a\n" +
+		"# wrapper that hangs or floods output cannot stall SessionStart for the 600s\n" +
+		"# Codex applies when a hook declares no timeout. timeout(1) is on Linux and\n" +
+		"# macOS-with-coreutils; where it is missing the probe falls back to the\n" +
+		"# unbounded capture (the prior behavior) rather than misreport a healthy af\n" +
+		"# as broken. The whole `af version` output is captured into a variable first\n" +
+		"# (no head in the pipe), so af version runs to completion and its real exit\n" +
+		"# status — not a masked pipeline — decides the branch; a timeout (exit 124)\n" +
+		"# or a wrapper that prints a version-looking line then exits non-zero is\n" +
+		"# reported as broken, not masked as healthy by a || true.\n" +
+		"af_version_bounded() {\n" +
+		"\tif command -v timeout >/dev/null 2>&1; then\n" +
+		"\t\ttimeout -k 2s 10s bash -c 'af version' 2>/dev/null\n" +
+		"\telse\n" +
+		"\t\taf version 2>/dev/null\n" +
+		"\tfi\n" +
+		"}\n" +
+		"\n" +
+		"if ! command -v af >/dev/null 2>&1; then\n" +
 		"\techo \"af is not installed. Install it with:\"\n" +
+		"\techo \"  " + session.AfInstallCommand + "\"\n" +
+		"\telif af_out=$(af_version_bounded) && [ -n \"$af_out\" ]; then\n" +
+		"\t# `af version` can print a second \"an upgrade is available\" line; the\n" +
+		"\t# hook only wants the version itself, so keep only the first line.\n" +
+		"\tversion=${af_out%%$'\\n'*}\n" +
+		"\techo \"${version} is available.\"\n" +
+		"else\n" +
+		"\techo \"af is on PATH but failed to execute. Reinstall it with:\"\n" +
 		"\techo \"  " + session.AfInstallCommand + "\"\n" +
 		"fi\n"
 }

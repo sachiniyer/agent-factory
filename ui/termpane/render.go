@@ -9,8 +9,13 @@ import (
 
 // renderGridWindow turns the emulator's visible cell grid into exactly height
 // ANSI-styled lines of exactly width cells, padding with blanks where the
-// grid is smaller and clipping where it is larger (the owner resizes the
-// emulator to the pane rect, so both are transient states around a resize).
+// grid is smaller and clipping where it is larger. A mismatch used to be only
+// a transient state around a resize (the owner resized the emulator to the
+// pane rect); since #4480 a viewer's emulator intentionally KEEPS the pane's
+// real size, so a narrower view is the steady state for watching a larger
+// pane. A clipped row whose cut region holds content gets a `…` in the last
+// cell — the cut must be visible, not a silent amputation (the fitLine
+// convention, #4175).
 // The caller must hold the lock that guards the emulator against concurrent
 // writes (TermPane.gridMu): CellAt returns pointers into the live buffer.
 //
@@ -42,6 +47,10 @@ func renderGridWindow(emu *vt.Emulator, width, height, sourceY int, cursor curso
 			sb.WriteByte('\n')
 		}
 		row := y + sourceY
+		// When the emulator is wider than this view, clipping the row could lose
+		// content the user can't see — mark the edge cell if the cut region holds
+		// any (#4175/#4480). Blank-space tails clip silently: nothing was lost.
+		clipped := emu.Width() > width && rowHasContent(emu, row, width)
 		prev := uv.Style{}
 		for x := 0; x < width; {
 			content, cellWidth, style := " ", 1, uv.Style{}
@@ -51,8 +60,13 @@ func renderGridWindow(emu *vt.Emulator, width, height, sourceY int, cursor curso
 			if x+cellWidth > width {
 				// A wide glyph straddling the clip boundary (only possible
 				// while the emulator is transiently larger than the pane)
-				// would overflow the row: blank it instead.
+				// would overflow the row: blank it instead. The glyph's own
+				// tail is content being clipped, so the edge is marked too.
 				content, cellWidth = " ", 1
+				clipped = true
+			}
+			if x+cellWidth == width && clipped {
+				content, cellWidth = "…", 1
 			}
 			if cursor.show && row == cursor.y && x <= cursor.x && cursor.x < x+cellWidth {
 				style.Attrs ^= uv.AttrReverse

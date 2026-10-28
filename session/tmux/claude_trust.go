@@ -1,0 +1,841 @@
+package tmux
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
+)
+
+// claudeTrustAffirmativeLabel is the option af must confirm on Claude Code's
+// folder-trust dialog. It is matched as a LABEL, never as a position: #3579 is
+// what happened when af answered that dialog with a bare Enter and Claude Code
+// 2.1.257 made "No, exit" the preselected row, so af's own dismissal quit the
+// agent and the create failed with "capture-pane: exit status 1".
+const claudeTrustAffirmativeLabel = "Yes, I trust this folder"
+
+// claudeTrustSelectionGlyph is the cursor Claude Code draws on the selected row
+// of a launch-time picker (U+276F). Its composer prompt uses the SAME glyph, so
+// it is read as a selection cursor only inside a dialog claudeTrustPromptPresent
+// has already identified.
+const claudeTrustSelectionGlyph = "❯"
+
+// claudeTrustAffordancePrefix is the modal's own footer. Requiring it to be the
+// LAST content on screen is what separates a live dialog from a transcript that
+// quotes one: the composer of a working agent is always painted below its
+// output, so a quoted dialog can never be the last thing in the pane. Measured
+// against claude 2.1.258 with af's own capture flags (-p -e -J): rows 15/16 are
+// the options, 17 is blank, 18 is this footer, and 19-30 are blank.
+//
+// The hidden-cursor oracle the codex branch uses is NOT available here. Claude
+// Code hides the terminal cursor in the modal (cursor_flag=0) — and in its
+// ordinary composer too, also measured — so cursor visibility cannot tell the
+// two apart for this agent. Structure is the only discriminator, so it carries
+// the whole weight.
+const claudeTrustAffordancePrefix = "Enter to confirm"
+
+const (
+	// claudeTrustSettleDelay is how long the dialog must have been on screen
+	// before af types into it.
+	//
+	// It exists because Claude Code DROPS keys sent in the instant after it
+	// paints this dialog, before it is reading input — measured on 2.1.258 at
+	// roughly one create in six, as sixteen consecutive captures showing the
+	// cursor still on the row af had tried to move off. That is the same class
+	// as the load-bearing delay on the prompt-delivery path.
+	//
+	// It has to be prevention rather than recovery, because a dropped key
+	// cannot be distinguished from a key the agent has buffered but not yet
+	// processed, and re-sending the second kind is what quits the agent: this
+	// picker WRAPS (measured — a second Down at the bottom returns to the top),
+	// so a duplicate movement key does not clamp harmlessly, it undoes the
+	// move. af therefore never re-sends one; see the pending-move hold.
+	claudeTrustSettleDelay = 500 * time.Millisecond
+	// claudeTrustHoldReportAfter is when an unproven movement key is REPORTED.
+	// It changes no behavior — af holds either way — it only decides when an
+	// operator is told why the session is stuck.
+	claudeTrustHoldReportAfter = 5 * time.Second
+	// claudeTrustMaxMovementKeys bounds the Down/Up keys af may inject into one
+	// dialog in a single check. Direction is recomputed from a fresh capture
+	// after every key, so a picker that moves the cursor somewhere af did not
+	// predict converges within a couple of steps — and one that ignores the keys
+	// entirely stops here and is REPORTED rather than confirmed blind.
+	claudeTrustMaxMovementKeys = 4
+	// claudeTrustRepaintWindow bounds how long af waits for the terminal to
+	// redraw the row it just moved the cursor to. `send-keys` returns once the
+	// key is written to the pty, so an immediate capture races the redraw; a
+	// stale frame read as "the cursor did not move" is what would make af send a
+	// second movement key and overshoot.
+	//
+	// It is short on purpose. This runs on the daemon's SEQUENTIAL per-instance
+	// poll, so time spent here is time every later instance waits. Half a second
+	// covers a terminal redraw with room to spare, and a redraw that misses it
+	// costs one poll, not a wrong keystroke: af returns without confirming and
+	// the next check re-reads the pane's real state.
+	claudeTrustRepaintWindow = 500 * time.Millisecond
+	claudeTrustRepaintPoll   = 25 * time.Millisecond
+)
+
+// claudeTrustNow and claudeTrustSleep are indirected so a test can drive the
+// repaint window without depending on wall-clock timing.
+var (
+	claudeTrustNow   = time.Now
+	claudeTrustSleep = time.Sleep
+)
+
+// claudeTrustState is the only cross-poll memory the folder-trust handler needs:
+// whether its refusal has already been reported, so an unreadable dialog is
+// logged once instead of on every tick of the daemon's per-second poll.
+// Access only while inputMu is held.
+type claudeTrustState struct {
+	refusalLogged bool
+	// pendingFrom is the label the cursor sat on when af last sent a movement
+	// key whose redraw it did not get to observe. While it is set af sends NO
+	// further movement key: `send-keys` returning is not proof the key landed,
+	// and a terminal that has not repainted yet is not proof it did not. A
+	// second key sent against a cursor that already moved would push it back
+	// off the affirmative row, and a redraw landing between the verification
+	// and confirmation captures could then let Enter reach the wrong option —
+	// which is the very failure #3579 is about.
+	//
+	// Only a frame showing a DIFFERENT selected label releases it, or a new
+	// pane process. This mirrors handleCodexSafetyBuffering's pending-selection
+	// discipline: holding costs a session that stays blocked on a dialog it was
+	// already blocked on, and that failure is loud and bounded; a movement key
+	// af cannot take back is neither.
+	pendingFrom   string
+	pendingSince  time.Time
+	pendingPolls  int
+	pendingLogged bool
+	// firstSeen is when af first observed the dialog currently on screen. af
+	// types nothing until claudeTrustSettleDelay has passed, so its first key
+	// does not land in the window where Claude Code is painting the dialog and
+	// not yet reading input.
+	firstSeen time.Time
+}
+
+func (s *claudeTrustState) beginPendingMove(from string) {
+	s.pendingFrom, s.pendingSince = from, claudeTrustNow()
+	s.pendingPolls, s.pendingLogged = 0, false
+}
+
+func (s *claudeTrustState) clearPendingMove() {
+	s.pendingFrom, s.pendingSince = "", time.Time{}
+	s.pendingPolls, s.pendingLogged = 0, false
+}
+
+// settled reports whether the dialog has been on screen long enough for af to
+// type into it. The first call records when it appeared and answers false.
+func (s *claudeTrustState) settled() bool {
+	now := claudeTrustNow()
+	if s.firstSeen.IsZero() {
+		s.firstSeen = now
+		return false
+	}
+	return now.Sub(s.firstSeen) >= claudeTrustSettleDelay
+}
+
+// claudeTrustRow is one visible pane line reduced to what af navigates by: the
+// option's LABEL and whether it carries the selection cursor. The numeric
+// ordinal Claude Code renders on some builds is picker syntax and is discarded
+// here — keying off it is the same assumption #3579 was, one layer down.
+type claudeTrustRow struct {
+	label    string
+	selected bool
+	blank    bool
+}
+
+// claudeTrustBoxDrawing is the frame some Claude Code builds draw around this
+// dialog. Every rune here is chrome: a row made only of them says nothing about
+// what is on screen, so it neither separates options nor counts as content
+// painted below the footer. claude 2.1.258 draws the dialog unframed, but the
+// framed form must parse identically — a rendering change is not a reason to
+// stop answering the dialog.
+const claudeTrustBoxDrawing = "│┃║╭╮╰╯┌┐└┘╔╗╚╝─━═┄┈├┤┏┓┗┛┬┴┼╠╣╦╩╬▏▕"
+
+// claudeMCPDialogPreamble is the line Claude Code renders immediately before the
+// trust question. The MCP modal always starts with this exact preamble; natural-
+// language prose about the dialog embeds the question in a sentence and does not
+// reproduce the preamble. Matching on the preamble (rather than the question
+// alone) is what keeps the partial-render detector from firing on agent output
+// that merely quotes the question string.
+const claudeMCPDialogPreamble = "new mcp server found"
+
+// claudeMCPDialogQuestion is the trust question Claude Code renders on the MCP
+// modal. The preamble and question may appear on separate consecutive rows; the
+// partial-render detector must recognise both as dialog content.
+const claudeMCPDialogQuestion = "do you trust this new mcp server"
+
+// claudeMCPDialogPartiallyRendered reports whether the pane shows the MCP
+// trust dialog in a state consistent with Claude Code still painting it. The
+// MCP preamble ("New MCP server found") must appear in the last block OR in
+// the block immediately above it (skipping blank chrome), AND the last
+// non-blank row of the last block must look like MCP dialog content (the
+// preamble, the question, or a known option label) rather than agent prose.
+//
+// When Claude Code paints the MCP modal it renders top-to-bottom: preamble +
+// question first, then options, then the footer. The layout may place blank
+// rows as separators: preamble/question in one block, then a blank row, then
+// the option rows in the next block. A capture taken after the options are
+// painted but before the footer shows the option block as the LAST block —
+// the preamble is in the preceding block, not the last one. This function
+// must recognise both layouts:
+//   - preamble + question + options in one contiguous block (no blank between)
+//   - preamble/question in one block, options in the next (blank separator)
+//
+// Agent prose or UI chrome (e.g. "? for shortcuts", trailing explanatory text)
+// appears in a different block or makes the last row non-dialog, so the
+// predicate stays false. The preamble check (not just the question) is what
+// prevents an agent-quoted question string above an unrelated picker from
+// satisfying this predicate.
+//
+// This is the "unconfirmed" sentinel: the dialog looks real but is not yet
+// complete. The caller must not proceed to deliver the user's prompt; it must
+// retry until the dialog either completes (claudeTrustPromptPresent) or the
+// preamble is no longer in the expected position.
+func claudeMCPDialogPartiallyRendered(content string) bool {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	rows := make([]claudeTrustRow, len(lines))
+	for i, line := range lines {
+		rows[i] = claudeTrustRowOf(line)
+	}
+
+	// Find the last non-blank row.
+	lastIdx := -1
+	for i := len(rows) - 1; i >= 0; i-- {
+		if !rows[i].blank {
+			lastIdx = i
+			break
+		}
+	}
+	if lastIdx < 0 {
+		return false
+	}
+
+	// Walk back to find the start of the contiguous block ending at lastIdx.
+	blockStart := lastIdx
+	for blockStart > 0 && !rows[blockStart-1].blank {
+		blockStart--
+	}
+
+	// The preamble must appear in the last block OR in the block immediately
+	// above it (skipping blank chrome). The Claude picker layout places a blank
+	// separator between the preamble/question block and the option block, so a
+	// capture taken after the options are painted has the options as the last
+	// block and the preamble in the preceding block. Applying the same
+	// blank-skipping discipline as claudeMCPTrustFooterIsLast covers both
+	// layouts without widening the window further.
+	hasPreamble := false
+	for i := blockStart; i <= lastIdx; i++ {
+		if strings.Contains(strings.ToLower(rows[i].label), claudeMCPDialogPreamble) {
+			hasPreamble = true
+			break
+		}
+	}
+	if !hasPreamble {
+		// Look in the block immediately above, skipping blank chrome.
+		prevBlockEnd := blockStart - 1
+		for prevBlockEnd >= 0 && rows[prevBlockEnd].blank {
+			prevBlockEnd--
+		}
+		if prevBlockEnd >= 0 {
+			prevBlockStart := prevBlockEnd
+			for prevBlockStart > 0 && !rows[prevBlockStart-1].blank {
+				prevBlockStart--
+			}
+			for i := prevBlockStart; i <= prevBlockEnd; i++ {
+				if strings.Contains(strings.ToLower(rows[i].label), claudeMCPDialogPreamble) {
+					hasPreamble = true
+					break
+				}
+			}
+		}
+	}
+	if !hasPreamble {
+		return false
+	}
+
+	// The last row of the block must look like MCP dialog content, not agent
+	// prose. A row is "dialog content" if it: contains the preamble (preamble
+	// still last), contains the question (question on a separate row, last), or
+	// exactly matches a known MCP option label (selected or not — ordinals are
+	// already stripped by claudeTrustRowOf, so exact match on "yes"/"no" is
+	// both strict and sufficient; a composer cursor on an arbitrary row does
+	// not satisfy this). Agent UI lines ("? for shortcuts", arbitrary prose)
+	// do not match any of these, so they disqualify the block.
+	//
+	// The selection glyph is NOT sufficient alone: Claude's composer uses the
+	// same glyph, so an already-running pane whose last block mentions
+	// "New MCP server found" in earlier output and has the composer cursor as
+	// its last non-blank row would otherwise be classified as partial indefinitely.
+	lastLabel := strings.ToLower(rows[lastIdx].label)
+	if strings.Contains(lastLabel, claudeMCPDialogPreamble) {
+		return true // preamble is still the last thing painted
+	}
+	if strings.Contains(lastLabel, claudeMCPDialogQuestion) {
+		return true // question on its own row is still the last thing painted
+	}
+	if strings.HasPrefix(lastLabel, strings.ToLower(claudeTrustAffordancePrefix)) {
+		// The footer is there but claudeMCPTrustFooterIsLast returned false
+		// (option-label validation failed), which means the block isn't a
+		// valid MCP dialog. Do not treat this as partial render.
+		return false
+	}
+	for _, opt := range claudeMCPOptionLabels {
+		if lastLabel == opt {
+			return true // an exact MCP option label is the last thing painted
+		}
+	}
+	return false
+}
+
+func claudeTrustRowOf(line string) claudeTrustRow {
+	line = strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(line, "\r"), ""))
+	// Strip the side borders so a bordered row and a bare row reduce to the
+	// same label, then treat a row that was ONLY frame as blank.
+	line = strings.TrimSpace(strings.Trim(line, claudeTrustBoxDrawing))
+	if line == "" {
+		return claudeTrustRow{blank: true}
+	}
+	row := claudeTrustRow{}
+	if rest, ok := strings.CutPrefix(line, claudeTrustSelectionGlyph); ok {
+		row.selected = true
+		line = strings.TrimSpace(rest)
+	}
+	row.label = strings.TrimSpace(trimClaudeTrustOrdinal(line))
+	return row
+}
+
+// trimClaudeTrustOrdinal drops a leading "N. " picker ordinal. Mirrors
+// codexPickerRow: the ordinal is parsed only so it cannot be mistaken for part
+// of the label.
+func trimClaudeTrustOrdinal(line string) string {
+	dot := strings.Index(line, ". ")
+	if dot <= 0 || dot > 3 {
+		return line
+	}
+	for _, r := range line[:dot] {
+		if r < '0' || r > '9' {
+			return line
+		}
+	}
+	return line[dot+2:]
+}
+
+// claudeFolderTrustDialog is a parsed folder-trust modal: every visible row,
+// plus the index of the row that owns the cursor and the index of the row af
+// must confirm.
+type claudeFolderTrustDialog struct {
+	rows        []claudeTrustRow
+	cursor      int
+	affirmative int
+}
+
+func (d claudeFolderTrustDialog) onAffirmative() bool {
+	return d.cursor >= 0 && d.cursor == d.affirmative
+}
+
+// keyTowardAffirmative picks the direction by RENDER ORDER, so it is correct
+// for both orders the dialog has shipped with — and for any future one.
+func (d claudeFolderTrustDialog) keyTowardAffirmative() string {
+	if d.affirmative > d.cursor {
+		return "Down"
+	}
+	return "Up"
+}
+
+func (d claudeFolderTrustDialog) selectedLabel() string {
+	if d.cursor < 0 || d.cursor >= len(d.rows) {
+		return ""
+	}
+	return d.rows[d.cursor].label
+}
+
+// claudeFolderTrustDialogPresent reports whether the capture shows the dialog
+// whose affirmative row af locates by label. The MCP-server prompt and the
+// legacy "Do you trust the files in this folder?" wording render no such row;
+// they keep the historical Enter tap.
+func claudeFolderTrustDialogPresent(content string) bool {
+	return strings.Contains(ansiCSISequence.ReplaceAllString(content, ""), claudeTrustAffirmativeLabel)
+}
+
+// claudeMCPOptionLabels are the fixed option labels the MCP trust picker
+// renders. Validating their presence in the same block as the question and
+// footer is what makes the check claim to know WHAT dialog is on screen rather
+// than only WHERE certain strings sit relative to each other. An agent that
+// quotes the MCP question above an unrelated picker cannot satisfy this because
+// it cannot reproduce both option labels inside the same contiguous block as
+// the unrelated footer. The labels are matched case-insensitively and
+// EXACTLY — claudeTrustRowOf already strips numeric ordinals ("1. Yes" → "Yes")
+// so an exact match against the normalised label is stricter than a suffix test:
+// HasSuffix(lower, " yes") would accept "Always yes"; exact match does not.
+var claudeMCPOptionLabels = []string{"yes", "no"}
+
+// claudeMCPTrustFooterIsLast reports whether the MCP trust modal's "Enter to
+// confirm" affordance is the last non-blank content in the pane AND the option
+// block above the footer (skipping any blank chrome between them) contains the
+// modal's own exact option labels ("yes" / "no"), AND the MCP question appears
+// either in that same option block or in the block immediately above it
+// (skipping any blank chrome between them). A live MCP modal is the last thing
+// on screen, so its footer is the final row; a quoted mention of the MCP phrase
+// has the agent's composer or further output below it, so the footer is not
+// last. This is the same footer-is-last discipline claudeTrustPickerStructure
+// applies to the folder-trust branch and that CodexTrustPromptPresent applies
+// as its `affordance == last` rule: "a working agent paints its composer
+// beneath its output, so a quoted dialog has something after it and a live one
+// does not."
+//
+// The blank-row skips are required because the Claude picker layout places blank
+// rows as separators: between the option rows and the footer, and between the
+// question and the option rows. Both gaps are bridged the same way
+// claudeTrustPickerStructure bridges blank chrome via claudeTrustNextContentRow.
+//
+// Validating the option labels EXACTLY — not just blank-line adjacency and not
+// with suffix matching — is what closes the cross-dialog injection class: an
+// agent quoting the MCP question immediately above an unrelated picker produces
+// a block that contains the question and an unrelated footer, but the unrelated
+// picker's option rows do not exactly match "yes" / "no" after ordinal stripping,
+// so the predicate stays false and no Enter is sent.
+//
+// Rows are parsed with claudeTrustRowOf so box-drawing chrome and ANSI styling
+// are stripped before the affordance is matched, letting a framed and an
+// unframed modal reduce to the same footer.
+func claudeMCPTrustFooterIsLast(content string) bool {
+	affordance := strings.ToLower(claudeTrustAffordancePrefix)
+	question := claudeMCPDialogQuestion
+
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	rows := make([]claudeTrustRow, len(lines))
+	for i, line := range lines {
+		rows[i] = claudeTrustRowOf(line)
+	}
+
+	// Find the index of the last non-blank row.
+	lastIdx := -1
+	for i := len(rows) - 1; i >= 0; i-- {
+		if !rows[i].blank {
+			lastIdx = i
+			break
+		}
+	}
+	if lastIdx < 0 {
+		return false
+	}
+
+	// The last non-blank row must be the footer.
+	if !strings.HasPrefix(strings.ToLower(rows[lastIdx].label), affordance) {
+		return false
+	}
+
+	// Walk back from the footer, skipping the blank chrome that the Claude picker
+	// layout places between the option rows and the footer (option rows, blank
+	// row, "Enter to confirm"). claudeTrustPickerStructure applies the same
+	// blank-skipping discipline via claudeTrustNextContentRow.
+	optBlockEnd := lastIdx - 1
+	for optBlockEnd >= 0 && rows[optBlockEnd].blank {
+		optBlockEnd--
+	}
+	if optBlockEnd < 0 {
+		return false
+	}
+
+	// Walk back to find the start of the contiguous option block.
+	optBlockStart := optBlockEnd
+	for optBlockStart > 0 && !rows[optBlockStart-1].blank {
+		optBlockStart--
+	}
+
+	// The option block must contain both known option labels. Requiring the
+	// options — not just the question — is what tells an agent-controlled-text
+	// quote from an actual dialog: the attacker can emit the question above any
+	// picker, but both option rows must also appear inside the same
+	// blank-line-delimited block as the footer for the predicate to fire. A
+	// generic picker cannot satisfy that without also reproducing the MCP option
+	// wording, which would then be answerable in good faith anyway.
+	//
+	// Options are matched EXACTLY against the normalised label: claudeTrustRowOf
+	// already strips numeric ordinals ("1. Yes" → "Yes"), so exact match on the
+	// lowercased label is both stricter and simpler than a suffix test.
+	// HasSuffix(lower, " yes") would accept "Always yes"; exact match does not.
+	hasQuestion := false
+	optionFound := make([]bool, len(claudeMCPOptionLabels))
+	for i := optBlockStart; i <= optBlockEnd; i++ {
+		lower := strings.ToLower(rows[i].label)
+		if strings.Contains(lower, question) {
+			hasQuestion = true
+		}
+		for j, opt := range claudeMCPOptionLabels {
+			if lower == opt {
+				optionFound[j] = true
+			}
+		}
+	}
+	for _, found := range optionFound {
+		if !found {
+			return false
+		}
+	}
+
+	// The question and preamble may appear in the block immediately above the
+	// option block, separated by blank chrome — the Claude picker layout places
+	// a blank row between the question and its options as well as between the
+	// options and the footer. Apply the same blank-skipping discipline upward:
+	// if the question was not found in the option block, look in the preceding
+	// content block. This is the "Bridge the separator above MCP options" fix:
+	// without it, the backward scan stops at the blank row between question and
+	// options, leaving hasQuestion false and blocking a genuine dialog.
+	//
+	// Requiring the preamble in the preceding block (not only the question) is
+	// what closes the cross-dialog injection path for the separator-bridge case:
+	// an agent can print the exact question string above an unrelated yes/no
+	// picker, but the real MCP preamble ("New MCP server found") is not
+	// attacker-supplied prose — it is a fixed string the modal itself renders.
+	// Checking the preamble alongside the question makes the preceding-block
+	// search as strong as the inline-block search.
+	hasPreamble := false
+	for i := optBlockStart; i <= optBlockEnd; i++ {
+		if strings.Contains(strings.ToLower(rows[i].label), claudeMCPDialogPreamble) {
+			hasPreamble = true
+			break
+		}
+	}
+	if !hasQuestion || !hasPreamble {
+		// Walk back past the blank chrome above the option block.
+		questionBlockEnd := optBlockStart - 1
+		for questionBlockEnd >= 0 && rows[questionBlockEnd].blank {
+			questionBlockEnd--
+		}
+		if questionBlockEnd >= 0 {
+			// Walk back to the start of the preceding content block.
+			questionBlockStart := questionBlockEnd
+			for questionBlockStart > 0 && !rows[questionBlockStart-1].blank {
+				questionBlockStart--
+			}
+			for i := questionBlockStart; i <= questionBlockEnd; i++ {
+				lower := strings.ToLower(rows[i].label)
+				if strings.Contains(lower, question) {
+					hasQuestion = true
+				}
+				if strings.Contains(lower, claudeMCPDialogPreamble) {
+					hasPreamble = true
+				}
+			}
+		}
+	}
+	if !hasQuestion || !hasPreamble {
+		return false
+	}
+	return true
+}
+
+// parseClaudeFolderTrustDialog locates the cursor row and the affirmative row.
+//
+// Both must be unambiguous and both must belong to the same block of adjacent
+// non-blank rows, because that is the only evidence that they are two options
+// of ONE picker rather than a live dialog plus a quoted mention of its label
+// somewhere else on screen. Anything less is reported as an error: af refuses to
+// answer a dialog it cannot read, which costs a retry, where guessing costs the
+// agent (#3579).
+func parseClaudeFolderTrustDialog(content string) (claudeFolderTrustDialog, error) {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	rows := make([]claudeTrustRow, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, claudeTrustRowOf(line))
+	}
+
+	dialog := claudeFolderTrustDialog{rows: rows, cursor: -1, affirmative: -1}
+	cursors, affirmatives := 0, 0
+	for idx, row := range rows {
+		if row.selected {
+			dialog.cursor, cursors = idx, cursors+1
+		}
+		// EXACT, not a prefix: "Yes, I trust this folder (quoted from the docs)"
+		// is prose about the dialog, not an option of one.
+		if row.label == claudeTrustAffirmativeLabel {
+			dialog.affirmative, affirmatives = idx, affirmatives+1
+		}
+	}
+
+	switch {
+	case cursors == 0 && affirmatives == 0:
+		return claudeFolderTrustDialog{}, fmt.Errorf("no row carries the %q selection cursor and none is labelled %q",
+			claudeTrustSelectionGlyph, claudeTrustAffirmativeLabel)
+	case cursors == 0:
+		return claudeFolderTrustDialog{}, fmt.Errorf("no row carries the %q selection cursor", claudeTrustSelectionGlyph)
+	case cursors > 1:
+		return claudeFolderTrustDialog{}, fmt.Errorf("%d rows carry the %q selection cursor, so af cannot tell which option is selected",
+			cursors, claudeTrustSelectionGlyph)
+	case affirmatives == 0:
+		return claudeFolderTrustDialog{}, fmt.Errorf("no row is labelled %q", claudeTrustAffirmativeLabel)
+	case affirmatives > 1:
+		return claudeFolderTrustDialog{}, fmt.Errorf("%d rows are labelled %q", affirmatives, claudeTrustAffirmativeLabel)
+	}
+	if err := claudeTrustPickerStructure(rows, dialog.cursor, dialog.affirmative); err != nil {
+		return claudeFolderTrustDialog{}, err
+	}
+	return dialog, nil
+}
+
+// claudeTrustPickerStructure requires the two rows to be options of a LIVE
+// picker rather than two lines that happen to be on screen together.
+//
+// Text alone cannot decide that. This handler runs on the daemon's continuous
+// poll against arbitrary agent output — including output that quotes this very
+// dialog, or this very file — and injecting Down/Up/Enter into a working
+// agent's composer is not recoverable. So the shape is required, all of it:
+//
+//   - the two rows sit in one unbroken run of non-blank rows (one picker),
+//   - that run holds at least two rows (a picker has options, plural),
+//   - the modal's footer is the next content below the run, and
+//   - that footer is the LAST content in the pane.
+//
+// The last requirement is the load-bearing one, and it is the same shape
+// CodexTrustPromptPresent's `affordance == last` rule already relies on: a
+// working agent paints its composer beneath its output, so a quoted dialog has
+// something after it and a live one does not.
+func claudeTrustPickerStructure(rows []claudeTrustRow, cursor, affirmative int) error {
+	first, last := claudeTrustRunBounds(rows, affirmative)
+	if cursor < first || cursor > last {
+		return fmt.Errorf("the selected row %q and the %q row are not in one unbroken block, so they are not two options of one picker",
+			rows[cursor].label, claudeTrustAffirmativeLabel)
+	}
+	if last-first+1 < 2 {
+		return fmt.Errorf("%q is the only row in its block; a picker af can navigate has more than one option",
+			claudeTrustAffirmativeLabel)
+	}
+	footer := claudeTrustNextContentRow(rows, last+1)
+	if footer < 0 || !strings.HasPrefix(rows[footer].label, claudeTrustAffordancePrefix) {
+		return fmt.Errorf("the option block is not followed by the modal's %q footer", claudeTrustAffordancePrefix)
+	}
+	if claudeTrustNextContentRow(rows, footer+1) >= 0 {
+		return fmt.Errorf("content is painted below the %q footer, so this is a dialog being quoted rather than one waiting for input",
+			claudeTrustAffordancePrefix)
+	}
+	return nil
+}
+
+// claudeTrustRunBounds returns the inclusive bounds of the unbroken run of
+// non-blank rows containing idx.
+func claudeTrustRunBounds(rows []claudeTrustRow, idx int) (first, last int) {
+	first, last = idx, idx
+	for first > 0 && !rows[first-1].blank {
+		first--
+	}
+	for last < len(rows)-1 && !rows[last+1].blank {
+		last++
+	}
+	return first, last
+}
+
+// claudeTrustNextContentRow returns the first non-blank row at or after from,
+// or -1 when the rest of the pane is blank.
+func claudeTrustNextContentRow(rows []claudeTrustRow, from int) int {
+	for idx := from; idx < len(rows); idx++ {
+		if !rows[idx].blank {
+			return idx
+		}
+	}
+	return -1
+}
+
+// answerClaudeTrustPrompt answers a Claude Code launch gate that
+// claudeTrustPromptPresent has already identified. It always reports true: the
+// dialog was positively identified, so every outcome — accepted, unproven, or
+// refused — leaves the caller owing another check before it may type into the
+// pane (#3302).
+func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
+	if !claudeFolderTrustDialogPresent(content) {
+		// The MCP-server trust prompt, or the legacy folder-trust wording.
+		// Neither renders a row af can locate by label and neither is what
+		// regressed in 2.1.257, so both keep the historical Enter tap on
+		// whatever Claude Code preselected. Both are structurally guarded at
+		// the predicate — claudeMCPTrustFooterIsLast for the MCP branch,
+		// claudeLegacyTrustDialogOf for the legacy branch — so only a live
+		// modal reaches this Enter; quoted output with the composer painted
+		// below it never reaches this branch.
+		if err := t.TapEnter(); err != nil {
+			log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
+			return true
+		}
+		t.noteDialogKeystroke(claudeLaunchGateDialogName, "", "Enter")
+		return true
+	}
+	return t.selectClaudeFolderTrust(content)
+}
+
+// selectClaudeFolderTrust moves the cursor onto the affirmative row and
+// confirms it — reading the pane at every step instead of assuming a preselected
+// option or a fixed key sequence.
+//
+// The shape is the one the codex safety-check handler beside it already uses:
+// look, act, then look again before the irreversible key. Enter is sent only
+// after a FRESH capture proves the affirmative row owns the cursor and the
+// dialog is still the thing on screen; without that second proof, a dialog that
+// closed underneath af would take the Enter into the agent's composer.
+func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
+	state := &t.claudeTrust
+	dialog, err := parseClaudeFolderTrustDialog(content)
+	if err != nil {
+		if state.pendingFrom != "" {
+			// A frame af cannot read is not evidence that a movement key it
+			// already sent did nothing either. Keep holding.
+			t.holdPendingClaudeTrustMove()
+			return true
+		}
+		t.refuseClaudeFolderTrust(err)
+		return true
+	}
+
+	// A movement key af sent and never saw land makes this handler READ-ONLY.
+	//
+	// Only an observed change of the selected row releases it. Elapsed time
+	// cannot: a key the agent has buffered but not yet processed looks exactly
+	// like a key it never received, and the two want opposite actions. Getting
+	// that wrong is not a small cost — this picker wraps, so a second movement
+	// key undoes the first, and a repaint landing between af's verification and
+	// confirmation captures would then let Enter reach "No, exit". That is
+	// #3579 again, so af holds instead, and the create fails loudly.
+	if state.pendingFrom != "" {
+		if dialog.selectedLabel() == state.pendingFrom {
+			t.holdPendingClaudeTrustMove()
+			return true
+		}
+		state.clearPendingMove()
+	}
+
+	// Do not type into a dialog Claude Code has only just painted: it is not
+	// reading input yet, and the key is dropped. See claudeTrustSettleDelay.
+	if !state.settled() {
+		return true
+	}
+
+	for moves := 0; !dialog.onAffirmative(); moves++ {
+		if moves >= claudeTrustMaxMovementKeys {
+			t.refuseClaudeFolderTrust(fmt.Errorf(
+				"the cursor stayed on %q after %d movement keys and never reached %q",
+				dialog.selectedLabel(), moves, claudeTrustAffirmativeLabel))
+			return true
+		}
+		key := dialog.keyTowardAffirmative()
+		// Recorded BEFORE the send: a send-keys that errors — or times out — is
+		// not proof the key failed to reach the pane, so it must hold too.
+		state.beginPendingMove(dialog.selectedLabel())
+		if err := t.tapPromptKeys(key); err != nil {
+			log.ErrorLog.Printf("could not move the %s cursor onto %q for session %q: %v",
+				claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, t.sanitizedName, err)
+			return true
+		}
+		t.noteDialogKeystroke(claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, key)
+
+		moved, ok := t.awaitClaudeFolderTrustRepaint(dialog)
+		if !ok {
+			// af has no proof of where the cursor is now, so it must not confirm
+			// — and the pending record above is what stops the next poll from
+			// re-sending this key against a cursor that may already have moved.
+			log.InfoLog.Printf("session %q: %s did not repaint within %s after af sent %s; sending nothing further until a frame proves the cursor moved",
+				t.sanitizedName, claudeFolderTrustDialogName, claudeTrustRepaintWindow, key)
+			return true
+		}
+		state.clearPendingMove()
+		dialog = moved
+	}
+
+	confirmed, err := t.captureClaudeFolderTrustDialog()
+	if err != nil {
+		log.InfoLog.Printf("session %q: could not confirm the %s selection before accepting it: %v",
+			t.sanitizedName, claudeFolderTrustDialogName, err)
+		return true
+	}
+	if !confirmed.onAffirmative() {
+		log.InfoLog.Printf("session %q: %s shows %q selected, not %q; not confirming this frame",
+			t.sanitizedName, claudeFolderTrustDialogName, confirmed.selectedLabel(), claudeTrustAffirmativeLabel)
+		return true
+	}
+	if err := t.tapPromptKeys("Enter"); err != nil {
+		log.ErrorLog.Printf("could not confirm %q on the %s dialog for session %q: %v",
+			claudeTrustAffirmativeLabel, claudeFolderTrustDialogName, t.sanitizedName, err)
+		return true
+	}
+	t.noteDialogKeystroke(claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, "Enter")
+	state.refusalLogged = false
+	return true
+}
+
+// holdPendingClaudeTrustMove keeps a sent-but-unproven movement key pending and
+// reports it once, after claudeTrustHoldReportAfter. af holds either way — the
+// report is the operator-visible signal, not a change of behavior. Mirrors
+// recordPendingCodexSafetySelection.
+func (t *TmuxSession) holdPendingClaudeTrustMove() {
+	state := &t.claudeTrust
+	state.pendingPolls++
+	elapsed := claudeTrustNow().Sub(state.pendingSince)
+	if state.pendingLogged || elapsed < claudeTrustHoldReportAfter {
+		return
+	}
+	state.pendingLogged = true
+	log.ErrorLog.Printf(
+		"session %q: %s has not shown the cursor leave %q in %s and %d polls since af sent a movement key; "+
+			"af will not send another, because a key the agent has buffered but not yet processed is indistinguishable "+
+			"from one it never received, and this picker wraps — a second key would move the cursor back off %q",
+		t.sanitizedName, claudeFolderTrustDialogName, state.pendingFrom,
+		elapsed.Round(time.Millisecond), state.pendingPolls, claudeTrustAffirmativeLabel)
+}
+
+// resetClaudeTrustState drops this handler's cross-poll memory at a proven
+// runtime boundary. A movement key af sent to the PREVIOUS pane process cannot
+// be pending against a new one, and a refusal reported for the old pane must not
+// silence the same refusal for its replacement.
+func (t *TmuxSession) resetClaudeTrustState() {
+	t.inputMu.Lock()
+	defer t.inputMu.Unlock()
+	t.claudeTrust = claudeTrustState{}
+}
+
+// awaitClaudeFolderTrustRepaint waits for the pane to show the cursor on a
+// different option than prev did, bounded by claudeTrustRepaintWindow. The
+// comparison is by LABEL, not by line index: a redraw may reflow the rows.
+func (t *TmuxSession) awaitClaudeFolderTrustRepaint(prev claudeFolderTrustDialog) (claudeFolderTrustDialog, bool) {
+	deadline := claudeTrustNow().Add(claudeTrustRepaintWindow)
+	for {
+		dialog, err := t.captureClaudeFolderTrustDialog()
+		if err == nil && dialog.selectedLabel() != prev.selectedLabel() {
+			return dialog, true
+		}
+		if !claudeTrustNow().Before(deadline) {
+			return claudeFolderTrustDialog{}, false
+		}
+		claudeTrustSleep(claudeTrustRepaintPoll)
+	}
+}
+
+// captureClaudeFolderTrustDialog re-reads the pane and parses it, requiring the
+// dialog to still be the thing on screen. A capture that no longer shows the
+// modal is an error and not an empty dialog: it is exactly the state in which
+// injecting a key would reach the agent's composer instead.
+func (t *TmuxSession) captureClaudeFolderTrustDialog() (claudeFolderTrustDialog, error) {
+	content, err := t.CapturePaneContent()
+	if err != nil {
+		return claudeFolderTrustDialog{}, err
+	}
+	if !claudeTrustPromptPresent(content) || !claudeFolderTrustDialogPresent(content) {
+		return claudeFolderTrustDialog{}, errors.New("the folder-trust dialog is no longer on screen")
+	}
+	return parseClaudeFolderTrustDialog(content)
+}
+
+// refuseClaudeFolderTrust reports a dialog af will not answer, once per dialog
+// rather than once per poll. Refusing surfaces as the create's trust-prompt
+// budget expiring, which is a loud, recoverable failure; the alternative —
+// pressing Enter on whatever happens to be selected — is how #3579 quit users'
+// agents silently.
+func (t *TmuxSession) refuseClaudeFolderTrust(reason error) {
+	if t.claudeTrust.refusalLogged {
+		return
+	}
+	t.claudeTrust.refusalLogged = true
+	log.ErrorLog.Printf(
+		"refusing to answer the %s dialog for session %q: %v; af will not press a key it cannot aim at %q",
+		claudeFolderTrustDialogName, t.sanitizedName, reason, claudeTrustAffirmativeLabel)
+}

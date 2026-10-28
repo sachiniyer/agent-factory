@@ -55,7 +55,7 @@ var testHookPersistInstanceData = func(string, session.InstanceData) error { ret
 // persistInstanceData replaces the on-disk record for data.Title in repoID's
 // instances file with data, under the per-repo file lock, leaving every other
 // record untouched. It is the targeted, clobber-safe persist primitive for
-// in-place mutations of an existing session (CloseTab, SetPRInfo, status/limit
+// in-place mutations of an existing session (CloseTab, status/limit
 // polls, archive) — the single-writer direction of #960 — analogous to
 // appendInstanceData for creates and DeleteInstanceByStableID for kills. It
 // deliberately does NOT use a whole-list SaveInstances, which would re-serialize
@@ -223,8 +223,8 @@ func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 // miss a readable second project it used to catch, i.e. strictly worse than the
 // fail-open being fixed. Caught in review of #3479 bucket 1.
 //
-// Defence in depth today: refreshDaemonInstances runs
-// config.MigrateAllRepoInstancesForDaemonLoad first, which already refuses hard
+// Defence in depth today: refreshDaemonInstances runs the per-repo file cache
+// (config.RepoInstancesFileCache.LoadAll) first, whose loadRepoFile refuses hard
 // on an unreadable per-repo file, so findSession never reaches here in that
 // state (pinned by TestDaemonLoadGateRefusesUnreadableRepoBeforeAnyTitleResolution).
 // Correct on its own terms anyway: an identity guard should not depend on an
@@ -704,7 +704,7 @@ func (m *Manager) completeLateGhostKill(repoID, title, stableID string) {
 		m.mu.Lock()
 		m.rootKilledAt[repoID] = nowFunc()
 		m.mu.Unlock()
-		log.InfoLog.Printf("root agent for repo %s: finished a late ghost kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
+		m.info().Printf("root agent for repo %s: finished a late ghost kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
 	}
 	m.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: stableID, Title: title})
 }
@@ -717,19 +717,77 @@ func (m *Manager) persistGhostCleanupStall(repoID string, data *session.Instance
 	return persistInstanceData(repoID, *data)
 }
 
+// persistLateGhostCleanupCheckpoint is the revocable callback captured by a
+// descriptor worker that may outlive its caller. The caller has already durably
+// retained the ghost's cleanup-recovery row before shutdown can reach the
+// background drain. A callback that arrives after that drain starts therefore
+// leaves the safe row alone; one already admitted is counted and joined through
+// its targeted write.
+func (m *Manager) persistLateGhostCleanupCheckpoint(repoID string, data *session.InstanceData) error {
+	if _, admitted := m.beginBackgroundMutation(); !admitted {
+		return nil
+	}
+	defer m.backgroundMutationWG.Done()
+	return m.persistGhostCleanupStall(repoID, data)
+}
+
 var (
-	lateGhostDeleteSessionRecord  = (*Manager).deleteSessionRecord
+	lateGhostDeleteSessionRecord  = deleteLateGhostSessionRecord
 	lateGhostCleanupRetryInterval = 10 * time.Second
 )
+
+// deleteLateGhostSessionRecord reloads the exact durable row after the
+// asynchronous cleanup settles. The row is the only remaining source of quota
+// evidence on this path; an unreadable row is unknown, not an empty observation
+// set, so it must fail closed before deletion.
+func deleteLateGhostSessionRecord(
+	m *Manager, repoID, title, stableID string, teardownErr error,
+) (bool, error) {
+	storage, err := session.NewStorage(config.LoadState(), repoID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := storage.LoadInstanceData()
+	if err != nil {
+		return false, fmt.Errorf("load account-limit evidence for late ghost session %q: %w", title, err)
+	}
+	var evidence session.InstanceData
+	for _, row := range rows {
+		if row.Title != title {
+			continue
+		}
+		if stableID != "" && row.ID != "" && row.ID != stableID {
+			continue
+		}
+		evidence = row
+		break
+	}
+	return m.deleteSessionRecord(repoID, title, stableID, teardownErr, evidence)
+}
 
 // reconcileLateGhostCleanup consumes the descriptor worker's definitive result.
 // The row remains the retry handle on any error; only a successful delete plus
 // the normal editor fence may remove it.
+//
+// The finalizer is a background mutation, so shutdown both stops its retry loop
+// and joins it; stopAndWaitBackgroundMutationsForShutdown is also how a test
+// joins it before restoring a seam it reads (#4125). A launch refused because
+// shutdown has begun leaves the retained row for the next daemon.
 func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string, lateResult <-chan error) {
-	go func() {
-		if err := <-lateResult; err != nil {
+	m.launchBackgroundMutation(func(stop <-chan struct{}) {
+		var lateErr error
+		select {
+		case <-stop:
+			// A stuck descriptor worker is deliberately restart-recoverable: its
+			// cleanup-recovery row was retained before this reconciler launched.
+			// Its callback has separate shutdown admission, so abandoning this
+			// consumer cannot leave a write live across the terminal checkpoint.
+			return
+		case lateErr = <-lateResult:
+		}
+		if lateErr != nil {
 			m.clearGhostCleanupStall(key, stableID)
-			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, err)
+			m.warn().Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, lateErr)
 			return
 		}
 		for {
@@ -741,18 +799,25 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 					m.clearGhostCleanupStall(key, stableID)
 					if deleted {
 						m.completeLateGhostKill(repoID, title, stableID)
-						log.InfoLog.Printf("ghost session %q: reconciled late descriptor cleanup and removed its durable row", title)
+						m.info().Printf("ghost session %q: reconciled late descriptor cleanup and removed its durable row", title)
 					} else {
-						log.InfoLog.Printf("ghost session %q: late descriptor cleanup belongs to a replaced row; releasing its process fence", title)
+						m.info().Printf("ghost session %q: late descriptor cleanup belongs to a replaced row; releasing its process fence", title)
 					}
 					return
 				}
 			}
-			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late, but final record cleanup failed; retrying in %s: %v", title, lateGhostCleanupRetryInterval, err)
+			m.warn().Printf("ghost session %q: descriptor cleanup finished late, but final record cleanup failed; retrying in %s: %v", title, lateGhostCleanupRetryInterval, err)
 			timer := time.NewTimer(lateGhostCleanupRetryInterval)
-			<-timer.C
+			select {
+			case <-stop:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
 		}
-	}()
+	})
 }
 
 // reconcileSettledGhostCleanup gives a synchronous descriptor success the same

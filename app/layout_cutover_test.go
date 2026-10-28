@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,10 +11,23 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
+
+// Layout tests exercise populated rail sections. Empty sections deliberately
+// reserve no rows under the P4 recipe.
+func newPopulatedLayoutHome(t *testing.T) *home {
+	h := newTestHome(t)
+	h.store.SetTasks([]task.Task{{ID: "layout-task", Name: "Layout task"}})
+	h.projects.SetProjects([]ui.SidebarProject{{Name: "project", Root: "/project"}, {Name: "tools", Root: "/tools"}})
+	return h
+}
 
 // resizeHome drives the real WindowSizeMsg path.
 func resizeHome(h *home, w, hgt int) {
@@ -39,7 +54,7 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		{120, 40},
 		{80, 24},
 	} {
-		h := newTestHome(t)
+		h := newPopulatedLayoutHome(t)
 		alpha := addTreeInstance(t, h, "alpha")
 		h.sidebar.SetSelectedInstance(0)
 		_ = h.selectionChanged()
@@ -52,12 +67,21 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		view := h.View()
 		requireViewSized(t, view, tc.w, tc.h)
 		assert.Contains(t, view, "Agent Factory", "%dx%d: tree title", tc.w, tc.h)
-		assert.Contains(t, view, "alpha · ◆ Agent", "%dx%d: pane header carries title · tab", tc.w, tc.h)
-		// The header ellipsizes at the narrowest rails, so assert the stable
-		// prefix plus the manage affordance FIX 2 guarantees is never cut.
-		assert.Contains(t, view, "Automation", "%dx%d: automations section", tc.w, tc.h)
-		manageHint := helpKey(keys.KeyTaskList) + " manage"
-		assert.Contains(t, view, manageHint, "%dx%d: the manage affordance survives", tc.w, tc.h)
+		assert.Contains(t, view, "alpha · Agent", "%dx%d: pane header carries title · tab", tc.w, tc.h)
+		// The header's noun is the last fragment shed since #5372: at every
+		// rail width either composed here produces (22 and 30 cells) the strip
+		// still says what is being counted, and never ellipsizes into
+		// "Autom…". The affordance outranks the secondary count, so the rail
+		// keeps "· m manage" at 30 cells and "(0 on)" at the 22-cell floor
+		// where the affordance itself has shed.
+		assert.Contains(t, view, "Automations:", "%dx%d: the automations noun survives (#5372)", tc.w, tc.h)
+		if tc.w >= 120 {
+			assert.Contains(t, view, "Automations: 1 · "+helpKey(keys.KeyTaskList)+" manage",
+				"%dx%d: the 30-cell rail keeps the affordance beside noun and primary count", tc.w, tc.h)
+		} else {
+			assert.Contains(t, view, "Automations: 1 (0 on)",
+				"%dx%d: the 22-cell rail floor keeps noun and full counts", tc.w, tc.h)
+		}
 		// #1087: the automations section lives inside the left rail, under a
 		// full-rail-width horizontal rule.
 		assert.Contains(t, view, strings.Repeat("─", h.lastLayout.RailRule.W),
@@ -70,7 +94,7 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		// dropped first), so #1422 tab management plus help/quit must survive
 		// at BOTH sizes.
 		assert.Contains(t, view, "t new tab", "%dx%d: tab-create hint", tc.w, tc.h)
-		assert.Contains(t, view, "w close tab", "%dx%d: tab-close hint", tc.w, tc.h)
+		assert.Contains(t, view, "w del tab", "%dx%d: tab-close hint", tc.w, tc.h)
 		assert.Contains(t, view, "1-9/g go", "%dx%d: tab-jump hint names both gestures (#3021)", tc.w, tc.h)
 		assert.Contains(t, view, "q quit", "%dx%d: quit hint must survive narrow widths", tc.w, tc.h)
 		assert.Contains(t, view, "? help", "%dx%d: help hint must survive narrow widths", tc.w, tc.h)
@@ -83,7 +107,7 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 // task manager (that is the tasks overlay — #1096 play-test); the status-bar
 // hints follow.
 func TestLayoutCutover_FocusRingCycles(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	alpha := addTreeInstance(t, h, "alpha")
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
@@ -122,7 +146,7 @@ func TestLayoutCutover_FocusRingCycles(t *testing.T) {
 // section moves the ring back to the tree (the pre-cutover "esc back" flow
 // re-homed).
 func TestLayoutCutover_AutomationsEscReturnsFocusToTree(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	resizeHome(h, 100, 30)
 	h.focusRegion(layout.RegionAutomations)
 	require.True(t, h.automations.Focused())
@@ -134,7 +158,7 @@ func TestLayoutCutover_AutomationsEscReturnsFocusToTree(t *testing.T) {
 }
 
 func TestLayoutCutover_AutomationsFocusConsumesHiddenPaneVerbs(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	alpha := addTreeInstance(t, h, "alpha")
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
@@ -164,7 +188,7 @@ func TestLayoutCutover_AutomationsFocusConsumesHiddenPaneVerbs(t *testing.T) {
 // config form, with no second keypress to leave the list. Esc steps back out of
 // the form to the list (overlay still open), and a second Esc closes it.
 func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	resizeHome(h, 100, 30)
 	tasks := []task.Task{
 		{ID: "1", Name: "alpha-task", CronExpr: "0 3 * * *", Enabled: true},
@@ -172,6 +196,7 @@ func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
 	}
 	h.store.SetTasks(tasks)
 	h.automations.TaskPane().SetTasks(tasks)
+	h.relayout()
 
 	h.focusRegion(layout.RegionAutomations)
 	h.automations.ScrollDown() // cursor onto beta-task
@@ -210,7 +235,7 @@ func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
 // ladder: <80 cols the strip becomes a 1-line summary; <60×15 it disappears
 // and the ring skips it; below 40×10 the whole window is the fallback banner.
 func TestLayoutCutover_DegradationLadder(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	alpha := addTreeInstance(t, h, "alpha")
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()
@@ -260,7 +285,7 @@ func TestLayoutCutover_HooksOverlay(t *testing.T) {
 		{name: "72x20", width: 72, height: 20},
 	} {
 		t.Run(size.name, func(t *testing.T) {
-			h := newTestHome(t)
+			h := newPopulatedLayoutHome(t)
 			resizeHome(h, size.width, size.height)
 			h.hooksPane.SetCommands([]string{"make setup"})
 
@@ -285,7 +310,7 @@ func TestLayoutCutover_HooksOverlay(t *testing.T) {
 // and task creation lives on the manager's own `n` key — the "m, then n"
 // muscle memory survives the overlay move (#1096 play-test fix 1).
 func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	resizeHome(h, 100, 30)
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")}, keys.KeyTaskList)
@@ -301,11 +326,37 @@ func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
 
 // TestE2E_LayoutCutover_FocusRingAndHooksOverlay drives the real tea.Program
 // through the new workspace: Tab cycles the focus ring end to end (through
-// handleMenuHighlighting's re-emit path), the automations strip expands while
+// handleMenuHighlighting), the automations strip expands while
 // focused, Esc returns to the tree, and e opens/closes the hooks overlay.
 func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	eh := newE2EHarness(t)
-	eh.addStartedInstance("alpha")
+	// Exercise macOS's symlinked temp-root shape on every platform.
+	linkedRoot := filepath.Join(t.TempDir(), "linked-repo")
+	require.NoError(t, os.Symlink(eh.home.repoRoot, linkedRoot))
+	eh.home.repoRoot = linkedRoot
+	alpha := eh.addStartedInstance("alpha")
+	// This is a healthy-workspace test. The harness default deliberately fails
+	// snapshots; sustained poll failures correctly show daemon recovery.
+	// Return a frozen snapshot, never read the live model from the fetch goroutine.
+	snapshot := daemon.SnapshotResponse{Instances: []session.InstanceData{alpha.ToInstanceData()}}
+	eh.home.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) { return snapshot, nil }
+	// The same poll reloads tasks from disk. Persist the rail fixture so it cannot
+	// disappear mid-focus-cycle, and let the poll populate the task editor too.
+	// Match production's resolved RepoContext.ID, not a hash of the raw path:
+	// macOS temp paths can name /var while Git resolves them under /private/var.
+	repo, err := config.RepoFromPath(eh.home.repoRoot)
+	require.NoError(t, err)
+	eh.home.repoID = repo.ID
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "layout-task", Name: "Layout task", Prompt: "Check the layout",
+		CronExpr: "0 3 * * *", ProjectPath: eh.home.repoRoot, Program: "claude",
+	}))
+	// Exercise the poll before any timing-dependent UI steps, so a fast run
+	// cannot conceal an unstubbed fetch or an incomplete persisted fixture.
+	_, _ = eh.home.Update(eh.home.fetchSnapshotCmd()())
+	require.False(t, eh.home.snapshotUnavailable)
+	require.Same(t, alpha, eh.home.store.GetInstanceByTitle("alpha"))
+	require.Equal(t, 1, eh.home.store.NumTasks())
 	eh.home.sidebar.SetSelectedInstance(0)
 	eh.start()
 
@@ -332,10 +383,17 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	assert.False(t, managerFocused,
 		"focusing the section must not focus the manager — it opens as an overlay")
 
-	// Enter opens the tasks overlay; Esc closes it (manager focus released).
+	// Enter opens the selected task's editor. Esc returns to the list, then
+	// another Esc closes the overlay (manager focus released).
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	eh.waitUntil(e2eAsyncTimeout, "Enter opens the tasks overlay", func() bool {
 		return eh.homeState() == stateTasks
+	})
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	eh.waitUntil(e2eAsyncTimeout, "Esc returns from the task editor to its list", func() bool {
+		var editing bool
+		eh.query(func(h *home) { editing = h.automations.TaskPane().IsEditing() })
+		return !editing
 	})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
 	eh.waitUntil(e2eAsyncTimeout, "Esc closes the tasks overlay", func() bool {
@@ -361,7 +419,7 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	// The workspace still renders the instance afterwards.
 	var view string
 	eh.query(func(h *home) { view = h.View() })
-	assert.Contains(t, view, "alpha · ◆ Agent")
+	assert.Contains(t, view, "alpha · Agent")
 }
 
 // TestLayoutCutover_DigitJumpGatedByFocusRegion pins the 1-9 gate (Greptile on
@@ -371,7 +429,7 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 // ContentModeTasks behavior). With focus back on the tree or pane A the jump
 // works as before.
 func TestLayoutCutover_DigitJumpGatedByFocusRegion(t *testing.T) {
-	h := newTestHome(t)
+	h := newPopulatedLayoutHome(t)
 	addTreeInstance(t, h, "alpha") // real agent + shell tab pair
 	h.sidebar.SetSelectedInstance(0)
 	_ = h.selectionChanged()

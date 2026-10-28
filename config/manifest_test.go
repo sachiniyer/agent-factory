@@ -135,11 +135,10 @@ func TestGlobalManifestCoversEveryGlobalConfigKey(t *testing.T) {
 // justifying only the exclusions that WERE deliberate. With this test the two
 // lists cannot part company silently again.
 //
-// The two dynamic families need care: program_overrides and limit_patterns are
-// PREFIXES, not literal settable keys. `af config set program_overrides.claude
-// <cmd>` works while a bare `af config set program_overrides <cmd>` does not, so
-// the registry key matches the manifest key, but the user-facing form carries a
-// ".<name>" leaf. All three are checked below.
+// The dynamic families need care: program_overrides and limit_patterns admit a
+// ".<name>" leaf, and a structured family may also admit the bare whole-table
+// form. The registry key still matches the manifest parent. All three directions
+// are checked below.
 func TestManifestAgreesWithSettableKeys(t *testing.T) {
 	byKey := manifestKeyIndex(t)
 
@@ -172,17 +171,26 @@ func TestManifestAgreesWithSettableKeys(t *testing.T) {
 
 	// 3. The user-facing settable list (what `af config set` prints, and what a
 	//    briefing tells an agent to type) resolves back onto the manifest. A
-	//    dynamic family renders as "prefix.<name>", so strip the leaf before
-	//    matching — the prefix is the manifest key.
+	//    dynamic family renders as "prefix.<name>" and a fixed table leaf as
+	//    "prefix.leaf", so both forms resolve back to the parent manifest key.
 	for _, shown := range SettableKeys() {
 		key := strings.TrimSuffix(shown, ".<name>")
+		if key == shown {
+			if prefix, leaf, ok := strings.Cut(shown, "."); ok {
+				if spec, found := settableKeySpecs[prefix]; found {
+					if _, allowed := spec.subkeys[leaf]; allowed {
+						key = prefix
+					}
+				}
+			}
+		}
 		if _, ok := byKey[key]; !ok {
 			t.Errorf("SettableKeys() advertises %q, which resolves to key %q — absent from the manifest",
 				shown, key)
 		}
 		// A "prefix.<name>" form must correspond to a spec actually marked
 		// dynamic, or the leaf would be rejected at set time.
-		if shown != key && !settableKeySpecs[key].dynamic {
+		if strings.HasSuffix(shown, ".<name>") && !settableKeySpecs[key].dynamic {
 			t.Errorf("SettableKeys() renders %q as a dynamic family, but settableKeySpecs[%q].dynamic is false", shown, key)
 		}
 	}
@@ -317,21 +325,6 @@ func TestManifestEntriesAreWellFormed(t *testing.T) {
 		if !validTypes[e.Type] {
 			t.Errorf("%s: type %q is not one of string/bool/int/duration/table/list", e.Key, e.Type)
 		}
-		if len(e.AcceptedTypes) > 0 {
-			seen := make(map[string]bool, len(e.AcceptedTypes))
-			for _, acceptedType := range e.AcceptedTypes {
-				if !validTypes[acceptedType] {
-					t.Errorf("%s: accepted type %q is not one of string/bool/int/duration/table/list", e.Key, acceptedType)
-				}
-				if seen[acceptedType] {
-					t.Errorf("%s: accepted type %q is duplicated", e.Key, acceptedType)
-				}
-				seen[acceptedType] = true
-			}
-			if !seen[e.Type] {
-				t.Errorf("%s: accepted types %v omit primary type %q", e.Key, e.AcceptedTypes, e.Type)
-			}
-		}
 		if !validTiers[e.Tier] {
 			t.Errorf("%s: tier %d is not one of TierCore/TierCommon/TierAdvanced", e.Key, e.Tier)
 		}
@@ -372,9 +365,9 @@ func TestManifestIsTierOrdered(t *testing.T) {
 func TestManifestTierAssignments(t *testing.T) {
 	wantCore := []string{
 		"default_program", "network.listen_addr", "network.require_token",
-		"network.require_loopback_token", "update_channel", "auto_update",
+		"network.require_loopback_token", "update_channel", "auto_update", "appearance",
 	}
-	wantCommon := []string{"theme", "vscode_server_binary"}
+	wantCommon := []string{"vscode_server_binary"}
 
 	var gotCore, gotCommon []string
 	for _, e := range Manifest() {
@@ -501,10 +494,12 @@ func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 		"`af config set network.require_loopback_token <value>`",
 		"`af config set program_overrides <value>`",
 		"`af config set limit_patterns <value>`",
-		"`af config set theme <value>`",
+		"`af config set appearance <value>`",
 		"`af config set session_env_passthrough <value>`",
 		"`af config set root_agents <value>`",
 		"`af config set root_agent <value>`",
+		"`af config set root_agent.enabled <value>`",
+		"`af config set root_agent.program <value>`",
 		"`af config set keys <value>`",
 	} {
 		if !strings.Contains(out, want) {
@@ -531,37 +526,6 @@ func TestRenderBriefingIntroducesValidatedSetPathAndPerKeyTiming(t *testing.T) {
 	} {
 		if strings.Contains(out, obsolete) {
 			t.Errorf("briefing introduction still contains obsolete guidance %q", obsolete)
-		}
-	}
-}
-
-func TestRenderBriefingDescribesThemeAsScalarOrTable(t *testing.T) {
-	entry := manifestKeyIndex(t)["theme"]
-	if !reflect.DeepEqual(entry.AcceptedTypes, []string{"string", "table"}) {
-		t.Fatalf("theme accepted types = %v, want string and table", entry.AcceptedTypes)
-	}
-
-	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
-	themeStart := strings.Index(out, "### `theme`")
-	if themeStart < 0 {
-		t.Fatal("briefing has no theme section")
-	}
-	themeEnd := strings.Index(out[themeStart+1:], "\n### `")
-	if themeEnd < 0 {
-		themeEnd = len(out) - themeStart - 1
-	}
-	theme := out[themeStart : themeStart+1+themeEnd]
-
-	if !strings.Contains(theme, "- type: string or table") {
-		t.Errorf("theme briefing does not describe both accepted shapes:\n%s", theme)
-	}
-	if strings.Contains(theme, "not a single value") {
-		t.Errorf("theme briefing contradicts the scalar preset syntax:\n%s", theme)
-	}
-
-	for _, rendered := range ManifestWithValues(DefaultConfig()) {
-		if rendered.Key == "theme" && !reflect.DeepEqual(rendered.AcceptedTypes, entry.AcceptedTypes) {
-			t.Errorf("rendered theme accepted types = %v, want %v", rendered.AcceptedTypes, entry.AcceptedTypes)
 		}
 	}
 }

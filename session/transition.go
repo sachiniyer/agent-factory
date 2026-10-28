@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The lifecycle transition chokepoint (#1195 Phase 2c).
@@ -54,6 +56,7 @@ const (
 	tkBeginRestore
 	tkAbortRestoreToLost
 	tkMarkRestoring
+	tkBeginRestoreFenced
 	tkBeginHandoff
 	tkCommitHandoff
 	tkParkHandoff
@@ -89,6 +92,8 @@ func (k transitionKind) String() string {
 		return "AbortRestoreToLost"
 	case tkMarkRestoring:
 		return "MarkRestoring"
+	case tkBeginRestoreFenced:
+		return "BeginRestoreUnderHeldFence"
 	case tkBeginHandoff:
 		return "BeginHandoff"
 	case tkCommitHandoff:
@@ -181,6 +186,25 @@ func AbortArchiveToLost() TransitionEvent { return TransitionEvent{kind: tkAbort
 // BeginRestore enters the restore fence for a restorable session (I3): Lost +
 // OpRestoring (replaces RestoreFromArchive's "park in Lost" head).
 func BeginRestore() TransitionEvent { return TransitionEvent{kind: tkBeginRestore} }
+
+// BeginRestoreUnderHeldFence is BeginRestore for a caller that ALREADY holds the
+// restore fence over a longer interval than the re-spawn — the daemon's local
+// archived-restore route, which raises MarkRestoring at the top so the fence
+// covers the worktree relocate in front of it (#3596).
+//
+// It is a separate edge rather than a relaxed allowedFrom on tkBeginRestore
+// because that guard is doing real work: `op == OpNone` is what makes a
+// double-restore impossible (I3), and widening it to admit OpRestoring would
+// admit any restore already in flight, not merely this operation's own fence.
+// Naming the two entries separately keeps the strict edge strict.
+//
+// The target is identical — {LiveLost, OpRestoring} with started set — because
+// this IS BeginRestore; only the op it is entered from differs. The liveness edge
+// is still Archived -> Lost and still happens here, after the worktree is home,
+// so the #1203 reconcile rebuild keys on the same transition it always did.
+func BeginRestoreUnderHeldFence() TransitionEvent {
+	return TransitionEvent{kind: tkBeginRestoreFenced}
+}
 
 // AbortRestoreToLost drops a failed restore's fence to a plain Lost so the
 // #1108 loop retries against the now-restored worktree.
@@ -444,6 +468,15 @@ var transitionTable = map[transitionKind]edgeSpec{
 		// run, and must not re-take the task's slot.
 		run: runKeep,
 	},
+	tkBeginRestoreFenced: {
+		// The held-fence entry (#3596). Same edge as tkBeginRestore in every respect
+		// but the op it is legal from: the caller raised OpRestoring before the
+		// worktree relocate, so the row arrives here already fenced.
+		allowedFrom: func(s stateAxes) bool { return s.op == OpRestoring && s.liveness == LiveArchived },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLost, OpRestoring} },
+		started:     startedSet,
+		run:         runKeep,
+	},
 	tkAbortRestoreToLost: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpRestoring && s.liveness == LiveLost },
 		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLost, OpNone} },
@@ -547,6 +580,24 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// mis-ordered edge (#2135). The observer re-decides on its next tick.
 		return nil
 	}
+	if ev.kind == tkBeginArchive && i.archiveCheckpointSealed {
+		return fmt.Errorf("session %q cannot begin an archive after the daemon shutdown checkpoint was sealed", i.Title)
+	}
+	if ev.kind == tkBeginArchive && i.pendingAccountSwap != nil {
+		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap before archiving", i.Title)
+	}
+	if ev.kind == tkObserveLiveness && ev.lv != LiveLost && i.rebuildTeardownPending {
+		// A committed worktree rebuild whose stale-pane teardown has not been
+		// confirmed means a live answer can still come from a pane bound to the
+		// DELETED inode — the observation cannot distinguish that survivor from
+		// a fresh pane, so it must not lift the row out of Lost. Leaving it Lost
+		// is what keeps the restore loop retrying the teardown instead of
+		// exposing the stale-cwd pane as healthy again (#5371 review). The flag
+		// is cleared only after every bound name is confirmed gone, so a
+		// positive claim before then is held as Lost; a LiveLost observation
+		// passes through untouched.
+		ev.lv = LiveLost
+	}
 	from := stateAxes{i.liveness, i.inFlightOp}
 	spec, ok := transitionTable[ev.kind]
 	if !ok {
@@ -560,6 +611,23 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	}
 
 	to := spec.target(from, ev)
+	if to != from {
+		// Invalidate async runtime evidence before publishing a replacement fence
+		// or a liveness change. noteStateChangeLocked advances it again after the
+		// full mutation; the two increments deliberately bracket the write so a
+		// lock-free validator cannot accept a half-applied transition.
+		i.runtimeEvidenceGeneration.Add(1)
+	}
+	if ev.kind == tkBeginArchive {
+		i.archiveSettled = make(chan struct{})
+	}
+	// The durable-push fence belongs to exactly one archive generation. Begin
+	// clears any historical value before the remote push starts; every settling
+	// edge clears it after checkpoint retention no longer needs the phase.
+	switch ev.kind {
+	case tkBeginArchive, tkCancelArchive, tkCommitArchive, tkAbortArchiveToLost:
+		i.archivePushCompleted = false
+	}
 	// Apply this transition's declared effect on the task run (#1892). The answer
 	// comes from the table, not from reading the resulting state — see runEffect.
 	//
@@ -567,21 +635,130 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	// session has exactly one run, and anything that happens to it afterwards
 	// (a user prompting it, an un-archive) is not the task's.
 	if i.taskRunActive {
-		switch spec.run {
-		case runEnds:
-			i.taskRunActive = false
-		case runEndsOnIdleEdge:
-			// The AGENT's own axis, and the EDGE into it. Not ClassifyActivity — that
-			// calls an in-flight archive "pending", which would miss an agent going
-			// idle mid-teardown. Not the resulting state alone — a session is born
-			// LiveReady before its agent ever runs, so that would end the run at birth.
-			if to.liveness == LiveReady && from.liveness != LiveReady {
+		if ev.kind == tkConfirmLive && from.op == OpRestoring && i.agentRuntimeReplaced {
+			// A restore landing on a REPLACED runtime ends a still-in-flight
+			// run as interrupted (#4222): the prompt's owner died with the old
+			// process and the replacement is never replayed the prompt, so the
+			// idle edge it is about to produce is a fresh agent at rest — not a
+			// finished run. Ending it here, inside the edge that drops the
+			// restore fence, keeps the marker away from the first idle
+			// ObserveLiveness, which is where the run used to "complete" and
+			// hand on_complete a session whose interrupted work it would
+			// destroy. A verified reattach takes the normal path: the recorded
+			// agent still owns the prompt, so its next idle edge remains a
+			// genuine completion.
+			i.endTaskRunInterruptedLocked()
+			i.taskRunInterruptedStamp = true
+		} else {
+			switch spec.run {
+			case runEnds:
 				i.taskRunActive = false
+				i.taskRunIdleEdgeHeld = false
+				i.taskRunTurnGateHeld = false
+				i.touchLocked()
+				// The completion transition IS the capture point for the adoption
+				// baseline (#3865): taken here, inside the same i.mu section that ends
+				// the run, nothing — not the rest of this transition, not the poll's
+				// later persistPollChange — can land a delivery that reads as though it
+				// had always been there. See session/adoption_fence.go.
+				i.captureAdoptionBaselineLocked()
+			case runEndsOnIdleEdge:
+				// The AGENT's own axis, and the EDGE into it. Not ClassifyActivity — that
+				// calls an in-flight archive "pending", which would miss an agent going
+				// idle mid-teardown. Not the resulting state alone — a session is born
+				// LiveReady before its agent ever runs, so that would end the run at birth.
+				//
+				// An idle pane is not a finished run while a handoff mission is still
+				// owed (#4429). The incoming agent may be idle precisely BECAUSE its
+				// takeover brief never landed, and this edge is what hands a task
+				// session to its on_complete policy — so ending the run here is what
+				// would archive or kill a session whose mission is still waiting for
+				// the operator. The replacement fence used to hide the row from the
+				// poll and carry this; the fence now settles on the incoming runtime's
+				// liveness, so the obligation itself has to say so.
+				//
+				// A held edge is recorded rather than dropped. A resend makes the
+				// agent work, and Mark delivered now likewise leaves the ROW working
+				// — the confirm publishes LiveRunning, or keeps a LiveLimitReached
+				// wall (#5023) — so the next idle observation lands as a real edge
+				// into Ready and ends the run itself. The held marker still closes
+				// the gap for an obligation retired while the row was already
+				// recorded Ready — records written before #5023 carry exactly that —
+				// whose later polls would otherwise see only Ready → Ready and hold
+				// the run open forever.
+				//
+				// ANY idle observation while the mission is owed holds, not only a
+				// transition into Ready. A row that reloads already Ready — every row
+				// a pre-#4429 daemon fenced, on the upgrade that settles it — sees
+				// only Ready → Ready, and would otherwise hold nothing and keep its
+				// run open forever after the confirm. The edge rule exists so a
+				// session born Ready does not end its run at birth; a row owing a
+				// takeover mission is past birth by construction.
+				//
+				// An idle edge is likewise not a finished run while the run's own
+				// prompt has been attempted but never demonstrably picked up (#5219).
+				// ConfirmLive publishes LiveRunning the moment the prompt send
+				// returns, so the FIRST quiet tick afterwards — long before an agent
+				// that boots behind a still pane (devin's ACP startup takes seconds,
+				// and no IsWorkingContent matcher covers it) has visibly reacted —
+				// used to end the run and hand on_complete a session whose turn never
+				// began. Pane churn alone is not the turn evidence: the same async
+				// pipeline that hides boot also makes the prompt's own echo, ACP
+				// init, and skill discovery land as ordinary Updated captures seconds
+				// after Enter. What releases the gate is the agent's own in-turn
+				// chrome — devin/claude's elapsed-timer row must tick, which boot
+				// cannot fake — or a post-attempt burst followed by sustained quiet
+				// past the completion grace (the arm that covers signature-less
+				// agents and turns too fast for two captures). The edge holds rather
+				// than drops: evidence landing while the row is already Ready (the
+				// paused poll path folds churn into lastPaneChurnAt without a
+				// liveness move) releases it through the flag exactly as the mission
+				// hold does. A run that never produces it stays open — reported
+				// in-flight, never a completion.
+				if to.liveness == LiveReady {
+					switch {
+					case i.owesMissionDeliveryLocked():
+						if !i.taskRunIdleEdgeHeld {
+							i.taskRunIdleEdgeHeld = true
+							i.touchLocked()
+						}
+					case i.taskRunAwaitingTurnLocked():
+						if !i.taskRunTurnGateHeld {
+							i.taskRunTurnGateHeld = true
+							i.touchLocked()
+						}
+					case from.liveness != LiveReady || i.taskRunIdleEdgeHeld || i.taskRunTurnGateHeld:
+						// The gate just opened. If no in-turn chrome was observed,
+						// the quiet-fallback arm — churn plus sustained silence — is
+						// what let this edge end the run: the weaker signal, so name
+						// it in the log with the agent and the attempt's age (#5219).
+						if !i.taskRunPromptAttemptAt.IsZero() &&
+							!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) &&
+							(i.taskRunQuietReleaseLocked() || i.taskRunSilentReleaseLocked()) {
+							log.InfoLog.Printf(
+								"task run for session %q completed on the quiet fallback (no in-turn chrome observed): agent=%s elapsed_since_attempt=%s",
+								i.Title, i.currentAgentNameLocked(),
+								time.Since(i.taskRunPromptAttemptAt).Round(time.Second))
+						}
+						i.taskRunActive = false
+						i.taskRunIdleEdgeHeld = false
+						i.taskRunTurnGateHeld = false
+						i.touchLocked()
+						i.captureAdoptionBaselineLocked()
+					}
+				}
 			}
 		}
 	}
 	prevResetAt := i.limitResetAt
-	i.liveness = to.liveness
+	// Only an edge that MOVES liveness goes through the coerce-to-Lost guard. An
+	// operation-only edge (ClearOp releasing a fence, BeginRespawn, …) leaves the
+	// liveness it found, which may be a disposition the transaction owner
+	// deliberately restored while a rebuild teardown is owed — re-assigning it
+	// would coerce that back to Lost and strand the row (#5371 review).
+	if to.liveness != from.liveness {
+		i.assignLivenessLocked(to.liveness)
+	}
 	i.inFlightOp = to.op
 	switch spec.limitReset {
 	case limitResetClear:
@@ -589,14 +766,28 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	case limitResetFromEvent:
 		i.limitResetAt = ev.resetAt
 	}
+	if ev.kind == tkParkHandoff {
+		// The incoming runtime, not the retired predecessor, produced this wall.
+		// Publish its identity and durable negative quota evidence in the same
+		// critical section as LiveLimitReached so account-swap admission cannot
+		// observe a limit without its provider/account attribution.
+		i.attributeLimitIdentityLocked()
+		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt)
+	}
 	// Every real change to the lifecycle state advances the epoch, so an observer
 	// holding an older one learns its in-flight decision is stale (#2135).
 	i.noteStateChangeLocked(from.liveness, from.op, prevResetAt)
 	switch spec.started {
 	case startedSet:
-		i.started = true
+		if !i.started {
+			i.started = true
+			i.touchLocked()
+		}
 	case startedClear:
-		i.started = false
+		if i.started {
+			i.started = false
+			i.touchLocked()
+		}
 	}
 	// A model-change diagnostic belongs to one concrete agent process. Archive
 	// retires that process, and restore starts a new one under the same Instance
@@ -605,7 +796,56 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	case tkCommitArchive, tkBeginRestore:
 		i.clearAgentModelChangeLocked()
 	}
+	// tkCommitArchive is the single commit edge every archive route converges
+	// on — local worktree relocation and remote branch-push alike — so it is the
+	// one place the durable archive timestamp can be stamped without a second
+	// per-route agreement (#5136). A re-archive overwrites it with the NEW
+	// commit, which is correct: the age prune measures belongs to the shelf the
+	// record currently sits on.
+	if ev.kind == tkCommitArchive {
+		i.archivedAt = time.Now()
+	}
+	// The mirror rule (#5136 review): a row that LEAVES the archive no longer
+	// sits on the shelf its timestamp measures — restore moves LiveArchived to
+	// Lost at the begin edge (both tkBeginRestore entries), so keying the
+	// clear on the liveness boundary rather than one event kind also covers
+	// any future un-archive edge. A later re-archive stamps the new shelf's
+	// own commit above.
+	if from.liveness == LiveArchived && to.liveness != LiveArchived {
+		i.archivedAt = time.Time{}
+	}
+	if from.op == OpArchiving && to.op != OpArchiving && i.archiveSettled != nil {
+		close(i.archiveSettled)
+		i.archiveSettled = nil
+	}
 	return nil
+}
+
+// endTaskRunInterruptedLocked ends an in-flight task run as interrupted: the
+// runtime that received its prompt is gone and the replacement was never
+// replayed it, so no later idle edge may report the run finished and hand
+// on_complete a session whose work belongs to the interrupted run (#4222).
+// Caller holds i.mu. The adoption baseline is pinned here for the same reason
+// the other marker-clearing edges pin it: this is one of them.
+func (i *Instance) endTaskRunInterruptedLocked() {
+	i.taskRunActive = false
+	i.taskRunIdleEdgeHeld = false
+	i.taskRunTurnGateHeld = false
+	i.taskRunInterrupted = true
+}
+
+// endTaskRunFailedLocked ends an in-flight task run as failed: the run's own
+// prompt was proven undelivered, so no later idle edge may report the run
+// finished and hand on_complete a session whose prompt never landed (#5278).
+// Caller holds i.mu. The adoption baseline is pinned here for the same reason
+// the other marker-clearing edges pin it: this is one of them.
+func (i *Instance) endTaskRunFailedLocked() {
+	i.taskRunActive = false
+	i.taskRunIdleEdgeHeld = false
+	i.taskRunTurnGateHeld = false
+	i.taskRunFailed = true
+	i.touchLocked()
+	i.captureAdoptionBaselineLocked()
 }
 
 // rejectTransitionLocked builds the rejection error, fires the illegal-transition

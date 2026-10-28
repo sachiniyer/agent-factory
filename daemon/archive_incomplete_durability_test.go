@@ -131,8 +131,8 @@ func TestArchiveSession_IncompleteAndUndurable_StaysPlainFailure(t *testing.T) {
 	// may be able to read, so stamp the incomplete shape on after the real
 	// teardown has moved the worktree.
 	prevTeardown := archiveTeardown
-	archiveTeardown = func(inst *session.Instance, dest string, claim git.RelocationClaim, before func() error) (error, error) {
-		hookErr, archiveErr := prevTeardown(inst, dest, claim, before)
+	archiveTeardown = func(inst *session.Instance, dest string, claim git.RelocationClaim, before func() error, trust bool) (error, error) {
+		hookErr, archiveErr := prevTeardown(inst, dest, claim, before, trust)
 		if archiveErr == nil {
 			markArchiveIncomplete(t, inst)
 		}

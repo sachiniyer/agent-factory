@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/rpc"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -85,7 +87,7 @@ func TestListBackends_OffersEverySupportedBackend(t *testing.T) {
 	// the builder passes any list through, this one proves the list it is given is
 	// the canonical one. Together they say a new backend reaches every client.
 	cfg, cfgErr := config.ResolveConfig(repo)
-	assert.Equal(t, backendCatalog(config.SupportedBackends, cfg, cfgErr, repo), resp.Backends,
+	assert.Equal(t, backendCatalog(config.SupportedBackends, cfg, cfgErr, repo, ""), resp.Backends,
 		"ListBackends must hand the canonical enum to backendCatalog untouched")
 
 	assert.Equal(t, BackendAvailable, optionByName(t, resp, config.BackendLocal).Status, "local needs no repo config")
@@ -107,6 +109,11 @@ func TestListBackends_OffersEverySupportedBackend(t *testing.T) {
 // with no reason to show.
 func TestListBackends_ReflectsRepoConfig(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the docker locality precondition resolves without a docker
+	// call; the picker must agree with the runtime that a configured, local repo is
+	// usable (see TestBackendUnusableReason_DockerRefusesRemoteEngine).
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	stubLookPath(t)
 	repo := setupControlRepo(t)
 	addOrigin(t, repo)
@@ -139,6 +146,10 @@ func TestListBackends_DefaultMatchesTheCreatePath(t *testing.T) {
 	})
 
 	t.Run("repo backend config is the default", func(t *testing.T) {
+		// A local engine so the docker locality precondition resolves without a
+		// docker call; the default's status is computed from the docker option.
+		t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+		t.Setenv("DOCKER_CONTEXT", "")
 		stubLookPath(t)
 		repo := setupControlRepo(t)
 		addOrigin(t, repo)
@@ -319,12 +330,17 @@ func TestListBackends_UnreadableConfigIsUnknownNotUnavailable(t *testing.T) {
 		assert.NotEmptyf(t, opt.Reason, "%s must say what stopped the check", name)
 	}
 
-	// local reads no repo config, and a create with no explicit backend still runs
-	// local through this failure — so calling it unknown would be its own lie, and
-	// the user can still create a session while they fix the file.
+	// local reads no repo config, so choosing it explicitly still works while the
+	// user fixes the file — calling it unknown would be its own lie.
 	assert.Equal(t, BackendAvailable, optionByName(t, resp, config.BackendLocal).Status)
-	assert.Equal(t, config.BackendLocal, resp.Default)
-	assert.Equal(t, BackendAvailable, resp.DefaultStatus)
+	// A create with NO explicit backend no longer falls back to local through this
+	// failure (#5801): it refuses with the config error, so the default is not a
+	// usable backend and the catalog says it could not be evaluated, with the
+	// reason, instead of promising local.
+	assert.Equal(t, "", resp.Default)
+	assert.Equal(t, BackendUnknown, resp.DefaultStatus)
+	assert.Contains(t, resp.DefaultReason, "cannot determine the backend")
+	assert.Contains(t, resp.DefaultReason, "config.json", "the reason names the file")
 }
 
 // TestListBackends_NewBackendReachesClientsWithNoClientChange is THE anti-drift
@@ -351,7 +367,7 @@ func TestListBackends_NewBackendReachesClientsWithNoClientChange(t *testing.T) {
 	// consults no registry, so an unrecognized backend correctly reports no config
 	// requirement — that is the property under test.
 	cfg, cfgErr := config.ResolveConfig(repo)
-	catalog := backendCatalog([]string{config.BackendLocal, "fargate"}, cfg, cfgErr, repo)
+	catalog := backendCatalog([]string{config.BackendLocal, "fargate"}, cfg, cfgErr, repo, "")
 
 	names := make([]string, 0, len(catalog))
 	for _, opt := range catalog {
@@ -389,6 +405,10 @@ func TestListBackends_RequiresARepo(t *testing.T) {
 // exists to keep honest.
 func TestListBackends_AnswersOverTheControlSocket(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the docker locality precondition resolves without a docker
+	// call; docker is configured here, so the socket must report it selectable.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	stubLookPath(t)
 	repo := setupControlRepo(t)
 	addOrigin(t, repo)
@@ -420,4 +440,72 @@ func TestListBackends_AnswersOverTheControlSocket(t *testing.T) {
 	assert.NotEmpty(t, hook.Reason, "the actionable reason is what the CLI prints; gob must carry it")
 	assert.Equal(t, config.BackendLocal, resp.Default)
 	assert.Equal(t, BackendAvailable, resp.DefaultStatus)
+}
+
+// TestBackendCatalog_CallbackAdvisoryOnlyOnInjectingKinds pins the W3.1 picker
+// contract (#5571): the callback advisory lands ONLY on kinds whose provisioner
+// actually delivers a credential (ssh/sandbox), it is advisory rather than a
+// status change — an "available" backend stays available — and it repeats the
+// same refusal the mint degrades with, so choose-time and create-time cannot
+// disagree.
+func TestBackendCatalog_CallbackAdvisoryOnlyOnInjectingKinds(t *testing.T) {
+	repo := setupControlRepo(t)
+	addOrigin(t, repo)
+	writeRepoBackendConfig(t, repo, map[string]any{
+		"docker": map[string]any{"image": "img:latest"},
+		"ssh":    map[string]any{"host": "sandbox.invalid"},
+	})
+	cfg, cfgErr := config.ResolveConfig(repo)
+	require.NoError(t, cfgErr)
+
+	const refusal = "refusing to give this sandbox a callback credential: require_token is false"
+	catalog := backendCatalog(config.SupportedBackends, cfg, cfgErr, repo, refusal)
+
+	for _, opt := range catalog {
+		injects := session.BackendKind(opt.Name).InjectsSandboxCallback()
+		if injects {
+			// The advisory is orthogonal to Status: it rides an injecting
+			// backend whether the backend is available, unavailable for an
+			// unrelated reason (no sandbox.ssh here), or unknown.
+			assert.Equal(t, refusal, opt.CallbackUnavailableReason,
+				"backend %s injects a callback, so the advisory must ride it", opt.Name)
+		} else {
+			assert.Empty(t, opt.CallbackUnavailableReason,
+				"backend %s never injects a callback, so it has nothing to lose", opt.Name)
+		}
+	}
+}
+
+// TestSandboxOptionCarriesTheCachedHostVerdict (#5571 W2.3 part B): the catalog
+// reads the readiness cache and never dials — unprobed and stale hosts stay
+// selectable but carry a note, only a fresh blocking verdict is unavailable.
+func TestSandboxOptionCarriesTheCachedHostVerdict(t *testing.T) {
+	cfg := &config.ResolvedConfig{}
+	cfg.SandboxSSH = "ssh backends-test-host"
+
+	opt := BackendOption{Name: "sandbox", Status: BackendAvailable}
+	applyHostReadiness(&opt, session.BackendSandbox, cfg)
+	if opt.Status != BackendAvailable || opt.Readiness != "unprobed" || opt.Note == "" {
+		t.Fatalf("never-probed host: got %+v, want available + unprobed note", opt)
+	}
+
+	session.RecordHostReadiness(cfg.SandboxSSH, errors.New("git is not on the host's PATH"))
+	opt = BackendOption{Name: "sandbox", Status: BackendAvailable}
+	applyHostReadiness(&opt, session.BackendSandbox, cfg)
+	if opt.Status != BackendUnavailable || !strings.Contains(opt.Reason, "git is not on the host's PATH") {
+		t.Fatalf("fresh blocking verdict: got %+v, want unavailable naming the fix", opt)
+	}
+
+	session.RecordHostReadiness(cfg.SandboxSSH, nil)
+	opt = BackendOption{Name: "sandbox", Status: BackendAvailable}
+	applyHostReadiness(&opt, session.BackendSandbox, cfg)
+	if opt.Status != BackendAvailable || opt.Readiness != "ready" || opt.Note != "" {
+		t.Fatalf("fresh pass: got %+v, want plain available", opt)
+	}
+
+	other := BackendOption{Name: "docker", Status: BackendAvailable}
+	applyHostReadiness(&other, session.BackendDocker, cfg)
+	if other.Readiness != "" || other.Note != "" {
+		t.Fatalf("a backend with no remote host must carry no readiness: %+v", other)
+	}
 }

@@ -27,7 +27,7 @@ func TestRedactInstanceDataRedactsPendingTabCleanupTmuxName(t *testing.T) {
 		},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	for i, cleanup := range d.PendingTabCleanup {
 		if cleanup.TmuxName != redactedMarker {
@@ -114,7 +114,7 @@ func TestRedactInstanceDataRedactsTitleDerivedFieldsAtEveryDepth(t *testing.T) {
 	var d session.InstanceData
 	seedStringFields(reflect.ValueOf(&d).Elem(), 0)
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	var leaked []string
 	collectUnredactedFields(reflect.ValueOf(d), "InstanceData", &leaked)

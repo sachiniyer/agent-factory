@@ -15,7 +15,7 @@ import (
 )
 
 var tabPaneStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.Foreground)
+	Foreground(activeTheme.Ink)
 
 // tabContentState holds the rendered content of the tab pane.
 //
@@ -489,7 +489,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	p.dropStaleView(instance, 0)
 	switch {
 	case instance == nil:
-		p.setFallbackState("No sessions yet — press n to create one.")
+		p.setFallbackState("No sessions · n to create one.")
 		p.mu.Unlock()
 		return nil
 	case instance.IsCreating():
@@ -514,7 +514,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 		// Lost (#1108): the tmux session vanished with no kill on record —
 		// same synchronous-with-the-sidebar treatment as Dead, but the message
 		// says what happened rather than implying a plain corpse.
-		p.setFallbackState("Session lost — its tmux session is gone.")
+		p.setFallbackState(lostSessionCopy(instance))
 		p.mu.Unlock()
 		return nil
 	}
@@ -576,7 +576,13 @@ func webTabPlaceholder(url string) string {
 // code-server on a 0600 unix socket, reachable only through the daemon's proxy
 // (#1873), so the only meaningful pointer is the web UI itself.
 func vscodeTabPlaceholder() string {
-	return "VS Code tab — view in the web UI\n\nThe editor opens this session's worktree. A terminal can't render it."
+	return "Open this VS Code tab in the web UI."
+}
+
+// docsTabPlaceholder is the TUI pane for a proposal Docs tab. The editor is web
+// only, so the pane names the proposal and the way to read it from a terminal.
+func docsTabPlaceholder(slug string) string {
+	return fmt.Sprintf("The Docs tab is web only. Open it in the web UI to edit proposal %s.\n\nIn a terminal, run: af proposal path %s", slug, slug)
 }
 
 // tabPlaceholder returns the TUI placeholder for a tab kind the terminal cannot
@@ -588,6 +594,8 @@ func tabPlaceholder(tab *session.Tab) (string, bool) {
 		return webTabPlaceholder(tab.URL), true
 	case session.TabKindVSCode:
 		return vscodeTabPlaceholder(), true
+	case session.TabKindDocs:
+		return docsTabPlaceholder(tab.Proposal), true
 	default:
 		return "", false
 	}
@@ -633,14 +641,14 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		}
 	}
 
-	// Remote instances have no local shell tab. When terminal_cmd is configured
-	// the tab is an interactive-only surface (#843): prompt the user to attach.
-	// Otherwise keep the "not available" fallback and name the config knob.
+	// Remote instances have no local shell tab. When the backend advertises a
+	// terminal surface the tab is interactive-only (#843): prompt the user to
+	// attach. Otherwise keep the "not available" fallback.
 	if caps := instance.Capabilities(); caps.Workspace == session.WorkspaceRemote {
 		if caps.TerminalTab {
-			p.setFallbackState("Press Enter to open a terminal on the remote machine.")
+			p.setFallbackState("Enter to open a remote terminal.")
 		} else {
-			p.setFallbackState("Terminal tab not available for remote sessions.\nConfigure remote_hooks.terminal_cmd to enable it.\nUse the Agent tab to see session output.")
+			p.setFallbackState("This tab streams from the sandbox.\nSelect the Agent tab for session output.")
 		}
 		p.mu.Unlock()
 		return nil
@@ -715,9 +723,31 @@ func (p *TabPane) String() string {
 	}
 	rect := layout.Rect{W: p.width, H: p.height}
 
-	// In scroll/copy mode always use the viewport.
+	// In scroll/copy mode always use the viewport. Render with an unbounded
+	// content width so the raw (possibly wider) scrollback rows survive the
+	// viewport's own MaxWidth truncation — view.View() clips wide rows with an
+	// empty tail (no marker), so a naive fitLine(view.View()) pass would only
+	// see lines already trimmed to p.width and add nothing. Then apply the same
+	// per-line fitLine ellipsis pass the normal-mode branch uses (#4175) so a
+	// cut that drops real content gets a visible … like every other surface.
+	// The width/style are restored before returning so scroll geometry (which
+	// depends on Width/Height, not Style) is untouched. Trailing pad spaces are
+	// trimmed first: viewport pads short rows to the widest visible row with
+	// spaces, and without trimming those fitLine's raw measure would mark a
+	// blank tail as lost content and append a spurious ….
 	if p.scroll.Active() {
-		return layout.ClampToRect(p.viewport.View(), rect)
+		savedW := p.viewport.Width
+		savedStyle := p.viewport.Style
+		p.viewport.Width = 0
+		p.viewport.Style = savedStyle.UnsetMaxWidth()
+		view := p.viewport.View()
+		p.viewport.Width = savedW
+		p.viewport.Style = savedStyle
+		viewLines := strings.Split(view, "\n")
+		for i := range viewLines {
+			viewLines[i] = fitLine(strings.TrimRight(viewLines[i], " "), p.width)
+		}
+		return layout.ClampToRect(strings.Join(viewLines, "\n"), rect)
 	}
 
 	if p.content.fallback {
@@ -759,17 +789,41 @@ func (p *TabPane) String() string {
 		lines = lines[len(lines)-p.height:]
 	}
 
+	// A preview-only tab keeps the pane's own width (e.g. 80 cols from a prior
+	// interactive session or spawn) while the preview box is narrower (#4175):
+	// ClampToRect would silently amputate the right side of every line. Mark
+	// each row whose cut drops real content with an ellipsis so the clip is
+	// visible. Trailing pad spaces are trimmed first — capture pads every row
+	// to the window width, so the raw measure would mark blank tails as losses.
+	for i := range lines {
+		lines[i] = fitLine(strings.TrimRight(lines[i], " "), p.width)
+	}
+
 	return layout.ClampToRect(tabPaneStyle.Render(strings.Join(lines, "\n")), rect)
 }
 
-// ScrollUp enters scroll mode (if not already) and scrolls up.
+// ScrollUp enters scroll mode (if not already) and scrolls up one line — the
+// wheel's step. The keyboard's ctrl+u is ScrollHalfPageUp.
 func (p *TabPane) ScrollUp(instance *session.Instance, activeTab int) error {
 	return p.scrollBy(instance, activeTab, scrollOneLineUp)
 }
 
-// ScrollDown enters scroll mode (if not already) and scrolls down.
+// ScrollDown enters scroll mode (if not already) and scrolls down one line.
 func (p *TabPane) ScrollDown(instance *session.Instance, activeTab int) error {
 	return p.scrollBy(instance, activeTab, scrollOneLineDown)
+}
+
+// ScrollHalfPageUp enters scroll mode (if not already) and scrolls up half a
+// viewport — the conventional ctrl+u step (vim, less, tmux copy-mode). The
+// magnitude stays semantic until the intent applies, so a gesture queued
+// across the off-loop history fill measures the geometry it lands on (#4173).
+func (p *TabPane) ScrollHalfPageUp(instance *session.Instance, activeTab int) error {
+	return p.scrollBy(instance, activeTab, scrollHalfPageUp)
+}
+
+// ScrollHalfPageDown is ScrollHalfPageUp toward newer content — ctrl+d.
+func (p *TabPane) ScrollHalfPageDown(instance *session.Instance, activeTab int) error {
+	return p.scrollBy(instance, activeTab, scrollHalfPageDown)
 }
 
 // scrollBy is the single keyboard/wheel-independent input path. It validates a
@@ -823,7 +877,7 @@ func (p *TabPane) canEnterScrollModeLocked(instance *session.Instance, activeTab
 			p.setFallbackState("Session no longer running.")
 			return false
 		case session.LiveLost:
-			p.setFallbackState("Session lost — its tmux session is gone.")
+			p.setFallbackState(lostSessionCopy(instance))
 			return false
 		}
 	}
@@ -886,7 +940,16 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	case instance.GetLiveness() == session.LiveDead:
 		p.setFallbackState("Session no longer running.")
 	case instance.GetLiveness() == session.LiveLost:
-		p.setFallbackState("Session lost — its tmux session is gone.")
+		p.setFallbackState(lostSessionCopy(instance))
 	}
 	return nil
+}
+
+// lostSessionCopy names what was lost without naming a mechanism the row does
+// not have: a sandbox session has no daemon-side tmux session.
+func lostSessionCopy(instance *session.Instance) string {
+	if instance != nil && instance.Capabilities().Workspace == session.WorkspaceRemote {
+		return "Session lost — its sandbox is not reachable."
+	}
+	return "Session lost — its tmux session is gone."
 }

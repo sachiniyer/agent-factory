@@ -2,6 +2,7 @@ package apiclient
 
 import (
 	"context"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,12 +18,10 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 )
 
-// TestParseDaemonURL_AcceptsHTTPSchemesRejectsTLS proves the URL parser derives
-// the http/ws authorities from either plaintext scheme and refuses a TLS scheme
-// (with the actionable HTTP-only error) or malformed input — the whole point
-// being that a stale wss:// config from the old pinned-TLS listener fails loudly
-// rather than mysteriously.
-func TestParseDaemonURL_AcceptsHTTPSchemesRejectsTLS(t *testing.T) {
+// TestParseDaemonURL_AcceptsPlainAndTLSSchemes proves the URL parser derives
+// the REST/WS authorities from either plaintext scheme or either TLS scheme and
+// refuses malformed input and unknown schemes.
+func TestParseDaemonURL_AcceptsPlainAndTLSSchemes(t *testing.T) {
 	ok := []struct {
 		in, http, ws string
 	}{
@@ -40,15 +39,19 @@ func TestParseDaemonURL_AcceptsHTTPSchemesRejectsTLS(t *testing.T) {
 			t.Fatalf("parseDaemonURL(%q) = (%q,%q), want (%q,%q)", tc.in, gotHTTP, gotWS, tc.http, tc.ws)
 		}
 	}
-	// A TLS scheme is rejected with the HTTP-only migration message.
-	for _, in := range []string{"wss://host:8443", "https://host:8443"} {
-		_, _, err := parseDaemonURL(in)
-		if err == nil {
-			t.Fatalf("parseDaemonURL(%q): want error, got nil", in)
+	// TLS schemes select the verified-TLS family; they are interchangeable.
+	for _, tc := range []struct{ in, http, ws string }{
+		{"https://host:8443", "https://host:8443", "wss://host:8443"},
+		{"wss://host:8443", "https://host:8443", "wss://host:8443"},
+		{"HTTPS://box.tail1234.ts.net/ignored", "https://box.tail1234.ts.net", "wss://box.tail1234.ts.net"},
+	} {
+		gotHTTP, gotWS, err := parseDaemonURL(tc.in)
+		if err != nil || gotHTTP != tc.http || gotWS != tc.ws {
+			t.Fatalf("parseDaemonURL(%q) = (%q,%q,%v), want (%q,%q)", tc.in, gotHTTP, gotWS, err, tc.http, tc.ws)
 		}
-		if !strings.Contains(err.Error(), "HTTP-only") {
-			t.Fatalf("parseDaemonURL(%q): want HTTP-only guidance, got %v", in, err)
-		}
+	}
+	if _, _, err := parseDaemonURL("ftp://host:1"); err == nil {
+		t.Fatal("parseDaemonURL(ftp://): want error")
 	}
 	bad := []string{"host:8443", "http://", ""}
 	for _, in := range bad {
@@ -156,7 +159,7 @@ func TestNewRemote_RESTRoundTripWithToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRemote: %v", err)
 	}
-	got, err := c.Snapshot(daemon.SnapshotRequest{})
+	got, _, err := c.Snapshot(daemon.SnapshotRequest{})
 	if err != nil {
 		t.Fatalf("Snapshot over HTTP: %v", err)
 	}
@@ -176,21 +179,47 @@ func TestNewRemote_WrongToken401(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewRemote: %v", err)
 		}
-		_, err = c.Snapshot(daemon.SnapshotRequest{})
+		_, _, err = c.Snapshot(daemon.SnapshotRequest{})
 		if err == nil || !strings.Contains(err.Error(), "unauthorized") {
 			t.Fatalf("token %q: want unauthorized error, got %v", badTok, err)
 		}
 	}
 }
 
-// TestNewRemote_RejectsTLSURL proves NewRemote refuses a wss:///https:// target
-// up front with the HTTP-only guidance, so a stale TLS config never silently
-// half-dials.
-func TestNewRemote_RejectsTLSURL(t *testing.T) {
-	for _, in := range []string{"wss://host:8443", "https://host:8443"} {
-		if _, err := NewRemote(in, "tok"); err == nil {
-			t.Fatalf("NewRemote(%q): want HTTP-only error, got nil", in)
-		}
+// W9.5: an https:// target is verified against the system CAs. A server whose
+// certificate the client does not trust fails with an actionable hint (and the
+// WS dial fails the same way, proving wss:// dials TLS); a client that trusts
+// the server's CA completes the round trip. There is no insecure option.
+func TestNewRemote_HTTPSVerifiesAgainstTrustRoots(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PingResponse{OK: true, Version: "9.9.9"}))
+	}))
+	defer srv.Close()
+
+	c, err := NewRemote(srv.URL, "tok") // https://127.0.0.1:port
+	if err != nil {
+		t.Fatalf("NewRemote(%q): %v", srv.URL, err)
+	}
+	defer c.CloseIdleConnections()
+	if c.remoteTransport.TLSClientConfig == nil || c.remoteTransport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("the remote transport must verify certificates")
+	}
+
+	_, err = c.Health(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not trusted by this machine's system CAs") {
+		t.Fatalf("untrusted server: want the system-CA hint, got %v", err)
+	}
+	if _, err := c.DialStream(context.Background(), StreamSession{Title: "t"}, "", 0, 0); err == nil ||
+		!strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("wss dial to an untrusted server: want a certificate error, got %v", err)
+	}
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	c.remoteTransport.TLSClientConfig.RootCAs = pool
+	resp, err := c.Health(context.Background())
+	if err != nil || resp.Version != "9.9.9" {
+		t.Fatalf("trusted server: want a clean round trip, got %+v %v", resp, err)
 	}
 }
 
@@ -256,7 +285,7 @@ func TestNewRemote_NeverRespondsAfterConnectTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, e := c.Snapshot(daemon.SnapshotRequest{})
+		_, _, e := c.Snapshot(daemon.SnapshotRequest{})
 		errc <- e
 	}()
 	select {
@@ -288,7 +317,7 @@ func TestDialStream_StalledHandshakeTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, e := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+		_, e := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0)
 		errc <- e
 	}()
 	select {
@@ -327,7 +356,7 @@ func TestDialStream_StalledRequestWriteTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+		_, err := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0)
 		errc <- err
 	}()
 	select {
@@ -378,7 +407,7 @@ func TestDialStream_SlowTCPDialKeepsFullHandshakeBudget(t *testing.T) {
 		}
 	}
 
-	sc, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+	sc, err := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0)
 	if err != nil {
 		t.Fatalf("TCP dial used the WebSocket handshake budget: %v", err)
 	}
@@ -418,7 +447,7 @@ func TestDialStream_RejectedUpgradeClosesPerDialTransport(t *testing.T) {
 		return &closeNotifyConn{Conn: conn, closed: closed}, nil
 	}
 
-	if _, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0); err == nil {
+	if _, err := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0); err == nil {
 		t.Fatal("rejected WebSocket upgrade unexpectedly succeeded")
 	}
 	select {
@@ -456,7 +485,7 @@ func TestNewRemote_SlowButProgressingResponseNotKilled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRemote: %v", err)
 	}
-	got, err := c.Snapshot(daemon.SnapshotRequest{})
+	got, _, err := c.Snapshot(daemon.SnapshotRequest{})
 	if err != nil {
 		t.Fatalf("slow-but-progressing response must NOT be timed out, got %v", err)
 	}
@@ -490,7 +519,7 @@ func TestDialStream_RemoteThreadsTokenHeaderAndQuery(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	sc, err := c.DialStream(ctx, "alpha", "", "", 0, 0)
+	sc, err := c.DialStream(ctx, StreamSession{Title: "alpha"}, "", 0, 0)
 	if err != nil {
 		t.Fatalf("DialStream over HTTP: %v", err)
 	}

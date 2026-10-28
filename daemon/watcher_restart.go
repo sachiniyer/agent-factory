@@ -30,7 +30,9 @@ func (s *watcherSupervisor) restart(t task.Task) error {
 	}
 	if current := s.watchers[t.ID]; current != nil {
 		delete(s.watchers, t.ID)
-		current.stop()
+		if dropped := current.stop(); dropped > t.DroppedEvents {
+			t.DroppedEvents = dropped
+		}
 	}
 
 	replacement := s.newTaskWatcher(t)
@@ -53,14 +55,22 @@ func watcherSignature(t task.Task) string {
 	return t.WatchCmd + "\x00" + t.ProjectPath + "\x00" + t.Name
 }
 
-func stopWatchers(ws []*taskWatcher) {
+func stopWatchers(ws []*taskWatcher) map[string]int {
 	var wg sync.WaitGroup
-	for _, w := range ws {
+	totals := make([]int, len(ws))
+	for i, w := range ws {
 		wg.Add(1)
-		go func(w *taskWatcher) {
+		go func(i int, w *taskWatcher) {
 			defer wg.Done()
-			w.stop()
-		}(w)
+			totals[i] = w.stop()
+		}(i, w)
 	}
 	wg.Wait()
+	dropped := make(map[string]int, len(ws))
+	for i, w := range ws {
+		if totals[i] > dropped[w.taskID] {
+			dropped[w.taskID] = totals[i]
+		}
+	}
+	return dropped
 }

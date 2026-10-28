@@ -23,7 +23,7 @@ type failKillBackend struct {
 	readyFakeBackend
 }
 
-func (failKillBackend) Kill(*session.Instance) error {
+func (failKillBackend) Kill(*session.Instance, bool) error {
 	return fmt.Errorf("teardown interrupted: %w", session.ErrPaneMayBeLive)
 }
 

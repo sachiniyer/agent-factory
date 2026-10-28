@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -47,6 +48,7 @@ func TestSelectProjectRowSwitchesProject(t *testing.T) {
 		{Name: filepath.Base(repoBRoot), Root: repoBRoot, SessionCount: 0},
 		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 1, Active: true},
 	})
+	h.relayout() // Project rows determine whether this section is visible.
 	h.focusRegion(layout.RegionProjects)
 	require.Equal(t, layout.RegionProjects, h.ring.Active())
 
@@ -101,6 +103,19 @@ func TestBuildProjectListBareCloneKeepsLinkedWorkspace(t *testing.T) {
 	assert.True(t, rows[0].Active)
 }
 
+// TestBuildProjectListCachesResolvedPathsAcrossPolls pins the cache the 750ms
+// sidebar poll leans on: a path that has resolved once is not probed again
+// while its resolution is fresh.
+//
+// The probe is observed through the budget ledger (#3720), not through a
+// wrapper `git` on PATH that appended a byte to a marker file. That marker was
+// a fact about the RUNNER rather than about the resolver: the wrapper's own
+// /bin/sh had to be scheduled inside the path's 150ms window for the byte to
+// exist at all, and a loaded macOS runner cancels the probe first — so the
+// test read "the probe was never issued" off a file its own setup had raced
+// (#3761, the shape #3710 → #3720 already removed from the sibling test). A
+// granted budget IS the probe being issued, recorded by the poll that issued
+// it, whether or not the fork won.
 func TestBuildProjectListCachesResolvedPathsAcrossPolls(t *testing.T) {
 	h := newTestHome(t)
 	repoRoot := initTestGitRepo(t)
@@ -109,27 +124,51 @@ func TestBuildProjectListCachesResolvedPathsAcrossPolls(t *testing.T) {
 	cachedRoot := initTestGitRepo(t)
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{cachedRoot: {}}
 
-	realGit, err := exec.LookPath("git")
-	require.NoError(t, err)
-	binDir := t.TempDir()
-	marker := filepath.Join(t.TempDir(), "git-probes")
-	wrapper := filepath.Join(binDir, "git")
-	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nprintf x >> \"$AF_GIT_PROBE_MARKER\"\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
-	t.Setenv("AF_GIT_PROBE_MARKER", marker)
-	t.Setenv("AF_REAL_GIT", realGit)
-	t.Setenv("PATH", binDir)
+	poll := func() (budgeted []string, cachedAt time.Time, cached bool) {
+		t.Helper()
+		_, degraded, budgets := h.buildProjectListFromCounted(nil)
+		require.False(t, degraded)
+		for _, budget := range budgets {
+			budgeted = append(budgeted, budget.path)
+		}
+		resolution, ok := h.projectPathResolutions[cachedRoot]
+		return budgeted, resolution.resolvedAt, ok
+	}
 
-	_, degraded := h.buildProjectListFrom(nil)
-	require.False(t, degraded)
-	first, err := os.ReadFile(marker)
-	require.NoError(t, err)
-	require.NotEmpty(t, first)
-
-	_, degraded = h.buildProjectListFrom(nil)
-	require.False(t, degraded)
-	second, err := os.ReadFile(marker)
-	require.NoError(t, err)
-	assert.Len(t, second, len(first), "a successful path resolution must survive the 750ms project poll")
+	// The property is about a PAIR of polls, and reaching the pair is not the
+	// property. Two things stop a loaded runner from reaching it, and neither
+	// is the cache failing: a first poll whose probe loses its own window
+	// caches nothing for the second poll to reuse, and a stall longer than the
+	// TTL between the two expires the entry before the second poll reads it.
+	// Those two retry; every other outcome is asserted.
+	var first, second []string
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		budgeted, cachedAt, cached := poll()
+		if !cached {
+			require.True(t, time.Now().Before(deadline),
+				"no poll ever cached a resolution for %s: either every probe lost its own %s window, "+
+					"or a successful resolution is no longer cached at all", cachedRoot, projectPathScanTimeout)
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		first = budgeted
+		second, _, _ = poll()
+		// time.Since is read AFTER the second poll, so it can only overstate
+		// the age that poll itself compared against the TTL: under the TTL
+		// here proves the entry was live when the poll ran, which makes a
+		// budget it opened anyway the defect rather than the clock.
+		if len(second) > 0 && time.Since(cachedAt) >= projectPathResolutionTTL {
+			require.True(t, time.Now().Before(deadline),
+				"every pair of polls straddled the %s resolution TTL", projectPathResolutionTTL)
+			continue
+		}
+		break
+	}
+	require.Contains(t, first, cachedRoot,
+		"an uncached path must be probed under a budget of its own before anything can be cached for it")
+	assert.Empty(t, second,
+		"a successful path resolution must survive the 750ms project poll, leaving the next one nothing to probe: %v", second)
 }
 
 func TestBuildProjectListUsesKnownActiveIdentityAfterProbeBudgetExpires(t *testing.T) {
@@ -184,7 +223,7 @@ func TestBuildProjectListGivesInactivePathsIndependentResolutionBudgets(t *testi
 	t.Setenv("AF_REAL_GIT", realGit)
 	t.Setenv("PATH", binDir)
 
-	projects, degraded := h.buildProjectListFrom([]session.InstanceData{
+	projects, degraded, budgets := h.buildProjectListFromCounted([]session.InstanceData{
 		{
 			Title: "stalled", Path: stalled,
 			Worktree: session.GitWorktreeData{RepoPath: stalled, WorktreePath: stalled},
@@ -195,10 +234,50 @@ func TestBuildProjectListGivesInactivePathsIndependentResolutionBudgets(t *testi
 		},
 	})
 	require.False(t, degraded)
-	assert.True(t, projectWithCountHasRoot(projects, 1, registeredRoot),
-		"one stalled inactive path must not consume the healthy bare worktree's resolution opportunity")
+
+	// The OPPORTUNITY is what is asserted, not what came back inside it. This
+	// checked that the healthy bare worktree had finished resolving within the
+	// first poll (#3710), which is a fact about the runner: the property holds
+	// whenever the healthy path is given its own window, and a loaded machine
+	// can miss the window while being given all of it. It reddened master's
+	// release Build at f98c3ae0 and passed on an immediate re-run of the same
+	// commit.
+	//
+	// Two assertions, and the pair is the point. Every path the poll probes is
+	// granted a budget, so the stalled path cannot crowd another out of being
+	// probed at all; and every budget is the WHOLE scan window, so no path is
+	// handed the remainder of one another path is already spending. A poll-wide
+	// budget shared across the paths fails both: it opens one window for the
+	// three of them, and whatever it grants the paths behind the stalled one is
+	// not projectPathScanTimeout.
+	wantBudgeted := []string{stalled, liveRoot, registeredRoot}
+	granted := make(map[string]time.Duration, len(budgets))
+	for _, budget := range budgets {
+		require.NotContains(t, granted, budget.path,
+			"%s drew two resolution budgets in one poll", budget.path)
+		granted[budget.path] = budget.window
+	}
+	require.Len(t, budgets, len(wantBudgeted),
+		"a budget for each uncached path of the poll, not one between them: %v", granted)
+	for _, path := range wantBudgeted {
+		require.Contains(t, granted, path,
+			"every path the poll resolves gets its own resolution opportunity, "+
+				"whatever another path is doing with its own")
+		assert.Equal(t, projectPathScanTimeout, granted[path],
+			"%s must be probed with the WHOLE scan window; a budget shared across the "+
+				"paths would hand it what the stalled path left", path)
+	}
+
+	// And the one thing about the outcome that does not depend on the clock: the
+	// stalled path's probe cannot succeed, so its row stands up from the identity
+	// hashed off its own recorded root rather than vanishing.
+	assert.True(t, projectWithCountHasRoot(projects, 1, stalled),
+		"a path that spends its whole budget without answering keeps its recorded identity")
 }
 
+// TestBuildProjectListInvalidatesVanishedRegisteredWorktree: a registry root
+// that disappears must not keep lending its cached spelling to the surviving
+// live workspace.
 func TestBuildProjectListInvalidatesVanishedRegisteredWorktree(t *testing.T) {
 	_, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
 	h := newTestHome(t)
@@ -212,19 +291,41 @@ func TestBuildProjectListInvalidatesVanishedRegisteredWorktree(t *testing.T) {
 		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: liveRoot},
 	}}
 
-	first, degraded := h.buildProjectListFrom(data)
-	require.False(t, degraded)
-	require.Contains(t, h.projectPathResolutions, registeredRoot, "the first poll must cache the successful registry root")
+	// Reaching the state the vanishing invalidates is not the property: a poll
+	// whose probes lost their own windows caches no resolution and proves no
+	// registration, so there is nothing cached for the vanishing to invalidate.
+	first := pollProjectsUntil(t, h, data, nil, func() bool {
+		return registryRootIsVouchedFor(h, registeredRoot)
+	}, "no poll ever resolved AND proved the registry root %s inside its own budgets, "+
+		"so nothing was ever cached for the vanishing to invalidate", registeredRoot)
 	require.True(t, projectWithCountHasRoot(first, 1, registeredRoot),
 		"the live registered root is the preferred spelling before it disappears")
 
 	runGit(t, bare, "worktree", "remove", "--force", registeredRoot)
-	second, degraded := h.buildProjectListFrom(data)
-	require.False(t, degraded)
+
+	second := pollProjectsUntil(t, h, data, nil, func() bool {
+		return workspaceIsResolved(h, liveRoot)
+	}, liveWorkspaceUnresolved, liveRoot, projectPathScanTimeout)
 	assert.True(t, projectWithCountHasRoot(second, 1, liveRoot),
 		"a vanished cached registry root must not replace the surviving live workspace")
 }
 
+// TestBuildProjectListRevalidatesPresentReplacementCheckout: a registry root
+// whose checkout is REPLACED by an unrelated repository — the directory is
+// still there, so nothing about its absence invalidates anything — must stop
+// lending the identity an earlier poll proved, once that proof has expired.
+//
+// The expiry is STAGED on the entries under test rather than waited out
+// (#3874). Sleeping past the one-second TTL expired the whole poll's cache
+// rather than the registry entry the assertion is about, the healthy live
+// workspace's resolution included, so the second poll had to re-probe a path
+// this test never meant to re-probe. That probe gets projectPathScanTimeout,
+// and a macOS runner that misses it makes the session row fall back to its
+// recorded bare RepoPath: the poll is then rooted at the bare repository, and
+// the assertion — which looks for the live workspace — reads that as the
+// revalidation having failed. Backdating the registry root's own timestamps
+// expires exactly what must be revalidated and leaves the live workspace's
+// fresh entry to be served from cache.
 func TestBuildProjectListRevalidatesPresentReplacementCheckout(t *testing.T) {
 	base, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
 	h := newTestHome(t)
@@ -238,17 +339,113 @@ func TestBuildProjectListRevalidatesPresentReplacementCheckout(t *testing.T) {
 		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: liveRoot},
 	}}
 
-	first, degraded := h.buildProjectListFrom(data)
-	require.False(t, degraded)
-	require.True(t, projectWithCountHasRoot(first, 1, registeredRoot))
+	first := pollProjectsUntil(t, h, data, nil, func() bool {
+		return registryRootIsVouchedFor(h, registeredRoot)
+	}, "no poll ever resolved AND proved the registry root %s inside its own budgets, "+
+		"so no resolution was ever staged for the replacement to have to expire", registeredRoot)
+	require.True(t, projectWithCountHasRoot(first, 1, registeredRoot),
+		"the proven registry root is the preferred spelling while it is still the checkout that was registered")
 
 	runGit(t, bare, "worktree", "remove", "--force", registeredRoot)
 	runGit(t, base, "init", "-b", "main", registeredRoot)
-	time.Sleep(projectPathResolutionTTL + 100*time.Millisecond)
-	second, degraded := h.buildProjectListFrom(data)
-	require.False(t, degraded)
+
+	// Expire the registry root's resolution and its proof, and only those.
+	// Absence counts as expired: a poll that fails to prove the replacement
+	// caches nothing, which is the same "nothing fresh to lend" this stages.
+	expireRegistryRoot := func() {
+		aged := time.Now().Add(-projectPathResolutionTTL - time.Second)
+		if resolution, ok := h.projectPathResolutions[registeredRoot]; ok {
+			resolution.resolvedAt = aged
+			h.projectPathResolutions[registeredRoot] = resolution
+		}
+		if identity, ok := h.registeredProjectIdentities[registeredRoot]; ok {
+			identity.resolvedAt = aged
+			h.registeredProjectIdentities[registeredRoot] = identity
+		}
+	}
+
+	second := pollProjectsUntil(t, h, data, expireRegistryRoot, func() bool {
+		return workspaceIsResolved(h, liveRoot)
+	}, liveWorkspaceUnresolved, liveRoot, projectPathScanTimeout)
 	assert.True(t, projectWithCountHasRoot(second, 1, liveRoot),
 		"an expired registry resolution must not lend the bare identity to a replacement checkout")
+}
+
+// liveWorkspaceUnresolved names the one poll outcome the two-poll registry
+// tests above cannot read their assertion through, and it is about the RUNNER
+// rather than the registry: a poll holds an identity for the live workspace
+// only when a probe of it answered — from cache, or freshly when the
+// one-second TTL lapsed across the git commands that replace the registry
+// checkout. Without one, the session row falls back to its recorded bare
+// RepoPath and the poll is rooted at the bare repository whatever the registry
+// did, so it answers the question neither way (#3874).
+const liveWorkspaceUnresolved = "the live workspace %s never resolved inside its own %s probe window, " +
+	"so no poll ever reached the state these assertions read"
+
+// registryRootIsVouchedFor reports whether the poll's caches hold BOTH facts a
+// registry root's preferred spelling rests on: its path resolved, and its
+// registration proven. Either one lost to its own budget leaves the row on the
+// recorded-identity fallback, which is a different case from the one under
+// test.
+func registryRootIsVouchedFor(h *home, root string) bool {
+	if _, resolved := h.projectPathResolutions[root]; !resolved {
+		return false
+	}
+	_, proven := h.registeredProjectIdentities[root]
+	return proven
+}
+
+// workspaceIsResolved reports whether the poll holds a resolved identity for a
+// path. Only successful probes are cached and an expired entry is dropped
+// before it is re-probed, so an entry present after a poll is that poll having
+// resolved the path — from its cache or from a probe of its own.
+func workspaceIsResolved(h *home, path string) bool {
+	_, resolved := h.projectPathResolutions[path]
+	return resolved
+}
+
+// pollProjectsUntil re-runs the project poll until one attempt satisfies ready,
+// returning that attempt's list, and fails naming the state never reached once
+// the deadline passes.
+//
+// It is the retry shape the sibling budget tests already carry (#3710 → #3720,
+// #3761 → #3765): every path a poll resolves is given one bounded window, and a
+// poll that lost one did not exercise the property under test — it produced the
+// same fallback a genuine failure produces, from the runner. Nothing caches a
+// lost probe, so polling again is a fresh attempt at the same question rather
+// than a reread of a settled one. stage runs before each attempt so every one of
+// them stages the same experiment.
+func pollProjectsUntil(t *testing.T, h *home, data []session.InstanceData, stage func(), ready func() bool,
+	unreached string, args ...any) []overlay.Project {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if stage != nil {
+			stage()
+		}
+		projects, degraded := h.buildProjectListFrom(data)
+		require.False(t, degraded)
+		if ready() {
+			return projects
+		}
+		require.Truef(t, time.Now().Before(deadline), unreached, args...)
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// probeOutcomeFor reports how the poll's probe for path ended, from the budget
+// ledger the poll returned. It fails the test when no budget was opened for the
+// path at all: that means the poll never probed it, which no assertion about
+// the probe's outcome can be read against.
+func probeOutcomeFor(t *testing.T, budgets []projectPathProbeBudget, path string) projectPathProbeOutcome {
+	t.Helper()
+	for _, budget := range budgets {
+		if budget.path == path {
+			return budget.outcome
+		}
+	}
+	t.Fatalf("no resolution budget was opened for %s: %+v", path, budgets)
+	return probeOutcomeUnanswered
 }
 
 func projectWithCountHasRoot(projects []overlay.Project, count int, root string) bool {
@@ -282,7 +479,7 @@ func TestBuildProjectListRetainsMismatchedRecordedIdentity(t *testing.T) {
 	ancestor := initTestGitRepo(t)
 	legacyRoot := filepath.Join(ancestor, "recorded-parent")
 	require.NoError(t, os.Mkdir(legacyRoot, 0o755))
-	require.NotEqual(t, config.RepoIDForRecordedRoot(legacyRoot), config.RepoIDForPath(legacyRoot),
+	require.NotEqual(t, config.RepoIDFromRoot(filepath.Clean(legacyRoot)), config.RepoIDForPath(legacyRoot),
 		"fixture must place the retained root inside another repository")
 
 	projects, degraded := h.buildProjectListFrom([]session.InstanceData{{
@@ -304,13 +501,15 @@ func TestBuildProjectListRetainsMismatchedRecordedIdentity(t *testing.T) {
 // the active project.
 func TestProjectsSectionEscReturnsToTree(t *testing.T) {
 	h := newTestHome(t)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil
 	}))
 	resizeHome(h, 100, 30)
 	h.projects.SetProjects([]ui.SidebarProject{
 		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 0, Active: true},
+		{Name: "other", Root: "/other"},
 	})
+	h.relayout() // Project rows determine whether this section is visible.
 	h.focusRegion(layout.RegionProjects)
 	require.True(t, h.projects.Focused())
 
@@ -366,7 +565,7 @@ func TestSwitchProjectRescopesSidebar(t *testing.T) {
 	assert.Contains(t, h.sidebar.String(), filepath.Base(repoBRoot), "sidebar title should name the active project")
 
 	// A new session created after the switch targets the new project's root.
-	h.startNewInstance(false)
+	h.startNewInstance()
 	require.NotNil(t, h.namingInstance)
 	assert.Equal(t, repoBRoot, h.namingInstance.Path, "new sessions must target the switched-to project root")
 }
@@ -540,7 +739,7 @@ func TestSwitchProjectFailedSnapshotLeavesProjectIntact(t *testing.T) {
 
 	// The user-visible payoff: a session created after the failed switch still
 	// targets the project the sidebar is showing.
-	h.startNewInstance(false)
+	h.startNewInstance()
 	require.NotNil(t, h.namingInstance)
 	assert.Equal(t, repoARoot, h.namingInstance.Path, "new sessions must still target the current project after a failed switch")
 }
@@ -708,7 +907,6 @@ func TestTaskCreateAfterFailedResolveUsesGlobalProgram(t *testing.T) {
 	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
-	globalDefault := h.appConfig.DefaultProgram
 	h.program = "codex"
 
 	projectBRoot := initTestGitRepo(t)
@@ -741,8 +939,12 @@ func TestTaskCreateAfterFailedResolveUsesGlobalProgram(t *testing.T) {
 	saved, err := task.LoadTasks()
 	require.NoError(t, err)
 	require.Len(t, saved, 1, "the create must have reached disk")
-	assert.Equal(t, globalDefault, saved[0].Program,
-		"a task created after a failed resolve must carry the global default program, not the previous project's (#2138)")
+	// The form's "Use config default" option stores Program="" — the implicit
+	// value the task runner resolves to the repo's live default_program at run
+	// time. After the failed project resolve that is the global default, which
+	// satisfies #2138 without baking a copy of it into the task.
+	assert.Empty(t, saved[0].Program,
+		"a task created after a failed resolve must store the implicit program, not a stale copy of the previous project's (#2138)")
 }
 
 // TestBuildProjectListUnionsSourcesWithCounts: the picker list unions the
@@ -753,7 +955,7 @@ func TestBuildProjectListUnionsSourcesWithCounts(t *testing.T) {
 	h.repoRoot = "/repos/active"
 
 	repoWithSessions := "/repos/busy"
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		mk := func(root string) session.InstanceData {
 			d := session.InstanceData{Title: "s", CreatedAt: time.Now()}
 			d.Worktree.RepoPath = root
@@ -791,7 +993,7 @@ func TestBuildProjectListUnionsSourcesWithCounts(t *testing.T) {
 func TestBuildProjectListUnionsTheRegistry(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = "/repos/active"
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil // no live sessions anywhere
 	}))
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
@@ -924,7 +1126,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 func TestBuildProjectListReportsDegradedRegistry(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = "/repos/active"
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil
 	}))
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
@@ -962,7 +1164,7 @@ func TestBuildProjectListReportsDegradedRegistry(t *testing.T) {
 // borrowing an ancestor's.
 func TestBuildProjectListRequiresProvenRegisteredCheckoutIdentity(t *testing.T) {
 	h := newTestHome(t)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil
 	}))
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
@@ -1003,6 +1205,260 @@ func TestBuildProjectListRequiresProvenRegisteredCheckoutIdentity(t *testing.T) 
 	}
 	assert.NotContains(t, ids, outerRepo.ID,
 		"an unproven registration must not lend the enclosing repository a Projects row")
-	assert.Contains(t, ids, config.RepoIDForRecordedRoot(project.Root),
+	assert.Contains(t, ids, config.RepoIDFromRoot(filepath.Clean(project.Root)),
 		"the registration keeps its own recorded-root identity rather than vanishing")
+}
+
+// TestBuildProjectListMergesAStaleOptInIntoItsRecordedProject pins #3530 review
+// id 3916912933.
+//
+// A root_agents key is a PATH, and an unresolvable one falls back to its own
+// hash. Once a registered project is addressed by the identity it RECORDED —
+// which for a bare clone's linked workspace is the bare directory, not the
+// path — that hash is nobody's identity, so the switcher rendered a second row
+// for the same project: zero sessions, nothing to open, and a delete that
+// delete-project refuses because it normalizes the same path back to the
+// recorded identity.
+func TestBuildProjectListMergesAStaleOptInIntoItsRecordedProject(t *testing.T) {
+	_, bare, registeredRoot, _ := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+
+	project, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	require.Equal(t, config.RepoIDFromRoot(bare), project.RepoID,
+		"fixture must record an identity that is not the recorded path's hash")
+	// The registered workspace goes away, and its root_agents opt-in — keyed by
+	// that same path — is all that is left of it in the config.
+	require.NoError(t, os.RemoveAll(registeredRoot))
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{registeredRoot: {}}
+
+	projects, degraded := h.buildProjectListFrom(nil)
+	require.False(t, degraded)
+	require.Len(t, projects, 1,
+		"one project must not split into a registry row and a path-hash row: %+v", projects)
+	assert.Equal(t, config.RepoIDFromRoot(bare), projects[0].RepoID,
+		"the surviving row is the one the record vouches for")
+}
+
+// TestBuildProjectListKeepsALiveWorkspaceOverAStaleOptIn pins #3530 review id
+// 3917445677 — the limit of the merge above.
+//
+// Identity and root SPELLING are separate decisions. Remapping the stale
+// root_agents key onto the record's identity collapses the duplicate row
+// correctly, but the key's path is the one that could not be resolved: at
+// priority 2 it overrode the live workspace a session had already contributed,
+// so the switcher displayed — and switched to — a directory that is not there.
+func TestBuildProjectListKeepsALiveWorkspaceOverAStaleOptIn(t *testing.T) {
+	_, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+
+	_, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(registeredRoot))
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{registeredRoot: {}}
+
+	projects, degraded := h.buildProjectListFrom([]session.InstanceData{{
+		Title: "live", Path: liveRoot,
+		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: liveRoot},
+	}})
+	require.False(t, degraded)
+	require.Len(t, projects, 1, "one project, whatever spelling wins: %+v", projects)
+	assert.Equal(t, liveRoot, projects[0].Root,
+		"an unresolved opt-in path must not outrank the workspace this project's live session is using")
+	assert.Equal(t, 1, projects[0].SessionCount)
+}
+
+// TestBuildProjectListKeepsAnOccupantWhenItsProbeTimesOut pins #3530 review id
+// 3918120760 — the limit of the recorded-identity remap.
+//
+// A timed-out probe leaves the resolution looking exactly like a genuinely
+// absent path. Deferring to a stale registry row on that basis hands a key the
+// daemon will apply to whatever is actually at that path to the old project's
+// identity instead, so the picker can hide a live repository behind the old row
+// and send delete-project an id and a path that name different things.
+//
+// The registered root here is a bare clone's linked workspace, so the record's
+// identity and its path's hash differ by construction — without that the two
+// candidate answers are the same value and the assertion cannot discriminate.
+func TestBuildProjectListKeepsAnOccupantWhenItsProbeTimesOut(t *testing.T) {
+	_, bare, registeredRoot, _ := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+
+	project, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	require.Equal(t, config.RepoIDFromRoot(bare), project.RepoID)
+	pathID := config.RepoIDFromRoot(filepath.Clean(registeredRoot))
+	require.NotEqual(t, project.RepoID, pathID,
+		"fixture must use a recorded root that is not the repository's identity root")
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{registeredRoot: {}}
+
+	// The path still holds a live workspace, and every probe for it stalls past
+	// the budget — indistinguishable from absence by resolvedAt alone.
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\ncase \" $* \" in\n  *\"$AF_STALLED_PROJECT\"*) /bin/sleep 2; exit 1 ;;\nesac\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	t.Setenv("AF_STALLED_PROJECT", registeredRoot)
+	t.Setenv("AF_REAL_GIT", realGit)
+	t.Setenv("PATH", binDir)
+
+	projects, degraded, budgets := h.buildProjectListFromCounted(nil)
+	require.False(t, degraded)
+	// The half of the pair this test owns, now stated rather than assumed: the
+	// probe spent its whole budget without answering. Its neighbour asserts the
+	// opposite outcome on the same fallback, so the two can no longer collapse
+	// into each other under load (#3765). Deterministic in the right direction —
+	// the stand-in sleeps for an order of magnitude longer than the budget, and
+	// a stand-in that never starts at all is unanswered too.
+	require.Equal(t, probeOutcomeUnanswered, probeOutcomeFor(t, budgets, registeredRoot),
+		"the stalled stand-in must leave the probe unanswered")
+	found := false
+	for _, project := range projects {
+		if project.RepoID == pathID {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"an unanswered probe is not evidence that the path is gone, so its root_agents key must keep the identity the daemon will resolve for it rather than borrowing the registry row's: got %+v", projects)
+}
+
+// TestBuildProjectListKeepsAnOccupantWhenGitFailsOperationally pins #3530
+// review id 3919195017 — the limit of the "answered negative" rule.
+//
+// Git exiting normally is not the same as git ANSWERING that the path is free:
+// dubious ownership, an unreadable .git and other operational failures all
+// complete. Treating them alike hands a live occupant's path-keyed opt-in to a
+// stale registry row, which is what the answered-verdict test above forbids for
+// a timeout.
+func TestBuildProjectListKeepsAnOccupantWhenGitFailsOperationally(t *testing.T) {
+	_, bare, registeredRoot, _ := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+
+	project, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	require.Equal(t, config.RepoIDFromRoot(bare), project.RepoID)
+	pathID := config.RepoIDFromRoot(filepath.Clean(registeredRoot))
+	require.NotEqual(t, project.RepoID, pathID)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{registeredRoot: {}}
+
+	// git COMPLETES, with an operational failure rather than a verdict about
+	// the path: exit 128 and a message that is not the not-a-repository one.
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\ncase \" $* \" in\n  *\"$AF_BROKEN_PROJECT\"*) echo \"fatal: detected dubious ownership in repository\" >&2; exit 128 ;;\nesac\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	t.Setenv("AF_BROKEN_PROJECT", registeredRoot)
+	t.Setenv("AF_REAL_GIT", realGit)
+	t.Setenv("PATH", binDir)
+
+	// The probe has to REACH git for this test to be about anything. A probe
+	// cancelled by its own budget leaves exactly the fallback an operational
+	// failure leaves, so asserting only the fallback made this a duplicate of
+	// the timeout test above whenever the runner was slow enough — it passed,
+	// for that test's reason, and the distinction #3530 asked for went
+	// unchecked (#3765). The ledger's outcome is what separates them: git ran
+	// and exited without a verdict, versus never having answered at all.
+	//
+	// An unanswered probe is therefore a poll that did not exercise the case,
+	// not a failure of it. Nothing caches a failed probe, so polling again is a
+	// fresh attempt at the same question rather than a reread of a settled one.
+	var projects []overlay.Project
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var degraded bool
+		var budgets []projectPathProbeBudget
+		projects, degraded, budgets = h.buildProjectListFromCounted(nil)
+		require.False(t, degraded)
+		outcome := probeOutcomeFor(t, budgets, registeredRoot)
+		if outcome == probeOutcomeUnanswered {
+			require.True(t, time.Now().Before(deadline),
+				"git never ran inside the %s budget, so the operational failure this test is about was never produced",
+				projectPathScanTimeout)
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		require.Equal(t, probeOutcomeFailed, outcome,
+			"the stand-in must COMPLETE with an operational failure — the state this test "+
+				"distinguishes from the cancelled probe next door")
+		break
+	}
+
+	found := false
+	for _, project := range projects {
+		if project.RepoID == pathID {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"an operational git failure is not a verdict that the path is free, so its root_agents key must keep the identity the daemon will resolve for it: got %+v", projects)
+}
+
+// TestBuildProjectListRecordsANotARepositoryAnswer covers the fourth ledger
+// outcome, and the only one no test reached when the seam landed (#3785): git
+// ran, completed, and ANSWERED that the path is outside any repository.
+//
+// It is deliberately not the same fact as the resolution's answeredNotARepo,
+// which a provably absent directory satisfies through os.Stat with git having
+// said nothing at all. That one is a verdict about the PATH; this is a fact
+// about the PROBE, and the seam exists to keep them apart — so the git-answered
+// half needs an assertion of its own rather than borrowing the path verdict's.
+//
+// The sibling occupant tests drive the other two failure branches: a stand-in
+// that sleeps past the budget (unanswered) and one that exits 128 with a
+// message that is not the not-a-repository diagnostic (ran and failed). Neither
+// uses a path git answers about, which is why this branch went unasserted.
+func TestBuildProjectListRecordsANotARepositoryAnswer(t *testing.T) {
+	h := newTestHome(t)
+
+	// The fixture is the whole difficulty, so it is ASSERTED rather than
+	// assumed — the mirror of the nesting check
+	// TestBuildProjectListRetainsMismatchedRecordedIdentity makes for the
+	// opposite property. config.gitMetadataMayExist walks EVERY ancestor for a
+	// .git before git's diagnostic is read as a verdict, so a temp dir that
+	// happens to sit inside a checkout resolves to that enclosing repository
+	// and the probe comes back resolved — an outcome no retry below could ever
+	// turn into the one under test. On such a host this fails here, naming the
+	// path, instead of looking like a broken classifier.
+	outsider := t.TempDir()
+	_, err := config.RepoFromPath(outsider)
+	require.ErrorIs(t, err, config.ErrNotGitRepository,
+		"fixture must be a path git ANSWERS is outside any repository, and %s is not: "+
+			"an ancestor holds .git, or GIT_DIR is set", outsider)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{outsider: {}}
+
+	// Retry-shaped for the same reason the operational-failure test is: git has
+	// to run AND answer inside the path's own budget for the verdict to exist,
+	// and a probe cancelled before that comes back unanswered. An unanswered
+	// probe is a poll that did not exercise the case, not a failure of it.
+	// Asserting the answer without this is the shape #3710 → #3720 and
+	// #3761 → #3764 removed — a positive that depends on winning a 150ms fork.
+	// Nothing caches an answered negative (resolveProjectPaths keeps it out of
+	// projectPathResolutions on purpose), so each poll genuinely re-probes.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		_, degraded, budgets := h.buildProjectListFromCounted(nil)
+		require.False(t, degraded)
+		outcome := probeOutcomeFor(t, budgets, outsider)
+		if outcome == probeOutcomeUnanswered {
+			require.True(t, time.Now().Before(deadline),
+				"git never answered inside the %s budget, so the not-a-repository verdict "+
+					"this test is about was never produced", projectPathScanTimeout)
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		require.Equal(t, probeOutcomeNotARepository, outcome,
+			"git answered that %s is outside any repository, so the probe must be recorded "+
+				"as that ANSWER rather than as an operational failure: got %s", outsider, outcome)
+		break
+	}
 }

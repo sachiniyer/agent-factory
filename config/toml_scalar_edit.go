@@ -1,0 +1,503 @@
+package config
+
+import (
+	"regexp"
+	"strings"
+)
+
+// The line-level surgical editors behind `af config set` and `af config unset`:
+// they find one key's line in config.toml and change (or remove) only that
+// line's bytes, so the comments, blank lines and key ordering of a file the
+// README tells users to hand-edit all survive an edit. The expression-level
+// helpers they lean on live in toml_surgical.go; the promise a scanner must not
+// break, and the guard that catches it when one does, live in rewrite_guard.go.
+
+// setTOMLScalar returns content with [section] leaf set to encoded, changing only
+// the target value's bytes. If the key exists its value (and only its value) is
+// replaced, preserving any trailing inline comment. It recognizes both TOML
+// spellings of a table entry — a leaf under a [section] header AND a top-level
+// dotted key (section.leaf = …) — and edits whichever is present, so a
+// hand-edited dotted-key file is never left with a duplicate. If the key is
+// absent it is inserted with minimal disturbance — appended to the end of its
+// section's content block, i.e. after the section's last non-blank line
+// (comments included) and before any trailing blanks preceding the next section
+// or EOF (#1687), or for a root key the pre-section block; if the section itself
+// is absent a new [section] block is appended. section == "" targets the root
+// block.
+func setTOMLScalar(content, section, leaf, encoded string) string {
+	return setTOMLScalarWithLeadingComments(content, section, leaf, encoded, nil)
+}
+
+// setTOMLScalarWithLeadingComments is setTOMLScalar for a caller carrying the
+// key's comment block in from elsewhere: comments is placed verbatim (and in
+// order) directly above the new leaf line when the key is INSERTED. It is
+// ignored on the update path — rewriting an existing line touches only that
+// line's bytes, and `af config migrate` never reaches it carrying comments:
+// a leaf that already exists in the destination takes the redundant-spelling
+// branch instead (#4872).
+func setTOMLScalarWithLeadingComments(content, section, leaf, encoded string, comments []string) string {
+	newLine := leaf + " = " + encoded
+	insertion := newLine
+	if len(comments) > 0 {
+		insertion = strings.Join(append(append([]string{}, comments...), newLine), "\n")
+	}
+
+	if strings.TrimSpace(content) == "" {
+		if section == "" {
+			return insertion + "\n"
+		}
+		return "[" + section + "]\n" + insertion + "\n"
+	}
+
+	hadTrailingNewline := strings.HasSuffix(content, "\n")
+	ls := strings.Split(content, "\n")
+	if hadTrailingNewline && len(ls) > 0 && ls[len(ls)-1] == "" {
+		ls = ls[:len(ls)-1]
+	}
+
+	keyRe := regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
+
+	// TOML also lets a hand-editor write a table entry as a top-level dotted key
+	// (program_overrides.claude = "…") instead of under a [program_overrides]
+	// header. For an UPDATE of an existing key we must recognize that form too,
+	// or we would miss the existing key and append a duplicate — corrupting the
+	// file. TOML forbids defining the same key twice, so a dotted path
+	// (section.leaf) and a section header ([section] leaf) for the same key
+	// cannot both appear in a valid file — at most one matches.
+	//
+	// Note: a quoted root key whose NAME contains a dot ("section.leaf" = …)
+	// is a DIFFERENT key from the dotted path section.leaf = … and CAN coexist
+	// with a dotted-path sibling. The caller (configset.go) handles insertions
+	// via insertTOMLDottedLeaf, which bypasses this regex-based matching and
+	// locates siblings via tomlAssignmentPath (TOML-aware, distinguishes dotted
+	// paths from quoted keys). setTOMLScalar is therefore only called for
+	// updates of an already-confirmed existing key or for plain root-block keys,
+	// and the "at most one matches" invariant holds in those cases.
+	// Dotted whitespace around the '.' is allowed by TOML, so tolerate it.
+	var dottedKeyRe *regexp.Regexp
+	if section != "" {
+		dottedKeyRe = regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(section) + `\s*\.\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
+	}
+
+	// A line that BEGINS inside an open multiline string is that string's
+	// content, never syntax (#3662).
+	stringContent := tomlStringContentLines(ls)
+
+	curSection := ""
+	firstHeaderIdx := -1
+	targetHeaderIdx := -1
+	// lastContentIdxInTarget tracks the last non-blank line of the target
+	// section INCLUDING comment lines, so a missing key is appended at the END
+	// of the section's content block (the documented contract). Tracking only
+	// key=value lines (the pre-#1687 behavior) left it at -1 for a comment-only
+	// section, which inserted the new key immediately after the [section] header
+	// and ABOVE the section's comments (#1687). Blank lines never update it, so
+	// trailing blanks before the next header / EOF are excluded and the insert
+	// lands at the end of the content, not spilling past it.
+	lastContentIdxInTarget := -1
+
+	rebuild := func() string {
+		out := strings.Join(ls, "\n")
+		if hadTrailingNewline {
+			out += "\n"
+		}
+		return out
+	}
+
+	for i, line := range ls {
+		if stringContent[i] {
+			// Content of somebody's multiline value: no header to open, no key
+			// to replace. It is still content OF the section it sits in, though,
+			// so an insert has to land after the whole value rather than in the
+			// middle of it — which is why this updates the bookkeeping below
+			// instead of skipping the line outright.
+			if curSection == section && strings.TrimSpace(line) != "" {
+				lastContentIdxInTarget = i
+			}
+			continue
+		}
+		if name, ok := tomlHeaderName(line); ok {
+			if firstHeaderIdx == -1 {
+				firstHeaderIdx = i
+			}
+			if name == section && targetHeaderIdx == -1 {
+				targetHeaderIdx = i
+			}
+			curSection = name
+			continue
+		}
+		// Top-level dotted form (section.leaf = …). Only valid at the root: the
+		// same text under another header would name a different key.
+		if dottedKeyRe != nil && curSection == "" {
+			if m := dottedKeyRe.FindStringSubmatch(line); m != nil {
+				if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
+					ls = updated
+					return rebuild()
+				}
+			}
+			if tomlScalarLineMatches(line, section, leaf) {
+				if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
+					ls = updated
+					return rebuild()
+				}
+			}
+			if updated, ok := setTOMLInlineTableMember(line, section, leaf, encoded); ok {
+				ls[i] = updated
+				return rebuild()
+			}
+		}
+		if curSection != section {
+			continue
+		}
+		if m := keyRe.FindStringSubmatch(line); m != nil {
+			if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
+				ls = updated
+				return rebuild()
+			}
+		}
+		if tomlScalarLineMatches(line, "", leaf) {
+			if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
+				ls = updated
+				return rebuild()
+			}
+		}
+		if strings.TrimSpace(line) != "" {
+			lastContentIdxInTarget = i
+		}
+	}
+
+	// Key not found — insert.
+	insertAt := func(idx int, s string) {
+		ls = append(ls, "")
+		copy(ls[idx+1:], ls[idx:])
+		ls[idx] = s
+	}
+
+	switch {
+	case section == "":
+		switch {
+		case lastContentIdxInTarget != -1:
+			insertAt(lastContentIdxInTarget+1, insertion)
+		case firstHeaderIdx != -1:
+			insertAt(firstHeaderIdx, insertion)
+		default:
+			ls = append(ls, insertion)
+		}
+	case targetHeaderIdx == -1:
+		// Section absent: append a fresh block, separated by one blank line.
+		if len(ls) > 0 && ls[len(ls)-1] != "" {
+			ls = append(ls, "")
+		}
+		ls = append(ls, "["+section+"]", insertion)
+	default:
+		if lastContentIdxInTarget != -1 {
+			insertAt(lastContentIdxInTarget+1, insertion)
+		} else {
+			insertAt(targetHeaderIdx+1, insertion)
+		}
+	}
+	return rebuild()
+}
+
+// insertTOMLDottedLeaf inserts section.leaf = encoded into content as a new
+// root-level dotted key. It must only be called when the leaf is known to be
+// absent (tomlRootDottedLeafExists returned false), so it never searches for
+// an existing line — bypassing the keyRe / tomlScalarLineMatches machinery
+// that cannot distinguish a genuine dotted path (program_overrides.claude =
+// …) from a quoted root key whose name happens to contain a dot
+// ("program_overrides.claude" = …). The new line is placed immediately after
+// the last existing dotted key for the same section so siblings stay adjacent;
+// if no such sibling exists it falls back to setTOMLScalar(section="") which
+// applies the usual root-block insertion rules.
+func insertTOMLDottedLeaf(content, section, leaf, encoded string) string {
+	newLine := section + "." + leaf + " = " + encoded
+
+	if strings.TrimSpace(content) == "" {
+		return newLine + "\n"
+	}
+
+	hadTrailingNewline := strings.HasSuffix(content, "\n")
+	ls := strings.Split(content, "\n")
+	if hadTrailingNewline && len(ls) > 0 && ls[len(ls)-1] == "" {
+		ls = ls[:len(ls)-1]
+	}
+
+	stringContent := tomlStringContentLines(ls)
+	curSection := ""
+	lastSiblingIdx := -1
+	for i, line := range ls {
+		if stringContent[i] {
+			continue
+		}
+		if _, ok := tomlHeaderName(line); ok {
+			curSection = line
+			// Once we enter any named section the root block is over.
+			if curSection != "" {
+				break
+			}
+			continue
+		}
+		if curSection != "" {
+			continue
+		}
+		// Look for a dotted key belonging to section at the root level.
+		// Use tomlAssignmentEnd so that the recorded index is the last line
+		// of the sibling's complete assignment (covers multiline strings and
+		// arrays), not just its opening line. Inserting at opening+1 would
+		// land inside the value for any multiline sibling.
+		if path, _, ok := tomlAssignmentPath(line); ok && len(path) >= 1 && path[0] == section {
+			lastSiblingIdx = tomlAssignmentEnd(ls, i)
+		}
+	}
+
+	rebuild := func() string {
+		out := strings.Join(ls, "\n")
+		if hadTrailingNewline {
+			out += "\n"
+		}
+		return out
+	}
+	insertAt := func(idx int, s string) {
+		ls = append(ls, "")
+		copy(ls[idx+1:], ls[idx:])
+		ls[idx] = s
+	}
+
+	if lastSiblingIdx != -1 {
+		insertAt(lastSiblingIdx+1, newLine)
+		return rebuild()
+	}
+	// No sibling found: fall back to setTOMLScalar's root-block insert rules,
+	// passing section="" so it treats section+"."+leaf as a plain root key
+	// for placement purposes. We reach here only when the root block has no
+	// dotted sibling for section yet, so there is no quoted root key
+	// "section.leaf" to confuse the fallback: the TOML file would be invalid
+	// if both were present (same decoded key, two definitions).
+	return setTOMLScalar(content, "", section+"."+leaf, encoded)
+}
+
+// deleteTOMLScalar removes the [section] leaf line from content, changing only
+// that one line and preserving every other comment, blank line, and key. It is
+// the inverse of setTOMLScalar and recognizes the same two spellings of a table
+// entry — a leaf under a [section] header AND a top-level dotted key
+// (section.leaf = …) — removing whichever is present. section == "" targets a
+// root-block key. Returns the edited content and whether a line was removed; an
+// absent key leaves content untouched and reports false. An emptied [section]
+// header is left in place (a present-but-empty table resolves to no leaves).
+func deleteTOMLScalar(content, section, leaf string) (string, bool) {
+	updated, _, _, removed := deleteTOMLScalarRange(content, section, leaf, false)
+	return updated, removed
+}
+
+// deleteTOMLScalarForMove removes the [section] leaf like deleteTOMLScalar,
+// but instead of preserving the key's own comments at the delete site it
+// hands them back so the caller can move them with the key — `af config
+// migrate`'s requirement (#4872). Anything left at the site reads as a note
+// about whatever line the delete exposes next, and worse: emitted comments
+// land as a `#` line directly above the NEXT key, which then carries them as
+// its own leading block. Three classes are returned separately:
+//
+//   - comments: the contiguous leading comment block, then any comments the
+//     assignment carried INSIDE a multiline value — all for placement above
+//     the moved line. A comment a blank line away is NOT the key's (the same
+//     association rule #4865 gives a moved table) and stays behind.
+//   - trailing: a single-line scalar's own trailing comment, including the
+//     whitespace that preceded it, for reattachment to the moved line's
+//     value — the inline position is part of the note.
+func deleteTOMLScalarForMove(content, section, leaf string) (updated string, comments []string, trailing string, removed bool) {
+	return deleteTOMLScalarRange(content, section, leaf, true)
+}
+
+// deleteTOMLScalarRange is the shared body: forMove additionally lifts the
+// key's comment associations out rather than preserving them at the site.
+func deleteTOMLScalarRange(content, section, leaf string, forMove bool) (string, []string, string, bool) {
+	if strings.TrimSpace(content) == "" {
+		return content, nil, "", false
+	}
+
+	hadTrailingNewline := strings.HasSuffix(content, "\n")
+	ls := strings.Split(content, "\n")
+	if hadTrailingNewline && len(ls) > 0 && ls[len(ls)-1] == "" {
+		ls = ls[:len(ls)-1]
+	}
+
+	keyRe := regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
+	var dottedKeyRe *regexp.Regexp
+	if section != "" {
+		dottedKeyRe = regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(section) + `\s*\.\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
+	}
+
+	stringContent := tomlStringContentLines(ls)
+
+	curSection := ""
+	removeAt := -1
+	removeThrough := -1
+	rebuild := func() string {
+		out := strings.Join(ls, "\n")
+		if hadTrailingNewline && out != "" {
+			out += "\n"
+		}
+		return out
+	}
+	for i, line := range ls {
+		// Content of a multiline value is not a key to delete, and not a header
+		// that changes which section the lines below it belong to (#3662).
+		if stringContent[i] {
+			continue
+		}
+		if name, ok := tomlHeaderName(line); ok {
+			curSection = name
+			continue
+		}
+		// Top-level dotted form (section.leaf = …), valid only at the root.
+		if dottedKeyRe != nil && curSection == "" && (dottedKeyRe.MatchString(line) || tomlScalarLineMatches(line, section, leaf)) {
+			removeAt = i
+			removeThrough = tomlAssignmentEnd(ls, i)
+			break
+		}
+		if curSection == "" && section != "" {
+			if updated, ok := deleteTOMLInlineTableMember(line, section, leaf); ok {
+				ls[i] = updated
+				return rebuild(), nil, "", true
+			}
+		}
+		if curSection != section {
+			continue
+		}
+		if keyRe.MatchString(line) || tomlScalarLineMatches(line, "", leaf) {
+			removeAt = i
+			removeThrough = tomlAssignmentEnd(ls, i)
+			break
+		}
+	}
+	if removeAt < 0 {
+		return content, nil, "", false
+	}
+
+	removeFrom := removeAt
+	var comments []string
+	var trailing string
+	var kept []string
+	if forMove {
+		removeFrom = leadingTOMLCommentStart(ls, stringContent, removeAt)
+		comments = append(comments, ls[removeFrom:removeAt]...)
+		preserved := preservedTOMLAssignmentComments(ls, removeAt, removeThrough)
+		if removeAt == removeThrough && len(preserved) == 1 {
+			// A single-line scalar's trailing comment reattaches to the moved
+			// line, not to a preamble slot — and never to the site.
+			trailing = tomlAssignmentTrailingComment(ls[removeAt])
+		} else {
+			comments = append(comments, preserved...)
+		}
+	} else {
+		kept = preservedTOMLAssignmentComments(ls, removeAt, removeThrough)
+	}
+	kept = append(kept, ls[removeThrough+1:]...)
+	ls = append(ls[:removeFrom], kept...)
+	return rebuild(), comments, trailing, true
+}
+
+// tomlAssignmentTrailingComment returns the inline comment on a single-line
+// assignment, including the whitespace that preceded the '#', so it can be
+// reattached to the value byte-for-byte — "" when there is none.
+func tomlAssignmentTrailingComment(line string) string {
+	_, equal, ok := tomlAssignmentPath(line)
+	if !ok {
+		return ""
+	}
+	valueStart := equal + 1
+	for valueStart < len(line) && (line[valueStart] == ' ' || line[valueStart] == '\t') {
+		valueStart++
+	}
+	_, comment := splitTrailingComment(line[valueStart:])
+	return comment
+}
+
+// TOML's two multiline string delimiters. They are scanned as three-byte UNITS
+// rather than as three individual quotes, which is the whole of #3455: a
+// per-quote toggle reads a triple quote as open-close-open and leaves the
+// scanner believing it is inside a string, so a '#' after the delimiter never
+// registers as a comment.
+const (
+	tomlMultilineBasic   = `"""`
+	tomlMultilineLiteral = `'''`
+)
+
+// splitTrailingComment separates a TOML value from a trailing inline comment,
+// tracking string state so a '#' inside a string is not mistaken for a comment.
+// It returns the value part and the comment part (including the whitespace that
+// preceded the '#'), so the comment can be reattached byte-for-byte.
+//
+// The scan begins OUTSIDE every string, which is right for a line that opens
+// whatever strings it contains: a single-line assignment's value, or an inline
+// table. The closing line of a MULTILINE assignment is the other case — the
+// string it ends was opened on an earlier line — and that one needs
+// scanTrailingComment with the delimiter still open.
+func splitTrailingComment(rest string) (value, comment string) {
+	value, comment, _ = scanTrailingComment(rest, "")
+	return value, comment
+}
+
+// scanTrailingComment splits one line of a TOML value, resuming inside the
+// string that `open` closes ("" when the line begins outside every string), and
+// reports the delimiter still open when the line ends so the caller can carry
+// the state to the next line.
+//
+// Carrying that state is what makes the closing delimiter of a multiline string
+// read as the CLOSE it is rather than the open of a new string. It also covers
+// the same defect one level down, where a multiline string is an ELEMENT of a
+// multiline array and holds its state open across the element boundary.
+func scanTrailingComment(rest, open string) (value, comment, stillOpen string) {
+	for i := 0; i < len(rest); {
+		if open != "" {
+			// Basic strings process backslash escapes, so an escaped quote is
+			// content and cannot close anything. Literal strings process none
+			// at all, which is exactly what lets a lone backslash sit inside
+			// one.
+			if open[0] == '"' && rest[i] == '\\' {
+				i += 2
+				continue
+			}
+			if !strings.HasPrefix(rest[i:], open) {
+				i++
+				continue
+			}
+			i += len(open)
+			if len(open) == 3 {
+				// TOML lets a multiline string's content end with one or two of
+				// its own quote characters, so the delimiter is the LAST three
+				// of the run: `"""a""""` is the string `a"`. Consuming the whole
+				// run keeps a stray quote from opening a phantom string that
+				// would swallow the comment after it.
+				for i < len(rest) && rest[i] == open[0] {
+					i++
+				}
+			}
+			open = ""
+			continue
+		}
+		switch {
+		case strings.HasPrefix(rest[i:], tomlMultilineBasic):
+			open = tomlMultilineBasic
+			i += len(tomlMultilineBasic)
+		case strings.HasPrefix(rest[i:], tomlMultilineLiteral):
+			open = tomlMultilineLiteral
+			i += len(tomlMultilineLiteral)
+		case rest[i] == '"':
+			open = `"`
+			i++
+		case rest[i] == '\'':
+			open = `'`
+			i++
+		case rest[i] == '#':
+			j := i
+			for j > 0 && (rest[j-1] == ' ' || rest[j-1] == '\t') {
+				j--
+			}
+			return rest[:j], rest[j:], ""
+		default:
+			i++
+		}
+	}
+	return rest, "", open
+}

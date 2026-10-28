@@ -1,0 +1,80 @@
+Head 9edbad57851628e817a28c3a3387e8b05e94e89e; new assertions, unchanged production bundle.
+Command: make perf-container
+Order: light 360/390/430, then dark 360/390/430.
+
+3981 chrome heights {"width":360,"viewport":812,"chrome":48,"keybar":44,"terminal":720}
+3981 drawer geometry {"width":360,"closed":{"x":0,"y":48,"width":360,"height":764},"opened":{"x":2,"y":228,"width":356,"height":582}}
+3981 terminal alignment {"width":360,"left":0,"right":345,"contentLeft":0,"hostRight":360,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":390,"viewport":812,"chrome":48,"keybar":44,"terminal":720}
+3981 drawer geometry {"width":390,"closed":{"x":0,"y":48,"width":390,"height":764},"opened":{"x":2,"y":228,"width":386,"height":582}}
+3981 terminal alignment {"width":390,"left":0,"right":371,"contentLeft":0,"hostRight":390,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":430,"viewport":812,"chrome":48,"keybar":44,"terminal":720}
+3981 drawer geometry {"width":430,"closed":{"x":0,"y":48,"width":430,"height":764},"opened":{"x":2,"y":228,"width":426,"height":582}}
+3981 terminal alignment {"width":430,"left":0,"right":410,"contentLeft":0,"hostRight":430,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":360,"viewport":812,"chrome":48,"keybar":44,"terminal":720}
+3981 drawer geometry {"width":360,"closed":{"x":0,"y":48,"width":360,"height":764},"opened":{"x":2,"y":228,"width":356,"height":582}}
+3981 terminal alignment {"width":360,"left":0,"right":345,"contentLeft":0,"hostRight":360,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":390,"viewport":812,"chrome":48,"keybar":44,"terminal":720}
+3981 drawer geometry {"width":390,"closed":{"x":0,"y":48,"width":390,"height":764},"opened":{"x":2,"y":228,"width":386,"height":582}}
+3981 terminal alignment {"width":390,"left":0,"right":371,"contentLeft":0,"hostRight":390,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":430,"viewport":812,"chrome":48,"keybar":44,"terminal":720}
+3981 drawer geometry {"width":430,"closed":{"x":0,"y":48,"width":430,"height":764},"opened":{"x":2,"y":228,"width":426,"height":582}}
+3981 terminal alignment {"width":430,"left":0,"right":410,"contentLeft":0,"hostRight":430,"scrollLeft":0,"paintLeft":2}
+  ✘  3 [demo] › selftest/web-demo.spec.ts:571:1 › web chrome · both themes (1.7m)
+  ✓  4 [demo] › selftest/web-demo.spec.ts:716:1 › task completion hints follow the selected consequence (1.2s)
+  ✓  5 [demo] › selftest/web-demo.spec.ts:737:1 › task completion catalog failure is visible and preserves the seed (915ms)
+
+
+  1) [demo] › selftest/web-demo.spec.ts:571:1 › web chrome · both themes ───────────────────────────
+
+    Error: P2 opening the overlay must not resize or displace the pane
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 4
+    + Received  + 4
+
+      Object {
+    -   "height": 764,
+    -   "width": 360,
+    -   "x": 0,
+    -   "y": 48,
+    +   "height": 582,
+    +   "width": 356,
+    +   "x": 2,
+    +   "y": 228,
+      }
+
+      441 |   const opened = await host.boundingBox();
+      442 |   console.log("3981 drawer geometry", JSON.stringify({ width: heights.width, closed, opened }));
+    > 443 |   expect.soft(opened, "P2 opening the overlay must not resize or displace the pane").toEqual(closed);
+          |                                                                                      ^
+      444 |   await page.locator(".af-nav-toggle").click();
+      445 |   expect.soft(await host.boundingBox(), "P2 closing the overlay preserves the pane").toEqual(closed);
+      446 |   await page.locator(".af-pane-host .xterm").first().click();
+        at assertPhoneHeader (/work/web/selftest/web-demo.spec.ts:443:86)
+        at recordChrome (/work/web/selftest/web-demo.spec.ts:498:7)
+        at /work/web/selftest/web-demo.spec.ts:573:5
+
+    Error: P1 column one clears the painted focus border
+
+    expect(received).toBeGreaterThanOrEqual(expected)
+
+    Expected: >= 2
+    Received:    0
+
+      461 |   });
+      462 |   console.log("3981 terminal alignment", JSON.stringify(alignment));
+    > 463 |   expect.soft(alignment.left, "P1 column one clears the painted focus border").toBeGreaterThanOrEqual(alignment.paintLeft);
+          |                                                                                ^
+      464 |   expect.soft(alignment.left, "P1 screen starts inside the pane content box").toBeGreaterThanOrEqual(alignment.contentLeft);
+      465 |   expect.soft(alignment.right, "P1 screen ends inside the pane").toBeLessThanOrEqual(alignment.hostRight);
+      466 |   expect.soft(alignment.scrollLeft, "P1 pane host has no horizontal scroll").toBe(0);
+        at assertPhoneTerminalAlignment (/work/web/selftest/web-demo.spec.ts:463:80)
+        at recordChrome (/work/web/selftest/web-demo.spec.ts:501:7)
+        at /work/web/selftest/web-demo.spec.ts:573:5
+
+
+Both assertions failed at each of 360/390/430px in light and dark (12 assertion failures).
+Requested host bounds and scrollLeft assertions passed on this head; the additional
+painted-border assertion exposes the actual column-one occlusion.

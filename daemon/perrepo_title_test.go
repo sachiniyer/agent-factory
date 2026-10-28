@@ -219,7 +219,7 @@ func TestHookNameNamespaceIsGlobalAcrossRepos(t *testing.T) {
 	t.Run("concurrent create in another repo is refused", func(t *testing.T) {
 		manager.mu.Lock()
 		manager.reservedRemoteNames[session.Slugify(existingTitle)] = struct{}{}
-		err := manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", runtimeNamespaceRemoteHook, false, nil)
+		err := manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", runtimeNamespaceRemoteHook, false, nil, false)
 		delete(manager.reservedRemoteNames, session.Slugify(existingTitle))
 		manager.mu.Unlock()
 		if err == nil {
@@ -241,7 +241,7 @@ func TestHookNameNamespaceIsGlobalAcrossRepos(t *testing.T) {
 		manager.instances[daemonInstanceKey(repoA.ID, existingTitle)] = inst
 		// No reservation entry — the create in repo A has SETTLED. This is the
 		// sequential case the repo-filtered scan used to let through.
-		err = manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", runtimeNamespaceRemoteHook, false, nil)
+		err = manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", runtimeNamespaceRemoteHook, false, nil, false)
 		delete(manager.instances, daemonInstanceKey(repoA.ID, existingTitle))
 		manager.mu.Unlock()
 		if err == nil {
@@ -267,7 +267,7 @@ func TestHookNameNamespaceIsGlobalAcrossRepos(t *testing.T) {
 		t.Cleanup(func() { _ = config.SaveRepoInstances(repoA.ID, json.RawMessage("[]")) })
 
 		manager.mu.Lock()
-		err = manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", runtimeNamespaceRemoteHook, false, nil)
+		err = manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", runtimeNamespaceRemoteHook, false, nil, false)
 		manager.mu.Unlock()
 		if err == nil {
 			t.Fatalf("a persisted hook session in another repo must block the name")
@@ -316,7 +316,7 @@ func TestHookNameNamespaceIsGlobalAcrossRepos(t *testing.T) {
 
 	t.Run("a free hook name is still allowed", func(t *testing.T) {
 		manager.mu.Lock()
-		err := manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, "totally-unused", "claude", runtimeNamespaceRemoteHook, false, nil)
+		err := manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, "totally-unused", "claude", runtimeNamespaceRemoteHook, false, nil, false)
 		manager.mu.Unlock()
 		if err != nil {
 			t.Fatalf("an unused hook name must be available: %v", err)
@@ -494,7 +494,7 @@ func TestNextAvailableTitlePropagatesFatalHookCheckError(t *testing.T) {
 	}
 
 	manager.mu.Lock()
-	got, err := manager.nextAvailableTitleLocked(repoB.ID, repoB.Root, "base", "claude", runtimeNamespaceRemoteHook, nil)
+	got, err := manager.nextAvailableTitleLocked(repoB.ID, repoB.Root, "base", "claude", runtimeNamespaceRemoteHook, nil, false)
 	manager.mu.Unlock()
 
 	if err == nil {

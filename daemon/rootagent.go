@@ -19,8 +19,10 @@ import (
 // "root" attached in-place at the repo root (the `af sessions create --here`
 // shape from #1107 — worktree_path == repo_path, current branch, cleanup
 // never touches the user's tree). The poll loop calls EnsureRootAgents right
-// after RefreshStatuses, so a root whose tmux died is marked Dead and healed
-// in the same tick.
+// after RefreshStatuses, so a root whose tmux died is marked Dead and its heal
+// begins in the same tick — begins, not completes: since #3721 the reap and
+// (re-)create run on their own goroutine (rootagent_create.go), because their
+// unbounded filesystem work must never own the poll goroutine.
 //
 // The loop is adopt-first: an existing root instance in any state other than
 // Dead — whatever program it runs and however it was created — is left
@@ -51,11 +53,30 @@ const rootEnsureEscalationThreshold = 6
 var (
 	rootEnsureBackoffBase = 10 * time.Second
 	rootEnsureBackoffMax  = 5 * time.Minute
+	// Checked-in and personal project configuration can change outside
+	// ApplyConfig. Re-resolve the command off the poll goroutine on this cadence.
+	rootProgramDriftConfigInspectionInterval = 30 * time.Second
 	// A transcript creation or removal can lag one poll without affecting the
 	// live root. Bound the directory scan instead of statting every historical
 	// transcript on the daemon's default one-second ensure cadence.
 	rootClaudeTranscriptInspectionInterval = 30 * time.Second
 )
+
+// rootClaudeTranscriptInspectBudget bounds how long the poll goroutine will
+// WAIT for one transcript inspection (#3782 item 3).
+//
+// Deliberately NOT rootRepoProbeBudget, even though the value matches and
+// the asymmetry is the same. That budget bounds a git CHILD PROCESS, which
+// a context can kill; this one bounds a wait on os.ReadDir and a stat per
+// entry, which no context can cancel — so it is a bound on the caller, and
+// the read outlives it. Two mechanisms, two names, and a reader who
+// conflates them will reach for a context that cannot help.
+//
+// 2s for the same reason the sibling is 2s: the inspection is advisory
+// while the root is live, so being late costs a resumable conversation id
+// staying stale for one more 30s interval, and #3503 is the standing
+// lesson about stingy budgets on a box whose load baseline is 60-95.
+const rootClaudeTranscriptInspectBudget = 2 * time.Second
 
 // rootEnsureBackoffFor is the shared ensure-cadence backoff curve: base
 // doubling per consecutive failure, capped at max. Used by the per-candidate
@@ -83,8 +104,10 @@ func rootEnsureBackoffFor(consecutiveFailures int) time.Duration {
 var rootKillHealDelay = 2 * time.Minute
 
 // rootEnsureState is the per-configured-repo retry state for the ensure
-// loop. Guarded by Manager.mu (the loop runs on the daemon poll goroutine,
-// but tests drive EnsureRootAgents directly).
+// loop. Guarded by Manager.mu, and since #3721 written from two goroutines
+// rather than one: the sweep on the poll goroutine records what it decides
+// without a create, and each create goroutine records its own outcome
+// (rootEnsureSucceeded/rootEnsureFailed). Tests drive EnsureRootAgents directly.
 type rootEnsureState struct {
 	consecutiveFailures int
 	// unansweredFailures counts how many of those consecutive failures never
@@ -101,11 +124,51 @@ type rootEnsureState struct {
 	// suppressLogged dedupes the "not re-creating a user-killed root" log
 	// line to once per suppression.
 	suppressLogged bool
+	// programDriftLogged dedupes the adopted-root command warning for this
+	// ensure-state. A healthy adopt is revisited every sweep tick, so the bit is
+	// deliberately not reset by rootEnsureSucceeded.
+	programDriftLogged       bool
+	programDriftLoggedRepoID string
+	// The default root command and bare agent names require repository/config
+	// resolution. Cache that answer after resolving it off the ensure sweep; the
+	// key covers the frozen profile, ApplyConfig epoch, repository identity,
+	// registered-checkout marker, and workspace. The complete repository config
+	// stack is periodically re-resolved
+	// off the poll goroutine because checked-in and personal project files can
+	// change without that epoch advancing; a cached command is never compared
+	// before the refresh. The key fields also identify a failed attempt so its
+	// retry delay applies only while those same resolution inputs remain current;
+	// programDriftResolved alone says the cached command is valid.
+	programDriftResolving          bool
+	programDriftResolvingEpoch     uint64
+	programDriftResolved           bool
+	programDriftResolvedEpoch      uint64
+	programDriftResolvedRepoID     string
+	programDriftResolvedWorkspace  string
+	programDriftResolvedCheckoutID string
+	programDriftResolvedProfile    config.RootAgent
+	programDriftConfiguredProgram  string
+	programDriftNextConfigCheck    time.Time
+	// A config result can finish against runtime evidence invalidated while the
+	// read was in flight. Retry that cached result against fresh evidence on the
+	// next sweep without admitting another filesystem reader.
+	programDriftLatchPending bool
+	// Test seam immediately before the latch tentatively claims its manager-owned
+	// dedupe bits. Runtime evidence is committed separately under the instance
+	// lifecycle lock.
+	programDriftBeforeLatchForTest func()
 	// Claude transcript verification is advisory while the root is live. Keep
 	// its filesystem work and any persistent inspection warning off the hot
 	// one-second ensure path.
 	nextClaudeTranscriptInspection time.Time
 	claudeTranscriptWarning        string
+	// claudeTranscriptInspecting marks one inspection as still running for
+	// this root (#3782 item 3). It is what keeps a bound from turning a sick
+	// transcript store into an accumulating pile of blocked goroutines: the
+	// deadline releases the POLL goroutine, it cannot release the filesystem
+	// read, so without single-flighting, every throttle interval would start
+	// another one that also blocks. Guarded by m.mu.
+	claudeTranscriptInspecting bool
 }
 
 // resolvedRootAgentFor is the single resolution choke point for one repo: every
@@ -113,6 +176,14 @@ type rootEnsureState struct {
 // through it (or through the same snapshot's resolve), so they can never
 // disagree on whether a root should run or what it runs.
 func (m *Manager) resolvedRootAgentFor(repoID string, legacy *config.RootAgentConfig) config.RootAgentResolution {
+	if m.rootAttributionPendingFor(repoID) {
+		// Identity verification for a recorded root that resolves to this
+		// repo is still in flight: fail closed exactly like the snapshot's
+		// own unknowable states, or the legacy sweep could start the root
+		// seconds before a personal enabled=false is re-attributed onto it
+		// (#3299 review round 8).
+		return config.RootAgentResolution{}
+	}
 	return m.rootAgentLayers.Load().resolve(repoID, legacy)
 }
 
@@ -129,10 +200,21 @@ func (s *rootAgentSnapshot) resolve(repoID string, legacy *config.RootAgentConfi
 	if s.decisionUnknown(repoID) {
 		return config.RootAgentResolution{}
 	}
+	personal := s.personal[repoID]
+	if record, ok := s.unresolvedRoots[repoID]; ok && record.identityMismatch {
+		// The layer under this ID belongs to a project whose claim on the
+		// recorded path is DISPROVEN — a different clone occupies it (#3299
+		// review round 13; same-path shape, where the derived hash IS the
+		// occupant's real ID). Neither the dead claim's enable (its program
+		// in a stranger's checkout) nor its disable (vetoing the occupant's
+		// own legacy entry) may govern the occupant. Unknowable shapes keep
+		// the layer: while undisproven, fail-closed applies it.
+		personal = nil
+	}
 	return config.ResolveRootAgent(config.RootAgentInputs{
 		Global:   s.global,
 		Legacy:   legacy,
-		Personal: s.personal[repoID],
+		Personal: personal,
 	})
 }
 
@@ -149,17 +231,64 @@ func (s *rootAgentSnapshot) decisionUnknown(repoID string) bool {
 	if s.registryUnreadable {
 		return true
 	}
-	_, unreadable := s.personalUnreadable[repoID]
-	return unreadable
+	if _, unreadable := s.personalUnreadable[repoID]; unreadable {
+		// A PROVEN mismatch releases this latch (#3299 review round 14): for
+		// a main-root recording the derived hash is the occupant's real ID,
+		// and the unreadable config belongs to a project whose claim on the
+		// path is disproven — it cannot govern the occupant, whichever value
+		// it holds.
+		if record, ok := s.unresolvedRoots[repoID]; !ok || !record.identityMismatch {
+			return true
+		}
+	}
+	// A checkout at some project's recorded root resolves to this repo, but
+	// its marker could not be READ (#3299 review round 6): the checkout may
+	// BE that project — whose personal layer (possibly enabled=false, or
+	// itself unreadable) sits where this resolution cannot see or trust it.
+	// Identity unknowable means the decision is unknowable; a legacy entry
+	// for the same repo must not start the root off global layers alone. A
+	// PROVEN mismatch deliberately does not gate here: a different project's
+	// layers do not govern this repo. The DIRECT lookup covers main-root
+	// recordings, where the derived hash IS the occupant's real ID and no
+	// bridge is ever recorded (#3299 review round 15).
+	if record, ok := s.unresolvedRoots[repoID]; ok && record.markerUnreadable {
+		return true
+	}
+	return false
 }
+
+// legacyRootAgentForRepoContext is the verdict path's entry into the legacy
+// lookup. A package var so a test can drive the unanswered case this bound
+// exists for; production assigns it once.
+var legacyRootAgentForRepoContext = config.LegacyRootAgentForRepoContext
 
 // legacyRootAgentForRepo returns a copy of the root_agents entry whose path
 // resolves to repoID, or nil if none does. Resolved per call (not from the
 // snapshot dedup set) to preserve the legacy contract that a path pointing at a
 // not-yet-cloned repo starts applying the moment the repo appears.
-func (m *Manager) legacyRootAgentForRepo(repoID string) *config.RootAgentConfig {
-	entry, _ := config.LegacyRootAgentForRepo(m.cfg, repoID)
-	return entry
+//
+// The error is the UNKNOWN answer, and callers must not collapse it into nil:
+// nil means "no entry names this repo", which the verdict turns into "add a
+// root_agents entry" — advice that is wrong, and unfixable by the user, when
+// the entry is already there and a probe simply did not answer.
+func (m *Manager) legacyRootAgentForRepo(repoID string) (*config.RootAgentConfig, error) {
+	// ONE budget for the WHOLE lookup, not one per key, and the lock is the
+	// reason. Two of the three consumers call this while holding taskTargetMu,
+	// and #3361 already states the rule for that lock: "a stalled mount must
+	// not be walked while taskTargetMu is held". A per-key budget would make
+	// the hold N x the budget, growing with a user's config; this makes it one
+	// budget however many keys there are.
+	//
+	// The cost, stated: one stalled key can exhaust the budget before a later
+	// key is reached, so a whole lookup goes UNKNOWN where a per-key budget
+	// might have found a definite answer further down the list. That direction
+	// is fail-closed and honest, and it is the same shape as #3247's
+	// registry-wide fail-closed — one unknowable input, every consumer
+	// refusing, rather than one unknowable input and a lock nobody can take.
+	ctx, cancel := context.WithTimeout(context.Background(), rootRepoProbeBudget)
+	defer cancel()
+	entry, _, err := legacyRootAgentForRepoContext(ctx, m.cfg, repoID)
+	return entry, err
 }
 
 // EnsureRootAgents runs one ensure pass over every repo that resolves to an
@@ -208,7 +337,7 @@ func (m *Manager) EnsureRootAgents() {
 	if len(layers.projectRoots) > 0 {
 		repoIDs := make([]string, 0, len(layers.projectRoots))
 		for repoID := range layers.projectRoots {
-			if layers.legacyRepoIDs[repoID] {
+			if layers.legacy.covers(repoID) {
 				continue
 			}
 			repoIDs = append(repoIDs, repoID)
@@ -234,13 +363,90 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 		return
 	}
 
-	repo, err := config.RepoFromPath(config.ExpandTilde(path))
+	repo, err := resolveLegacyRootRepo(path)
 	if err != nil {
 		m.rootEnsureFailed(path, st, fmt.Errorf("%s: %w", repoResolveClaim("root_agents entry", path, err), err))
 		return
 	}
 	resolution := m.resolvedRootAgentFor(repo.ID, &rc)
-	m.ensureResolvedRoot(path, st, repo, resolution)
+	// No identity to re-prove: a root_agents entry is an opt-in the user wrote
+	// against a PATH, not a registry record, so there is no recorded checkout id
+	// a checkout there must match. #3334 already settled that shape — a proven
+	// mismatch releases the repo so its legacy opt-in still applies — and #3366
+	// deliberately does not change it (see verifyRootCreateCheckout).
+	m.ensureResolvedRoot(path, st, repo, resolution, nil)
+}
+
+// rootRepoProbeBudget bounds every repository resolution the root-agent
+// machinery performs where a caller cannot afford to wait forever:
+//
+//   - the legacy root_agents sweep, on the instance poll goroutine, every
+//     non-backed-off tick (#3757);
+//   - the dedup-set recompute the heal pass runs on every published heal, and
+//     its retry for a path that has not answered yet (#3782 items 1 and 2);
+//   - the start-of-day snapshot, for both the legacy keys and every registered
+//     project's recorded root (#3782 item 2, #3793);
+//   - the admission verdict's legacy lookup, on the RPC goroutine and under
+//     taskTargetMu (#3782 item 4).
+//
+// ONE budget, not one per site, and the name says repo rather than legacy
+// because it stopped being the legacy sweep's alone. Same goroutines are not
+// the reason — they differ — the reason is that every one of them is asking
+// git the same question with the same asymmetry, and a second knob would be a
+// second thing to get wrong and to drift.
+//
+// 2s, matching rootHealProbeGrace — its sibling on the same goroutine for the
+// same purpose — and the value repoGitWaitDelay documents as "what every other
+// WaitDelay in this repo uses for this same mechanism".
+//
+// GENEROUS ON PURPOSE, and the asymmetry is the reason. A budget that expires
+// on a checkout which was merely slow costs a HEALTHY repo a backoff interval
+// of delayed healing, and #3503 is the standing lesson about stingy probe
+// budgets on a box whose load baseline is 60-95. Being late here is cheap;
+// being wrong about a live checkout is not. The bound exists to convert
+// "indefinitely" into "bounded", not to make the sweep prompt.
+//
+// The worst case is ~2x this, not this: repoProbeWaitDelay grants each probe a
+// WaitDelay allowance equal to the caller's remaining time, and that timer
+// STARTS WHEN THE CONTEXT IS DONE, so it is added to the deadline rather than
+// carved out of it. Commands attempted after the deadline get the 50ms floor,
+// so the total settles around 4s. Paid at most once per backoff interval — 10s
+// doubling to rootEnsureBackoffMax — rather than once per tick, and never
+// forever, which was the whole defect.
+//
+// A package var so tests can drive both sides of the bound; production never
+// reassigns it.
+var rootRepoProbeBudget = 2 * time.Second
+
+// legacyRootRepoFromPath resolves one root_agents path for the ensure sweep,
+// under the caller's context. A package var so a test can drive the stalled-path
+// case this bound exists for; production assigns it once.
+var legacyRootRepoFromPath = config.RepoFromPathContext
+
+// resolveLegacyRootRepo resolves one root_agents path under a bound, owning the
+// context's lifetime so it cannot outlive the resolution it bounds.
+//
+// THE BOUNDED ENTRY POINT, NOT THE UNBOUNDED ONE, and the distinction is the
+// whole of #3757. config.RepoFromPathContext's contract states the split: it is
+// what "polling and registry scans use ... so one unreachable checkout cannot
+// indefinitely block an unrelated live project", while "admission paths retain
+// RepoFromPath's full error contract and unbounded caller lifetime". This sweep
+// is polling. It admits nothing — a refusal here returns before
+// ensureResolvedRoot, so nothing is adopted, reaped, created or released — so
+// there is no half-created object a deadline could strand. That is exactly the
+// property #3721's create does NOT have, which is why that one was moved off
+// this goroutine instead of bounded.
+//
+// A timed-out resolution is therefore UNKNOWN, never a verdict: the error
+// carries config.ErrRepoProbeUnanswered, rootEnsureFailed counts it as a
+// failure that established nothing, repoResolveClaim words it in #3500's form,
+// and the candidate settles onto the ensure backoff and keeps retrying forever
+// (#1122). A live root on that repo is untouched throughout — the sweep never
+// reaches the code that could touch it.
+func resolveLegacyRootRepo(path string) (*config.RepoContext, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), rootRepoProbeBudget)
+	defer cancel()
+	return legacyRootRepoFromPath(ctx, config.ExpandTilde(path))
 }
 
 // ensureSingletonRootAgent ensures the root for a registered project enabled by
@@ -248,17 +454,22 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 // identity and root come from the snapshot the caller enumerated (no per-tick
 // git resolution — a registered project resolved when its snapshot was read),
 // and the state is keyed by that resolved root path.
-func (m *Manager) ensureSingletonRootAgent(repoID, root string) {
+//
+// The binding's identity evidence rides down to ensureResolvedRoot, which
+// re-proves it at the create boundary and around adopted-root command-layer
+// reads (#3366/#4087): a binding made once, at boot or at re-attribution, is
+// not evidence about the checkout that is at the path now.
+func (m *Manager) ensureSingletonRootAgent(repoID string, binding resolvedProjectRoot) {
 	m.mu.Lock()
-	st := m.rootEnsureStateForLocked(root)
+	st := m.rootEnsureStateForLocked(binding.root)
 	skip := time.Now().Before(st.nextAttempt)
 	m.mu.Unlock()
 	if skip {
 		return
 	}
-	repo := &config.RepoContext{Root: root, ID: repoID}
+	repo := &config.RepoContext{Root: binding.root, IdentityRoot: binding.identityRoot, ID: repoID}
 	resolution := m.resolvedRootAgentFor(repoID, nil)
-	m.ensureResolvedRoot(root, st, repo, resolution)
+	m.ensureResolvedRoot(binding.root, st, repo, resolution, &binding)
 }
 
 // rootEnsureStateForLocked returns the retry state for a candidate key, creating
@@ -280,8 +491,10 @@ func (m *Manager) rootEnsureStateForLocked(key string) *rootEnsureState {
 // the retry state and leaves any existing root alone — removing an opt-in never
 // tears a live root down, it just stops re-ensuring it. All outcomes are logged;
 // failures back off exponentially and settle at rootEnsureBackoffMax, so the
-// loop always heals once the cause clears.
-func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution) {
+// loop always heals once the cause clears. identity is the registry binding a
+// registry-backed candidate was enumerated from, re-proven at the create
+// boundary (#3366), and nil for a legacy root_agents path.
+func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution, identity *resolvedProjectRoot) {
 	if !resolution.Enabled {
 		m.rootEnsureSucceeded(st)
 		return
@@ -292,8 +505,17 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	// daemon's life: DeleteProject already stopped its root and removed it from
 	// root_agents on disk, so respawning it here from the still-immutable
 	// in-memory config would resurrect the project the user just deleted.
+	// Deletion state may be keyed by EITHER identity: a project deleted while
+	// its recorded root was unavailable keys the fence and tombstone by the
+	// derived recorded-path ID, and the snapshot's reattributedFrom alias is
+	// the durable bridge — checked here, at admission time, so a derived-ID
+	// delete suppresses no matter when it landed relative to the identity
+	// transition (#3299 review round 4). An ACTIVE derived-ID delete
+	// (projectDeletes) skips this tick the same way; when it finishes, its
+	// tombstone holds through this alias.
+	sweepLayers := m.rootAgentLayers.Load()
 	m.mu.Lock()
-	_, deleted := m.deletedRootRepos[repo.ID]
+	deleted := m.rootDeletionTombstoneApplies(sweepLayers, repo.ID)
 	m.mu.Unlock()
 	if deleted {
 		m.rootEnsureSucceeded(st)
@@ -316,7 +538,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			st.suppressLogged = true
 			m.mu.Unlock()
 			if logSuppression {
-				log.InfoLog.Printf("root agent for %s was explicitly killed; honoring the stop, will re-create it in ~%s (config is the source of truth for an always-on root — remove it from root_agents to keep it down)", workspace, rootKillHealDelay)
+				m.info().Printf("root agent for %s was explicitly killed; honoring the stop, will re-create it in ~%s (config is the source of truth for an always-on root — remove it from root_agents to keep it down)", workspace, rootKillHealDelay)
 			}
 			return
 		}
@@ -328,18 +550,8 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		delete(m.rootKilledAt, repo.ID)
 		st.suppressLogged = false
 		m.mu.Unlock()
-		log.InfoLog.Printf("root agent for %s: kill grace window elapsed; re-creating (always-on self-heal, #1223)", workspace)
+		m.info().Printf("root agent for %s: kill grace window elapsed; re-creating (always-on self-heal, #1223)", workspace)
 	}
-
-	// What the vanished root was, snapshotted before the reap deletes the record
-	// that holds it: the conversation it was in (#2616) and the tabs it had open
-	// (#2628). reapedRoot distinguishes "the reaped root had none of these" from
-	// "there was no prior root at all" — only the first is worth reporting, and
-	// they are different answers to the question an operator asks after an outage.
-	var (
-		carried    reapedRootState
-		reapedRoot bool
-	)
 
 	if inst != nil {
 		if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
@@ -347,147 +559,29 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// and whoever created it — is the root agent. The one mutation is
 			// refreshing a recorded Claude conversation from durable transcript
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
+			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst, identity)
 			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
 			m.rootEnsureSucceeded(st)
 			return
 		}
-		// An Archived root (#1028) is inert — no tmux — so it must NOT be
-		// adopted as live; fall through to reap-and-recreate like Dead/Lost so
-		// the always-ensured root comes back. In practice ArchiveSession
-		// rejects archiving the reserved root title, so this is defensive; the
-		// in-place root worktree is external, so reapDeadRoot's Cleanup is a
-		// no-op that only removes daemon-owned state.
-		// The root's tmux vanished (crash, tmux server death — the #1104
-		// outage class; recorded as Lost since #1108, Dead by older builds).
-		// Reap the dead record and fall through to re-create in place — the
-		// root keeps its stronger always-ensure semantics rather than waiting
-		// for the general Lost-restore loop. Kill is best-effort teardown of
-		// already-dead tmux, and an in-place worktree's Cleanup never touches
-		// the user's tree (#1107), so this can only remove daemon-owned state.
-		//
-		// Carrying agent_conversation across that reap is what keeps the two
-		// halves of the heal from disagreeing (#2616): the record about to be
-		// deleted holds the only pointer to the conversation the root was in, and
-		// CreateSession would otherwise mint a fresh id — leaving the one session
-		// every watch/monitor delivery targets healthy, Ready, and amnesiac. The
-		// tab roster rides across for the same reason and from the same record
-		// (#2628): a fresh create comes up with only its agent tab, so everything
-		// else the user had open — a terminal, a process tab, a dev-server web
-		// tab, an editor — would vanish with the record that listed it.
-		log.WarningLog.Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", workspace)
-		var err error
-		carried, reapedRoot, err = m.reapDeadRoot(repo.ID, inst)
-		if err != nil {
-			m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to remove dead root record: %w", err))
-			return
-		}
-		if !reapedRoot {
-			return
-		}
 	}
 
-	program := rootAgentProgramForProfile(workspace, resolution.RootAgent)
-	skipRecordedResume := false
-	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
-		transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
-		state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
-		if inspectErr == nil {
-			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, carried.conversation)
-		}
-		switch {
-		case inspectErr != nil:
-			log.WarningLog.Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
-				workspace, carried.conversation.ID, inspectErr)
-		case !state.RecordedExists && state.Resume.HasID():
-			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
-				workspace, carried.conversation.ID, state.Resume.ID)
-			carried.conversation = state.Resume
-		case !state.RecordedExists:
-			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
-				workspace, carried.conversation.ID)
-			skipRecordedResume = true
-		}
-	}
-	req := CreateSessionRequest{
-		Title:    session.RootSessionTitle,
-		RepoPath: workspace,
-		Program:  program,
-		InPlace:  true,
-		// Say local out loud, because InPlace already decided it. A root agent is
-		// documented as the `af sessions create --here` shape — in-place at the
-		// repo root, no worktree, no branch (configuration.md § root_agents) — and
-		// an in-place session has no meaning on a runtime that works in a sandbox
-		// clone it cannot see.
-		//
-		// Left empty, the create resolves the repo's `backend` key, so a project
-		// that opted into docker/ssh/hook silently got a root whose agent ran in a
-		// clone while its record claimed the working tree — the #2778 contradiction,
-		// on the one session the daemon guarantees. Once #2778 refuses that
-		// contradiction, the same repos would instead lose their always-on root
-		// entirely. Neither is what `root_agents` asks for.
-		//
-		// This does not override the repo's choice for anything else: `backend`
-		// still governs every ordinary session there. It only stops the reserved,
-		// daemon-owned, hardcoded-in-place session from being read as a sandbox
-		// create it can never be.
-		Backend:       string(session.BackendLocal),
-		allowReserved: true,
-		// Both zero on every path that did not just reap a root — a first-ever
-		// create, or a kill whose grace window elapsed (KillSession already deleted
-		// that record, so there is nothing to continue or rebuild).
-		resumeConversation: carried.conversation,
-		restoreTabs:        carried.tabs,
-		// True only for a heal, including one whose reaped root had nothing to
-		// carry — that is the heal whose replacement most needs the marker.
-		replacesReapedRecord:  reapedRoot,
-		pendingRecreateNotice: carried.notice,
-	}
-	if skipRecordedResume {
-		req.resumeConversation = session.AgentConversationData{}
-	}
-	data, err := m.CreateSession(context.Background(), req)
-	if err != nil && req.resumeConversation.HasID() {
-		// The always-on guarantee outranks continuity. A conversation the provider
-		// can no longer resume (cleared history, a transcript store the agent no
-		// longer has) makes the resumed command exit at startup — and since the
-		// reaped record is already gone, retrying it here rather than next tick is
-		// what keeps an unresumable id from costing the root a backoff interval of
-		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
-		// would be worse than the bug.
-		if req.resumeConversation.Agent == tmux.ProgramClaude {
-			transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
-			state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
-			if inspectErr == nil {
-				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, req.resumeConversation)
-			}
-			if inspectErr != nil {
-				log.WarningLog.Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
-					workspace, req.resumeConversation.ID, inspectErr)
-			} else if !state.RecordedExists && state.Resume.HasID() && !strings.EqualFold(state.Resume.ID, req.resumeConversation.ID) {
-				log.WarningLog.Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
-					workspace, req.resumeConversation.ID, err, state.Resume.ID)
-				req.resumeConversation = state.Resume
-				carried.conversation = state.Resume
-				data, err = m.CreateSession(context.Background(), req)
-			}
-		}
-	}
-	if err != nil && req.resumeConversation.HasID() {
-		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
-			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
-		req.resumeConversation = session.AgentConversationData{}
-		data, err = m.CreateSession(context.Background(), req)
-	}
-	if err != nil {
-		m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to create root session: %w", err))
-		return
-	}
-	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q)", workspace, program)
-	if reapedRoot {
-		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
-		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
-	}
-	m.rootEnsureSucceeded(st)
+	// THE CREATE BOUNDARY (#3721). Everything above this line reads state; nothing
+	// below it can be relied on to return. A (re-)create is an admission path whose
+	// first act is an unbounded `git rev-parse`, so running it here made one
+	// unreachable checkout stop the poll goroutine — and with it RefreshStatuses,
+	// RestoreLostSessions and the settlement retries — for every session on the box.
+	// It gets its own goroutine instead; see rootagent_create.go for why the create
+	// is moved rather than bounded, and for what keeps the next tick from starting a
+	// second one.
+	m.launchRootCreate(rootCreateJob{
+		stateKey:   stateKey,
+		st:         st,
+		repo:       repo,
+		resolution: resolution,
+		identity:   identity,
+		inst:       inst,
+	})
 }
 
 // reportRootTabCarry records what became of the reaped root's non-agent tabs
@@ -619,10 +713,18 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 	// before sending — otherwise this path pastes into an attached pane the
 	// "exists" path would have deferred (#1638).
 	if m.deferWhileAttached(repo.ID, req) {
+		if req.TaskOrigin && m.taskTargetAtUsageLimit(repo.ID, req.Title) {
+			return TaskStatusLimitParked, session.PromptNotDelivered, true, nil
+		}
 		return StatusDeferredAttached, session.PromptNotDelivered, true, nil
 	}
-	status, err := m.SendPromptWithStatus(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt})
+	status, err := m.SendPromptWithStatus(SendPromptRequest{
+		Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+	})
 	if err != nil {
+		if errors.Is(err, errTargetLimitReached) {
+			return TaskStatusLimitParked, session.PromptNotDelivered, true, nil
+		}
 		return "", session.PromptCouldNotConfirm, true, err
 	}
 	return "sent", status, true, nil
@@ -645,103 +747,6 @@ type reapedRootState struct {
 	// the replacement'"'"'s own verdict so the older, unseen loss is not erased by a
 	// cleaner second heal.
 	notice session.RootRecreateContext
-}
-
-// reapDeadRoot removes a Dead root instance so ensureRootAgent can re-create
-// the title. On success it returns the state snapshotted under the operation
-// lock from the exact record it deleted. The boolean reports whether
-// the root was actually reaped; false means a concurrent operation owns or
-// changed the title, or provider conversation discovery is still polling, so
-// ensure should wait for a later tick instead of falling through to
-// CreateSession. Mirrors KillSession's teardown but deliberately does NOT
-// record rootKilledAt: this is the daemon healing itself, not a user decision.
-func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRootState, bool, error) {
-	key := daemonInstanceKey(repoID, session.RootSessionTitle)
-	opLock := m.opLockFor(key)
-	if !opLock.TryLock() {
-		// A user kill (or its finish pass) owns this title right now. Let that
-		// operation decide whether the root is removed or left for the next tick.
-		return reapedRootState{}, false, nil
-	}
-	defer opLock.Unlock()
-
-	m.mu.Lock()
-	current := m.instances[key]
-	_, killing := m.killsInFlight[key]
-	capturePending := m.pendingConversationCaptures[inst] > 0
-	m.mu.Unlock()
-	if killing || current != inst || capturePending {
-		return reapedRootState{}, false, nil
-	}
-
-	// Snapshot only after taking the same operation lock used by async
-	// conversation capture and re-confirming that this is still the tracked
-	// instance. Reading before the lock leaves a narrow loss window: capture can
-	// commit a newly discovered ID after the read but before the reap acquires
-	// the lock, and the reap would then delete the updated record while carrying
-	// the stale snapshot.
-	//
-	// Both fields come out of ONE projection — the same one the record on disk is
-	// written from — rather than two reads of the instance. Two reads could land
-	// on either side of a capture commit and hand the replacement a conversation
-	// and a roster that never coexisted; there is no reason to leave that open
-	// when the whole record is available atomically.
-	snapshot := inst.ToInstanceData()
-	carried := reapedRootState{tabs: snapshot.Tabs, notice: snapshot.RootRecreateContext}
-	if snapshot.AgentConversation != nil {
-		carried.conversation = *snapshot.AgentConversation
-	}
-
-	// The reaped root's per-session editor is bound to the record this pass is
-	// deleting, so it must not outlive it — a carried vscode tab re-resolves
-	// against the REPLACEMENT record and lazily spawns a fresh editor on the next
-	// proxy request (WebTabTarget), which is what makes the carry safe here. Stop
-	// before runtime teardown and confirm again before record deletion, mirroring
-	// KillSession/finishUserKill and closing a proxy spawn that resolved the dead
-	// root immediately before this pass took ownership. Either unknown result
-	// retains the record for the next ensure pass.
-	if err := m.stopVSCodeForInstance(key, inst.ID); err != nil {
-		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: VS Code editor teardown is not confirmed, retaining its record for a retry: %w", repoID, err)
-	}
-
-	// Best-effort by design (#478): tmux is already gone and an in-place
-	// worktree's Cleanup is a no-op, so failures Kill can ANSWER for only log
-	// inside Kill and never surface here.
-	//
-	// An error that does reach us therefore means the teardown could not complete
-	// SAFELY — tmux never confirmed the pane dead, or a worktree removal was cut off
-	// mid-delete — so the workspace is still there. Deleting the record would orphan
-	// it and leave nothing pointing at it. Keep the record; this loop runs every
-	// tick, so it IS the retry (#1917: found by auditing every record delete against
-	// the invariant, not reported).
-	teardownErr := inst.Kill()
-	if err := m.stopVSCodeForInstance(key, inst.ID); err != nil {
-		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: VS Code editor teardown is not confirmed after runtime teardown, retaining its record for a retry: %w", repoID, err)
-	}
-	// Through the one choke point (#1917): it refuses while the teardown's outcome
-	// is unknown. This site was still log-and-delete after two audits I called
-	// exhaustive — which is the argument for there being exactly one place to call.
-	deleted, err := m.deleteSessionRecord(repoID, session.RootSessionTitle, inst.ID, teardownErr)
-	if err != nil {
-		// Return the ERROR, not (false, nil) (#1917 round 8). "No, but fine" is
-		// absence-of-error wearing a different hat: the caller reads it as "nothing to
-		// reap" and skips rootEnsureFailed, so a persistent tmux/file-lock timeout
-		// re-runs this whole bounded teardown on EVERY tick — occupying the single
-		// status/restore poll loop and spamming warnings — instead of backing off.
-		// A failure has to look like one for the retry cadence to see it.
-		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: %w", repoID, err)
-	}
-	if !deleted {
-		log.InfoLog.Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)
-		return reapedRootState{}, false, nil
-	}
-	m.mu.Lock()
-	if m.instances[key] == inst {
-		delete(m.instances, key)
-		m.forgetSessionRuntimeStateLocked(repoID, inst)
-	}
-	m.mu.Unlock()
-	return carried, true, nil
 }
 
 // rootEnsureSucceeded resets a repo's retry state after a pass that left a
@@ -780,10 +785,10 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 	if rootEnsureShouldEscalate(st) {
 		st.escalated = true
 		st.escalatedPersistent = rootEnsureCauseIsEstablished(st)
-		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; %s — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureEscalationCause(st), rootEnsureBackoffMax, err)
+		m.err().Printf("root agent ensure for %q failed %d consecutive times; %s — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureEscalationCause(st), rootEnsureBackoffMax, err)
 		return
 	}
-	log.WarningLog.Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)
+	m.warn().Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)
 }
 
 // rootEnsureAnsweredFailures counts the failures in the current streak that
@@ -856,36 +861,92 @@ func rootEnsureEscalationCause(st *rootEnsureState) string {
 	}
 }
 
-// rootAgentProgram resolves the command the root agent runs from a legacy
-// per-repo entry. Retained as the thin adapter the direct-map program test and
-// any legacy-only caller use; it delegates to rootAgentProgramForProfile so the
-// resolution rule lives in exactly one place.
-func rootAgentProgram(repoRoot string, rc config.RootAgentConfig) string {
-	return rootAgentProgramForProfile(repoRoot, config.RootAgent{Program: rc.Program})
-}
-
 // rootAgentProgramForProfile resolves the command the root agent runs from a
-// resolved root-agent profile. An explicit program wins verbatim (an agent enum
-// name still resolves through program_overrides downstream, exactly like any
-// session program). The default profile — an empty program — is the repo's
-// resolved claude command with --dangerously-skip-permissions ensured, the root
-// agent's whole purpose being autonomous operation (#1106).
+// resolved root-agent profile. An explicit program wins verbatim (a bare agent
+// name resolves through program_overrides downstream, exactly like any session
+// program). The default profile — an empty program — is the repo's resolved
+// claude command with --dangerously-skip-permissions ensured, the root agent's
+// whole purpose being autonomous operation (#1106).
 func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
 	if strings.TrimSpace(ra.Program) != "" {
 		return ra.Program
 	}
-	program := "claude"
 	repo, err := config.RepoFromPath(repoRoot)
 	if err == nil {
 		var resolved *config.ResolvedConfig
 		resolved, err = config.ResolveConfigForRepo(repo)
 		if err == nil {
-			program = config.ResolveProgram(&resolved.Config, "claude")
+			return rootAgentCreateProgramFromResolvedConfig(&resolved.Config)
 		}
 	}
-	if err != nil {
-		log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
+	log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
+	return finishRootAgentProgram("claude")
+}
+
+// rootAgentCreateProgramFromResolvedConfig performs the root-specific first
+// stage for the empty/default profile. The returned command is handed to the
+// ordinary session launch resolver, which performs the second lookup if this
+// stage selected another bare agent name. It must not pre-apply that second
+// lookup or launch will perform a third one.
+func rootAgentCreateProgramFromResolvedConfig(cfg *config.Config) string {
+	return finishRootAgentProgram(config.ResolveProgram(cfg, "claude"))
+}
+
+func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAgent, resolve func(*config.RepoContext) (*config.ResolvedConfig, error)) (string, error) {
+	requested := ra.Program
+	hasProgram := strings.TrimSpace(requested) != ""
+	if hasProgram && !tmux.IsSupportedProgram(requested) {
+		return rootAgentProgramFromResolvedConfig(ra, nil)
 	}
+	if repo == nil {
+		return "", fmt.Errorf("repo context is required to resolve root-agent program %q", requested)
+	}
+	resolved, err := resolve(repo)
+	if err != nil {
+		return "", err
+	}
+	return rootAgentProgramFromResolvedConfig(ra, resolved)
+}
+
+func rootAgentProgramFromResolvedConfig(ra config.RootAgent, resolved *config.ResolvedConfig) (string, error) {
+	requested := ra.Program
+	// Outer whitespace decides only whether the default form was requested.
+	// Otherwise the exact bytes select an override or become the shell command:
+	// trailing whitespace can be escaped and therefore shell-significant.
+	hasProgram := strings.TrimSpace(requested) != ""
+	if hasProgram && !tmux.IsSupportedProgram(requested) {
+		return requested, nil
+	}
+	if resolved == nil {
+		return "", fmt.Errorf("resolved repository config is required to interpret root-agent program %q", requested)
+	}
+	if hasProgram {
+		return config.ResolveProgram(&resolved.Config, requested), nil
+	}
+	// The default-profile create first resolves claude here, then hands that
+	// command to the ordinary session launch path. If the first override is
+	// itself a bare agent name, launch resolves that name once more. Diagnostics
+	// must reproduce both stages or a root created from chained overrides appears
+	// stale immediately even though it runs exactly what AF launched.
+	program := rootAgentCreateProgramFromResolvedConfig(&resolved.Config)
+	return config.ResolveProgram(&resolved.Config, program), nil
+}
+
+// RootAgentProgramForProfileResolvedConfig interprets a profile through an
+// already-resolved repository-config snapshot. Read-only diagnostics use it to
+// keep the profile and its program_overrides on one source generation.
+func RootAgentProgramForProfileResolvedConfig(ra config.RootAgent, resolved *config.ResolvedConfig) (string, error) {
+	return rootAgentProgramFromResolvedConfig(ra, resolved)
+}
+
+// RootAgentProfileNeedsRepoConfig reports whether interpreting a root profile
+// depends on repository-scoped program_overrides. Diagnostics use the same
+// predicate so a free-form command does not acquire an unrelated Git failure.
+func RootAgentProfileNeedsRepoConfig(ra config.RootAgent) bool {
+	return strings.TrimSpace(ra.Program) == "" || tmux.IsSupportedProgram(ra.Program)
+}
+
+func finishRootAgentProgram(program string) string {
 	// Only ensure the claude-only flag when the resolved command actually
 	// runs claude: a program_overrides entry may point "claude" at another
 	// program that exits on the unknown flag (#1116 defect class — e.g. the

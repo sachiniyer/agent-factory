@@ -1,11 +1,15 @@
 package app
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 )
@@ -21,7 +25,38 @@ type newTabChoice struct {
 
 var newTabChoices = []newTabChoice{
 	{label: "Terminal", kind: session.TabKindShell},
-	{label: "VS Code", kind: session.TabKindVSCode},
+	{label: "VS Code (web UI)", kind: session.TabKindVSCode},
+}
+
+// errRenameTabFixedLabel is the one notice `R` raises for every tab it refuses:
+// the agent tab always renders "Agent" and a shell tab always renders
+// "Terminal" (session.TabKindRenameable / session.TabLabel), so a rename would
+// write a Name nothing displays. One short sentence names the class — the
+// refusal must read as an answer, not a dead key (#5280).
+var errRenameTabFixedLabel = errors.New("Agent and Terminal tabs can't be renamed")
+
+// tabPickerRefusal reports why `t` cannot run on selected, or nil when it may
+// proceed — the TUI's front gate for the new-tab picker, shared by the
+// pre-modal check and the post-submit recheck. TabSpawnBlocked covers the
+// archived liveness, an in-flight teardown, and a pending account swap; the
+// resting-liveness check covers the rest — a lost/dead row owns no runtime a
+// tab could spawn into, and reads liveness rather than LifecycleAction so a
+// fenced resting row (startup-unknown, mid-restore) is refused too (#4755
+// review): a picker that could never submit never opens.
+func tabPickerRefusal(selected *session.Instance) error {
+	// The capability refusal outranks the resting one: an off-box backend
+	// (docker/ssh/hook) can never take a tab — a restore changes nothing —
+	// so it names the permanent reason, not the transient one (#4755 review).
+	if !selected.Capabilities().TabManagement {
+		return fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in")
+	}
+	if err := selected.TabSpawnBlocked(); err != nil {
+		return err
+	}
+	if selected.IsResting() {
+		return fmt.Errorf("cannot add a tab to session %q while it is not running; restore it first (af sessions restore)", selected.Title)
+	}
+	return nil
 }
 
 // showNewTabPicker opens the TUI's existing enum-selection overlay for `t`.
@@ -31,12 +66,26 @@ var newTabChoices = []newTabChoice{
 // while the modal owns the keyboard and may replace the instance pointer or
 // reuse its display title.
 func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
+	// Gated on workspace focus, exactly as the rename prompt and the
+	// jump-to-tab prompt are (#3067): t is routed through the global key map,
+	// so without this gate it would open the new-tab picker targeting the
+	// sidebar cursor's row — a session whose row the Automations or Projects
+	// rail does not display — while that rail owns the keyboard. A key the
+	// focused rail's footer does not advertise must stay inert there (#1417):
+	// a rail that owns the keyboard keeps it.
+	if active := m.ring.Active(); active != layout.RegionTree && !layout.IsPaneRegion(active) {
+		return m, nil
+	}
+	selected := m.sidebar.RowVerbTarget()
 	if selected == nil || selected.HasInFlightOp() {
 		return m, nil
 	}
-	if !selected.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
+	// Archived sessions keep a frozen roster for restore and a pending swap
+	// owns its own tab answer — refuse BEFORE the picker opens, since the
+	// picker could never submit (#4755's `t` dead end). The same goes for
+	// the other resting rows the footer withholds `t` from.
+	if err := tabPickerRefusal(selected); err != nil {
+		return m, m.handleNotice(err)
 	}
 
 	items := make([]string, len(newTabChoices))
@@ -98,8 +147,10 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	if selected.HasInFlightOp() {
 		return m, nil
 	}
-	if !selected.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
+	// Same gate as the picker, re-checked after the modal resolves its captured
+	// target: an archive or a pending swap can land while the picker is open.
+	if err := tabPickerRefusal(selected); err != nil {
+		return m, m.handleNotice(err)
 	}
 
 	target := captureSessionActionTarget(selected, m.repoID)
@@ -109,12 +160,41 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	}
 	response, err := createTabThroughDaemon(request)
 	if err != nil {
+		// A tab that may exist is not reported as a failure to retry: a second
+		// press would spawn a second tab (#4820). Nothing is projected locally —
+		// the next snapshot poll brings the tab in if the daemon made it.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("creating a tab in %q", selected.Title), "the session's tabs", err))
+		}
 		return m, m.handleError(err)
 	}
 	// Reflect the daemon-created tab locally for instant display. A shell binds to
 	// the exact tmux session the daemon reported (#1957); a VS Code tab is metadata
 	// only and carries no tmux session at all. Neither path spawns or persists a
 	// second tab.
+	//
+	// #2377 minted a stable id per CreateTab response and made the local attach
+	// refuse a same-name row that already belongs to a different id (an identity-
+	// hijacking guard in resolveAttachedTabLocked). That refusal is reachable
+	// here only through the stale-roster race — another client closed the
+	// same-name tab and the local TUI has not yet processed its next snapshot
+	// (snapshotRefreshInterval) — by which point the daemon has already created
+	// and persisted the tab. Surfacing the refusal as a raw error makes the user
+	// think the tab was not created, inviting a retry that spawns a SECOND tab
+	// (#4820). Mirror handleStateRenameTab: the daemon has the tab, so skip the
+	// local projection, defer to the next snapshot poll (it reconciles the
+	// roster and the tab appears), and tell the user the tab was created rather
+	// than showing the refusal as a total failure. The guard is gated on the
+	// non-empty id the collision depends on — an empty id is the pre-#1738
+	// legacy daemon's name-keyed fallback, where the attach never collides
+	// (resolveAttachedTabLocked just returns the same-name row), so genuine pane
+	// failures (e.g., a `Restore("")` that cannot reconnect) still fall through
+	// to handleError below.
+	if response.ID != "" && localTabNameTaken(selected, &session.Tab{ID: response.ID}, response.Name) {
+		log.InfoLog.Printf("tab %q created in %q; local reflection deferred to the next snapshot: the local roster still holds that name", response.Name, selected.Title)
+		return m, m.handleNotice(fmt.Errorf("tab created in %q; it will appear after the next snapshot", selected.Title))
+	}
 	var attachErr error
 	if kind == session.TabKindVSCode {
 		_, attachErr = selected.AttachVSCodeTab(response.Name, response.ID)
@@ -156,6 +236,17 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 // tab locally via DropClosedTab — a no-kill removal, since the daemon already
 // tore the tmux session down.
 func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
+	// Gated on workspace focus, exactly as the rename prompt and the
+	// jump-to-tab prompt are (#3067): w is routed through the global key map,
+	// so without this gate it would open the delete-tab confirmation against
+	// the store's sticky last tree selection — a session whose row the
+	// Automations or Projects rail does not display — while that rail owns the
+	// keyboard. That is the most destructive verb of the #1417 leak class: a
+	// key the focused rail's footer does not advertise must stay inert there.
+	// A rail that owns the keyboard keeps it.
+	if active := m.ring.Active(); active != layout.RegionTree && !layout.IsPaneRegion(active) {
+		return m, nil
+	}
 	// The focused pane owns the close target: w acts on the tab on screen, not
 	// the tree cursor's tab (#1884). Fall back to the tree's selection + its
 	// active tab when focus is on the tree.
@@ -191,44 +282,76 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if idx <= 0 {
 		return m, m.handleNotice(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
 	}
-	if !inst.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("this session's tab list is fixed by its runtime and can't be edited"))
+	if !inst.TabRosterMutable() {
+		return m, m.handleNotice(fmt.Errorf("cannot close tabs on archived session %q; restore it first (af sessions restore)", inst.Title))
 	}
 	tabs := inst.GetTabs()
 	if idx >= len(tabs) {
 		return m, m.handleNotice(fmt.Errorf("tab cannot be closed"))
 	}
 	tab := tabs[idx]
-	tabName := tab.Name
-	// Capture the slot→identity list before the drop: reconcilePanesForTabs maps
-	// the open panes' bindings across the change by stable tab id (#1088/#1886).
-	oldKeys := paneTabKeys(inst)
-	// Remember which tab the TREE is on, by identity. A pane-focused close can
-	// remove a tab that is NOT the tree's active tab, and the tree must keep
-	// pointing at its own tab across the shift (#1884 follow-up) — resolving it by
-	// id afterwards is what keeps the arithmetic from guessing.
-	// The ordinal rides along with the id for mixed-version compatibility: an
-	// older daemon omits CreateTabResponse.ID, so that projection remains ID-less
-	// until the next snapshot and the ordinal is the only key it has.
-	treeActiveID := ""
-	treeActiveIdx := -1
-	// Whose tab is store.ActiveTab()? The STORE's selected instance's — so that is
-	// what decides whether the tree's active tab needs preserving across this
-	// close, not the sidebar cursor. The cursor is nil on a section header and
-	// points at the archived instance on an archived row, while the store's
-	// display selection stays deliberately sticky on the live instance; reading
-	// the cursor there made this false and left ActiveTab un-shifted, so returning
-	// to the tree landed on a different surviving tab.
-	treeIsSelected := inst == m.store.GetSelectedInstance()
-	if treeIsSelected {
-		if a := m.store.ActiveTab(); a >= 0 && a < len(tabs) {
-			treeActiveIdx = a
-			treeActiveID = tabs[a].ID
-		}
+	target := captureSessionActionTarget(inst, m.repoID)
+	tabID := tab.ID
+	rosterGeneration := inst.TabRosterGeneration()
+	// Quote the tab's TEXT, not its decorated label: "› Terminal" would put
+	// the presentation glyph inside the quotation as if it were part of the
+	// name (#4630). The slot-number prefix still applies when texts collide.
+	tabLabel, _ := tree.TabTextAt(inst, idx)
+	message := fmt.Sprintf("Delete tab %q from session %q?", tabLabel, inst.Title)
+	detail := "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."
+	if tab.Kind == session.TabKindWeb {
+		detail = "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available."
 	}
+	if tab.Kind == session.TabKindDocs {
+		detail = "This removes the Docs tab, not the proposal it edits. Hiding a pane leaves the tab available."
+	}
+	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
+		current := m.resolveSessionActionTarget(target)
+		if current == nil || !current.TabRosterMutable() {
+			return m.handleNotice(fmt.Errorf("Tab %q is no longer available to delete", tabLabel))
+		}
+		if current.HasInFlightOp() {
+			return m.handleNotice(fmt.Errorf("Session %q is busy; try again", current.Title))
+		}
+		if tabID == "" && current.TabRosterGeneration() != rosterGeneration {
+			return m.handleNotice(fmt.Errorf("Tab %q changed while the dialog was open; reopen it and try again", tabLabel))
+		}
+		for at, candidate := range current.GetTabs() {
+			// IDs survive reorder/snapshot replacement. Legacy consent additionally
+			// needs the captured generation: name-based reconcile can retain a
+			// pointer even when a different tab now occupies that name.
+			if at > 0 && ((tabID != "" && candidate.ID == tabID) || (tabID == "" && candidate == tab)) {
+				_, cmd := m.deleteConfirmedTab(current, at)
+				return cmd
+			}
+		}
+		return m.handleNotice(fmt.Errorf("Tab %q is no longer available to delete", tabLabel))
+	})
+}
+
+// deleteConfirmedTab applies the existing daemon mutation and pane reconciliation
+// only after the captured tab has been confirmed and resolved in the current roster.
+func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, tea.Cmd) {
+	tabs := inst.GetTabs()
+	tab := tabs[idx]
+	tabName := tab.Name
+	// Capture the slot→identity list before the drop. BOTH bindings into the
+	// roster need it: reconcilePanesForTabs maps the open panes across the
+	// change by stable tab id (#1088/#1886), and remapActiveTabForTabs carries
+	// the tree's selection the same way — a pane-focused close can remove a
+	// tab that is NOT the tree's active tab, so the tree's own tab is
+	// re-resolved by identity, never by arithmetic on the closed index (#1884
+	// follow-up).
+	oldKeys := paneTabKeys(inst)
 
 	target := captureSessionActionTarget(inst, m.repoID)
 	if err := closeTabThroughDaemon(target.closeTabRequest(tab.ID, tabName)); err != nil {
+		// A close that may have landed is not dropped locally or reported as
+		// refused (#4824): the next snapshot removes the tab if it is gone.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("closing tab %q", tabName), "the session's tabs", err))
+		}
 		return m, m.handleError(err)
 	}
 	// The daemon killed the tmux and persisted the shrunk list; drop the
@@ -236,6 +359,19 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	// authoritative, so the TUI never saves (#960 PR 4).
 	if dropErr := inst.DropClosedTab(idx); dropErr != nil {
 		return m, m.handleError(dropErr)
+	}
+
+	// Re-resolve the tree's selection BEFORE the pane reconcile below. That
+	// reconcile relayouts, and relayout re-reads the sidebar for the footer's
+	// row-verb target — a rebuild running while the cursor still holds the
+	// pre-delete flat index lands it on the NEXT row, which for a closed LAST
+	// tab is the following session's instance row, and pushSelection commits
+	// that drifted row as the new display selection (#5298). The remap picks
+	// the nearest remaining sibling — the tab now occupying the closed slot,
+	// else the new last tab — and the re-pin runs while the store still
+	// selects this session, so every later sync in this handler is a no-op.
+	if m.remapActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
+		m.sidebar.SyncCursorToActiveTab()
 	}
 
 	// The kill shifts every higher tab slot down by one, so the open panes
@@ -246,38 +382,302 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
 		m.relayout()
 	}
+	return m, m.selectionChanged()
+}
 
-	// Re-point the tree at the tab it was already on, found by its id in the
-	// shrunk roster — so a pane-focused close of a DIFFERENT tab leaves the tree's
-	// tab alone (closing tab 3 must not move a tree sitting on tab 1), and a close
-	// below it still follows the shift. Only when the tree's own tab is the one
-	// that died does it fall back to the left/previous neighbour (#930 PR 4).
-	if treeIsSelected {
-		// Adjust the tree's OWN ordinal for the closed slot first. This is the answer
-		// during the id-less window, and it is why `idx - 1` cannot be the fallback:
-		// idx is the FOCUSED PANE's closed tab, so on a pane-focused close of some
-		// other tab it names a neighbour of the wrong tab entirely — the tree would
-		// jump even though its tab merely shifted (or did not move at all).
-		next := treeActiveIdx
-		switch {
-		case treeActiveIdx == idx:
-			next = idx - 1 // the tree's own tab is the one that died
-		case treeActiveIdx > idx:
-			next = treeActiveIdx - 1 // it shifted down one
+// tabRenameRef is the identity the rename prompt acts on, captured when it
+// opens (#1904's verb reaching the TUI). The session half is a
+// sessionActionTarget for the usual reason — a background snapshot can replace
+// the instance pointer or reuse its title while the modal owns the keyboard
+// (#2358). The tab half carries the stable id; the roster generation is the
+// fallback proof for a pre-#1738 id-less tab, where a captured NAME is only
+// trustworthy while the roster provably has not changed (the same rule the
+// delete consent applies — a name is freed by a close and handed to the next
+// tab that asks for it, #1929).
+type tabRenameRef struct {
+	session          sessionActionTarget
+	tabID            string
+	tabName          string
+	tabLabel         string
+	rosterGeneration uint64
+}
+
+// showRenameTabPrompt opens the `R` rename prompt against the tab the user is
+// LOOKING at — the focused pane's effective binding, or the tree's selection's
+// active tab. That is the same target `w` closes, resolved the same way for the
+// same reason (#1884: every wrong-target tab bug has been two sources
+// disagreeing about which tab is on screen).
+//
+// The guards mirror the daemon's own (daemon.Manager.RenameTab): only kinds
+// that DISPLAY their name are renameable (session.TabKindRenameable) — the
+// agent tab always renders "Agent" and a shell tab always renders "Terminal",
+// so a rename there would write a field nothing reads. Refusing before the
+// prompt opens beats taking a name and then failing; the RPC re-checks
+// everything regardless.
+func (m *home) showRenameTabPrompt() (tea.Model, tea.Cmd) {
+	// Gated on workspace focus, exactly as the digit jumps and `g` are (#3067):
+	// R is routed through the global key map, so without this gate it would
+	// retarget a session's roster while the automations or projects rail owns
+	// the keyboard. A rail that owns the keyboard keeps it.
+	if active := m.ring.Active(); active != layout.RegionTree && !layout.IsPaneRegion(active) {
+		return m, nil
+	}
+
+	inst := m.store.GetSelectedInstance()
+	idx := m.store.ActiveTab()
+	if p := m.focusedOpenPane(); p != nil {
+		b := m.effectivePaneBinding(p)
+		inst, idx = b.instance, b.tab
+	}
+	if inst == nil {
+		return m, nil
+	}
+	if idx <= 0 {
+		return m, m.handleNotice(errRenameTabFixedLabel)
+	}
+	tabs := inst.GetTabs()
+	if idx >= len(tabs) {
+		// A stale index (the tab it named has since closed) is not the agent
+		// tab; say what actually happened, as handleCloseTab keeps these apart.
+		return m, m.handleNotice(fmt.Errorf("the selected tab no longer exists; select a tab and try again"))
+	}
+	tab := tabs[idx]
+	if tab == nil || !session.TabKindRenameable(tab.Kind) {
+		return m, m.handleNotice(errRenameTabFixedLabel)
+	}
+
+	m.tabRenameTarget = tabRenameRef{
+		session:          captureSessionActionTarget(inst, m.repoID),
+		tabID:            tab.ID,
+		tabName:          tab.Name,
+		tabLabel:         session.TabLabel(tab),
+		rosterGeneration: inst.TabRosterGeneration(),
+	}
+	// Seeded with the current name so the user edits rather than retypes; the
+	// name — not the label — is the editable field.
+	m.promptOverlay = overlay.NewPromptOverlay(fmt.Sprintf("Rename tab %q", m.tabRenameTarget.tabLabel), tab.Name)
+	m.promptOverlay.SetPlaceholder("New tab name…")
+	m.promptOverlay.SetHints("enter rename · esc cancel", "enter rename · esc cancel")
+	m.layoutPromptOverlay()
+	m.state = stateRenameTab
+	return m, nil
+}
+
+// handleStateRenameTab drives the prompt and performs the rename. Submit and
+// cancel are owned HERE, not delegated — PromptOverlay is the naming form's
+// multi-line field, where Enter is text and only ctrl+c marks a cancel; a
+// one-line rename needs Enter to submit and Esc to abandon (the same re-owning
+// handleStateJumpTab does, #4172).
+func (m *home) handleStateRenameTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.promptOverlay = nil
+		m.tabRenameTarget = tabRenameRef{}
+		m.state = stateDefault
+		return m, nil
+	case tea.KeyEnter:
+		// fall through to submit
+	default:
+		m.promptOverlay.HandleKeyPress(msg)
+		return m, nil
+	}
+
+	newName := strings.TrimSpace(m.promptOverlay.Value())
+	target := m.tabRenameTarget
+	m.promptOverlay = nil
+	m.tabRenameTarget = tabRenameRef{}
+	m.state = stateDefault
+	if newName == "" {
+		// An empty submission abandons the rename rather than asking the daemon
+		// to sanitize nothing — Enter on a blank prompt is how a user backs out
+		// of a field they opened by accident.
+		return m, nil
+	}
+
+	current := m.resolveSessionActionTarget(target.session)
+	if current == nil {
+		return m, m.handleNotice(fmt.Errorf("tab %q is no longer available to rename", target.tabLabel))
+	}
+	if current.HasInFlightOp() {
+		return m, m.handleNotice(fmt.Errorf("Session %q is busy; try again", current.Title))
+	}
+
+	// Re-find the tab the prompt was opened on, by the same identity that will
+	// go on the wire: the stable id survives reorder and snapshot replacement;
+	// the id-less legacy case needs the captured roster generation to prove the
+	// name still names the same tab (the delete consent rule).
+	var tab *session.Tab
+	if target.tabID != "" {
+		if at, ok := current.TabIndexByID(target.tabID); ok {
+			tab = current.GetTabs()[at]
 		}
-		// The id is authoritative whenever there IS one: it survives the reorder a
-		// concurrent snapshot could apply between the capture and here, which the
-		// ordinal arithmetic above cannot see.
-		if treeActiveID != "" {
-			if at, ok := inst.TabIndexByID(treeActiveID); ok {
-				next = at
+	} else {
+		if current.TabRosterGeneration() != target.rosterGeneration {
+			return m, m.handleNotice(fmt.Errorf("Tab %q changed while the prompt was open; reopen it and try again", target.tabLabel))
+		}
+		for _, candidate := range current.GetTabs() {
+			if candidate != nil && candidate.Name == target.tabName {
+				tab = candidate
+				break
 			}
 		}
-		if next < 0 {
-			next = 0
+	}
+	if tab == nil {
+		return m, m.handleNotice(fmt.Errorf("Tab %q is no longer available to rename", target.tabLabel))
+	}
+
+	resolved, err := renameTabThroughDaemon(target.session.renameTabRequest(tab.ID, tab.Name, newName))
+	if err != nil {
+		// A rename that may have landed is not projected locally or reported as
+		// refused (#4824): retrying it could clobber a concurrent rename, so the
+		// user checks the snapshot's name first.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("renaming tab %q", tab.Name), "the session's tabs", err))
 		}
-		m.store.SetActiveTab(next)
-		m.clampSelectionTab()
+		return m, m.handleError(err)
+	}
+	// Reflect the rename locally so the bar reads it before the next daemon
+	// snapshot lands — the same instant-projection pattern createNewTab uses.
+	// The daemon's answer is already sanitized and collision-suffixed, so
+	// RenameTabByID resolves it back to itself — unless the local roster is
+	// stale: another client may have just freed the name the daemon returned,
+	// and re-resolving against a sibling that is only still here locally would
+	// show "name-2" for a tab the daemon calls "name". The daemon is the
+	// authority, so in that case skip the projection and let the next snapshot
+	// apply the name verbatim; a local miss is what the snapshot exists for.
+	if localTabNameTaken(current, tab, resolved) {
+		log.InfoLog.Printf("rename to %q deferred to the next snapshot: the local roster still holds that name", resolved)
+	} else if _, rerr := current.RenameTabByID(tab.ID, resolved); rerr != nil {
+		log.ErrorLog.Printf("rename reflected daemon-side but not locally: %v", rerr)
+	}
+	// Through handleNotice, not errBox.SetNotice: it advances the notice
+	// generation and schedules the usual expiry, so the confirmation neither
+	// lingers forever nor gets erased early by an older notice's timer.
+	notice := m.handleNotice(fmt.Errorf("renamed tab to %q", resolved))
+	return m, tea.Batch(notice, m.selectionChanged())
+}
+
+// localTabNameTaken reports whether a tab other than self holds name in inst's
+// local roster — the case where applying a daemon-resolved name locally would
+// re-suffix it instead of showing it verbatim.
+func localTabNameTaken(inst *session.Instance, self *session.Tab, name string) bool {
+	for _, candidate := range inst.GetTabs() {
+		if candidate == nil || candidate.Name != name {
+			continue
+		}
+		if candidate == self || (self.ID != "" && candidate.ID == self.ID) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// handleMoveTab moves the tab the user is LOOKING at one slot — `<` left, `>`
+// right — through the daemon's ReorderTab RPC (#1813), the same route the web's
+// drag reorder and `af sessions tab-reorder` take, so all three surfaces
+// permute one roster one way.
+//
+// The target is resolved exactly like `w` (#1884): a pane-focused move acts on
+// the FOCUSED PANE's effective binding — the tab on screen, not the tree's
+// active tab — and a tree-focused move acts on the store selection's active
+// tab. Everything else is the daemon's invariant enforced TUI-side so the
+// friendly notice shows without a round-trip: the agent tab is pinned to slot
+// 0 in both directions (reorderTabLocked's from/to <= 0 guard), and a move
+// past either end is a no-op with a notice rather than a silent swallow.
+//
+// It shares `w`/`t`'s roster gates even though a reorder spawns and kills
+// nothing: the snapshot's ReconcileTabsFromData skips non-TabManagement
+// backends (app/sync.go), so a move on an off-box roster could diverge from a
+// second client's view with nothing to heal it, and the daemon refuses every
+// tab mutation on an archived session outright to keep the roster intact for
+// restore. Refusing here keeps the notice friendly and off the wire.
+//
+// On success the projection applies the daemon's RESOLVED index — by stable id
+// when the tab carries one, else by ordinal for the id-less legacy window —
+// then the shared slot-resolver carries every open pane and the tree selection
+// across the permutation (the same code the snapshot reconcile runs when a
+// reorder arrives out-of-band, so an in-TUI move and a web drag reconcile
+// identically). The TUI never persists; the daemon write is the one write.
+func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
+	inst := m.store.GetSelectedInstance()
+	idx := m.store.ActiveTab()
+	treeFocused := true
+	if p := m.focusedOpenPane(); p != nil {
+		b := m.effectivePaneBinding(p)
+		inst, idx = b.instance, b.tab
+		treeFocused = false
+		// A pane may be previewing the tab about to move; the transient binding
+		// must not keep pointing at whatever slides into the slot (#1884).
+		m.cancelPanePreview(false)
+	}
+	if inst == nil {
+		return m, nil
+	}
+	if treeFocused {
+		// On an archived row the sidebar cursor resolves to the ARCHIVED
+		// instance while the store's display selection stays sticky on a live
+		// one (#1884) — so an unguarded move here would silently reorder a
+		// session the user is not looking at, and whose row footer does not
+		// advertise the pair. Refuse on what the cursor actually names; the
+		// archived roster is frozen for restore regardless.
+		if cur := m.sidebar.GetSelectedInstance(); cur != nil && cur.IsArchived() {
+			return m, m.handleNotice(fmt.Errorf("cannot reorder tabs on archived session %q; restore it first (af sessions restore)", cur.Title))
+		}
+	}
+	if inst.IsArchived() {
+		return m, m.handleNotice(fmt.Errorf("cannot reorder tabs on archived session %q; restore it first (af sessions restore)", inst.Title))
+	}
+	if idx == 0 {
+		return m, m.handleNotice(fmt.Errorf("the agent tab is pinned to the first slot"))
+	}
+	tabs := inst.GetTabs()
+	if idx < 0 || idx >= len(tabs) {
+		return m, nil
+	}
+	to := idx + delta
+	if to <= 0 {
+		return m, m.handleNotice(fmt.Errorf("the agent tab is pinned to the first slot"))
+	}
+	if to >= len(tabs) {
+		return m, m.handleNotice(fmt.Errorf("the tab is already at the last position"))
+	}
+	if inst.HasInFlightOp() {
+		return m, m.handleNotice(fmt.Errorf("Session %q is busy; try again", inst.Title))
+	}
+
+	tab := tabs[idx]
+	target := captureSessionActionTarget(inst, m.repoID)
+	// Capture the slot→identity list before the permutation: the resolver maps
+	// every open pane and the tree selection across it by stable id (#1886).
+	oldKeys := paneTabKeys(inst)
+
+	resp, err := reorderTabThroughDaemon(target.reorderTabRequest(tab.ID, tab.Name, to))
+	if err != nil {
+		// A move that may have landed is not projected locally or reported as
+		// refused (#4820): the next snapshot shows where the tab ended up.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("moving tab %q", tab.Name), "the session's tabs", err))
+		}
+		return m, m.handleError(err)
+	}
+	if tab.ID != "" {
+		err = inst.ReorderTabByID(tab.ID, resp.Index)
+	} else {
+		// A pre-#1738 row has no stable id until the next snapshot backfills it;
+		// the ordinal is the only key it has, and the synchronous call means the
+		// local roster cannot have drifted since the capture above.
+		err = inst.ReorderTab(idx, resp.Index)
+	}
+	if err != nil {
+		return m, m.handleError(err)
+	}
+	if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
+		m.relayout()
+	}
+	if m.remapActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
 		m.sidebar.SyncCursorToActiveTab()
 	}
 	return m, m.selectionChanged()

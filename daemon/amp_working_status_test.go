@@ -147,7 +147,8 @@ func TestRefreshStatuses_AmpWorkingThenIdleTransitions(t *testing.T) {
 // TestRefreshStatuses_NonAmpStillPaneUnchanged pins the blast radius: the working
 // check is additive and agent-scoped, so a claude session whose pane happens to
 // contain amp-shaped box drawing still resolves Ready on a still tick exactly as
-// it did before. Every non-amp agent keeps the pure pane-churn inference.
+// it did before. claude reads only its own composer frame, which an amp pane
+// does not have.
 func TestRefreshStatuses_NonAmpStillPaneUnchanged(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := stillPaneBackend{FakeBackend: session.NewFakeBackend(), content: ampPaneStreaming}

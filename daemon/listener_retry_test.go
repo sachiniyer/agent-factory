@@ -96,7 +96,7 @@ func TestWebListenerRetryEndsWhenListenerIsConfiguredOff(t *testing.T) {
 
 	off := *m.Config()
 	off.ListenAddr = ""
-	m.live.Store(&off)
+	m.storeLivePosture(&off)
 
 	require.Eventually(t, func() bool {
 		s := m.lifecycle.snapshot().listeners
@@ -139,7 +139,7 @@ func TestWebListenerRetryIsSerializedWithConfigApply(t *testing.T) {
 
 	off := *m.Config()
 	off.ListenAddr = ""
-	m.live.Store(&off)
+	m.storeLivePosture(&off)
 	m.configApplyMu.Unlock()
 
 	require.Eventually(t, func() bool { return !m.lifecycle.snapshot().listeners.BindRetrying },

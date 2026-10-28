@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/afhome"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
@@ -98,7 +99,12 @@ func ensureDedicatedServer(home string) error {
 		// spawn replaces it with the dedicated server below.
 		return nil
 	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
+	// afhome.MkdirAll, not os.MkdirAll: the argument IS the AF home, so this is
+	// the most direct resurrection there is — and it runs on any spawn where the
+	// dedicated server is not up, which is exactly the state the comment above
+	// describes after exit-empty retires it (#3850). afhome rather than
+	// config.MkdirAllUnderAFHome because config imports this package.
+	if err := afhome.MkdirAll(home, 0o700); err != nil {
 		return fmt.Errorf("create AF home for tmux server log: %w", err)
 	}
 	logPath := filepath.Join(home, dedicatedServerLogName)
@@ -334,15 +340,6 @@ func runDedicatedServer() error {
 	}
 	_, _ = fmt.Fprintf(writer, "%s af tmux server exited cleanly\n", time.Now().Format(time.RFC3339))
 	return nil
-}
-
-// newTmuxServerCommand keeps the historical per-session scope as a fail-open
-// fallback only. Once the daemon observes or creates the shared server, this
-// new-session is a plain no-autostart client. -N closes the final probe/connect
-// race: if that server exits first, the daemon client fails instead of creating
-// its replacement inside agent-factory-daemon.service.
-func newTmuxServerCommand(args ...string) (*exec.Cmd, bool) {
-	return newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), args...)
 }
 
 func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd, bool) {

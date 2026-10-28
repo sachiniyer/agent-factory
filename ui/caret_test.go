@@ -8,11 +8,6 @@ import (
 	"github.com/muesli/termenv"
 )
 
-// The caret is the reverse-video SGR (ESC[7m) wrapping a single cell. Asserting on
-// the sequence rather than a rendered glyph keeps the test honest about what makes
-// the caret visible in a terminal.
-const reverseVideoSGR = "\x1b[7m"
-
 // forceProfile pins the lipgloss colour profile for one test. Rendering is
 // profile-dependent (termenv emits no sequences under Ascii) and the profile is
 // process-wide, so it must be restored.
@@ -23,16 +18,16 @@ func forceProfile(t *testing.T, p termenv.Profile) {
 	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
 }
 
-// TestInputCaretIsStaticReverseVideo covers #1826 item 7. The inline inputs used to
+// TestInputCaretIsStaticFocusColor covers #1826 item 7. The inline inputs used to
 // append a literal "_", which is indistinguishable from a typed underscore. The
-// replacement is a reverse-video cell — and it is STATIC: no blink, per the
+// replacement is a fixed-colour cell — and it is STATIC: no blink, per the
 // no-animation doctrine of #1766.
-func TestInputCaretIsStaticReverseVideo(t *testing.T) {
+func TestInputCaretIsStaticFocusColor(t *testing.T) {
 	forceProfile(t, termenv.TrueColor)
 
 	caret := InputCaret()
-	if !strings.Contains(caret, reverseVideoSGR) {
-		t.Errorf("want a reverse-video caret, got %q", caret)
+	if !strings.Contains(caret, termenv.TrueColor.FromColor(CurrentTheme().Accent).Sequence(true)) {
+		t.Errorf("want a focus-colour caret, got %q", caret)
 	}
 	if strings.Contains(caret, "_") {
 		t.Errorf("the literal underscore caret must be gone, got %q", caret)
@@ -88,8 +83,8 @@ func TestHooksPaneRendersCaretNotUnderscore(t *testing.T) {
 	h.editBuffer = "make lint"
 
 	out := h.String()
-	if !strings.Contains(out, reverseVideoSGR) {
-		t.Errorf("want the edit line to carry a reverse-video caret, got %q", out)
+	if !strings.Contains(out, InputCaret()) {
+		t.Errorf("want the edit line to carry a focus-colour caret, got %q", out)
 	}
 	if strings.Contains(out, "make lint_") {
 		t.Errorf("the edit buffer must not carry a literal _ caret, got %q", out)

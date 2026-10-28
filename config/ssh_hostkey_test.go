@@ -24,7 +24,7 @@ func TestValidateConfigSSHHostKeyVerification(t *testing.T) {
 		t.Run(tc.in, func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.SSHHostKeyVerification = tc.in
-			out, err := validateConfig(cfg, "test-config")
+			out, err := validateConfig(cfg, "test-config", true)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, out.SSHHostKeyVerification)
 		})

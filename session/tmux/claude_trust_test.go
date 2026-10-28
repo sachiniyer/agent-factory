@@ -1,0 +1,1340 @@
+package tmux
+
+import (
+	"errors"
+	"fmt"
+	"os/exec"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	cmd_test "github.com/sachiniyer/agent-factory/cmd/cmd_test"
+)
+
+// Regression tests for #3579.
+//
+// Claude Code 2.1.257 reordered the folder-trust dialog so that "No, exit" is
+// the PRESELECTED option. af dismissed that dialog by tapping Enter, which was
+// written when the affirmative option was the default — so af's own dismissal
+// chose to quit the agent, and the create failed with the unrelated-looking
+// "capture-pane: exit status 1".
+//
+// The gap that let it ship is what these tests close: claudeTrustPromptPresent
+// asserted the dialog was PRESENT, and nothing asserted WHICH option the cursor
+// was on when Enter was sent. So the fixtures below are not static strings —
+// they are a live picker that moves its cursor in response to Down/Up and
+// records the label under the cursor at the moment Enter arrives. A test that
+// only counted keystrokes would pass on the buggy code.
+
+const (
+	claudeTrustYesLabel = "Yes, I trust this folder"
+	claudeTrustNoLabel  = "No, exit"
+)
+
+// claudeFolderTrustPane models Claude Code's folder-trust modal as an actual
+// picker: Down/Up move the cursor, Enter COMMITS whichever option owns it. The
+// committed label is the oracle — pressing Enter on "No, exit" is what quits
+// the agent in production, so a test that reaches that state has reproduced the
+// defect regardless of how many keys af sent to get there.
+type claudeFolderTrustPane struct {
+	// mu guards every field below, so the pane is only ever held and passed by
+	// POINTER. A copy takes its own zero-value mutex and guards nothing —
+	// which is what `go vet`'s copylocks reports, and what made the release
+	// job's vet step red while --fast lint stayed green (#3613).
+	mu       sync.Mutex
+	options  []string
+	selected int
+	// committed records the label under the cursor for every Enter af injected.
+	committed []string
+	// ordinals renders "N. " prefixes on the option rows, as some Claude Code
+	// builds do. The label — never the ordinal — must be what af navigates by.
+	ordinals bool
+	// boxed wraps the modal in the box-drawing frame Claude Code draws around
+	// it, so the parser is exercised against bordered rows and not just the
+	// bare lines the issue's poller printed.
+	boxed bool
+	// staleFrames makes the N captures that FOLLOW a movement key return the
+	// pre-movement frame, modelling the terminal repaint race between
+	// `send-keys` returning and the redraw actually landing.
+	staleFrames  int
+	pendingStale int
+	stale        string
+	// frozen holds the LAST painted frame on screen no matter what the picker's
+	// internal selection does, modelling an application whose redraw has not
+	// reached the terminal yet.
+	frozen bool
+	// deaf is how many movement keys the picker DROPS before it starts acting on
+	// them — Claude Code does exactly this in the instant after it paints the
+	// dialog, before it is reading input.
+	deaf int
+}
+
+func (p *claudeFolderTrustPane) freeze(frozen bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if frozen && p.stale == "" {
+		p.stale = p.render()
+	}
+	p.frozen = frozen
+}
+
+func (p *claudeFolderTrustPane) render() string {
+	var b strings.Builder
+	write := func(line string) {
+		if p.boxed {
+			fmt.Fprintf(&b, "│ %-48s │\n", line)
+			return
+		}
+		b.WriteString(line + "\n")
+	}
+	if p.boxed {
+		b.WriteString("╭" + strings.Repeat("─", 50) + "╮\n")
+	}
+	write("Quick safety check:")
+	write("Is this a project you created or one you trust?")
+	write("")
+	for idx, option := range p.options {
+		row := "  "
+		if idx == p.selected {
+			row = "❯ "
+		}
+		if p.ordinals {
+			row += fmt.Sprintf("%d. ", idx+1)
+		}
+		write(row + option)
+	}
+	write("")
+	write("Enter to confirm · Esc to cancel")
+	if p.boxed {
+		b.WriteString("╰" + strings.Repeat("─", 50) + "╯\n")
+	}
+	return b.String()
+}
+
+// capture answers a capture-pane, honoring any pending repaint lag.
+func (p *claudeFolderTrustPane) capture() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.committed) > 0 {
+		// The dialog is gone once af answered it; the composer is what a pane
+		// that accepted the affirmative option actually shows next.
+		return "╭──────────────────────────────────────────╮\n│ > Try \"how do I…\"                        │\n╰──────────────────────────────────────────╯\n? for shortcuts\n"
+	}
+	if p.frozen {
+		return p.stale
+	}
+	if p.pendingStale > 0 {
+		p.pendingStale--
+		return p.stale
+	}
+	return p.render()
+}
+
+// key applies one injected keystroke to the picker.
+func (p *claudeFolderTrustPane) key(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.committed) > 0 {
+		return
+	}
+	if p.deaf > 0 && (name == "Down" || name == "Up") {
+		p.deaf--
+		return
+	}
+	switch name {
+	case "Down":
+		p.stale, p.pendingStale = p.render(), p.staleFrames
+		p.selected = (p.selected + 1) % len(p.options)
+	case "Up":
+		p.stale, p.pendingStale = p.render(), p.staleFrames
+		p.selected = (p.selected - 1 + len(p.options)) % len(p.options)
+	case "Enter":
+		p.committed = append(p.committed, p.options[p.selected])
+	}
+}
+
+func (p *claudeFolderTrustPane) selectedIndex() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.selected
+}
+
+func (p *claudeFolderTrustPane) committedLabels() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.committed...)
+}
+
+// driveClaudeTrustPane runs CheckAndHandleTrustPrompt against the live picker
+// until it answers the dialog or the poll budget runs out, mirroring
+// task.DismissTrustPrompt's repeated calls. It returns every send-keys command
+// issued across the whole run.
+func driveClaudeTrustPane(t *testing.T, pane *claudeFolderTrustPane, polls int) []string {
+	t.Helper()
+	advance := setClaudeTrustClock(t)
+	session, keys := claudeTrustSession(t, pane)
+	for i := 0; i < polls; i++ {
+		// One daemon poll interval between checks. af declines to type into a
+		// dialog it has only just seen (claudeTrustSettleDelay), so a driver
+		// that never let time pass would never get a keystroke at all — which
+		// is the production behavior, not a harness detail.
+		advance(time.Second)
+		if !session.CheckAndHandleTrustPrompt() {
+			break
+		}
+		if len(pane.committedLabels()) > 0 {
+			break
+		}
+	}
+	return *keys
+}
+
+// claudeTrustSession binds a session to the live picker and returns it together
+// with the send-keys commands it issues, so a test can poll it by hand.
+func claudeTrustSession(t *testing.T, pane *claudeFolderTrustPane) (*TmuxSession, *[]string) {
+	t.Helper()
+	keys := &[]string{}
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			if !strings.Contains(joined, "send-keys") {
+				return nil
+			}
+			*keys = append(*keys, joined)
+			for _, name := range injectedKeyNames([]string{joined}) {
+				pane.key(name)
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				return []byte("0 0 0"), nil
+			}
+			return []byte(pane.capture()), nil
+		},
+	}
+	return newTmuxSession(toTmuxName("trust", ""), ProgramClaude, NewMockPtyFactory(t), cmdExec), keys
+}
+
+// This is the assertion the issue names as missing: not that a keystroke was
+// sent, but WHICH option the cursor was on when Enter reached the dialog. It
+// fails on master for every fixture whose preselected row is "No, exit".
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustCommitsTheAffirmativeOption(t *testing.T) {
+	tests := []struct {
+		name     string
+		pane     *claudeFolderTrustPane
+		wantKeys []string
+	}{
+		{
+			name: "No first, preselected — Claude Code 2.1.257/2.1.258 (#3579)",
+			pane: &claudeFolderTrustPane{
+				options:  []string{claudeTrustNoLabel, claudeTrustYesLabel},
+				selected: 0,
+			},
+			wantKeys: []string{"Down", "Enter"},
+		},
+		{
+			name: "Yes first, preselected — the historical order",
+			pane: &claudeFolderTrustPane{
+				options:  []string{claudeTrustYesLabel, claudeTrustNoLabel},
+				selected: 0,
+			},
+			wantKeys: []string{"Enter"},
+		},
+		{
+			name: "Yes first, cursor parked on No",
+			pane: &claudeFolderTrustPane{
+				options:  []string{claudeTrustYesLabel, claudeTrustNoLabel},
+				selected: 1,
+			},
+			wantKeys: []string{"Up", "Enter"},
+		},
+		{
+			name: "No first, numbered rows",
+			pane: &claudeFolderTrustPane{
+				options:  []string{claudeTrustNoLabel, claudeTrustYesLabel},
+				selected: 0,
+				ordinals: true,
+			},
+			wantKeys: []string{"Down", "Enter"},
+		},
+		{
+			name: "No first, drawn inside the modal frame",
+			pane: &claudeFolderTrustPane{
+				options:  []string{claudeTrustNoLabel, claudeTrustYesLabel},
+				selected: 0,
+				boxed:    true,
+			},
+			wantKeys: []string{"Down", "Enter"},
+		},
+		{
+			name: "three options, affirmative last",
+			pane: &claudeFolderTrustPane{
+				options:  []string{claudeTrustNoLabel, "No, and don't ask again", claudeTrustYesLabel},
+				selected: 0,
+				ordinals: true,
+			},
+			wantKeys: []string{"Down", "Down", "Enter"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keys := driveClaudeTrustPane(t, tt.pane, 6)
+			require.Equal(t, []string{claudeTrustYesLabel}, tt.pane.committedLabels(),
+				"af must confirm the affirmative option, exactly once; keystrokes were %v", keys)
+			require.Equal(t, tt.wantKeys, injectedKeyNames(keys),
+				"af must reach the affirmative row by reading the pane, not by a fixed key sequence")
+		})
+	}
+}
+
+// The repaint between `send-keys Down` and the redraw is asynchronous. A stale
+// frame must never be read as "the cursor did not move" and answered with a
+// second movement key, and it must never be answered with Enter either — the
+// confirmation read is what makes the selection safe.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustWaitsForTheRepaint(t *testing.T) {
+	pane := claudeFolderTrustPane{
+		options:     []string{claudeTrustNoLabel, claudeTrustYesLabel},
+		selected:    0,
+		staleFrames: 2,
+	}
+	keys := driveClaudeTrustPane(t, &pane, 6)
+	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels(),
+		"a lagging repaint must not change which option af confirms; keystrokes were %v", keys)
+	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(keys),
+		"af must wait for the redraw rather than re-sending the movement key; got %v", keys)
+}
+
+// injectedKeyNames flattens the recorded send-keys commands into the key names
+// that reached the pane, in order.
+func injectedKeyNames(cmds []string) []string {
+	var keys []string
+	for _, c := range cmds {
+		fields := strings.Fields(c)
+		for idx, field := range fields {
+			if field == "send-keys" {
+				// skip "send-keys -t <target>"
+				keys = append(keys, fields[idx+3:]...)
+				break
+			}
+		}
+	}
+	return keys
+}
+
+// dialogFixture renders a folder-trust modal without driving it, for the
+// parser's own table.
+func dialogFixture(pane *claudeFolderTrustPane) string { return pane.render() }
+
+// The parser is what decides which key af presses, so it is tested on its own
+// against both orders the dialog has shipped with — and against the shapes it
+// must REFUSE rather than guess at. A refusal costs a retry and a loud log; a
+// guess costs the user's agent (#3579).
+func TestParseClaudeFolderTrustDialog(t *testing.T) {
+	noFirst := dialogFixture(&claudeFolderTrustPane{
+		options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, selected: 0})
+	yesFirst := dialogFixture(&claudeFolderTrustPane{
+		options: []string{claudeTrustYesLabel, claudeTrustNoLabel}, selected: 0})
+	yesFirstOnNo := dialogFixture(&claudeFolderTrustPane{
+		options: []string{claudeTrustYesLabel, claudeTrustNoLabel}, selected: 1})
+
+	t.Run("No first: the affirmative row is below the cursor", func(t *testing.T) {
+		dialog, err := parseClaudeFolderTrustDialog(noFirst)
+		require.NoError(t, err)
+		require.Equal(t, claudeTrustNoLabel, dialog.selectedLabel())
+		require.False(t, dialog.onAffirmative())
+		require.Equal(t, "Down", dialog.keyTowardAffirmative())
+	})
+
+	t.Run("Yes first, preselected: nothing to move", func(t *testing.T) {
+		dialog, err := parseClaudeFolderTrustDialog(yesFirst)
+		require.NoError(t, err)
+		require.Equal(t, claudeTrustYesLabel, dialog.selectedLabel())
+		require.True(t, dialog.onAffirmative())
+	})
+
+	t.Run("Yes first, cursor below it", func(t *testing.T) {
+		dialog, err := parseClaudeFolderTrustDialog(yesFirstOnNo)
+		require.NoError(t, err)
+		require.False(t, dialog.onAffirmative())
+		require.Equal(t, "Up", dialog.keyTowardAffirmative())
+	})
+
+	t.Run("ordinals and box borders are chrome, not identity", func(t *testing.T) {
+		for _, pane := range []*claudeFolderTrustPane{
+			{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, ordinals: true},
+			{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, boxed: true},
+			{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, boxed: true, ordinals: true},
+		} {
+			dialog, err := parseClaudeFolderTrustDialog(dialogFixture(pane))
+			require.NoError(t, err)
+			require.Equal(t, claudeTrustNoLabel, dialog.selectedLabel())
+			require.Equal(t, "Down", dialog.keyTowardAffirmative())
+		}
+	})
+
+	t.Run("ANSI colour does not hide the rows", func(t *testing.T) {
+		coloured := strings.ReplaceAll(noFirst, "❯", "\x1b[1m❯\x1b[0m")
+		coloured = strings.ReplaceAll(coloured, claudeTrustYesLabel, "\x1b[32m"+claudeTrustYesLabel+"\x1b[0m")
+		dialog, err := parseClaudeFolderTrustDialog(coloured)
+		require.NoError(t, err)
+		require.Equal(t, "Down", dialog.keyTowardAffirmative())
+	})
+
+	// Every case below must be an ERROR, never a best guess.
+	refusals := []struct {
+		name    string
+		content string
+		reason  string
+	}{
+		{
+			name:    "neither row found",
+			content: "Quick safety check:\nIs this a project you created or one you trust?\n",
+			reason:  "no row carries the \"❯\" selection cursor and none is labelled",
+		},
+		{
+			name: "no cursor: a frame caught mid-repaint",
+			content: "Quick safety check:\nIs this a project you created or one you trust?\n\n" +
+				"  1. " + claudeTrustNoLabel + "\n  2. " + claudeTrustYesLabel + "\n",
+			reason: "no row carries",
+		},
+		{
+			name: "affirmative label present but no cursor anywhere",
+			content: "Is this a project you created or one you trust?\n" +
+				claudeTrustYesLabel + "\n",
+			reason: "no row carries",
+		},
+		{
+			name: "two cursors: af cannot tell which row is selected",
+			content: "Is this a project you created or one you trust?\n\n" +
+				"❯ " + claudeTrustNoLabel + "\n❯ " + claudeTrustYesLabel + "\n",
+			reason: "2 rows carry",
+		},
+		{
+			name: "the label also appears elsewhere on screen",
+			content: "❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n" +
+				"  " + claudeTrustYesLabel + "\n",
+			reason: "2 rows are labelled",
+		},
+		{
+			name: "a label carrying trailing prose is not an option row",
+			content: "❯ Resume the previous conversation\n" +
+				claudeTrustYesLabel + " (quoted from the docs)\n" +
+				"Enter to confirm · Esc to cancel\n",
+			reason: "no row is labelled",
+		},
+		{
+			name: "the cursor and the label are not one picker",
+			content: "❯ Resume the previous conversation\n\nsome output\n\n" +
+				claudeTrustYesLabel + "\n\nEnter to confirm · Esc to cancel\n",
+			reason: "not in one unbroken block",
+		},
+		{
+			name:    "one option is not a picker",
+			content: "❯ " + claudeTrustYesLabel + "\n\nEnter to confirm · Esc to cancel\n",
+			reason:  "is the only row in its block",
+		},
+		{
+			name:    "no modal footer under the options",
+			content: "❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\nsomething else\n",
+			reason:  "not followed by the modal's",
+		},
+		{
+			name: "a quoted dialog with the agent's composer painted below it",
+			content: "❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\n" +
+				"Enter to confirm · Esc to cancel\n\n" +
+				"╭──────────────────────────────╮\n│ > Type your message here     │\n╰──────────────────────────────╯\n",
+			reason: "content is painted below",
+		},
+	}
+	for _, tt := range refusals {
+		t.Run("refuses: "+tt.name, func(t *testing.T) {
+			_, err := parseClaudeFolderTrustDialog(tt.content)
+			require.Error(t, err, "af must refuse a dialog it cannot read, not guess at it")
+			require.Contains(t, err.Error(), tt.reason)
+		})
+	}
+}
+
+// A dialog af cannot read must cost a keystroke af does NOT send. The create's
+// trust-prompt budget then fails the start loudly, which is recoverable; the
+// alternative is #3579 — Enter on whatever happened to be selected.
+func TestCheckAndHandleTrustPrompt_UnreadableClaudeFolderTrustDialogIsRefused(t *testing.T) {
+	// The dialog is unmistakably present (claudeTrustPromptPresent matches) but
+	// no row carries the cursor, so there is nothing af can aim at.
+	content := "Quick safety check:\nIs this a project you created or one you trust?\n\n" +
+		"  1. " + claudeTrustNoLabel + "\n  2. " + claudeTrustYesLabel + "\n\n" +
+		"Enter to confirm · Esc to cancel\n"
+
+	_, _, errLog := captureTrustPromptLogs(t)
+	handled, cmds := runTrustPromptCheck(t, ProgramClaude, content)
+	require.True(t, handled, "the dialog is still in the way, so the caller may not type into the pane (#3302)")
+	require.Empty(t, sentKeystrokes(cmds),
+		"af must not press a key it cannot aim at the affirmative row; got %v", cmds)
+	require.Contains(t, errLog.String(), claudeTrustYesLabel,
+		"the refusal must name what af was trying to select")
+}
+
+// The MCP-server prompt and the legacy folder-trust wording render no
+// "Yes, I trust this folder" row. Neither is what regressed, and both keep the
+// historical Enter tap on Claude Code's own preselection.
+func TestCheckAndHandleTrustPrompt_NonFolderClaudeGatesKeepTheEnterTap(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{"MCP server trust", "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes\n  2. No\nEnter to confirm"},
+		{"legacy folder-trust wording", "Do you trust the files in this folder?\n❯ Yes  No"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := runTrustPromptCheck(t, ProgramClaude, tt.content)
+			require.True(t, handled)
+			require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)))
+		})
+	}
+}
+
+// A repaint that never lands must cost a poll, not a confirmation. af has no
+// proof of where the cursor is, so it sends no Enter — and it does not re-send
+// the movement key either, which is how a stale frame would make it overshoot.
+// The window is driven on a virtual clock so the test does not sleep through it.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustNeverRepaintsSoNothingIsConfirmed(t *testing.T) {
+	setClaudeTrustClock(t)
+
+	_, _, errLog := captureTrustPromptLogs(t)
+	pane := claudeFolderTrustPane{
+		options:     []string{claudeTrustNoLabel, claudeTrustYesLabel},
+		staleFrames: 1 << 20, // the redraw never arrives
+	}
+	// Two polls: the first notes that the dialog appeared, the second is the
+	// one that types into it.
+	keys := driveClaudeTrustPane(t, &pane, 2)
+
+	require.Empty(t, pane.committedLabels(), "af must not confirm a selection it could not verify")
+	require.Equal(t, []string{"Down"}, injectedKeyNames(keys),
+		"exactly one movement key, and no Enter behind it; got %v", keys)
+	require.Empty(t, errLog.String(), "an unproven repaint is a retry, not an error")
+}
+
+// setClaudeTrustClock installs a virtual clock for the repaint window and
+// returns a knob that advances it, so a test can age a pending movement without
+// sleeping through it.
+func setClaudeTrustClock(t *testing.T) func(time.Duration) {
+	t.Helper()
+	if claudeTrustVirtualNow != nil {
+		return claudeTrustVirtualAdvance
+	}
+	now := time.Now()
+	previousNow, previousSleep := claudeTrustNow, claudeTrustSleep
+	claudeTrustVirtualNow = &now
+	claudeTrustVirtualAdvance = func(d time.Duration) { now = now.Add(d) }
+	t.Cleanup(func() {
+		claudeTrustNow, claudeTrustSleep = previousNow, previousSleep
+		claudeTrustVirtualNow, claudeTrustVirtualAdvance = nil, nil
+	})
+	claudeTrustNow = func() time.Time { return now }
+	claudeTrustSleep = func(d time.Duration) { now = now.Add(d) }
+	return claudeTrustVirtualAdvance
+}
+
+// claudeTrustVirtualNow/Advance let a test install the virtual clock and then
+// hand the SAME clock to driveClaudeTrustPane, rather than shadowing it with a
+// second one whose time never moves.
+var (
+	claudeTrustVirtualNow     *time.Time
+	claudeTrustVirtualAdvance func(time.Duration)
+)
+
+// #3587 review, P1. `send-keys` returning is not proof the key landed, and a
+// terminal that has not repainted is not proof it did not. If af re-sent the
+// movement key on the next poll against a frame that had not caught up, the
+// picker's real cursor — already moved — would be pushed BACK off the
+// affirmative row; a redraw landing between the verification and confirmation
+// captures could then let Enter reach "No, exit" and reproduce #3579 through
+// the very code that fixes it.
+//
+// So a movement key af did not see land makes this handler read-only until a
+// frame proves the cursor moved.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustDoesNotResendAnUnverifiedMove(t *testing.T) {
+	advance := setClaudeTrustClock(t)
+	_, _, errLog := captureTrustPromptLogs(t)
+
+	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
+	session, keys := claudeTrustSession(t, pane)
+
+	// The terminal stops repainting the moment af starts driving the picker.
+	require.True(t, session.CheckAndHandleTrustPrompt()) // notes when the dialog appeared
+	advance(claudeTrustSettleDelay)
+	pane.freeze(true)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys))
+	require.Equal(t, 1, pane.selectedIndex(),
+		"precondition: the picker's INTERNAL selection moved, even though the screen still shows the old row")
+
+	for i := 0; i < 5; i++ {
+		require.True(t, session.CheckAndHandleTrustPrompt(), "the dialog is still in the way")
+	}
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys),
+		"a second movement key would push the cursor back off %q; got %v", claudeTrustYesLabel, *keys)
+	require.Empty(t, pane.committedLabels(), "nothing may be confirmed while af cannot see the cursor")
+
+	// The redraw finally lands, inside the window. af has its proof, and
+	// confirms — with no second movement key anywhere in the sequence.
+	pane.freeze(false)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(*keys))
+	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
+	require.Empty(t, errLog.String())
+}
+
+// #3587 review round 2, P1. The earlier version of this fix released the hold
+// on a TIMER — "the cursor never moved in 3s, so the key must have been
+// dropped, re-send it". That inference is not available: a key the agent has
+// BUFFERED but not yet processed looks exactly like a key it never received,
+// and the two want opposite actions.
+//
+// Getting it wrong is not a small cost, because this picker WRAPS. Measured on
+// claude 2.1.258:
+//
+//	start:         ❯ No, exit
+//	after Down #1: ❯ Yes, I trust this folder
+//	after Down #2: ❯ No, exit          <- back to the option that quits
+//
+// So a duplicate movement key does not clamp harmlessly; it undoes the move,
+// and a repaint landing between af's verification and confirmation captures
+// would then let Enter reach "No, exit" — #3579 again. af therefore never
+// re-sends: it holds, reports, and lets the create fail loudly.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustNeverResendsAMovementKey(t *testing.T) {
+	advance := setClaudeTrustClock(t)
+	_, _, errLog := captureTrustPromptLogs(t)
+
+	// A picker that never acts on a movement key, however many arrive.
+	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, deaf: 1 << 20}
+	session, keys := claudeTrustSession(t, pane)
+
+	require.True(t, session.CheckAndHandleTrustPrompt()) // records when the dialog appeared
+	advance(claudeTrustSettleDelay)
+	require.True(t, session.CheckAndHandleTrustPrompt()) // settled: af sends its one movement key
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys), "precondition: af sent one movement key")
+
+	// However long af waits, and however many polls run, it sends nothing more.
+	for i := 0; i < 8; i++ {
+		advance(claudeTrustHoldReportAfter)
+		require.True(t, session.CheckAndHandleTrustPrompt(), "the dialog is still in the way")
+	}
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys),
+		"elapsed time is not evidence the key was dropped, and this picker wraps; got %v", *keys)
+	require.Empty(t, pane.committedLabels(), "nothing may be confirmed while af cannot see the cursor")
+
+	// The operator is told why the session is stuck — once, not every poll.
+	require.Contains(t, errLog.String(), "af will not send another")
+	require.Equal(t, 1, strings.Count(errLog.String(), "af will not send another"),
+		"the hold is reported once per dialog, not on every tick of the daemon poll")
+}
+
+// Claude Code drops keys sent in the instant after it paints this dialog, before
+// it is reading input — measured on 2.1.258 at roughly one create in six. Since
+// a dropped key can never be safely re-sent (above), the only remedy is not to
+// send it too early: af waits for the dialog to settle before it types.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustWaitsForTheDialogToSettle(t *testing.T) {
+	advance := setClaudeTrustClock(t)
+	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
+	session, keys := claudeTrustSession(t, pane)
+
+	require.True(t, session.CheckAndHandleTrustPrompt(), "a dialog af has only just seen is still in the way")
+	require.Empty(t, injectedKeyNames(*keys),
+		"af must not type into a dialog Claude Code has only just painted; got %v", *keys)
+
+	// Still too soon.
+	advance(claudeTrustSettleDelay / 2)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Empty(t, injectedKeyNames(*keys))
+
+	// Settled: now af drives it.
+	advance(claudeTrustSettleDelay)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(*keys))
+	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
+}
+
+// #3587 review, P2. RestoreWithResult respawns a missing session through Start
+// on the SAME TmuxSession. Cross-poll state describes one pane process: a
+// movement key pending against the dead pane must not hold its replacement, and
+// a refusal already reported for the dead pane must not silence the same
+// refusal for the new one.
+func TestStart_ResetsClaudeTrustStateAtTheProvenRuntimeBoundary(t *testing.T) {
+	session := newTmuxSession(toTmuxName("respawn", ""), ProgramClaude, NewMockPtyFactory(t), cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			for _, arg := range c.Args {
+				if arg == "has-session" {
+					// Determinate absence: Start proceeds past the existence gate.
+					return errors.New("can't find session")
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, errors.New("no server running") },
+	})
+	session.claudeTrust = claudeTrustState{refusalLogged: true, pendingFrom: claudeTrustNoLabel}
+
+	// Start fails somewhere after the resets — which is fine; the boundary is
+	// the name being proven absent, not the launch succeeding.
+	_ = session.Start(t.TempDir())
+
+	require.Equal(t, claudeTrustState{}, session.claudeTrust,
+		"a new pane process inherits no pending movement and no silenced refusal")
+}
+
+// A frame af cannot parse at all is not evidence that a pending movement key
+// did nothing either, so it holds rather than refusing and starting over.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustHoldsThroughAnUnparseableFrame(t *testing.T) {
+	advance := setClaudeTrustClock(t)
+	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
+	session, keys := claudeTrustSession(t, pane)
+
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	advance(claudeTrustSettleDelay)
+	pane.freeze(true)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys))
+
+	// A capture caught mid-repaint: the dialog's text is there, but no row
+	// carries the cursor.
+	pane.mu.Lock()
+	pane.stale = "Quick safety check:\nIs this a project you created or one you trust?\n\n" +
+		"  " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\nEnter to confirm · Esc to cancel\n"
+	pane.mu.Unlock()
+	advance(time.Second)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys),
+		"an unreadable frame must not release the pending movement; got %v", *keys)
+}
+
+// pollStaticPane drives CheckAndHandleTrustPrompt over unchanging content for
+// several daemon poll intervals, so af's settle delay is crossed and the pane
+// is genuinely offered as something af could type into. A single call would
+// prove nothing now that af declines to touch a dialog it has only just seen.
+func pollStaticPane(t *testing.T, content string, polls int) (handled bool, cmds []string) {
+	t.Helper()
+	advance := setClaudeTrustClock(t)
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			cmds = append(cmds, strings.Join(c.Args, " "))
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				return []byte("0 0 0"), nil
+			}
+			return []byte(content), nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("quoted", ""), ProgramClaude, NewMockPtyFactory(t), cmdExec)
+	for i := 0; i < polls; i++ {
+		advance(time.Second)
+		handled = session.CheckAndHandleTrustPrompt()
+	}
+	return handled, cmds
+}
+
+// #3587 review, P1. This handler runs on the daemon's continuous poll against
+// ARBITRARY agent output, and Down/Up/Enter typed into a working composer
+// cannot be taken back. Output that quotes the dialog — including this repo's
+// own source and issue text, which is how #1952 and #2638 happened — must
+// inject nothing, however long it stays on screen.
+func TestCheckAndHandleTrustPrompt_QuotedClaudeFolderTrustDialogInjectsNothing(t *testing.T) {
+	dialog := "Quick safety check: Is this a project you created or one you trust?\n\n" +
+		"❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\n" +
+		"Enter to confirm · Esc to cancel\n"
+
+	for _, tt := range []struct{ name, content string }{
+		{
+			// The agent is showing the dialog inside its own transcript, with
+			// its composer painted below — the shape every live pane has.
+			name: "quoted above the agent's composer",
+			content: dialog + "\n╭────────────────────────────────────╮\n" +
+				"│ > Type your message here           │\n╰────────────────────────────────────╯\n? for shortcuts\n",
+		},
+		{
+			name:    "quoted with trailing prose",
+			content: dialog + "\nThat is the dialog af answers at startup.\n",
+		},
+		{
+			name: "the label mentioned in a sentence next to the composer cursor",
+			content: "Quick safety check: Is this a project you created or one you trust?\n" +
+				"❯ I will select \"" + claudeTrustYesLabel + "\" for you\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.True(t, handled, "af has not OBSERVED a dialog-free pane, so it may not report one (#3302)")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into a pane that only quotes the dialog; got %v", cmds)
+		})
+	}
+}
+
+// The same guard from the other side: a pane showing the REAL dialog, polled
+// the same way, is driven. Without this, the test above could pass because af
+// had stopped answering dialogs entirely.
+func TestCheckAndHandleTrustPrompt_RealClaudeFolderTrustDialogIsStillDriven(t *testing.T) {
+	pane := claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
+	keys := driveClaudeTrustPane(t, &pane, 6)
+	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
+	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(keys))
+}
+
+// The legacy folder-trust wording ("Do you trust the files in this folder?")
+// is anchored on its unique question AND its picker row (the
+// claudeTrustSelectionGlyph "❯" on the Yes option) being the LAST non-blank
+// content on screen, the same footer-is-last discipline the MCP branch uses.
+// This handler runs on the daemon's continuous poll against ARBITRARY agent
+// output, and Enter typed into a working composer cannot be taken back. Output
+// that quotes the legacy wording — including this repo's own source (where the
+// phrase appears verbatim in trust_prompt.go and this file's docstrings), and issue
+// text — must inject nothing, however long it stays on screen. The legacy
+// branch was the last trust predicate in this file that matched on a single
+// bare phrase; this test is the quote-negative test that was missing for it
+// (every sibling branch already has one).
+func TestCheckAndHandleTrustPrompt_QuotedLegacyFolderTrustDialogInjectsNothing(t *testing.T) {
+	legacyPhrase := "Do you trust the files in this folder?"
+	pickerRow := "❯ Yes  No"
+
+	for _, tt := range []struct{ name, content string }{
+		{
+			// The phrase quoted above the agent's composer — the shape every
+			// live pane has, and the exact shape the MCP and reworded branches
+			// refuse. The picker row is NOT last (the composer is below it),
+			// so the legacy branch must refuse too.
+			name: "quoted above the agent's composer",
+			content: "I remember when Claude asked: \"" + legacyPhrase + "\"\n" +
+				"That prompt is gone now.\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ > Type your message here            │\n" +
+				"╰────────────────────────────────────╯\n" +
+				"? for shortcuts\n",
+		},
+		{
+			// The phrase in agent prose with content painted below it — the
+			// composer's own input box is below the quoted line.
+			name: "quoted with trailing prose and composer",
+			content: "I read in the docs: \"" + legacyPhrase + "\"\n" +
+				"That is what af used to type Enter into.\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ > Type your message here            │\n" +
+				"╰────────────────────────────────────╯\n",
+		},
+		{
+			// The phrase appears verbatim with no picker chrome at all — the
+			// shape of a code review or explanation that mentions the dialog.
+			name: "phrase in agent prose without chrome",
+			content: "The bug report quotes the dialog: \"" + legacyPhrase + "\"\n" +
+				"That is no longer a string af should treat as a prompt.\n" +
+				"? for shortcuts\n",
+		},
+		{
+			// The phrase above the legacy picker row but with another row painted
+			// below it — a quoted dialog whose transcript continues underneath.
+			// The picker row is NOT last, so the predicate must refuse.
+			name: "picker row with trailing content painted below it",
+			content: legacyPhrase + "\n" +
+				pickerRow + "\n" +
+				"That is the end of the dialog af used to tap Enter on.\n" +
+				"? for shortcuts\n",
+		},
+		{
+			// The phrase above the agent's own composer that happens to use the
+			// selection glyph in its input box. The composer row IS the last
+			// non-blank line, but it is the composer — its label does not begin
+			// with "Yes", so the picker check fails.
+			name: "phrase above the composer whose input box carries the composer cursor",
+			content: "I quoted \"" + legacyPhrase + "\" in my reply\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ ❯ Yes, I will fix that now         │\n" +
+				"╰────────────────────────────────────╯\n" +
+				"? for shortcuts\n",
+		},
+		{
+			// The composer IS the last visible content (no "? for shortcuts"
+			// below it) and its draft begins with "Yes". The composer shares
+			// the ❯ glyph with the picker, so a bare "label begins with yes"
+			// test would mark this row as the picker and submit the draft with
+			// Enter. The picker check must match the legacy option-row shape —
+			// the Yes AND No options together — not any label beginning with
+			// "yes". The draft does not reproduce the No option, so the
+			// predicate refuses and no Enter is injected.
+			name: "composer draft beginning with Yes is the last visible content",
+			content: "I was asked: \"" + legacyPhrase + "\"\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ ❯ Yes, I will fix that now         │\n" +
+				"╰────────────────────────────────────╯\n",
+		},
+		{
+			// Same cross-dialog hazard with a draft beginning "Yesterday": a
+			// prefix test accepts it because HasPrefix(lower, "yes") is true.
+			// The picker check requires the Yes/No option pair, so the prose
+			// draft is refused.
+			name: "composer draft beginning with Yesterday is the last visible content",
+			content: "I was asked: \"" + legacyPhrase + "\"\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ ❯ Yesterday I finished that task   │\n" +
+				"╰────────────────────────────────────╯\n",
+		},
+		{
+			// A composer draft that is exactly "Yes" — the row that a bare
+			// selected-and-prefix test could not tell from the stacked
+			// picker's selected Yes row. The picker check requires the No
+			// option alongside it, and a single "Yes" row has no No, so the
+			// predicate refuses.
+			name: "composer draft that is exactly Yes is the last visible content",
+			content: "I was asked: \"" + legacyPhrase + "\"\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ ❯ Yes                              │\n" +
+				"╰────────────────────────────────────╯\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled,
+				"a pane that merely quotes the legacy phrase is not a live modal; af must not report one in the way")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into a pane that only quotes the legacy dialog; got %v", cmds)
+		})
+	}
+}
+
+// The same guard from the other side: a pane showing the REAL legacy dialog —
+// the picker row last, nothing painted below it — still fires Enter, so the
+// guard does not stop af answering a genuine launch gate. The legacy dialog's
+// affirmative option's preselection is "Yes", so a bare Enter accepts it, the
+// same way the MCP branch taps Enter on Claude Code's MCP preselection.
+func TestCheckAndHandleTrustPrompt_RealLegacyFolderTrustDialogStillFiresEnter(t *testing.T) {
+	legacyModal := "Do you trust the files in this folder?\n❯ Yes  No"
+
+	for _, tt := range []struct{ name, content string }{
+		{"legacy modal with Yes preselected, picker last", legacyModal},
+		{
+			// The legacy picker row may carry a numeric ordinal on the selected
+			// option ("❯ 1. Yes  2. No"); claudeTrustRowOf strips the ordinal so
+			// the row reduces to "Yes  2. No" and the picker check still fires.
+			name:    "legacy modal with numeric ordinal on the selected row",
+			content: "Do you trust the files in this folder?\n❯ 1. Yes  2. No",
+		},
+		{
+			// The legacy modal may render inside a box frame; the box-drawing
+			// chrome is stripped by claudeTrustRowOf, so the picker row still
+			// reduces to the same selected Yes row.
+			name: "legacy modal framed in a box",
+			content: "╭────────────────────────────────────╮\n" +
+				"│ Do you trust the files in this folder?│\n" +
+				"│ ❯ Yes  No                            │\n" +
+				"╰────────────────────────────────────╯\n",
+		},
+		{
+			// The legacy picker may stack its options on separate rows, with
+			// the selected Yes row immediately above the unselected No row.
+			// task/runner_test.go:60 records this stacked layout as a known
+			// Claude trust shape, so the dismissal must recognise it too —
+			// otherwise readiness succeeds but DismissTrustPrompt treats the
+			// pane as dialog-free and delivers the initial prompt into the
+			// live modal. The No row is the last non-blank content; the row
+			// immediately above it is the selected Yes row, so the picker
+			// check fires.
+			name:    "legacy modal with options stacked on separate rows",
+			content: "Do you trust the files in this folder?\n❯ 1. Yes\n  2. No",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := runTrustPromptCheck(t, ProgramClaude, tt.content)
+			require.True(t, handled, "the live legacy modal is in the way")
+			require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+				"the real legacy modal keeps the historical Enter tap on Claude Code's preselection")
+		})
+	}
+}
+
+// Claude Code paints the legacy folder-trust dialog top-to-bottom: the
+// question first, then the picker row. A capture taken between the question
+// and the picker shows a partially rendered dialog. This capture must block
+// (return true) — "I could not confirm the dialog structure" and "the pane is
+// dialog-free" are different answers and must not map to the same return value,
+// the same fail-closed partial-render path the MCP branch has. Without it, the
+// conjunction in claudeTrustPromptPresent returns false for this frame (the
+// question is present but the picker is not last) and task.DismissTrustPrompt
+// would deliver the user's initial prompt into the still-rendering trust
+// modal — the previous phrase-only condition kept this frame blocked, and the
+// partial-render hold restores that without re-introducing the quote-injection
+// bug.
+func TestCheckAndHandleTrustPrompt_PartiallyRenderedLegacyFolderDialogBlocks(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			// Question painted, picker row not yet rendered. The question is
+			// the last non-blank content, so the partial-render hold fires.
+			name:    "question only, picker not yet painted",
+			content: "Do you trust the files in this folder?\n\n\n\n",
+		},
+		{
+			// Same partial state with a single trailing newline — the
+			// question is still the last non-blank row.
+			name:    "question only with one trailing newline",
+			content: "Do you trust the files in this folder?\n",
+		},
+		{
+			// The bare question with nothing after it at all.
+			name:    "question only, no trailing newline",
+			content: "Do you trust the files in this folder?",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.True(t, handled,
+				"a partially rendered legacy dialog must block; reporting false lets the caller paste into it")
+			require.Empty(t, sentKeystrokes(cmds),
+				"a partially rendered dialog must not receive a key; got %v", cmds)
+		})
+	}
+}
+
+// The MCP-server trust prompt is anchored on its unique question AND the
+// modal's "Enter to confirm" footer being the LAST non-blank content on screen,
+// the same footer-is-last discipline the folder-trust branch applies. Output
+// that quotes the MCP phrase — including this repo's own source, where the
+// phrase appears verbatim — must inject nothing, however long it stays on
+// screen, because a spurious Enter lands on the agent's composer.
+func TestCheckAndHandleTrustPrompt_QuotedMCPTrustDialogInjectsNothing(t *testing.T) {
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"❯ 1. Yes\n  2. No\nEnter to confirm"
+
+	for _, tt := range []struct{ name, content string }{
+		{
+			// The modal chrome is quoted above the agent's composer — the shape
+			// every live pane has, and the exact shape the folder-trust branch
+			// refuses. The footer is NOT last, so the MCP branch must refuse too.
+			name: "quoted above the agent's composer",
+			content: mcpModal + "\n\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ > Type your message here           │\n" +
+				"╰────────────────────────────────────╯\n" +
+				"? for shortcuts\n",
+		},
+		{
+			// The phrase in agent prose with trailing content below it.
+			name:    "quoted with trailing prose",
+			content: mcpModal + "\nThat is the MCP trust dialog af answers.\n",
+		},
+		{
+			// The phrase appears verbatim with no modal chrome at all — the shape
+			// of a code review or explanation that mentions the dialog.
+			name: "phrase in agent prose without chrome",
+			content: "I see the New MCP server found prompt. Do you trust this new MCP server?\n" +
+				"❯ I will select Yes for you\n? for shortcuts\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled, "a quoted MCP phrase is not a live modal, so af must not report one in the way")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into a pane that only quotes the MCP dialog; got %v", cmds)
+		})
+	}
+}
+
+// The same guard from the other side: a pane showing the REAL MCP modal — the
+// footer last, nothing painted below it — still fires Enter, so the guard
+// does not stop af answering a genuine launch gate.
+func TestCheckAndHandleTrustPrompt_RealMCPTrustDialogStillFiresEnter(t *testing.T) {
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"❯ 1. Yes\n  2. No\nEnter to confirm"
+	handled, cmds := runTrustPromptCheck(t, ProgramClaude, mcpModal)
+	require.True(t, handled, "the live MCP modal is in the way")
+	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+		"the real MCP modal keeps the historical Enter tap on Claude Code's preselection")
+}
+
+// Claude Code paints the MCP modal top-to-bottom: question first, then options,
+// then the footer. A capture taken between the question and the footer shows a
+// partially rendered dialog. This capture must block (return true) — "I could
+// not confirm the dialog structure" and "the pane is dialog-free" are different
+// answers and must not map to the same return value. The latter permits prompt
+// delivery; the former does not.
+//
+// This is the start.go:503 finding: the pane is NOT dialog-free just because
+// the footer hasn't painted yet.
+func TestCheckAndHandleTrustPrompt_PartiallyRenderedMCPDialogBlocks(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			// Question painted, options and footer not yet rendered.
+			name:    "question only, footer not yet painted",
+			content: "New MCP server found. Do you trust this new MCP server?\n\n\n\n",
+		},
+		{
+			// Question and first option painted, footer not yet rendered.
+			name:    "question and first option, footer not yet painted",
+			content: "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes\n\n\n",
+		},
+		{
+			// Question and both options painted, footer not yet rendered.
+			name:    "question and both options, footer not yet painted",
+			content: "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes\n  2. No\n\n\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.True(t, handled,
+				"a partially rendered MCP dialog must block; reporting false lets the caller paste into it")
+			require.Empty(t, sentKeystrokes(cmds),
+				"a partially rendered dialog must not receive a key; got %v", cmds)
+		})
+	}
+}
+
+// An agent can quote the MCP question in its output — for example when
+// explaining what it did or reproducing a transcript. Even if the quoted output
+// sits immediately above an unrelated live picker (with or without an
+// intervening blank row), af must not send Enter to that picker: the Enter
+// would accept whatever it had preselected, not the MCP trust answer.
+//
+// These are the cross-dialog injection cases the option-label validation closes.
+// Each must be watched fail first to confirm the fix is real: before the
+// validation, a quoted question above an unrelated picker with no blank row
+// produced a block match and injected Enter.
+func TestCheckAndHandleTrustPrompt_MCPQuoteAboveUnrelatedPickerInjectsNothing(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			// Quoted MCP question immediately above an unrelated picker, no blank
+			// row between them. The footer ("Enter to confirm") ends the block, so
+			// the block-membership check passes — but the option labels are wrong.
+			name: "quoted question above unrelated picker, no blank row",
+			content: "New MCP server found. Do you trust this new MCP server?\n" +
+				"❯ Resume previous conversation\n" +
+				"  Start new conversation\n" +
+				"Enter to confirm",
+		},
+		{
+			// Same adversarial arrangement, with a blank row between the quoted
+			// question and the unrelated picker. The blank row puts them in
+			// different blocks, so the block-membership check already fails; this
+			// case is included to confirm the blank-row path is also safe.
+			name: "quoted question above unrelated picker, with blank row",
+			content: "New MCP server found. Do you trust this new MCP server?\n\n" +
+				"❯ Resume previous conversation\n" +
+				"  Start new conversation\n" +
+				"Enter to confirm",
+		},
+		{
+			// Unrelated picker whose options happen to end in "yes" and "no" but
+			// are not the exact MCP option labels. HasSuffix would accept these;
+			// exact match after ordinal stripping does not.
+			// Watched fail before exact-match guard: the suffix test accepted
+			// "Always yes" and "Definitely no" and sent Enter to the unrelated picker.
+			name: "unrelated picker with suffix-matching options, no blank row",
+			content: "New MCP server found. Do you trust this new MCP server?\n" +
+				"❯ Always yes\n" +
+				"  Definitely no\n" +
+				"Enter to confirm",
+		},
+		{
+			// Same adversarial arrangement with a blank separator.
+			name: "unrelated picker with suffix-matching options, with blank row",
+			content: "New MCP server found. Do you trust this new MCP server?\n\n" +
+				"❯ Always yes\n" +
+				"  Definitely no\n" +
+				"Enter to confirm",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled,
+				"a quoted MCP question above an unrelated picker is not a trust prompt; af must not report one in the way")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into an unrelated picker; got %v", cmds)
+		})
+	}
+}
+
+// The Claude picker layout places a blank row between the option rows and the
+// "Enter to confirm" footer (option rows, blank row, footer). The blank-row
+// skip in claudeMCPTrustFooterIsLast must bridge that gap so the option block
+// is found and validated, letting the real dialog still fire Enter.
+//
+// This is the "Allow the modal's blank separator before its footer" P1: without
+// the skip, the backward scan stops at the blank row, the option block is not
+// found, and the real dialog is treated as absent — allowing prompt delivery
+// into a fully rendered trust dialog.
+func TestCheckAndHandleTrustPrompt_RealMCPTrustDialogWithBlankBeforeFooterStillFiresEnter(t *testing.T) {
+	// Layout matching the Claude picker format: option rows, blank row, footer.
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"❯ 1. Yes\n" +
+		"  2. No\n" +
+		"\n" +
+		"Enter to confirm"
+	handled, cmds := runTrustPromptCheck(t, ProgramClaude, mcpModal)
+	require.True(t, handled, "the live MCP modal with blank before footer is still in the way")
+	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+		"the real MCP modal still fires Enter regardless of a blank row before the footer")
+}
+
+// The Claude picker layout may place a blank row between the question and the
+// option rows as well as between the option rows and the footer
+// (question, blank row, options, blank row, footer). The blank-row skip in
+// claudeMCPTrustFooterIsLast must bridge BOTH gaps so the question is found
+// even when it sits in the block above the options.
+//
+// This is the "Bridge the separator above MCP options" P1: without the upward
+// skip, the backward scan stops at the blank row above the options, the option
+// block holds Yes and No but not the question, hasQuestion stays false, and the
+// real dialog is treated as absent — allowing prompt delivery into a fully
+// rendered trust dialog.
+func TestCheckAndHandleTrustPrompt_RealMCPTrustDialogWithBlankAboveAndBelowOptionsStillFiresEnter(t *testing.T) {
+	// Layout: question, blank row, option rows, blank row, footer.
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"\n" +
+		"❯ 1. Yes\n" +
+		"  2. No\n" +
+		"\n" +
+		"Enter to confirm"
+	handled, cmds := runTrustPromptCheck(t, ProgramClaude, mcpModal)
+	require.True(t, handled, "the live MCP modal with blanks above and below options is still in the way")
+	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+		"the real MCP modal still fires Enter regardless of blank rows around the option block")
+}
+
+// An already-running Claude pane whose last output block mentions
+// "New MCP server found" and whose last non-blank row is the Claude composer
+// cursor "❯" must NOT be classified as a partially rendered MCP dialog.
+// Claude's composer uses the same glyph; treating any selected row as
+// unambiguous dialog content would block every handoff into such a pane,
+// exhausting DismissTrustPrompt's 20 retries and surfacing an error for
+// legitimate sessions.
+//
+// This is the "Do not treat the Claude composer glyph as modal content" P2.
+func TestCheckAndHandleTrustPrompt_ComposerGlyphAfterMCPMentionDoesNotTriggerPartialRender(t *testing.T) {
+	// A pane that mentioned the MCP server message earlier in its output, then
+	// returned to normal operation; the last non-blank row is the Claude composer.
+	content := "New MCP server found.\n" +
+		"Configured server: my-server\n" +
+		"\n" +
+		"❯ "
+	handled, cmds := pollStaticPane(t, content, 4)
+	require.False(t, handled,
+		"a composer cursor after an MCP mention in scrollback is not a partial dialog; af must not block")
+	require.Empty(t, sentKeystrokes(cmds),
+		"no key may be injected into a pane that only shows a composer cursor; got %v", cmds)
+}
+
+// When Claude Code paints the preamble and question on separate consecutive
+// rows and the capture lands before the first option, the last non-blank row is
+// the question itself ("Do you trust this new MCP server?") — not the preamble.
+// The partial-render check must recognise the question row as dialog content
+// and return true (blocking), not false (which would allow prompt delivery).
+//
+// This is the "Treat the separate MCP question row as partial" P1.
+func TestCheckAndHandleTrustPrompt_SeparateQuestionRowIsPartial(t *testing.T) {
+	// Preamble and question on separate rows; capture before first option.
+	content := "New MCP server found.\n" +
+		"Do you trust this new MCP server?\n" +
+		"\n\n"
+	handled, cmds := pollStaticPane(t, content, 4)
+	require.True(t, handled,
+		"preamble and question on separate rows, before first option, must block")
+	require.Empty(t, sentKeystrokes(cmds),
+		"no key may be sent into a partially rendered dialog; got %v", cmds)
+}
+
+// When the Claude picker layout places a blank row between the preamble/question
+// block and the option block, a capture taken after the options are painted but
+// before the footer shows the options as the LAST contiguous block — the preamble
+// is in the preceding block. The partial-render detector must recognise this
+// layout and return true (blocking), not false (which would allow prompt delivery
+// into a live, partially painted MCP picker).
+//
+// This is the sachiniyer verdict finding: claudeMCPDialogPartiallyRendered was
+// only checking the last block for the preamble, missing the case where the
+// Claude picker layout puts a blank separator between preamble/question and options.
+func TestCheckAndHandleTrustPrompt_PartiallyRenderedMCPDialogWithBlankAboveOptionsBlocks(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			// Layout: preamble+question / blank / first option only (footer not yet painted).
+			// The option block is the last block; preamble is in the preceding block.
+			name: "preamble in preceding block, first option only, footer not painted",
+			content: "New MCP server found. Do you trust this new MCP server?\n" +
+				"\n" +
+				"❯ 1. Yes\n" +
+				"\n\n",
+		},
+		{
+			// Layout: preamble+question / blank / both options (footer not yet painted).
+			// The most dangerous partial frame: options are fully painted but footer is not.
+			name: "preamble in preceding block, both options, footer not painted",
+			content: "New MCP server found. Do you trust this new MCP server?\n" +
+				"\n" +
+				"❯ 1. Yes\n" +
+				"  2. No\n" +
+				"\n\n",
+		},
+		{
+			// Layout: preamble on its own row / question on its own row / blank /
+			// both options (footer not yet painted). Preamble and question are both
+			// in the preceding block.
+			name: "preamble and question on separate rows in preceding block, both options, footer not painted",
+			content: "New MCP server found.\n" +
+				"Do you trust this new MCP server?\n" +
+				"\n" +
+				"❯ 1. Yes\n" +
+				"  2. No\n" +
+				"\n\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.True(t, handled,
+				"a partially rendered MCP dialog with options in a separate block must block; "+
+					"reporting false lets the caller paste into the live picker")
+			require.Empty(t, sentKeystrokes(cmds),
+				"a partially rendered dialog must not receive a key; got %v", cmds)
+		})
+	}
+}
+
+// An agent that prints the exact MCP question above an unrelated yes/no picker
+// — but WITHOUT the MCP preamble ("New MCP server found") — must not fire
+// Enter. The separator bridge in claudeMCPTrustFooterIsLast requires the
+// preamble to appear in the preceding block alongside the question; a question-
+// only preceding block does not satisfy it.
+//
+// This is the thread 2 finding (claude_trust.go:470): the separator bridge
+// extended the search to the preceding block but only required the question
+// there, leaving an attacker-controlled path via the exact question string above
+// any yes/no picker with a blank row between them.
+func TestCheckAndHandleTrustPrompt_QuestionOnlyAboveYesNoPickerInjectsNothing(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			// Question (without preamble) in preceding block, then blank, then
+			// an unrelated yes/no picker with footer last.
+			name: "question only above yes/no picker, blank separator",
+			content: "Do you trust this new MCP server?\n" +
+				"\n" +
+				"❯ 1. Yes\n" +
+				"  2. No\n" +
+				"Enter to confirm",
+		},
+		{
+			// Same without any blank separator: question immediately above picker.
+			name: "question only above yes/no picker, no blank separator",
+			content: "Do you trust this new MCP server?\n" +
+				"❯ 1. Yes\n" +
+				"  2. No\n" +
+				"Enter to confirm",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled,
+				"a question without the MCP preamble above a yes/no picker is not a trust prompt; "+
+					"af must not report one in the way")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into an unrelated picker; got %v", cmds)
+		})
+	}
+}

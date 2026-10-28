@@ -207,7 +207,7 @@ func TestPane_AutoHideStatusNamesDisplacedTab(t *testing.T) {
 			name:              "terminal displaces agent",
 			openOrder:         []int{0, 1},
 			wantVisibleTab:    1,
-			wantHiddenNamedAs: "alpha · ◆ Agent hidden",
+			wantHiddenNamedAs: "alpha · Agent hidden",
 		},
 		{
 			// The reverse: the displaced pane is NOT slot 0, so a toast that
@@ -318,7 +318,7 @@ func TestPane_OpenPaneWindowIsIdempotent(t *testing.T) {
 // the one that dies — and that fragment is the `s` key, the cheaper of the two
 // remedies (no resize needed, and the only one a user cannot discover by
 // fiddling). #1973 bought room for it by dropping a word; #1997 then spent that
-// room making the subject a full pane identity (`alpha · ◆ Agent` rather than
+// room making the subject a full pane identity (`alpha · Agent` rather than
 // `alpha`), pushing the hint back off the end at the default terminal size.
 //
 // The assertion is on the RENDERED bar, not the composed string: the composed
@@ -344,7 +344,7 @@ func TestPane_AutoHideStatusKeepsTheRecoveryHintAtEightyColumns(t *testing.T) {
 			openPaneKey := keys.GlobalKeyBindings[keys.KeyOpenPane].Help().Key
 			require.NotEmpty(t, openPaneKey)
 
-			assert.Contains(t, rendered, title+" · ◆ Agent hidden",
+			assert.Contains(t, rendered, title+" · Agent hidden",
 				"the subject still names the pane that was actually displaced (#1997)")
 			assert.Contains(t, rendered, "resize", "the resize remedy survives")
 			assert.Contains(t, rendered, "`"+openPaneKey+"`",

@@ -58,8 +58,6 @@ func (w *inPlaceTmuxWorld) Start(c *exec.Cmd) (*os.File, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
 }
 
-func (w *inPlaceTmuxWorld) Close() {}
-
 func (w *inPlaceTmuxWorld) exec() cmd_test.MockCmdExec {
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {

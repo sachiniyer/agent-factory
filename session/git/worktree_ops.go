@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -29,7 +29,7 @@ func (g *GitWorktree) Setup() error {
 		return fmt.Errorf("failed to get worktree directory: empty worktree directory")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(g.worktreePath), 0755); err != nil {
+	if err := ensureWorktreeParent(g.worktreePath); err != nil {
 		return err
 	}
 
@@ -46,9 +46,9 @@ func (g *GitWorktree) Setup() error {
 	if setupErr != nil {
 		return setupErr
 	}
-
+	g.markWorktreePlaced()
 	// Fire-and-forget post-worktree hooks (cancellable via hooksCtx)
-	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
+	g.hooksDone = g.runHooks()
 	return nil
 }
 
@@ -66,7 +66,7 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 	if strings.TrimSpace(g.branchName) == "" {
 		return fmt.Errorf("cannot rebuild worktree %s: branch name is empty", g.worktreePath)
 	}
-	if err := os.MkdirAll(filepath.Dir(g.worktreePath), 0755); err != nil {
+	if err := ensureWorktreeParent(g.worktreePath); err != nil {
 		return err
 	}
 	if _, err := g.runGitCommand(g.repoPath, "show-ref", "--verify", fmt.Sprintf("refs/heads/%s", g.branchName)); err != nil {
@@ -84,7 +84,7 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 		return err
 	}
 	g.branchCreatedByUs = branchCreatedByUs
-
+	g.markWorktreePlaced()
 	g.startHooks()
 	return nil
 }
@@ -105,7 +105,7 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 	if strings.TrimSpace(g.branchName) == "" {
 		return fmt.Errorf("cannot rebuild worktree %s: branch name is empty", g.worktreePath)
 	}
-	if err := os.MkdirAll(filepath.Dir(g.worktreePath), 0755); err != nil {
+	if err := ensureWorktreeParent(g.worktreePath); err != nil {
 		return err
 	}
 	if _, err := g.runGitCommand(g.repoPath, "show-ref", "--verify", fmt.Sprintf("refs/heads/%s", g.branchName)); err == nil {
@@ -130,21 +130,28 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 		return err
 	}
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, baseCommit); err != nil {
-		return fmt.Errorf("failed to create fresh worktree from commit %s: %w", baseCommit, err)
+		return g.annotateWorktreeAddError(
+			fmt.Errorf("failed to create fresh worktree from commit %s: %w", baseCommit, err))
 	}
 
 	g.baseCommitSHA = baseCommit
 	g.branchCreatedByUs = true
+	g.markWorktreePlaced()
 	g.startHooks()
 	return nil
 }
 
 // hookStopTimeout bounds how long cleanup or rebuild waits for the previous hook
-// run to actually be gone after cancelling it. Cancellation SIGKILLs the hook's
-// process group, but cmd.Wait can still take up to hookWaitDelay to return when a
-// backgrounded grandchild holds the capture pipe — so this has to exceed that
-// bound to mean anything. A timeout fails closed before worktree mutation.
-var hookStopTimeout = 10 * time.Second
+// run to actually be gone after cancelling it. A timeout fails closed before
+// worktree mutation, so it has to exceed everything a NORMALLY PROGRESSING
+// teardown can spend, or it refuses rebuilds that were about to succeed.
+//
+// The scope stop under it can take up to systemdunit.HookScopeStopTimeout (10s)
+// when a setsid'd descendant ignores SIGTERM and systemd has to escalate. Keep
+// headroom over that bound so scheduling delay cannot turn a progressing stop
+// into a false refusal (#3650 review). Hook output uses direct files, so an
+// inherited descriptor no longer adds a pipe-drain WaitDelay here (#4010).
+var hookStopTimeout = 30 * time.Second
 
 // cancelAndWaitHooks retires the current post-worktree hook run. A closed
 // hooksDone means the runner has returned from cmd.Wait, so the hook process has
@@ -152,23 +159,116 @@ var hookStopTimeout = 10 * time.Second
 // modifying the checkout while an unjoined hook may still use it recreates the
 // exact remove/write race this boundary exists to prevent.
 func (g *GitWorktree) cancelAndWaitHooks() error {
+	if g.IsExternalWorktree() {
+		return nil
+	}
 	if g.hooksCancel != nil {
 		g.hooksCancel()
 	}
-	if g.hooksDone == nil {
-		return nil
+	if g.hooksDone != nil {
+		timer := time.NewTimer(hookStopTimeout)
+		defer timer.Stop()
+		select {
+		case <-g.hooksDone:
+		case <-timer.C:
+			return fmt.Errorf(
+				"post-worktree hooks for %s did not exit within %s of cancellation; refusing to modify the worktree while the hook process may still be using it",
+				g.worktreePath, hookStopTimeout)
+		}
 	}
+	if err := g.stopSurvivingHookScopes(); err != nil {
+		return err
+	}
+	return g.retireHookProgress()
+}
 
-	timer := time.NewTimer(hookStopTimeout)
-	defer timer.Stop()
-	select {
-	case <-g.hooksDone:
+// hookScopePrefixes names every transient scope this worktree's hooks could
+// still be running in.
+//
+// The persisted handle alone is not enough, and that is not a hypothetical. The
+// hook goroutine records the prefix in memory the moment a scope exists, but the
+// instance reaches disk on some later checkpoint; a daemon that died in that
+// window left a live survivor behind a record that says no scope ever existed.
+// So when we ARE the systemd daemon, also derive the names the runner would have
+// used — from the session id and from the worktree-path fallback identity — which
+// needs no write-ahead and cannot be lost.
+//
+// The derivation is gated on being the daemon for a reason beyond tidiness: it
+// is the only process that creates these scopes, and the only one guaranteed a
+// reachable user manager. Deriving unconditionally would make every cleanup on
+// a machine without systemd consult a manager that is not there, and the sweep
+// below fails closed — which would wedge cleanup for users who never had a scope.
+func (g *GitWorktree) hookScopePrefixes() []string {
+	if g.IsExternalWorktree() {
 		return nil
-	case <-timer.C:
-		return fmt.Errorf(
-			"post-worktree hooks for %s did not exit within %s of cancellation; refusing to modify the worktree while the hook process may still be using it",
-			g.worktreePath, hookStopTimeout)
 	}
+	var prefixes []string
+	add := func(prefix string) {
+		if prefix == "" {
+			return
+		}
+		for _, existing := range prefixes {
+			if existing == prefix {
+				return
+			}
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	add(g.HookScopeUnitPrefix())
+	if systemdunit.RunningDaemonProcess() {
+		add(systemdunit.HookScopeUnitPrefix(g.hookScopeSessionID))
+		add(systemdunit.HookScopeUnitPrefix(worktreePathScopeIdentity(g.worktreePath)))
+	}
+	return prefixes
+}
+
+// stopSurvivingHookScopes closes the gap the in-process join above cannot reach:
+// hooksCancel, cmd.Wait and the process-group SIGKILL all died with the daemon
+// that started the run, so a hook that outlived that daemon — which is exactly
+// what the unbound scope now guarantees it can — has no in-process handle left.
+// A named scope is that handle, and it survives the restart.
+//
+// It is deliberately reachable ONLY from cancelAndWaitHooks, which is to say only
+// from the paths that are about to rebuild or remove the tree (#2770 ordering).
+// A survivor over an INTACT tree is left alone to finish: nothing on the restore
+// path calls this, and nothing re-runs the hook over a tree it did not rebuild.
+//
+// It fails closed on EVERY failure, including an unreachable user manager. An
+// earlier draft treated that one as "no survivors" on the theory that a scope
+// lives only inside the manager — but unreachable-from-here is not gone: a client
+// that lost the bus, or never had XDG_RUNTIME_DIR, gets exactly that error while
+// the manager and the hook inside it keep running. Proceeding there would hand
+// the rebuild a tree a live hook is still writing to, which is the one outcome
+// this ordering exists to prevent.
+//
+// The manager's "none" is not a clean bill of health either, for the same reason
+// in a different shape: a survivor caught between systemd-run's execve and its
+// StartTransientUnit reply has no unit yet. StopHookScopes therefore reads the
+// process table beside the manager and waits such a launcher out (#3667); an
+// unreadable process table is UNKNOWN and refuses here exactly as a lost bus
+// does.
+func (g *GitWorktree) stopSurvivingHookScopes() error {
+	prefixes := g.hookScopePrefixes()
+	if len(prefixes) == 0 {
+		return nil
+	}
+	if err := systemdunit.StopHookScopes(prefixes...); err != nil {
+		return fmt.Errorf(
+			"post-worktree hook scopes (%s) for %s could not be stopped; refusing to modify the worktree while a hook may still be using it: %w",
+			strings.Join(prefixes, ", "), g.worktreePath, err)
+	}
+	return nil
+}
+
+// CancelAndJoinHooks is cancelAndWaitHooks for a caller outside this package
+// that is about to move the tree. Archive is that caller: relocating a checkout
+// a hook is still writing into is the same hazard rebuild and cleanup already
+// order against (#2770), and only cancelling the RUNNER stops it — stopping its
+// current scope alone makes the runner treat the dead command as an ordinary
+// failure and start the next configured command in a fresh scope, into a tree
+// that is about to move (#3650 review).
+func (g *GitWorktree) CancelAndJoinHooks() error {
+	return g.cancelAndWaitHooks()
 }
 
 // stopHooks retires the previous post-worktree hook run and installs a fresh
@@ -210,7 +310,21 @@ func (g *GitWorktree) stopHooks() error {
 // a failed one leaves the previous run's closed channel in place, which readers
 // correctly see as "nothing in flight".
 func (g *GitWorktree) startHooks() {
-	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
+	g.hooksDone = g.runHooks()
+}
+
+// runHooks is the single place the hook runner is handed this worktree's scope
+// identity. A worktree with no session id derives no scope name, so the runner
+// takes exactly the path it took before #3650.
+func (g *GitWorktree) runHooks() <-chan struct{} {
+	return runPostWorktreeHooks(g.hooksCtx, hookRun{
+		repoPath:            g.repoPath,
+		worktreePath:        g.worktreePath,
+		passthrough:         g.hookEnvPassthrough,
+		scopeSessionID:      g.hookScopeSessionID,
+		onScopeLaunched:     g.SetHookScopeUnitPrefix,
+		onProgressPublished: g.retainHookProgressForCreate,
+	})
 }
 
 func (g *GitWorktree) rebuildBaseCommit() (string, error) {
@@ -254,7 +368,8 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 
 	// Create a new worktree from the existing branch
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", g.worktreePath, g.branchName); err != nil {
-		return fmt.Errorf("failed to create worktree from branch %s: %w", g.branchName, err)
+		return g.annotateWorktreeAddError(
+			fmt.Errorf("failed to create worktree from branch %s: %w", g.branchName, err))
 	}
 
 	// Resolve the base commit SHA so diffs and other operations have a reference point.
@@ -340,7 +455,8 @@ func (g *GitWorktree) setupNewWorktree() error {
 	// Create a new worktree from the base commit.
 	// This starts the worktree with a clean slate without inheriting uncommitted changes.
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, baseCommit); err != nil {
-		return fmt.Errorf("failed to create worktree from commit %s: %w", baseCommit, err)
+		return g.annotateWorktreeAddError(
+			fmt.Errorf("failed to create worktree from commit %s: %w", baseCommit, err))
 	}
 
 	return nil
@@ -548,6 +664,10 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 	if g.repoPath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: repo path is empty")
 	}
+	// Same discharge the relocation claim performs: an identity-unknown stall
+	// whose path is conclusively gone fences nothing, and refusing on it below
+	// would make a live row unkillable for good (#5102).
+	g.SettleAbsentIdentityUnknownStall()
 	worktreePath, recovery, hasRecovery := g.RelocationSnapshot()
 	if worktreePath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: worktree path is empty")
@@ -712,184 +832,4 @@ func (g *GitWorktree) isWorktreeRegistered() (bool, error) {
 		return false, err
 	}
 	return worktreeListed(output, g.worktreePath)
-}
-
-var (
-	// worktreeReapGrace is how long a writer discovered inside the worktree gets
-	// to exit on its own before it is SIGTERMed. Zero: by the time a worktree is
-	// being deleted the pane teardown has already SIGHUP'd the pane's process
-	// group and waited for the pane to exit (#802), so a process still writing
-	// here has already had its grace and there is no reason to wait again — go
-	// straight to the escalation. var, not const, so a test can tune the pacing.
-	worktreeReapGrace = 0 * time.Second
-	// worktreeReapTermWait is how long a SIGTERMed writer gets before SIGKILL.
-	// WaitForExits returns as soon as everything is gone, so a well-behaved writer
-	// costs a poll interval, not the whole wait.
-	worktreeReapTermWait = 2 * time.Second
-)
-
-// reapWorktreeWriters kills every live process still working inside worktreePath
-// BEFORE the tree is deleted (#2025): any process whose current working directory
-// is at or under the tree, plus that process's whole descendant subtree.
-//
-// The leak this closes: `git worktree remove -f` and the os.RemoveAll fallback
-// both delete recursively and do NOT fail on a merely-non-empty directory — they
-// fail "directory not empty" only when files are being CREATED into the tree
-// faster than they can be unlinked, i.e. a live process is still writing to it.
-// A session whose agent backgrounded a long-lived writer (an installer, a dev
-// server, a package manager) can leave that writer alive after the kill tore down
-// the agent/tmux — the tmux reaper (#1104) escalates asynchronously and does not
-// block this removal — and it then races, and beats, the delete, orphaning the
-// worktree (the worktree_ops.go / teardown.go "directory not empty" pair).
-// Killing the writers first removes the racer so the delete can finish.
-//
-// WHICH processes are killed is deliberately narrow (the #1104 "only our own
-// descendants" discipline, and the "which children are garbage" hazard): an AF
-// worktree directory is a session-private path, so a process cwd'd inside it is
-// unambiguously this session's and no unrelated process is ever signalled. The
-// kill itself routes through the existing #1104 reaper (proctree.KillEscalating):
-// every signal is identity-verified against (pid, start-time) so a recycled PID
-// is never hit, and the SIGTERM→SIGKILL escalation is shared, not re-implemented.
-//
-// Best-effort, like every reaper on this path: an unreadable process table (no
-// /proc, an unsupported platform) degrades to a no-op — nothing is reaped, and
-// the existing WARNING plus doctor's stale-worktree path own whatever survives.
-// It never errors and never loops: a writer that ignores SIGKILL (a D-state,
-// uninterruptible I/O, a mount) is left for the removal to fail loudly on, not
-// spun on forever.
-//
-// Linux and darwin both back proctree.WorkingDir (/proc/<pid>/cwd and
-// proc_info(PROC_PIDVNODEPATHINFO) respectively), so the reap is live on both
-// as of #2050. Elsewhere, and for any process whose cwd the kernel will not
-// disclose, WorkingDir reports the honest unknown and that process is simply not
-// matched — the safe degradation, since it can only fail to signal the right
-// process, never signal the wrong one.
-func reapWorktreeWriters(worktreePath string) {
-	// The path exists (callers reap only after an os.Stat succeeds), so resolving
-	// symlinks here matches /proc/<pid>/cwd, which the kernel already resolves.
-	root := normalizeWorktreePath(worktreePath)
-	reapWorktreeWritersMatching(worktreePath, func(pid int) bool {
-		cwd, ok := proctree.WorkingDir(pid)
-		return ok && pathAtOrUnder(root, filepath.Clean(cwd))
-	})
-}
-
-func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
-	snap, err := proctree.Snapshot()
-	if err != nil {
-		// Could not READ the process table — never the same fact as "no writers"
-		// (proctree's whole design). Skip the reap and let the removal proceed; a
-		// writer that really is alive surfaces as the existing "directory not empty"
-		// WARNING for doctor to reconcile, never a silently-swept process table.
-		return
-	}
-	procs := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.IsTmuxServer)
-	if len(procs) == 0 {
-		return
-	}
-	proctree.KillEscalating(procs, worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
-		// Every tier stays a WARNING here, and the outcome is deliberately unused
-		// (#2765). This reaper does not run on the requested-teardown side of that
-		// split: it fires only when a process is STILL WRITING into a worktree
-		// after the agent and its tmux session were already torn down, which is the
-		// definition of having escaped its pane tree. There is no routine case.
-		//
-		// worktreePath is a runtime value that may legally contain `%`, so it MUST
-		// be a `%s` ARGUMENT, never spliced into the format string (the #1211 rule
-		// the tmux reaper follows). `format` is KillEscalating's own constant literal.
-		log.WarningLog.Printf("worktree %s: leaked past its session: "+format, append([]any{worktreePath}, args...)...)
-	})
-}
-
-// worktreeWriterProcesses selects the identity-verified snapshot entries the
-// worktree reaper may signal. The process fact functions are explicit so tests
-// can cover dangerous ancestry shapes without scanning or signalling real
-// processes on the host.
-func worktreeWriterProcesses(
-	root string,
-	snap map[int]proctree.Process,
-	selfPID int,
-	workingDir func(int) (string, bool),
-	isTmuxServer func(int) bool,
-) []proctree.Process {
-	matches := func(pid int) bool {
-		cwd, ok := workingDir(pid)
-		return ok && pathAtOrUnder(root, filepath.Clean(cwd))
-	}
-	return worktreeWriterProcessesMatching(snap, selfPID, matches, isTmuxServer)
-}
-
-// worktreeWriterProcessesMatching applies the shared-infrastructure exclusions
-// to both pathname-based cleanup and the repo-gone cleanup's descriptor-identity
-// matcher. The latter must not lose the protections merely because it cannot
-// safely re-resolve the pathname it is about to delete.
-func worktreeWriterProcessesMatching(
-	snap map[int]proctree.Process,
-	selfPID int,
-	matches func(int) bool,
-	isTmuxServer func(int) bool,
-) []proctree.Process {
-	// The daemon can inherit a cwd inside a worktree when an af invocation
-	// auto-starts it there, and the shared tmux server inherits its cwd from the
-	// client that first started it. Neither may be a selected root or be reached
-	// through another matching ancestor. Prune each protected subtree during that
-	// walk; descendants remain eligible when their own cwd independently matches.
-	protectedInfrastructure := func(pid int) bool {
-		return pid == selfPID || isTmuxServer(pid)
-	}
-	seen := make(map[int]bool)
-	var procs []proctree.Process
-	add := func(p proctree.Process) {
-		if !seen[p.PID] {
-			seen[p.PID] = true
-			procs = append(procs, p)
-		}
-	}
-	for pid := range snap {
-		if !matches(pid) {
-			continue
-		}
-		if protectedInfrastructure(pid) {
-			// A tmux server is shared infrastructure whose cwd comes from the client
-			// that first started it. It is not owned by this worktree, and selecting
-			// its tree could terminate every tmux session on the server. The same
-			// subtree rule protects a self-matching daemon and its unrelated sessions.
-			continue
-		}
-		if seen[pid] {
-			continue
-		}
-		// Take the whole subtree of the matching process: a child of a
-		// worktree-cwd'd writer is this session's too even if it chdir'd elsewhere,
-		// and it may be the actual file-creator holding the directory non-empty.
-		pruned := make(map[int]bool)
-		for _, p := range proctree.TreeOf(snap, pid) {
-			if pruned[p.PPID] {
-				pruned[p.PID] = true
-				continue
-			}
-			if protectedInfrastructure(p.PID) {
-				pruned[p.PID] = true
-				continue
-			}
-			add(p)
-		}
-	}
-	return procs
-}
-
-// pathAtOrUnder reports whether cleaned path p is root itself or a path nested
-// inside it. root must already be cleaned and symlink-resolved (normalizeWorktreePath)
-// and p cleaned; the kernel resolves /proc/<pid>/cwd, so the caller cleans the cwd
-// but need not re-resolve it. A sibling ("/a/b-other") or a parent is rejected —
-// only the tree itself and its descendants match.
-func pathAtOrUnder(root, p string) bool {
-	if p == root {
-		return true
-	}
-	rel, err := filepath.Rel(root, p)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

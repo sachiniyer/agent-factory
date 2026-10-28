@@ -54,9 +54,26 @@ const (
 	// daemon's ListBackends catalog. Like stateSelectProgram and statePromptInput
 	// it is a sub-state of stateNew — closing it returns to naming.
 	stateSelectBackend
+	// stateSelectAccount is the state when the account field of the naming form is
+	// open (#3844): which of the agent's registered credential accounts the session
+	// runs as, listed from the daemon's own ListAccounts registry. A sub-state of
+	// stateNew like stateSelectBackend beside it — closing it returns to naming.
+	stateSelectAccount
 	// stateJumpTab is the unbounded jump-to-tab prompt (#3021). Its own state rather
 	// than statePromptInput's because that one belongs to the naming form and returns
 	// to stateNew when it closes; this returns to stateDefault. Both drive the same
 	// promptOverlay field — one overlay, two owners, distinguished by who is asking.
 	stateJumpTab
+	// stateSelectHandoffResolve is the state when the user is choosing how to
+	// settle an ambiguous handoff delivery (#4429): resend the pending mission or
+	// mark it delivered without a resend. It reuses the selection overlay; like
+	// stateSelectHandoffAgent it differs only in what submit does — and here the
+	// two answers are NOT interchangeable, which is why the choice exists at all.
+	stateSelectHandoffResolve
+	// stateRenameTab is the `R` rename-tab prompt (#1904's verb reaching the TUI).
+	// Its own state for the same reason stateJumpTab is: it returns to
+	// stateDefault, drives the shared promptOverlay, and owns its Enter/Esc
+	// semantics — a tab name is one line, so Enter submits and Esc cancels,
+	// neither of which is the composer's meaning for them.
+	stateRenameTab
 )

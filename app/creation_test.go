@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -41,6 +42,8 @@ func activeProjectHome(t *testing.T) *home {
 	h.repoRoot = setupRealRepo(t)
 	return h
 }
+
+var errTestFetcherUnstubbed = errors.New("test home: all-repos fetcher not stubbed")
 
 // newTestHome builds a minimal home with real UI components and a tempdir-
 // scoped storage. AGENT_FACTORY_HOME is redirected so nothing escapes into
@@ -71,20 +74,34 @@ func newTestHome(t *testing.T) *home {
 	}))
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
-	// Tab mutations and PR-info refresh pokes route through daemon RPCs.
+	// Tab mutations route through daemon RPCs.
 	// Stub the seams with safe defaults so tests that incidentally trigger them
 	// never dial — or spawn — a real daemon. Tests exercising these paths
 	// override the relevant seam. createTab/closeTab default to an error so an
-	// unstubbed mutation fails loudly rather than reaching the daemon; PR refresh
-	// defaults to a no-op because snapshots own the projected badge.
+	// unstubbed mutation fails loudly rather than reaching the daemon.
 	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return daemon.CreateTabResponse{}, fmt.Errorf("createTabThroughDaemon not stubbed in test")
 	}))
 	t.Cleanup(SetTabCloserForTest(func(daemon.CloseTabRequest) error {
 		return fmt.Errorf("closeTabThroughDaemon not stubbed in test")
 	}))
-	t.Cleanup(SetPRInfoRefresherForTest(func(daemon.RefreshPRInfoRequest) error {
-		return nil
+	t.Cleanup(SetTabReordererForTest(func(daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
+		return daemon.ReorderTabResponse{}, fmt.Errorf("reorderTabThroughDaemon not stubbed in test")
+	}))
+	// The snapshot poll also asks the daemon which tasks are actually armed
+	// (#3626). It dials rather than spawns, so an unstubbed call would fail
+	// harmlessly — but it would still reach for a socket on every poll, and
+	// "harmlessly" is not something a test should have to keep being right about.
+	// Nil is the no-observation answer, which leaves arming UNKNOWN exactly as a
+	// down daemon does; tests exercising the merge swap in their own.
+	t.Cleanup(SetLiveTaskArmingFetcherForTest(func() ([]task.Task, error) { return nil, nil }))
+
+	// The same snapshot poll also fetches cross-repo rows. Its production
+	// default reaches EnsureDaemon, so close this seam even when polling is
+	// incidental. An error preserves rows a test preloaded; an empty success
+	// would reconcile them away. Tests needing fresh rows override this seam.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		return nil, errTestFetcherUnstubbed
 	}))
 
 	// The live-termpane bind would dial a real WS PTY stream (#1592 PR6). Default
@@ -92,7 +109,7 @@ func newTestHome(t *testing.T) *home {
 	// (mock-backed instances answer has-session) binds harmlessly instead of
 	// dialing the daemon. Tests exercising the live path swap in a recording fake.
 	origLiveTerm := newLiveTermPaneFn
-	newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int) liveTermAttachment {
+	newLiveTermPaneFn = func(apiclient.StreamSession, string, int, int, int) liveTermAttachment {
 		return newFakeLiveTerm()
 	}
 	t.Cleanup(func() { newLiveTermPaneFn = origLiveTerm })
@@ -161,9 +178,11 @@ func testPreviewFetcher(h *home) func(daemon.PreviewRequest) (daemon.PreviewResp
 			snapshot, snapshotErr := inst.AgentServer().Preview(req.Tab, req.Full)
 			content, err = snapshot.Content, snapshotErr
 		case req.Full:
-			content, err = inst.PreviewTabFullHistory(req.Tab)
+			snap, snapErr := inst.PreviewTabSnapshot(req.Tab, true)
+			content, err = snap.Content, snapErr
 		default:
-			content, err = inst.PreviewTab(req.Tab)
+			snap, snapErr := inst.PreviewTabSnapshot(req.Tab, false)
+			content, err = snap.Content, snapErr
 		}
 		if errors.Is(err, tmux.ErrSessionGone) {
 			return daemon.PreviewResponse{Gone: true}, nil

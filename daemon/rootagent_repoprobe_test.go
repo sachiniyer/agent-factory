@@ -1,8 +1,8 @@
 package daemon
 
 import (
-	"bytes"
 	"fmt"
+	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,36 +56,23 @@ func installUnanswerableGit(t *testing.T) (letGitAnswer func()) {
 	}
 }
 
-// captureRootEnsureLogs redirects the warning and error loggers for one test.
-func captureRootEnsureLogs(t *testing.T) (warnings, errors *bytes.Buffer) {
-	t.Helper()
-	warnings, errors = &bytes.Buffer{}, &bytes.Buffer{}
-	prevWarning, prevError := log.WarningLog.Writer(), log.ErrorLog.Writer()
-	log.WarningLog.SetOutput(warnings)
-	log.ErrorLog.SetOutput(errors)
-	t.Cleanup(func() {
-		log.WarningLog.SetOutput(prevWarning)
-		log.ErrorLog.SetOutput(prevError)
-	})
-	return warnings, errors
-}
-
 // TestRootEnsureDoesNotNarrateAnUnansweredProbeAsNotARepository is the #3500
 // headline regression: one ensure pass whose repo probe never completed must
 // report the subprocess outcome, not a verdict on the configured path.
 func TestRootEnsureDoesNotNarrateAnUnansweredProbeAsNotARepository(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	path := t.TempDir()
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
 	// Shim git only once the manager exists, so nothing but the ensure pass
 	// under test sees an unanswerable probe.
 	_ = installUnanswerableGit(t)
-	warnings, _ := captureRootEnsureLogs(t)
-	manager.EnsureRootAgents()
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	warnings := ownLogs.warnings
+	warnings.Reset()
+	manager.ensureRootAgentsAndWait()
 
 	got := warnings.String()
 	if !strings.Contains(got, "root agent ensure for") {
@@ -105,13 +92,14 @@ func TestRootEnsureDoesNotNarrateAnUnansweredProbeAsNotARepository(t *testing.T)
 func TestRootEnsureStillNarratesAnAnsweredRefusalAsAPathFailure(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	path := t.TempDir() // a real directory, and really not a git repository
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
-	warnings, _ := captureRootEnsureLogs(t)
-	manager.EnsureRootAgents()
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	warnings := ownLogs.warnings
+	warnings.Reset()
+	manager.ensureRootAgentsAndWait()
 
 	got := warnings.String()
 	if !strings.Contains(got, "does not resolve to a git repository") {
@@ -137,15 +125,16 @@ func TestRootEnsureEscalationDoesNotAssertPersistenceFromUnansweredProbes(t *tes
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 
 	path := t.TempDir()
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
 	_ = installUnanswerableGit(t)
-	_, errorLog := captureRootEnsureLogs(t)
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	errorLog := ownLogs.errors
+	errorLog.Reset()
 	for i := 0; i < rootEnsureEscalationThreshold; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 
 	got := errorLog.String()
@@ -180,14 +169,15 @@ func TestRootEnsureEscalationStillAssertsPersistenceForAnsweredFailures(t *testi
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 
 	path := t.TempDir()
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
-	_, errorLog := captureRootEnsureLogs(t)
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	errorLog := ownLogs.errors
+	errorLog.Reset()
 	for i := 0; i < rootEnsureEscalationThreshold; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 
 	if got := errorLog.String(); !strings.Contains(got, "the cause looks persistent") {
@@ -205,8 +195,13 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 	project := config.Project{ID: "prj_0123456789abcdef0123456789abcdef", Root: t.TempDir()}
 
 	_ = installUnanswerableGit(t)
-	warnings, _ := captureRootEnsureLogs(t)
-	_, _, projectRoots, unresolvedRoots := projectRootAgentLayers([]config.Project{project})
+	// This test calls the package-level layer builder directly, so there is no
+	// Manager to own the log — it hands the builder a sink of its own instead,
+	// which is the same ownership the routed callers get (#3797).
+	warnings := &logCapture{}
+	_, _, projectRoots, unresolvedRoots, _ := projectRootAgentLayers(
+		stdlog.New(warnings, log.WarningLog.Prefix(), log.WarningLog.Flags()),
+		[]config.Project{project}, nil)
 
 	got := warnings.String()
 	if strings.Contains(got, "does not resolve to a git repository") {
@@ -218,10 +213,17 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 	// The fail-open handling itself is unchanged: the root is still recorded as
 	// unresolved for this run, and the singleton sweep still starts nothing for
 	// it. Only the claim the log makes about WHY changes.
-	if _, ok := projectRoots[config.RepoIDForRecordedRoot(project.Root)]; ok {
+	// This record carries no recorded identity (#3530), so it is keyed by an
+	// INVENTED id — one no repository can hold — rather than by a hash of its
+	// path, which is what a stranger arriving at that path would also produce.
+	key := config.ReconciledRepoIDForProject(project)
+	if !config.IsDerivedRepoID(key) {
+		t.Fatalf("a project with no recorded identity must be keyed by an invented id, got %s", key)
+	}
+	if _, ok := projectRoots[key]; ok {
 		t.Fatalf("an unresolved root must stay out of projectRoots")
 	}
-	if _, ok := unresolvedRoots[config.RepoIDForRecordedRoot(project.Root)]; !ok {
+	if _, ok := unresolvedRoots[key]; !ok {
 		t.Fatalf("an unresolved root must still be recorded as unresolved")
 	}
 }
@@ -241,15 +243,16 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 
 	path := t.TempDir() // a real directory, and really not a git repository
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
 	letGitAnswer := installUnanswerableGit(t)
-	_, errorLog := captureRootEnsureLogs(t)
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	errorLog := ownLogs.errors
+	errorLog.Reset()
 	for i := 0; i < rootEnsureEscalationThreshold; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 	if got := errorLog.String(); !strings.Contains(got, "no attempt got an answer out of git") {
 		t.Fatalf("expected the unknown-cause escalation first, got: %q", got)
@@ -263,7 +266,7 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 	// (#3500 review round 2).
 	errorLog.Reset()
 	letGitAnswer()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	if got := errorLog.String(); got != "" {
 		t.Fatalf("one answered failure is not a persistent cause; it must not re-escalate: %q", got)
 	}
@@ -271,7 +274,7 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 	// A full threshold of answered failures is the same bar the first
 	// escalation cleared. Now the established cause gets its ERROR.
 	for i := 1; i < rootEnsureEscalationThreshold; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 
 	got := errorLog.String()
@@ -286,7 +289,7 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 	// must not re-log the ERROR on every pass.
 	errorLog.Reset()
 	for i := 0; i < 3; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 	if got := errorLog.String(); got != "" {
 		t.Fatalf("the escalation must not repeat once the cause is established: %q", got)
@@ -307,21 +310,22 @@ func TestRootEnsureMixedStreakNeitherClaimsPersistenceNorLocksOutTheUpgrade(t *t
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 
 	path := t.TempDir() // a real directory, and really not a git repository
-	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	manager, ownLogs := newManagerCapturingLogs(t, rootTestConfig(path, config.RootAgentConfig{}))
 
 	letGitAnswer := installUnanswerableGit(t)
-	_, errorLog := captureRootEnsureLogs(t)
+	// This Manager's own logs (#3797). Reset stands in for the old "install the
+	// capture here": it drops the setup phase's output, which is what installing
+	// late used to accomplish.
+	errorLog := ownLogs.errors
+	errorLog.Reset()
 
 	// One short of the threshold, all unanswered; then git answers, and that
 	// single real error is what crosses it.
 	for i := 0; i < rootEnsureEscalationThreshold-1; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 	letGitAnswer()
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	got := errorLog.String()
 	if !strings.Contains(got, fmt.Sprintf("failed %d consecutive times", rootEnsureEscalationThreshold)) {
@@ -338,9 +342,114 @@ func TestRootEnsureMixedStreakNeitherClaimsPersistenceNorLocksOutTheUpgrade(t *t
 	// still be available — this is the half a streak-class flag locked out.
 	errorLog.Reset()
 	for i := 1; i < rootEnsureEscalationThreshold; i++ {
-		manager.EnsureRootAgents()
+		manager.ensureRootAgentsAndWait()
 	}
 	if got := errorLog.String(); !strings.Contains(got, "the cause looks persistent") {
 		t.Fatalf("a mixed first escalation must stay eligible for the upgrade, got: %q", got)
+	}
+}
+
+// TestDeletedClaimDisprovenRequiresCurrentEvidence pins #3611's release rule at
+// the predicate itself, including the states the end-to-end fixtures above
+// cannot reach: a mismatch no probe pass ever established, and a mark from a
+// pass that has not happened. Both are UNKNOWN, and unknown holds the tombstone.
+func TestDeletedClaimDisprovenRequiresCurrentEvidence(t *testing.T) {
+	const (
+		repo     = "abcdef012345"
+		claimant = "project-1"
+	)
+	layersWith := func(record unresolvedProjectRecord) *rootAgentSnapshot {
+		return &rootAgentSnapshot{unresolvedRoots: map[string]unresolvedProjectRecord{repo: record}}
+	}
+	mismatchAt := func(pass uint64) unresolvedProjectRecord {
+		return unresolvedProjectRecord{projectID: claimant, identityMismatch: true, identityPass: pass}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		layers   *rootAgentSnapshot
+		claimant string
+		pass     uint64
+		want     bool
+		why      string
+	}{
+		{
+			name:     "proven this pass releases",
+			layers:   layersWith(mismatchAt(7)),
+			claimant: claimant,
+			pass:     7,
+			want:     true,
+			why:      "a mismatch established by the pass now asking is the round-15 release",
+		},
+		{
+			name:     "proven last pass still releases",
+			layers:   layersWith(mismatchAt(7)),
+			claimant: claimant,
+			pass:     8,
+			want:     true,
+			why:      "the snapshot carrying a pass-N verdict is first read in pass N+1; discarding it there would release nothing, ever",
+		},
+		{
+			name:     "proven two passes ago is stale",
+			layers:   layersWith(mismatchAt(7)),
+			claimant: claimant,
+			pass:     9,
+			want:     false,
+			why:      "nothing re-proved this mismatch, and the checkout at the path may be the deleted project's own (#3611)",
+		},
+		{
+			name:     "never established never releases",
+			layers:   layersWith(unresolvedProjectRecord{projectID: claimant, identityMismatch: true}),
+			claimant: claimant,
+			pass:     1,
+			want:     false,
+			why:      "a flag no probe result ever dated is unknown, not disproof",
+		},
+		{
+			name:     "a mark from the future never releases",
+			layers:   layersWith(mismatchAt(9)),
+			claimant: claimant,
+			pass:     7,
+			want:     false,
+			why:      "unsigned arithmetic would otherwise underflow into freshly-proven-forever",
+		},
+		{
+			name:     "another project's mismatch never releases",
+			layers:   layersWith(mismatchAt(7)),
+			claimant: "project-2",
+			pass:     7,
+			want:     false,
+			why:      "only the disproven claimant's own tombstone may be released (#3299 review round 15)",
+		},
+		{
+			name:     "an unattributed tombstone never releases",
+			layers:   layersWith(mismatchAt(7)),
+			claimant: "",
+			pass:     7,
+			want:     false,
+			why:      "an occupant-safe delete records no claimant, and nothing may release what nothing claims",
+		},
+		{
+			name:     "no record never releases",
+			layers:   &rootAgentSnapshot{unresolvedRoots: map[string]unresolvedProjectRecord{}},
+			claimant: claimant,
+			pass:     7,
+			want:     false,
+			why:      "with no unresolved record there is no evidence at all",
+		},
+		{
+			name:     "a resolved-again record never releases",
+			layers:   layersWith(unresolvedProjectRecord{projectID: claimant, identityPass: 7}),
+			claimant: claimant,
+			pass:     7,
+			want:     false,
+			why:      "a current probe result that is not a mismatch disproves nothing",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deletedClaimDisproven(tc.layers, repo, tc.claimant, tc.pass); got != tc.want {
+				t.Fatalf("deletedClaimDisproven = %v, want %v: %s", got, tc.want, tc.why)
+			}
+		})
 	}
 }

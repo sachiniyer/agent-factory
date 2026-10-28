@@ -11,14 +11,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/peercred"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The daemon-hosted HTTP/JSON server (#1029 PR 4) makes HTTP just another thin
@@ -70,9 +75,10 @@ func DaemonHTTPSocketPath() (string, error) {
 }
 
 // startHTTPServer binds the HTTP/JSON server on its own Unix socket and serves
-// it in the background, returning a cleanup function that shuts the server down
-// and unlinks the socket. It shares the daemon's live *Manager (via a
-// controlServer built the same way startControlServer builds its own), so both
+// it in the background, returning a cleanup function that closes its listeners,
+// joins dispatched RPC-shaped requests, and unlinks the socket. It shares the
+// daemon's live *Manager (via a controlServer built the same way
+// startControlServer builds its own), so both
 // transports dispatch through one core. The Shutdown RPC is deliberately NOT
 // wired here (shutdownCh nil): HTTP mirrors only the client-facing surface, not
 // daemon lifecycle control.
@@ -81,7 +87,7 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+	if err := requireDaemonHomePresent("daemon HTTP socket", socketPath); err != nil {
 		return nil, err
 	}
 	_ = os.Remove(socketPath)
@@ -98,17 +104,49 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		manager.lifecycle.setHTTPUnixBound(true)
 	}
 
-	cs := &controlServer{manager: manager, scheduler: scheduler, watchers: watchers}
+	cs := &controlServer{
+		manager: manager, scheduler: scheduler, watchers: watchers,
+		httpRequests: newHTTPRequestDrain(),
+	}
 	// One mux, shared by both listeners, so the REST/RPC/WS handler graph is
 	// single-sourced and the two transports can never drift (§1.1).
 	mux := newHTTPMux(cs)
+	// The opt-in profiling routes (#3651), mounted HERE and nowhere else. This is
+	// the whole enforcement of "unix socket only": the wrapper is a new handler in
+	// front of the mux, so the mux handed to newWebListeners below is the unwrapped
+	// one and the TCP listeners carry no pprof handler to reach. Off by default,
+	// in which case withDebugPprof returns the mux untouched. The opt-in is read
+	// from the FROZEN startup config because the route table is built once, here —
+	// which is why the key is classified EffectNextDaemonStart.
+	unixHandler := withDebugPprof(mux, debugPprofEnabled(manager.cfg))
 	srv := &http.Server{
 		// The unix socket is trusted transport (0600 perms are the auth, #1029),
 		// so it passes a NIL gate: no token enforcement (#1592 Phase 3 PR2,
 		// §1.4). The TCP listener below passes a real gate over the same mux.
 		// CORS is config-driven (§1.5): empty allow-list ⇒ no ACAO emitted.
-		Handler:           withAuth(mux, nil, manager.cfg.CORSAllowedOrigins),
+		Handler:           withAuth(unixHandler, nil, manager.cfg.CORSAllowedOrigins),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			// The same kernel question the control socket asks at accept
+			// (#5182): which process CONNECTED, resolved to its (pid,
+			// start-stamp) instance while the peer provably still owns the
+			// slot — resolving here rather than in the handler keeps a peer
+			// that exits and has its pid recycled mid-request from lending a
+			// stranger the exemption. This is the unix socket's server — the
+			// TCP web listeners run their own http.Server with no ConnContext,
+			// so a remote peer never acquires a local pid and can never
+			// present one a teardown would trust. A read failure leaves the
+			// context unchanged: no requester, the pre-#5182 posture.
+			pid, err := peercred.ConnPID(conn)
+			if err != nil {
+				return ctx
+			}
+			proc, err := proctree.Lookup(pid)
+			if err != nil {
+				return ctx
+			}
+			return context.WithValue(ctx, httpPeerRequesterContextKey{}, &proc)
+		},
 	}
 
 	go func() {
@@ -132,30 +170,73 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	// socket and control plane every local client depends on must not regress
 	// because a web port could not open. The auth/CORS keys apply live per request
 	// (livePosture) and never come through here. A tokenless network bind is
-	// reported, not refused (#2168 Phase 0), by bindWebLocked's banner.
+	// REFUSED since #5137 — reconcile declines the socket and logs the reason at
+	// ERROR — unless network.allow_unauthenticated_network opts in, in which case
+	// bindWebLocked's banner reports the exposure it is serving.
 	wl := newWebListeners(manager, mux, newPreviewMux(cs))
 	manager.webListeners = wl
-	if _, err := wl.reconcile(manager.cfg); err != nil {
-		log.WarningLog.Printf("daemon web listener(s): %v — retrying in the background", err)
+	// Reconcile against the LIVE config, not the frozen boot cfg: the unix
+	// control socket admits config writes during warm-up before webListeners
+	// exists, so an apply that landed in that window already published the live
+	// config — binding off the stale boot copy could serve a posture the
+	// applied config already revoked (e.g. an allow_unauthenticated_network
+	// revocation landing between socket-accept and this reconcile). The
+	// snapshot and the reconcile must also be ATOMIC against applies: hold
+	// configApplyMu across both, or a revocation apply that finishes between
+	// the Config() read and wl.mu records its refusal only for this stale
+	// reconcile to clear it and bind the socket under the now-tokenless live
+	// config.
+	manager.configApplyMu.Lock()
+	_, recErr := wl.reconcile(manager.Config())
+	manager.configApplyMu.Unlock()
+	if recErr != nil {
+		log.WarningLog.Printf("daemon web listener(s): %v — retrying in the background", recErr)
 		// A startup bind that lost a race (tailnet IP not assigned yet) is retried
 		// with capped backoff instead of staying down until a restart (#5571 W9.9).
 		wl.retryFailedBinds()
 	}
 
+	// The dedicated sandbox callback endpoint (#5571 W3.4). Non-fatal like the
+	// web listeners: a daemon that cannot bind it still serves everything else,
+	// and sandbox creates degrade through the W3.1 path.
+	var sandboxEP *sandboxEndpoint
+	if epPath, pathErr := SandboxEndpointSocketPath(); pathErr != nil {
+		log.WarningLog.Printf("daemon sandbox callback endpoint disabled: %v", pathErr)
+	} else if ep, epErr := startSandboxEndpoint(mux, &manager.sandboxTokens, epPath); epErr != nil {
+		log.WarningLog.Printf("daemon sandbox callback endpoint disabled: %v", epErr)
+	} else {
+		sandboxEP = ep
+		manager.setSandboxEndpointSocket(epPath)
+	}
+
+	var closeOnce sync.Once
+	var closeErr error
 	return func() error {
-		// Close stops the listeners (a listener unlinks its own Unix socket file,
-		// net's default for a listener it created) and terminates active
-		// connections. Deliberately no explicit os.Remove: mirrors
-		// startControlServer's #718/#767 reasoning — a Remove could race a freshly
-		// bound socket.
-		if manager.lifecycle != nil {
-			manager.lifecycle.clearHTTPListeners()
-		}
-		listenersErr := wl.close()
-		if err := srv.Close(); err != nil {
-			return err
-		}
-		return listenersErr
+		closeOnce.Do(func() {
+			manager.setSandboxEndpointSocket("")
+			_ = sandboxEP.close()
+			// Stop route admission before closing the listeners. Close cancels
+			// context-aware calls immediately; the request drain below joins every
+			// already-dispatched ordinary RPC, including context-free archive/kill
+			// calls, before the daemon takes its terminal checkpoint.
+			cs.httpRequests.closeAdmission()
+			if manager.lifecycle != nil {
+				manager.lifecycle.clearHTTPListeners()
+			}
+			listenersErr := wl.close()
+			unixErr := srv.Close()
+			cs.httpRequests.wait()
+			// ApplyConfig is itself in the drain. If it passed admission before
+			// shutdown, it can rebind a TCP listener after the first close while
+			// finishing its committed write. Close once more after every handler
+			// has returned so no replacement listener escapes the shutdown fence.
+			listenersErr = errors.Join(listenersErr, wl.close())
+			if manager.lifecycle != nil {
+				manager.lifecycle.clearHTTPListeners()
+			}
+			closeErr = errors.Join(listenersErr, unixErr)
+		})
+		return closeErr
 	}, nil
 }
 
@@ -172,7 +253,7 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	for _, rt := range servedHTTPRoutes() {
-		mux.HandleFunc(rt.Path, rt.handler(cs))
+		mux.HandleFunc(rt.Path, cs.trackHTTPRPC(rt.handler(cs)))
 	}
 
 	// WS data plane (#1592 Phase 2 PR5): the PTY stream broker + its stream-info
@@ -195,6 +276,15 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	mux.HandleFunc("POST /v1/config-assistant", cs.configAssistantHandler)
 	mux.HandleFunc("GET /v1/config-assistant/stream", cs.configAssistantStreamHandler)
 	mux.HandleFunc("DELETE /v1/config-assistant", cs.configAssistantDeleteHandler)
+
+	// The account-login stream (#3385): the same bare-session PTY WebSocket for a
+	// login pane, which likewise has no Instance. It DOES take an account in the
+	// query — the daemon maps it to a pane its own supervisor spawned, so the only
+	// sessions reachable are login panes this daemon started — and it is a stream,
+	// not an RPC mirror, so it registers here beside its sibling rather than in the
+	// httpRoutes catalog. The spawn and the account reads are RPCs (AccountLogin,
+	// ListAccounts, RegisterAccount) and live in the catalog with everything else.
+	mux.HandleFunc("GET /v1/account-login/stream", cs.accountLoginStreamHandler)
 
 	// The web-tab preview credential (#1856 step 2): an authenticated control-plane
 	// client fetches the preview origin's ephemeral token here, then delivers it to
@@ -239,6 +329,9 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 //
 //	200 — success: {"data": <resp>, "error": null}
 //	400 — malformed / unreadable JSON request body, or unknown request field
+//	404 — the addressed tab is gone (session.ErrTabGone — the same mapping the
+//	      stream data plane applies, shared so an id-keyed RPC answers like
+//	      the WS it drives, #5571 W4.3)
 //	405 — wrong HTTP verb (not POST)
 //	413 — request body exceeds maxHTTPBodyBytes
 //	503 — daemon warm-up or upgrade probation (typed, retryable)
@@ -258,6 +351,15 @@ func rpcHandler[Req any, Resp any](call func(Req, *Resp) error) http.HandlerFunc
 // client disconnects — r.Context() is done the moment the connection drops. This
 // is what stops an abandoned create from leaving a pane-poll spinning on the
 // daemon.
+// rpcHandlerCtxPtr adapts a handler whose request is a pointer — the tracked
+// teardown methods take *Req so the net/rpc argv pointer (and thus the
+// requester unregister parked under it) is shared with the transport (#5182).
+func rpcHandlerCtxPtr[Req any, Resp any](call func(context.Context, *Req, *Resp) error) http.HandlerFunc {
+	return rpcHandlerCtx(func(ctx context.Context, req Req, resp *Resp) error {
+		return call(ctx, &req, resp)
+	})
+}
+
 func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -278,15 +380,41 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 			return
 		}
 		var resp Resp
-		if err := call(withHTTPRPCRequester(r), req, &resp); err != nil {
-			status := http.StatusInternalServerError
+		// Teardown handlers park their requester unregistrations on this
+		// per-request queue (trackTeardownRequester, #5182); drain it only
+		// after the reply has been flushed into the socket, so the requester
+		// stays exempt for as long as it is still waiting on this answer.
+		pending := &pendingUntracks{}
+		ctx := context.WithValue(withHTTPRPCRequester(r), teardownReplyPendingContextKey{}, pending)
+		if err := call(ctx, req, &resp); err != nil {
+			status := httpStatusForTab(err)
+			var shaped interface{ HTTPStatus() int }
 			if IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
+			} else if errors.As(err, &shaped) {
+				// A refusal that names its own status (projectReboundError's
+				// 409, proposal conflicts) keeps it; the rest stay a 500.
+				status = shaped.HTTPStatus()
 			}
 			writeHTTPError(w, r, status, err)
+			flushHTTPResponse(w)
+			pending.drain()
 			return
 		}
 		writeHTTPSuccess(w, r, resp)
+		flushHTTPResponse(w)
+		pending.drain()
+	}
+}
+
+// flushHTTPResponse forces the buffered reply into the socket now rather than
+// on handler return, so teardown-requester unregistrations released right
+// after it genuinely trail the reply (#5182). net/http's response writer
+// always satisfies http.Flusher here; the check is only for wrapped writers
+// in tests.
+func flushHTTPResponse(w http.ResponseWriter) {
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 
@@ -405,18 +533,74 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 	}
 	var coded codedError
 	if errors.As(err, &coded) {
-		writeHTTPEnvelope(w, r, status, apiproto.FailureWithCode(err.Error(), coded.APIErrorCode()))
+		env := apiproto.FailureWithCode(err.Error(), coded.APIErrorCode())
+		// An error can carry data the client needs to recover, such as the three
+		// versions of a conflicting proposal save.
+		var withData interface{ EnvelopeData() any }
+		if errors.As(err, &withData) {
+			env.Data = withData.EnvelopeData()
+		}
+		writeHTTPEnvelope(w, r, status, env)
+		return
+	}
+	// A stale stable-id refusal is a bare 404 on the status line — the same
+	// status the catch-all gives an unknown route — so without a code the two
+	// are indistinguishable on the wire. tab_gone lets a remote client
+	// reconstruct session.ErrTabGone instead of guessing (#5571 W4.3).
+	if errors.Is(err, session.ErrTabGone) {
+		writeHTTPEnvelope(w, r, status,
+			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeTabGone))
+		return
+	}
+	// A verified resource errno is worth a machine-readable code on the wire:
+	// the errno's errors.Is identity dies in serialization, so the code is how
+	// a client-side classifier still sees "the remote ran out of a kernel
+	// resource" rather than a generic message string (#5295 review).
+	if lostRestoreResourceErrno(err) {
+		writeHTTPEnvelope(w, r, status,
+			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeResourceExhausted))
+		return
+	}
+	// A deadline inside the operation — the archive RPC's inner git push
+	// deadline, not this transport's — serializes just as lossy: the client
+	// receives an uncoded message string its bounded-deadline arm cannot
+	// re-see, so a stalled origin would charge the structural budget until
+	// give-up. The resource check above deliberately wins when both hold —
+	// a resource verdict is the stronger environmental signal (#5295 review).
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeHTTPEnvelope(w, r, status,
+			apiproto.FailureWithCode(err.Error(), apiproto.ErrorCodeDeadlineExceeded))
 		return
 	}
 	writeHTTPEnvelope(w, r, status, apiproto.Failure(err.Error()))
 }
 
 // writeHTTPEnvelope is the single write path for both success and failure so the
-// Content-Type, status, and byte-identical envelope shape stay uniform.
+// Content-Type, status, and byte-identical envelope shape stay uniform. The
+// body is serialized before WriteHeader so Content-Length accompanies it: a
+// length-delimited response is COMPLETE the moment the handler's flush pushes
+// it into the socket, with no chunked terminator left for handler return to
+// write — which is what makes flushHTTPResponse a real reply-completed hook
+// for teardown-requester release (#5182).
 func writeHTTPEnvelope(w http.ResponseWriter, r *http.Request, status int, env apiproto.Envelope) {
+	if env.Error != nil {
+		// Keep provenance separate from the machine-readable outcome code.
+		// Copy the error so serializing it does not mutate the caller's envelope.
+		err := *env.Error
+		err.DaemonRejected = err.Code != apiproto.ErrorCodeMutationCommitted
+		env.Error = &err
+	}
+	var body bytes.Buffer
+	if err := apiproto.WriteEnvelope(&body, env); err != nil {
+		if !httpResponseWriteAbandoned(r, err) {
+			log.WarningLog.Printf("failed to marshal HTTP response envelope: %v", err)
+		}
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
 	w.WriteHeader(status)
-	if err := apiproto.WriteEnvelope(w, env); err != nil && !httpResponseWriteAbandoned(r, err) {
+	if _, err := w.Write(body.Bytes()); err != nil && !httpResponseWriteAbandoned(r, err) {
 		log.WarningLog.Printf("failed to write HTTP response envelope: %v", err)
 	}
 }

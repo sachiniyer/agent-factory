@@ -41,6 +41,36 @@ func TestRewriteProgramCmdByAf_KeepsTheDeclarationInStepWithResume(t *testing.T)
 			agent:     "codex",
 			wantAdded: "--last",
 		},
+		{
+			// The #5238 flag injection splices `resume --last` in after the
+			// injected -c — `codex -c … resume --last`, a positional extension
+			// of the launch command — so the declaration must grow with the
+			// rewrite or every account-scoped codex restore dies at the
+			// boundary (#5238 review).
+			name:      "codex splices resume --last behind the injected flag",
+			program:   "codex -c check_for_update_on_startup=false",
+			declared:  []string{"-c", "check_for_update_on_startup=false"},
+			agent:     "codex",
+			wantAdded: "--last",
+		},
+		{
+			// Same splice through an account-accepted wrapper: the executable
+			// is the codex operand inside `exec`, not the command's first
+			// word — a first-word proof would clear the declaration and the
+			// boundary would refuse the respawn (#5238 review).
+			name:      "exec codex wrapper keeps the proof across the splice",
+			program:   "exec codex -c check_for_update_on_startup=false",
+			declared:  []string{"-c", "check_for_update_on_startup=false"},
+			agent:     "codex",
+			wantAdded: "--last",
+		},
+		{
+			name:      "env codex wrapper keeps the proof across the splice",
+			program:   "env codex -c check_for_update_on_startup=false",
+			declared:  []string{"-c", "check_for_update_on_startup=false"},
+			agent:     "codex",
+			wantAdded: "--last",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			session := &TmuxSession{program: test.program, generatedArgs: test.declared}
@@ -81,21 +111,30 @@ func TestRewriteProgramCmdByAf_ClearsAnUndescribableRewrite(t *testing.T) {
 // coverage of Restore itself.
 //
 // The helper above is unit-tested, but the thing that actually breaks is the CALL
-// SITE: reverting Restore to `setProgramCmd(resumeProgram(...))` leaves every test
+// SITE: reverting Restore to a bare setter around resumeProgram leaves every test
 // here green while the declaration goes stale again. Binding that properly needs a
 // real re-spawn against real tmux, which this suite can do but only by spawning a
 // server for a one-line assertion.
 //
-// So this asserts the drift-prone spelling is absent. It is weak — it proves a
-// string is not present, not that the behaviour is right — and it is here because
-// the alternative was to claim the call site was covered when it was not.
+// The HALF of that this used to assert — that `setProgramCmd(resumeProgram(` is
+// absent from start.go — is now the compiler's, because #3734 deleted
+// setProgramCmd: it survived the #3083 rewrite with no caller at all, which is
+// to say the only thing left reaching for it was this string. A spelling that
+// does not compile cannot drift back, so the string check is kept only as a
+// tripwire against someone reintroducing the setter, and the assertion that
+// still carries weight is the positive one below.
+//
+// It remains weak — it proves a string is present, not that the behaviour is
+// right — and it is here because the alternative was to claim the call site was
+// covered when it was not.
 func TestRestoreUsesTheDeclarationPreservingRewrite(t *testing.T) {
 	source, err := os.ReadFile("start.go")
 	require.NoError(t, err)
 	require.NotContains(t, string(source), "setProgramCmd(resumeProgram(",
 		"Restore must rewrite the program through rewriteProgramCmdByAf, which moves the generated-args "+
-			"declaration with it; setProgramCmd alone leaves the declaration stale and an account-scoped "+
-			"re-spawn then exits 127 (#3083 review)")
+			"declaration with it; a bare setter leaves the declaration stale and an account-scoped "+
+			"re-spawn then exits 127 (#3083 review). setProgramCmd was removed in #3734, so reaching "+
+			"this assertion means it was reintroduced")
 	require.Contains(t, string(source), "rewriteProgramCmdByAf(resumeProgram)",
 		"and it must still be doing that rewrite at all")
 }
@@ -122,7 +161,7 @@ func TestLaunchSnapshot_NeverTearsTheCommandFromItsDeclaration(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 500; i++ {
-		program, proof, _, _, _, _ := session.launchSnapshot()
+		program, proof, _, _, _, _, _ := session.launchSnapshot()
 		// Every legal pair: bare with no declaration, or resumed with --continue
 		// declared. A torn read produces one without the other.
 		switch program {
@@ -156,7 +195,7 @@ func TestLaunchSnapshot_NeverTearsTrustedExecutableFromCommand(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 500; i++ {
-		program, proof, _, _, _, _ := session.launchSnapshot()
+		program, proof, _, _, _, _, _ := session.launchSnapshot()
 		switch program {
 		case "claude":
 			require.Empty(t, proof.TrustedExecutable)
@@ -186,11 +225,45 @@ func TestSetProgram_ClearsAPreviousDeclaration(t *testing.T) {
 	// A handoff target that happens to end in the very same words.
 	session.SetProgram("other-agent --session-id sid-1 --plugin-dir /p")
 
-	program, proof, _, _, _, _ := session.launchSnapshot()
+	program, proof, _, _, _, _, _ := session.launchSnapshot()
 	require.Equal(t, "other-agent --session-id sid-1 --plugin-dir /p", program)
 	require.Empty(t, proof.GeneratedArgs,
 		"the outgoing launch's declaration survived into the replacement, so af would vouch for "+
 			"arguments it did not author for this command and the account would transfer across the handoff")
 	require.Empty(t, proof.TrustedExecutable,
 		"an exact executable path is part of the old launch's proof and must not survive replacement")
+}
+
+// GeneratedArgs surfaces the af-authored declaration validateAccountSwapPlan
+// seeds a swap proof from when the resolved base came from the pane's frozen
+// program (#5433): it must return the slice SetLaunchProgram recorded, stay
+// empty when no declaration was recorded, and grow with af's own program
+// rewrites the way launchSnapshot's proof does — and never alias the field
+// so a caller mutating its result cannot race concurrent rewrites.
+func TestGeneratedArgs_ReportsTheRecordedDeclaration(t *testing.T) {
+	session := &TmuxSession{}
+	require.Nil(t, session.GeneratedArgs(),
+		"a session that never recorded a launch declares no af-authored words")
+
+	declared := []string{"-c", "check_for_update_on_startup=false"}
+	session.SetLaunchProgram("codex -c check_for_update_on_startup=false", sessionenv.AccountLaunchProof{
+		GeneratedArgs: declared,
+	})
+	require.Equal(t, declared, session.GeneratedArgs(),
+		"the accessor returns the words SetLaunchProgram recorded")
+
+	// af's own rewrites keep the declaration growing alongside the command,
+	// the same invariant launchSnapshot's proof preserves.
+	session.rewriteProgramCmdByAf(resumeProgram)
+	require.Equal(t,
+		[]string{"-c", "check_for_update_on_startup=false", "resume", "--last"},
+		session.GeneratedArgs(),
+		"the accessor mirrors the declaration rewriteProgramCmdByAf keeps")
+
+	// Must snapshot, not alias: mutating the returned slice must not affect a
+	// concurrent read of the field.
+	snap := session.GeneratedArgs()
+	snap[0] = "MUTATED"
+	require.Equal(t, "-c", session.GeneratedArgs()[0],
+		"the accessor returns a copy so a caller cannot corrupt the field it serializes under programMu")
 }

@@ -1,0 +1,144 @@
+# Web client selftest
+
+For contributors changing the browser client and maintainers diagnosing its
+acceptance gate. This page explains what the Playwright selftest proves and
+how its daemon sandbox works.
+
+Read [Container testing](container-testing.md) first for safe execution rules,
+then the [web guide](../web.md) for the flows under test. To capture documentation
+media, follow [Demo assets](demo-assets.md).
+
+The **web-driver-selftest** is the acceptance proof for the embedded browser web
+client (`web/`, #1592 Phase 5) — the browser analogue of the
+[TUI driver selftest](tui-manual-testing.md). It drives the daemon's embedded
+single-page app in a headless Chromium against a **real** `af` daemon and asserts
+the core flows end to end. Assertions are the gate, not screenshots.
+
+The [demo recorder](demo-assets.md) borrows this harness — the same image, the
+same throwaway-daemon sandbox — to record the media the README leads with, so
+what the docs show is the product this gate asserts on. It is reached only
+through its own config and CI never runs it; nothing below changes because of
+it.
+
+## Running it
+
+```bash
+make web-selftest-container
+```
+
+That is the only sanctioned entry point. It:
+
+1. Builds a dedicated container image
+   (`scripts/container/Dockerfile.web-selftest`) carrying three toolchains the
+   plain [testbox image](container-testing.md) deliberately omits: **Go** (to
+   build `af` and run the daemon), **Node** (to run Playwright), and a real
+   **Chromium** with all its system deps. It is pinned to the Playwright version
+   locked in `web/package-lock.json` so the bundled browser matches the npm
+   package.
+2. Runs the whole harness inside **one ephemeral container**
+   (`scripts/container/web-selftest-entry.sh`): builds `af`, brings up a real
+   daemon on a **throwaway home** with a loopback plain-HTTP+token listener
+   (`listen_addr=127.0.0.1:8899`), seeds two sessions in a mock repo behind a
+   fake agent, then runs Playwright (`web/selftest/web-driver.spec.ts`).
+
+Everything — the daemon, its tmux server, the sessions, the browser — lives on
+`127.0.0.1` inside the container and dies with it. There are **no published
+ports**, no access to the host tmux server, and no touch of the real
+`~/.agent-factory`, exactly like the other container harnesses.
+
+## In CI
+
+Since #2069 a PR touching `web/`, `daemon/`, `agentproto/`, `apiproto/`, the
+harness itself or the CI wiring around it also runs this on a GitHub runner
+(`.github/workflows/web-selftest.yml`), using the same `make` target — CI does
+not keep its own copy of the steps.
+
+Since #2762 it **gates, and it runs on master**:
+
+- **On a PR** `pr.yml` calls the workflow as a job and lists it in `Build`'s
+  `needs`, so a red run turns a required check red. A cheap `Web selftest scope`
+  job decides first whether the change can reach the web client — the decision
+  lives in `.github/scripts/web-selftest-scope.js`, whose tests run in `Lint` — and
+  the expensive job is `skipped` when it cannot. Every way of failing to work out
+  the diff resolves to *run it*.
+- **On master** a `push` trigger runs the same definition with the same path
+  filter. It blocks nothing (master has already merged); its job is to name the
+  commit. Before #2762 nothing ran the suite on master at all, so a regression
+  stayed invisible until some later PR happened to touch these paths — and then it
+  looked like that PR's fault. Master runs are not cancelled by a newer push, so
+  each commit keeps its own verdict.
+
+A red run is worth investigating rather than re-running: twice on 2026-07-21 a
+"flake" here was a genuine web-client race (#2311, #2341).
+
+The deterministic web checks — typecheck, the unit/parity suites, and
+`web/dist` reproducibility — gate too, as pr.yml's `Web` job. The two are a pair:
+`Web` proves the committed bundle matches `web/src`, and this suite proves that
+bundle works. This harness deliberately serves the **committed** `web/dist` rather
+than rebuilding, so it exercises the artifact a released binary embeds — which is
+also why you run `make web-build` before it locally.
+
+Failures give you Playwright's assertion output in the job log **and** the trace.
+The harness works inside the container's own copy of the tree, so its
+`web/test-results/` used to die with the container on every failure (#3505) —
+`scripts/testbox.sh` now bind-mounts that directory, so the trace, the
+screenshots and the daemon logs land in `web/test-results/<run-token>/` on the
+host, and CI uploads them as the `web-selftest-artifacts` artifact on the run's
+page. Open one with
+`npx playwright show-trace web/test-results/<run-token>/<test>/trace.zip`.
+
+## What it asserts
+
+Against the live SPA served over the daemon's plain-HTTP listener:
+
+| Flow | Assertion |
+| --- | --- |
+| **Login** | Pasting the daemon token into the login form renders the authed app. |
+| **Sidebar** | The rail lists the seeded sessions from the Snapshot/events plane, and the client reports an open event stream (`.af-app[data-live="open"]`). |
+| **Attach** | Click-to-attach opens the xterm terminal and shows the fake agent's live output (a real binary PTY frame decoded by the TS codec and painted in the browser). |
+| **Keyboard (#1694/#2517)** | In the sessions view's rail mode `j`/`k` navigate the rail; `Enter` attaches the selection; `ctrl+]` returns to the rail; `Escape` forwards to the agent as its interrupt (the ESC byte reaches the PTY and focus stays in the terminal). |
+| **View cycling (#1694/PR8)** | In rail mode `]` cycles the top-level view forward (sessions → tasks) and `[` cycles it back (tasks → sessions), the active view tab following each step. |
+| **Tabs (#1592 PR7)** | The tab bar opens the New tab picker (`+` / `t`), creates a Terminal or VS Code tab when supported, switches to it (click / `1`-`9`), and deletes it after confirmation (`×` / `w` → Delete tab) — the agent tab stays undeletable. |
+| **Create** | The **+ New** modal creates a session and its row appears in the rail. |
+| **Delete session** | The Delete session confirmation removes the session's row. |
+| **Archive** | The archive confirm moves a session into the archived group. |
+
+## Toolchain boundary
+
+Node and Playwright stay **entirely** behind `make web-selftest-container` (and
+`make web-build` / `make web-test`). `go build ./...` and `make test-container`
+never invoke them — the built `web/dist/` is committed, so the Go side is
+Node-free (the locked toolchain decision). The harness tests the **committed**
+`web/dist/` bundle the binary embeds; rebuild it with `make web-build` after
+changing `web/src/`.
+
+## Artifacts
+
+The harness is assertion-gated, so it needs no committed artifacts. Per-run
+Playwright outputs (`web/test-results/`, `web/playwright-report/`,
+`web/blob-report/`, `web/selftest/.last-run.json`) are git-ignored; a failing run
+retains a trace under `web/test-results/` for local debugging.
+
+Each run gets its **own** subdirectory under `web/test-results/`, keyed by the
+same per-run token the container and image tags use (#3505). That is what keeps
+two concurrent `web-selftest` invocations from one checkout out of each other's
+output — the collision class #1171 already paid for — and it means the artifacts
+are that run's by construction rather than because something cleared a shared
+directory. Subdirectories older than a week are pruned on the next run; only
+failures create them.
+
+The container runs as root, so it hands ownership back on the way out AND writes
+under `umask 000`. Both, because the trap only runs on a graceful exit: a
+SIGKILLed container (the docker daemon dying, the CI job timeout) is precisely
+what the mount rescues, and its files would otherwise be root-owned directories
+you cannot delete without sudo.
+
+In CI the same directory is uploaded as `web-selftest-artifacts` (14-day
+retention); the upload is best-effort and cannot change the job's verdict either
+way, and the harness step is capped below the job timeout so a hung run still has
+budget left to upload.
+
+The trace records full request and response headers. There is no `Authorization`
+header in it only because the loopback browser is tokenless (#1696) — not because
+Playwright redacts anything. If this harness ever drives a token-bearing request,
+re-check what the upload would publish before trusting it.

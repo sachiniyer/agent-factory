@@ -1,15 +1,11 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
-	stdlog "log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
 func TestWebTabProxyFailureDoesNotLogTargetAccessToken(t *testing.T) {
@@ -18,10 +14,7 @@ func TestWebTabProxyFailureDoesNotLogTargetAccessToken(t *testing.T) {
 	targetURL := dead.URL + "/app?view=2&access_token=" + token
 	dead.Close()
 
-	var warnings bytes.Buffer
-	previous := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "", 0)
-	t.Cleanup(func() { aflog.WarningLog = previous })
+	warnings := captureWarnings(t)
 
 	mux, sessionID, tabID := newWebTabProxyFixture(t, targetURL)
 	rec := proxyGet(t, mux, sessionID, tabID, "app?view=2")
@@ -47,10 +40,7 @@ func TestWebTabProxy_ClientCancellationIsNotAnUpstreamFailure(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	var warnings bytes.Buffer
-	previous := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "", 0)
-	t.Cleanup(func() { aflog.WarningLog = previous })
+	warnings := captureWarnings(t)
 
 	mux, sessionID, tabID := newWebTabProxyFixture(t, upstream.URL)
 	requestCtx, cancelRequest := context.WithCancel(context.Background())

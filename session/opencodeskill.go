@@ -104,10 +104,10 @@ func ensureOpencodeAfConfig() (string, error) {
 // opencodeCarriesConfigEnv reports whether a resolved command already sets
 // OPENCODE_CONFIG itself — e.g. a program_overrides entry like
 // `OPENCODE_CONFIG=~/mine.jsonc opencode` or `env OPENCODE_CONFIG=~/mine.jsonc
-// opencode`. Shell semantics give the LAST assignment precedence, so af prepending
-// its own would be overridden by the user's anyway and their config would win
-// either way; detecting it lets af SAY the guidance did not land rather than
-// leaving that silent.
+// opencode`. Shell semantics give the LAST assignment precedence, so an
+// af-injected OPENCODE_CONFIG on the pane environment would be overridden by
+// the user's anyway and their config would win either way; detecting it lets
+// af SAY the guidance did not land rather than leaving that silent.
 //
 // The scan stops at the command word, so an OPENCODE_CONFIG=... appearing later as
 // an ARGUMENT (`opencode --prompt 'set OPENCODE_CONFIG=x'`) is correctly not
@@ -118,9 +118,23 @@ func ensureOpencodeAfConfig() (string, error) {
 // QUOTED value containing spaces in an assignment BEFORE an OPENCODE_CONFIG one
 // (`FOO='a b' OPENCODE_CONFIG=x opencode`) ends the scan early and misses it. The
 // cost is only the warning: the user's assignment still wins at runtime, so their
-// config is honored regardless. tmux's splitShellTokens would handle it but is
+// config is honored regardless. tmux's SplitShellTokens would handle it but is
 // package-private, and duplicating a shell tokenizer here to recover a log line is
 // not worth the second parser.
+//
+// This function inspects ONLY the resolved command string. It does NOT consult
+// the process environment, so it cannot see a user's EXPORTED OPENCODE_CONFIG
+// (which the opencode allowlist in internal/sessionenv deliberately delivers to
+// the pane when the command is operator-attributable). For that channel — where,
+// unlike the in-command case, an af-injected command-prefix assignment would
+// SHADOW the exported variable rather than lose to it — the caller
+// (injectSystemPrompt) additionally checks `os.Getenv("OPENCODE_CONFIG")` and
+// skips injection on a non-empty value, gated on
+// opencodeExportedConfigReachesPane so the env channel is honored only when the
+// pane's allowlist will actually deliver it. Do not move that env check into this
+// function: its single-string contract keeps it unit-testable without t.Setenv,
+// and the call site is the only place that knows which environment the pane will
+// actually inherit.
 func opencodeCarriesConfigEnv(resolved string) bool {
 	for _, tok := range strings.Fields(resolved) {
 		switch {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -575,6 +576,8 @@ func TestMouse_ClickSectionBackgroundFocusesAutomations(t *testing.T) {
 // exactly like pressing Tab.
 func TestMouse_ClickStatusHintRunsAction(t *testing.T) {
 	h, _, _ := mouseTestHome(t)
+	h.projects.SetProjects([]ui.SidebarProject{{Name: "project", Root: "/project"}, {Name: "other", Root: "/other"}})
+	h.relayout()
 	newFakeClock(h)
 	h.focusRegion(layout.RegionAutomations)
 
@@ -811,6 +814,10 @@ func TestMouse_TransientPreviewUsesTargetSnapshotOwner(t *testing.T) {
 func TestMouse_ConfirmOverlayClicks(t *testing.T) {
 	h, alpha, beta := mouseTestHome(t)
 	clock := newFakeClock(h)
+	// A completed, no-op loss check: this test is about clicks, not git.
+	origCheck := killLossCheck
+	t.Cleanup(func() { killLossCheck = origCheck })
+	killLossCheck = func(session.WorktreeCleanupImpact) killLossAssessment { return killLossAssessment{} }
 
 	// Open the kill dialog and click background, then "n or esc to cancel".
 	_, _ = h.handleKill()
@@ -826,10 +833,22 @@ func TestMouse_ConfirmOverlayClicks(t *testing.T) {
 	assert.Equal(t, stateDefault, h.state, "clicking n cancels the dialog")
 	assert.NotEqual(t, session.Deleting, alpha.GetStatus(), "cancel must not kill")
 
-	// Re-open and click "y/enter to confirm".
+	// Re-open. While the loss checks are pending (#4848) the confirm is
+	// withheld: no yes zone is drawn, and a click resolved to it does nothing.
 	clock.advance(time.Second)
-	_, _ = h.handleKill()
+	_, checkCmd := h.handleKill()
 	require.Equal(t, stateConfirm, h.state)
+	require.NotEmpty(t, h.confirmationOverlay.Pending(), "alpha owns a local worktree, so its kill dialog opens pending")
+	_ = h.View()
+	_, drawn := h.zones.Find(zones.OverlayConfirmYes)
+	assert.False(t, drawn, "a pending dialog must not draw a confirm zone")
+	_, _ = h.handleModalClick(zones.OverlayConfirmYes)
+	assert.Equal(t, stateConfirm, h.state, "clicking yes while pending must not confirm")
+	assert.NotEqual(t, session.Deleting, alpha.GetStatus(), "clicking yes while pending must not kill")
+	// Let the (injected, no-op) check land so the dialog is final, then click
+	// "y/enter to confirm".
+	settleKillCheck(t, h, checkCmd)
+	require.Empty(t, h.confirmationOverlay.Pending())
 	cmd := clickZone(t, h, zones.OverlayConfirmYes)
 	assert.Equal(t, stateDefault, h.state)
 	assert.Equal(t, session.Deleting, alpha.GetStatus(),
@@ -890,9 +909,7 @@ func TestMouse_StaleClickTrackerClearedAcrossModal(t *testing.T) {
 		"precondition: the click seeds the double-click tracker")
 	require.Equal(t, beta.Title, h.store.GetSelectedInstance().Title)
 
-	// Open the kill confirmation through Update — 'D' first highlights the menu
-	// hint and re-emits itself, so it takes two dispatches to reach handleKill.
-	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	// Open the kill confirmation through Update, the real keyboard path.
 	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
 	require.Equal(t, stateConfirm, h.state, "D opens the kill confirmation")
 	require.Empty(t, h.lastClickZone,
@@ -913,6 +930,103 @@ func TestMouse_StaleClickTrackerClearedAcrossModal(t *testing.T) {
 	assert.Equal(t, stateDefault, h.state)
 }
 
+// TestMouse_RecoveryOverlayFalseDoubleFromAsyncKill: the recovery overlay
+// (m.recovery) is a stateless modal that never changes m.state, unlike the
+// stateConfirm modal in the tests above. An async kill error raises it between
+// two clicks on the same instance row; the state-keyed clearStaleClickTrackerAfter
+// gate sees stateDefault→stateDefault and cannot invalidate the pre-recovery
+// seed, so showRecovery must clear the tracker at the raise boundary (#1731
+// invariant, regressed by the recovery overlay added in 4af1c606).
+//
+// Variant 1: seed click, key dismissal (the screen's named action), re-press —
+// all within the double-click window.
+func TestMouse_RecoveryOverlayFalseDoubleFromAsyncKill(t *testing.T) {
+	h, alpha, beta := mouseTestHome(t)
+	clock := newFakeClock(h)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	_, _ = stubLiveTermFactory(t)
+
+	// A real click on beta's row seeds the tracker (and selects beta).
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+	require.Equal(t, zones.TreeInstance(beta.Title), h.lastClickZone,
+		"precondition: the click seeds the double-click tracker")
+	require.Equal(t, beta.Title, h.store.GetSelectedInstance().Title)
+
+	// An unrelated async kill error raises the recovery overlay. m.state stays
+	// stateDefault, so the state-keyed gate cannot see this excursion; showRecovery
+	// must clear the tracker itself (the fix).
+	target := captureSessionActionTarget(alpha, h.repoID)
+	_, _ = h.Update(instanceKilledMsg{target: target, err: errors.New("daemon refused the kill")})
+	require.NotNil(t, h.recovery, "the kill error raises the recovery overlay")
+	require.Equal(t, stateDefault, h.state, "recovery does not change m.state")
+	assert.Empty(t, h.lastClickZone,
+		"showRecovery must clear the double-click tracker so a pre-recovery click cannot pair with a post-recovery click (#1731)")
+
+	// Dismiss the overlay with a key press (the screen's named action). The
+	// dismissal early-returns before trackClick, so it neither seeds nor clears.
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeySpace})
+	require.Nil(t, h.recovery, "a key press dismisses the recovery overlay")
+	require.Equal(t, stateDefault, h.state)
+
+	// A fast click on that same row within the double-click window must stay a
+	// single select — the pre-recovery press must not pair with it.
+	clock.advance(50 * time.Millisecond)
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+
+	assert.Nil(t, h.store.FindOpenPane(beta, 0),
+		"a pre-recovery click must not survive the recovery overlay into a false double")
+	assert.False(t, h.interactive, "the post-recovery single click must not enter interactive mode")
+	assert.Equal(t, stateDefault, h.state)
+}
+
+// TestMouse_RecoveryOverlayFalseDoubleFromAsyncCreate: the recovery overlay
+// raised by an async create error on a DIFFERENT instance than the clicked row.
+// Because the failing instance is not the selected one, restoreFailedCreate is
+// not taken and m.state stays stateDefault — the same state-keyed gate gap as
+// the kill variant. Exercises dismissal via a mouse click (Variant 2): the
+// recovery screen registers no tree zones, so a click short-circuits at the
+// recovery gate before trackClick regardless of coordinates.
+func TestMouse_RecoveryOverlayFalseDoubleFromAsyncCreate(t *testing.T) {
+	h, alpha, beta := mouseTestHome(t)
+	clock := newFakeClock(h)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	_, _ = stubLiveTermFactory(t)
+
+	// A real click on beta's row seeds the tracker (and selects beta).
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+	require.Equal(t, zones.TreeInstance(beta.Title), h.lastClickZone,
+		"precondition: the click seeds the double-click tracker")
+	require.Equal(t, beta.Title, h.store.GetSelectedInstance().Title)
+
+	// An async create error on alpha (a different instance than the clicked
+	// beta) raises the recovery overlay. userStillWatching is false (the
+	// selection is beta, not alpha), so restoreFailedCreate is not taken and
+	// m.state stays stateDefault — the state-keyed gate cannot see this
+	// excursion; showRecovery must clear the tracker itself (the fix).
+	_, _ = h.Update(instanceStartedMsg{instance: alpha, err: errors.New("daemon refused the create")})
+	require.NotNil(t, h.recovery, "the create error raises the recovery overlay")
+	require.Equal(t, stateDefault, h.state, "recovery does not change m.state")
+	assert.Empty(t, h.lastClickZone,
+		"showRecovery must clear the double-click tracker so a pre-recovery click cannot pair with a post-recovery click (#1731)")
+
+	// Dismiss the overlay with a mouse click. The recovery screen registers no
+	// tree zones, so the click short-circuits at the recovery gate before
+	// trackClick — it neither seeds nor clears the tracker.
+	_, _ = h.Update(tea.MouseMsg{X: 1, Y: 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	require.Nil(t, h.recovery, "a click dismisses the recovery overlay")
+	require.Equal(t, stateDefault, h.state)
+
+	// A fast click on that same row within the double-click window must stay a
+	// single select — the pre-recovery press must not pair with it.
+	clock.advance(50 * time.Millisecond)
+	clickZone(t, h, zones.TreeInstance(beta.Title))
+
+	assert.Nil(t, h.store.FindOpenPane(beta, 0),
+		"a pre-recovery click must not survive the recovery overlay into a false double")
+	assert.False(t, h.interactive, "the post-recovery single click must not enter interactive mode")
+	assert.Equal(t, stateDefault, h.state)
+}
+
 // TestMouse_SelectionOverlayRowClick: clicking a program row selects and
 // submits it, like ↓ + enter.
 func TestMouse_SelectionOverlayRowClick(t *testing.T) {
@@ -928,6 +1042,43 @@ func TestMouse_SelectionOverlayRowClick(t *testing.T) {
 	assert.Equal(t, stateNew, h.state, "a row click submits the selection")
 	assert.Equal(t, tmux.SupportedPrograms[2], h.pendingProgram,
 		"the clicked row's program is chosen")
+}
+
+// TestMouse_HandoffResolveOverlayRowClick (#4528, Codex): the delivery-resolve
+// picker is the same selection overlay as the program/tab/agent/backend/account
+// ones, so its rows must submit on a click. Without routing, `c` on a
+// confirmable row opened a picker that answered the keyboard and swallowed the
+// mouse — and "Mark delivered" is not a verb to leave mouse-only users unable
+// to reach.
+func TestMouse_HandoffResolveOverlayRowClick(t *testing.T) {
+	h, _, _ := mouseTestHome(t)
+	newFakeClock(h)
+	target := captureSessionActionTarget(h.store.GetInstances()[0], h.repoID)
+	var confirmed daemon.ConfirmHandoffDeliveryRequest
+	restore := SetHandoffDeliveryConfirmerForTest(func(req daemon.ConfirmHandoffDeliveryRequest) error {
+		confirmed = req
+		return nil
+	})
+	defer restore()
+	h.handoffResolve = handoffResolveState{
+		actions: []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
+		target:  target,
+	}
+	h.selectionOverlay = overlay.NewSelectionOverlay("Resolve delivery", []string{
+		"Retry send — submit the pending mission again",
+		"Mark delivered — retire the pending mission without resending",
+	})
+	h.selectionOverlay.SetWidth(60)
+	h.state = stateSelectHandoffResolve
+
+	cmd := clickZone(t, h, zones.OverlaySelectRow(1))
+	assert.Equal(t, stateDefault, h.state, "a row click submits the picker")
+	require.NotNil(t, cmd, "the clicked row dispatches its verb")
+	if msg, ok := cmd().(handoffDeliveryConfirmedMsg); ok {
+		assert.NoError(t, msg.err)
+	}
+	assert.Equal(t, target.title, confirmed.Title,
+		"the mark-delivered row confirms against the captured identity")
 }
 
 // TestMouse_SearchOverlayRowClick: clicking a search result selects it and
@@ -1151,7 +1302,13 @@ func TestMouse_InteractiveStatusHintExits(t *testing.T) {
 // TestMouse_HintClickMatchesKeyGates: keyMsgFromString covers every primary
 // key the menu can advertise, so a rendered hint is always clickable.
 func TestMouse_HintClickMatchesKeyGates(t *testing.T) {
-	for _, binding := range keys.GlobalKeyBindings {
+	for name, binding := range keys.GlobalKeyBindings {
+		if name == keys.KeyNewRemote {
+			// Compatibility-only action: no default key or advertised hint (#4017).
+			require.Empty(t, binding.Keys(), "retired new_remote must not advertise a default hint")
+			continue
+		}
+		require.NotEmpty(t, binding.Keys(), "advertised binding %v must have a primary key", name)
 		primary := binding.Keys()[0]
 		if primary == "1" { // KeyJumpTab renders no zone by design
 			continue

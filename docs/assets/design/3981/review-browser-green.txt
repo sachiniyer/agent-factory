@@ -1,0 +1,27 @@
+Corrected production bundle; make perf-container (comparison without update flag)
+Order: light 360/390/430, then dark 360/390/430.
+All P1 screen/content-box/painted-border/scrollLeft assertions and P2 open/close
+host-rectangle equality assertions passed, alongside the >=85% height budget
+and the unchanged #3980 PTY input stream suite.
+
+3981 chrome heights {"width":360,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":360,"closed":{"x":2,"y":50,"width":356,"height":760},"opened":{"x":2,"y":50,"width":356,"height":760}}
+3981 terminal alignment {"width":360,"left":2,"right":340,"contentLeft":2,"hostRight":358,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":390,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":390,"closed":{"x":2,"y":50,"width":386,"height":760},"opened":{"x":2,"y":50,"width":386,"height":760}}
+3981 terminal alignment {"width":390,"left":2,"right":373,"contentLeft":2,"hostRight":388,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":430,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":430,"closed":{"x":2,"y":50,"width":426,"height":760},"opened":{"x":2,"y":50,"width":426,"height":760}}
+3981 terminal alignment {"width":430,"left":2,"right":412,"contentLeft":2,"hostRight":428,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":360,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":360,"closed":{"x":2,"y":50,"width":356,"height":760},"opened":{"x":2,"y":50,"width":356,"height":760}}
+3981 terminal alignment {"width":360,"left":2,"right":340,"contentLeft":2,"hostRight":358,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":390,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":390,"closed":{"x":2,"y":50,"width":386,"height":760},"opened":{"x":2,"y":50,"width":386,"height":760}}
+3981 terminal alignment {"width":390,"left":2,"right":373,"contentLeft":2,"hostRight":388,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":430,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":430,"closed":{"x":2,"y":50,"width":426,"height":760},"opened":{"x":2,"y":50,"width":426,"height":760}}
+3981 terminal alignment {"width":430,"left":2,"right":412,"contentLeft":2,"hostRight":428,"scrollLeft":0,"paintLeft":2}
+
+5 visual scenarios passed; performance budgets passed.
+Full web-driver.spec.ts container run: 146 passed (4.9m), zero retries.

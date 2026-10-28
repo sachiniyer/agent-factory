@@ -1,0 +1,133 @@
+name: Auto Merge
+
+# Throughput mode (see .github/auto-merge.md): squash-merge every open master PR
+# with green Build + Lint on its current head, no conflict, no hold label and no
+# unanswered P1 Codex finding.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+  workflow_run:
+    workflows: ['PR Validation', 'Build', 'Lint']
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  issues: write
+  checks: read
+
+# One merger at a time; a pending run replaces an older pending one.
+concurrency:
+  group: auto-merge
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    name: Merge ready PRs
+    # Kill switch: set the repository variable AUTO_MERGE_ENABLED to 'false'.
+    if: vars.AUTO_MERGE_ENABLED != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out master
+        uses: actions/checkout@v6
+        with:
+          ref: master
+
+      - name: Debounce workflow_run triggers
+        id: debounce
+        uses: actions/github-script@v8
+        with:
+          script: |
+            // Skips a workflow_run trigger only when a merger run that started
+            // after the triggering run completed (or one already queued) will read
+            // state at least as new. Never merely because a run was "recent".
+            await require('./.github/scripts/auto-merge.js').checkDebounce({ github, core, context });
+
+      - name: Check for a broken-master halt
+        id: halt
+        if: steps.debounce.outputs.skip != 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await require('./.github/scripts/auto-merge.js').checkHalt({ github, core, context });
+
+      - name: Set up Go
+        if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Re-check master composition
+        id: recheck
+        if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
+        continue-on-error: true
+        run: |
+          go build ./...
+          go vet ./...
+          scripts/lint-file-length.sh
+
+      - name: Settle the broken-master issue
+        id: settle
+        if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
+        uses: actions/github-script@v8
+        env:
+          BROKEN_NUMBER: ${{ steps.halt.outputs.broken_number }}
+          RECHECK_OUTCOME: ${{ steps.recheck.outcome }}
+        with:
+          script: |
+            await require('./.github/scripts/auto-merge.js').settleBroken({
+              github, core, context,
+              passed: process.env.RECHECK_OUTCOME === 'success',
+              number: process.env.BROKEN_NUMBER,
+            });
+
+      - name: Merge ready PRs
+        id: merge
+        if: steps.debounce.outputs.skip != 'true' && (steps.settle.outputs.halted != 'true')
+        uses: actions/github-script@v8
+        env:
+          USING_PAT: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
+          AUTO_MERGE_BATCH_SIZE: ${{ vars.AUTO_MERGE_BATCH_SIZE }}
+        with:
+          github-token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
+          script: |
+            await require('./.github/scripts/auto-merge.js').mergeAll({ github, core, context });
+
+      - name: Move to the new master head
+        id: head
+        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true')
+        run: |
+          git fetch --quiet origin master
+          git checkout --quiet --detach origin/master
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go (post-merge)
+        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true' && steps.halt.outputs.broken != 'true')
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Post-merge composition check
+        id: compose
+        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true')
+        continue-on-error: true
+        run: |
+          go build ./...
+          go vet ./...
+          scripts/lint-file-length.sh
+
+      - name: Report broken master
+        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true' && steps.compose.outcome != 'success')
+        uses: actions/github-script@v8
+        env:
+          MASTER_SHA: ${{ steps.head.outputs.sha }}
+          MERGED_PRS: ${{ steps.merge.outputs.merged_prs }}
+        with:
+          script: |
+            await require('./.github/scripts/auto-merge.js').reportBroken({
+              github, core, context, merged: process.env.MERGED_PRS,
+            });

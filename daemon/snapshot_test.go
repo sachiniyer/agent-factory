@@ -58,7 +58,7 @@ func TestManagerSnapshot_RepoScopedAndOrdered(t *testing.T) {
 	}
 }
 
-func TestManagerSnapshot_CarriesInFlightOp(t *testing.T) {
+func TestManagerSnapshot_CarriesTransientOperationState(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)

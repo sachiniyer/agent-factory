@@ -8,7 +8,6 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The daemon's events plane (#1592 Phase 2 PR5, §4.3): a WebSocket/JSON fan-out
@@ -105,7 +104,7 @@ func (m *Manager) publishEvent(t agentproto.EventType, payload any) {
 	}
 	ev, err := agentproto.NewEvent(t, payload)
 	if err != nil {
-		log.WarningLog.Printf("events plane: marshal %s event: %v", t, err)
+		m.warn().Printf("events plane: marshal %s event: %v", t, err)
 		return
 	}
 	m.events.publish(ev)

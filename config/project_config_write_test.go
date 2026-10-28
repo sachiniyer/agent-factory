@@ -89,22 +89,23 @@ func TestSetProjectConfigValueUnregisteredSelector(t *testing.T) {
 	loose := initProjectRegistryRepo(t, filepath.Join(base, "loose"))
 	_, err := SetProjectConfigValue(loose, "default_program", "codex")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "af projects register", "an unregistered target never silently writes")
+	require.Contains(t, err.Error(), "af projects add", "an unregistered target never silently writes")
 }
 
 // TestSetProjectConfigValueEqualToGlobalIsStillOverride pins the distinction
 // unset exists for: a personal value equal to the lower layer is a present,
-// winning override, not the same as clearing it.
+// winning override, not the same as clearing it. (branch_prefix is the one
+// personal key this does not hold for — its stored value never wins, #4539.)
 func TestSetProjectConfigValueEqualToGlobalIsStillOverride(t *testing.T) {
 	home, repoRoot, project := registeredTestProject(t)
-	writeGlobalTOML(t, home, "branch_prefix = \"same/\"\n")
+	writeGlobalTOML(t, home, "on_archive_command = \"same\"\n")
 
-	_, err := SetProjectConfigValue(project.ID, "branch_prefix", "same/")
+	_, err := SetProjectConfigValue(project.ID, "on_archive_command", "same")
 	require.NoError(t, err)
 
 	resolved, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)
-	value, ok := resolved.ResolvedValue("branch_prefix")
+	value, ok := resolved.ResolvedValue("on_archive_command")
 	require.True(t, ok)
 	require.NotNil(t, value.Winner)
 	assert.Equal(t, SourceProjectPersonal.String(), value.Winner.Layer)
@@ -234,6 +235,53 @@ func TestSetProjectConfigValueRootAgentPreservesOmittedEnabled(t *testing.T) {
 		Personal: layer,
 	})
 	assert.True(t, resolved.RootAgent.Enabled, "the omitted personal field must inherit global enabled=true")
+}
+
+func TestSetProjectConfigValueRootAgentReportsMergedProfile(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\nprogram = \"custom\"\n")
+
+	res, err := SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true}`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"enabled":true,"program":"custom"}`, res.Value)
+
+	res, err = SetProjectConfigValue(project.ID, "root_agent", `{"enabled":false,"program":"next"}`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"enabled":false,"program":"next"}`, res.Value)
+}
+
+func TestSetProjectConfigValueRootAgentReadbackOmitsUnknownMembers(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\nprogram = \"custom\"\nfuture_policy = \"keep\"\n")
+
+	res, err := SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true}`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"enabled":true,"program":"custom"}`, res.Value)
+	assert.NotContains(t, res.Value, "future_policy")
+
+	_, err = SetProjectConfigValue(project.ID, "root_agent", res.Value)
+	require.NoError(t, err, "the reported value must be accepted by config set")
+	path, err := ProjectConfigTomlPath(project.ID)
+	require.NoError(t, err)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `future_policy = 'keep'`)
+}
+
+func TestSetProjectConfigValueRootAgentReadbackFailureDoesNotWrite(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\nfuture_policy = nan\n")
+	path, err := ProjectConfigTomlPath(project.ID)
+	require.NoError(t, err)
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	_, err = SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no changes written")
+	after, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, before, after)
 }
 
 func TestUnsetProjectConfigAbsentKeyIsNoOp(t *testing.T) {

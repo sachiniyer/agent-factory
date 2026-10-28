@@ -9,7 +9,6 @@ import (
 
 type PtyFactory interface {
 	Start(cmd *exec.Cmd) (*os.File, error)
-	Close()
 }
 
 // trackedPtyFactory is the production PtyFactory extension used when the
@@ -49,8 +48,6 @@ func startPtyTracked(factory PtyFactory, cmd *exec.Cmd) (*os.File, <-chan error,
 	ptmx, err := factory.Start(cmd)
 	return ptmx, nil, err
 }
-
-func (pt Pty) Close() {}
 
 func MakePtyFactory() PtyFactory {
 	return Pty{}

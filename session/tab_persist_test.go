@@ -1,10 +1,12 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
@@ -34,17 +36,27 @@ func (p persistPtyFactory) Start(cmd *exec.Cmd) (*os.File, error) {
 	}
 	return f, err
 }
-func (p persistPtyFactory) Close() {}
 
 // nameKeyedExec is a tmux mock that tracks session existence per session name,
 // so an instance's agent and shell sessions are independent. Sessions named in
 // `alive` report existing immediately (the reconnect path); others come into
 // existence after their new-session.
 func nameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
+	return nameKeyedExecWithFinishedPanes(alive, nil)
+}
+
+// nameKeyedExecWithFinishedPanes is nameKeyedExec where each session named in
+// finished holds a finished command's pane for as long as it exists, answered
+// the way tmux answers a held dead pane (#4506 review): its pane pid is absent
+// from the process table.
+func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]finishedPane) cmd_test.MockCmdExec {
 	existing := map[string]bool{}
 	for k, v := range alive {
 		existing[k] = v
 	}
+	// Concurrent spawns can drive the same mock from two goroutines (a raced
+	// same-id tab create), so every read/write of the maps goes through mu.
+	var mu sync.Mutex
 	nameOf := func(cmd *exec.Cmd) string {
 		for i, a := range cmd.Args {
 			switch {
@@ -64,6 +76,8 @@ func nameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			n := nameOf(cmd)
+			mu.Lock()
+			defer mu.Unlock()
 			switch {
 			case strings.Contains(s, "has-session"):
 				if existing[n] {
@@ -71,6 +85,12 @@ func nameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
 				}
 				return assertNoSession
 			case strings.Contains(s, "new-session"):
+				// Real tmux can never create a session over a name that already
+				// exists — the duplicate rejection is exactly what dedupes two
+				// concurrent spawns that derived the same name (#5571 W4.3).
+				if existing[n] {
+					return fmt.Errorf("duplicate session: %s", n)
+				}
 				existing[n] = true
 				return nil
 			case strings.Contains(s, "kill-session"):
@@ -80,6 +100,13 @@ func nameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if pane, ok := finished[tmuxTarget(cmd)]; ok && existing[tmuxTarget(cmd)] {
+				if answer, ok := pane.answer(cmd); ok {
+					return []byte(answer), nil
+				}
+			}
 			// list-panes is asked for `#{pane_pid}` and its answer is PARSED, so a
 			// generic "content" stub is not a neutral default — it reads as a pane
 			// whose pid is unparseable, i.e. a process set that could not be
@@ -124,7 +151,7 @@ func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 	pty := persistPtyFactory{t: t, cmdExec: origExec}
 
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "restart",
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), "restart",
 		"restart-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -169,8 +196,7 @@ func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 
 	loadStore, err := NewStorage(ms, repoID)
 	require.NoError(t, err)
-	loaded, err := loadStore.LoadInstances()
-	require.NoError(t, err)
+	loaded := loadInstancesForTest(t, loadStore)
 	require.Len(t, loaded, 1, "the persisted instance must reload")
 
 	restored := loaded[0]
@@ -208,7 +234,7 @@ func TestRestartSurvival_AccountScopedLiveTabsAreReplaced(t *testing.T) {
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-restart",
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), "account-restart",
 		"account-restart-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -249,11 +275,17 @@ func TestRestartSurvival_AccountScopedLiveTabsAreReplaced(t *testing.T) {
 	for _, name := range []string{shellName, processName} {
 		require.Equal(t, 1, killed[name],
 			"a live tab from before the daemon restart may carry ambient credentials and must be stopped")
-		require.Equal(t, 1, started[name],
-			"the persisted tab must be replaced so the scoped launch environment is applied to its process")
-		require.Contains(t, startCommands[name], sessionenv.AccountEnvironmentExecMarker,
-			"the replacement process must launch through the selected-account environment boundary")
 	}
+	// The shell is replaced so the scoped launch environment applies to its
+	// process. The process tab is only stopped: its command ran once at
+	// tab-create and restore never re-executes it — not even to re-scope it
+	// (#4479) — so the tab restores inert.
+	require.Equal(t, 1, started[shellName],
+		"the persisted shell must be replaced so the scoped launch environment is applied to its process")
+	require.Contains(t, startCommands[shellName], sessionenv.AccountEnvironmentExecMarker,
+		"the replacement shell must launch through the selected-account environment boundary")
+	assert.Zero(t, started[processName],
+		"a stopped process tab restores inert; its command is never re-executed")
 	for _, tab := range inst.GetTabs()[1:] {
 		require.False(t, tab.accountScopeProvenanceUnknown,
 			"a verified scoped replacement must survive a later same-daemon agent respawn")
@@ -296,7 +328,7 @@ func TestAccountScopedAgentRespawnPreservesLiveTabProcesses(t *testing.T) {
 	}
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-respawn",
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), "account-respawn",
 		"account-respawn-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -347,7 +379,7 @@ func TestRestartSurvival_AccountScopedLiveTabRefusesUnconfirmedStop(t *testing.T
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-refusal",
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), "account-refusal",
 		"account-refusal-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -406,7 +438,7 @@ func TestRestartSurvival_BackCompatSynthesizesTabs(t *testing.T) {
 		TmuxName: legacyName, // legacy single-session field; NO Tabs
 		Worktree: GitWorktreeData{
 			RepoPath:     repoPath,
-			WorktreePath: filepath.Join(t.TempDir(), "wt"),
+			WorktreePath: existingDir(t, filepath.Join(t.TempDir(), "wt")),
 			SessionName:  "legacy",
 			BranchName:   "legacy-branch",
 		},

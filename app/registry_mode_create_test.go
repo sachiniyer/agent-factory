@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 
@@ -20,18 +22,13 @@ import (
 // anyway, so the user typed a name, pressed enter, and only THEN learned it
 // could not work: the daemon resolved the non-git cwd and answered `failed to
 // get git repo root for <path>: exit status 128`.
-//
-// Both creation keys are covered. `N` already refused early in registry mode,
-// but for the wrong reason and with the wrong words — it reported the cwd as a
-// repo with no remote_hooks configured, which tells a user with no project
-// selected to go configure something.
 func TestStartNewInstanceInRegistryModeRefusesWithoutProject(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		remote bool
+		name string
+		key  keys.KeyName
 	}{
-		{name: "local", remote: false},
-		{name: "remote", remote: true},
+		{name: "local", key: keys.KeyNew},
+		{name: "remote", key: keys.KeyNewRemote},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHome(t)
@@ -39,7 +36,7 @@ func TestStartNewInstanceInRegistryModeRefusesWithoutProject(t *testing.T) {
 			h.repoRoot = ""
 			h.errBox.SetSize(200, 1)
 
-			model, cmd := h.startNewInstance(tc.remote)
+			model, cmd := h.handleDefaultKeyPress(tea.KeyMsg{}, tc.key)
 
 			require.Same(t, h, model)
 			require.NotNil(t, cmd, "an advertised key must produce a visible outcome, never a swallowed keypress")
@@ -77,10 +74,10 @@ func TestStartNewInstanceWithActiveProjectStillOpensNaming(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = repoDir
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance()
 
 	require.Same(t, h, model)
-	require.Nil(t, cmd)
+	requireNamingFormOpened(t, h)
 	assert.Equal(t, stateNew, h.state)
 	require.NotNil(t, h.namingInstance)
 	assert.Equal(t, repoDir, h.namingInstance.Path,
@@ -94,7 +91,7 @@ func TestStartNewInstanceWithActiveProjectStillOpensNaming(t *testing.T) {
 // In registry mode newHome lands focus on the Projects section, which is a
 // captive vim-style list that consumes the create verbs on purpose (#1620). So
 // `n` produced no form, no notice, and no repaint — while the workspace beside
-// it read "No sessions yet — press n to create one."
+// it read "No sessions yet Press n to create one."
 //
 // The table is the point: WHICH key is live depends on the focused region and on
 // whether the section has a row, so a single hardcoded hint is a dead key in one
@@ -111,25 +108,25 @@ func TestRegistryModeEmptyWorkspaceNamesOnlyLiveKeys(t *testing.T) {
 		{
 			// The startup state once a project is registered.
 			name: "projects focused with a row", focus: layout.RegionProjects, hasProject: true,
-			want: "press enter to pick one", absent: "ctrl+p",
+			want: "Press enter to pick one", absent: "ctrl+p",
 		},
 		{
-			// Enter is a no-op with nothing under the cursor, and ctrl+p is
-			// suppressed here, so the only way forward is out of the section.
+			// With no registered projects the section is hidden; onboarding
+			// names the registration command instead of an empty picker.
 			name: "projects focused with no rows", focus: layout.RegionProjects,
-			want: "press esc, then press ctrl+p to add one", absent: "press enter",
+			want: "Run af projects add <path>", absent: "Press enter",
 		},
 		{
 			// From the tree ctrl+p reaches the picker and Enter means something else.
 			name: "tree focused", focus: layout.RegionTree, hasProject: true,
-			want: "press ctrl+p to pick one", absent: "press enter",
+			want: "Press ctrl+p to pick one", absent: "Press enter",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHome(t)
 			h.repoRoot = "" // registry mode: launched outside a repo (#2477)
 			if tc.hasProject {
-				h.projects.SetProjects([]ui.SidebarProject{{Name: "elsewhere", Root: "/repos/elsewhere"}})
+				h.projects.SetProjects([]ui.SidebarProject{{Name: "elsewhere", Root: "/repos/elsewhere"}, {Name: "another", Root: "/repos/another"}})
 			}
 			resizeHome(h, 120, 30)
 			h.focusRegion(tc.focus)
@@ -137,9 +134,13 @@ func TestRegistryModeEmptyWorkspaceNamesOnlyLiveKeys(t *testing.T) {
 
 			view := flatten(h.View())
 
-			assert.NotContains(t, view, "press n to create one",
+			assert.NotContains(t, view, "Press n to create one",
 				"no focused region in registry mode can honor that promise (#2830)")
-			assert.Contains(t, view, "No project selected", "the empty state must name the actual blocker")
+			if tc.hasProject {
+				assert.Contains(t, view, "No project selected")
+			} else {
+				assert.Contains(t, view, "No project registered")
+			}
 			assert.Contains(t, view, tc.want, "the hint must name a key that is live from here")
 			assert.NotContains(t, view, tc.absent, "and must not name one that is not")
 		})
@@ -147,7 +148,7 @@ func TestRegistryModeEmptyWorkspaceNamesOnlyLiveKeys(t *testing.T) {
 }
 
 // A pane-empty workspace keeps its own message even with no active project.
-// "no panes open" and "no project selected" answer different questions and are
+// "No panes ·" and "No project selected" answer different questions and are
 // not alternatives — collapsing them told a user who had just closed their panes
 // to go pick a project instead of reopening one. Caught in review on this PR.
 func TestPaneEmptyWorkspaceKeepsItsOwnMessageWithoutAProject(t *testing.T) {
@@ -160,7 +161,7 @@ func TestPaneEmptyWorkspaceKeepsItsOwnMessageWithoutAProject(t *testing.T) {
 
 	view := flatten(h.View())
 
-	assert.Contains(t, view, "no panes open", "the pane-empty state owns this message")
+	assert.Contains(t, view, "No panes ·", "the pane-empty state owns this message")
 	assert.NotContains(t, view, "No project selected",
 		"#2830 is scoped to the EMPTY rail; it must not reach a workspace that has sessions")
 }
@@ -175,7 +176,7 @@ func TestNonRegistryModeEmptyWorkspaceStillAdvertisesCreate(t *testing.T) {
 
 	view := flatten(h.View())
 
-	assert.Contains(t, view, "No sessions yet — press n to create one.")
+	assert.Contains(t, view, "No sessions yet Press n to create one.")
 	assert.NotContains(t, view, "No project selected")
 }
 

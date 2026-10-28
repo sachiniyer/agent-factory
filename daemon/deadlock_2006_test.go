@@ -13,10 +13,13 @@ import (
 // DeliverPrompt takes the per-target lock and then the per-session op lock (the op
 // lock is acquired inside SendPrompt), i.e. target-before-op. resumeFromLimit used
 // to take those same two locks in the OPPOSITE order: the op lock first (TryLock),
-// then the target lock (inside resumeFromLimitLocked). A manual send-prompt that
-// overlapped a resume of the SAME session therefore formed an ABBA deadlock — and
-// the auto-resume scheduler drives resumeFromLimitLocked automatically whenever
-// limit_auto_resume is on, so any such daemon could wedge indefinitely.
+// then the target lock inside the shared resume body. A manual send-prompt that
+// overlapped a resume of the same session therefore formed an ABBA deadlock and
+// could wedge the daemon indefinitely. Today resumeFromLimitOutcome and the
+// auto-resume scheduler's resumeLimitedSession both take target-before-op before
+// reaching resumeFromLimitLockedOutcome (the scheduler goes through
+// resumeFromLimitLockedWithAccount), including ordinary limit_auto_resume retries
+// and recovery of a committed account swap after auto-resume is disabled.
 //
 // The interleaving is forced deterministically through two no-op production seams:
 // a resumeFromLimit goroutine is pinned holding its FIRST lock, a DeliverPrompt
@@ -73,7 +76,7 @@ func TestDeliverPromptResumeFromLimit_NoInvertedLockDeadlock(t *testing.T) {
 	// Goroutine A: resumeFromLimit — grabs its first lock and parks in the seam.
 	go func() {
 		defer wg.Done()
-		resumeErr = manager.resumeFromLimit(ResumeFromLimitRequest{Title: "shared", RepoID: repoID})
+		_, resumeErr = manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "shared", RepoID: repoID})
 	}()
 
 	// Do not start the delivery until the resume goroutine is provably holding its

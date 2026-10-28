@@ -1,20 +1,47 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
-	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session"
+)
+
+type rootAgentProgramInspection struct {
+	resolveProfile func(context.Context, *config.RepoContext) (config.ResolvedValue, error)
+	resolveConfig  func(context.Context, *config.RepoContext) (*config.ResolvedConfig, error)
+}
+
+var (
+	rootAgentProgramProbeTimeout  = binaryProbeTimeout
+	resolveRootAgentForInspection = func(ctx context.Context, global *config.Config, projectSelector string, strictProjectLookup bool) (rootAgentProgramInspection, error) {
+		snapshot, err := config.ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, global, projectSelector, strictProjectLookup)
+		if err != nil {
+			return rootAgentProgramInspection{}, err
+		}
+		return rootAgentProgramInspection{
+			resolveProfile: snapshot.ResolveRootAgentForRepoContext,
+			resolveConfig:  snapshot.ResolveConfigForRepoContext,
+		}, nil
+	}
+	inspectRootAgentProgram = func(ctx context.Context, repo *config.RepoContext, profile config.RootAgent, inspection rootAgentProgramInspection) (string, error) {
+		if !daemon.RootAgentProfileNeedsRepoConfig(profile) {
+			return daemon.RootAgentProgramForProfileResolvedConfig(profile, nil)
+		}
+		resolved, err := inspection.resolveConfig(ctx, repo)
+		if err != nil {
+			return "", err
+		}
+		return daemon.RootAgentProgramForProfileResolvedConfig(profile, resolved)
+	}
 )
 
 func selfPID() int { return os.Getpid() }
@@ -23,6 +50,10 @@ func tempDirDefault() string { return os.TempDir() }
 
 var (
 	daemonProcessArgv = daemon.ProcessArgv
+	// withheldEnvCause names why the kernel served no environment for a
+	// process (#3584). A package var so tests on Linux, which has no such
+	// redaction, can stage the darwin answer.
+	withheldEnvCause = proctree.WithheldEnvCause
 	// tempHomeLockProbe answers "is a daemon running for this home?" through the
 	// home's daemon.lock — the kernel-guaranteed fact that authorises removing an
 	// abandoned temp home (#1989). A package var so tests can stage each of the
@@ -37,6 +68,16 @@ var (
 	daemonProcessEnvLookup = proctree.EnvLookup
 	daemonProcessOwnerUID  = proctree.OwnerUID
 	daemonProcessCwd       = proctree.WorkingDir
+	// cpuFraction reads a process's lifetime-average CPU. A package var so
+	// tests can stage the possible-orphan overflow tail's measured CPU
+	// deterministically: the per-process fraction is, like the daemon
+	// identities above, a machine-dependent fact no test can stage without
+	// root, and whether a busy loop reads 0.3 or 1.0 of a core depends on
+	// the host's free-core count at scan time. The possible-orphan summary
+	// describes the hidden tail by its measured max, so the one row the
+	// operator sees about those processes reflects their CPU rather than
+	// a hardcoded "idle" guess.
+	cpuFraction = proctree.CPUFraction
 )
 
 // processLeakMinAge separates durable escaped/orphaned processes from ordinary
@@ -56,7 +97,7 @@ const (
 // describeProc renders "pid 123 (yes, 99% CPU over 15d2h): yes" for findings.
 func describeProc(p proctree.Process) string {
 	desc := fmt.Sprintf("pid %d (%s", p.PID, p.Comm)
-	if frac, age, err := proctree.CPUFraction(p); err == nil {
+	if frac, age, err := cpuFraction(p); err == nil {
 		desc += fmt.Sprintf(", %.0f%% CPU over %s", frac*100, formatAge(age))
 	}
 	desc += ")"
@@ -155,34 +196,21 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 			},
 		)
 	}
-	if h.PingErr == nil && cfg != nil {
-		checkRunningDaemonConfig(report, h, cfg)
+	daemonConfig := cfg
+	if h.PingErr == nil && daemonConfig == nil && ctx.globalConfigMissing {
+		// A deleted or never-materialized file has a known next-start posture,
+		// but it does not make every default a user-configured requirement. Apply
+		// defaults only to diagnostics about the daemon that is demonstrably still
+		// running with an older snapshot; other checks retain nil/unconfigured.
+		daemonConfig = config.DefaultConfig()
 	}
-	// The #2090 exposure is INFORMATIONAL since #2168 Phase 0: a tokenless
-	// network listener is an allowed, deliberate configuration, so this is a Warn
-	// with problem=false — it never makes `af doctor` exit non-zero over a posture
-	// the owner decided users may choose. It was a Fail ("not running, and it
-	// cannot start") back when the daemon refused; there is no such dead end left
-	// to report.
-	//
-	// Reported independently of daemon liveness, unlike the old row: the exposure
-	// matters MOST when the daemon is up, because then it is actually being
-	// served. The separate daemon-config row compares this disk value with the
-	// posture returned by the running daemon itself (#2168 Phase 4).
-	//
-	// cfg is nil when the config could not be loaded at all (doctor.Run passes
-	// what it got). Say nothing then rather than guessing a posture — the load
-	// failure has its own row, and inventing either answer here would be worse
-	// than the silence.
-	if cfg != nil && config.ListenerServesUnauthenticatedNetwork(cfg.ListenAddr, cfg.RequireToken) {
-		report.Warn(sectionDaemon, "listener",
-			fmt.Sprintf("network.listen_addr %q is reachable from the network and network.require_token is false, so the control API "+
-				"(including DeliverPrompt, which runs instructions through your agents) is served to anyone who can "+
-				"reach that address, with no authentication", cfg.ListenAddr),
-			"if that is not what you want, run `af config set network.require_token true` to require a bearer token (`af token "+
-				"show` prints it), or `af config set network.listen_addr 127.0.0.1:8443` to serve this machine only",
-			false)
+	if h.PingErr == nil && daemonConfig != nil {
+		checkRunningDaemonConfig(report, h, daemonConfig)
+		checkRootAgentPrograms(ctx, report, daemonConfig)
 	}
+	// The listener/auth disk-posture row (#5137 refusal, opted-in exposure)
+	// lives in listener_posture.go.
+	checkListenerPosture(report, cfg)
 	// "A unit file exists" is not "this home has autostart". There is one unit
 	// per user and it bakes its AGENT_FACTORY_HOME at install time, so under a
 	// non-default AGENT_FACTORY_HOME the installed unit is somebody else's
@@ -207,13 +235,223 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	default:
 		report.Pass(sectionDaemon, "autostart", "installed")
 	}
-	if h.PIDFilePID > 0 && !h.PIDVerified && h.PingErr != nil {
+	// An unverifiable pid is NEITHER verified nor stale: the file names a
+	// live af daemon whose home binding could not be proven — possibly this
+	// home's own daemon with an unreadable process frame (the normal shape
+	// on macOS), possibly another home's. It gets an advisory rather than
+	// the stale-file row, because suggesting removal over a pid that might
+	// name this home's live daemon would orphan the very handle recovery
+	// needs (#5188).
+	if h.PIDUnverifiable && h.PingErr != nil {
+		report.Warn(sectionDaemon, "daemon.pid",
+			fmt.Sprintf("records pid %d, a live af daemon whose home could not be verified", h.PIDFilePID),
+			"it may be this home's daemon or another's — check `af daemon status` in the intended home before removing the file or signalling the pid", false)
+	}
+	if h.PIDFilePID > 0 && !h.PIDVerified && !h.PIDUnverifiable && h.PingErr != nil {
 		report.Warn(sectionDaemon, "daemon.pid", fmt.Sprintf("records pid %d but no agent-factory daemon is running under it", h.PIDFilePID),
 			"remove the stale daemon.pid after verifying the pid is not an af daemon", true)
 	}
 	if h.BinaryDeleted {
 		report.Warn(sectionDaemon, "daemon binary", fmt.Sprintf("pid %d is running a binary that was replaced on disk", h.PIDFilePID),
 			"run `af daemon restart` to pick up the current binary", true)
+	}
+}
+
+// checkRootAgentPrograms compares every adopted live root with the profile the
+// current on-disk config resolves for its repository. The daemon-side warning
+// compares against its frozen startup snapshot; doctor's disk view is
+// deliberately complementary, so a post-start edit is visible here even before
+// a restarted daemon can enforce it.
+func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config) {
+	instances, err := ctx.opts.sessionInventory()
+	if err != nil {
+		report.Warn(sectionDaemon, "root agent program",
+			"could not compare live root sessions with the configured profiles: "+oneLine(err),
+			"rerun `af doctor` when the daemon session inventory is available", false)
+		report.markIncomplete("root agent program")
+		return
+	}
+	compared, drifted, unresolved, unrecorded := 0, 0, 0, 0
+	for _, inst := range instances {
+		if !session.IsReservedTitle(inst.Title) || rootSessionIsInert(inst) {
+			continue
+		}
+		if inst.InFlightOp != session.OpNone || inst.Status == session.Loading || inst.Status == session.Deleting {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not compare the root agent program for %s because a lifecycle operation is in-flight", rootSessionDisplayPath(inst)),
+				"wait for the operation to settle, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		if inst.StartupStateUnknown {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not compare the root agent program for %s because its startup state is unknown", rootSessionDisplayPath(inst)),
+				"kill the startup-unknown root, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		identityPath := inst.Worktree.RepoPath
+		if identityPath == "" {
+			identityPath = inst.Worktree.WorktreePath
+		}
+		if identityPath == "" {
+			identityPath = inst.Path
+		}
+		if identityPath == "" {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the root agent program for %s because its repository path is missing", rootSessionDisplayPath(inst)),
+				"repair or remove the retained root session record, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		// Reuse doctor's binaryProbeTimeout independently for each root: one stale
+		// mount is an unknown answer about that root, not permission to spend the
+		// probe budget of every healthy root that follows it in the inventory.
+		probeCtx, cancel := context.WithTimeout(context.Background(), rootAgentProgramProbeTimeout)
+		inspection, resolveErr := resolveRootAgentForInspection(probeCtx, cfg, identityPath, false)
+		if resolveErr != nil {
+			cancel()
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not resolve the configured profile for live root at %s: %s", identityPath, oneLine(resolveErr)),
+				"restore the checkout or mount, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		commandPath := inst.Worktree.WorktreePath
+		if commandPath == "" {
+			commandPath = inst.Path
+		}
+		if commandPath == "" {
+			commandPath = identityPath
+		}
+		commandRepo, resolveErr := config.RepoFromPathContext(probeCtx, commandPath)
+		if resolveErr != nil {
+			cancel()
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not revalidate the configured profile for live root at %s: %s", commandPath, oneLine(resolveErr)),
+				"restore the checkout or mount, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		resolved, resolveErr := inspection.resolveProfile(probeCtx, commandRepo)
+		if resolveErr != nil {
+			cancel()
+			unresolved++
+			remediation := "repair the named config source, then rerun `af doctor`"
+			if errors.Is(resolveErr, config.ErrRootAgentInspectionIdentityChanged) {
+				remediation = "rerun `af doctor`; if the checkout is being replaced, wait for that operation to finish first"
+			}
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not revalidate the configured profile for live root at %s: %s", commandPath, oneLine(resolveErr)),
+				remediation, false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		if config.RootAgentValueFailsClosed(resolved) {
+			cancel()
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the configured profile for live root at %s: %s", identityPath, config.RootAgentFailClosedReason(resolved)),
+				"repair the named config source, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		profile, ok := resolved.Value.(config.RootAgent)
+		if !ok {
+			cancel()
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the configured profile for live root at %s: unexpected root_agent resolution type %T", identityPath, resolved.Value),
+				"rerun `af doctor`; if this persists, report the incompatible config result", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		if !profile.Enabled {
+			cancel()
+			drifted++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("live root at %s remains running although its configured profile is disabled · the live root was adopted as-is", identityPath),
+				"restart the daemon to load the disabled profile, then kill the root; restarting alone does not stop an adopted live root", true)
+			continue
+		}
+		runningProgram := inst.RuntimeProgram
+		if strings.TrimSpace(runningProgram) == "" {
+			cancel()
+			// Unknown, not uninspectable: adoption and name-only reattach never
+			// record a launch command, so an empty runtime_program is the designed
+			// steady state for a root this daemon did not spawn. Nothing here is
+			// broken and nothing the user can run fills the field — only the
+			// root's next real launch does. That is a note, not a warning.
+			unrecorded++
+			report.Info(sectionDaemon, "root agent program",
+				fmt.Sprintf("the resolved runtime command is not recorded for %s — the running process was adopted, or launched before runtime commands were recorded; it will be recorded on the root's next launch", rootSessionDisplayPath(inst)))
+			continue
+		}
+		configuredProgram, programErr := inspectRootAgentProgram(probeCtx, commandRepo, profile, inspection)
+		cancel()
+		if programErr != nil {
+			unresolved++
+			remediation := "repair the named config source, then rerun `af doctor`"
+			if errors.Is(programErr, config.ErrRootAgentInspectionIdentityChanged) {
+				remediation = "rerun `af doctor`; if the checkout is being replaced, wait for that operation to finish first"
+			}
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the configured command for live root at %s: %s", commandPath, oneLine(programErr)),
+				remediation, false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		compared++
+		// Same byte-or-literal-argv rule as the daemon's drift latch
+		// (#5504): quoting-only spellings of the same argv are not drift,
+		// and a non-literal side falls back to the byte verdict.
+		if configuredProgram == runningProgram ||
+			sessionenv.LiteralCommandsEqual(configuredProgram, runningProgram) {
+			continue
+		}
+		drifted++
+		report.Warn(sectionDaemon, "root agent program",
+			fmt.Sprintf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is", commandPath, configuredProgram, runningProgram),
+			"restart the daemon, then kill the root", true)
+	}
+	if drifted == 0 && unresolved == 0 {
+		detail := "no enabled live root sessions to compare"
+		switch {
+		case compared > 0:
+			detail = fmt.Sprintf("%d live root session(s) match the configured command", compared)
+			if unrecorded > 0 {
+				detail += fmt.Sprintf("; %d adopted live root(s) have no recorded runtime command", unrecorded)
+			}
+		case unrecorded > 0:
+			detail = "every live root was adopted without a recorded runtime command to compare"
+		}
+		report.Pass(sectionDaemon, "root agent program", detail)
+	}
+}
+
+func rootSessionDisplayPath(inst session.InstanceData) string {
+	for _, path := range []string{inst.Worktree.WorktreePath, inst.Path, inst.Worktree.RepoPath} {
+		if path != "" {
+			return path
+		}
+	}
+	return inst.Title
+}
+
+func rootSessionIsInert(inst session.InstanceData) bool {
+	if inst.UserKilled {
+		return true
+	}
+	switch session.EffectiveLiveness(inst) {
+	case session.LiveLost, session.LiveDead, session.LiveArchived:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -242,533 +480,6 @@ func checkRunningDaemonConfig(report *Report, h daemon.HealthStatus, cfg *config
 				"restart the daemon to apply the current config, or rerun `af doctor` after upgrading the daemon", false)
 		},
 	)
-}
-
-// checkOrphanedProcesses finds processes carrying the AF_SESSION ancestry
-// marker. Marker + dead session = verified orphan (killable with --fix);
-// marker + live session but outside its pane trees = escaped (report-only);
-// no marker but a TMUX env var pointing at a dead server = possible orphan
-// (report-only — could belong to any tmux, not necessarily agent-factory).
-// checkProcessInspection reports whether doctor can see the process table at
-// all, and it must run BEFORE every check that reads ctx.snap.
-//
-// This is the check that exists because of what its absence did (#1939).
-// proctree was /proc-only with no darwin backend, so on macOS every snapshot
-// failed, Run discarded the error, and the process checks below returned early
-// on a nil snap. Nothing was reported — not a warning, not a note — so `af
-// doctor` printed a clean report on a machine it had never managed to inspect.
-// Every macOS user who ran doctor to ask "are there orphaned processes?" was
-// told "no" by a program that could not have known either way.
-//
-// So blindness gets its own row, and that row is a FAIL: it contributes to the
-// exit code, because "I could not look" is a broken doctor, not a healthy
-// machine. Do not soften this to a Warn, and do not let the process checks
-// below start reporting emptiness as health.
-func checkProcessInspection(ctx *scanContext, report *Report) {
-	if ctx.snap != nil {
-		report.Pass(sectionProcesses, "process-inspection",
-			fmt.Sprintf("read the process table (%d processes)", len(ctx.snap)))
-		return
-	}
-	detail := fmt.Sprintf("cannot read the process table on %s, so the orphan, escaped-process and "+
-		"runaway-CPU checks below could not run: %v", runtime.GOOS, ctx.snapErr)
-	remediation := "the checks that depend on the process table are UNKNOWN, not clean — " +
-		"do not read this report as evidence that no processes leaked"
-	if errors.Is(ctx.snapErr, proctree.ErrUnsupportedPlatform) {
-		remediation = fmt.Sprintf("af has no process-table backend for %s; the process checks cannot run here "+
-			"and this report says nothing about leaked processes", runtime.GOOS)
-	}
-	report.Fail(sectionProcesses, "process-inspection", detail, remediation)
-}
-
-func checkOrphanedProcesses(ctx *scanContext, report *Report) {
-	// Silent only because checkProcessInspection already reported the
-	// blindness as a FAIL. Never make this branch the whole story again.
-	if ctx.snap == nil {
-		return
-	}
-	// A name missing from `live` is what arms the kill below, so an
-	// unavailable listing cannot be allowed to empty this map: every live
-	// session would read as dead and every one of its processes as a verified
-	// orphan. Silent for the same reason as the branch above — checkTmuxInspection
-	// already reported the blindness as a FAIL (#2874).
-	names, listErr := ctx.tmuxSessions()
-	if listErr != nil {
-		return
-	}
-	live := map[string]bool{}
-	for _, name := range names {
-		live[name] = true
-	}
-
-	marked := map[string][]proctree.Process{}
-	var possibles []proctree.Process
-	var observations processLeakObservations
-	for pid, p := range ctx.snap {
-		if ctx.selfAncestors[pid] {
-			continue
-		}
-		// EnvUnknown must NOT land in `marked`: that set is the killable
-		// candidate pool, and a process we could not read is a process we
-		// cannot claim is ours. It falls through to the report-only paths
-		// below, which is the safe direction — we under-report an orphan
-		// rather than act on one we never identified.
-		name, nameStatus := proctree.LookupEnv(pid, tmux.EnvMarkerSession)
-		if nameStatus == proctree.EnvFound && name != "" {
-			if observations.oldEnough(ctx, p) {
-				marked[name] = append(marked[name], p)
-			}
-			continue
-		}
-		if tmuxEnv, st := proctree.LookupEnv(pid, "TMUX"); st == proctree.EnvFound && tmuxServerDead(ctx, tmuxEnv) {
-			if observations.oldEnough(ctx, p) {
-				possibles = append(possibles, p)
-			}
-		}
-	}
-
-	for _, name := range sortedKeys(marked) {
-		procs := marked[name]
-		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
-		if live[name] {
-			inSession := map[int]bool{}
-			for _, p := range tmux.SessionProcessTrees(ctx.opts.Exec, name) {
-				inSession[p.PID] = true
-			}
-			for _, p := range procs {
-				if inSession[p.PID] || !observations.stillPresent(p) {
-					continue
-				}
-				report.addAdvisoryFinding(Finding{
-					Check: "escaped-process",
-					Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
-						"(left alone while the session is alive)", describeProc(p), name),
-				})
-			}
-			continue
-		}
-		for _, p := range procs {
-			if !observations.stillPresent(p) {
-				continue
-			}
-			// A kill requires a PROVEN home match, not just a dead-looking
-			// session: another agent-factory home (e.g. a play-test sandbox
-			// on a private `tmux -L` server) has sessions that are invisible
-			// to this server's live list, so its perfectly healthy processes
-			// would otherwise masquerade as verified orphans here. Foreign
-			// or missing AF_HOME downgrades to report-only.
-			// Only EnvFound may arm the kill. EnvUnknown (a denied or
-			// redacted read) falls to the default arm — report-only —
-			// because "I could not read its home" is not "its home is
-			// mine".
-			home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
-			hasHome := homeStatus == proctree.EnvFound
-			switch {
-			case hasHome && filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir):
-				report.addActionableFinding(Finding{
-					Check: "orphaned-process",
-					Detail: fmt.Sprintf("%s was spawned by dead session %s (home %s)",
-						describeProc(p), name, home),
-					FixAction: fmt.Sprintf("kill pid %d", p.PID),
-					fix:       killFix(ctx, p),
-				})
-			case hasHome:
-				report.addAdvisoryFinding(Finding{
-					Check: "orphaned-process",
-					Detail: fmt.Sprintf("%s marks dead session %s but belongs to another "+
-						"agent-factory home (%s) — its session may be live on that install's "+
-						"private tmux server, so it is not fixed from here; run `af doctor` "+
-						"with that home active", describeProc(p), name, home),
-				})
-			default:
-				report.addAdvisoryFinding(Finding{
-					Check: "orphaned-process",
-					Detail: fmt.Sprintf("%s marks dead session %s but carries no readable "+
-						"home marker — cannot prove which install owns it, so it is "+
-						"reported, not killed", describeProc(p), name),
-				})
-			}
-		}
-	}
-
-	// Sort by CPU so a core-burning `yes` outranks fifty idle shells, and
-	// cap the listing — on a long-lived dev box this class is numerous and
-	// mostly idle, and it is report-only by definition.
-	type ranked struct {
-		p    proctree.Process
-		frac float64
-	}
-	rankedPossibles := make([]ranked, 0, len(possibles))
-	for _, p := range possibles {
-		if !observations.stillPresent(p) {
-			continue
-		}
-		frac, _, _ := proctree.CPUFraction(p)
-		rankedPossibles = append(rankedPossibles, ranked{p, frac})
-	}
-	sort.Slice(rankedPossibles, func(i, j int) bool {
-		if rankedPossibles[i].frac != rankedPossibles[j].frac {
-			return rankedPossibles[i].frac > rankedPossibles[j].frac
-		}
-		return rankedPossibles[i].p.PID < rankedPossibles[j].p.PID
-	})
-	const maxPossibleOrphans = 15
-	for i, r := range rankedPossibles {
-		if i == maxPossibleOrphans {
-			report.addAdvisoryFinding(Finding{
-				Check: "possible-orphan",
-				Detail: fmt.Sprintf("… and %d more processes of dead tmux servers (all idle or near-idle; "+
-					"none carry an agent-factory marker, so none are killed)", len(rankedPossibles)-maxPossibleOrphans),
-			})
-			break
-		}
-		report.addAdvisoryFinding(Finding{
-			Check: "possible-orphan",
-			Detail: fmt.Sprintf("%s belongs to a dead tmux server (no agent-factory marker — "+
-				"cannot verify ownership, so it is reported, not killed)", describeProc(r.p)),
-		})
-	}
-	observations.report(report)
-}
-
-// processLeakObservations keeps every unprovable state visible without mixing
-// it into the leak counts. A vanished process is normal churn and needs no row;
-// missing age or an identity-read failure means the check was blind.
-type processLeakObservations struct {
-	unknownAge      int
-	unknownIdentity int
-}
-
-func (o *processLeakObservations) oldEnough(ctx *scanContext, p proctree.Process) bool {
-	if p.StartedAt.IsZero() {
-		o.unknownAge++
-		return false
-	}
-	return ctx.snapAt.Sub(p.StartedAt) >= ctx.opts.minProcessLeakAge
-}
-
-func (o *processLeakObservations) stillPresent(p proctree.Process) bool {
-	same, err := proctree.SameIdentity(p)
-	if err != nil {
-		o.unknownIdentity++
-		return false
-	}
-	return same
-}
-
-func (o processLeakObservations) report(report *Report) {
-	var blind []string
-	if o.unknownAge > 0 {
-		blind = append(blind, fmt.Sprintf("could not determine the age of %s",
-			plural(o.unknownAge, "candidate process", "candidate processes")))
-	}
-	if o.unknownIdentity > 0 {
-		blind = append(blind, fmt.Sprintf("could not revalidate the identity of %s",
-			plural(o.unknownIdentity, "candidate process", "candidate processes")))
-	}
-	if len(blind) == 0 {
-		return
-	}
-	report.Warn(sectionProcesses, "process-leak-inspection",
-		strings.Join(blind, " and ")+"; they are omitted from the escaped, orphaned, and possible-orphan counts",
-		"those candidates are UNKNOWN, not proven leaks; rerun doctor or inspect them manually", false)
-}
-
-// tmuxServerDead parses a TMUX env value ("socketPath,serverPID,sessionIdx")
-// and reports whether the process identity it records still belongs to tmux.
-// Unparseable values are treated as alive (never accuse on garbage). The socket
-// path is deliberately not a liveness signal: a crashed server can leave it
-// behind after the kernel recycles the recorded PID to an unrelated process.
-func tmuxServerDead(ctx *scanContext, tmuxEnv string) bool {
-	parts := strings.Split(tmuxEnv, ",")
-	if len(parts) < 2 {
-		return false
-	}
-	serverPID, err := strconv.Atoi(parts[1])
-	if err != nil || serverPID <= 0 {
-		return false
-	}
-	server, alive := ctx.snap[serverPID]
-	if alive && strings.HasPrefix(server.Comm, "tmux") {
-		return false
-	}
-	// PID gone or recycled to a non-tmux process: the server named by this
-	// environment value is dead, regardless of any stale or reused socket path.
-	return true
-}
-
-// afHomeMarkers are the files/dirs whose presence identifies a directory as
-// an agent-factory home. Two or more must match before doctor will even
-// report a directory, let alone remove it.
-var afHomeMarkers = []string{
-	config.TomlConfigFileName, config.ConfigFileName, "state.json", "instances", "daemon.sock", "daemon.pid", "agent-factory.log",
-}
-
-// checkStaleTempHomes finds abandoned agent-factory homes under the temp
-// dir (leaked by tests/debug runs — the #1093 immortal-daemon fuel). A home
-// is stale only when nothing references it: no live process has it as
-// AGENT_FACTORY_HOME, no live tmux session marks it as AF_HOME, its
-// daemon.pid (if any) is verified absent/dead/stale rather than merely
-// unreadable, and it has not been touched for MinTempHomeAge.
-func checkStaleTempHomes(ctx *scanContext, report *Report) {
-	tempDir := filepath.Clean(ctx.opts.TempDir)
-	activeHome := filepath.Clean(ctx.opts.ConfigDir)
-	processHomes := processReferencedHomes(ctx.snap)
-	// An unavailable tmux claim set is not an empty one. A temp home with live
-	// tmux sessions and a dead daemon holds no lock, so this set is the only
-	// thing that can spare it — derived from a read that failed, it would spare
-	// nothing and the rm -rf would go ahead (#2874). Detection stops here; the
-	// blindness is already a FAIL row from checkTmuxInspection (or, for an
-	// unreadable ownership marker, reported below).
-	tmuxHomes, tmuxHomesErr := liveTmuxHomes(ctx)
-	if tmuxHomesErr != nil {
-		// Advisory, not FAIL: an unreadable session LIST is already a FAIL row
-		// from checkTmuxInspection, and the narrower case left here — one live
-		// session that would not answer, often one that vanished mid-scan — is
-		// an ordinary unknown, not a broken machine. Either way nothing is
-		// assessed and nothing is removed, which is the part that matters.
-		report.addAdvisoryFinding(Finding{
-			Check: "stale-temp-home",
-			Detail: fmt.Sprintf("no temp home could be assessed: cannot establish which AF homes live tmux "+
-				"sessions claim (%v), and a home a live session claims must never be removed", tmuxHomesErr),
-			Severity:    StatusWarn,
-			Remediation: "re-run `af doctor` once every live session answers, or inspect the temp dir yourself",
-		})
-		return
-	}
-
-	for _, dir := range candidateTempHomes(tempDir) {
-		dir = filepath.Clean(dir)
-		if dir == activeHome || !isAFHome(dir) {
-			continue
-		}
-		// POSITIVE proofs of use come first. Each can only ADD a reason to keep
-		// the home; none authorises a delete, so an unread or unavailable surface
-		// here costs at worst an unreported keep — never a wrong removal.
-		if processHomes[dir] {
-			report.Pass(sectionProcesses, "temp home", fmt.Sprintf("%s is in use (a live process references it)", dir))
-			continue
-		}
-		if tmuxHomes[dir] {
-			report.Pass(sectionProcesses, "temp home", fmt.Sprintf("%s is in use (a live tmux session references it)", dir))
-			continue
-		}
-		// The AUTHORITATIVE signal: does a live daemon hold the home's lock? This
-		// replaces the old "did I see a process referencing this home?" — a
-		// negative four consecutive P1 reviews each found a fresh way to falsify,
-		// every one ending at an rm -rf. The lock cannot be falsified that way:
-		// the kernel releases it on the daemon's death, so a takeable lock is
-		// PROOF (not inference) that no live daemon owns the home (#1989).
-		lock := tempHomeLockProbe(dir)
-		var daemonHoldsLock, provablyFree bool
-		var lockCause error
-		lock.Match(
-			func() { daemonHoldsLock = true }, // Yes: a live daemon owns it
-			func() { provablyFree = true },    // No: we took the lock; no daemon owns it
-			func() {},                         // NotFound: ProbeHomeLock never returns this; treat as unknown
-			func(cause error) { lockCause = cause },
-		)
-		if daemonHoldsLock {
-			report.Pass(sectionProcesses, "temp home", fmt.Sprintf("%s is in use (an af daemon holds its lock)", dir))
-			continue
-		}
-
-		age := timeSince(newestMtime(dir))
-		if age < ctx.opts.MinTempHomeAge {
-			continue
-		}
-		if !pathInside(tempDir, dir) {
-			continue
-		}
-
-		if provablyFree {
-			// The teeth, restored on a FACT. The lock is takeable (no live daemon)
-			// and no live tmux session names it, so the home is provably unused.
-			// The fix re-verifies every precondition at fix time (TOCTOU): a
-			// daemon may have started, or a tmux session appeared, since detection.
-			report.addActionableFinding(Finding{
-				Check: "stale-temp-home",
-				Detail: fmt.Sprintf("agent-factory home %s is abandoned (untouched for %s) and no live daemon "+
-					"holds its lock, so it is safe to remove", dir, formatAge(age.Seconds())),
-				FixAction:   "remove " + dir,
-				fix:         staleTempHomeRemoveFix(ctx, dir, tempDir, activeHome),
-				Severity:    StatusWarn,
-				Remediation: "run `af doctor --fix` to remove it, or `rm -rf " + dir + "`",
-			})
-			continue
-		}
-
-		// UNKNOWN: no lock file at all (absence of a lock is not proof of
-		// non-use), a filesystem whose flock cannot be trusted (NFS), or an I/O
-		// error. Report it — reporting is safe — but never authorise the delete
-		// on a proof we do not have. The operator decides.
-		report.addAdvisoryFinding(Finding{
-			Check: "stale-temp-home",
-			Detail: fmt.Sprintf("agent-factory home %s looks abandoned (untouched for %s), but nothing here can "+
-				"PROVE it is unused (%s) — inspect it and remove it yourself if it is dead",
-				dir, formatAge(age.Seconds()), lockUnknownReason(lockCause)),
-			Severity:    StatusWarn,
-			Remediation: "verify nothing is using it, then `rm -rf " + dir + "`",
-		})
-	}
-}
-
-// lockUnknownReason renders the cause of an undetermined lock probe for the
-// report, defaulting to a plain phrase when the probe carried none.
-func lockUnknownReason(cause error) string {
-	if cause == nil {
-		return "no lock to take proves nothing"
-	}
-	return cause.Error()
-}
-
-// timeSince is time.Since, indirected so tests can pin the clock if needed.
-var timeSince = time.Since
-
-// candidateTempHomes lists directories one and two levels below tempDir —
-// Go tests produce /tmp/TestName123/001-style homes, manual runs
-// /tmp/tmp.XXXX ones.
-func candidateTempHomes(tempDir string) []string {
-	var out []string
-	level1, err := os.ReadDir(tempDir)
-	if err != nil {
-		return nil
-	}
-	for _, e := range level1 {
-		if !e.IsDir() {
-			continue
-		}
-		dir := filepath.Join(tempDir, e.Name())
-		out = append(out, dir)
-		level2, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e2 := range level2 {
-			if e2.IsDir() {
-				out = append(out, filepath.Join(dir, e2.Name()))
-			}
-		}
-	}
-	return out
-}
-
-func isAFHome(dir string) bool {
-	found := 0
-	for _, marker := range afHomeMarkers {
-		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
-			found++
-		}
-	}
-	return found >= 2
-}
-
-// processReferencedHomes returns the AF homes live processes name in their
-// AGENT_FACTORY_HOME environment. It is a POSITIVE signal only: finding a
-// process that names a home proves the home is in use, which spares it. The
-// converse — "no process names it" — is NOT proof of non-use and is deliberately
-// not derived here: that inference was the unsound predicate behind the
-// temp-home rm -rf, and the delete now rests on the daemon lock instead (#1989,
-// staleTempHomeRemoveFix). So an unreadable environment simply contributes no
-// home, which can only under-spare — never authorise a removal.
-//
-// Only EnvFound attributes a home. A redacted or denied read (EnvUnknown) must
-// add nothing to the set in either direction — "I could not read its home" is
-// not "its home is X", and it is not "it names no home" either.
-func processReferencedHomes(snap map[int]proctree.Process) map[string]bool {
-	homes := map[string]bool{}
-	for pid := range snap {
-		if home, status := proctree.LookupEnv(pid, "AGENT_FACTORY_HOME"); status == proctree.EnvFound && home != "" {
-			homes[filepath.Clean(home)] = true
-		}
-	}
-	return homes
-}
-
-// staleTempHomeRemoveFix rm -rf's an abandoned temp home — the teeth #1969 took
-// out, restored on a predicate the kernel guarantees rather than an inference we
-// assemble (#1989).
-//
-// The old closure was careful — containment, active-home and isAFHome checks, a
-// fresh snapshot at fix time — and none of that was the problem. Its PREDICATE
-// was: "did I see any process referencing this home? no → delete." Four
-// consecutive P1 reviews each found a fresh way for that "no" to be false, every
-// one ending here in an rm -rf. You cannot make an unsound question safe by
-// validating its inputs harder.
-//
-// So the gate is now a FACT: re-probe the home's daemon lock, and delete only on
-// AnswerNo — the lock existed on a trusted filesystem and we took it, proving no
-// live daemon owns the home. Everything is re-checked at fix time because the
-// findings are applied after detection, leaving a window in which a daemon could
-// start (its lock would then be held → refuse) or a tmux session could claim the
-// home (refuse). Undetermined (no lock file, untrusted filesystem) never reaches
-// here: only a provably-free home carries this closure.
-func staleTempHomeRemoveFix(ctx *scanContext, dir, tempDir, activeHome string) func() error {
-	return func() error {
-		dir = filepath.Clean(dir)
-		// Re-assert containment and identity at fix time — cheap, and the home
-		// may have changed under us since detection.
-		if dir == activeHome {
-			return fmt.Errorf("refusing to remove the active home %s", dir)
-		}
-		if !pathInside(tempDir, dir) {
-			return fmt.Errorf("refusing to remove %s: it is not inside the temp dir %s", dir, tempDir)
-		}
-		if !isAFHome(dir) {
-			return fmt.Errorf("refusing to remove %s: it no longer looks like an agent-factory home", dir)
-		}
-		// A live tmux session naming the home is the second, sound signal the
-		// lock cannot see (a home with live tmux sessions but a dead daemon holds
-		// no lock). Re-check it fresh — and refuse if the recheck cannot be
-		// PERFORMED, because a guard that cannot run has not passed.
-		//
-		// liveTmuxHomesNow, not liveTmuxHomes: the run's memoized listing was
-		// taken before this window opened, so a session started since detection
-		// is absent from it and would be missed by exactly the guard meant to
-		// catch it.
-		claimed, err := liveTmuxHomesNow(ctx)
-		if err != nil {
-			return fmt.Errorf("refusing to remove %s: cannot check whether a live tmux session references it: %w", dir, err)
-		}
-		if claimed[dir] {
-			return fmt.Errorf("refusing to remove %s: a live tmux session now references it", dir)
-		}
-		// The authoritative gate: delete ONLY on a proven "no live daemon owns
-		// this" (AnswerNo). A daemon that appeared since detection now holds the
-		// lock (Yes → refuse); an unprovable answer (Undetermined → refuse) is not
-		// a licence to os.RemoveAll.
-		answer := tempHomeLockProbe(dir)
-		proven := false
-		answer.Match(func() {}, func() { proven = true }, func() {}, func(error) {})
-		if !proven {
-			return fmt.Errorf("refusing to remove %s: cannot prove no daemon owns it (lock answer: %s)", dir, answer.String())
-		}
-		return os.RemoveAll(dir)
-	}
-}
-
-func pathInside(base, path string) bool {
-	rel, err := filepath.Rel(base, path)
-	if err != nil || rel == "." || rel == ".." {
-		return false
-	}
-	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// newestMtime returns the most recent mtime among the dir itself and its
-// marker files — a fair "last touched" signal without a full tree walk.
-func newestMtime(dir string) time.Time {
-	newest := time.Time{}
-	consider := func(path string) {
-		if info, err := os.Stat(path); err == nil && info.ModTime().After(newest) {
-			newest = info.ModTime()
-		}
-	}
-	consider(dir)
-	for _, marker := range afHomeMarkers {
-		consider(filepath.Join(dir, marker))
-	}
-	return newest
 }
 
 // checkForeignDaemons finds agent-factory daemon processes serving a home

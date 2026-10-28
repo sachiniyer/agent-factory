@@ -366,7 +366,8 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 
 	// Scheduler bumps the status to a fresher value via the canonical path.
 	t2 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
-	require.NoError(t, UpdateTaskStatus("u1", &t2, "completed"))
+	_, statusErr := UpdateTaskStatus("u1", &t2, "completed")
+	require.NoError(t, statusErr)
 
 	// A user edit patches only user-editable fields; the scheduler-owned status
 	// fields and immutable CreatedAt are not part of TaskUpdate, so they can
@@ -570,7 +571,8 @@ func TestUpdateTaskStatus_BypassesProgramValidation(t *testing.T) {
 	setupTestTasks(t, stored)
 
 	now := time.Now().Truncate(time.Second)
-	require.NoError(t, UpdateTaskStatus("legacy1", &now, "started"))
+	_, statusErr := UpdateTaskStatus("legacy1", &now, "started")
+	require.NoError(t, statusErr)
 
 	got, err := GetTask("legacy1")
 	require.NoError(t, err)
@@ -594,10 +596,12 @@ func TestUpdateTaskStatus_NilLastRunAtPreservesTimestamp(t *testing.T) {
 
 	// A newer event delivery lands first (this is the value we must not lose).
 	newer := existing.Add(90 * time.Second)
-	require.NoError(t, UpdateTaskStatus("w1", &newer, "completed"))
+	_, statusErr := UpdateTaskStatus("w1", &newer, "completed")
+	require.NoError(t, statusErr)
 
 	// A supervision-status write races in with a nil timestamp.
-	require.NoError(t, UpdateTaskStatus("w1", nil, "stopped"))
+	_, stopErr := UpdateTaskStatus("w1", nil, "stopped")
+	require.NoError(t, stopErr)
 
 	got, err := GetTask("w1")
 	require.NoError(t, err)
@@ -614,7 +618,7 @@ func TestUpdateTaskStatus_NotFound(t *testing.T) {
 	setupTestTasks(t, []Task{{ID: "exists"}})
 
 	now := time.Now()
-	err := UpdateTaskStatus("missing", &now, "started")
+	_, err := UpdateTaskStatus("missing", &now, "started")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -1119,3 +1123,37 @@ func TestRemoveTask_MatchingExpectationSucceeds(t *testing.T) {
 }
 
 func strPtrT(s string) *string { return &s }
+
+// TestUpdateTaskStatusIf_GuardRunsAgainstCommittedRow pins the compare-and-set
+// of #5645: the guard sees the row as committed under the file lock, a refusing
+// guard leaves the row untouched and reports applied=false, and a passing guard
+// writes.
+func TestUpdateTaskStatusIf_GuardRunsAgainstCommittedRow(t *testing.T) {
+	setupTestTasks(t, []Task{
+		{ID: "r1", Name: "Run", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: "/tmp", Enabled: true},
+	})
+	t0 := time.Now().Truncate(time.Second)
+	_, err := UpdateTaskStatus("r1", &t0, "errored: prompt not delivered")
+	require.NoError(t, err)
+
+	var seen string
+	later := t0.Add(time.Minute)
+	_, applied, err := UpdateTaskStatusIf("r1", &later, "started", func(cur Task) bool {
+		seen = cur.LastRunStatus
+		return cur.LastRunStatus != "errored: prompt not delivered"
+	})
+	require.NoError(t, err)
+	assert.False(t, applied)
+	assert.Equal(t, "errored: prompt not delivered", seen)
+	got, err := GetTask("r1")
+	require.NoError(t, err)
+	assert.Equal(t, "errored: prompt not delivered", got.LastRunStatus, "refused write must not land")
+	assert.True(t, got.LastRunAt.Equal(t0), "refused write must not move LastRunAt")
+
+	_, applied, err = UpdateTaskStatusIf("r1", &later, "started", func(Task) bool { return true })
+	require.NoError(t, err)
+	assert.True(t, applied)
+	got, err = GetTask("r1")
+	require.NoError(t, err)
+	assert.Equal(t, "started", got.LastRunStatus)
+}

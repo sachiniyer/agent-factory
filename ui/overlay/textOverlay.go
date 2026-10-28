@@ -75,17 +75,25 @@ func (t *TextOverlay) HandleKeyPress(msg tea.KeyMsg) (tea.Cmd, bool) {
 // Render renders the text overlay
 func (t *TextOverlay) Render() string {
 	// Create styles
-	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.CurrentTheme().Accent).
-		Padding(textOverlayVerticalPadding, textOverlayHorizontalPadding).
+	style := ui.DialogStyle().
 		Width(t.width)
-	if inner := t.innerHeight(); inner > 0 && t.contentOverflows(inner) {
-		style = style.Height(inner)
+	// One predicate for "this overlay windows its content", so the ↑/↓ markers
+	// visibleContent paints and the Scrollable() the host gates its keys on can
+	// never disagree (#3628).
+	if t.Scrollable() {
+		style = style.Height(t.innerHeight())
 	}
 
 	// Apply the border style and return
-	return style.Render(t.visibleContent())
+	content := t.visibleContent()
+	if t.scroll == 0 {
+		first, rest, more := strings.Cut(content, "\n")
+		content = ui.DialogTitleStyle().Render(first)
+		if more {
+			content += "\n" + rest
+		}
+	}
+	return ui.RenderDialog(style, content)
 }
 
 func (t *TextOverlay) SetWidth(width int) {
@@ -96,6 +104,20 @@ func (t *TextOverlay) SetWidth(width int) {
 func (t *TextOverlay) SetHeight(height int) {
 	t.height = height
 	t.clampScroll(t.innerHeight())
+}
+
+// Scrollable reports whether the content is taller than the visible window —
+// i.e. exactly whether Render will paint an "↑ more" / "↓ more" marker.
+//
+// It is the seam that makes scrolling a property of the CONTENT rather than of
+// the caller (#3628). The markers were painted for every overflowing overlay
+// while only the general `?` help wired scroll keys up (#1290/#1399/#1447), so
+// the one-shot "Session created" screen advertised a `↓` that dismissed it —
+// and, being a once-per-home screen, took its unread tail with it forever.
+// Hosts must gate their scroll/dismiss policy on this so no overlay can
+// advertise an affordance it does not honour.
+func (t *TextOverlay) Scrollable() bool {
+	return t.contentOverflows(t.innerHeight())
 }
 
 func (t *TextOverlay) ScrollUp() {
@@ -225,6 +247,6 @@ func textOverlayScrollMarker(width int, marker string) string {
 		width = 1
 	}
 	return lipgloss.NewStyle().
-		Foreground(ui.CurrentTheme().ForegroundDim).
+		Foreground(ui.CurrentTheme().InkMuted).
 		Render(lipgloss.PlaceHorizontal(width, lipgloss.Center, marker))
 }

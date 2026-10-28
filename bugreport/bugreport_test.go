@@ -140,7 +140,6 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 			},
 		},
 		AgentConversation: &session.AgentConversationData{Agent: "claude", ID: "019f386f-7206-7fc2-803b-f7045e07a242"},
-		PRInfo:            session.PRInfoData{Number: 42, State: "open", Title: "secret pr title", URL: "https://example.com/pr/42"},
 		RuntimeCleanup: &session.RuntimeCleanupData{SSH: &session.SSHRuntimeCleanupData{
 			Config:     config.SSHConfig{Host: "private-builder.internal", User: "alice", IdentityFile: "/home/alice/.ssh/private-builder"},
 			SessionDir: "/srv/private/proprietary-session",
@@ -157,7 +156,7 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 		},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 	if d.RuntimeCleanup != nil {
 		t.Fatal("runtime cleanup credentials/identity survived structured redaction")
 	}
@@ -182,15 +181,9 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	if d.Tabs[0].Conversation.ID != "" || d.AgentConversation.ID != "" {
 		t.Errorf("conversation ids not redacted: tab=%q instance=%q", d.Tabs[0].Conversation.ID, d.AgentConversation.ID)
 	}
-	if d.PRInfo.Title != redactedMarker || d.PRInfo.URL != redactedMarker {
-		t.Errorf("PR free-text not redacted: %+v", d.PRInfo)
-	}
 	// Structural fields intact.
 	if d.ID != "abc123" || d.Program != "claude" || d.Status != session.Status(1) {
 		t.Errorf("structural fields mutated: %+v", d)
-	}
-	if d.PRInfo.Number != 42 || d.PRInfo.State != "open" {
-		t.Errorf("structural PR fields mutated: %+v", d.PRInfo)
 	}
 	if d.Worktree.BaseCommitSHA != testSHA {
 		t.Errorf("base commit SHA must survive: %q", d.Worktree.BaseCommitSHA)
@@ -242,12 +235,13 @@ func TestRedactTaskDropsTargetSession(t *testing.T) {
 		TargetSession: target,
 		Program:       "claude",
 		Enabled:       true,
+		DroppedEvents: 7,
 	})
 
 	if got.TargetSession != redactedMarker {
 		t.Fatalf("task target session leaked: got %q, want %q", got.TargetSession, redactedMarker)
 	}
-	if got.ID != "task-2201" || got.CronExpr != "0 9 * * *" || got.Program != "claude" || !got.Enabled {
+	if got.ID != "task-2201" || got.CronExpr != "0 9 * * *" || got.Program != "claude" || !got.Enabled || got.DroppedEvents != 7 {
 		t.Fatalf("safe structural task fields changed: %+v", got)
 	}
 }
@@ -446,8 +440,8 @@ func TestScrubSessionTitlesDoesNotRewriteItsOwnMarker(t *testing.T) {
 
 // TestRedactInstanceDataRedactsNonLoopbackWebTabURL pins the #1954 fix: a web
 // tab's URL is user-supplied (any http/https target passes NormalizeWebTabURL)
-// and can name internal infrastructure or a private repo, exactly the class of
-// data PRInfo.URL is redacted for. A NON-loopback URL must be redacted; a
+// and can name internal infrastructure or a private repo. A NON-loopback URL
+// must be redacted; a
 // loopback URL (the proxied dev-server case) is kept for triage, mirroring the
 // same loopback/non-loopback split the daemon proxy draws.
 func TestRedactInstanceDataRedactsNonLoopbackWebTabURL(t *testing.T) {
@@ -463,10 +457,10 @@ func TestRedactInstanceDataRedactsNonLoopbackWebTabURL(t *testing.T) {
 		},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	if d.Tabs[0].URL != redactedMarker {
-		t.Errorf("non-loopback web tab URL not redacted: %q (leaks internal/private identifiers, same class as PRInfo.URL)", d.Tabs[0].URL)
+		t.Errorf("non-loopback web tab URL not redacted: %q (leaks internal/private identifiers, a private link)", d.Tabs[0].URL)
 	}
 	if d.Tabs[1].URL != loopbackOrigin {
 		t.Errorf("loopback web tab URL must retain only its origin: got %q, want %q", d.Tabs[1].URL, loopbackOrigin)
@@ -651,9 +645,14 @@ func TestRedactInstancesFallbackRedactsConversationIDs(t *testing.T) {
 	}
 	// Structural triage fields must still survive: `id` is NOT sensitive, and
 	// blanket-redacting it to fix this bug would gut the bundle's usefulness.
+	// `program` is no longer among them — #3588 established it is an arbitrary
+	// command line, so this path drops it with the other free text.
 	if !strings.Contains(out, "leg-1") || !strings.Contains(out, "legacy-string-status") ||
-		!strings.Contains(out, "claude") || !strings.Contains(out, "feature/test") {
+		!strings.Contains(out, "feature/test") {
 		t.Errorf("fallback dropped safe structural fields:\n%s", out)
+	}
+	if strings.Contains(out, `"program": "claude"`) {
+		t.Errorf("fallback kept a program command line verbatim:\n%s", out)
 	}
 }
 
@@ -1048,7 +1047,6 @@ func TestBuildEndToEnd(t *testing.T) {
 			Name:    "agent",
 			Command: "claude --token sk-INSTANCESECRET0123456789",
 		}},
-		PRInfo: session.PRInfoData{Number: 42, State: "open", Title: "secret pr", URL: "https://x/pr/42"},
 	}})
 	if err != nil {
 		t.Fatalf("marshal instances: %v", err)
@@ -1129,8 +1127,8 @@ func TestBuildEndToEnd(t *testing.T) {
 		"<details>", issueSummaryLabel,
 		"### Daemon status", "daemon: not running",
 		"### Daemon log tail",
-		"~/.agent-factory/daemon.sock", // daemon status inlined, home collapsed
-		testSHA,                        // the real log tail rode in (and stayed structural)
+		"[af-home]/daemon.sock", // daemon status inlined, AF home collapsed to its token (#3588)
+		testSHA,                 // the real log tail rode in (and stayed structural)
 	)
 	// The redaction assertion below is only meaningful because the planted log
 	// line and daemon status actually reached the body — assert the scrubbed
@@ -1230,7 +1228,10 @@ func TestBuildIssueDraftBoundsBodyToURLCapWithBrokenInstall(t *testing.T) {
 func TestBuildIssueDraftAccountsForBundlePathInBudget(t *testing.T) {
 	r := &redactor{home: "/home/tester", users: []string{"tester"}}
 	var hugeLog strings.Builder
-	for i := 0; i < 5000; i++ {
+	// 1000 lines (~70KB) still dwarfs the 6KB body cap — the whole input is
+	// scrubbed before the tail is fitted, so a larger fixture only multiplies
+	// wall-clock without reaching new code (#4464).
+	for i := 0; i < 1000; i++ {
 		fmt.Fprintf(&hugeLog, "2026-01-01 12:00:00 daemon: reconciled session %d, state=Ready\n", i)
 	}
 	nested := strings.Repeat("nested/", 30)
@@ -1283,10 +1284,18 @@ func TestBuildIssueDraftBodyIsFinalAfterBudgeting(t *testing.T) {
 			// Lines are realistically long so the BYTE budget binds rather than
 			// issueLogMaxLines, which would cap the body at ~4.3KB and make every
 			// assertion vacuous.
+			//
+			// The step and line count are sized for the -race preflight budget
+			// (#4464): the sweep used to walk every even length and feed 120
+			// lines per shape — ~400 full scrub+build cycles, ~200s instrumented.
+			// Halving both keeps the same plateau coverage: once the log is deep
+			// enough into the cap that the tail is byte-bound, the encoded body
+			// still lands flush and the nearCap assertion below proves the sweep
+			// reached the boundary rather than skipping over the band.
 			nearCap := 0
-			for lineLen := 60; lineLen <= 260; lineLen += 2 {
+			for lineLen := 60; lineLen <= 260; lineLen += 4 {
 				var log strings.Builder
-				for i := 0; i < 120; i++ {
+				for i := 0; i < 60; i++ {
 					line := fmt.Sprintf("[DAEMON] INFO:2026/07/16 05:03:33 taskrun.go:100: task %06d reconciled session ", i)
 					for len(line) < lineLen {
 						line += "x"
@@ -1378,15 +1387,20 @@ func TestFenceForOutrunsLongestRun(t *testing.T) {
 // TestBuildIssueDraftBoundsBodyToURLCap is the guard on the inline summary's
 // core risk: the draft reaches GitHub as an issues/new URL, and a body past the
 // cap yields a dead link (or a 414) instead of a draft. A pathological bundle —
-// a megabyte of log, a verbose daemon status, a pile of collection errors — must
-// still produce a body that fits ONCE PERCENT-ENCODED, which is the length that
-// actually matters: these log lines are newline- and space-dense, so the encoded
-// form is far larger than the raw one.
+// a log far over the body cap, a verbose daemon status, a pile of collection
+// errors — must still produce a body that fits ONCE PERCENT-ENCODED, which is
+// the length that actually matters: these log lines are newline- and
+// space-dense, so the encoded form is far larger than the raw one.
+//
+// The log is sized for the -race preflight budget (#4464): the whole input is
+// scrubbed before the tail is fitted, so every extra line costs full redactor
+// time — 2000 lines still overshoots the 6KB cap ~30x, and a megabyte-scale log
+// exercised the same path at ~10x the wall-clock.
 func TestBuildIssueDraftBoundsBodyToURLCap(t *testing.T) {
 	r := &redactor{home: "/home/tester", users: []string{"tester"}}
 
 	var hugeLog strings.Builder
-	for i := 0; i < 20000; i++ {
+	for i := 0; i < 2000; i++ {
 		fmt.Fprintf(&hugeLog, "2026-01-01 12:00:00 daemon: reconciled session %d of many, state=Ready\n", i)
 	}
 	b := Bundle{
@@ -1410,7 +1424,7 @@ func TestBuildIssueDraftBoundsBodyToURLCap(t *testing.T) {
 		"Earlier lines elided", truncatedNote,
 		"more (see the attached bundle)", "~/af-bug-report-20260716-080519.txt")
 	// The newest lines are what explain a bug, so those are the ones kept.
-	mustContain(t, "capped body", body, "session 19999 of many")
+	mustContain(t, "capped body", body, "session 1999 of many")
 	mustNotContain(t, "capped body", body, "session 0 of many")
 }
 

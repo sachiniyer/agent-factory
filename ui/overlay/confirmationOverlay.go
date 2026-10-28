@@ -31,10 +31,15 @@ type ConfirmationOverlay struct {
 	message string
 	// detail is optional elaboration rendered below message. Setting it (via
 	// SetDetail) opts this overlay into the critical-content guarantee (#1973):
-	// message becomes the part the user MUST read to consent, and only detail
-	// may be clipped — announced, never swallowed. With no detail the whole
-	// message stays clippable, which is the historical behavior.
+	// message becomes the part the user MUST read to consent. Since #5171 the
+	// whole body scrolls, so "must read" is honoured by reachability — the
+	// confirm key still refuses only when the window cannot show a single
+	// body row.
 	detail string
+	// scroll is the first body line currently rendered, when the wrapped body
+	// is taller than its window. The confirm prompt never scrolls — it sits
+	// pinned under the window — so paging can never hide the buttons.
+	scroll int
 	// Width of the overlay
 	width int
 	// Maximum outer dimensions available for rendering.
@@ -48,19 +53,21 @@ type ConfirmationOverlay struct {
 	ConfirmKey string
 	// Custom cancel key (defaults to 'n')
 	CancelKey string
-	// Custom styling options
-	borderColor lipgloss.TerminalColor
+	// pending, when non-empty, is a static note saying the dialog is still
+	// assembling what the user would consent to (#4848). The dialog is already
+	// open, so the key visibly registered, but the confirm is withheld and the
+	// hint line shows the note in place of the confirm key until SetPending("").
+	pending string
 }
 
 // NewConfirmationOverlay creates a new confirmation dialog overlay with the given message
 func NewConfirmationOverlay(message string) *ConfirmationOverlay {
 	return &ConfirmationOverlay{
-		Dismissed:   false,
-		message:     message,
-		width:       50, // Default width
-		ConfirmKey:  defaultConfirmKey,
-		CancelKey:   "n",
-		borderColor: ui.CurrentTheme().Error,
+		Dismissed:  false,
+		message:    message,
+		width:      50, // Default width
+		ConfirmKey: defaultConfirmKey,
+		CancelKey:  "n",
 	}
 }
 
@@ -86,6 +93,12 @@ func (c *ConfirmationOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 	// #1238, unmerged #2022) must not be dispatchable by the D+enter reflex — the
 	// same reason it already rejects a reflexive 'y' (#2405).
 	if key == strings.ToLower(c.ConfirmKey) || (key == "enter" && c.enterConfirms()) {
+		// A pending dialog has not finished stating the consequences, so a confirm
+		// now would consent to copy the user has not seen yet (#4848). Esc still
+		// cancels; the confirm key starts working once the result lands.
+		if c.pending != "" {
+			return false
+		}
 		// A guarded overlay too small to show its consequences must not collect a
 		// confirm (#1973). Refusing here — not merely rendering a warning — is
 		// what makes the guarantee real: the render and the key agree, so a confirm
@@ -100,6 +113,27 @@ func (c *ConfirmationOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 			c.OnConfirm()
 		}
 		return true
+	}
+
+	// Scroll keys page the body when it overflows its window. They sit AFTER
+	// the confirm/cancel branches so a dialog that claims 'k' as its
+	// deliberate key (root #1238, unmerged #2022) keeps 'k' meaning confirm —
+	// the same priority esc already holds over a misconfigured ConfirmKey
+	// above. On a dialog that did not claim them, j/k and the arrows move the
+	// body window while the confirm prompt stays pinned (#5171).
+	switch key {
+	case "up", "k":
+		c.scrollBy(-1)
+	case "down", "j":
+		c.scrollBy(1)
+	case "pgup":
+		c.scrollBy(-c.pageStep())
+	case "pgdown":
+		c.scrollBy(c.pageStep())
+	case "ctrl+u":
+		c.scrollBy(-c.halfStep())
+	case "ctrl+d":
+		c.scrollBy(c.halfStep())
 	}
 
 	// Ignore other keys in confirmation state
@@ -117,10 +151,7 @@ func (c *ConfirmationOverlay) enterConfirms() bool {
 // frameStyle is the overlay's border+padding style, shared by every path that
 // needs to know how much room the text actually gets.
 func (c *ConfirmationOverlay) frameStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(c.borderColor).
-		Padding(confirmationOverlayVerticalPadding, confirmationOverlayHorizontalPadding)
+	return ui.DialogStyle()
 }
 
 // textRect resolves the text area the message will actually be rendered into.
@@ -151,7 +182,7 @@ func (c *ConfirmationOverlay) Render() string {
 	}
 
 	// Apply the border style and return
-	return style.Render(content)
+	return ui.RenderDialog(style, content)
 }
 
 // SetWidth sets the width of the confirmation overlay
@@ -170,12 +201,24 @@ func (c *ConfirmationOverlay) SetConfirmKey(key string) {
 	c.ConfirmKey = key
 }
 
+// SetPending marks the dialog as still waiting on the result that completes its
+// copy, with note as the static text the hint line shows meanwhile (#4848). The
+// confirm key is refused until SetPending(""); cancel keeps working.
+func (c *ConfirmationOverlay) SetPending(note string) {
+	c.pending = note
+}
+
+// Pending reports the note set by SetPending, or "" once the dialog is complete.
+func (c *ConfirmationOverlay) Pending() string {
+	return c.pending
+}
+
 // SetDetail sets elaboration rendered below the message, and opts this overlay
 // into the critical-content guarantee (#1973). Split the copy so the message
 // carries the consequences the user is consenting to and the detail carries the
-// explanation: the message then either renders in full — with any clipped detail
-// announced — or the overlay refuses to confirm at all. Use it for any confirm
-// whose message would be a lie if its tail fell below the fold.
+// explanation: every line then stays reachable by scrolling, or the overlay
+// refuses to confirm at all. Use it for any confirm whose message would be a
+// lie if its tail fell below the fold.
 func (c *ConfirmationOverlay) SetDetail(detail string) {
 	c.detail = detail
 }
@@ -187,9 +230,7 @@ func (c *ConfirmationOverlay) guarded() bool {
 }
 
 // detailLines wraps the elaboration. The blank spacer that separates it from
-// the message is added only when the detail fits whole (see fitDetail) — under
-// pressure a spacer is a line of nothing, and lines of nothing are the first
-// thing to surrender.
+// the message is part of the body — it scrolls like everything else.
 func (c *ConfirmationOverlay) detailLines(width int) []string {
 	if !c.guarded() {
 		return nil
@@ -197,26 +238,19 @@ func (c *ConfirmationOverlay) detailLines(width int) []string {
 	return wrapOverlayLines(c.detail, width)
 }
 
-// fitDetail places the elaboration in whatever room the message left, and
-// reports the notice the caller must show if anything was dropped.
-//
-// The notice is returned rather than rendered because when room runs out
-// entirely it goes in the blank separator's slot — the gap is a line we were
-// spending on nothing, so announcing the clip there costs zero lines. That is
-// what lets the consequences fit at the declared 40x10 floor AND still say that
-// more text exists, instead of trading one against the other.
-func fitDetail(detail []string, room, width int) (lines []string, notice string) {
-	switch {
-	case len(detail) == 0:
-		return nil, ""
-	case room >= len(detail)+1:
-		// Room for the spacer too — render it as designed.
-		return append([]string{""}, detail...), ""
-	case room >= 1:
-		return windowOverlayBody(detail, room, width), ""
-	default:
-		return nil, moreLinesNotice(countContentLines(detail))
+// bodyLines is the complete scrollable payload: the message, styled as the
+// destructive headline it is, plus the blank separator and elaboration a
+// guarded overlay carries. Nothing here is ever dropped — an overflow means a
+// window, not a clip (#5171).
+func (c *ConfirmationOverlay) bodyLines(width int) []string {
+	critical := wrapOverlayLines(c.message, width)
+	for i := range critical {
+		critical[i] = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Dead).Render(critical[i])
 	}
+	if detail := c.detailLines(width); len(detail) > 0 {
+		critical = append(append(critical, ""), detail...)
+	}
+	return critical
 }
 
 // bodyBudget splits height between the body and the confirm prompt, reserving a
@@ -231,17 +265,17 @@ func bodyBudget(height, hintLines int) (budget, gap int) {
 	return budget, gap
 }
 
-// tooSmallToConfirm reports whether a guarded overlay cannot render its message
-// plus the confirm prompt at the given text rect. Such an overlay must refuse
-// the action outright: a destructive confirm that cannot show its consequences
-// has no business collecting a 'y' (#1973). Unguarded overlays never refuse.
+// tooSmallToConfirm reports whether a guarded overlay cannot render even one
+// line of what it is about to do plus the confirm prompt. Such an overlay must
+// refuse the action outright: a destructive confirm that cannot show any of
+// its consequences has no business collecting a 'y' (#1973). One body row is
+// enough to decline the refusal — the rest is reachable by scrolling (#5171).
+// Unguarded overlays never refuse.
 func (c *ConfirmationOverlay) tooSmallToConfirm(width, height int) bool {
 	if !c.guarded() || height <= 0 || width <= 0 {
 		return false
 	}
-	critical := wrapOverlayLines(c.message, width)
-	budget, _ := bodyBudget(height, len(c.fittedHint(width, height)))
-	return budget < len(critical)
+	return len(c.fittedHint(width, height)) >= height
 }
 
 // fittedHint picks the full or compact confirm prompt for the available height.
@@ -250,30 +284,86 @@ func (c *ConfirmationOverlay) fittedHint(width, height int) []string {
 	if height <= 0 {
 		return hint
 	}
-	body := len(wrapOverlayLines(c.message, width)) + len(c.detailLines(width))
-	if body+1+len(hint) > height || len(hint) > 2 {
+	if len(c.bodyLines(width))+1+len(hint) > height || len(hint) > 2 {
 		return wrapOverlayLines(c.instruction(true), width)
 	}
 	return hint
 }
 
+// scrollContent resolves the body and the window it scrolls through, using the
+// same text rect Render does — the key handler's page math and the renderer's
+// window can never disagree about how much fits.
+func (c *ConfirmationOverlay) scrollContent() (body []string, budget int) {
+	rect := c.textRect()
+	if rect.H <= 0 || rect.W <= 0 {
+		return nil, 0
+	}
+	budget, _ = bodyBudget(rect.H, len(c.fittedHint(rect.W, rect.H)))
+	if budget < 1 {
+		return nil, 0
+	}
+	return c.bodyLines(rect.W), budget
+}
+
+// Scrollable reports whether the body is taller than its window — i.e. exactly
+// whether Render will paint a scroll notice. Hosts gate wheel routing on this
+// so the notice never advertises a scroll the overlay cannot take.
+func (c *ConfirmationOverlay) Scrollable() bool {
+	body, budget := c.scrollContent()
+	return len(body) > budget
+}
+
+func (c *ConfirmationOverlay) ScrollUp()   { c.scrollBy(-1) }
+func (c *ConfirmationOverlay) ScrollDown() { c.scrollBy(1) }
+
+// scrollBy moves the body window, clamped to its real range so a resize that
+// grew the window — or a key pressed against a fitting body — is a no-op
+// rather than a stuck offset.
+func (c *ConfirmationOverlay) scrollBy(delta int) {
+	body, budget := c.scrollContent()
+	max := len(body) - budget
+	if max < 0 {
+		max = 0
+	}
+	c.scroll += delta
+	if c.scroll > max {
+		c.scroll = max
+	}
+	if c.scroll < 0 {
+		c.scroll = 0
+	}
+}
+
+// pageStep is how far PgUp/PgDn move: one window, keeping a line of context.
+func (c *ConfirmationOverlay) pageStep() int {
+	_, budget := c.scrollContent()
+	if step := budget - 1; step > 1 {
+		return step
+	}
+	return 1
+}
+
+// halfStep is how far ctrl+u/ctrl+d move: half a window.
+func (c *ConfirmationOverlay) halfStep() int {
+	_, budget := c.scrollContent()
+	if step := budget / 2; step > 1 {
+		return step
+	}
+	return 1
+}
+
 func (c *ConfirmationOverlay) visibleContent(width, height int) string {
-	critical := wrapOverlayLines(c.message, width)
-	detail := c.detailLines(width)
+	body := c.bodyLines(width)
 
 	if height <= 0 {
 		// Unbounded: everything renders, spacer and all.
-		lines := append([]string{}, critical...)
-		if len(detail) > 0 {
-			lines = append(append(lines, ""), detail...)
-		}
-		return strings.Join(append(lines, append([]string{""}, wrapOverlayLines(c.instruction(false), width)...)...), "\n")
+		return strings.Join(append(body, append([]string{""}, wrapOverlayLines(c.instruction(false), width)...)...), "\n")
 	}
 
 	hint := c.fittedHint(width, height)
 
-	// A guarded overlay that cannot show what it destroys refuses instead of
-	// rendering a reassuring fragment above a hidden consequence.
+	// A guarded overlay that cannot show a single line of what it destroys
+	// refuses instead of rendering a prompt above content nobody can reach.
 	if c.tooSmallToConfirm(width, height) {
 		return c.refusalContent(width, height)
 	}
@@ -285,23 +375,86 @@ func (c *ConfirmationOverlay) visibleContent(width, height int) string {
 	budget, gap := bodyBudget(height, len(hint))
 
 	var lines []string
-	gapLine := ""
-	if c.guarded() {
-		// The message is never windowed — tooSmallToConfirm already proved it
-		// fits. Only the elaboration gives ground, and it says what it dropped.
-		detailLines, notice := fitDetail(detail, budget-len(critical), width)
-		lines = append(lines, critical...)
-		lines = append(lines, detailLines...)
-		gapLine = notice
+	if len(body) <= budget {
+		// Fits: identical to the pre-scroll layout — whole body, blank gap,
+		// prompt. Resetting the offset keeps a dialog resized LARGER from
+		// reopening mid-scroll.
+		c.scroll = 0
+		lines = append(lines, body...)
+		if gap > 0 && len(lines) > 0 {
+			lines = append(lines, "")
+		}
 	} else {
-		lines = windowOverlayBody(critical, budget, width)
-	}
-
-	if gap > 0 && len(lines) > 0 {
-		lines = append(lines, gapLine)
+		// The body pages through a window while the prompt stays pinned. The
+		// scroll notice takes the blank gap's slot — a line that was doing
+		// nothing — so announcing hidden lines costs zero body rows.
+		if c.scroll > len(body)-budget {
+			c.scroll = len(body) - budget
+		}
+		if c.scroll < 0 {
+			c.scroll = 0
+		}
+		lines = append(lines, body[c.scroll:c.scroll+budget]...)
+		if gap > 0 {
+			lines = append(lines, c.scrollNotice(body, budget, width))
+		}
 	}
 	lines = append(lines, hint...)
 	return strings.Join(lines, "\n")
+}
+
+// scrollNotice is the muted footer that replaces the blank gap whenever the
+// body overflows: how many content lines are hidden in each direction and the
+// keys that reach them. countContentLines skips the blank separator so "N more
+// lines" counts lines that carry words, matching the notice's own wording.
+func (c *ConfirmationOverlay) scrollNotice(body []string, budget, width int) string {
+	var parts []string
+	if above := countContentLines(body[:c.scroll]); above > 0 {
+		parts = append(parts, moreLinesLabel("↑", above))
+	}
+	if below := countContentLines(body[c.scroll+budget:]); below > 0 {
+		parts = append(parts, moreLinesLabel("↓", below))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	notice := "… " + strings.Join(parts, " · ") + " · " + c.scrollKeysLabel()
+	muted := lipgloss.NewStyle().Foreground(ui.CurrentTheme().InkMuted).Render(notice)
+	return truncateOverlayLine(muted, width)
+}
+
+// moreLinesLabel phrases one direction's hidden count — "↑ 1 more line",
+// "↓ 3 more lines".
+func moreLinesLabel(arrow string, n int) string {
+	if n == 1 {
+		return arrow + " 1 more line"
+	}
+	return fmt.Sprintf("%s %d more lines", arrow, n)
+}
+
+// scrollKeysLabel names the keys the scroll notice may advertise: j/k only on
+// a dialog that did not claim either letter as its confirm/cancel key —
+// telling the reader 'k' scrolls on a dialog where 'k' kills would be a worse
+// lie than no hint at all (#1238/#2022 vs #5171). The bare glyph list stays
+// short on purpose: at narrow widths a "scroll" verb would be the first thing
+// truncated away, taking the keys with it.
+func (c *ConfirmationOverlay) scrollKeysLabel() string {
+	keys := "↑/↓"
+	var extra []string
+	if !c.scrollKeyCollides("j") {
+		extra = append(extra, "j")
+	}
+	if !c.scrollKeyCollides("k") {
+		extra = append(extra, "k")
+	}
+	if len(extra) > 0 {
+		keys += " or " + strings.Join(extra, "/")
+	}
+	return keys
+}
+
+func (c *ConfirmationOverlay) scrollKeyCollides(key string) bool {
+	return strings.EqualFold(c.ConfirmKey, key) || strings.EqualFold(c.CancelKey, key)
 }
 
 // refusalContent is what a guarded overlay shows when the window cannot fit its
@@ -357,38 +510,18 @@ func refusalNotices(short int) []string {
 }
 
 func (c *ConfirmationOverlay) instruction(compact bool) string {
-	bold := lipgloss.NewStyle().Bold(true).Render
-	if compact {
-		return bold(c.ConfirmKey) + " confirm · " +
-			bold(c.CancelKey) + "/" + bold("esc") + " cancel"
+	if c.pending != "" {
+		// No confirm key while pending: advertising one the handler refuses would
+		// read as a dead key. The cancel words stay, so the no-zone still registers.
+		return ui.ActionStyle(false).Render(c.pending) + " · " +
+			ui.ActionStyle(false).Render(c.CancelKey+"/esc cancel")
 	}
-	confirmKeys := bold(c.ConfirmKey)
-	if c.enterConfirms() {
-		// "/enter" mirrors the compact "n/esc" idiom and keeps the full hint on one
-		// line at the confirmation's fixed width, so its click zone survives (#2405).
-		confirmKeys += "/" + bold("enter")
+	confirm := c.ConfirmKey
+	if !compact && c.enterConfirms() {
+		confirm += "/enter"
 	}
-	return "Press " + confirmKeys + " to confirm, " +
-		bold(c.CancelKey) + " or " + bold("esc") + " to cancel"
-}
-
-// windowOverlayBody keeps the leading lines and surrenders the tail, replacing
-// what it drops with a notice that SAYS how much is missing. The old bare "…"
-// was indistinguishable from "there was nothing else to say" — the reader could
-// not tell a styled ellipsis from swallowed content, which is how a hidden
-// consequence reads as an absent one (#1973).
-func windowOverlayBody(lines []string, limit, width int) []string {
-	if limit <= 0 {
-		return nil
-	}
-	if len(lines) <= limit {
-		return lines
-	}
-	if limit == 1 {
-		return []string{truncateOverlayLine(moreLinesNotice(countContentLines(lines)), width)}
-	}
-	out := append([]string{}, lines[:limit-1]...)
-	return append(out, truncateOverlayLine(moreLinesNotice(countContentLines(lines[limit-1:])), width))
+	return ui.ActionStyle(true).Render(confirm+" confirm") + " · " +
+		ui.ActionStyle(false).Render(c.CancelKey+"/esc cancel")
 }
 
 // countContentLines ignores blank spacers so the notice counts lines that
@@ -401,12 +534,4 @@ func countContentLines(lines []string) int {
 		}
 	}
 	return n
-}
-
-// moreLinesNotice names what the clip is hiding and how to read it.
-func moreLinesNotice(n int) string {
-	if n == 1 {
-		return "… 1 more line · resize to read"
-	}
-	return fmt.Sprintf("… %d more lines · resize to read", n)
 }

@@ -31,12 +31,12 @@ func TestSelected_TwoAccountsSeeDifferentDirectories(t *testing.T) {
 		"PATH=/usr/bin",
 	}
 
-	accountA, err := Selected(home, "codex", "work", "")
+	accountA, err := Selected(home, "codex", "work")
 	require.NoError(t, err)
 	scopedA, err := sessionenv.ApplyAccount(ambient, "codex", accountA)
 	require.NoError(t, err)
 
-	accountB, err := Selected(home, "codex", "personal", "")
+	accountB, err := Selected(home, "codex", "personal")
 	require.NoError(t, err)
 	scopedB, err := sessionenv.ApplyAccount(ambient, "codex", accountB)
 	require.NoError(t, err)
@@ -69,7 +69,7 @@ func TestSelected_NoSelectionIsNotAnAccount(t *testing.T) {
 	_, err := Register(home, "codex", "work")
 	require.NoError(t, err)
 
-	account, err := Selected(home, "codex", "", "")
+	account, err := Selected(home, "codex", "")
 	require.NoError(t, err)
 	require.Equal(t, sessionenv.Account{}, account,
 		"an unselected session must carry no account, not the first registered one")
@@ -80,7 +80,7 @@ func TestSelected_NoSelectionIsNotAnAccount(t *testing.T) {
 // unauthenticated agent while the UI reported the selected account.
 func TestSelected_RefusesAnUnregisteredAccount(t *testing.T) {
 	home := t.TempDir()
-	_, err := Selected(home, "codex", "never-registered", "")
+	_, err := Selected(home, "codex", "never-registered")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not registered")
 	require.Contains(t, err.Error(), "af accounts add", "the error must say how to fix it")
@@ -88,8 +88,13 @@ func TestSelected_RefusesAnUnregisteredAccount(t *testing.T) {
 
 // Agents whose credential relocation was never verified refuse, rather than
 // accepting a selection that would do nothing.
+//
+// gemini left this list in #3387 on measured evidence (GEMINI_CLI_HOME moves the
+// keychain, verified under strace); the rest stay because their agent-specific
+// variables move settings or config while the credentials follow a generic
+// XDG/HOME path — amp and opencode were both measured doing exactly that.
 func TestDir_RefusesAnUnverifiedAgent(t *testing.T) {
-	for _, agent := range []string{"gemini", "amp", "aider", "unknown"} {
+	for _, agent := range []string{"amp", "aider", "opencode", "devin", "unknown"} {
 		_, err := Dir(t.TempDir(), agent, "work")
 		require.ErrorIs(t, err, ErrUnsupportedAgent, "agent %q", agent)
 	}
@@ -237,7 +242,7 @@ func TestRegister_RefusesASymlinkedAccountPath(t *testing.T) {
 
 	// And Selected must agree with List that it is not an account, rather than
 	// authenticating through a path the registry never created.
-	if _, err := Selected(home, "codex", "linked", ""); err == nil {
+	if _, err := Selected(home, "codex", "linked"); err == nil {
 		t.Fatal("Selected must refuse a symlinked account, matching List which cannot see it")
 	}
 }
@@ -282,7 +287,7 @@ func TestSelectedAndList_RefuseAnAncestorSwappedAfterRegistration(t *testing.T) 
 	if _, err := Register(home, "codex", "work"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if _, err := Selected(home, "codex", "work", ""); err != nil {
+	if _, err := Selected(home, "codex", "work"); err != nil {
 		t.Fatalf("precondition: a freshly registered account must select cleanly: %v", err)
 	}
 
@@ -300,7 +305,7 @@ func TestSelectedAndList_RefuseAnAncestorSwappedAfterRegistration(t *testing.T) 
 		t.Skipf("symlinks unavailable on this platform: %v", err)
 	}
 
-	if _, err := Selected(home, "codex", "work", ""); err == nil {
+	if _, err := Selected(home, "codex", "work"); err == nil {
 		t.Fatal("Selected accepted an account whose ancestor is now a symlink: the " +
 			"session would authenticate through a path outside the registry")
 	}
@@ -308,24 +313,6 @@ func TestSelectedAndList_RefuseAnAncestorSwappedAfterRegistration(t *testing.T) 
 		t.Fatal("List enumerated through a symlinked ancestor, reporting an arbitrary " +
 			"directory's contents as registered accounts")
 	}
-}
-
-// The login guidance must be the agent's REAL invocation. Appending "login"
-// universally printed `claude login`, which Claude Code does not have — it lives
-// under `auth`. Verified against the installed CLIs on 2026-08-07.
-func TestLoginCommand_IsPerAgentAndNotGuessed(t *testing.T) {
-	claude, ok := LoginCommand("claude")
-	require.True(t, ok)
-	require.Equal(t, []string{"auth", "login"}, claude,
-		"claude puts login under `auth`; `claude login` is not a command")
-
-	codex, ok := LoginCommand("codex")
-	require.True(t, ok)
-	require.Equal(t, []string{"login"}, codex)
-
-	// An unknown agent yields nothing rather than a guess.
-	_, ok = LoginCommand("gemini")
-	require.False(t, ok, "an agent with no verified login command must report none, not a guess")
 }
 
 // Concurrent registration of case-variant names must not produce two accounts.

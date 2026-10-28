@@ -1,0 +1,29 @@
+[
+  {
+    "rail_ms": 733.8999996185303,
+    "terminal_surface_ms": 2581.3999996185303,
+    "first_terminal_ms": 2803.6000003814697,
+    "snapshot_rail_ms": 59.69999885559082,
+    "echo_ms": 303.1999988555908,
+    "load_shift": 0,
+    "snapshot_shift": 0
+  },
+  {
+    "rail_ms": 713.9000015258789,
+    "terminal_surface_ms": 2528.400001525879,
+    "first_terminal_ms": 2912.1000003814697,
+    "snapshot_rail_ms": 63.70000076293945,
+    "echo_ms": 298.6999988555908,
+    "load_shift": 0,
+    "snapshot_shift": 0
+  },
+  {
+    "rail_ms": 766,
+    "terminal_surface_ms": 2621.5,
+    "first_terminal_ms": 3059.3999996185303,
+    "snapshot_rail_ms": 64.89999961853027,
+    "echo_ms": 333.8999996185303,
+    "load_shift": 0,
+    "snapshot_shift": 0
+  }
+]

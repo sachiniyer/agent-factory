@@ -1,7 +1,6 @@
 package tmux
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,8 +17,10 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // shrinkReapWaits lowers the grace periods so reap tests finish in
@@ -41,9 +42,14 @@ func spawnSessionWithEscapee(t *testing.T, name string) proctree.Process {
 	pidFile := filepath.Join(dir, "escapee.pid")
 	// nohup makes the sleeper ignore the SIGHUP that `tmux kill-session`
 	// delivers, so without reaping it would outlive the session forever.
-	script := "nohup sleep 300 >/dev/null 2>&1 & " + recordPIDShell("$!", pidFile) + "; exec sleep 300"
+	// Publish readiness from inside nohup, after SIGHUP protection is installed.
+	// The parent's $! only proves a fork: Close could otherwise kill the child
+	// before nohup starts, leaving a dead escapee but no reap report (#4068).
+	readySleep := recordPIDShell("$$", pidFile) + "; exec sleep 300"
+	script := shellsuggest.Command("nohup", "sh", "-c", readySleep) + " >/dev/null 2>&1 & exec sleep 300"
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
 
 	var pid int
 	require.Eventually(t, func() bool {
@@ -74,7 +80,7 @@ func spawnSessionWithEscapee(t *testing.T, name string) proctree.Process {
 // with `%!s(MISSING)` / `%!d(...)` garbage.
 func TestReapLogsSessionNameLiterally(t *testing.T) {
 	// Redirect the WARNING logger to a buffer for the duration of this test.
-	var buf bytes.Buffer
+	var buf logtest.Buffer
 	oldOut, oldFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
 	log.WarningLog.SetOutput(&buf)
 	log.WarningLog.SetFlags(0)
@@ -125,14 +131,13 @@ func TestCloseReapsEscapedPaneProcesses(t *testing.T) {
 	require.True(t, proctree.AliveSame(escapee), "escapee must be alive before Close")
 
 	session := NewTmuxSessionFromSanitizedName(name, "sh")
+	waitForReap := awaitCloseReap(t, session)
 	_, closeErr := session.Close()
 	require.NoError(t, closeErr)
 	require.False(t, session.ExistsOrUnknown(), "session must be gone after Close")
 
-	// Close reaps asynchronously; the escapee ignores SIGHUP, so only the
-	// reaper's SIGTERM/SIGKILL can end it.
-	require.Eventually(t, func() bool { return !proctree.AliveSame(escapee) },
-		5*time.Second, 25*time.Millisecond,
+	waitForReap()
+	require.False(t, proctree.AliveSame(escapee),
 		"SIGHUP-immune pane child survived Close — process tree was not reaped")
 }
 
@@ -498,7 +503,7 @@ func TestCleanupSessionsPreservesPartialCaptureAfterGenericFailure(t *testing.T)
 	out, err := exec.Command("tmux", "set-environment", "-t", exactTarget(name), EnvMarkerHome, home).CombinedOutput()
 	require.NoError(t, err, "set ownership marker: %s", out)
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	oldWarningOut := log.WarningLog.Writer()
 	log.WarningLog.SetOutput(&warnings)
 	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarningOut) })
@@ -610,9 +615,13 @@ func spawnMarkedSessionWithEscapee(t *testing.T, name, home string, generation .
 	if len(generation) > 0 {
 		args = append(args, "-e", EnvMarkerGeneration+"="+generation[0])
 	}
-	args = append(args, "nohup sleep 300 >/dev/null 2>&1 & "+recordPIDShell("$!", pidFile)+"; exec sleep 300")
+	// The child publishes its own PID only after setsid and SIGHUP protection.
+	// A shell publishing $! can race the child's first exec and nohup setup.
+	args = append(args, shellsuggest.Command(os.Args[0], markedEscapeeArg, pidFile)+
+		" </dev/null >/dev/null 2>&1 & exec sleep 300")
 	out, err := exec.Command("tmux", args...).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
 
 	var pid int
 	require.Eventually(t, func() bool {
@@ -623,18 +632,21 @@ func spawnMarkedSessionWithEscapee(t *testing.T, name, home string, generation .
 		pid, readErr = strconv.Atoi(strings.TrimSpace(string(data)))
 		return readErr == nil && pid > 1
 	}, 5*time.Second, 20*time.Millisecond, "helper pid file never appeared")
-	t.Cleanup(func() {
-		if snap, snapErr := proctree.Snapshot(); snapErr == nil {
-			if process, ok := snap[pid]; ok {
-				_ = proctree.Signal(process, syscall.SIGKILL)
-			}
-		}
-	})
-
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
 	marked, ok := snap[pid]
 	require.True(t, ok, "helper %d not in process snapshot", pid)
+	t.Cleanup(func() { _ = proctree.Signal(marked, syscall.SIGKILL) })
+	require.Equal(t, marked.PID, marked.SID, "marked helper must have detached before publishing its pid")
+	environ, err := proctree.Environ(marked.PID)
+	require.NoError(t, err)
+	require.Contains(t, environ, EnvMarkerSession+"="+name)
+	if home != "" {
+		require.Contains(t, environ, EnvMarkerHome+"="+home)
+	}
+	if len(generation) > 0 {
+		require.Contains(t, environ, EnvMarkerGeneration+"="+generation[0])
+	}
 	return marked
 }
 
@@ -643,11 +655,13 @@ func spawnSessionWaitingToStartHelper(t *testing.T, name, home string) (trigger,
 	dir := t.TempDir()
 	trigger = filepath.Join(dir, "start-helper")
 	pidFile = filepath.Join(dir, "late-helper.pid")
-	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
-		"nohup sleep 300 >/dev/null 2>&1 & %s; exec sleep 300", trigger, recordPIDShell("$!", pidFile))
+	script := fmt.Sprintf("%s; "+
+		"nohup sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
+		testguard.BoundedGateWait(trigger, 10*time.Millisecond, 5*time.Minute), recordPIDShell("$!", pidFile))
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
 	t.Cleanup(func() {
 		if data, readErr := os.ReadFile(pidFile); readErr == nil {
 			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil {
@@ -930,12 +944,13 @@ func spawnSessionWaitingToStartUnmarkedHelper(t *testing.T, name, home string) (
 	dir := t.TempDir()
 	trigger = filepath.Join(dir, "start-helper")
 	pidFile = filepath.Join(dir, "unmarked-helper.pid")
-	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
+	script := fmt.Sprintf("%s; "+
 		"nohup env -u AF_SESSION -u AF_HOME setsid sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
-		trigger, recordPIDShell("$!", pidFile))
+		testguard.BoundedGateWait(trigger, 10*time.Millisecond, 5*time.Minute), recordPIDShell("$!", pidFile))
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
 	t.Cleanup(func() {
 		if data, readErr := os.ReadFile(pidFile); readErr == nil {
 			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil {
@@ -970,14 +985,16 @@ func spawnSessionWaitingToForkUnmarkedHelper(t *testing.T, name, home string) (t
 	recorder := filepath.Join(dir, "record-child-pid.sh")
 	require.NoError(t, os.WriteFile(recorder, []byte("#!/bin/sh\n"+
 		recordPIDShell("$$", "$1")+"\nexec sleep 300\n"), 0o700))
-	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
+	script := fmt.Sprintf("%s; "+
 		"nohup sh -c '%s; sleep 0.1; "+
 		"nohup env -u AF_SESSION -u AF_HOME setsid sh %s %s >/dev/null 2>&1 & exec sleep 300' "+
 		">/dev/null 2>&1 & exec sleep 300",
-		trigger, recordPIDShell("$$", parentPIDFile), recorder, childPIDFile)
+		testguard.BoundedGateWait(trigger, 10*time.Millisecond, 5*time.Minute),
+		recordPIDShell("$$", parentPIDFile), recorder, childPIDFile)
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
 	t.Cleanup(func() {
 		for _, pidFile := range []string{parentPIDFile, childPIDFile} {
 			if data, readErr := os.ReadFile(pidFile); readErr == nil {

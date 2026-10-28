@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -15,12 +16,8 @@ import (
 
 // The naming form's backend field (#1933).
 //
-// The daemon has always accepted a backend on create (CreateSessionRequest.Backend,
-// the CLI's `--backend`), and #1968 gave the web a picker over the daemon's
-// ListBackends catalog. The TUI was the surface left out: `N` reaches the hook
-// backend and nothing else, so a docker or ssh session could not be created from
-// the primary interface at all — a user had to edit the repo's checked-in `backend`
-// key, which is all-or-nothing per repo, or drop to the CLI.
+// The creation form selects from the daemon's ListBackends catalog.
+// Configured legacy new_remote bindings open this same field (#4017).
 //
 // Two rules this file exists to hold, both borrowed from its web twin
 // (web/src/backends.ts), because a second implementation of either is how the two
@@ -50,8 +47,13 @@ type backendChoice struct {
 	// status is the daemon's checked answer for this choice.
 	status daemon.BackendAvailability
 	// reason is the actionable explanation whenever status is not available — the
-	// same sentence the CLI prints at create time. Empty when available.
+	// same sentence the CLI prints at create time. On an AVAILABLE choice it
+	// instead carries the callback advisory ("af callback unavailable: …") — a
+	// degradation the create will succeed with, not a refusal (#5571 W3.1).
 	reason string
+	// callbackless marks an available choice that will create WITHOUT an af
+	// callback, so the list row can flag it before the user selects.
+	callbackless bool
 }
 
 // backendChoicesFrom turns the daemon's catalog into the picker's rows: the
@@ -78,6 +80,25 @@ func backendChoicesFrom(catalog daemon.ListBackendsResponse) []backendChoice {
 	// A repo whose `backend` key names something unrecognized has NO default: such a
 	// create fails rather than falling back to local, so the row stays "Repo default"
 	// with no parenthetical and carries the daemon's misconfiguration reason.
+	//
+	// The callback advisory rides the same `reason` channel as a refusal, but ONLY
+	// on an available choice — the selection handler proceeds with an available
+	// choice AND shows its reason as a notice, which is exactly the advisory's
+	// semantics ("this will create, just without a callback", #5571 W3.1).
+	//
+	// The host-readiness note (an unprobed or stale sandbox host) rides beside it,
+	// as on the web: the choice stays available, the notice says the host is
+	// unverified (#5785).
+	advisory := func(opt daemon.BackendOption) string {
+		var parts []string
+		if opt.Note != "" {
+			parts = append(parts, "Host "+opt.Note)
+		}
+		if opt.CallbackUnavailableReason != "" {
+			parts = append(parts, session.CallbackUnavailablePrefix+opt.CallbackUnavailableReason)
+		}
+		return strings.Join(parts, " · ")
+	}
 	choices := []backendChoice{{
 		value:  repoDefaultBackend,
 		label:  label,
@@ -86,12 +107,20 @@ func backendChoicesFrom(catalog daemon.ListBackendsResponse) []backendChoice {
 	}}
 	if catalog.DefaultStatus == daemon.BackendAvailable {
 		choices[0].reason = ""
+		for _, opt := range catalog.Backends {
+			if opt.Name == catalog.Default {
+				choices[0].reason = advisory(opt)
+				choices[0].callbackless = opt.CallbackUnavailableReason != ""
+				break
+			}
+		}
 	}
 
 	for _, opt := range catalog.Backends {
 		choice := backendChoice{value: opt.Name, label: opt.Label, status: opt.Status, reason: opt.Reason}
 		if opt.Status == daemon.BackendAvailable {
-			choice.reason = ""
+			choice.reason = advisory(opt)
+			choice.callbackless = opt.CallbackUnavailableReason != ""
 		}
 		choices = append(choices, choice)
 	}
@@ -113,6 +142,9 @@ func (c backendChoice) item() string {
 	case daemon.BackendUnknown:
 		return c.label + " — cannot check"
 	default:
+		if c.callbackless {
+			return c.label + " — no af callback"
+		}
 		return c.label
 	}
 }
@@ -178,6 +210,7 @@ func (m *home) handleBackendCatalog(msg backendCatalogMsg) (tea.Model, tea.Cmd) 
 	if m.state != stateNew || m.namingInstance == nil || m.namingInstance != msg.naming {
 		return m, nil
 	}
+	m.backendPickerPending = false
 	if msg.err != nil {
 		// Lead with what failed and what it blocks; the daemon's own error text
 		// follows. The naming form stays open — the field is optional, so a catalog
@@ -280,5 +313,24 @@ func (m *home) handleStateSelectBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.pendingBackend = choice.value
 	m.menu.SetNamingBackend(m.pendingBackend != repoDefaultBackend)
+	if choice.reason != "" {
+		// An AVAILABLE choice's reason is the callback advisory, not a refusal:
+		// the create succeeds, and the notice says it will have no af callback —
+		// the same "af callback unavailable: …" the surfaces show afterwards
+		// (#5571 W3.1).
+		return m, m.handleNotice(errors.New(choice.reason))
+	}
 	return m, nil
+}
+
+// startNewInstanceAtBackend preserves configured new_remote keys through the
+// creation form's backend field, including restored failed-create drafts.
+func (m *home) startNewInstanceAtBackend() (tea.Model, tea.Cmd) {
+	_, cmd := m.startNewInstance()
+	if m.state != stateNew {
+		return m, cmd
+	}
+	m.backendPickerPending = true
+	_, backendCmd := m.openBackendPicker()
+	return m, tea.Batch(cmd, backendCmd)
 }

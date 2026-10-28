@@ -7,7 +7,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -25,6 +24,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case hideErrMsg:
 		if msg.noticeID == m.transientNoticeID {
+			if m.namingNoticePinned(msg.noticeID) {
+				return m, m.clearTransientMessageAfterDelay(msg.noticeID)
+			}
 			// Expire, not Clear: the notice leaves the bar but stays readable
 			// through `E details`. Clearing here is what made that key dead 3
 			// seconds after every notice (#2618).
@@ -69,22 +71,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case keyupMsg:
 		m.menu.ClearKeydownIfMatch(msg.name)
 		return m, nil
-	case tickUpdatePRInfoMessage:
-		// Poke daemon-owned discovery only for the selected instance; the daemon's
-		// background sweep covers the rest. The request runs off the event loop.
-		// Skip it while attached because the sidebar badge is hidden (#598).
-		if m.attached.Load() {
-			return m, tickUpdatePRInfoCmd
-		}
-		selected := m.sidebar.GetSelectedInstance()
-		return m, tea.Batch(tickUpdatePRInfoCmd, refreshPRInfoCmd(selected, m.repoID, true))
-	case prInfoRefreshFinishedMsg:
-		// The command is only a daemon poke. PR data arrives through Snapshot,
-		// keeping the TUI a read-only mirror of the daemon projection (#3296).
-		if msg.err != nil {
-			log.WarningLog.Printf("PR info refresh request failed for %q: %v", msg.target.title, msg.err)
-		}
-		return m, nil
 	case tickRefreshExternalMessage:
 		// The tick only PACES the loop; the actual Snapshot fetch runs off the
 		// event loop (it can block while a daemon warms up — #829) and comes back
@@ -105,6 +91,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (#1461): applying its old-repo sessions/tasks would bleed the previous
 		// project into the new view. Still re-arm the pacing tick so polling of
 		// the now-active repo continues.
+		// The target's registry is not repo-scoped, so it is applied even when the
+		// rest of the message is dropped below.
+		m.remote.apply(msg.remote)
 		if msg.repoID != m.repoID {
 			return m, tickRefreshExternalCmd
 		}
@@ -124,6 +113,36 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
+		// A save since the last poll dropped a draft whose task was deleted;
+		// say so once (#4798). Do not consume the notice while the recovery
+		// screen shadows the notice bar: the save that drops a draft can
+		// itself raise that screen (a sibling edit's generic failure), and
+		// Take clears the only durable copy, so an unguarded poll would
+		// swallow the very notice it is the fallback for. Hold it for a
+		// frame whose bar is actually painted.
+		if m.recovery == nil {
+			// Drain every notice a save queued in priority order — a discarded
+			// draft (#4798, lost work), a settled draft (#4824, an unconfirmed
+			// edit that landed), and a cross-repo retarget (#1836, a save that
+			// landed in another project) — and surface them in one message.
+			// showTransientMessage replaces the bar, so per-notice Takes would
+			// drop every notice but the last: a save that both discards an
+			// externally deleted draft and retargets another task to a different
+			// repo runs both branches in this tick, and the later Take would
+			// clobber the more urgent discarded-work warning after both queues
+			// were already cleared. One combined message keeps each notice
+			// visible. The Takes always run (they clear the durable copies),
+			// so a notice a save raised still drains exactly once.
+			notices := []string{
+				m.automations.TaskPane().TakeDiscardedDraftNotice(),
+				m.automations.TaskPane().TakeSettledDraftNotice(),
+				m.automations.TaskPane().TakeCrossRepoRetargetNotice(),
+			}
+			combined := strings.TrimSpace(strings.Join(notices, " "))
+			if combined != "" {
+				cmds = append(cmds, m.showTransientMessage(combined))
+			}
+		}
 		if changed {
 			// A snapshot poll is a background refresh, not a user action, so its
 			// selectionChanged must NOT steal focus onto the selected instance's
@@ -141,10 +160,21 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// short positive acknowledgement while the resulting session and updated
 		// task status live-project in from the daemon snapshot.
 		if msg.err != nil {
+			// A run that may have started is never reported as failed: pressing
+			// run again would fire it twice (#4820). The snapshot and task polls
+			// show whether it ran.
+			if mutationMayHaveLanded(msg.err) {
+				return m, m.handleError(mutationOutcomeError(
+					fmt.Sprintf("running task %q", msg.title), "the sidebar and the task's last run", msg.err))
+			}
 			return m, m.handleError(fmt.Errorf("failed to trigger task %q: %w", msg.title, msg.err))
 		}
 		return m, m.showTransientMessage(fmt.Sprintf("triggered %s", msg.title))
 	case tea.MouseMsg:
+		if m.recovery != nil {
+			m.recovery = nil
+			return m, nil
+		}
 		// First-class mouse (#1024 R4, closes #1025): every event is
 		// resolved through the zone registry the last View() rebuilt and
 		// dispatched to the region actually under the cursor — clicks
@@ -154,6 +184,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fully sufficient.
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
+		if m.recovery != nil {
+			m.recovery = nil
+			return m, nil
+		}
 		return m.handleKeyPress(msg)
 	case tea.WindowSizeMsg:
 		return m, m.updateHandleWindowSizeEvent(msg)
@@ -199,6 +233,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.killInstanceCmd(msg.target)
 	case instanceKilledMsg:
 		return m.handleInstanceKilled(msg)
+	case killLossCheckedMsg:
+		// The kill confirmation's git checks finished off the event loop (#4848);
+		// complete the dialog they were started for, if it is still open.
+		return m.handleKillLossChecked(msg)
 	case daemonRestartRequestedMsg:
 		// The restart confirm was accepted; run it off the event loop (it stops a
 		// daemon and respawns one), mirroring the kill/archive async dispatch.
@@ -236,12 +274,31 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleProjectDeleted(msg)
 	case projectAddedMsg:
 		return m.handleProjectAdded(msg)
+	case projectReboundMsg:
+		return m.handleProjectRebound(msg)
+	case rebindConflictSnapshotMsg:
+		return m.handleRebindConflictSnapshot(msg)
 	case limitRetriedMsg:
 		return m.handleLimitRetried(msg)
+	case handoffDeliveryConfirmedMsg:
+		return m.handleHandoffDeliveryConfirmed(msg)
 	case configAgentSpawnedMsg:
 		return m.handleConfigAgentSpawned(msg)
 	case configAgentDoneMsg:
 		return m.handleConfigAgentDone(msg)
+	case handoffAccountsLoadedMsg:
+		return m.handleHandoffAccountsLoaded(msg)
+	case accountsLoadedMsg:
+		return m, m.handleAccountsLoaded(msg)
+	case quotaLoadedMsg:
+		m.handleQuotaLoaded(msg)
+		return m, nil
+	case accountRegisteredMsg:
+		return m, m.handleAccountRegistered(msg)
+	case accountLoginStartedMsg:
+		return m.handleAccountLoginStarted(msg)
+	case accountLoginDoneMsg:
+		return m.handleAccountLoginDone(msg)
 	case repaintAfterDetachMsg:
 		// Trigger an immediate repaint with whatever content is already
 		// cached on the panes (rendered when bubbletea's main loop calls
@@ -265,7 +322,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// panesRefreshedMsg ever arrives, and the watchdog would fire a
 		// spurious goroutine dump after slowDetachThreshold even though there
 		// was nothing to paint. Cancel it here: a nil cmd, or a cmd carrying
-		// only non-capture work (the PR-info fetch), means the detach already
+		// only non-capture work, means the detach already
 		// completed everything it was going to paint (#683 class).
 		if cmd == nil || len(m.visiblePanes) == 0 {
 			endDetachWatchdog()
@@ -288,7 +345,35 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case backendCatalogMsg:
 		// The naming form's backend field asked the daemon which backends this repo
 		// can use (#1933); open the picker over the answer, if the form is still open.
-		return m.handleBackendCatalog(msg)
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleBackendCatalog(msg) })
+	case accountRegistryMsg:
+		// The naming form's account field asked the daemon which credential accounts
+		// it holds (#3844); open the picker over the answer, if the form is still
+		// open ON THE SAME PROGRAM — see handleAccountRegistry.
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleAccountRegistry(msg) })
+	case accountDefaultMsg:
+		// The naming form asked which account this PROJECT would apply to a create
+		// that names none (#3386); preselect it, so the default is visible and
+		// changeable rather than applied in silence.
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleAccountDefault(msg) })
+	case remoteDefaultMsg:
+		// A remote target's form opened with the LOCAL default as a guess; this
+		// reply carries the daemon's resolved default_program for the project
+		// (#4889 review), so the field can show the program the implicit create
+		// will actually run.
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleRemoteDefault(msg) })
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.
@@ -315,7 +400,30 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// placeholder, which is never persisted, and the daemon is the sole
 			// writer (#960 PR 4). Removing the in-memory row is the whole cleanup.
 
-			return m, tea.Batch(m.handleError(msg.err), m.selectionChanged())
+			// The create may have landed with only its reply lost (#4820). The
+			// draft is NOT re-armed — resubmitting it would create a second
+			// session — and the removed placeholder is not a claim either way:
+			// the next snapshot poll adds the session back if the daemon made it.
+			if mutationMayHaveLanded(msg.err) {
+				return m, tea.Batch(m.handleError(mutationOutcomeError(
+					fmt.Sprintf("creating session %q", msg.instance.Title), "the sidebar", msg.err)),
+					m.selectionChanged())
+			}
+
+			var restoreCmd tea.Cmd
+			if msg.draft != nil {
+				m.failedCreate = &msg
+				if userStillWatching {
+					_, restoreCmd = m.restoreFailedCreate()
+				}
+			}
+			detail := "Your input is retained. " + msg.err.Error()
+			action := "Press any key to return to the form."
+			if !userStillWatching {
+				detail += " The next create in this project reopens the failed draft."
+				action = "Press any key to continue."
+			}
+			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged(), restoreCmd)
 		}
 
 		started := msg.instance
@@ -356,11 +464,23 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !swapped && started.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 			m.store.RegisterRepoForInstance(started)
 		}
+		// Version skew on the account field (#3844 constraint 5): a daemon predating
+		// account support drops it silently, and the row is about to be shown — and
+		// reported by every later surface — as the session the user asked for. Raised
+		// AFTER the row is in the store on purpose: the session EXISTS, so the message
+		// names it as something to remove rather than pretending the create failed.
+		// Batched into whichever return path runs below, including the one for a user
+		// who has navigated away: a wrong identity is not a message to skip because
+		// the user is looking elsewhere.
+		var accountSkew tea.Cmd
+		if err := accountSkewRefusal(msg.account, started); err != nil {
+			accountSkew = m.handleError(err)
+		}
 		if !userStillWatching {
 			// User moved on — update status silently and keep their current
 			// focus. The instance flips from Loading to Running in the
 			// sidebar on its own.
-			return m, tea.Batch(tea.WindowSize(), m.selectionChanged())
+			return m, tea.Batch(accountSkew, tea.WindowSize(), m.selectionChanged())
 		}
 
 		m.menu.SetState(ui.StateDefault)
@@ -374,6 +494,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openPaneWindow(started, 0)
 			m.relayout()
 		}
+		if accountSkew != nil {
+			// The create succeeded, on the WRONG identity. The start-help modal would
+			// cover the message saying so — and it explains how to work in a session
+			// the user has just been told to remove — so the refusal takes the screen
+			// instead. The pane above is still opened: the session is real, and seeing
+			// it is how the user confirms what it is running as.
+			return m, tea.Batch(accountSkew, tea.WindowSize(), m.selectionChanged())
+		}
 		m.showHelpScreen(helpStart(started), nil)
 
 		return m, tea.Batch(tea.WindowSize(), m.selectionChanged())
@@ -381,10 +509,32 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleMenuHighlighting underlines the menu hint for a mapped key and returns
+// the tick that clears it. The action itself runs in the same Update, right
+// after (handleKeyPress): the underline is paint only — Menu.keyDown has no
+// reader but the menu renderer — so nothing needs it on screen before the
+// action runs.
+//
+// It used to split each mapped keypress into two Update passes — paint the
+// highlight, then re-emit the key through the command pipeline and act on the
+// replay. The next physical key could beat that replay onto the event loop and
+// run in the pre-action state ("/" then "p" lost the "p" before search opened,
+// #4828), and every guard against that race added a new one. One pass has no
+// replay to race. returnEarly reports a key consumed here that must not reach
+// the state dispatch.
 func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly bool) {
-	if m.keySent {
-		m.keySent = false
-		return nil, false
+	// A form action while a promised backend picker is still loading answers
+	// with a notice instead of acting: its catalog would otherwise open the
+	// picker over a create the action already submitted or left.
+	if m.state == stateNew && m.backendPickerPending {
+		switch msg.Type {
+		case tea.KeyEnter, tea.KeyTab, tea.KeyShiftTab, tea.KeyCtrlR, tea.KeyCtrlO:
+			return m.showTransientMessage("Loading backends…"), true
+		case tea.KeyEsc:
+			// Let handleStateNew cancel synchronously, before a late catalog
+			// can turn this key into merely closing the backend picker.
+			return nil, false
+		}
 	}
 	// While naming a new instance the menu only shows the submit-name (enter),
 	// change-program (tab), and cancel (esc) options, so those keys are the only ones
@@ -413,21 +563,23 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			if m.pendingBackend != repoDefaultBackend {
 				name = keys.KeyEditBackend
 			}
+		case "ctrl+o":
+			// Same swap for the account hint (#3844).
+			name = keys.KeySetAccount
+			if m.pendingAccount != ambientAccount {
+				name = keys.KeyEditAccount
+			}
 		case "esc":
 			name = keys.KeyCancelName
 		default:
 			return nil, false
 		}
-		m.keySent = true
-		return tea.Batch(
-			func() tea.Msg { return msg },
-			m.keydownCallback(name)), true
+		return m.keydownCallback(name), false
 	}
 	// Any other modal state (help/confirm/search/select-program/hooks): the
-	// overlay owns the keyboard, so no hint highlighting and no re-emit —
-	// this runs BEFORE handleKeyPress's state switch, so without this guard
-	// mapped keys typed into an overlay would take the highlight + re-emit
-	// detour first. A blanket non-default check (rather than enumerating
+	// overlay owns the keyboard, so no hint highlighting — without this guard
+	// mapped keys typed into an overlay would underline hints the overlay
+	// hides. A blanket non-default check (rather than enumerating
 	// states) can't silently miss a future modal state (Greptile on #1083).
 	if m.state != stateDefault {
 		return nil, false
@@ -453,10 +605,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		return nil, false
 	}
 
-	m.keySent = true
-	return tea.Batch(
-		func() tea.Msg { return msg },
-		m.keydownCallback(name)), true
+	return m.keydownCallback(name), false
 }
 
 func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
@@ -469,17 +618,28 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleInteractiveKey(msg)
 	}
 
-	cmd, returnEarly := m.handleMenuHighlighting(msg)
+	highlight, returnEarly := m.handleMenuHighlighting(msg)
 	if returnEarly {
-		return m, cmd
+		return m, highlight
 	}
+	mod, cmd = m.dispatchKeyAction(msg)
+	return mod, tea.Batch(highlight, cmd)
+}
 
+// dispatchKeyAction runs a key's action for the current state — the half of
+// handleKeyPress after the menu highlight.
+func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
+	// The details key goes first, so the status bar's hint and this dispatch
+	// answer from the same function (#4940).
+	if mod, cmd, opened := m.openNoticeDetails(msg); opened {
+		return mod, cmd
+	}
 	// Dispatch to state-specific handlers
 	switch m.state {
 	case stateHelp:
 		return m.handleHelpState(msg)
 	case stateNew:
-		return m.handleStateNew(msg)
+		return m.handleNamingFormKey(msg)
 	case stateConfirm:
 		return m.handleStateConfirm(msg)
 	case stateSearch:
@@ -487,17 +647,23 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	case stateSwitchProject:
 		return m.handleStateSwitchProject(msg)
 	case stateSelectProgram:
-		return m.handleStateSelectProgram(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateSelectProgram(msg) })
 	case stateSelectTabKind:
 		return m.handleStateSelectTabKind(msg)
 	case statePromptInput:
-		return m.handleStateInitialPrompt(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateInitialPrompt(msg) })
 	case stateJumpTab:
 		return m.handleStateJumpTab(msg)
+	case stateRenameTab:
+		return m.handleStateRenameTab(msg)
 	case stateSelectHandoffAgent:
 		return m.handleStateSelectHandoffAgent(msg)
+	case stateSelectHandoffResolve:
+		return m.handleStateSelectHandoffResolve(msg)
 	case stateSelectBackend:
-		return m.handleStateSelectBackend(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateSelectBackend(msg) })
+	case stateSelectAccount:
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateSelectAccount(msg) })
 	case stateHooks:
 		return m.handleStateHooks(msg)
 	case stateTasks:

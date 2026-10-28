@@ -134,7 +134,7 @@ func TestCloseTab_UnconfirmedTeardownPersistsCleanupHandle(t *testing.T) {
 		t.Fatalf("precondition: process tab tmux = %q, want %q", created.TmuxName, agentName+"__btop")
 	}
 
-	name, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabID: created.ID})
+	name, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabID: created.ID}, "internal daemon caller")
 	if err != nil {
 		t.Fatalf("CloseTab must succeed on an unconfirmed teardown: the roster decision is durable: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestCloseTab_ConfirmedTeardownPersistsNoCleanupHandle(t *testing.T) {
 		t.Fatalf("CreateTab: %v", err)
 	}
 
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabID: created.ID}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabID: created.ID}, "internal daemon caller"); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 	if aliveFn(created.TmuxName) {
@@ -231,7 +231,7 @@ func TestCreateTab_AvoidsTmuxNameRetainedByUnconfirmedClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTab: %v", err)
 	}
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabID: first.ID}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabID: first.ID}, "internal daemon caller"); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 	if !aliveFn(first.TmuxName) {

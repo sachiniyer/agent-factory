@@ -143,27 +143,20 @@ func (h *HooksPane) handleEditMode(msg tea.KeyMsg) bool {
 		h.adding = false
 		h.editing = false
 		h.editBuffer = ""
-	case tea.KeyBackspace:
-		if len(h.editBuffer) > 0 {
-			runes := []rune(h.editBuffer)
-			h.editBuffer = string(runes[:len(runes)-1])
-		}
-	case tea.KeySpace:
-		h.editBuffer += " "
-	case tea.KeyRunes:
-		h.editBuffer += string(msg.Runes)
+	default:
+		h.editBuffer, _ = EditLine(h.editBuffer, msg)
 	}
 	return true
 }
 
 func (h *HooksPane) String() string {
 	t := CurrentTheme()
-	tStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	normalStyle := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	editStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Purple)
-	descStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim).Italic(true)
+	tStyle := DialogTitleStyle()
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	hintStyle := DialogHintStyle()
+	editStyle := selectedStyle
+	descStyle := lipgloss.NewStyle().Foreground(t.Ink)
 
 	var b strings.Builder
 	b.WriteString(tStyle.Render("Post-worktree hooks"))
@@ -183,9 +176,9 @@ func (h *HooksPane) String() string {
 	for i, cmd := range h.commands {
 		isSelected := i == h.selectedIdx
 		if h.editing && isSelected {
-			b.WriteString(editStyle.Render("▸ "+h.editBuffer) + InputCaret())
-		} else if isSelected && h.hasFocus {
-			b.WriteString(selectedStyle.Render("▸ " + cmd))
+			b.WriteString(SelectionMarker("▸ ") + editStyle.Render(h.editBuffer) + InputCaret())
+		} else if isSelected && h.hasFocus && !h.adding {
+			b.WriteString(SelectionMarker("▸ ") + selectedStyle.Render(cmd))
 		} else {
 			b.WriteString(normalStyle.Render("  " + cmd))
 		}
@@ -193,7 +186,7 @@ func (h *HooksPane) String() string {
 	}
 
 	if h.adding {
-		b.WriteString(editStyle.Render("▸ "+h.editBuffer) + InputCaret())
+		b.WriteString(SelectionMarker("▸ ") + editStyle.Render(h.editBuffer) + InputCaret())
 		b.WriteString("\n")
 	}
 
@@ -206,10 +199,10 @@ func (h *HooksPane) String() string {
 			if h.width > 0 && lipgloss.Width(hint) > h.width {
 				hint = "n add · enter · esc back"
 			}
-			b.WriteString(hintStyle.Render(hint))
+			b.WriteString(ActionHint(hint))
 		}
 	} else {
-		b.WriteString(hintStyle.Render("enter to focus and edit hooks"))
+		b.WriteString(hintStyle.Render("enter edit hooks"))
 	}
 
 	return fitBlockToSize(b.String(), h.width, h.height, 1)

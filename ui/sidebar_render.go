@@ -26,52 +26,8 @@ const chromeLines = 2
 func (s *Sidebar) String() string {
 	s.syncFromStore()
 
-	// Render every visible row up front and measure real heights: instance
-	// rows are multi-line (title + branch, plus an optional PR line) while tab
-	// rows are single-line, so the window math cannot assume one line per item.
-	rows := make([]string, len(s.visibleItems))
-	heights := make([]int, len(s.visibleItems))
-	totalLines := 0
-	for i, item := range s.visibleItems {
-		isSelected := i == s.selectedIdx
-		switch {
-		case item.IsHeader:
-			rows[i] = s.renderHeader(item.Kind, isSelected)
-		case item.IsRootSep:
-			// The display-only demarcation rule under the pinned root agent (#2513),
-			// its own item so heights/zones account for it (registerZones skips it).
-			rows[i] = s.renderRootSeparator()
-		case item.Kind == SectionInstances && item.IsTab:
-			rows[i] = s.renderTabRow(item, isSelected)
-		default:
-			// An instance row — live (SectionInstances) or archived (SectionArchived,
-			// flat #1028). Both index GetInstances() by ItemIndex.
-			rows[i] = s.renderInstance(item.ItemIndex, isSelected)
-		}
-		heights[i] = lipgloss.Height(rows[i])
-		totalLines += heights[i]
-	}
-
-	avail := s.height - chromeLines
-	start, end := 0, len(rows)
-	hiddenAbove, hiddenBelow := 0, 0
-	if s.height > 0 && totalLines > avail {
-		s.scrollToSelection(heights, avail)
-		start = s.scrollOffset
-		// The root demarcation rule has no row above it to set off once root scrolls
-		// out of the window, so skip it when it would be the first rendered row —
-		// otherwise a scrolled window opens with a dangling hairline directly under
-		// the "▲ N more" indicator (#2513, P3-1). The selection sits below the rule,
-		// so advancing past it never scrolls the selection out of view.
-		if start < len(s.visibleItems) && s.visibleItems[start].IsRootSep {
-			start++
-		}
-		end, _, _ = fitWindow(heights, start, avail)
-		hiddenAbove = start
-		hiddenBelow = len(rows) - end
-	} else {
-		s.scrollOffset = 0
-	}
+	rows, heights, totalLines := s.measureVisibleRows()
+	start, end, hiddenAbove, hiddenBelow := s.fitRenderedWindow(heights, totalLines)
 
 	s.registerZones(heights, start, end, hiddenAbove > 0)
 
@@ -83,7 +39,7 @@ func (s *Sidebar) String() string {
 	// widths the 15-cell " Agent Factory " (or the padded chip itself) would
 	// otherwise push the row past s.width — the same #646 overflow class the
 	// section headers hit. The chip doubles as the tree's focus-ring indicator:
-	// the accent background recedes to gray when focus is elsewhere.
+	// underline disappears when focus is elsewhere.
 	titleWidth := s.contentWidth() + 2
 	if s.width > 0 && titleWidth > s.width {
 		titleWidth = s.width
@@ -110,21 +66,114 @@ func (s *Sidebar) String() string {
 		b.WriteString(s.renderWindowIndicator("▼", hiddenBelow))
 	}
 
-	out := lipgloss.Place(s.width, s.height, lipgloss.Left, lipgloss.Top, b.String())
-	// Safety clamp to the exact allocation via PR 1's shared helper:
-	// lipgloss.Place pads but never truncates in either dimension, fitWindow
-	// force-includes the first windowed row even when it alone exceeds the
-	// height budget (e.g. a tall PR row at a tiny height), and rare row shapes
-	// (double-digit index prefixes at ultra-narrow widths) can still exceed
-	// the width after the per-row truncation (#646/#700 class).
+	// Size to the exact allocation with the shared helper: it pads AND truncates
+	// in both dimensions, which is what this needs — fitWindow force-includes the
+	// first windowed row even when it alone exceeds the height budget (e.g. a tall
+	// PR row at a tiny height), and rare row shapes (double-digit index prefixes at
+	// ultra-narrow widths) can still exceed the width after the per-row truncation
+	// (#646/#700 class).
+	//
+	// It used to run lipgloss.Place first and clamp after. Place pads but never
+	// truncates, so it was doing only the half the clamp already does — and doing
+	// it in lipgloss's measure, which puts back the cells the clamp deliberately
+	// withholds from a row whose width cannot be trusted (#3614). One pass, one
+	// measure.
 	if s.width > 0 && s.height > 0 {
-		out = layout.ClampToRect(out, layout.Rect{W: s.width, H: s.height})
-	} else if s.height > 0 {
+		return layout.ClampToRect(b.String(), layout.Rect{W: s.width, H: s.height})
+	}
+	out := lipgloss.Place(s.width, s.height, lipgloss.Left, lipgloss.Top, b.String())
+	if s.height > 0 {
 		if lines := strings.Split(out, "\n"); len(lines) > s.height {
 			out = strings.Join(lines[:s.height], "\n")
 		}
 	}
 	return out
+}
+
+// measureVisibleRows renders every row that can enter the viewport, returning
+// the styled strings, their line heights, and the list's total line count.
+// Every row occupies at least one line, so rows beyond the later of the
+// selection/current scroll start plus a whole viewport cannot be reached by
+// fitWindow — that suffix gets a one-line lower bound instead of styling
+// thousands of invisible rows. Rows before/around selection retain exact
+// heights and existing scrolling.
+func (s *Sidebar) measureVisibleRows() (rows []string, heights []int, totalLines int) {
+	lastMeasured := len(s.visibleItems) - 1
+	if s.height > chromeLines {
+		lastMeasured = max(s.scrollOffset, s.selectedIdx) + s.height - chromeLines
+	}
+	rows = make([]string, len(s.visibleItems))
+	heights = make([]int, len(s.visibleItems))
+	for i, item := range s.visibleItems {
+		if i > lastMeasured {
+			heights[i] = 1
+			totalLines++
+			continue
+		}
+		isSelected := i == s.selectedIdx
+		switch {
+		case item.IsHeader:
+			rows[i] = s.renderHeader(item.Kind, isSelected)
+		case item.IsRootSep:
+			// The display-only demarcation rule under the pinned root agent (#2513),
+			// its own item so heights/zones account for it (registerZones skips it).
+			rows[i] = s.renderRootSeparator()
+		case item.Kind == SectionInstances && item.IsTab:
+			rows[i] = s.renderTabRow(item, isSelected)
+		default:
+			// An instance row — live (SectionInstances) or archived (SectionArchived,
+			// flat #1028). Both index GetInstances() by ItemIndex.
+			rows[i] = s.renderInstance(item.ItemIndex, isSelected)
+		}
+		heights[i] = lipgloss.Height(rows[i])
+		totalLines += heights[i]
+	}
+	return rows, heights, totalLines
+}
+
+// fitRenderedWindow computes which visibleItems indices the CURRENT list puts
+// on screen — scrolling minimally so the selection stays visible — and records
+// the result as renderedStart/renderedEnd. String() calls it each frame;
+// ensureRenderedWindow calls it lazily between a rebuild and the next frame so
+// the bounds never describe a list that has already been replaced (#4755
+// review): the window is the only place a ▾ marker exists, so it is what
+// scopes the resting-binding fallback.
+func (s *Sidebar) fitRenderedWindow(heights []int, totalLines int) (start, end, hiddenAbove, hiddenBelow int) {
+	avail := s.height - chromeLines
+	start, end = 0, len(s.visibleItems)
+	if s.height > 0 && totalLines > avail {
+		s.scrollToSelection(heights, avail)
+		start = s.scrollOffset
+		// The root demarcation rule has no row above it to set off once root scrolls
+		// out of the window, so skip it when it would be the first rendered row —
+		// otherwise a scrolled window opens with a dangling hairline directly under
+		// the "▲ N more" indicator (#2513, P3-1). The selection sits below the rule,
+		// so advancing past it never scrolls the selection out of view.
+		if start < len(s.visibleItems) && s.visibleItems[start].IsRootSep {
+			start++
+		}
+		end, _, _ = fitWindow(heights, start, avail)
+		hiddenAbove = start
+		hiddenBelow = len(s.visibleItems) - end
+	} else {
+		s.scrollOffset = 0
+	}
+	s.renderedStart, s.renderedEnd, s.hasRendered = start, end, true
+	return start, end, hiddenAbove, hiddenBelow
+}
+
+// ensureRenderedWindow refits the rendered row window when a rebuild has
+// replaced the list since the last paint — a key update lands in that gap
+// before String() runs, and resolving row verbs off the stale bounds would
+// let the footer advertise (or dispatch to) a row that is not on screen
+// (#4755 review). One measurement per stale window; the paint reuses it via
+// String()'s own fit.
+func (s *Sidebar) ensureRenderedWindow() {
+	if s.hasRendered {
+		return
+	}
+	_, heights, totalLines := s.measureVisibleRows()
+	s.fitRenderedWindow(heights, totalLines)
 }
 
 // scrollToSelection clamps scrollOffset and moves it minimally so the selected
@@ -346,16 +395,17 @@ func (s *Sidebar) renderInstance(idx int, selected bool) string {
 
 // renderTabRow renders one tab child row of an expanded instance. The label
 // set comes from tree.TabLabels — the same slots the tab bar shows — and the
-// row whose slot matches the store's active tab carries the "*" marker.
+// row whose instance and slot match an open pane carries the " · open" marker.
 func (s *Sidebar) renderTabRow(item SidebarItem, selected bool) string {
 	instances := s.proj.GetInstances()
 	if item.ItemIndex < 0 || item.ItemIndex >= len(instances) {
 		return ""
 	}
-	labels := tree.TabLabels(instances[item.ItemIndex])
+	inst := instances[item.ItemIndex]
+	labels := tree.TabLabels(inst)
 	if item.TabIndex < 0 || item.TabIndex >= len(labels) {
 		return ""
 	}
 	return s.renderer.RenderTab(labels[item.TabIndex], item.TabIndex+1,
-		item.TabIndex == len(labels)-1, selected, s.proj.ActiveTab() == item.TabIndex)
+		item.TabIndex == len(labels)-1, selected, s.proj.FindOpenPane(inst, item.TabIndex) != nil)
 }

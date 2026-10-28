@@ -14,11 +14,14 @@ import (
 
 func checkConfigAndStorage(ctx *scanContext, report *Report) *config.Config {
 	load, cfgErr := config.LoadConfigReadOnly()
+	ctx.globalConfigMissing = load.Missing
 	cfg := load.Config
 	channel := "unknown"
 	if cfg != nil && cfg.UpdateChannel != "" {
 		channel = cfg.UpdateChannel
-	} else if load.Missing {
+	} else if load.Missing || load.EmptyStub {
+		// Both states self-heal to DefaultConfig on the next start, so the
+		// channel af will actually run on is the default — not "unknown".
 		channel = config.UpdateChannelStable
 	}
 
@@ -35,7 +38,7 @@ func checkConfigAndStorage(ctx *scanContext, report *Report) *config.Config {
 	reportConfigValidity(report, load, cfgErr)
 	checkHomeHealth(ctx, report)
 	repoRoot, repoErr := currentRepoRoot()
-	mode := worktreeMode(cfg, load.Missing)
+	mode := worktreeMode(cfg, load.Missing, load.EmptyStub)
 	report.AddHeader("repo", repoHeader(repoRoot, repoErr, mode))
 	checkWorktreeMode(ctx, report, repoRoot, repoErr, mode)
 	return cfg
@@ -55,6 +58,15 @@ func reportConfigValidity(report *Report, load config.ReadOnlyConfigLoad, err er
 		}
 		report.Fail(sectionConfig, "config", fmt.Sprintf("%s is not valid: %v", path, err),
 			"edit the config file, or delete it to regenerate defaults")
+	case load.EmptyStub:
+		// A contentless config.toml with no shadowing config.json is a state
+		// af runs past on in-memory defaults (#4483 — a load never deletes),
+		// so it is a WARN (advisory), not a FAIL: a health check that exits 1
+		// for a state af considers healthy disagrees with the thing it
+		// diagnoses. problem=false keeps it out of UnresolvedCount so
+		// `af doctor` exits 0, matching startup.
+		report.Warn(sectionConfig, "config", fmt.Sprintf("empty config stub at %s; af runs on built-in defaults and leaves the file untouched", load.Path),
+			"write your settings to it, or delete it and run `af` to regenerate defaults", false)
 	case load.Missing:
 		report.Warn(sectionConfig, "config", fmt.Sprintf("no config file at %s; defaults will be created on first write", load.Path),
 			"run `af` once to materialize defaults or create config.toml", false)
@@ -90,6 +102,7 @@ func checkHomeHealth(ctx *scanContext, report *Report) {
 	for _, subdir := range []string{"instances", "repos"} {
 		checkStorageDir(report, filepath.Join(home, subdir), subdir)
 	}
+	checkHookLogs(report, filepath.Join(home, "logs", "hooks"))
 }
 
 func checkStorageDir(report *Report, path, name string) {
@@ -120,11 +133,15 @@ func currentRepoRoot() (string, error) {
 	return repo.Root, nil
 }
 
-func worktreeMode(cfg *config.Config, missingConfig bool) string {
+func worktreeMode(cfg *config.Config, missingConfig, emptyStub bool) string {
 	if cfg != nil && cfg.WorktreeRoot != "" {
 		return cfg.WorktreeRoot
 	}
-	if missingConfig {
+	if missingConfig || emptyStub {
+		// Both self-heal to DefaultConfig on the next start, whose
+		// WorktreeRoot is WorktreeRootSibling — not the "unknown" the empty
+		// (no-config-loadable) case is, which would emit a problem WARN and
+		// make `af doctor` exit 1 for a state af boots cleanly on.
 		return config.WorktreeRootSibling
 	}
 	return "unknown"
@@ -200,7 +217,7 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 		}
 		header = append(header, agent+"=missing")
 		detail := fmt.Sprintf("%q is not runnable: %v", command, err)
-		remediation := fmt.Sprintf("install %s or set program_overrides.%s", agent, agent)
+		remediation := preflight.ProgramError(agent, command, err).Error()
 		if configured {
 			report.Fail(sectionEnvironment, agent, detail, remediation)
 		} else {

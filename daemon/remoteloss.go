@@ -4,7 +4,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -69,7 +68,76 @@ var (
 	// status, root-ensure, lost-restore and limit-resume for EVERY other
 	// session (#1794). The confirmation only has to break a tie the debounce
 	// has already all but settled, so it gets a tight budget.
+	//
+	// This budget is for the POLL LOOP only: settleRemoteProbeFailure's
+	// debounce confirmation and remoteSandboxLiveness's pre-recovery probe,
+	// both reached inside RefreshStatuses's serial walk after a slow failure.
+	// The operator-initiated one-shot probes reached through
+	// probeLivenessForOperator use remoteConfirmProbeTimeout instead — see
+	// that var for why the 5s tie-break budget does not fit them.
 	remoteLostConfirmTimeout = 5 * time.Second
+	// remoteConfirmProbeTimeout bounds the operator-initiated Alive() probe
+	// driven through probeLivenessForOperator: ConfirmHandoffDelivery, the
+	// startup-unknown arm of retryPendingHandoff, the limit-resume re-spawn
+	// gate, and the account-swap runtime prep. It is deliberately SEPARATE
+	// from remoteLostConfirmTimeout and sized for a structurally different
+	// caller.
+	//
+	// remoteLostConfirmTimeout's shortness is justified ONLY for the daemon's
+	// serial poll walk: a failed Snapshot already spent the full
+	// remoteAgentCallTimeout (30s), and RefreshStatuses walks instances
+	// SERIALLY, so an unbounded second probe would let one blackholed sandbox
+	// stall status, root-ensure, lost-restore and limit-resume for EVERY other
+	// session (#1794). None of that applies to an operator RPC: it is a
+	// one-shot action under a single per-session op lock — no prior 30s call
+	// already spent, no serial walk of other sessions to protect, no debounce
+	// tie to break. Inheriting the poll's 5s budget (as cc0208b did when it
+	// wired the new confirm/retry verbs to probeLiveness) was never
+	// re-justified for this context and cuts a live-but-slow runtime off
+	// mid-probe.
+	//
+	// The budget must be STRICTLY LONGER than the transport's whole control
+	// round-trip, not merely equal to it. The remote agent-server HTTP client
+	// dials with a 10s TCP budget (remoteAgentDialTimeout) and bounds the
+	// whole control round-trip at 30s (remoteAgentCallTimeout); both live in
+	// the session package unexported, so they are named as literals here
+	// (status_remote_test.go does the same). A caller budget shorter than
+	// the dial timeout lets the probe give up before the transport even
+	// finishes establishing the connection on a cold link — the 5s budget
+	// is shorter than the 10s dial it runs on top of, so a remote whose
+	// /v1/agent/alive exceeds 5s answered probeUnknown and both operator
+	// exits refused on every retry, leaving only restore/kill (which
+	// discard unpushed commits) — the exact harm the #1794/#2589
+	// "unreachable is not dead" discipline exists to prevent.
+	//
+	// But EQUALITY with the 30s transport timeout is not enough either. The
+	// spawned Alive() goroutine in aliveWithin does not start running the
+	// instant the outer timer is created: under a busy daemon the scheduler
+	// can defer the goroutine, and the transport's own 30s deadline then
+	// begins at that deferred start. If the caller's budget were equal to
+	// 30s, the outer timer could fire probeUnknown while the transport
+	// still had time to receive a valid slow response — contrary to the
+	// stated guarantee and leaving the operator unable to confirm or retry
+	// a live handoff. remoteConfirmProbeSlack covers that goroutine
+	// scheduling delay so the outer timer never fires before the transport
+	// gives up on its own; the orphaned goroutine then settles to the
+	// buffered channel within its own remoteAgentCallTimeout and nothing
+	// leaks past either bound.
+	//
+	// The trade-off is operator wait time on a truly unreachable remote — a
+	// one-shot, per-session cost to the operator, not a stall affecting
+	// other sessions — and both ends land in the same safe probeUnknown
+	// refusal; the looser budget only widens the window in which a
+	// live-but-slow remote can answer and avoid the destructive path.
+	remoteConfirmProbeTimeout = 30*time.Second + remoteConfirmProbeSlack
+	// remoteConfirmProbeSlack is the margin by which the operator probe's
+	// outer budget exceeds the transport's remoteAgentCallTimeout (30s). It
+	// exists so the goroutine aliveWithin spawns can start late under a
+	// busy daemon without the outer timer firing before the transport's own
+	// deadline. Named separately so the relationship to the transport
+	// timeout is explicit; sized generously over any realistic goroutine
+	// scheduling delay.
+	remoteConfirmProbeSlack = 5 * time.Second
 )
 
 // remoteLossState is the per-session debounce state. Guarded by Manager.mu.
@@ -169,7 +237,7 @@ func (m *Manager) noteRemoteProbeFailureAtGeneration(
 	if now.Sub(st.firstFailureAt) < remoteLostGracePeriod {
 		return false, true
 	}
-	log.WarningLog.Printf("remote session %q has failed %d consecutive agent-server probes over %s; confirming before marking it Lost", title, st.consecutiveFailures, now.Sub(st.firstFailureAt).Round(time.Second))
+	m.warn().Printf("remote session %q has failed %d consecutive agent-server probes over %s; confirming before marking it Lost", title, st.consecutiveFailures, now.Sub(st.firstFailureAt).Round(time.Second))
 	return true, true
 }
 
@@ -219,10 +287,25 @@ func (m *Manager) clearRemoteLossAtGeneration(
 //
 // Bounded, so a wedged remote cannot stall the poll goroutine here either.
 func (m *Manager) remoteSandboxLiveness(instance *session.Instance) livenessProbe {
+	return m.remoteSandboxLivenessWithin(instance, remoteLostConfirmTimeout)
+}
+
+// remoteSandboxLivenessForOperator is the operator-RPC form: the manual
+// restore path's pre-replacement probe. It rides remoteConfirmProbeTimeout for
+// the reason probeLivenessForOperator does — no prior failed 30s call was
+// spent, no serial walk of other sessions needs protecting, and no debounce
+// tie is being broken, so the poll loop's 5s budget would cut a cold-but-live
+// remote off before it could answer (#5203). The automatic loop above keeps
+// the tight budget because it runs inside RefreshStatuses's serial walk.
+func (m *Manager) remoteSandboxLivenessForOperator(instance *session.Instance) livenessProbe {
+	return m.remoteSandboxLivenessWithin(instance, remoteConfirmProbeTimeout)
+}
+
+func (m *Manager) remoteSandboxLivenessWithin(instance *session.Instance, timeout time.Duration) livenessProbe {
 	if !isRemoteWorkspace(instance) {
 		return probeAbsent // a local session has no remote sandbox to preserve
 	}
-	return aliveWithin(instance.AgentServer(), remoteLostConfirmTimeout)
+	return aliveWithin(instance.AgentServer(), timeout)
 }
 
 // noteRuntimeReplaced retires observations owned by the prior runtime after a
@@ -263,7 +346,27 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	instance.ClearAgentModelChange()
 	instance.ClearIdleEvidence()
 	instance.ClearLostRestoreFailure()
-	m.clearRemoteLoss(stableSessionKey(repoID, instance))
+	instance.ClearLostRestoreWait()
+	// The outage flag is an observation OF THE OLD RUNTIME: a fresh sandbox has
+	// earned no silence yet, and keeping it would mark a just-provisioned
+	// runtime unreachable before its first probe (#5571 W1.3).
+	instance.ClearUnreachable()
+	key := stableSessionKey(repoID, instance)
+	m.clearRemoteLoss(key)
+	// A replaced runtime is a fresh pane: the task-run turn watcher's prev
+	// frame belongs to the dead one (#5221 review). The run's own boundary
+	// survives ClearIdleEvidence — it is a fact about the run, not the pane —
+	// so the replacement still boots behind the gate and must prove its turn.
+	m.pausedMu.Lock()
+	delete(m.taskRunTurnWatches, key)
+	m.pausedMu.Unlock()
+	// If the replacement's ConfirmLive interrupted a still-in-flight task run
+	// (#4222), stamp the owning task's status here — the post-operation
+	// settlement site that every restore route crosses. The run ended without
+	// completing, so on_complete does not apply and the session is kept.
+	if instance.ConsumeTaskRunInterrupted() {
+		stampTaskRunInterrupted(instance, m.taskRunPeerSnapshot())
+	}
 }
 
 // sweepRemoteLossStates drops debounce entries that no longer describe anything
@@ -324,11 +427,24 @@ func (m *Manager) settleRemoteProbeFailure(
 	before session.Liveness,
 	beforeReset time.Time,
 	epoch uint64,
+	probeErr error,
 ) {
 	if !isRemoteWorkspace(instance) {
 		// A local agent-server's Snapshot never errors; if that ever changes,
 		// an unexplained local error is not evidence of death. Leave it be.
 		return
+	}
+	// Record the outage on the row FIRST (#5571 W1.3): the flag is an
+	// observation, not a verdict, so it belongs to every unanswered remote
+	// probe — including the Lost row's below (Lost+unreachable is the honest
+	// pair: the mark cannot be re-confirmed right now) and the pre-durable blip
+	// the debounce is still absorbing. The generation gate does for the flag
+	// what it does for the count below: a stale predecessor failure must not
+	// claim a fresh runtime's outage. The not-provisioned sentinel is excluded
+	// because it is definitive absence — af KNOWS there is no runtime to reach,
+	// and flagging it "unreachable" would invert the word's meaning.
+	if instance.AgentObservationCurrent(generation) && !errors.Is(probeErr, session.ErrRemoteSandboxNotProvisioned) {
+		instance.SetUnreachable(probeErr)
 	}
 	if before == session.LiveLost {
 		// Already settled where a failing probe would put it. There is nothing to
@@ -354,20 +470,27 @@ func (m *Manager) settleRemoteProbeFailure(
 		if !m.clearRemoteLossAtGeneration(key, instance, generation) {
 			return
 		}
-		log.InfoLog.Printf("remote session %q failed repeated snapshots but its agent-server answers as alive; leaving its status alone", instance.Title)
+		// An answered probe ends the outage claim too — under the same
+		// generation gate, so a stale answer cannot un-mark a successor's.
+		instance.ClearUnreachableAtObservation(generation)
+		m.info().Printf("remote session %q failed repeated snapshots but its agent-server answers as alive; leaving its status alone", instance.Title)
 		return
 	case probeAbsent, probeAnsweredDead:
 		if !m.clearRemoteLossAtGeneration(key, instance, generation) {
 			return
 		}
+		// Answered either way — reachable server reporting death or absence.
+		// The transport works, so the outage flag retires even as the agent is
+		// marked Lost below.
+		instance.ClearUnreachableAtObservation(generation)
 		// The server answered: reachable, agent gone. The snapshots were failing
 		// for some other reason. An answer of any kind ends the transport episode.
-		log.WarningLog.Printf("remote session %q: agent-server reports its agent is gone — marking it Lost", instance.Title)
+		m.warn().Printf("remote session %q: agent-server reports its agent is gone — marking it Lost", instance.Title)
 	case probeUnknown:
 		if !m.clearRemoteLossAtGeneration(key, instance, generation) {
 			return
 		}
-		log.WarningLog.Printf("remote session %q: agent-server unreachable and still unanswerable after %s — leaving its last-known status unchanged; unreachable is not evidence that this sandbox is gone", instance.Title, remoteLostGracePeriod)
+		m.warn().Printf("remote session %q: agent-server unreachable and still unanswerable after %s — leaving its last-known status unchanged; unreachable is not evidence that this sandbox is gone", instance.Title, remoteLostGracePeriod)
 		return
 	}
 	_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(epoch))
@@ -401,13 +524,59 @@ const (
 	probeUnknown
 )
 
+// notAliveReason says in an operator's words why a probe result is not proof
+// of a live runtime. The refusals that print it are read at a terminal, where
+// the enum's integer means nothing.
+func (p livenessProbe) notAliveReason() string {
+	switch p {
+	case probeAbsent:
+		return "its pane is gone"
+	case probeAnsweredDead:
+		return "its agent has exited"
+	case probeUnknown:
+		return "the liveness probe got no answer"
+	default:
+		return "the liveness probe did not report it alive"
+	}
+}
+
 // probeLiveness runs one liveness probe for an instance, bounding the wait for
 // REMOTE instances only. A local probe is in-process (no network to hang on) and
 // its Alive never errors, so it answers directly; wrapping it would spend a
 // goroutine and a timer per idle session per tick for nothing.
+//
+// This is the POLL-LOOP entry: it bounds a remote probe with the serial-walk
+// tie-break budget remoteLostConfirmTimeout (5s), which is justified by the
+// failed Snapshot and serial RefreshStatuses walk that precede it (#1794). The
+// one idle-branch poll caller below (refreshInstanceStatus) uses this form for
+// exactly that reason. Operator-initiated one-shot RPCs — confirm, retry,
+// limit-resume, account-swap — have no prior failed call and no serial walk, so
+// they use probeLivenessForOperator and a budget that does not cut a cold-but-live
+// connection off before it can answer.
 func probeLiveness(instance *session.Instance, as session.AgentServer) livenessProbe {
+	return probeLivenessWithin(instance, as, remoteLostConfirmTimeout)
+}
+
+// probeLivenessForOperator is the operator-initiated RPC form of probeLiveness:
+// ConfirmHandoffDelivery, the startup-unknown arm of retryPendingHandoff, the
+// limit-resume re-spawn gate, and the account-swap runtime prep. It bounds a
+// remote probe with remoteConfirmProbeTimeout (see that var) rather than the
+// poll loop's 5s tie-break budget, because none of the 5s justification — a
+// prior 30s Snapshot already spent, a serial walk of other sessions to protect,
+// a debounce tie to break (#1794) — applies to a one-shot action under a single
+// per-session op lock. Local instances are in-process and answer directly, so
+// the timeout is irrelevant on that branch.
+func probeLivenessForOperator(instance *session.Instance, as session.AgentServer) livenessProbe {
+	return probeLivenessWithin(instance, as, remoteConfirmProbeTimeout)
+}
+
+// probeLivenessWithin is the shared remote-vs-local probe. For a REMOTE instance
+// the probe crosses a network, so it runs under the caller's timeout via
+// aliveWithin (probeUnknown on no answer); for a LOCAL instance it is in-process
+// and answers directly.
+func probeLivenessWithin(instance *session.Instance, as session.AgentServer, timeout time.Duration) livenessProbe {
 	if isRemoteWorkspace(instance) {
-		return aliveWithin(as, remoteLostConfirmTimeout)
+		return aliveWithin(as, timeout)
 	}
 	alive, err := as.Alive()
 	if err != nil {
@@ -469,36 +638,19 @@ func aliveWithin(as session.AgentServer, timeout time.Duration) livenessProbe {
 	}
 }
 
-// noteAliveObservation records that a poll got an ANSWER out of this session's
-// runtime — the daemon's only positive proof of life.
+// noteAliveObservationLocked is the gate-protected core of an alive observation:
+// only the runtime that currently owns the daemonInstanceKey slot earns the
+// increment, in the SAME critical section. RefreshStatuses snapshots instances
+// and releases m.mu for the slow probe, so a probe that began before a kill can
+// land after forgetSessionRuntimeStateLocked deleted this entry — and an ungated
+// increment recreates it, leaking exactly the entry #3031 exists to remove.
 //
-// The Lost-restore loop clears a session's failure history only when this counter
-// has advanced past the value captured at its last respawn. That is what makes
-// "confirmed alive" an observation rather than a clock (#1917 round 6): a fixed
-// settle window is wrong at both ends — a daemon_poll_interval longer than the
-// window means a runtime that died instantly is only SEEN Lost after it expires
-// (so its history is wrongly cleared and the backoff never arms), and the 60s
-// remoteLostGracePeriod means an unanswerable remote stays non-Lost long past any
-// short window. Counting answers is immune to both, and scales with whatever the
-// poll interval and grace actually are.
-func (m *Manager) noteAliveObservation(repoID string, instance *session.Instance) {
-	// Gated on the instance still being the tracked one, in the SAME critical
-	// section as the increment. RefreshStatuses snapshots instances and releases
-	// m.mu for the slow probe, so a probe that began before a kill can land after
-	// forgetSessionRuntimeStateLocked deleted this entry — and an ungated
-	// increment recreates it, leaking exactly the entry #3031 exists to remove.
-	//
-	// The check is pointer identity against m.instances, NOT presence of the
-	// observation key: the two maps do not share a key space. m.instances is keyed
-	// by daemonInstanceKey (repoID\x00title) while aliveObservations is keyed by
-	// stableSessionKey, which is the stable instance ID whenever one is set — so
-	// `m.instances[key]` would miss on every ID-bearing session and silently stop
-	// recording the observations the restore-confirmation depends on.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.noteAliveObservationLocked(repoID, instance)
-}
-
+// The check is pointer identity against m.instances, NOT presence of the
+// observation key: the two maps do not share a key space. m.instances is keyed
+// by daemonInstanceKey (repoID\x00title) while aliveObservations is keyed by
+// stableSessionKey, which is the stable instance ID whenever one is set — so
+// `m.instances[key]` would miss on every ID-bearing session and silently stop
+// recording the observations the restore-confirmation depends on.
 func (m *Manager) noteAliveObservationLocked(repoID string, instance *session.Instance) bool {
 	if m.instances[daemonInstanceKey(repoID, instance.Title)] != instance {
 		return false
@@ -507,9 +659,22 @@ func (m *Manager) noteAliveObservationLocked(repoID string, instance *session.In
 	return true
 }
 
-// noteAliveObservationAtGeneration is the poll-owned form. It validates the
-// runtime generation inside Manager.mu so a predecessor answer cannot land
-// after a replacement snapshots this counter as its confirmation boundary.
+// noteAliveObservationAtGeneration is the poll-owned form of an alive observation.
+// It validates the runtime generation inside Manager.mu so a predecessor answer
+// cannot land after a replacement snapshots this counter as its confirmation
+// boundary.
+//
+// An alive observation records that a poll got an ANSWER out of this session's
+// runtime — the daemon's only positive proof of life. The Lost-restore loop
+// clears a session's failure history only when this counter has advanced past the
+// value captured at its last respawn. That is what makes "confirmed alive" an
+// observation rather than a clock (#1917 round 6): a fixed settle window is wrong
+// at both ends — a daemon_poll_interval longer than the window means a runtime
+// that died instantly is only SEEN Lost after it expires (so its history is
+// wrongly cleared and the backoff never arms), and the 60s remoteLostGracePeriod
+// means an unanswerable remote stays non-Lost long past any short window. Counting
+// answers is immune to both, and scales with whatever the poll interval and grace
+// actually are.
 func (m *Manager) noteAliveObservationAtGeneration(
 	repoID string,
 	instance *session.Instance,

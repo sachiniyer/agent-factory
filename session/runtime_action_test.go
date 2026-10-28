@@ -10,11 +10,13 @@ import (
 // ValidateRuntimeAction instead of falling through to accidental permission.
 func TestRuntimeAction_EveryActionHasAnEligibleState(t *testing.T) {
 	valid := map[RuntimeAction]LifecycleView{
-		RuntimeActionRestoreArchived:   {Title: "archived", Liveness: LiveArchived},
-		RuntimeActionRestoreLostOrDead: {Title: "dead", Liveness: LiveDead, Started: true},
-		RuntimeActionRecoverLost:       {Title: "lost", Liveness: LiveLost, Started: true},
-		RuntimeActionResumeLimit:       {Title: "limited", Liveness: LiveLimitReached, Started: true},
-		RuntimeActionHandoff:           {Title: "live", Liveness: LiveRunning, Started: true},
+		RuntimeActionRestoreArchived:       {Title: "archived", Liveness: LiveArchived},
+		RuntimeActionRestoreArchivedFenced: {Title: "archived-fenced", Liveness: LiveArchived, InFlightOp: OpRestoring},
+		RuntimeActionRestoreLostOrDead:     {Title: "dead", Liveness: LiveDead, Started: true},
+		RuntimeActionRecoverLost:           {Title: "lost", Liveness: LiveLost, Started: true},
+		RuntimeActionRecoverFenced:         {Title: "fenced", Liveness: LiveLost, Started: true, InFlightOp: OpRestoring},
+		RuntimeActionResumeLimit:           {Title: "limited", Liveness: LiveLimitReached, Started: true},
+		RuntimeActionHandoff:               {Title: "live", Liveness: LiveRunning, Started: true},
 	}
 	for action := RuntimeAction(0); action < numRuntimeActions; action++ {
 		view, ok := valid[action]
@@ -36,8 +38,10 @@ func TestRuntimeAction_EveryActionHasAnEligibleState(t *testing.T) {
 func TestRuntimeAction_PendingKillVetoesEveryAction(t *testing.T) {
 	valid := []LifecycleView{
 		{Title: "archived", Liveness: LiveArchived},
+		{Title: "archived-fenced", Liveness: LiveArchived, InFlightOp: OpRestoring},
 		{Title: "dead", Liveness: LiveDead, Started: true},
 		{Title: "lost", Liveness: LiveLost, Started: true},
+		{Title: "fenced", Liveness: LiveLost, Started: true, InFlightOp: OpRestoring},
 		{Title: "limited", Liveness: LiveLimitReached, Started: true},
 		{Title: "live", Liveness: LiveRunning, Started: true},
 	}

@@ -44,6 +44,43 @@ func (legacyCommittedTaskRPC) AddTask(_ AddTaskRequest, _ *AddTaskResponse) erro
 	return errors.New(taskAddCommittedErrorPrefix + " simulated reload failure")
 }
 
+type accountIgnoringHandoffRPC struct{}
+
+type unsupportedAccountHandoffRPC struct {
+	handoffCalls int
+}
+
+type committedResumeRPC struct{}
+
+func (committedResumeRPC) ResumeFromLimit(_ ResumeFromLimitRequest, resp *ResumeFromLimitResponse) error {
+	resp.OK = true
+	resp.MutationOutcome.record(&mutationCommittedError{err: errors.New("mission delivered; settlement pending")})
+	return nil
+}
+
+func (accountIgnoringHandoffRPC) Ping(_ PingRequest, resp *PingResponse) error {
+	resp.OK = true
+	resp.AccountHandoff = true
+	return nil
+}
+
+func (accountIgnoringHandoffRPC) HandoffSessionV2(_ HandoffSessionRequest, resp *HandoffSessionResponse) error {
+	*resp = HandoffSessionResponse{OK: true, From: "claude", To: "codex"}
+	return nil
+}
+
+func (s *unsupportedAccountHandoffRPC) Ping(_ PingRequest, resp *PingResponse) error {
+	resp.OK = true
+	resp.AccountHandoff = true
+	return nil
+}
+
+func (s *unsupportedAccountHandoffRPC) HandoffSession(_ HandoffSessionRequest, resp *HandoffSessionResponse) error {
+	s.handoffCalls++
+	*resp = HandoffSessionResponse{OK: true, From: "claude", To: "codex"}
+	return nil
+}
+
 // TestControlClientPreservesMutationCommittedOutcome crosses a real isolated
 // net/rpc socket. net/rpc normally flattens the server error to rpc.ServerError;
 // the client must restore the definite committed outcome without classifying
@@ -88,6 +125,17 @@ func TestControlClientPreservesMutationCommittedOutcome(t *testing.T) {
 		"the control client must preserve the server's definite committed outcome: %T: %v", err, err)
 }
 
+func TestControlClientPreservesCommittedResumeWarning(t *testing.T) {
+	serveControlRPC(t, committedResumeRPC{})
+
+	var resp ResumeFromLimitResponse
+	err := callDaemonNoEnsure("ResumeFromLimit", ResumeFromLimitRequest{Title: "worker"}, &resp)
+	require.Error(t, err)
+	require.True(t, isMutationCommitted(err), "delivered retry must remain classified across net/rpc: %T: %v", err, err)
+	require.Contains(t, err.Error(), "settlement pending")
+	require.True(t, resp.OK)
+}
+
 // TestControlClientDoesNotInventCommittedOutcome is the negative control, and it
 // runs as its OWN test rather than a subtest: it needs a different
 // AGENT_FACTORY_HOME, and the earlier version set an env var
@@ -116,6 +164,28 @@ func TestControlClientClassifiesLegacyCommittedRPCError(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, isMutationCommitted(err),
 		"an older daemon's committed task failure read as an ordinary one; a retry would duplicate the task: %T: %v", err, err)
+}
+
+func TestControlClientClassifiesIgnoredHandoffAccountAsCommitted(t *testing.T) {
+	serveControlRPC(t, accountIgnoringHandoffRPC{})
+
+	resp, err := HandoffSession(HandoffSessionRequest{To: "codex", Account: "personal"})
+	require.Equal(t, "codex", resp.To)
+	require.ErrorContains(t, err, "did not honor")
+	require.ErrorContains(t, err, "credential identity is unknown")
+	require.NotContains(t, err.Error(), "ambient identity")
+	require.True(t, isMutationCommitted(err),
+		"an older daemon already restarted the runtime, so the compatibility mismatch is committed: %T: %v", err, err)
+}
+
+func TestControlClientRefusesTargetOnlyHandoffBeforeUnsupportedDaemonMutates(t *testing.T) {
+	handler := &unsupportedAccountHandoffRPC{}
+	serveControlRPC(t, handler)
+
+	_, err := HandoffSession(HandoffSessionRequest{To: "codex"})
+	require.ErrorContains(t, err, "account-aware handoff")
+	require.Zero(t, handler.handoffCalls,
+		"a legacy mutation must stay untouched even when that daemon's health response advertised support")
 }
 
 // The control socket is net/rpc with gob encoding, and gob ELIDES zero-valued

@@ -8,9 +8,24 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-var localSessionPreflight = preflight.LocalSessionPrereqs
+var (
+	localSessionPreflight = preflight.LocalSessionPrereqs
+	localPrereqsRequired  = session.LocalPrereqsRequired
+)
 
 func (m *home) preflightSessionCreate() error {
+	// A remote target hosts the session on the daemon's machine — its tmux,
+	// its PATH, its backend resolution, its default_program. Checked FIRST,
+	// before LocalPrereqsRequired resolves the client's repo config: every
+	// client-local question can both block the event loop on this host's
+	// filesystem and refuse a create the remote could serve (an untouched
+	// form sends "" for the daemon to resolve, so substituting the client's
+	// cfg.DefaultProgram below is actively wrong when the hosts differ). The
+	// daemon rechecks the program itself at create time — remote creates
+	// skip client-local prereqs (#4889 review).
+	if isRemoteTarget() {
+		return nil
+	}
 	// A backend picked in the naming form's field (#1933) decides this, and the
 	// placeholder instance cannot: it is constructed when the form OPENS, before the
 	// user has chosen anything, so its capabilities describe the repo default rather
@@ -35,16 +50,8 @@ func (m *home) preflightSessionCreate() error {
 	// `claude` is not what is wrong with it. The daemon owns the verdict on a
 	// backend it could not resolve, and states it when the create is submitted.
 	//
-	// Every input is now a fact about the CREATE rather than about the placeholder
-	// (#2599): the picked backend, and `N` via m.pendingForceRemote. The placeholder
-	// used to answer the `N` half through its capabilities, which only worked
-	// because it had been provisioned as a hook runtime while the user was still
-	// typing a title. It is pinned local now and provisions nothing, so reading its
-	// capabilities would report every create local and refuse a docker/ssh/hook
-	// session for a missing local `claude` — #2592, reintroduced in the TUI.
-	local, _ := session.LocalPrereqsRequired(session.InstanceOptions{
-		Backend:     session.BackendKind(m.pendingBackend),
-		ForceRemote: m.pendingForceRemote,
+	local, _ := localPrereqsRequired(session.InstanceOptions{
+		Backend: session.BackendKind(m.pendingBackend),
 	}, m.repoRoot)
 	if !local {
 		return nil
@@ -53,7 +60,18 @@ func (m *home) preflightSessionCreate() error {
 	if err != nil {
 		return err
 	}
-	return localSessionPreflight(cfg, m.pendingProgram)
+	// Preflight must check the program the wire carries — the same derivation
+	// the submit path applies (#4889 review). An untouched form sends "" and
+	// the daemon resolves the LIVE default_program at create time, so cfg's
+	// default_program is the program to check; an explicit pick, a launch
+	// --program, or a CHOSEN account instead pins the displayed
+	// pendingProgram, and checking the config value then would refuse a valid
+	// request or approve one whose sent program lacks local prerequisites.
+	program := m.sendProgramForCreate()
+	if program == "" {
+		program = cfg.DefaultProgram
+	}
+	return localSessionPreflight(cfg, program)
 }
 
 func (m *home) preflightConfig() (*config.Config, error) {

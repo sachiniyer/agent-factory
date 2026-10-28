@@ -1,0 +1,36 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                 Cannot create session
+ Your input is retained. backend=docker requires docker.image to be set in this repo's .agent-factory/config.json (the
+         container image that carries git + tmux + the agent CLIs; the `af` binary is copied in automatically)
+
+                                          Press any key to return to the form.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

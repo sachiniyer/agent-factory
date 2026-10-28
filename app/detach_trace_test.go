@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -10,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 )
@@ -17,9 +17,9 @@ import (
 // captureWarningLog redirects log.WarningLog into a buffer for the duration
 // of the test and restores the previous writer on cleanup. Tests using it
 // must not run in parallel — WarningLog is package-global.
-func captureWarningLog(t *testing.T) *bytes.Buffer {
+func captureWarningLog(t *testing.T) *logtest.Buffer {
 	t.Helper()
-	var buf bytes.Buffer
+	var buf logtest.Buffer
 	prev := log.WarningLog.Writer()
 	log.WarningLog.SetOutput(&buf)
 	t.Cleanup(func() { log.WarningLog.SetOutput(prev) })

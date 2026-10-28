@@ -413,7 +413,7 @@ func spawnMarkedProcess(t *testing.T, sessionName, afHome string) proctree.Proce
 	}
 	// Its OWN kernel session, because the sweep expands a matched process to its
 	// SID members — which is scoped in production precisely because tmux makes a
-	// pane root a session leader (see captureSessionProcessTrees). A child that
+	// pane root a session leader (see CaptureSessionProcessTrees). A child that
 	// merely inherits the test runner's SID is not that shape: measured, the
 	// expansion then pulled in the developer's live af session processes and the
 	// fixture indicted them instead of its own child.

@@ -94,6 +94,6 @@ test("entryNote marks only what can become a project", () => {
 test("truncationNote says a capped listing is capped", () => {
   assert.equal(truncationNote(listing()), "", "nothing dropped, nothing to say");
   const capped = truncationNote(listing({ truncated: true }));
-  assert.match(capped, /first 2 directories/, "the cap names how many are shown");
-  assert.match(capped, /type the path below/, "and points at the escape hatch");
+  assert.match(capped, /First 2 directories/, "the cap names how many are shown");
+  assert.match(capped, /enter a path/, "and points at the escape hatch");
 });

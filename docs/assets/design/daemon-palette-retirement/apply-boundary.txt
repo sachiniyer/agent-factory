@@ -1,0 +1,35 @@
+live Snapshot before pending edits: 200
+{
+  "data": {
+    "instances": []
+  },
+  "error": null
+}
+migrated CLI appearance: system
+persisted keys:
+appearance = 'system'
+listen_addr = '127.0.0.1:18836'
+require_token = true
+require_loopback_token = true
+migration log:
+WARNING:2026/09/06 18:47:15 appearance_migration.go:98: config ~/sandbox/home/config.toml: migrated retired theme to appearance = "system"; use `af config set appearance light|dark|system`
+migration log count after second read: 1
+live Snapshot after launch (no token): 200
+{
+  "data": {
+    "instances": []
+  },
+  "error": null
+}
+pending listener after launch: 000
+set network.listen_addr = 127.0.0.1:18836 in ~/sandbox/home/config.toml
+Applied — the running daemon is using the new value now.
+daemon now listening at 127.0.0.1:18836
+Snapshot after explicit apply (no token): 401
+{
+  "data": null,
+  "error": {
+    "message": "unauthorized: missing or invalid bearer token",
+    "daemon_rejected": true
+  }
+}

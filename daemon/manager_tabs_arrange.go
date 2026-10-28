@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -34,12 +33,6 @@ type tabMutationLabels struct {
 // and its post-lock gate so a mutation that LOSES the race to an archive is
 // indistinguishable — to a CLI user or the web UI — from one that arrived after
 // it: same refusal, same advice, roster intact.
-//
-// SetPRInfo (daemon/manager_tabs.go) is the third caller and not a tab mutation
-// at all; it takes this refusal because the user-facing goal is one consistent
-// message and remedy for every mutation an archive turns away, whatever it was
-// trying to change. The name has stayed narrower than the use — worth widening
-// the day a fourth non-tab caller appears.
 func errTabMutationArchived(action, title string) error {
 	return fmt.Errorf("cannot %s on archived session %q; restore it first (af sessions restore)", action, title)
 }
@@ -88,12 +81,6 @@ func (m *Manager) tabMutationTarget(reqID, reqTitle, reqRepoID string, labels ta
 	if instance == nil {
 		return nil, "", "", nil, fmt.Errorf("failed to restore instance %q", title)
 	}
-	// Still a session-level gate: no user-managed tab can exist on an off-box
-	// session today, because RefuseTabKind admits none of the four kinds there
-	// (#3053) — process tabs need a worktree to spawn in, a vscode tab needs one
-	// to read, and a web tab cannot be SERVED off-box yet (#3062). Relaxing this
-	// belongs with the change that admits the first such tab, not before it:
-	// until then it would be a path nothing can reach.
 	// No blanket refusal any more, and the reason it is safe to drop is a property
 	// of what such a roster can CONTAIN rather than a new per-tab check here.
 	//
@@ -221,8 +208,7 @@ func stableTabTargetID(tab *session.Tab, title string) (string, error) {
 // Rename and reorder are the third case: pure in-memory metadata, no tmux, no
 // side effect, and exactly reversible. So memory can and should be put back —
 // leaving it diverged would show the user a name/order that silently reverts on
-// the next restart, which reads as data loss. This matches SetPRInfo, the other
-// pure-metadata mutation.
+// the next restart, which reads as data loss.
 
 // RenameTab relabels one tab of the target session, persists the roster, and
 // returns the RESOLVED name (#1813). It mirrors CloseTab's discipline via
@@ -274,7 +260,7 @@ func (m *Manager) RenameTab(req RenameTabRequest) (string, error) {
 		// and resolves back exactly; a surprise means the roster changed underneath
 		// us, which is worth a log line rather than a silent wrong name.
 		if got, rerr := instance.RenameTabByID(targetID, prevName); rerr != nil || got != prevName {
-			log.WarningLog.Printf("RenameTab %q: rolling back unpersisted rename of tab %q returned %q, %v", title, prevName, got, rerr)
+			m.warn().Printf("RenameTab %q: rolling back unpersisted rename of tab %q returned %q, %v", title, prevName, got, rerr)
 		}
 		return "", fmt.Errorf("failed to persist tab rename: %w", err)
 	}
@@ -336,7 +322,7 @@ func (m *Manager) ReorderTab(req ReorderTabRequest) (string, int, error) {
 		// Put the original order back (see the rollback note above). Moving the tab from its
 		// new index back to its old one is the exact inverse of the move above.
 		if rerr := instance.ReorderTabByID(targetID, idx); rerr != nil {
-			log.WarningLog.Printf("ReorderTab %q: rolling back unpersisted move of tab %q failed: %v", title, name, rerr)
+			m.warn().Printf("ReorderTab %q: rolling back unpersisted move of tab %q failed: %v", title, name, rerr)
 		}
 		return "", 0, fmt.Errorf("failed to persist tab reorder: %w", err)
 	}

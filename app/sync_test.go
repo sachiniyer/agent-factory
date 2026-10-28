@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestSnapshotReconcilesModelChangeWithoutLivenessChange(t *testing.T) {
@@ -74,6 +75,62 @@ func TestSnapshotReconcilesIdleEvidenceWithoutLivenessChange(t *testing.T) {
 	require.True(t, h.updateInstanceFromSnapshot(inst, data), "clearing daemon evidence is itself a row change")
 	reason, _ = inst.IdleReasonSnapshot()
 	require.Equal(t, session.IdleReasonNone, reason)
+}
+
+func TestSnapshotReconcilesAccountHandoffBeforeRetryGate(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "account-handoff")
+	data := inst.ToInstanceData()
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: true, Mission: "continue", From: "work", To: "personal",
+		ReplacementPanesStarted: true, MissionDeliveryStatus: session.PromptCouldNotConfirm,
+	}
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	account, _ := inst.AccountSelection()
+	require.Equal(t, "personal", account)
+	require.True(t, inst.CanRetryPendingManualAccountSwapDelivery(),
+		"the same-session projection must expose the daemon's pending inspected retry")
+}
+
+func TestSnapshotReconcilesAgentHandoffBeforeRetryGate(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "agent-handoff")
+	data := inst.ToInstanceData()
+	data.Liveness = session.LiveRunning
+	data.Status = session.Running
+	data.InFlightOp = session.OpReplacing
+	data.PendingHandoffMission = "continue the inherited work"
+	data.HandoffDeliveryStatus = session.PromptCouldNotConfirm
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	require.Equal(t, data.PendingHandoffMission, inst.PendingHandoffMission())
+	require.True(t, inst.CanRetryPendingHandoffMissionDelivery(),
+		"the same-session projection must expose the daemon's pending inspected retry")
+}
+
+func TestSnapshotReconcilesReplacementAgentRuntime(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "replacement-agent")
+	inst.SetTmuxSession(tmux.NewTmuxSession("replacement-agent", tmux.ProgramClaude))
+	require.True(t, inst.SetAgentConversation(session.AgentConversationData{
+		Agent: tmux.ProgramClaude, ID: "outgoing-conversation",
+	}))
+	data := inst.ToInstanceData()
+	data.Program = tmux.ProgramCodex
+	data.CurrentAgent = tmux.ProgramCodex
+	data.AgentConversation = &session.AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: "incoming-conversation",
+	}
+	data.Tabs[0].Conversation = data.AgentConversation
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	require.Equal(t, tmux.ProgramCodex, inst.AgentProgram())
+	require.Equal(t, tmux.ProgramCodex, inst.ResolvedPaneProgram())
+	require.Equal(t, tmux.ProgramCodex, inst.CurrentAgentName(),
+		"the next handoff picker must query and exclude the replacement agent")
+	require.Equal(t, *data.AgentConversation, inst.AgentConversation())
 }
 
 // TestSnapshotReconcilesUserKilledTombstone pins the same-session half of the
@@ -298,3 +355,30 @@ func TestReconcileSnapshot_IdentityUsesStableID(t *testing.T) {
 // enumeration/import path (list_cmd, SetRemoteImporterForTest,
 // ListRemoteHookInstanceData, importRemoteHookSessions, RemoteMeta) was deleted
 // in the provision-and-expose migration. // #1592 Phase 4 PR7
+
+// #5803: the daemon publishes a pending create before its worktree exists.
+// That empty path is an expected transient and must not warn; the same empty
+// path on a record with no create in flight is a real fault and still does.
+func TestAddInstanceFromSnapshot_EmptyWorktreePath(t *testing.T) {
+	pending := session.InstanceData{
+		ID: session.NewInstanceID(), Title: "hello", Path: "/repo", Program: "claude",
+		Status: session.Loading, Liveness: session.LiveReady, InFlightOp: session.OpCreating,
+		Worktree: session.GitWorktreeData{RepoPath: "/repo"},
+	}
+	require.True(t, snapshotAwaitingWorktree(pending))
+
+	h := newTestHome(t)
+	require.False(t, h.addInstanceFromSnapshot(pending), "deferred, not added")
+	require.Nil(t, h.store.GetInstanceByTitle("hello"))
+
+	for _, live := range []session.Liveness{session.LiveReady, session.LiveRunning} {
+		fault := pending
+		fault.InFlightOp = session.OpNone
+		fault.Liveness = live
+		require.False(t, snapshotAwaitingWorktree(fault), "liveness %v with no create in flight is a fault", live)
+	}
+
+	withPath := pending
+	withPath.Worktree.WorktreePath = "/repo/wt"
+	require.False(t, snapshotAwaitingWorktree(withPath))
+}

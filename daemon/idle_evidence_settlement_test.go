@@ -69,9 +69,10 @@ func TestSuccessfulLimitResumePersistFailureIsRetried(t *testing.T) {
 	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
 	failedWrites, seen, heal := fullDiskFor(t, inst.Title, errors.New("disk full"))
 
-	require.NoError(t, manager.resumeFromLimit(ResumeFromLimitRequest{
+	_, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{
 		Title: inst.Title, RepoID: repoID,
-	}))
+	})
+	require.NoError(t, err)
 	require.NotZero(t, failedWrites(), "test failed no write; saw %s", seen())
 	rec := recordFor(t, repoID, inst.Title)
 	require.True(t, rec.LastPromptAttemptAt.IsZero(),
@@ -82,7 +83,8 @@ func TestSuccessfulLimitResumePersistFailureIsRetried(t *testing.T) {
 	manager.FlushOwedSettlements()
 	rec = recordFor(t, repoID, inst.Title)
 	require.False(t, rec.LastPromptAttemptAt.IsZero())
-	require.Equal(t, session.PromptCouldNotConfirm, rec.LastPromptDeliveryStatus)
+	require.Equal(t, session.PromptDelivered, rec.LastPromptDeliveryStatus,
+		"settlement retry must preserve the interactive backend's confirmed delivery verdict")
 	require.Equal(t, session.LiveRunning, rec.Liveness)
 }
 

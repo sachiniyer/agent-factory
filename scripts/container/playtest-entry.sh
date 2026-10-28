@@ -10,6 +10,12 @@
 # `docker rm -f`, not a checklist.
 set -euo pipefail
 
+# shellcheck source=scripts/container/playtest-lifetime.sh
+source "$(dirname "${BASH_SOURCE[0]}")/playtest-lifetime.sh"
+if [ "${1:-}" = hold ]; then
+    playtest_with_deadline bash "$0" hold-timed
+fi
+
 SANDBOX="$HOME/sandbox"
 export AGENT_FACTORY_HOME="${AGENT_FACTORY_HOME:-$SANDBOX/home}"
 rm -f "$SANDBOX/playtest-ready"
@@ -88,8 +94,8 @@ cat <<EOF
 
 EOF
 
-if [ "${1:-}" = "hold" ]; then
-    # Detached mode: park so the driver can `docker exec` tmux commands.
+if [ "${1:-}" = "hold-timed" ]; then
+    # The outer timeout bounds setup and this parked driver window.
     exec sleep infinity
 fi
 cd "$MOCK"

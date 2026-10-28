@@ -1,26 +1,67 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"time"
 
-	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
 )
+
+// beforeRestoreOperationLock fires immediately before either manual restore path
+// waits for the session's per-session operation lock. No-op in production; the
+// #3600 tests substitute a blocking stand-in so they can assert what the daemon
+// advertises and admits while a restore is parked in front of that lock.
+var beforeRestoreOperationLock = func() {}
+
+// afterRestoreLivenessSnapshot fires after manual Lost/Dead restore has taken
+// the lifecycle snapshot it will act on. No-op in production; the #4249 test
+// uses it to land a poll observation at this exact boundary without timing.
+var afterRestoreLivenessSnapshot = func() {}
 
 // claimRestoreOperation makes restore admission atomic with DeleteProject's
 // per-repo lifecycle fence. If restore wins, killsInFlight makes deletion see
 // the session even while an archived row has not yet entered OpRestoring. If
 // deletion wins, projectDeletes refuses the restore before any state/worktree
 // mutation. The legacy killsInFlight name covers all exclusive lifecycle ops.
-func (m *Manager) claimRestoreOperation(repoID, key, title string) error {
+//
+// Both callers hold the session's operation lock by the time they get here
+// (#3600), which is what makes the claim adjacent to the fence raise that
+// follows it. The atomicity above is unchanged — this still runs under m.mu and
+// still reads projectDeletes there — but it is now decided at the END of a wait
+// that may have taken up to opLockTimeout, so `waited` is folded into the
+// refusals. A delay that says nothing about itself reads as a hang.
+//
+// That wait is also why sinceDeleteSeq exists, and it is load-bearing rather
+// than defensive. projectDeletes answers "is a delete running RIGHT NOW", and a
+// delete that STARTED and FINISHED inside the wait lowers that fence before this
+// line reads it. The instance re-read the callers do next cannot see it either:
+// DeleteProject deliberately LEAVES archived rows in m.instances — they are the
+// restorable state it preserves — so for the archived route the pointer, the
+// liveness and every other guard are bit-for-bit what they were, and the queued
+// restore would reactivate a session whose project was just deregistered. That
+// is the live-orphan shape #2549 exists to prevent, and pre-#3600 it was
+// unreachable only because the claim ran first and made the delete refuse.
+//
+// The generation counter #2947 added for exactly this question is the fix: the
+// caller samples it BEFORE the wait, and a strictly-greater value here means the
+// repo's delete fence transitioned while this restore was queued. Strictly
+// greater, so an equal value — a delete that completed before the sample — stays
+// ordinary history and a project that is deleted and later re-created is not
+// stranded.
+func (m *Manager) claimRestoreOperation(repoID, key, title string, waited time.Duration, sinceDeleteSeq uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, deleting := m.projectDeletes[repoID]; deleting {
-		return fmt.Errorf("cannot restore session %q: project %s is being deleted; retry after deletion finishes", title, repoID)
+		return fmt.Errorf("cannot restore session %q%s: project %s is being deleted; retry after deletion finishes", title, afterOpLockWait(waited), repoID)
+	}
+	if m.projectDeleteMovedLocked(repoID, sinceDeleteSeq) {
+		return fmt.Errorf("cannot restore session %q%s: project %s was deleted while this restore was waiting to start; nothing was restored — retry if the project still exists", title, afterOpLockWait(waited), repoID)
 	}
 	if _, busy := m.killsInFlight[key]; busy {
-		return fmt.Errorf("an operation is already in progress for session %q", title)
+		return fmt.Errorf("an operation is already in progress for session %q%s", title, afterOpLockWait(waited))
 	}
 	if m.restoresInFlight == nil {
 		m.restoresInFlight = make(map[string]struct{})
@@ -28,6 +69,17 @@ func (m *Manager) claimRestoreOperation(repoID, key, title string) error {
 	m.killsInFlight[key] = struct{}{}
 	m.restoresInFlight[key] = struct{}{}
 	return nil
+}
+
+// afterOpLockWait renders the operation-lock wait a restore refusal was decided
+// after. Empty when the lock was uncontended, so the ordinary refusal keeps the
+// wording it has always had — lockWithin reports zero only for an acquisition
+// nobody was ahead of, never for a rounded-down real wait.
+func afterOpLockWait(waited time.Duration) string {
+	if waited <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" after waiting %s for another operation on it to finish", waited.Round(time.Millisecond))
 }
 
 func (m *Manager) releaseRestoreOperation(key string) {
@@ -63,6 +115,16 @@ func (m *Manager) RestoreSession(req RestoreSessionRequest) (string, session.Ins
 		path, restoreErr := m.restoreLostOrDeadSession(repoID, title, instance, req.ForceReap)
 		return path, resolved, restoreErr
 	default:
+		// A flagged live row is the case the plain refusal misdiagnoses: the
+		// session may be perfectly healthy and af simply cannot reach it, so
+		// restore is neither needed nor able to verify that. Name the outage and
+		// the remedy rather than implying a state problem (#5571 W1.3).
+		if u := instance.UnreachableSnapshot(); u != nil {
+			return "", session.InstanceData{}, fmt.Errorf(
+				"cannot restore session %q: its sandbox has been unreachable for %s (%s) — the session is still marked live, and af retries the connection automatically. "+
+					"Retry when the row recovers; if its work is expendable, kill and recreate it instead",
+				title, unreachableAge(u), u.Error)
+		}
 		return "", session.InstanceData{}, fmt.Errorf("session %q is not archived, lost, or dead", title)
 	}
 }
@@ -79,16 +141,98 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	}
 
 	key := daemonInstanceKey(repoID, title)
-	if err := m.claimRestoreOperation(repoID, key, title); err != nil {
-		return "", err
-	}
-	defer m.releaseRestoreOperation(key)
 
-	opLock, err := m.lockSessionOperationWithin(key, "restore", title)
+	// Registered BEFORE both the lock and the claim so LIFO runs it LAST — after
+	// releaseRestoreOperation and after opLock.Unlock (Codex on #3597).
+	//
+	// Order matters because the claim is what actually refuses Kill. Lowering the
+	// fence while killsInFlight is still set publishes a row saying can_kill=true to
+	// every client while the admission gate would still answer "an operation is
+	// already in progress" — the same false affordance this change exists to remove,
+	// just narrower. Released last, the busy projection covers exactly the claim's
+	// interval, and the one event that says the row is killable is published when it
+	// genuinely is.
+	//
+	// fenceRaised is ownership, not bookkeeping: the early returns above the raise
+	// include a claim that FAILED because another restore holds it, and that restore
+	// may well have OpRestoring up. Releasing on the bare op value would lower a
+	// fence belonging to someone else's operation.
+	fenceRaised := false
+	defer func() {
+		if !fenceRaised {
+			return
+		}
+		if instance.EndRecoverFence() {
+			m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
+		}
+	}()
+
+	// The op-lock is taken BEFORE the claim, and that order is the whole of #3600.
+	//
+	// Claiming first put killsInFlight up for the length of this wait — up to
+	// opLockTimeout (30s), and the holder in front is routinely the automatic
+	// Lost-restore loop, which owns this same lock across its own UNFENCED
+	// probe/preserve phase (lostrestore.go, bounded at sandboxPushTimeout). From
+	// the claim onward a Kill is refused at the admission gate with "kill already
+	// in progress" — about an operation the user never started — while the row sat
+	// at {LiveLost, OpNone} and canKillFor, which reads the op axis alone, went on
+	// advertising that Kill. #3597 made the fence coextensive with the claim from
+	// this line onward; the wait in FRONT of it was the remainder.
+	//
+	// Raising the fence earlier is the fix that cannot be taken: BeginRecoverFence
+	// validates RuntimeActionRecoverLost, which requires OpNone, so a manual
+	// restore that fenced ahead of the wait would make the automatic loop's own
+	// raise REFUSE — charging a failure against that session's #1108 backoff
+	// episode for a session that was not failing. Projecting a second "claimed but
+	// not yet fenced" axis is the other rejected direction: the TUI rebuilds an
+	// Instance through session.FromInstanceData and recomputes CanKill from the op
+	// axis, so a projection-side fix either leaves TUI and web disagreeing or
+	// requires making the derived InstanceData.CanKill authoritative on rebuild —
+	// which storage.go's scrub exists to forbid.
+	//
+	// Taking the lock first removes the window instead of hiding it: the claim and
+	// the raise become adjacent, so the row genuinely reaches OpRestoring before
+	// any observer can see it claimed-but-unfenced, and during the wait itself it
+	// is honestly unclaimed — the Kill it advertises is admitted, and bounded by
+	// whoever really holds the lock.
+	//
+	// Nothing about that inverts a lock order. The canonical one is
+	// target-before-op (#2006), and no restore path takes a target lock at all;
+	// m.mu is never held across an op-lock acquisition, and holding the op-lock
+	// while briefly taking m.mu is what every re-verify below this line already
+	// does. The claim's atomicity with DeleteProject's projectDeletes fence is
+	// preserved because the claim still reads that fence under m.mu — it just
+	// reads it after the wait. What changed is which side of a delete race
+	// refuses: a delete that STARTS during the wait now proceeds and this restore
+	// refuses (naming the wait), where before the delete was the one turned away.
+	//
+	// The delete generation is sampled HERE, in front of the wait, because the
+	// claim's projectDeletes read can only see a delete that is still running: one
+	// that starts and finishes inside the wait lowers that fence again before the
+	// claim looks. See claimRestoreOperation for why the instance re-read below
+	// does not cover that case on the archived route.
+	deleteSeq := m.projectDeleteSeqNow()
+	beforeRestoreOperationLock()
+	opLock, waited, err := m.lockSessionOperationWithin(key, "restore", title)
 	if err != nil {
 		return "", err
 	}
 	defer opLock.Unlock()
+	// A local Recover may rebuild a vanished worktree. Serialize that registration
+	// with create, and do the bounded wait before this restore claims or fences the
+	// row so a stalled peer cannot leave the session busy indefinitely.
+	worktreeAdmission, err := m.lockLocalWorktreeAdmissionWithin(repoID, title, "restore", instance)
+	if err != nil {
+		return "", err
+	}
+	if worktreeAdmission != nil {
+		defer worktreeAdmission.Unlock()
+	}
+
+	if err := m.claimRestoreOperation(repoID, key, title, waited, deleteSeq); err != nil {
+		return "", err
+	}
+	defer m.releaseRestoreOperation(key)
 
 	m.mu.Lock()
 	current := m.instances[key]
@@ -97,16 +241,74 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		return "", fmt.Errorf("session %q changed state before restore could start", title)
 	}
 	view := instance.LifecycleView()
+	afterRestoreLivenessSnapshot()
 	if err := view.ValidateRuntimeAction(session.RuntimeActionRestoreLostOrDead); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
 	switch view.Liveness {
 	case session.LiveLost:
 	case session.LiveDead:
-		_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+		// Dead is legacy input that recovery normalizes to Lost. The decision comes
+		// from view, so scope it to the epoch captured in that same snapshot: a poll
+		// that has since found the runtime alive is newer truth. Preserve the default
+		// refusal above when that newer observation wins.
+		_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(view.StateEpoch))
+		if instance.GetLiveness() != session.LiveLost {
+			return "", fmt.Errorf("session %q changed state before restore could start", title)
+		}
 	default:
 		return "", fmt.Errorf("session %q changed state before restore could start", title)
 	}
+
+	// Raise the restore fence HERE, not around the backend call at the bottom, so
+	// it is COEXTENSIVE with the claim above (#3586).
+	//
+	// claimRestoreOperation already made Kill fail: from that line on, a Kill is
+	// rejected at the daemon's ADMISSION gate with "kill already in progress for
+	// session X" — a message about an operation the user never started. canKillFor
+	// is what hides the affordance, and it reads the op axis alone, so raising the
+	// fence inside the backend call — where RecoverFencedWithLiveBoundary raised it
+	// before this change — left the row at {LiveLost, OpNone} through both network
+	// phases below: a 5s liveness probe and a pre-reap push bounded at 3m30s. For up
+	// to ~3m35s the TUI and the web UI advertised a Kill that could only fail
+	// (#3533, whose fenced suffix #3534 fixed). The claim's interval and the fence's
+	// interval are now the same one.
+	//
+	// It is raised AFTER the LiveDead -> LiveLost normalization above because the
+	// fence's own precondition is LiveLost: raising it first would refuse every Dead
+	// row. And it is the recover fence itself, validated and raised under one lock
+	// (#3555) — not a second, weaker overlay that the backend call would then have
+	// to re-validate around.
+	if err := instance.BeginRecoverFence(); err != nil {
+		return "", fmt.Errorf("cannot restore: %w", err)
+	}
+	// ANNOUNCE the raise, the same contract #2997 gave the limit resume next door.
+	// Clients gate their controls on the projected op and perform no optimistic
+	// update for a CLI- or web-initiated restore, so a fence nobody is told about
+	// leaves an already-connected client offering Kill for the whole operation —
+	// which is the bug, seen from the client rather than from the row. The TUI's
+	// snapshot tick would repair it eventually; the events plane is what makes it
+	// immediate, and it is the only repair a web client gets.
+	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
+	// The release registered above now owns this fence. A DEFER rather than a
+	// statement on each arm, because every exit below has to lower it and a missed
+	// one is worse than the bug: the poll skips any session with an op in flight and
+	// every runtime action and lifecycle control refuses it, so the row would be
+	// permanently busy. The arms are the probe-alive heal (settled and
+	// settle-failed), the indeterminate refusal, the two durable-branch refusals,
+	// the failed pre-reap push, the two failed-Recover exits, and the successful
+	// restore — and the defer covers whatever is added next to that list, which an
+	// enumeration would not.
+	//
+	// A no-op on the success path, where ConfirmLive has already cleared the op, and
+	// it never disturbs an op another owner raised.
+	//
+	// Nothing between here and there lowers the fence early, deliberately. Every
+	// snapshot published while the claim is held — preserveSandboxBeforeReap's
+	// settlement, the heal arm's — therefore reports the row as busy, which is what
+	// it is: Kill would be refused at the admission gate. The release announces the
+	// settled, killable row once, at the end, when that is true.
+	fenceRaised = true
 
 	// The same live recheck the automatic loop runs before re-provisioning
 	// (lostrestore.go), for the same reason: a remote Recover is not a reconnect
@@ -120,18 +322,26 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// really lost and healing the row delivers exactly what was asked for, without
 	// the destruction. A user who genuinely wants a new sandbox kills and
 	// recreates (#1794).
-	switch m.remoteSandboxLiveness(instance) {
+	switch m.remoteSandboxLivenessForOperator(instance) {
 	case probeAlive:
-		log.InfoLog.Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
+		m.info().Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 		instance.ClearLostRestoreFailure()
+		instance.ClearLostRestoreWait()
+		// The probe answered: transport evidence, so the outage flag retires too.
+		instance.ClearUnreachable()
 		// Both of these are per-runtime state and both are filed under the session's
 		// stable identity, never under the repo/title `key` above (#2868).
 		stateKey := stableSessionKey(repoID, instance)
 		m.clearRemoteLoss(stateKey)
-		m.mu.Lock()
-		delete(m.lostRestoreStates, stateKey)
-		m.mu.Unlock()
+		// The manual off-ramp clears the whole in-memory episode on EVERY
+		// successful manual path: this probe-alive heal returns before the
+		// armRestoreConfirmation call that would reset it for the spawn path,
+		// so a stale window cannot outlive the operator's intervention and trip
+		// the bound on the next automatic cycle (#5238 review), and a pending
+		// automatic arm cannot charge the healed runtime's answers to the old
+		// episode (#5436).
+		m.clearLostRestoreEpisode(stateKey)
 		if settleErr := m.persistSettlement(repoID, key, instance); settleErr != nil {
 			failure := fmt.Errorf(
 				"session %q was confirmed alive, but its healed state could not be written to disk: %w",
@@ -145,7 +355,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// release HERE: a refusal whose advertised retry lands on the same branch and
 		// refuses again is the same defect wearing a helpful message.
 		if !force {
-			return "", refuseIndeterminateReap(instance)
+			return "", refuseIndeterminateReap(repoID, instance)
 		}
 		// Forced past an unanswerable probe: the sandbox may well be alive behind a
 		// broken path, so a replacement still must not land on the default branch and
@@ -154,11 +364,41 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		if err := requireDurableSandboxBranch(repoID, instance); err != nil {
 			return "", err
 		}
-		log.WarningLog.Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
+		m.warn().Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
+		// The episode resets — the push-failure budget and the Recover-flap budget
+		// alike — are registered as a one-shot hook that reprovisionRemote fires
+		// only after reapRemoteRuntimeForReplacement returns without error — the
+		// point where the old sandbox is provably gone and the new episode genuinely
+		// begins.
+		//
+		// A Recover failure BEFORE that point belongs to the surviving sandbox's
+		// episode, so it is deliberately NOT shielded from recordLostRestoreFailure's
+		// restart seed: with no in-memory entry the failure continues the persisted
+		// count (terminal stays terminal), exactly the verdict an existing entry
+		// produces. Pre-seeding an empty entry here would make the same failure log
+		// "retrying in" after a daemon restart — a promise the durable
+		// LostRestoreGaveUp gate refuses to keep — so the same input would take a
+		// different verdict depending on whether the daemon had restarted.
+		//
+		// If reprovisionRemote fails before the reap (e.g. unresolvable account,
+		// invalid runtime config, agent-account drift), the hook is cleared without
+		// firing and the budgets stay charged, so the surviving sandbox's preserve
+		// episode continues instead of restarting, and repeated pre-reap failures
+		// cannot reset either budget indefinitely.
+		instance.SetOnSandboxRetired(func() {
+			m.resetPreserveBudget(repoID, instance)
+			m.resetRecoverBudget(repoID, instance)
+		})
 	case probeAbsent:
 		// af's own not-provisioned sentinel: nothing to preserve, so replacement is
 		// unconditional. The only arm that licenses that.
+		// It is also an ANSWER — definitive, not silence — so any outage flag a
+		// prior transport failure left behind retires here.
+		instance.ClearUnreachable()
 	case probeAnsweredDead:
+		// The probe answered: the transport works, so the outage flag retires
+		// regardless of what the answer says about the agent (#5571 W1.3).
+		instance.ClearUnreachable()
 		// It ANSWERED: the agent is gone, the sandbox is not. Push its work to origin
 		// before anything replaces it, and refuse outright if that push does not
 		// land — the same order and the same refusal ArchiveSandbox uses.
@@ -180,34 +420,103 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			if err := requireDurableSandboxBranch(repoID, instance); err != nil {
 				return "", err
 			}
-			log.WarningLog.Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
+			m.warn().Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
+			// Gate the push-failure and Recover-budget resets on sandbox retirement,
+			// using the same hook pattern as the probeUnknown arm above. A direct
+			// reset here would zero the budget even if reprovisionRemote then fails
+			// before reapRemoteRuntimeForReplacement retires the old sandbox —
+			// letting repeated pre-reap failures restart the budgets indefinitely,
+			// and for the preserve budget restarting a surviving sandbox's push
+			// episode as if it were fresh. A pre-reap failure belongs to the
+			// surviving sandbox's episode and keeps charging its existing count —
+			// seeded from the persisted terminal failure after a restart, so the
+			// verdict is identical whether or not the daemon restarted. The hook
+			// fires only after the sandbox is provably gone, ending its preserve
+			// episode and starting the replacement's Recover budget fresh.
+			instance.SetOnSandboxRetired(func() {
+				m.resetPreserveBudget(repoID, instance)
+				m.resetRecoverBudget(repoID, instance)
+			})
 			break
 		}
-		if err := m.preserveSandboxBeforeReap(repoID, key, instance, forceReapSuggestionFor(instance)); err != nil {
+		// The shared selector keeps the refusal's off-ramp executable even when
+		// this session's branch is not durable and --force-reap cannot proceed (#4195).
+		if err := m.preserveUnlessRelaunchable(repoID, key, instance); err != nil {
+			// The failure is the session's newest evidence even though it is an
+			// operator's, not the episode's. A structural one — rejected auth, an
+			// empty branch — means the row must stop claiming the environment,
+			// the same clear the automatic arm applies when its own failure goes
+			// structural; an environmental one leaves the armed wait's claim
+			// intact. Same call-site deadline rule as the automatic arm: the
+			// only deadline this push produces is the remote transport's
+			// (#5295 review).
+			class := lostRestoreEnvironmentalClass(err)
+			if class == lostRestoreEnvNone && errors.Is(err, context.DeadlineExceeded) {
+				class = lostRestoreEnvDeadline
+			}
+			if class == lostRestoreEnvNone {
+				m.clearLostRestoreWaitDurable(repoID, instance)
+			}
 			return "", err
 		}
+		// The push landed: reset the push-failure episode budget so that a later
+		// blip earns a fresh counter rather than inheriting this episode's
+		// escalation — the same reset the automatic probeAnsweredDead path applies.
+		m.resetPreserveBudget(repoID, instance)
 	}
 
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
 	// a failed recovery leaves its evidence intact, but before the backend can
 	// lower the restore fence and expose the replacement. A failed write remains
 	// owed and does not veto a replacement that is already running (#2883).
-	// RecoverFencedWithLiveBoundary raises OpRestoring before the backend runs so
-	// clients (TUI and web) see the fence and hide Kill, mirroring the
-	// archived-restore path (BeginRestore). ConfirmLive clears it on success;
-	// the method lowers it with ClearOp on failure.
-	if err := instance.RecoverFencedWithLiveBoundary(func() {
+	// The fence this runs under was raised at the top of the operation, so it has
+	// been hiding Kill since before the probe (#3586). The held variant re-checks
+	// that precondition through the shared ledger (RuntimeActionRecoverFenced)
+	// instead of re-entering RuntimeActionRecoverLost, which still requires OpNone
+	// and would now refuse its own operation's fence. ConfirmLive clears the fence
+	// on success; the deferred EndRecoverFence above lowers it on failure.
+	// Same settle-persist contract as the automatic loop: a respawn that
+	// settles a relocation record persists the cleared state before the spawn
+	// proceeds, so a daemon exit cannot strand the recovery on a stale
+	// record (#5295 review).
+	instance.SetRelocationSettleNotify(func(i *session.Instance) error {
+		return m.persistInstanceErr(repoID, i)
+	})
+	// A rebuild teardown obligation must be durable when it is set and again
+	// when it is discharged — before any replacement launches (#5371 review).
+	instance.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
+	instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
+		return m.stopVSCodeForInstance(key, i.ID)
+	})
+	// --force-reap asks for the sandbox to be REPLACED; the in-place relaunch
+	// would keep the work it asked to discard (W7.1).
+	instance.SetForceSandboxReplacement(force)
+	defer instance.SetForceSandboxReplacement(false)
+	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
-			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
+			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
 		}
 	}); err != nil {
+		// The fence stays up through the bookkeeping below and comes down in the
+		// deferred release, which is what announces it. Nothing here is distorted by
+		// that ordering — persistInstanceData scrubs the in-flight op before it
+		// writes, and recordLostRestoreFailure touches only the retry state.
+		//
+		// A retirement hook registered by a force-reap arm above must not outlive
+		// this attempt: if Recover returned before reprovisionRemote reached the
+		// reap (e.g. the recover-fence validation refused a superseded op), the
+		// hook is still armed and would fire at the NEXT call's retirement,
+		// resetting a budget that belongs to a different episode. A hook that did
+		// fire, or that reprovisionRemote's defer already cleared, reads nil here
+		// — so clearing unconditionally costs nothing.
+		instance.SetOnSandboxRetired(nil)
 		// Error-returning, not the logging wrapper: the committed arm below must
 		// not claim "recorded" for a write that failed (#3353 review), so the
 		// outcome of this persist is part of the message. The plain arm keeps the
 		// prior best-effort behavior, logged with persistInstance's own wording.
 		persistErr := m.persistInstanceErr(repoID, instance)
 		if persistErr != nil {
-			log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, persistErr)
+			m.warn().Printf("failed to persist instance %q: %v", instance.Title, persistErr)
 		}
 		m.recordLostRestoreFailure(key, repoID, instance, err, lostRestoreManual)
 		// Recovery that rebuilt the missing worktree (and possibly recreated its
@@ -261,7 +570,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// auto path now prevents (#1976). consecutiveFailures is CARRIED; RestoreLostSessions
 	// clears the state once a poll observes the runtime alive, and the auto loop charges
 	// an immediate re-loss against the same episode.
-	m.armRestoreConfirmation(repoID, instance)
+	m.armRestoreConfirmation(repoID, instance, lostRestoreManual)
 	if settleErr != nil {
 		failure := fmt.Errorf(
 			"session %q was restored and its agent is running, but its recovered state could not be written to disk: %w",

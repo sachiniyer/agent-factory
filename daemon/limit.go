@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -23,7 +25,7 @@ import (
 //     limit_auto_resume is on, or the manual `c` retry) re-delivers it once the
 //     window resets. Return nil so CreateSession registers+persists it as a
 //     parked row, not a failed one, firing no failure side-effects. The stored
-//     prompt is the only input resumeFromLimit re-delivers, so it is set here so
+//     prompt is the only input resumeFromLimitOutcome re-delivers, so it is set here so
 //     a parked task run resumes its OWN work rather than a bare "continue". A
 //     later handoff brief may replace this durable goal; both paths use Instance's
 //     prompt accessors so the resume scheduler cannot race the handoff writer.
@@ -68,8 +70,9 @@ func createdTaskStatus(data session.InstanceData) string {
 // "Did not change" is NOT the same as "is idle", which is the whole reason the
 // working check sits here. The caller reaches this branch on pane STILLNESS, and
 // stillness is only evidence of idleness for agents that repaint while they work
-// (claude/codex animate a spinner + elapsed timer; amp does not — it holds a
-// static frame through every quiet gap in a turn). So before settling Ready, ask
+// (codex animates a spinner + elapsed timer; amp holds a static frame through
+// every quiet gap in a turn; claude animates one but was still seen holding a
+// still pane mid-turn). So before settling Ready, ask
 // the agent: a pane that says it is working IS working, and stays Running. See
 // task.IsWorkingContent for why a debounce cannot stand in for this.
 //
@@ -90,13 +93,13 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	if hit, resetAt, _ := m.limitDetector.Load().Check(content, agent, time.Now()); hit {
 		// Returns false when the decision was superseded; nothing to do about it
 		// here — the next tick observes the session as it is now.
-		_ = instance.SetLimitReachedAtEpoch(resetAt, epoch)
+		_ = m.setLimitReachedAtEpoch(instance, resetAt, epoch)
 		return
 	}
 	if task.IsWorkingContent(content, agent) {
 		// Still mid-turn behind a still pane: hold Running so the #1766 status dot
 		// stays dark. Settling Ready here is the green flash (#1766 says green ==
-		// waiting for you), and it is not merely cosmetic — a Ready amp is what
+		// waiting for you), and it is not merely cosmetic — a Ready session is what
 		// `af sessions watch` unblocks on and what tells a user their turn is done.
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
 		return
@@ -191,12 +194,18 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	settlementCheckpoint bool,
 ) {
 	if instance.GetInFlightOp() != session.OpNone {
+		// The write is skipped, but a consumed one-shot checkpoint must not be
+		// silently dropped: record the obligation so a later poll re-attempts it.
+		if settlementCheckpoint {
+			key := daemonInstanceKey(repoID, instance.Title)
+			m.recordSettlementWrite(repoID, key, instance, errors.New("ceded to in-flight op"))
+		}
 		return
 	}
 	data := instance.ToInstanceData()
 	livenessChanged := data.Liveness != before
 	resetChanged := !data.LimitResetAt.Equal(beforeReset)
-	durableChanged := livenessChanged || resetChanged || settlementCheckpoint
+	durableChanged := livenessChanged || resetChanged || settlementCheckpoint || conversationNeedsWrite(instance)
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return
@@ -209,9 +218,32 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	// lifecycle state only, so using it as a whole-payload change detector lets
 	// an untracked roster mutation publish first and then get erased by this stale event.
 	data = instance.ToInstanceData()
+	// The lock-free gate above can pass an OpNone a client op raises before the
+	// re-read lands. A handoff is the concrete case: between the gate and this
+	// lock it runs BeginHandoff (OpReplacing) and RecordHandoffSwap (rewriting
+	// Program to the incoming agent before its mission marker exists), and it
+	// holds the per-(repo,title) and op locks — neither of which is repoStartLock
+	// — so acquiring repoStartLock does not exclude it. persistInstanceData →
+	// ForStorage strips the transient op axis, so persisting that snapshot stores
+	// the incoming agent as SETTLED with no delivery obligation: a state the
+	// session never legitimately reached. Re-check under the lock and cede to
+	// the op's executor, which owns the durable state — the same fence the
+	// settlement retry holds under the op lock (settlement.go). The gate decides
+	// WHETHER to write; an op holding the session decides WHO writes.
+	if data.InFlightOp != session.OpNone {
+		// The write is skipped, but a consumed one-shot checkpoint must not be
+		// silently dropped: record the obligation so a later poll re-attempts it.
+		if settlementCheckpoint {
+			key := daemonInstanceKey(repoID, instance.Title)
+			m.recordSettlementWrite(repoID, key, instance, errors.New("ceded to in-flight op"))
+		}
+		repoStartLock.Unlock()
+		return
+	}
 	var err error
 	if durableChanged {
 		err = persistInstanceData(repoID, data)
+		noteConversationWritten(instance, data, err)
 	}
 	key := daemonInstanceKey(repoID, instance.Title)
 	testHookPollBeforeSettlementRecord()
@@ -242,12 +274,12 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
 	if err != nil {
-		log.WarningLog.Printf("daemon failed to persist status for %q: %v", instance.Title, err)
+		m.warn().Printf("daemon failed to persist status for %q: %v", instance.Title, err)
 	}
 }
 
 // This file is the daemon side of the usage-limit manual-retry action (#1146
-// PR2): the ResumeFromLimit RPC and the reusable resumeFromLimit Manager method
+// PR2): the ResumeFromLimit RPC and the reusable resumeFromLimitOutcome Manager method
 // behind it. Detection itself lives in refreshInstanceStatus (control.go), which
 // runs the PR1 detector over captured pane content and sets the LiveLimitReached
 // liveness. Split out of control.go to keep that (grandfathered, #1145) file
@@ -279,140 +311,32 @@ type ResumeFromLimitRequest struct {
 type ResumeFromLimitResponse struct {
 	OK     bool   `json:"ok"`
 	Reason string `json:"reason,omitempty"`
+	// An explicit handoff retry can deliver its mission before the final
+	// settlement checkpoint fails. Carry that committed outcome structurally so
+	// neither HTTP nor net/rpc turns an unsafe-to-repeat retry into a failure.
+	MutationOutcome
 }
 
-type resumeFromLimitOutcome uint8
-
-const (
-	resumeNotPerformed resumeFromLimitOutcome = iota
-	resumePerformed
-)
-
-// The TUI and web reach this handler through apiclient/HTTP. The CLI reaches the
-// same handler through daemon.ResumeFromLimit on the gob control socket; only
-// the transport differs, while the controlServer and Manager action stay shared.
-
-func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *ResumeFromLimitResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	outcome, err := s.manager.resumeFromLimitOutcome(req)
-	if err != nil {
-		return err
-	}
-	resp.OK = outcome == resumePerformed
-	if !resp.OK {
-		resp.Reason = "the session changed or another operation owns its retry"
-	}
-	return nil
+// resumeFromLimitLockedWithAccount is the auto-resume scheduler's entry to the
+// shared limit-resume body. It returns the outcome alongside the error so the
+// caller can distinguish a real resume (resumePerformed) from a no-op
+// (resumeNotPerformed): both return a nil error, and only the former is a
+// success worth logging. The manual-retry path exposes this same distinction
+// through ResumeFromLimitResponse.OK (outcome == resumePerformed).
+func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) (resumeFromLimitOutcome, error) {
+	return m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap, false)
 }
 
-// resumeFromLimit clears a session's usage-limit block and nudges its agent back
-// to work (#1146). It is the reusable resume action shared by the TUI manual-
-// retry key (`c`) and PR3's auto-resume scheduler — factored as a Manager method
-// rather than inlined so the scheduler can call it directly. If the agent's tmux
-// session exited while blocked it is re-spawned (Recover → resumeProgram) before
-// the prompt is sent; a live stall needs no respawn. The pending prompt is then
-// re-delivered — the session's stored initial/task prompt when it carries one (a
-// task-driven session resumes its work), else a bare "continue" that un-stalls an
-// interactive session (which loses context per anthropics/claude-code#5977;
-// documented). The LimitReached liveness is cleared so the poll re-resolves the
-// real state on the next tick, and the transition is persisted.
-//
-// Delivering that prompt is the ONLY thing that lifts the block: a resume that
-// fails anywhere before the send lands leaves the session parked at the wall,
-// both in memory and on disk, so the manual retry and the auto-resume scheduler
-// (which both gate on the limit still being set) can pick it up again. The
-// respawn arm re-applies the block for that reason — Respawn ends in ConfirmLive,
-// which would otherwise report a session as resumed before its prompt existed.
-//
-// Takes the per-(repo, title) target lock and then the per-session op lock — the
-// same target-before-op order DeliverPrompt uses (#2006) — and re-verifies the
-// limit state under them, so it never races a self-recovery, a kill, a concurrent
-// resume, or an overlapping send-prompt. Rejects a tombstoned / reserved-root
-// session, mirroring the lostrestore guards.
-//
-// testHookResumeAfterFirstLock fires in resumeFromLimit immediately after the
-// FIRST of its two locks is acquired, before the second. No-op in production; the
-// #2006 ABBA regression test substitutes a barrier so it can pin one resume
-// goroutine holding its first lock and force the cross-lock interleaving that the
-// inverted order deadlocked on.
-var testHookResumeAfterFirstLock = func() {}
-
-func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
-	_, err := m.resumeFromLimitOutcome(req)
-	return err
-}
-
-func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFromLimitOutcome, error) {
-	// resolveActionSession, not findSession: id-first with a {title, repoID}
-	// fallback, the same resolver kill/archive/restore and the tab verbs use. This
-	// verb re-delivers a prompt INTO a pane, so resolving it by title alone would
-	// let a duplicate title across repos type someone's prompt into an unrelated
-	// agent — which is why the web, which holds stable ids, sends one (#1934).
-	//
-	// Every use below is the RESOLVED title rather than req.Title, which an
-	// id-keyed request may leave empty.
-	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
-	if err != nil {
-		return resumeNotPerformed, err
+// fallBackFromUncommittedAccountSwap applies one deadline rule to every refusal
+// before identity selection: once the ordinary resume is already due, a failed
+// replacement must retain the current identity and yield to that ordinary path.
+func fallBackFromUncommittedAccountSwap(title string, swap *autoAccountSwap, cause error) bool {
+	if swap == nil || swap.alreadySet || !swap.fallbackDue {
+		return false
 	}
-	if instance == nil {
-		return resumeNotPerformed, fmt.Errorf("session %q not found", title)
-	}
-	if !instance.LimitReached() {
-		return resumeNotPerformed, fmt.Errorf("session %q is not blocked on a usage limit", title)
-	}
-
-	key := daemonInstanceKey(repoID, instance.Title)
-	m.mu.Lock()
-	if _, killing := m.killsInFlight[key]; killing {
-		m.mu.Unlock()
-		return resumeNotPerformed, nil
-	}
-	m.mu.Unlock()
-
-	// Canonical lock order is target-before-op (#2006). DeliverPrompt holds the
-	// per-target lock across the op lock it acquires inside SendPrompt, so every
-	// path that needs both must take the target lock FIRST. Taking the op lock
-	// first here — as this path used to — inverted that order, so a manual resume
-	// overlapping a send-prompt (or the auto-resume scheduler) to the same session
-	// deadlocked: each held one lock and blocked on the other. The op lock is still
-	// only TryLock'd, so a resume never blocks behind a kill teardown that holds it.
-	unlock := m.lockTarget(repoID, instance.Title)
-	defer unlock()
-	testHookResumeAfterFirstLock()
-
-	opLock := m.opLockFor(key)
-	if !opLock.TryLock() {
-		return resumeNotPerformed, nil
-	}
-	defer opLock.Unlock()
-
-	m.mu.Lock()
-	current := m.instances[key]
-	_, killing := m.killsInFlight[key]
-	m.mu.Unlock()
-	if killing || current != instance || instance.IsTearingDown() {
-		return resumeNotPerformed, nil
-	}
-
-	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title)
-}
-
-// resumeFromLimitLocked performs the shared limit-resume action. The caller must
-// hold BOTH the per-target lock and the per-session op lock for key, acquired in
-// that canonical target-before-op order (#2006) — the target lock serializes this
-// resume's send against a concurrent DeliverPrompt to the same pane, and the op
-// lock keeps a manual retry from interleaving with kill teardown. Both entry
-// points (resumeFromLimit and the auto-resume scheduler) take the two locks before
-// calling in, so this body never touches the lock helpers itself.
-func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.Instance, requestedTitle string) error {
-	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle)
-	return err
+	log.WarningLog.Printf("automatic account replacement for %q failed before identity commit; its ordinary resume deadline is due, so retaining the current identity: %v", title, cause)
+	swap.fellBack = true
+	return true
 }
 
 // publishSessionSnapshot pushes this session's current projection to clients while
@@ -439,13 +363,48 @@ func (m *Manager) publishSessionSnapshot(repoID string, instance *session.Instan
 	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 }
 
-func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string) (resumeFromLimitOutcome, error) {
+// resumeFromLimitLockedOutcome performs the shared limit-resume action. The caller
+// must hold both the per-target lock and the per-session op lock for key, acquired
+// in that canonical target-before-op order (#2006): the target lock serializes
+// this resume's send against a concurrent DeliverPrompt to the same pane, and the
+// op lock keeps a manual retry from interleaving with kill teardown.
+// resumeFromLimitOutcome calls this body directly; the auto-resume scheduler's
+// resumeLimitedSession reaches it through resumeFromLimitLockedWithAccount. Both
+// take the two locks before calling in, so this body never acquires either itself.
+// operatorInitiated selects the liveness-probe budget: the explicit RPC uses
+// probeLivenessForOperator; the poll-driven scheduler keeps the short poll budget.
+func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap, operatorInitiated bool) (outcome resumeFromLimitOutcome, resultErr error) {
 	// Set by the respawn arm's settlement below and reported at the very end, so a
 	// failed durable write neither aborts the resume nor disappears from it.
 	var settleErr error
 	// Re-verify under the lock: a self-recovery or the poll may have cleared the
 	// limit between the check above and the lock.
-	if !instance.LimitReached() {
+	manual := accountSwap != nil && accountSwap.manual
+	identityCommittedThisAttempt := false
+	defer func() {
+		if resultErr == nil || !manual || !identityCommittedThisAttempt || isMutationCommitted(resultErr) {
+			return
+		}
+		// A successful identity checkpoint is already an externally visible
+		// mutation even when startup, readiness, or mission delivery later fails.
+		// Preserve that distinction so every client keeps the resolved identities
+		// and warns against treating this as an untouched, freely retryable request.
+		resultErr = &mutationCommittedError{err: fmt.Errorf(
+			"account handoff for %q committed %s, but startup or mission delivery did not complete; inspect the reported failure before retrying: %w",
+			requestedTitle, accountSwapIdentity(accountSwap.accountNamespace(), accountSwap.to), resultErr)}
+	}()
+	originalLiveness := instance.GetLiveness()
+	restorePendingLiveness := func(resetAt time.Time) error {
+		if manual && (originalLiveness == session.LiveRunning || originalLiveness == session.LiveReady) {
+			// The pending manual transaction is the recovery obligation. A healthy
+			// handoff must never manufacture quota evidence for the selected account.
+			// Bookkeeping after a refused respawn, not a pane observation: the observe
+			// path's rebuild-teardown guard would park LiveLost (#5371 review).
+			return instance.RestoreLivenessUnderResumeFence(originalLiveness)
+		}
+		return m.reparkLimitUnderResumeFence(instance, resetAt)
+	}
+	if !instance.LimitReached() && !manual {
 		return resumeNotPerformed, nil
 	}
 	m.mu.Lock()
@@ -494,7 +453,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// Deferred release covers every exit: it is a no-op once Respawn's ConfirmLive has
 	// cleared the op on the success path, and it is what keeps a refused or failed
 	// resume from stranding the session as permanently busy.
-	if err := instance.BeginLimitResume(); err != nil {
+	begin := instance.BeginLimitResume
+	if manual {
+		begin = instance.BeginManualAccountSwap
+	}
+	if err := begin(); err != nil {
 		return resumeNotPerformed, fmt.Errorf("cannot resume %q: %w", requestedTitle, err)
 	}
 	// Tell the clients. The web rail is event-driven and performs no optimistic update
@@ -514,11 +477,161 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 	}()
 
+	forceRespawn := false
+	configFenceHeld := false
+	accountLimitFenceHeld := false
+	releaseAccountSwapFences := func() {
+		if accountLimitFenceHeld {
+			m.accountLimitMu.Unlock()
+			accountLimitFenceHeld = false
+		}
+		if configFenceHeld {
+			m.configApplyMu.Unlock()
+			configFenceHeld = false
+		}
+	}
+	defer releaseAccountSwapFences()
+	if accountSwap != nil && !accountSwap.alreadySet {
+		testHookAccountSwapBeforeFinalFence()
+		// Compute the liveness probe BEFORE acquiring the global config-apply
+		// and account-limit fences below. The probe is a network round-trip
+		// bounded by the caller-specific budget (probeLivenessForOperator for
+		// the manual RPC, probeLiveness for the poll-driven scheduler), and
+		// holding those fences for its whole budget blocks unrelated config
+		// application and account-limit/delivery operations daemon-wide. Both
+		// the manual and the automatic caller reach commitNewAccountSwapIdentity
+		// through this path after the fences are taken, so computing the probe
+		// inside it (as the previous revision did) held the fences for the full
+		// probe on every caller — including the manual RPC's 30s operator
+		// budget. The per-session op lock the caller already holds keeps the
+		// runtime stable across the fence acquisition, so a probe taken here is
+		// still current when prepareRuntimeForAccountSwap runs under the
+		// fences below. See remoteloss.go and prepareRuntimeForAccountSwap.
+		//
+		// For a manual swap, run a non-mutating admission precheck BEFORE the
+		// slow liveness probe. An obviously invalid manual swap (an
+		// unregistered, limited, or otherwise inadmissible account, or a VS
+		// Code tab) is already determinable without the network round-trip, so
+		// waiting the operator probe budget (up to 35s) only to report that
+		// error needlessly blocks the session's target/op/worktree locks the
+		// caller (handoffAccount) still holds. checkManualAccountSwap is
+		// non-mutating (recordLaunch=false) and the authoritative admission
+		// under the fences below re-evaluates it, so this unlocked pass only
+		// short-circuits the network wait for the already-determinable failure;
+		// the probe is skipped when the precheck fails. If the precheck did
+		// fail, probeComputed stays false and the zero-value probe is NOT
+		// trusted: commitNewAccountSwapIdentity performs a real probe before
+		// teardown when its authoritative admission reverses this precheck
+		// (a config/registry change between the unlocked pass and the fenced
+		// admission), so prepareRuntimeForAccountSwap never receives a
+		// fabricated probeAlive verdict for a runtime it never probed.
+		var accountSwapProbe livenessProbe
+		probeComputed := false
+		if !accountSwap.manual || m.checkManualAccountSwap(instance, accountSwap) == nil {
+			if operatorInitiated {
+				accountSwapProbe = probeLivenessForOperator(instance, instance.AgentServer())
+			} else {
+				accountSwapProbe = probeLiveness(instance, instance.AgentServer())
+			}
+			probeComputed = true
+		}
+		// Serialize the final policy read and identity checkpoint with live config
+		// application. If an opt-out or candidate restriction has already applied,
+		// this admission observes it; once admission owns the fence, ApplyConfig
+		// cannot report a newer policy live until the identity commit has settled.
+		m.configApplyMu.Lock()
+		configFenceHeld = true
+		m.accountLimitMu.Lock()
+		accountLimitFenceHeld = true
+		liveConfig := m.Config()
+		if !liveConfig.LimitAutoResume && !manual {
+			// A live opt-out forbids every new automatic action, including an
+			// already-due ordinary same-account retry. Committed replacements use
+			// the independent recovery path and never enter this branch.
+			releaseAccountSwapFences()
+			return resumeNotPerformed, nil
+		}
+
+		root := instance.GetRepoPath()
+		if root == "" {
+			root = instance.Path
+		}
+		fallbackEligible := true
+		var precheckErr error
+		if accountSwap.manual {
+			if err := m.checkManualAccountSwap(instance, accountSwap); err != nil {
+				precheckErr = fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
+			}
+			if m.accountSwapAfterManualPrecheckForTest != nil {
+				m.accountSwapAfterManualPrecheckForTest()
+			}
+		}
+		// The unlocked manual check is latency-only evidence. Its program and
+		// candidate policy may change before the personal-project lock is acquired,
+		// so failures as well as successes are re-evaluated under that lock. When
+		// the lock lookup itself cannot establish a project, preserve a domain
+		// refusal the precheck already proved instead of replacing it with marker
+		// probe infrastructure detail.
+		lockEntered := false
+		lockErr := config.WithProjectConfigLockForRoot(root, func() error {
+			lockEntered = true
+			var err error
+			fallbackEligible, err = m.commitNewAccountSwapIdentity(
+				repoID, key, requestedTitle, instance, accountSwap, liveConfig, operatorInitiated, accountSwapProbe, probeComputed)
+			return err
+		})
+		swapErr := lockErr
+		if !lockEntered && precheckErr != nil {
+			swapErr = precheckErr
+		}
+		if swapErr != nil {
+			if !fallbackEligible || !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, swapErr) {
+				return resumeNotPerformed, swapErr
+			}
+			accountSwap = nil
+			releaseAccountSwapFences()
+		} else {
+			identityCommittedThisAttempt = true
+			releaseAccountSwapFences()
+			forceRespawn = true
+		}
+	}
+
 	as := instance.AgentServer()
-	switch probe := probeLiveness(instance, as); probe {
+	probe := probeAbsent
+	if !forceRespawn {
+		// Caller-specific budget — see the operatorInitiated doc above and remoteloss.go.
+		if operatorInitiated {
+			probe = probeLivenessForOperator(instance, as)
+		} else {
+			probe = probeLiveness(instance, as)
+		}
+	}
+	shouldRespawn := forceRespawn
+	switch probe {
 	case probeAlive:
-		// A live stall — the common claude/codex case. No re-spawn; the un-stall
-		// prompt below is all it needs.
+		// A live ordinary stall needs only the un-stall prompt. A committed account
+		// replacement is stronger: every persisted sibling must also be present.
+		// A daemon can crash after the agent starts but before setupTabs completes,
+		// so repair an incomplete pane set as one fresh credential boundary.
+		if accountSwap != nil && accountSwap.alreadySet {
+			var repairErr error
+			if paneErr := instance.ValidateAccountSwapReplacementPanes(); paneErr != nil {
+				repairErr = paneErr
+			}
+			if repairErr != nil {
+				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
+				}
+				if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
+				}
+				if err := instance.StopForAccountSwap(); err != nil {
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
+				}
+				shouldRespawn = true
+			}
+		}
 	case probeUnknown:
 		return resumeNotPerformed, fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
 	case probeAnsweredDead:
@@ -528,7 +641,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// restore paths guard, reached through a third door (#2923). Push and durably
 		// record the branch first, and refuse rather than re-spawn if that cannot be
 		// done. A local session has no sandbox to preserve and falls through.
-		if isRemoteWorkspace(instance) {
+		if replacesSandbox(instance) {
 			// kill, not --force-reap: RestoreSession refuses a LiveLimitReached
 			// session and ResumeFromLimitRequest has no force option, so the
 			// forced-reap hatch cannot open from this door (Codex on #2967).
@@ -541,17 +654,110 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		fallthrough
 	case probeAbsent:
+		if accountSwap != nil && !forceRespawn {
+			if accountSwap.alreadySet {
+				if err := revalidateGoneAccountSwap(instance, accountSwap.to); err != nil {
+					return resumeNotPerformed, err
+				}
+			}
+			if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
+				return resumeNotPerformed, err
+			}
+			if err := instance.StopRemainingPanesForAccountSwap(); err != nil {
+				return resumeNotPerformed, err
+			}
+		}
+		shouldRespawn = true
+	}
+	var accountConversationCapture session.ConversationCaptureSnapshot
+	captureAccountConversationAfterDelivery := false
+	if shouldRespawn {
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
 		// which drops both the LiveLimitReached liveness and its reset time, and
 		// LimitResetAt reports (zero, false) once that has happened. Re-applying the
 		// block below has to restore THIS episode's window, not a zeroed one — the
 		// auto-resume scheduler schedules off it (reset + grace).
 		resetAt, _ := instance.LimitResetAt()
-		if rerr := instance.RespawnWithLiveBoundary(func() {
+		var rerr error
+		beforeLive := func() {
 			if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
-				log.WarningLog.Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
+				m.warn().Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
 			}
-		}); rerr != nil {
+		}
+		// Same settle-persist contract as the restore paths: a respawn that
+		// settles a relocation record persists the cleared state before the
+		// spawn proceeds (#5295 review).
+		instance.SetRelocationSettleNotify(func(i *session.Instance) error {
+			return m.persistInstanceErr(repoID, i)
+		})
+		// Rebuild-teardown obligation must be durable; nil notify refuses (#5371).
+		instance.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
+		instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error { return m.stopVSCodeForInstance(key, i.ID) })
+		if accountSwap != nil {
+			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
+			if rerr == nil {
+				rerr = instance.RespawnForAccountSwapWithLiveBoundary(beforeLive)
+			}
+		} else {
+			rerr = instance.RespawnWithLiveBoundary(beforeLive)
+		}
+		if rerr != nil {
+			if accountSwap != nil {
+				if perr := restorePendingLiveness(resetAt); perr != nil {
+					rerr = errors.Join(rerr, perr)
+				}
+				if errors.Is(rerr, session.ErrAccountSwapAgentTeardownBlind) {
+					// The replacement teardown was not observed conclusively. A
+					// detached child may still write this worktree, so preserve the
+					// pending mission but suppress automatic retries until inspection.
+					instance.MarkStartupStateUnknown()
+				}
+			}
+			// Persist the instance even on failure, matching the sibling recovery
+			// paths (lostrestore.go, restore.go): Respawn shares LocalBackend.respawn,
+			// so reaching this line can mean it rebuilt a vanished worktree —
+			// recreating the branch, flipping branchCreatedByUs and rewriting
+			// baseCommitSHA — before a later step (tmux spawn, setupTabs) failed.
+			// Without this write the in-memory flag is lost, so after a daemon
+			// restart the instance reloads a stale branchCreatedByUs=false; the
+			// next recovery skips the rebuild (the worktree now exists) and the
+			// flag stays wrong, so kill never deletes the branch and it is
+			// orphaned (#1532/#1841/#2883). The poll does not cover it —
+			// persistPollChange writes only on a liveness/reset-time change, and
+			// the re-parked row matches the one the poll already knows. A
+			// SETTLEMENT, not best-effort: the auto-resume scheduler has no
+			// caller to report a failed write to and the retry set is what makes
+			// the state durable (#2883). persistSettlement also captures
+			// MarkStartupStateUnknown applied above for the blind-teardown case.
+			// Error-returning, not the logging wrapper: the committed arm below must
+			// not claim "recorded" for a write that failed (#3353 review), so the
+			// outcome of this persist is part of the message — mirroring restore.go's
+			// manual-restore path.
+			persistErr := m.persistSettlement(repoID, key, instance)
+			if persistErr != nil {
+				rerr = errors.Join(rerr, persistErr)
+			}
+			// A rebuild that already mutated durable workspace state before the
+			// later failure committed that mutation — report it as committed,
+			// not as an untouched, freely retryable failure, the way restore.go
+			// does for the manual restore path (#3236). The git side lives on
+			// disk regardless of the record write; a raw error reading as
+			// failed-nothing-committed about a mutation that landed would
+			// mislead a retry. Use failure-specific wording: when the persist
+			// itself failed the on-disk row is still stale until a retry, so the
+			// message must not claim the rebuilt state is recorded.
+			var rebuilt *session.RecoverRebuiltWorkspaceError
+			if errors.As(rerr, &rebuilt) {
+				failure := fmt.Errorf(
+					"re-spawn for %q failed after recovery rebuilt its worktree at %s; the rebuilt state is recorded — retry the resume: %w",
+					requestedTitle, instance.GetWorktreePath(), rerr)
+				if persistErr != nil {
+					failure = fmt.Errorf(
+						"re-spawn for %q failed after recovery rebuilt its worktree at %s, and the rebuilt state could not be written to disk (%v) — retry the resume once the cause clears: %w",
+						requestedTitle, instance.GetWorktreePath(), persistErr, rerr)
+				}
+				return resumeNotPerformed, &mutationCommittedError{err: failure}
+			}
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
 		// The runtime this session's failure history was about is gone; the fresh
@@ -584,7 +790,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// through prompt delivery now (#2997), and the plain SetLimitReached refuses
 		// while any op is in flight — it would no-op here and lose this episode's
 		// reset time, which the auto-resume scheduler schedules off.
-		if perr := instance.ReparkLimitUnderResumeFence(resetAt); perr != nil {
+		if perr := restorePendingLiveness(resetAt); perr != nil {
 			return resumeNotPerformed, fmt.Errorf("failed to restore the limit window for %q: %w", requestedTitle, perr)
 		}
 		// Write the respawn's durable state NOW, not at the end of the happy path
@@ -615,28 +821,101 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// provenance is still memory-only.
 		settleErr = m.persistSettlement(repoID, key, instance)
 		if settleErr != nil {
-			log.WarningLog.Printf("limit resume for %q: %v", instance.Title, settleErr)
+			m.warn().Printf("limit resume for %q: %v", instance.Title, settleErr)
+		}
+	}
+	if accountSwap != nil {
+		// A committed-swap recovery that re-established the runtime after a
+		// post-commit blind teardown (ErrAccountSwapAgentTeardownBlind) entered
+		// with StartupStateUnknown set and started cleared. The probe or the
+		// replacement respawn above has now positively identified the runtime,
+		// but ConfirmLive re-establishes liveness without clearing the inert
+		// fence or restoring started — so resolve the startup state HERE, before
+		// the readiness contract and mission delivery below attempt to preview
+		// or send against this row. On the real local backend both preview
+		// (LocalBackend.PreviewContext) and the prompt send
+		// (SendPromptCommandWithStatus) refuse a row whose started bit is still
+		// false, so a resolve left until the success path's tail is unreachable
+		// and the committed swap stays wedged. No-op for an ordinary resume or a
+		// healthy committed swap, where the fence was never raised.
+		instance.ResolveStartupState()
+		if err := instance.ValidateAccountSwapReplacementPanes(); err != nil {
+			boundaryErr := fmt.Errorf("account replacement for %q did not restore every expected pane: %w", requestedTitle, err)
+			if settleErr != nil {
+				return resumeNotPerformed, errors.Join(boundaryErr, settleErr)
+			}
+			return resumeNotPerformed, boundaryErr
+		}
+		if err := instance.SynchronizeAccountSwapRuntimeMetadata(); err != nil {
+			return resumeNotPerformed, err
+		}
+		// The fresh runtime may be parked on Codex's directory-trust modal — alive
+		// but idle, writing no rollout. Run the shared readiness/dismissal
+		// contract before capture and the send (#4392).
+		var err error
+		captureAccountConversationAfterDelivery, err = m.settleReplacementRuntime(
+			repoID, key, requestedTitle, instance, accountSwap, shouldRespawn, accountConversationCapture)
+		if err != nil {
+			if settleErr != nil {
+				return resumeNotPerformed, errors.Join(err, settleErr)
+			}
+			return resumeNotPerformed, err
+		}
+		if !shouldRespawn && instance.AgentRuntimeToken().Agent() == tmux.ProgramCodex &&
+			!instance.AgentConversation().HasID() {
+			// A daemon restart loses the pre-launch provider-store snapshot while
+			// preserving the live replacement pane. Baseline the shared account
+			// store now, after readiness and immediately before delivery, so the
+			// mission's rollout can be captured without mistaking an older or
+			// concurrently-created rollout from another session for this one (#4715).
+			accountConversationCapture, captureAccountConversationAfterDelivery =
+				m.prepareLiveAccountSwapConversationCapture(instance, accountSwap)
 		}
 	}
 
 	prompt := strings.TrimSpace(instance.GetPrompt())
-	if prompt == "" {
+	if accountSwap != nil {
+		if accountSwap.manual {
+			// The replacement launch can demote a committed conversation carry
+			// to a fresh start and re-render the stored mission; deliver the
+			// record's version, never the one frozen before the launch (#4367).
+			if _, mission := instance.PendingManualAccountSwap(); mission != "" {
+				accountSwap.mission = mission
+			}
+		}
+		prompt = accountSwapPrompt(accountSwap, prompt, instance.PendingAccountSwapConversation())
+	} else if prompt == "" {
 		// Interactive session with no stored prompt: the best we can do is
 		// un-stall it. Loses the agent's prior context (documented caveat).
 		prompt = "continue"
 	}
-	_, serr := instance.SendPromptWithEvidence(prompt, nowFunc)
+	var serr error
+	readinessSettlementAttempted := false
+	readinessSettled := false
+	if manual {
+		readinessSettlementAttempted, readinessSettled, serr = m.deliverManualAccountMission(repoID, key, instance, accountSwap, prompt)
+	} else {
+		_, serr = instance.SendPromptWithEvidence(prompt, nowFunc)
+	}
 	if serr != nil {
 		// The send crossed the runtime boundary, so even an error is an observed
 		// delivery fact: remote transport failure means could-not-confirm, not that
 		// the prompt missed. Persist it before this early return so a restart can
 		// still order later pane churn against the attempt (#3162/#3168).
-		evidenceErr := m.persistSettlement(repoID, key, instance)
-		if evidenceErr != nil {
-			log.WarningLog.Printf("limit resume prompt evidence for %q: %v", instance.Title, evidenceErr)
+		if readinessSettlementAttempted {
+			// deliverManualAccountMission already settled the inert marker. A second
+			// write here could mask that write's failure and erase its retry record.
+			if readinessSettled {
+				settleErr = nil
+			}
 		} else {
-			// The successful evidence checkpoint persisted the whole respawn row too.
-			settleErr = nil
+			evidenceErr := m.persistSettlement(repoID, key, instance)
+			if evidenceErr != nil {
+				m.warn().Printf("limit resume prompt evidence for %q: %v", instance.Title, evidenceErr)
+			} else {
+				// The successful evidence checkpoint persisted the whole respawn row too.
+				settleErr = nil
+			}
 		}
 		resumeErr := fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 		if settleErr != nil {
@@ -648,9 +927,17 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		return resumeNotPerformed, resumeErr
 	}
+	if accountSwap != nil && !instance.ClearPendingAccountSwap(accountSwap.from, accountSwap.to) {
+		return resumeNotPerformed, fmt.Errorf("account swap for %q changed while its notice was being delivered", requestedTitle)
+	}
 	// The prompt landed: this is the resume's single completion point, and the only
 	// place the limit block is lifted on either arm.
 	instance.ClearLimitReached()
+	if manual {
+		// Successful delivery starts work even if the outgoing agent was idle.
+		// Keep original liveness only on the failure paths above.
+		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
+	}
 	// Lower the fence HERE, before the completion payload is built (#3004 review).
 	// Every destructive phase is behind us, and the projection published below carries
 	// the op axis: on the live-stall arm nothing else lowers it — there is no Respawn
@@ -685,17 +972,29 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
+	if captureAccountConversationAfterDelivery {
+		// The first mission minted the fresh Codex rollout that did not exist at
+		// the synchronous pre-delivery capture. Start discovery only after delivery
+		// retired the pending swap and its completion checkpoint was attempted. The
+		// async capture serializes its whole-row write through this operation's lock,
+		// so it cannot persist the retired marker state until this recovery returns.
+		m.captureAgentConversationAsync(repoID, key, instance, accountConversationCapture)
+	}
 	if persistErr != nil {
-		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, persistErr)
+		m.warn().Printf("failed to persist instance %q: %v", instance.Title, persistErr)
+		if manual {
+			return resumePerformed, &mutationCommittedError{err: fmt.Errorf("handed off %q and delivered its mission, but completion has a pending settlement; the daemon retries the disk write, and an unclean exit before it lands could repeat the mission: %w",
+				requestedTitle, errors.Join(settleErr, persistErr))}
+		}
 	}
 	if settleErr != nil {
 		// The resume itself landed — the prompt was delivered and the limit lifted —
 		// but the respawn's durable state did not. Say both, so a caller cannot read
 		// this as a failed resume, and cannot read a successful resume as meaning
 		// everything is on disk (#2883).
-		return resumePerformed, fmt.Errorf(
+		return resumePerformed, &mutationCommittedError{err: fmt.Errorf(
 			"resumed %q, but the state its respawn rebuilt could not be written to disk: %w",
-			requestedTitle, settleErr)
+			requestedTitle, settleErr)}
 	}
 	return resumePerformed, nil
 }

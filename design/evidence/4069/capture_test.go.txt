@@ -1,0 +1,30 @@
+package app
+
+import (
+	"encoding/base64"
+	"fmt"
+	"github.com/sachiniyer/agent-factory/session"
+	"testing"
+)
+
+func TestConfigRemedyCapture(t *testing.T) {
+	for _, phase := range []string{"before", "after"} {
+		t.Run(phase, func(t *testing.T) {
+			configureDesignStillsOutput(t)
+			h, _ := newDesignDriverSceneHome(t, "dark", nil)
+			t.Setenv("HOME", "/home/operator")
+			t.Setenv("AGENT_FACTORY_HOME", "/home/operator/relocated-af")
+			h.termWidth, h.termHeight = 80, 24
+			h.relayout()
+			err := session.ReservedTitleRefusal("root")
+			if phase == "before" {
+				err = fmt.Errorf("session title %q is reserved for the daemon-managed root agent; pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)", "root")
+			}
+			h.handleNotice(err)
+			h.showErrorDetails()
+			frame := h.View()
+			t.Log("CAPTURE_SVG=" + base64.StdEncoding.EncodeToString([]byte(recoverySVG(frame, "dark", 80, 24))))
+			t.Log("CAPTURE_ANSI=" + base64.StdEncoding.EncodeToString([]byte(frame)))
+		})
+	}
+}

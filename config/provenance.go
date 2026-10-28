@@ -1,8 +1,6 @@
 package config
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -214,6 +212,43 @@ func resolveReplace(entry ManifestEntry, result ResolvedValue, candidates []sour
 	ref := sourceReference(candidates[winner].document, winnerTrace.KeyPath)
 	result.Winner = &ref
 
+	// The dotted read — `af config get web.terminal_font_size_phone` — needs
+	// per-leaf origins to project one leaf (#5500). Each leaf's source is the
+	// highest-precedence candidate whose document actually configured it,
+	// else the built-in the loader materialized the field from: the
+	// whole-table winner alone cannot answer for a leaf its document never
+	// set, and ResolvedValuePath refuses to project without a real leaf
+	// origin rather than fabricate one. Scoped to web deliberately — it is
+	// the only replace-merged table with fixed settable leaves, and a
+	// subkey walk over every replace-merged key would re-provenance tables
+	// no caller asked about. root_agent's leaves already project through
+	// resolveComposite under MergeTableByField.
+	if entry.Key == "web" {
+		subkeys := settableKeySpecs[entry.Key].subkeys
+		origins := make(map[string]SourceRef, len(subkeys))
+		for leaf := range subkeys {
+			for i := len(candidates) - 1; i >= 0; i-- {
+				candidate := &candidates[i]
+				trace := &result.Candidates[candidate.traceIndex]
+				if !trace.Allowed || !trace.Present {
+					continue
+				}
+				configured, _ := candidate.document.metadata.topLevel(entry.Key)
+				leaves, _, _, _, err := compositeLeaves(candidate.typed, configured, candidate.document.isBuiltIn())
+				if err != nil {
+					return computedValue{}, err
+				}
+				if _, ok := leaves[leaf]; ok {
+					origins[leaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, leaf))
+					break
+				}
+			}
+		}
+		if len(origins) > 0 {
+			result.Origins = origins
+		}
+	}
+
 	for i := range candidates {
 		if i == winner {
 			continue
@@ -237,7 +272,6 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 	leafValues := make(map[string]reflect.Value)
 	origins := make(map[string]SourceRef)
 	materialized := false
-	var themeIdentity *ThemeConfig
 	for i := range candidates {
 		candidate := &candidates[i]
 		trace := &result.Candidates[candidate.traceIndex]
@@ -247,11 +281,6 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 		}
 
 		configured, _ := candidate.document.metadata.topLevel(entry.Key)
-		if entry.Key == "theme" {
-			if theme, ok := reflectedThemeConfig(candidate.typed); ok {
-				themeIdentity = &theme
-			}
-		}
 		leaves, configuredCount, normalizedCount, candidateMaterialized, err := compositeLeaves(
 			candidate.typed, configured, candidate.document.isBuiltIn())
 		if err != nil {
@@ -358,26 +387,7 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 	if len(origins) > 0 {
 		result.Origins = origins
 	}
-	if entry.Key == "theme" && themeIdentity != nil {
-		theme := value.Interface().(ThemeConfig)
-		theme.preset = themeIdentity.preset
-		theme.explicitPreset = themeIdentity.explicitPreset
-		value = reflect.ValueOf(theme)
-	}
 	return computedValue{resolved: result, value: value}, nil
-}
-
-func reflectedThemeConfig(value reflect.Value) (ThemeConfig, bool) {
-	for value.IsValid() && value.Kind() == reflect.Pointer {
-		if value.IsNil() {
-			return ThemeConfig{}, false
-		}
-		value = value.Elem()
-	}
-	if !value.IsValid() || value.Type() != reflect.TypeOf(ThemeConfig{}) {
-		return ThemeConfig{}, false
-	}
-	return value.Interface().(ThemeConfig), true
 }
 
 func setNonParticipantResult(trace *CandidateTrace) {
@@ -482,13 +492,6 @@ func compositeLeaves(value reflect.Value, configured any, builtIn bool) (map[str
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		materialized = true
-	} else if _, namedPreset := configured.(string); namedPreset && value.Kind() == reflect.Struct {
-		// A dual-shape composite such as theme = "zenburn" configures the
-		// complete typed struct produced by its text decoder. Treating the scalar
-		// only as top-level presence would make every expanded field look like an
-		// unconfigured mutation of the inherited snapshot.
-		names = compositeNames(value)
 		materialized = true
 	} else {
 		// JSON null is a present, typed nil table. It contributes no fields but
@@ -628,25 +631,6 @@ func clonedInterface(value reflect.Value) any {
 	return cloneExportedValue(value).Interface()
 }
 
-func jsonEquivalent(left, right any) bool {
-	canonical := func(value any) (any, error) {
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			return nil, err
-		}
-		decoder := json.NewDecoder(bytes.NewReader(encoded))
-		decoder.UseNumber()
-		var decoded any
-		if err := decoder.Decode(&decoded); err != nil {
-			return nil, err
-		}
-		return decoded, nil
-	}
-	leftValue, leftErr := canonical(left)
-	rightValue, rightErr := canonical(right)
-	return leftErr == nil && rightErr == nil && reflect.DeepEqual(leftValue, rightValue)
-}
-
 func leafKeyPath(key, leaf string) string {
 	if isBareConfigPathPart(leaf) {
 		return key + "." + leaf
@@ -675,7 +659,7 @@ func pluralize(word string, count int) string {
 }
 
 // ResolvedValuePath returns either a top-level resolution or a dotted leaf
-// projection such as program_overrides.codex or theme.accent. Only values with
+// projection such as program_overrides.codex or root_agent.program. Only values with
 // a real per-leaf origin can be projected: borrowing a replace-table's winner
 // would fabricate a source for omitted fields materialized as zero values. A
 // leaf is projected from the already-resolved value and origins; it never runs

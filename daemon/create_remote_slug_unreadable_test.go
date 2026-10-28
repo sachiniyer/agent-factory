@@ -121,7 +121,7 @@ func TestRemoteHookSlugRefusesWhenAnotherReposRecordsAreUnreadable(t *testing.T)
 	// CreateSession path acts on: before the fix this returns nil and the create
 	// is ADMITTED.
 	manager.mu.Lock()
-	err = manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", runtimeNamespaceRemoteHook, false, nil)
+	err = manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", runtimeNamespaceRemoteHook, false, nil, false)
 	manager.mu.Unlock()
 	if err == nil {
 		t.Fatalf("remote hook create for %q was ADMITTED while a project record that may hold the same hook name could not be read", newTitle)
@@ -148,7 +148,7 @@ func TestRemoteHookSlugRefusesWhenAnotherReposRecordsAreUnreadable(t *testing.T)
 	// project file must not block ordinary local sessions, whose names are
 	// per-repo and never consult this scan.
 	manager.mu.Lock()
-	err = manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", runtimeNamespaceLocalTmux, false, nil)
+	err = manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", runtimeNamespaceLocalTmux, false, nil, false)
 	manager.mu.Unlock()
 	if err != nil {
 		t.Fatalf("local session titles are per-repo and must stay creatable while another project's record is unreadable: %v", err)

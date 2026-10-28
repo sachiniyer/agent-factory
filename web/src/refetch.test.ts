@@ -1,0 +1,422 @@
+// Coverage for the latest-request fence every refetch in index.ts commits through
+// (#3659, generalizing #2330 and #3654).
+//
+// Two halves, and the second is the one no amount of driving the helper can reach:
+//
+//   - the RULE — an older response commits nothing once a newer request has gone
+//     out, whichever order they settle in, on success and on failure alike. Driven
+//     below per projection, with two overlapping fake responses resolved out of
+//     order, because in-order resolution hides the bug entirely.
+//   - the WIRING — index.ts routes each projection THROUGH the fence rather than
+//     settling a response inline. index.ts cannot be imported here (it builds DOM
+//     nodes and mounts at import time), so that half is asserted against its source.
+//     Without it every rule test below would still pass in a tree where nothing used
+//     the fence at all, which is exactly the tree this issue was filed against.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import type { RegisteredProject } from "./api.js";
+import { createFencedRefetcher, createLatestRequestGate, retryWithBackoff } from "./refetch.js";
+import type { ConfigResponse } from "./types.js";
+
+const srcRoot = dirname(fileURLToPath(import.meta.url));
+
+/** Lets the promise chains inside the refetcher run to completion. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** A projection whose responses are handed back on demand, so a test can land them
+ *  in an order the network chose rather than the order they were issued in. */
+function pendingFetch<T>(): {
+  fetch: (token: string) => Promise<T>;
+  tokens: string[];
+  resolve: (index: number, value: T) => void;
+  reject: (index: number, error: unknown) => void;
+} {
+  const settlers: Array<{ resolve: (value: T) => void; reject: (error: unknown) => void }> = [];
+  const tokens: string[] = [];
+  return {
+    fetch: (token: string) => {
+      tokens.push(token);
+      return new Promise<T>((resolve, reject) => {
+        settlers.push({ resolve, reject });
+      });
+    },
+    tokens,
+    resolve: (index, value) => settlers[index].resolve(value),
+    reject: (index, error) => settlers[index].reject(error),
+  };
+}
+
+function project(root: string): RegisteredProject {
+  return { id: root, checkout_id: root, root, relative_root: root, path_exists: true };
+}
+
+function config(value: string): ConfigResponse {
+  return {
+    path: "/home/u/.af/config.toml",
+    entries: [
+      {
+        key: "default_program",
+        type: "string",
+        default: "claude",
+        purpose: "The agent a new session starts",
+        tier: 1,
+        tier_name: "core",
+        settable: true,
+        value,
+        requires_restart: false,
+      },
+    ],
+  };
+}
+
+// --- the rule, per projection ----------------------------------------------
+
+test("#3659 an older ListProjects response commits nothing once a newer one has landed", async () => {
+  const committed: string[][] = [];
+  const projects = pendingFetch<RegisteredProject[]>();
+  const refetcher = createFencedRefetcher({
+    readToken: () => "tok",
+    fetch: projects.fetch,
+    commit: (value) => {
+      committed.push(value.map((p) => p.root));
+    },
+  });
+
+  // Registering a project fires both triggers by design: the modal refetches
+  // directly, and the projects.changed it causes schedules the debounced resync.
+  refetcher.refresh(); // the direct one — issued first, still reading the OLD registry
+  refetcher.refresh(); // the resync — issued second, and the one that sees the new project
+
+  projects.resolve(1, [project("/repo/one"), project("/repo/two")]);
+  await settle();
+  projects.resolve(0, [project("/repo/one")]);
+  await settle();
+
+  assert.deepEqual(
+    committed,
+    [["/repo/one", "/repo/two"]],
+    "the pre-registration list must not drop the just-registered project back out of the switcher",
+  );
+});
+
+test("#3659 an older GetConfig response commits nothing once a newer one has landed", async () => {
+  const committed: string[] = [];
+  const entries = pendingFetch<ConfigResponse>();
+  const refetcher = createFencedRefetcher({
+    readToken: () => "tok",
+    fetch: entries.fetch,
+    commit: (value) => {
+      committed.push(value.entries[0].value);
+    },
+  });
+
+  // Entering the config view fetches; setting a key refetches. Set one soon after
+  // arriving and the two overlap.
+  refetcher.refresh(); // the view-entry read, carrying the PRE-write value
+  refetcher.refresh(); // the post-write read, carrying what the writer stored
+
+  entries.resolve(1, config("codex"));
+  await settle();
+  entries.resolve(0, config("claude"));
+  await settle();
+
+  assert.deepEqual(committed, ["codex"], "the view-entry read must not redisplay the value the write replaced");
+});
+
+test("#3659 an older response commits nothing even when it FAILS", async () => {
+  const committed: string[] = [];
+  const surfaced: unknown[] = [];
+  const entries = pendingFetch<ConfigResponse>();
+  const refetcher = createFencedRefetcher({
+    readToken: () => "tok",
+    fetch: entries.fetch,
+    commit: (value) => {
+      committed.push(value.entries[0].value);
+    },
+    onError: (error) => {
+      surfaced.push(error);
+    },
+  });
+
+  refetcher.refresh();
+  refetcher.refresh();
+
+  entries.resolve(1, config("codex"));
+  await settle();
+  entries.reject(0, new Error("connection reset"));
+  await settle();
+
+  assert.deepEqual(committed, ["codex"]);
+  assert.deepEqual(surfaced, [], "a stale request's failure must not paint an error over the fresher answer");
+});
+
+test("#3659 the newest response still reports its own failure", async () => {
+  const surfaced: string[] = [];
+  const entries = pendingFetch<ConfigResponse>();
+  const refetcher = createFencedRefetcher({
+    readToken: () => "tok",
+    fetch: entries.fetch,
+    commit: () => {
+      assert.fail("nothing to commit");
+    },
+    onError: (error) => {
+      surfaced.push(String(error));
+    },
+  });
+
+  refetcher.refresh();
+  entries.reject(0, new Error("the read failed"));
+  await settle();
+
+  assert.deepEqual(surfaced, ["Error: the read failed"], "a failure must still reach the tab-error line");
+});
+
+// --- the token half of the fence -------------------------------------------
+
+test("#3659 a response issued under a rotated credential commits nothing", async () => {
+  const committed: string[] = [];
+  const entries = pendingFetch<ConfigResponse>();
+  let token: string | null = "first";
+  const refetcher = createFencedRefetcher({
+    readToken: () => token,
+    fetch: entries.fetch,
+    commit: (value) => {
+      committed.push(value.entries[0].value);
+    },
+  });
+
+  refetcher.refresh();
+  // The newest generation is still this request's; only the token moved. It now
+  // describes a daemon session that is no longer the one on screen.
+  token = "second";
+  entries.resolve(0, config("claude"));
+  await settle();
+
+  assert.deepEqual(committed, [], "the generation alone cannot catch a rotation");
+});
+
+test("#3659 a disconnect drops an in-flight response even under the same credential", async () => {
+  const committed: string[] = [];
+  const tasks = pendingFetch<string[]>();
+  const refetcher = createFencedRefetcher({
+    readToken: () => "",
+    fetch: tasks.fetch,
+    commit: (value) => {
+      committed.push(...value);
+    },
+  });
+
+  refetcher.refresh();
+  // Reconnecting on the tokenless loopback (#1696) moves neither the generation nor
+  // the token, so stopStream's invalidate() is the only thing that can close it.
+  refetcher.invalidate();
+  tasks.resolve(0, ["a task removed while the stream was away"]);
+  await settle();
+
+  assert.deepEqual(committed, []);
+});
+
+test("#3659 no credential issues no request, and the tokenless sentinel is a credential", () => {
+  const disconnected = pendingFetch<string[]>();
+  createFencedRefetcher({
+    readToken: () => null,
+    fetch: disconnected.fetch,
+    commit: () => assert.fail("a disconnected client must not fetch"),
+  }).refresh();
+  assert.deepEqual(disconnected.tokens, []);
+
+  const tokenless = pendingFetch<string[]>();
+  createFencedRefetcher({
+    readToken: () => "",
+    fetch: tokenless.fetch,
+    commit: () => {},
+  }).refresh();
+  assert.deepEqual(tokenless.tokens, [""], '"" is the authorized tokenless credential (#1696), not "no token"');
+});
+
+test("#4888 a hung fetch is aborted on its bound and its late answer commits nothing", async () => {
+  const committed: string[] = [];
+  const surfaced: unknown[] = [];
+  const signals: Array<AbortSignal | undefined> = [];
+  const resolvers: Array<() => void> = [];
+  const refetcher = createFencedRefetcher<string>({
+    readToken: () => "tok",
+    fetch: (_token, signal) => {
+      signals.push(signal);
+      return new Promise<string>((resolve) => {
+        resolvers.push(() => resolve("late"));
+      });
+    },
+    timeoutMs: 5,
+    commit: (value) => committed.push(value),
+    onError: (error) => surfaced.push(error),
+  });
+
+  refetcher.refresh();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(signals[0]?.aborted, true, "the bound must abort a request that never answered");
+
+  resolvers[0]();
+  await settle();
+  assert.deepEqual(committed, [], "an expired request's answer is disowned, not committed");
+  assert.deepEqual(surfaced, [], "the abort itself is an expiry, not a reportable failure");
+
+  // The bound disowns the request; it does not poison the refetcher.
+  refetcher.refresh();
+  resolvers[1]();
+  await settle();
+  assert.deepEqual(committed, ["late"], "the next refresh still commits");
+});
+
+test("request generations reject an older completion for the same token", () => {
+  const gate = createLatestRequestGate();
+  const older = gate.begin();
+  const newer = gate.begin();
+
+  assert.equal(older.isCurrent(), false);
+  assert.equal(newer.isCurrent(), true);
+});
+
+// --- the wiring -------------------------------------------------------------
+
+/** The source of one top-level `function name()… { … }`, closing brace included.
+ *  Top-level declarations close at column 0, which is what makes this reliable
+ *  without parsing TypeScript. The return type is left out of the header on
+ *  purpose: a delegator may return the refetcher's settle promise. */
+function topLevelFunction(source: string, name: string): string {
+  const header = `function ${name}(`;
+  const start = source.indexOf(header);
+  assert.notEqual(start, -1, `index.ts must declare ${name}`);
+  const end = source.indexOf("\n}\n", start);
+  assert.notEqual(end, -1, `${name} must close at column 0`);
+  return source.slice(start, end);
+}
+
+test("#3659 every refetcher in index.ts commits through the fence, not inline", () => {
+  const source = readFileSync(join(srcRoot, "index.ts"), "utf8");
+
+  // Discover every fenced refetcher declared at module scope.  The pattern is
+  // always `const <name> = createFencedRefetcher(` — the helper is only ever
+  // called at the top level, so a simple regex over the whole file is reliable.
+  // Skipping the import line is guaranteed by the word-boundary before `const`.
+  const refetchers: string[] = [];
+  const discovery = /\bconst (\w+) = createFencedRefetcher\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = discovery.exec(source)) !== null) {
+    refetchers.push(m[1]);
+  }
+  assert.ok(refetchers.length > 0, "index.ts must declare at least one fenced refetcher");
+
+  // For each discovered refetcher, find the top-level refresh* function that
+  // delegates through it, and confirm the response path is entirely inside the
+  // fence (no .then / store.set shortcuts).
+  const teardown = topLevelFunction(source, "stopStream");
+
+  for (const refetcher of refetchers) {
+    // Locate the refresh* function whose body calls `<refetcher>.refresh()`. An
+    // awaitable delegator is fine — the fence's promise returns to the caller.
+    const callerMatch = new RegExp(
+      `function (refresh\\w+)\\(\\): (?:void|Promise<void>) \\{[^}]*?\\b${refetcher}\\.refresh\\(\\)`,
+      "s",
+    ).exec(source);
+    assert.ok(callerMatch, `a top-level refresh* function must delegate to ${refetcher}.refresh()`);
+    const refreshFnName = callerMatch[1];
+    const body = topLevelFunction(source, refreshFnName);
+    // The response is settled INSIDE the fence or not at all: a `.then` here would be
+    // a second, unfenced path to the store — which is the whole of #3659.
+    assert.doesNotMatch(body, /\.then\(|store\.set\(/, `${refreshFnName} must not settle a response outside the fence`);
+
+    // And a response outstanding across a stream teardown is disowned: reconnecting
+    // with the same credential moves neither the generation nor the token.
+    assert.match(teardown, new RegExp(`${refetcher}\\.invalidate\\(\\)`), `stopStream must invalidate ${refetcher}`);
+  }
+});
+
+// #5500 — a connect-time config read that fails degrades to the compiled
+// defaults; the bounded background reconcile is what converges the font
+// controller onto the served values. These cover the driver's contract:
+// stopped by a landed read, stopped by a dead session, and bounded by the
+// delay list so a dead daemon is never an endless poller.
+test("#5500 the bounded retry stops at the first landed read", async () => {
+  const slept: number[] = [];
+  let calls = 0;
+  const landed = await retryWithBackoff(
+    async () => ++calls >= 3,
+    () => true,
+    [10, 20, 40, 80],
+    async (ms) => { slept.push(ms); },
+  );
+  assert.equal(landed, true);
+  assert.equal(calls, 3);
+  assert.deepEqual(slept, [10, 20, 40]);
+});
+
+test("#5500 a dead session ends the retry before the next request", async () => {
+  let calls = 0;
+  let alive = true;
+  const landed = await retryWithBackoff(
+    async () => { calls++; alive = false; return false; },
+    () => alive,
+    [10, 20, 40],
+    async () => {},
+  );
+  assert.equal(landed, false);
+  // The second wait observed the dead gate — no further fetch went out.
+  assert.equal(calls, 1);
+});
+
+test("#5500 a read that never lands exhausts its bounded delays", async () => {
+  let calls = 0;
+  const landed = await retryWithBackoff(
+    async () => { calls++; return false; },
+    () => true,
+    [10, 20],
+    async () => {},
+  );
+  assert.equal(landed, false);
+  assert.equal(calls, 2); // exactly one attempt per delay — the bound holds
+});
+
+test("#5500 a failed connect-time config read schedules the bounded reconcile", () => {
+  const source = readFileSync(join(srcRoot, "index.ts"), "utf8");
+  // The bootstrap degrades a failed GetConfig to null — and the null branch
+  // must drive reconcileConfigRead, the only caller of retryWithBackoff for
+  // this projection, rather than leaving the defaults in place.
+  assert.match(source, /getConfig\(candidate\)\.catch\(\(\) => null\)/);
+  assert.match(source, /void reconcileConfigRead\(candidate, attempt\)/);
+  // The reconcile's alive-gate is the same fence the bootstrap commit uses —
+  // a disconnect or token rotation ends the loop before another fetch.
+  const body = topLevelFunction(source, "reconcileConfigRead");
+  assert.match(body, /connectionAttemptMayCommit\(attempt, token, candidate\)/);
+  assert.match(body, /retryWithBackoff\(/);
+  // The loop's retries are silent — a per-retry toast would keep reporting a
+  // failure the loop recovered from. Only a spent budget surfaces, through
+  // one ordinary loud read.
+  assert.match(body, /refresh\(\{ silent: true \}\)/);
+});
+
+// The reconcile's silence lives in the refetcher: a `silent` refresh must not
+// reach onError at all — even under the fence — while an ordinary refresh
+// still reports through it.
+test("a silent refresh reports no error through the fence", async () => {
+  const errors: unknown[] = [];
+  const commits: string[] = [];
+  const refetcher = createFencedRefetcher({
+    readToken: () => "tok",
+    fetch: () => Promise.reject(new Error("down")),
+    commit: () => commits.push("commit"),
+    onError: (e) => errors.push(e),
+  });
+  await refetcher.refresh({ silent: true });
+  assert.equal(errors.length, 0, "the retry-owned read must not toast");
+  await refetcher.refresh();
+  assert.equal(errors.length, 1, "an ordinary read still surfaces its failure");
+  assert.equal(commits.length, 0);
+});

@@ -63,8 +63,8 @@ func TestPreviewTick_PausedWhileAttached(t *testing.T) {
 }
 
 // TestSelectionChanged_SkipsRefreshWhileAttached covers selectionChanged
-// directly. While attached, it must skip refreshPanesCmd and refreshPRInfoCmd
-// — both of which were observed in the #598 trace adding to tmux-server
+// directly. While attached, it must skip refreshPanesCmd
+// — observed in the #598 trace adding to tmux-server
 // contention. The synchronous mutations (mode, menu state) still run so
 // other code paths that happen to call selectionChanged stay consistent.
 func TestSelectionChanged_SkipsRefreshWhileAttached(t *testing.T) {
@@ -80,40 +80,8 @@ func TestSelectionChanged_SkipsRefreshWhileAttached(t *testing.T) {
 	// refreshPanesCmd.
 	assert.Nil(t, cmd,
 		"selectionChanged must return nil while attached: refreshPanesCmd "+
-			"and refreshPRInfoCmd are both gated — neither should be queued "+
+			"is gated — it should not be queued "+
 			"behind the user's detach key (#598)")
-}
-
-// TestTickUpdatePRInfo_PausedWhileAttached: the 60s PR info refresh tick pokes
-// the daemon for the selected instance. While attached that round-trip provides
-// no visible benefit because the sidebar is hidden.
-func TestTickUpdatePRInfo_PausedWhileAttached(t *testing.T) {
-	h := newTestHome(t)
-	inst := instanceWithFakeBackend(t, "a")
-	h.store.AddInstance(inst)
-	h.sidebar.SetSelectedInstance(0)
-
-	// Count requests to prove refreshPRInfoCmd was NOT dispatched.
-	calls := 0
-	restore := SetPRInfoRefresherForTest(func(daemon.RefreshPRInfoRequest) error {
-		calls++
-		return nil
-	})
-	defer restore()
-
-	h.attached.Store(true)
-	_, cmd := h.Update(tickUpdatePRInfoMessage{})
-	require.NotNil(t, cmd, "tick must still re-arm itself")
-
-	// Identity check: the cmd should be the bare re-schedule, not a
-	// tea.Batch that contains refreshPRInfoCmd.
-	gotPtr := reflect.ValueOf(cmd).Pointer()
-	wantPtr := reflect.ValueOf(tickUpdatePRInfoCmd).Pointer()
-	assert.Equal(t, wantPtr, gotPtr,
-		"while attached the handler must return tickUpdatePRInfoCmd, "+
-			"not a tea.Batch that includes refreshPRInfoCmd (#598)")
-	assert.Equal(t, 0, calls,
-		"PR-info refresh must not be requested while attached")
 }
 
 // TestAttachOverlayCallback_ClearsFlagOnDetach exercises the success path
@@ -145,7 +113,7 @@ func TestAttachOverlayCallback_ClearsFlagOnDetach(t *testing.T) {
 
 	require.False(t, h.attached.Load(),
 		"attached flag must clear after <-ch unblocks — otherwise the "+
-			"metadata tick / preview refresh / PR info fetcher stay paused "+
+			"metadata tick / preview refresh stay paused "+
 			"until the next process restart")
 	assertPostDetachRepaintSequence(t, postDetachCmd)
 	// End the watchdog we armed via beginDetachWatchdog so subsequent
@@ -371,9 +339,9 @@ func TestAttachOverlayCallback_AttachSucceedsWhenPauseErrors(t *testing.T) {
 	endDetachWatchdog()
 }
 
-// drainCmd runs cmd (and any nested tea.Cmd it produces via tea.Batch) up
-// to the given deadline and returns the messages it produced. Used by the
-// previewTickMsg pause test to inspect the batch contents.
+// drainCmd runs cmd (and any nested tea.Cmd it produces via tea.Batch, at any
+// depth — a key's action cmd arrives batched with its menu-highlight tick) up
+// to the given deadline and returns the messages it produced.
 func drainCmd(t *testing.T, cmd tea.Cmd, deadline time.Duration) []tea.Msg {
 	t.Helper()
 	if cmd == nil {
@@ -386,31 +354,38 @@ func drainCmd(t *testing.T, cmd tea.Cmd, deadline time.Duration) []tea.Msg {
 	select {
 	case msg := <-done:
 		// tea.Batch returns a msg of type tea.BatchMsg ([]tea.Cmd internally
-		// in bubbletea). We only care about whether any nested cmd
-		// produces a panesRefreshedMsg; recursing one level deep is enough
-		// for our purposes here.
+		// in bubbletea).
 		batch, ok := msg.(tea.BatchMsg)
 		if !ok {
 			return []tea.Msg{msg}
 		}
-		var got []tea.Msg
-		for _, inner := range batch {
-			if inner == nil {
-				continue
-			}
-			innerCh := make(chan tea.Msg, 1)
-			go func(c tea.Cmd) { innerCh <- c() }(inner)
-			select {
-			case innerMsg := <-innerCh:
-				got = append(got, innerMsg)
-			case <-time.After(deadline):
-				// Slow re-schedule sleep — that's the only cmd in the
-				// batch that takes longer than a few µs.
-			}
-		}
-		return got
+		return drainBatch(batch, deadline)
 	case <-time.After(deadline):
 		t.Fatalf("cmd did not return within %v", deadline)
 		return nil
 	}
+}
+
+// drainBatch runs each cmd of a tea.BatchMsg, recursing into nested batches, and
+// collects what they produce. A cmd still running at the deadline — a slow
+// re-schedule sleep or a notice's clear timer — is skipped, not fatal.
+func drainBatch(batch tea.BatchMsg, deadline time.Duration) []tea.Msg {
+	var got []tea.Msg
+	for _, inner := range batch {
+		if inner == nil {
+			continue
+		}
+		innerCh := make(chan tea.Msg, 1)
+		go func(c tea.Cmd) { innerCh <- c() }(inner)
+		select {
+		case innerMsg := <-innerCh:
+			if nested, ok := innerMsg.(tea.BatchMsg); ok {
+				got = append(got, drainBatch(nested, deadline)...)
+				continue
+			}
+			got = append(got, innerMsg)
+		case <-time.After(deadline):
+		}
+	}
+	return got
 }

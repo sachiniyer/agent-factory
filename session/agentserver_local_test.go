@@ -63,7 +63,7 @@ func (b *probeBackend) Launch(_ *Instance, firstTimeSetup bool) error {
 	return nil
 }
 
-func (b *probeBackend) Kill(*Instance) error {
+func (b *probeBackend) Kill(*Instance, bool) error {
 	b.killed = true
 	return nil
 }
@@ -148,7 +148,7 @@ func TestLocalAgentServerLifecycle(t *testing.T) {
 	if b.launchFirst == nil || *b.launchFirst != false {
 		t.Error("Launch must forward firstTimeSetup to Backend.Launch")
 	}
-	if err := as.Kill(); err != nil {
+	if err := as.Kill(false); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	if !b.killed {

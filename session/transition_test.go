@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -75,6 +76,9 @@ func TestTransitionTable_RunEffectsAreTheAgreedTable(t *testing.T) {
 		tkBeginRestore:       runKeep,
 		tkAbortRestoreToLost: runKeep,
 		tkMarkRestoring:      runKeep,
+		// Same edge as tkBeginRestore, entered from a fence the caller already
+		// holds (#3596), so it answers the run question identically.
+		tkBeginRestoreFenced: runKeep,
 		// A handoff continues the same task run; begin/commit/abort only bracket
 		// which agent process owns it.
 		tkBeginHandoff:  runKeep,
@@ -138,6 +142,10 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 		// MarkRestoring: optimistic restore overlay — OpRestoring, liveness KEPT
 		// Archived (unlike BeginRestore which flips to Lost), started untouched.
 		{"MarkRestoring keeps liveness", stateAxes{LiveArchived, OpNone}, false, false, MarkRestoring(), LiveArchived, OpRestoring, false},
+		// BeginRestoreUnderHeldFence is BeginRestore entered from the caller's own
+		// MarkRestoring fence (#3596): same {LiveLost, OpRestoring} target, same
+		// started=true, only the op it is legal FROM differs.
+		{"BeginRestoreUnderHeldFence from a held fence", stateAxes{LiveArchived, OpRestoring}, false, false, BeginRestoreUnderHeldFence(), LiveLost, OpRestoring, true},
 		{"BeginHandoff fences running agent", stateAxes{LiveRunning, OpNone}, true, false, BeginHandoff(), LiveRunning, OpReplacing, true},
 		{"CommitHandoff settles incoming agent", stateAxes{LiveReady, OpReplacing}, true, false, CommitHandoff(), LiveRunning, OpNone, true},
 		{"ParkHandoff settles incoming agent at limit", stateAxes{LiveRunning, OpReplacing}, true, false, ParkHandoff(time.Date(2026, 7, 25, 17, 55, 0, 0, time.UTC)), LiveLimitReached, OpNone, true},
@@ -164,6 +172,28 @@ func TestTransition_ParkHandoffStoresIncomingResetTime(t *testing.T) {
 	got, ok := i.LimitResetAt()
 	require.True(t, ok)
 	require.Equal(t, resetAt, got)
+}
+
+func TestTransition_ParkHandoffAttributesIncomingAccountLimit(t *testing.T) {
+	resetAt := time.Date(2026, 8, 14, 19, 0, 0, 0, time.UTC)
+	i := &Instance{
+		Program: tmux.ProgramCodex, Account: "work",
+		liveness: LiveRunning, inFlightOp: OpReplacing,
+	}
+	require.NoError(t, i.Transition(ParkHandoff(resetAt)))
+
+	account, ok := i.LimitAccount()
+	require.True(t, ok)
+	require.Equal(t, "work", account)
+	want := []AccountLimitObservationData{{
+		Agent: tmux.ProgramCodex, Account: "work", ResetAt: resetAt,
+	}}
+	require.Equal(t, want, i.AccountLimitObservations(),
+		"the handoff fence must publish the incoming identity's quota wall atomically")
+	stored := i.ToInstanceData().ForStorage()
+	require.Equal(t, "work", stored.LimitAccount)
+	require.Equal(t, want, stored.AccountLimitObservations,
+		"killing or restarting the handoff must not lose its account quota evidence")
 }
 
 // I1 (tombstone-before-teardown) is intentionally NOT a chokepoint edge —

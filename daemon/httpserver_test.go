@@ -18,7 +18,6 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/stretchr/testify/assert"
@@ -93,7 +92,9 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 
+	clockBefore := operationClockMilliseconds()
 	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/Snapshot", `{"repo_id":""}`)
+	clockAfter := operationClockMilliseconds()
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	env := decodeEnvelope(t, rec)
@@ -101,56 +102,34 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 	var resp SnapshotResponse
 	dataInto(t, env, &resp)
 	require.Empty(t, resp.Instances)
+	require.Equal(t, m.lifecycle.snapshot().bootID, resp.BootID,
+		"Snapshot must identify the daemon process that owns in-flight requests")
+	require.Equal(t, opLockTimeout.Milliseconds(), resp.OperationLockTimeoutMS,
+		"the browser must receive the daemon's live admission bound")
+	require.GreaterOrEqual(t, resp.OperationClockMS, clockBefore,
+		"the browser must receive a daemon-monotonic admission reading")
+	require.LessOrEqual(t, resp.OperationClockMS, clockAfter,
+		"the projected clock must be sampled during the Snapshot")
 }
 
-// TestHTTP_GetTheme_ReadRoute pins the daemon palette as a first-class API
-// contract instead of leaving the browser to duplicate config defaults.
-func TestHTTP_GetTheme_ReadRoute(t *testing.T) {
+func TestHTTP_RestoreSessionRejectsDifferentDaemonBootIDBeforeAdmission(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	cfg := config.DefaultConfig()
-	custom, ok := config.ThemePreset("zenburn")
-	require.True(t, ok)
-	cfg.Theme = custom
-	m, err := NewManager(cfg)
+	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 
-	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/GetTheme", `{}`)
-	require.Equal(t, http.StatusOK, rec.Code)
+	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/RestoreSession",
+		`{"id":"session","title":"worker","repo_id":"","expected_daemon_boot_id":"previous-daemon"}`)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
 
 	env := decodeEnvelope(t, rec)
-	require.Nil(t, env.Error)
-	var resp GetThemeResponse
-	dataInto(t, env, &resp)
-	assert.Equal(t, "zenburn", resp.Theme.Name)
-	assert.Equal(t, "#3F3F3F", resp.Theme.Background)
-	assert.Equal(t, "#8CD0D3", resp.Theme.Accent)
+	require.NotNil(t, env.Error)
+	require.Contains(t, env.Error.Message, "daemon process changed before restore admission")
 }
 
-// A TUI launch applies the on-disk config to an already-running daemon before it
-// mounts. GetTheme must therefore read the same live generation so a newly loaded
-// browser cannot stay on the daemon's startup palette while that TUI uses the edit.
-func TestHTTP_GetTheme_FollowsAppliedLaunchGeneration(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	startup := config.DefaultConfig()
-	m, err := NewManager(startup)
-	require.NoError(t, err)
-
-	onDisk := config.DefaultConfig()
-	onDisk.Theme.Accent = "#010203"
-	require.NoError(t, config.SaveConfig(onDisk))
-	_, err = config.SetGlobalConfigValue("default_program", "codex")
-	require.NoError(t, err)
-	result, err := m.ApplyConfig()
-	require.NoError(t, err)
-	require.Contains(t, result.Applied, "theme", "the palette projection must be reported as live")
-	require.Equal(t, "#010203", m.Config().Theme.Accent,
-		"anti-vacuous: ApplyConfig must have loaded the hand-edited palette")
-
-	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/GetTheme", `{}`)
-	require.Equal(t, http.StatusOK, rec.Code)
-	var resp GetThemeResponse
-	dataInto(t, decodeEnvelope(t, rec), &resp)
-	assert.Equal(t, onDisk.Theme.Accent, resp.Theme.Accent)
+// The fixed browser palettes retired the last consumer of this renderer RPC.
+func TestHTTP_RetiredThemeRoute(t *testing.T) {
+	rec := doHTTP(&controlServer{}, http.MethodPost, "/v1/GetTheme", `{}`)
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 // TestHTTP_AddTask_MutationRoute covers a create/mutation route: POST /v1/AddTask
@@ -537,10 +516,7 @@ func (w responseWriteError) Write(p []byte) (int, error) {
 // TestWriteHTTPEnvelope_LogsLiveBrokenPipe proves a raw socket error still
 // warns while its request is live: only a canceled request may suppress it.
 func TestWriteHTTPEnvelope_LogsLiveBrokenPipe(t *testing.T) {
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	warnings := captureWarnings(t)
 
 	writeHTTPEnvelope(responseWriteError{ResponseRecorder: httptest.NewRecorder(), err: syscall.EPIPE},
 		httptest.NewRequest(http.MethodGet, "/", nil), http.StatusOK, apiproto.Success("ok"))
@@ -551,10 +527,7 @@ func TestWriteHTTPEnvelope_LogsLiveBrokenPipe(t *testing.T) {
 // TestWriteHTTPEnvelope_SuppressesCanceledBrokenPipe proves the same raw socket
 // error is quiet once the request context confirms the client disconnected.
 func TestWriteHTTPEnvelope_SuppressesCanceledBrokenPipe(t *testing.T) {
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	warnings := captureWarnings(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -565,9 +538,33 @@ func TestWriteHTTPEnvelope_SuppressesCanceledBrokenPipe(t *testing.T) {
 	assert.Empty(t, warnings.String())
 }
 
+// maskSnapshotOperationClock preserves every response byte except the volatile
+// monotonic reading independently sampled by each Snapshot call.
+func maskSnapshotOperationClock(t *testing.T, body string) string {
+	t.Helper()
+	const field = `"operation_clock_ms":`
+	start := strings.Index(body, field)
+	require.NotEqual(t, -1, start, "Snapshot envelope must carry its operation clock")
+	numberStart := start + len(field)
+	for numberStart < len(body) && strings.ContainsRune(" \t\r\n", rune(body[numberStart])) {
+		numberStart++
+	}
+	valueEnd := numberStart
+	if valueEnd < len(body) && body[valueEnd] == '-' {
+		valueEnd++
+	}
+	digitStart := valueEnd
+	for valueEnd < len(body) && body[valueEnd] >= '0' && body[valueEnd] <= '9' {
+		valueEnd++
+	}
+	require.Greater(t, valueEnd, digitStart, "Snapshot operation clock must be numeric")
+	return body[:numberStart] + "<operation-clock>" + body[valueEnd:]
+}
+
 // TestHTTP_SuccessBodyUsesSharedEnvelopeWriter pins that the HTTP success body is
 // produced by the SAME apiproto.WriteEnvelope the CLI's --json path uses, so the
-// two surfaces are byte-for-byte identical and can never drift.
+// two surfaces are byte-for-byte identical apart from independently sampled
+// volatile values and can never otherwise drift.
 func TestHTTP_SuccessBodyUsesSharedEnvelopeWriter(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
@@ -582,7 +579,8 @@ func TestHTTP_SuccessBodyUsesSharedEnvelopeWriter(t *testing.T) {
 	var want bytes.Buffer
 	require.NoError(t, apiproto.WriteEnvelope(&want, apiproto.Success(resp)))
 
-	require.Equal(t, want.String(), rec.Body.String(),
+	require.Equal(t, maskSnapshotOperationClock(t, want.String()),
+		maskSnapshotOperationClock(t, rec.Body.String()),
 		"HTTP body must be the shared envelope writer's bytes (identical to CLI --json)")
 }
 

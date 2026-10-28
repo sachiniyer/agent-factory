@@ -78,12 +78,10 @@ func SendPromptWithStatus(server AgentServer, prompt string) (PromptDeliveryStat
 // moment the operation binds — and never round-trips through an ordinal that a
 // concurrent close/reorder can shift underneath it (#1779).
 //
-// The local runtime implements it (its brokers are already keyed by stable id, so
-// id-addressing is strictly simpler than the ordinal round-trip it replaces). A
-// runtime whose wire protocol is ordinal-shaped — the remote agent-server — does
-// not. Its roster is fixed (TabManagement=false), so the handler's compatibility
-// bridge cannot race a close/reorder; mutable remote tabs must add this id-native
-// plane before that capability is enabled.
+// Every runtime implements it: the local one directly; the remote one natively
+// when the sandbox advertises tab-id-addressing (#5571 W4.3/W4.4), and through a
+// per-operation id→ordinal bridge for an older sandbox whose wire is
+// ordinal-shaped.
 type TabAddressableServer interface {
 	// SubscribeTab is Subscribe addressed by stable tab id. ErrTabGone when the id
 	// names no live tab.
@@ -196,7 +194,11 @@ type AgentServer interface {
 	Resize(tab int, rows, cols uint16) error
 
 	// Kill terminates the session and releases its backing resources.
-	Kill() error
+	//
+	// trustLiveGeneration is a parameter, not a second method name, for the
+	// reason Backend.Kill documents: a second name is a promise Go embedding
+	// does not enforce overriding.
+	Kill(trustLiveGeneration bool) error
 
 	// Archive makes the workspace durable before its sandbox is torn down (#1592
 	// Phase 4 PR6): it commits any uncommitted work and pushes the session branch
@@ -251,6 +253,14 @@ type Observation struct {
 	// agent safety dialog. The runtime reports it on every snapshot until the
 	// model returns to Before, so no consumer has to race a one-shot log line.
 	ModelChange *AgentModelChange
+	// Captured reports whether the pane was actually captured this snapshot.
+	// A live-but-wedged local capture path returns an all-false observation
+	// indistinguishable from an unchanged empty pane; bookkeeping that
+	// accumulates observed-silence evidence must not count it (#5221 review).
+	// A backend that cannot express capture success reports true — its
+	// narrower contract already asserts the observation ran — and a remote
+	// observation resolves the wire field's compat default before here.
+	Captured bool
 }
 
 // PTYSubscription is one subscriber's read side of a session's PTY stream
@@ -326,4 +336,16 @@ type PTYEvent struct {
 	Modes             terminal.Modes
 	HasModes          bool
 	RepaintProvenance PTYRepaintProvenance
+}
+
+// PaneGridServer is the optional grid-capture surface (#5571 W4.2): the pane as
+// one line per row (no -J), with its cursor, modes and measured size — what a
+// local subscriber's repaint is built from. An agent-server that has it lets a
+// remote client paint a fresh subscriber exactly, at any width; one that lacks
+// it leaves the client on the -J-joined Preview content.
+type PaneGridServer interface {
+	PreviewGrid(tab int) (PaneSnapshot, error)
+	// PreviewGridByID is PreviewGrid addressed by stable tab id; a stale id is
+	// ErrTabGone, never an ordinal fallback (#5571 W4.3).
+	PreviewGridByID(tabID string) (PaneSnapshot, error)
 }

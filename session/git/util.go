@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"os/exec"
@@ -124,7 +125,7 @@ func BranchForTitle(branchPrefix, title string) string {
 	return result
 }
 
-// sanitizeWorktreePathSegment turns a display title into one filesystem path
+// worktreePathTitleSegment turns a display title into one filesystem path
 // segment for AF-owned worktree directories. It preserves ordinary title case
 // for readability while removing separators/traversal and replacing whitespace
 // or shell-hostile punctuation with dashes.
@@ -133,15 +134,11 @@ func BranchForTitle(branchPrefix, title string) string {
 // "<repoName>-<segment>", so the segment's NAME_MAX allowance depends on the repo
 // name and is applied by the caller at the join site (resolveWorktreePlacement),
 // where that prefix is known (#2528).
-func sanitizeWorktreePathSegment(title string) string {
+func worktreePathTitleSegment(title string) string {
 	s := reUnsafeWorktreePathSegment.ReplaceAllString(title, "-")
 	s = strings.ReplaceAll(s, "..", "")
 	s = reMultiDash.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-.")
-	if s == "" {
-		return "session"
-	}
-	return s
+	return strings.Trim(s, "-.")
 }
 
 // maxBranchComponentLen bounds a single title-derived git ref component. Linux
@@ -220,8 +217,21 @@ func IsGitInstalled() bool {
 // to surface an actionable startup error) should call EnsureGitInstalled
 // before relying on IsGitRepo.
 func IsGitRepo(path string) bool {
+	return CheckGitRepo(path) == nil
+}
+
+// CheckGitRepo is IsGitRepo with the reason kept. The bool cannot express the
+// difference between "git says no" and "git never answered", so every caller
+// that NARRATES the result collapsed a killed or unstartable probe into a
+// verdict about the user's path (#3504). Callers branch on
+// config.RepoProbeUnanswered to word that honestly; callers that only need a
+// yes/no decision keep IsGitRepo.
+//
+// The probe is the same single rev-parse — no WaitDelay is added here, so the
+// abandoned-read failure mode #3503 covers is not introduced on this path.
+func CheckGitRepo(path string) error {
 	cmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
-	return cmd.Run() == nil
+	return config.ClassifyGitProbeError(context.Background(), cmd.Run())
 }
 
 // EnsureGitInstalled returns an actionable error when the git binary is not on

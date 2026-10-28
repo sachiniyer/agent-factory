@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ func checkSetup(ctx *scanContext, report *Report) {
 	checkAFHome(ctx, report)
 	cfg := checkConfig(ctx, report)
 	checkStateDirs(ctx, report)
+	checkCodexAccounts(ctx.opts.ConfigDir, report)
 	checkLogStorage(report)
 	checkGit(report)
 	checkTmux(report)
@@ -108,7 +110,7 @@ func checkConfig(_ *scanContext, report *Report) *config.Config {
 	if _, statErr := os.Stat(path); statErr != nil {
 		report.addActionableFinding(Finding{
 			Check:  "config",
-			Detail: fmt.Sprintf("config loaded in memory but %s is not materialized on disk — run `%s` or fix AF home permissions: %v", path, shellsuggest.Command("af", "config", "set", "default_program", cfg.DefaultProgram), statErr),
+			Detail: fmt.Sprintf("config loaded in memory but %s is not materialized on disk — run `%s` or fix AF home permissions: %v", path, shellsuggest.PositionalCommand("af", []string{"config", "set"}, "default_program", cfg.DefaultProgram), statErr),
 		})
 		return cfg
 	}
@@ -138,6 +140,16 @@ func checkGit(report *Report) {
 	}
 	out, err := exec.Command(gitPath, "-C", cwd, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
+		// Advice is worse than useless when the probe never answered: "run af
+		// from a repo root" sends a user who is already at one somewhere else
+		// (#3504). Classify through the same rule the resolver uses.
+		if classified := config.ClassifyGitProbeError(context.Background(), err); config.RepoProbeUnanswered(classified) {
+			report.addActionableFinding(Finding{
+				Check:  "git-repo",
+				Detail: fmt.Sprintf("%s — run `af doctor` again; if it persists, check that git runs here: %v", config.RepoProbeUnansweredClaim("the current directory", cwd), err),
+			})
+			return
+		}
 		report.addActionableFinding(Finding{
 			Check:  "git-repo",
 			Detail: fmt.Sprintf("%s is not inside a git repository — run `af` from a repo root or pass --repo where supported", cwd),
@@ -208,7 +220,11 @@ func checkOneProgram(field, agent, command string, report *Report) {
 }
 
 func writableDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// Through the home guard: every caller passes the AF home or a directory
+	// inside it (#3850). `af doctor` is a CLI process and never arms the latch,
+	// so this is an exact os.MkdirAll — but see the note in app/detach_trace.go
+	// on why the routing is unconditional.
+	if err := config.MkdirAllUnderAFHome(dir, 0o755); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(dir, ".af-doctor-*")

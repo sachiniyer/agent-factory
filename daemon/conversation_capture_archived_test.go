@@ -65,7 +65,7 @@ func persistedConversationID(t *testing.T, repoID string) string {
 // front-door half: a session already archived when the async capture lands must
 // not have a conversation id (nor anything else ToInstanceData snapshots) written
 // over the record the archive committed. Archive is inert in BOTH directions
-// (#1809). Mirrors TestSetPRInfo_RejectsAlreadyArchivedSession.
+// (#1809).
 func TestCaptureAgentConversation_RejectsAlreadyArchivedSession(t *testing.T) {
 	manager, inst, repoID, key, snap := captureArchiveTestInstance(t)
 
@@ -84,8 +84,7 @@ func TestCaptureAgentConversation_RejectsAlreadyArchivedSession(t *testing.T) {
 // session's op-lock — the lock ArchiveSession holds while it commits LiveArchived
 // and persists. With no op-lock (the pre-fix behavior) the capture would not park
 // at all: it would interleave INSIDE the archive and write a conversation id over
-// the record the archive just committed. Mirrors
-// TestSetPRInfo_ArchiveWinningOpLockRaceKeepsPRInfo.
+// the record the archive just committed.
 func TestCaptureAgentConversation_ArchiveWinningOpLockRaceKeepsCleanRecord(t *testing.T) {
 	manager, inst, repoID, key, snap := captureArchiveTestInstance(t)
 

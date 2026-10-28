@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -30,7 +29,7 @@ import (
 // bounded either way, which is what the poll needs.
 const sandboxPushTimeout = session.AgentArchiveCallTimeout + 30*time.Second
 
-// forceReapCommandFor renders the per-session escape hatch the refusals below
+// The force-reap suggestion renders the per-session escape hatch the refusals below
 // must name. A guard that blocks without naming its own release is #2917, so
 // every refusal in this file ends with this string.
 //
@@ -58,22 +57,37 @@ func sessionRepoScope(instance *session.Instance) []string {
 	return []string{"--repo", root}
 }
 
-func forceReapCommandFor(instance *session.Instance) []string {
-	// `--` before the title, and the flag before it: shellsuggest quotes an argument
-	// but deliberately leaves option termination to the call site, so a title
-	// beginning with "-" would otherwise be parsed as a flag and the advertised
-	// command would exit "unknown flag" instead of releasing the refusal.
+// forceReapArgvFor is everything before the title: the verb, the resolved scope,
+// and the override flag. The title is passed separately to PositionalCommand,
+// which puts the option terminator between them — a title beginning with "-"
+// would otherwise be parsed as a flag and the advertised command would exit
+// "unknown flag" instead of releasing the refusal (#3432).
+func forceReapArgvFor(instance *session.Instance) []string {
 	args := append([]string{"sessions", "restore"}, sessionRepoScope(instance)...)
-	return append(args, "--force-reap", "--", instance.Title)
+	return append(args, "--force-reap")
 }
 
 func forceReapSuggestionFor(instance *session.Instance) string {
-	return shellsuggest.Command("af", forceReapCommandFor(instance)...)
+	return shellsuggest.PositionalCommand("af", forceReapArgvFor(instance), instance.Title)
 }
 
 func killSuggestionFor(instance *session.Instance) string {
 	args := append([]string{"sessions", "kill"}, sessionRepoScope(instance)...)
-	return shellsuggest.Command("af", append(args, "--", instance.Title)...)
+	return shellsuggest.PositionalCommand("af", args, instance.Title)
+}
+
+// reapRefusalSuggestionFor derives advice from the same guard as --force-reap:
+// the branch must be known, durable, and match this session's identity and current
+// branch. Reuse the guard rather than duplicating its predicate, so new refusal
+// conditions cannot leave the advice advertising a command that immediately fails.
+// The record read is worth doing on this recovery path, which already probes the
+// sandbox. Preserve the guard's diagnostic: missing/unreadable storage needs repair,
+// and a conflicting identity must never lead to a title-only destructive command.
+func reapRefusalSuggestionFor(repoID string, instance *session.Instance) string {
+	if err := requireDurableSandboxBranch(repoID, instance); err != nil {
+		return err.Error()
+	}
+	return forceReapSuggestionFor(instance)
 }
 
 // preserveSandboxBeforeReap runs the push that makes a reachable sandbox's work
@@ -97,44 +111,52 @@ func killSuggestionFor(instance *session.Instance) string {
 // Returns nil when the caller may proceed to reap. A non-nil error means REFUSE:
 // leave the session Lost and recoverable, because the alternative is destroying
 // work that nothing else has a copy of.
-// escapeSuggestion is the command a caller offers when the push refuses. It is a
-// parameter rather than a constant because the escape that works depends on the
+// reapGuidance is the guidance a caller offers when the push refuses: a command
+// or a repair diagnostic. It is a parameter because the escape depends on the
 // door this was reached through: the restore paths can force a reap, and the
 // limit-resume path cannot — RestoreSession refuses a LiveLimitReached session
 // (it is not archived, Lost, or Dead) and ResumeFromLimitRequest has no force
 // option, so --force-reap there is a hatch that always fails.
 //
-// This file already refuses to do that in the empty-branch case, for the same
-// stated reason: an escape hatch that cannot open is the thing this guard exists
-// to avoid. Making the suggestion the caller's to name applies that rule to
-// every door instead of one (Codex on #2967).
-func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *session.Instance, escapeSuggestion string) error {
+// Every refusal before the branch is durably settled preserves this classification.
+// An archive error or empty branch is a fact about the push attempt, not a new
+// verdict about which destructive command is executable. Re-selecting from that
+// narrower symptom can advertise kill despite unreadable storage or identity
+// drift, or replace an executable force-reap with an unnecessarily destructive
+// kill (#4195).
+func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *session.Instance, reapGuidance string) error {
 	branch, err := archiveWithin(instance.AgentServer(), sandboxPushTimeout)
 	if err != nil {
 		// Refuse, exactly as ArchiveSandbox refuses (AbortArchiveToLost) when its
 		// push fails. The session stays Lost and the retry loop keeps trying, which
-		// is what makes this recoverable rather than terminal.
+		// is what makes this recoverable rather than terminal — up to the bounded
+		// give-up budget (#3347): after lostRestoreMaxAttempts persistent push
+		// failures the loop publishes a durable LostRestoreFailure and stops, while
+		// the sandbox stays intact and --force-reap remains the off-ramp. Give-up
+		// ends the forever-retry, not the recoverability.
 		return fmt.Errorf(
 			"refusing to replace the sandbox for %q: its agent is gone but the sandbox still ANSWERS, "+
 				"and the push that would make its unpushed work durable failed (%w). "+
 				"Replacing it now would destroy any commits it holds. "+
-				"It stays recoverable and the daemon keeps retrying; if you know its work is expendable, force it with: %s",
-			instance.Title, err, escapeSuggestion)
+				"It stays recoverable. Recovery guidance: %s",
+			instance.Title, err, reapGuidance)
 	}
 	if branch == "" {
 		// A push that reports no branch leaves recovery with the empty RestoreBranch
 		// that clones the default branch — the reported bug. Refuse rather than
 		// "succeed" onto the wrong branch.
-		// NOT --force-reap here: the forced arm requires a known branch, and an empty
-		// one is precisely what this case has, so that retry would refuse again. An
-		// escape hatch that cannot open is the thing this whole guard is built to
-		// avoid, so name the alternative that actually ends it.
+		//
+		// Do not choose an off-ramp from this response. The session may already have
+		// a durable branch that makes --force-reap executable, or its stored record
+		// may be unreadable or belong to another identity, making a title-only kill
+		// fail or target the wrong session. reapGuidance was classified from those
+		// actual preconditions before the archive attempt, so retain it unchanged.
 		return fmt.Errorf(
-			"refusing to replace the sandbox for %q: its push reported no branch name, so a replacement "+
-				"would clone the repository's default branch and strand whatever the sandbox holds. "+
-				"af cannot recover this session onto its own branch without one. If its work is "+
-				"expendable, remove it and create a replacement: %s",
-			instance.Title, killSuggestionFor(instance))
+			"refusing to replace the sandbox for %q: its push reported no branch name, so af cannot "+
+				"prove what branch that attempt made durable. Replacing it automatically could clone the "+
+				"repository's default branch or return to stale work and strand whatever the sandbox holds. "+
+				"It stays recoverable. Recovery guidance: %s",
+			instance.Title, reapGuidance)
 	}
 	// Record it the INSTANT it is durable, for the reason ArchiveSandbox records it
 	// there: from here the branch is the only handle on the user's work, so it
@@ -155,7 +177,7 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 				"the record is writable",
 			instance.Title, branch, perr)
 	}
-	log.InfoLog.Printf("recovery of %q: pushed its sandbox's work to %s before replacing it", instance.Title, branch)
+	m.info().Printf("recovery of %q: pushed its sandbox's work to %s before replacing it", instance.Title, branch)
 	return nil
 }
 
@@ -195,35 +217,45 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 // So an authorization to DESTROY reads the durable record. Anything less trusts
 // state that the destruction itself is about to make unrecoverable.
 func requireDurableSandboxBranch(repoID string, instance *session.Instance) error {
-	if err := requireKnownSandboxBranch(instance); err != nil {
-		return err
-	}
-	rec, err := findPersistedInstance(repoID, instance.Title)
+	// Check storage and identity before branch state: even an unknown branch
+	// cannot license kill advice when its tombstone cannot be written or its
+	// title now belongs to a different session.
+	rec, err := findPersistedInstance(repoID, instance.Title, instance.ID)
 	if err != nil {
 		return fmt.Errorf(
 			"cannot replace the sandbox for %q: af could not read its stored record to confirm the "+
 				"branch is durable, and replacing it on a branch that exists only in memory risks "+
-				"stranding the work already pushed there: %w",
+				"stranding the work already pushed there. Retry once the stored record is readable: %w",
 			instance.Title, err)
 	}
-	if rec == nil || strings.TrimSpace(rec.Branch) == "" {
+	if rec == nil {
 		return fmt.Errorf(
-			"cannot replace the sandbox for %q: its branch %q is known only in memory — the write that "+
-				"would have recorded it did not land — so a crash after the replacement would leave nothing "+
-				"pointing at the pushed work. Retry once the record is writable; if its work is expendable, "+
-				"remove it and create a replacement: %s",
-			instance.Title, instance.GetBranch(), killSuggestionFor(instance))
+			"cannot replace the sandbox for %q: its stored record is missing, so neither its branch "+
+				"durability nor a kill intent can be recorded safely. Retry once this session's own "+
+				"record is restored; keep the sandbox intact while repairing storage",
+			instance.Title)
 	}
 	// A record under this title is not necessarily a record of THIS session.
 	// Titles are reused — an archived name can be reclaimed — so a stored row
 	// belonging to a different instance says nothing about whether this
 	// sandbox's branch is durable.
-	if rec.ID != "" && instance.ID != "" && rec.ID != instance.ID {
+	if !stableIDMatchesForDaemon(rec.ID, instance.ID) {
 		return fmt.Errorf(
 			"cannot replace the sandbox for %q: the stored record under that title belongs to a "+
-				"different session, so af cannot confirm this sandbox's branch %q was ever recorded. "+
-				"Retry once its own record is written; if its work is expendable, remove it and create "+
-				"a replacement: %s",
+				"different session (stored ID %q, current ID %q), so af cannot confirm this sandbox's "+
+				"branch %q was ever recorded. Retry after reconciling these identities and restoring "+
+				"this session's own record without overwriting the other session",
+			instance.Title, rec.ID, instance.ID, instance.GetBranch())
+	}
+	if err := requireKnownSandboxBranch(instance); err != nil {
+		return err
+	}
+	if strings.TrimSpace(rec.Branch) == "" {
+		return fmt.Errorf(
+			"cannot replace the sandbox for %q: its branch %q is known only in memory — the write that "+
+				"would have recorded it did not land — so a crash after the replacement would leave nothing "+
+				"pointing at the pushed work. Retry once the record is writable; if its work is expendable, "+
+				"remove it and create a replacement: %s",
 			instance.Title, instance.GetBranch(), killSuggestionFor(instance))
 	}
 	// Non-empty is not the question — MATCHING is. A partial archive pushes a new
@@ -244,18 +276,27 @@ func requireDurableSandboxBranch(repoID string, instance *session.Instance) erro
 	return nil
 }
 
-// findPersistedInstance reads one session's record off disk.
-func findPersistedInstance(repoID, title string) (*session.InstanceData, error) {
+// findPersistedInstance uses the same identity matching as persistInstanceData:
+// skip foreign same-title rows before accepting a compatible record. Retain a
+// foreign row only if no compatible row exists, for the identity-drift diagnostic.
+func findPersistedInstance(repoID, title, instanceID string) (*session.InstanceData, error) {
 	data, err := loadRepoInstanceData(repoID)
 	if err != nil {
 		return nil, err
 	}
+	var foreign *session.InstanceData
 	for i := range data {
-		if data[i].Title == title {
+		if data[i].Title != title {
+			continue
+		}
+		if stableIDMatchesForDaemon(data[i].ID, instanceID) {
 			return &data[i], nil
 		}
+		if foreign == nil {
+			foreign = &data[i]
+		}
 	}
-	return nil, nil
+	return foreign, nil
 }
 
 func requireKnownSandboxBranch(instance *session.Instance) error {
@@ -271,18 +312,38 @@ func requireKnownSandboxBranch(instance *session.Instance) error {
 		instance.Title, killSuggestionFor(instance))
 }
 
+// unreachableAge renders the outage's wall-clock span for refusal prose and
+// logs. Negative durations (clock skew between set and read) floor at zero.
+func unreachableAge(u *session.UnreachableData) string {
+	age := time.Since(u.Since)
+	if age < 0 {
+		age = 0
+	}
+	return age.Round(time.Second).String()
+}
+
 // refuseIndeterminateReap is the message for a sandbox whose reachability could
 // not be established at all — a transport failure or a timed-out probe.
 //
 // Unreachable is NOT gone. A replacement here would reap a sandbox that may still
 // be holding hours of unpushed commits, so the decision is to refuse: stranded
 // cloud spend is visible on a bill and fixable afterwards, lost work is neither.
-func refuseIndeterminateReap(instance *session.Instance) error {
+func refuseIndeterminateReap(repoID string, instance *session.Instance) error {
+	// A row already carrying the outage flag earns the named version: the since
+	// and the last transport error are exactly the evidence the operator needs
+	// to decide between "wait" and "discard" (#5571 W1.3).
+	if u := instance.UnreachableSnapshot(); u != nil {
+		return fmt.Errorf(
+			"cannot restore %q: its sandbox has been unreachable for %s (last error: %s), so af cannot tell whether it is gone or merely unreachable, "+
+				"and replacing it would discard anything it has not pushed. "+
+				"It stays recoverable and the daemon keeps retrying. Recovery guidance: %s",
+			instance.Title, unreachableAge(u), u.Error, reapRefusalSuggestionFor(repoID, instance))
+	}
 	return fmt.Errorf(
 		"cannot restore %q: af could not determine whether its sandbox is gone or merely unreachable, "+
 			"and replacing it would discard anything it has not pushed. "+
-			"It stays recoverable and the daemon keeps retrying; if you know the sandbox is gone, force it with: %s",
-		instance.Title, forceReapSuggestionFor(instance))
+			"It stays recoverable and the daemon keeps retrying. Recovery guidance: %s",
+		instance.Title, reapRefusalSuggestionFor(repoID, instance))
 }
 
 // archiveWithin runs the sandbox's push under a hard local deadline, mirroring

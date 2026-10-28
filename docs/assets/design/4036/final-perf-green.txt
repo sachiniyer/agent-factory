@@ -1,0 +1,49 @@
+Running 5 tests using 1 worker
+
+  ✓  1 [demo] › selftest/web-demo.spec.ts:625:1 › web demo · default theme (19.5s)
+  ✓  2 [demo] › selftest/web-demo.spec.ts:635:1 › web demo · dark (14.6s)
+3981 chrome heights {"width":360,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":360,"closed":{"x":2,"y":50,"width":356,"height":760},"opened":{"x":2,"y":50,"width":356,"height":760}}
+3981 terminal alignment {"width":360,"left":2,"right":340,"contentLeft":2,"hostRight":358,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":390,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":390,"closed":{"x":2,"y":50,"width":386,"height":760},"opened":{"x":2,"y":50,"width":386,"height":760}}
+3981 terminal alignment {"width":390,"left":2,"right":373,"contentLeft":2,"hostRight":388,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":430,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":430,"closed":{"x":2,"y":50,"width":426,"height":760},"opened":{"x":2,"y":50,"width":426,"height":760}}
+3981 terminal alignment {"width":430,"left":2,"right":412,"contentLeft":2,"hostRight":428,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":360,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":360,"closed":{"x":2,"y":50,"width":356,"height":760},"opened":{"x":2,"y":50,"width":356,"height":760}}
+3981 terminal alignment {"width":360,"left":2,"right":340,"contentLeft":2,"hostRight":358,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":390,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":390,"closed":{"x":2,"y":50,"width":386,"height":760},"opened":{"x":2,"y":50,"width":386,"height":760}}
+3981 terminal alignment {"width":390,"left":2,"right":373,"contentLeft":2,"hostRight":388,"scrollLeft":0,"paintLeft":2}
+3981 chrome heights {"width":430,"viewport":812,"chrome":48,"keybar":44,"terminal":718}
+3981 drawer geometry {"width":430,"closed":{"x":2,"y":50,"width":426,"height":760},"opened":{"x":2,"y":50,"width":426,"height":760}}
+3981 terminal alignment {"width":430,"left":2,"right":412,"contentLeft":2,"hostRight":428,"scrollLeft":0,"paintLeft":2}
+  ✓  3 [demo] › selftest/web-demo.spec.ts:649:1 › web chrome · both themes (2.3m)
+  ✓  4 [demo] › selftest/web-demo.spec.ts:794:1 › task completion hints follow the selected consequence (1.1s)
+  ✓  5 [demo] › selftest/web-demo.spec.ts:815:1 › task completion catalog failure is visible and preserves the seed (970ms)
+
+  5 passed (2.9m)
+
+Running 1 test using 1 worker
+
+Snapshot row audit run 1: {"initialCohort":996,"currentCohort":996,"currentUniqueIds":996,"sameNodes":true,"writes":0}
+Snapshot row audit run 2: {"initialCohort":996,"currentCohort":996,"currentUniqueIds":996,"sameNodes":true,"writes":0}
+Snapshot row audit run 3: {"initialCohort":996,"currentCohort":996,"currentUniqueIds":996,"sameNodes":true,"writes":0}
+Accepted snapshot rail samples (ms): [ 76.29999923706055, 57.89999961853027, 46.900001525878906 ]
+  ✓  1 [demo] › selftest/web-perf.spec.ts:17:1 › three container measurements at 1000 sessions (31.1s)
+
+  1 passed (33.0s)
+| Metric | Mean | Min–max | SD | Budget |
+| --- | ---: | ---: | ---: | ---: |
+| raw_bytes | 921994.000 | 921994.000–921994.000 | 0.000 | 967961.400 |
+| gzip_bytes | 205115.000 | 205115.000–205115.000 | 0.000 | 215330.850 |
+| first_terminal_ms | 3219.867 | 3201.800–3245.900 | 18.864 | 5740.833 |
+| echo_ms | 307.133 | 287.700–329.300 | 17.093 | 615.100 |
+| rail_ms | 744.433 | 728.400–760.500 | 13.105 | 1452.767 |
+| load_shift | 0.000 | 0.000–0.000 | 0.000 | 0.010 |
+| snapshot_shift | 0.000 | 0.000–0.000 | 0.000 | 0.010 |
+| frame_ms | 83.970 | 70.281–100.871 | 12.693 | 960.011 |
+| key_render_ms | 84.047 | 61.722–104.371 | 17.469 | 701.279 |
+

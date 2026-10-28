@@ -81,7 +81,11 @@ func dumpSlowDetach(label string, start time.Time) {
 		log.WarningLog.Printf("[detach-trace] could not resolve config dir for slow-dump: %v", err)
 		return
 	}
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
+	// Through the home guard: configDir IS the AF home (#3850). The TUI never
+	// arms the latch, so this is an exact os.MkdirAll there; routing it anyway
+	// keeps the property "no bare MkdirAll can land on the home" checkable
+	// rather than argued case by case.
+	if err := config.MkdirAllUnderAFHome(configDir, 0o755); err != nil {
 		log.WarningLog.Printf("[detach-trace] could not mkdir config dir for slow-dump: %v", err)
 		return
 	}

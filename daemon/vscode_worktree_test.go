@@ -35,7 +35,7 @@ func TestVSCodeStartOne_WorktreeValidation(t *testing.T) {
 			t.Fatalf("write file: %v", err)
 		}
 
-		_, err := v.startOne("repo/session", "instance-id", binary, flavorCodeServer, socketPath, file)
+		_, err := v.startOne("repo/session", "instance-id", binary, flavorCodeServer, socketPath, file, "", vscodeChildEnv())
 		if err == nil {
 			t.Fatal("startOne accepted a file as the worktree; want an error")
 		}
@@ -57,7 +57,7 @@ func TestVSCodeStartOne_WorktreeValidation(t *testing.T) {
 	t.Run("missing_cannot_be_accessed", func(t *testing.T) {
 		missing := filepath.Join(t.TempDir(), "does-not-exist")
 
-		_, err := v.startOne("repo/session", "instance-id", binary, flavorCodeServer, socketPath, missing)
+		_, err := v.startOne("repo/session", "instance-id", binary, flavorCodeServer, socketPath, missing, "", vscodeChildEnv())
 		if err == nil {
 			t.Fatal("startOne accepted a missing worktree; want an error")
 		}

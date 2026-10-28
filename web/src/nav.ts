@@ -63,15 +63,10 @@ export interface NavContext {
    *  tab 0, and the 1-9 keys no-op on the already-active tab. */
   activeTab: number;
   /** Whether the selected session supports user tab management (false for remote
-   *  sessions, whose tabs are fixed by hook config). Gates `t`/`w`. */
+   *  sessions, whose roster belongs to the runtime's agent-server). Gates `t`/`w`. */
   /** Whether this session may gain a NEW tab of at least one kind — the daemon's
    *  per-kind answer, not a backend-type guess (#3060). */
   tabManagement: boolean;
-  /** Whether a SHELL tab specifically may be created. The `t` shortcut makes one —
-   *  createSessionTab defaults to "shell" — so it must ask the shell verdict, not
-   *  "any offerable kind". A session allowing vscode but refusing shell would
-   *  otherwise consume the key for a create that is silently rejected (#3060). */
-  shellCreatable: boolean;
   /** Whether the SELECTED tab can be closed. Deliberately separate from
    *  tabManagement: CloseTab has no backend gate at all (it refuses only the agent
    *  tab), so a web tab that already exists on an off-box session is closable even
@@ -216,11 +211,10 @@ export function decideKey(key: string, ctx: NavContext, mods: KeyMods = {}): Nav
       }
       return { kind: "none" };
     }
-    // t creates a new $SHELL tab (no command prompt, like Instance.AddShellTab);
-    // w closes the active non-agent tab. Both need user tab management (remote
-    // sessions' tabs are fixed), and w refuses the agent tab (index 0).
+    // t opens the existing kind picker; w closes the active non-agent tab.
+    // Creation and closure each use their own capability verdict.
     if (key === "t") {
-      return ctx.shellCreatable ? { kind: "newTab" } : { kind: "none" };
+      return ctx.tabManagement ? { kind: "newTab" } : { kind: "none" };
     }
     if (key === "w") {
       return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };

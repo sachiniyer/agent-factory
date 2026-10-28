@@ -27,7 +27,7 @@ func assertInRepoConfigFields(t *testing.T, cfg *InRepoConfig, raw []byte) {
 	require.NotNil(t, cfg)
 	assert.NotEmpty(t, raw)
 	assert.Equal(t, "aider", cfg.DefaultProgram)
-	assert.Equal(t, "/opt/codex --fast", cfg.ProgramOverrides["codex"])
+	assert.Equal(t, "codex --fast", cfg.ProgramOverrides["codex"])
 	assert.Equal(t, []string{"npm install"}, cfg.PostWorktreeCommands)
 	require.NotNil(t, cfg.RemoteHooks)
 	assert.Equal(t, "l", cfg.RemoteHooks.LaunchCmd)
@@ -50,7 +50,7 @@ func TestLoadInRepoConfigFields(t *testing.T) {
 	repoRoot := t.TempDir()
 	writeInRepoConfig(t, repoRoot, `{
 		"default_program": "aider",
-		"program_overrides": {"codex": "/opt/codex --fast"},
+		"program_overrides": {"codex": "codex --fast"},
 		"post_worktree_commands": ["npm install"],
 		"remote_hooks": {"launch_cmd": "l", "list_cmd": "ls", "attach_cmd": "a", "delete_cmd": "d"}
 	}`)
@@ -176,14 +176,9 @@ func TestLoadInRepoConfigRejectsGlobalOnlyKeys(t *testing.T) {
 			assert.Contains(t, err.Error(), "global setting")
 			// The message must name the real global config file under the
 			// active config dir, not a hardcoded ~/.agent-factory path that
-			// AGENT_FACTORY_HOME has relocated (#890). TOML-only keys (the
-			// keymap) point at config.toml; every other key at config.json
-			// (#1141 play-test minor 4).
-			wantFile := ConfigFileName
-			if tomlOnlyGlobalKeys[key] {
-				wantFile = TomlConfigFileName
-			}
-			assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, wantFile)))
+			// AGENT_FACTORY_HOME has relocated (#890). Every global key
+			// belongs in the authoritative TOML file (#4069).
+			assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, TomlConfigFileName)))
 			assert.NotContains(t, err.Error(), "~/.agent-factory/config.json")
 		})
 	}
@@ -453,6 +448,40 @@ func TestSaveInRepoRefusesSymlinkDirSwappedOutsideBeforeWrite(t *testing.T) {
 		_, statErr := os.Stat(filepath.Join(outsideDir, name))
 		assert.True(t, os.IsNotExist(statErr), "nothing must be written outside the repo (%s)", name)
 	}
+}
+
+// TestSaveInRepoRefusesSymlinkedConfigFileOutsideRepo pins the refusing half of
+// the in-repo link rule docs/configuration.md states (#3687). The following
+// half — a link whose target stays inside the repository is resolved, the
+// target rewritten and the link left in place (#1092) — is pinned by
+// TestSaveInRepoPostWorktreeCommandsTOML's "writes through a symlinked
+// config.toml" subtest, and the two are only meaningful together: without this
+// one, "followed" would read as unconditional. Here the target leaves the
+// repository, so the save must refuse naming both ends and touch neither the
+// outside file nor the link, because a file checked into a repository must not
+// be able to aim af's write at a path the clone never chose.
+func TestSaveInRepoRefusesSymlinkedConfigFileOutsideRepo(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.toml")
+	outsideContent := `default_program = "codex"` + "\n"
+	require.NoError(t, os.WriteFile(outside, []byte(outsideContent), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, InRepoConfigDirName), 0755))
+	linkPath := InRepoTomlConfigPath(repoRoot)
+	require.NoError(t, os.Symlink(outside, linkPath))
+
+	err := SaveInRepoPostWorktreeCommands(repoRoot, []string{"echo hi"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside the repository")
+	assert.Contains(t, err.Error(), filepath.Base(outside), "the refusal must name the target it declined, not only the link")
+
+	data, readErr := os.ReadFile(outside)
+	require.NoError(t, readErr)
+	assert.Equal(t, outsideContent, string(data), "the escaping target must be byte-for-byte untouched by the refused save")
+
+	info, lstatErr := os.Lstat(linkPath)
+	require.NoError(t, lstatErr)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink, "a refused save must not replace the link with a regular file either")
 }
 
 func TestSaveInRepoPostWorktreeCommands(t *testing.T) {

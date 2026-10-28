@@ -9,20 +9,45 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	result, err := config.UnsetGlobalConfigValue(req.Key)
+	result, wroteDigest, err := config.UnsetGlobalConfigValueWithDigest(req.Key)
 	if err != nil {
 		return err
 	}
 	resp.Result = result
-	daemonApplied := false
+	// Carry the WHOLE apply outcome to the notice, not just "the apply call returned
+	// nil" (#3397). ApplyConfig succeeding does not mean a network.listen_addr /
+	// network.preview_listen_addr rebind succeeded — a failed one keeps the OLD
+	// listener serving and lands in FailedListenerKeys — and this handler used to
+	// drop that half, so an unset whose rebind failed claimed "Applied" on stdout
+	// while resp.Warnings said the opposite. config.EffectNotice owns that decision
+	// now, so the two set surfaces and the two unset surfaces cannot diverge again.
+	// Same explicit not-reached answer as SetConfigValue for a nil manager — an
+	// unset DaemonApply reports unknown, not no-daemon (#4482).
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if s.manager != nil {
 		if applied, applyErr := s.manager.ApplyConfig(); applyErr == nil {
 			resp.Applied = applied.Applied
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
-			daemonApplied = true
+			outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applied.FailedListenerKeys}
+			// Same race and the same single comparison as SetConfigValue (#4247).
+			// An unset needs no special expected value here: the digest asks
+			// whether the apply loaded the file this unset left behind, which is
+			// the same question for a removed key as for a written one.
+			confirmSavedConfigDigest(&outcome, &resp.Warnings, wroteDigest, applied.Digest)
+		} else {
+			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+applyErr.Error())
+			outcome.DaemonApply = config.DaemonApplyFailed
 		}
 	}
-	resp.RestartNotice = config.EffectNotice(result.Key, daemonApplied)
+	resp.ApplyOutcome = outcome.StatusForKey(result.Key)
+	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
+	// Where the daemon is accepting now, for a listener key (#3722). Same read as
+	// SetConfigValue's, after the apply for the same reason: clearing
+	// network.listen_addr moves the listener back to its default address, and the
+	// caller may have been talking over the one it moved off.
+	if s.manager != nil {
+		resp.ListenerAddr = s.manager.ListenerAddress(result.Key)
+	}
 	return nil
 }

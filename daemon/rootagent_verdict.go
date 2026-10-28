@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -36,6 +38,12 @@ const (
 	// "add a root_agents entry" here would misdirect toward the fail-open
 	// residue instead of the record repair.
 	rootAgentRecordsUnreadable
+	// rootAgentAttributionPending: a re-attribution probe has resolved this
+	// repo as some unresolved project's real identity but not yet delivered
+	// its marker verdict — the project's layers still sit under the derived
+	// ID, so the decision is unknowable for the moment (#3299 review
+	// round 8).
+	rootAgentAttributionPending
 	// rootAgentProjectUnresolved: the repo's registered project is configured
 	// and resolves to enabled, but its recorded root did not resolve to a git
 	// repository at daemon start and no legacy entry exists, so nothing can
@@ -50,6 +58,29 @@ const (
 	// rootAgentPersonalUnreadable: this repo's personal config exists but
 	// could not be loaded at daemon start (#3241).
 	rootAgentPersonalUnreadable
+	// rootAgentLegacyProbeUnanswered: whether a root_agents entry names this
+	// repo could not be established, because a key's repository probe never
+	// answered (#3782 item 4). It is the ONLY reason here that is about the
+	// daemon rather than about the configuration, and it is deliberately not
+	// collapsed into rootAgentNotConfigured: "no root agent is configured for
+	// this repo — add a root_agents entry" is advice a user cannot act on when
+	// the entry is already there, and #3500's rule is that a subprocess that
+	// did not answer establishes nothing about the user's config.
+	//
+	// Unlike every other refusing reason it is TRANSIENT: nothing about the
+	// config has to change, and the next request re-probes.
+	rootAgentLegacyProbeUnanswered
+	// rootAgentProjectRootProbeUnanswered: the repo's registered project is
+	// configured and resolves to enabled, but whether its RECORDED ROOT is a
+	// git repository could not be established at daemon start — the probe
+	// never answered (#3793).
+	//
+	// Deliberately not rootAgentProjectUnresolved. That reason means git
+	// answered, and its remedy says so: "bring that path back". Said because a
+	// subprocess was killed, it is a claim about the user's checkout that
+	// nothing established (#3500), and it sends them to look at a path that
+	// may be perfectly fine.
+	rootAgentProjectRootProbeUnanswered
 )
 
 // rootAgentMaterializeVerdict pairs the reason with what a message needs to
@@ -73,6 +104,36 @@ type rootAgentMaterializeVerdict struct {
 	// remedy that only says "enable it and restart" is incomplete when the
 	// path must also come back before any restart can create the root.
 	rootUnresolved bool
+	// rootIdentityMismatch narrows rootUnresolved: the recorded path RESOLVES,
+	// but the checkout there does not carry the project's registry marker.
+	// "Bring the path back" is an impossible remedy there — the path is
+	// present; the fix is a rebind plus a daemon restart (#3299 review
+	// round 4).
+	rootIdentityMismatch bool
+	// rootMarkerUnreadable narrows rootUnresolved the other way: the recorded
+	// path resolves but the marker could not be READ — identity unknowable.
+	// Neither "bring the path back" nor a rebind applies; the readability
+	// problem is the remedy (#3299 review round 5).
+	rootMarkerUnreadable bool
+	// rootPathVanished narrows rootMarkerUnreadable: the recorded path itself
+	// disappeared mid-verification — the remedy is the path, not marker
+	// readability (#3299 review round 12).
+	rootPathVanished bool
+	// rootProbeUnanswered narrows rootUnresolved at its own boundary: the
+	// recorded root's RESOLUTION never answered, so neither "the path does not
+	// resolve" nor any remedy about the path may be stated (#3793). It rides
+	// alongside rootAgentDisabled too, for the same reason the other three
+	// narrowing flags do — a disable whose path clause claims a gone checkout
+	// is still making the claim.
+	rootProbeUnanswered bool
+	// createRefusedAt stamps the create-boundary identity refusal this verdict
+	// was derived from (#3714), and is zero for every snapshot-derived one.
+	// The three narrowing flags above carry the CAUSE either way — the same
+	// three outcomes, the same rendered clauses — and this is what lets the
+	// message add the one thing the snapshot-derived wording cannot say: that
+	// the daemon is trying and being refused right now, rather than reporting
+	// something established once at daemon start.
+	createRefusedAt time.Time
 }
 
 // rootAgentMaterializeVerdictFor is the single authority for "will the ensure
@@ -84,24 +145,81 @@ type rootAgentMaterializeVerdict struct {
 // legacy lookup below, whose result could not change the answer; then
 // candidacy; then the layered resolution the ensure sweeps share.
 func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMaterializeVerdict {
+	// The pending gate is sampled BEFORE the snapshot load (#3299 review
+	// round 11): the healer publishes the moved layers and only then retires
+	// the probe, so a gate observed open here guarantees the Load below sees
+	// the post-transition snapshot — sampled the other way around, a verdict
+	// could pass the gate yet resolve against layers still keyed by the
+	// derived ID.
+	if m.rootAttributionPendingFor(repoID) {
+		return rootAgentMaterializeVerdict{reason: rootAgentAttributionPending, rootUnresolved: true}
+	}
+	// One Load for the whole verdict, so the flags, the candidacy sets, and the
+	// resolution are read from a single consistent snapshot value. Loaded
+	// before the deletion check because deletion state may be keyed by the
+	// derived recorded-path ID a re-attributed repo used to carry — the
+	// snapshot's reattributedFrom alias bridges the two (#3299 review round 4).
+	layers := m.rootAgentLayers.Load()
 	m.mu.Lock()
-	_, deleted := m.deletedRootRepos[repoID]
+	// Exactly the sweep's rule, from the one function that owns it — a verdict
+	// that disagreed with the sweep about whether a project was deleted would
+	// explain a root that is running, or fail to explain one that is not.
+	deleted := m.rootDeletionTombstoneApplies(layers, repoID)
 	m.mu.Unlock()
 	if deleted {
 		return rootAgentMaterializeVerdict{reason: rootAgentProjectDeleted}
 	}
-	// One Load for the whole verdict, so the flags, the candidacy sets, and the
-	// resolution are read from a single consistent snapshot value.
-	layers := m.rootAgentLayers.Load()
 	if layers.registryUnreadable {
 		return rootAgentMaterializeVerdict{reason: rootAgentRegistryUnreadable}
 	}
 	if projectID, unreadable := layers.personalUnreadable[repoID]; unreadable {
-		return rootAgentMaterializeVerdict{reason: rootAgentPersonalUnreadable, projectID: projectID}
+		// Mirror decisionUnknown (#3299 review round 14): a PROVEN mismatch
+		// means the unreadable config's claimant is disproven at this path,
+		// so the occupant's verdict must not send users to repair a dead
+		// project's file.
+		if record, ok := layers.unresolvedRoots[repoID]; !ok || !record.identityMismatch {
+			return rootAgentMaterializeVerdict{reason: rootAgentPersonalUnreadable, projectID: projectID}
+		}
 	}
-	legacy := m.legacyRootAgentForRepo(repoID)
+	// A direct unresolved record whose marker is unreadable (or whose path
+	// vanished mid-verification) makes the decision unknowable for BOTH
+	// same-ID and bridged shapes — decisionUnknown fails the sweeps closed —
+	// and the verdict names that cause directly rather than falling through
+	// to a resolution that would misreport it as an ordinary disable (#3299
+	// review round 15).
+	if record, ok := layers.unresolvedRoots[repoID]; ok && record.markerUnreadable {
+		// rootProbeUnanswered is deliberately NOT carried: reaching here means
+		// a probe answered about the path and failed on the MARKER, so the
+		// boot-time absence of an answer is superseded (#3793).
+		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, rootUnresolved: true, rootMarkerUnreadable: true, rootPathVanished: record.pathVanished, projectID: record.projectID}
+	}
+	legacy, legacyErr := m.legacyRootAgentForRepo(repoID)
+	if legacyErr != nil {
+		// UNKNOWN, and it may not become "not configured". nil from this
+		// lookup renders as "add a root_agents entry", which is advice a user
+		// cannot act on when the entry is already there and a probe simply did
+		// not answer (#3264's misreport, reached through a deadline).
+		return rootAgentMaterializeVerdict{reason: rootAgentLegacyProbeUnanswered}
+	}
 	_, isProject := layers.projectRoots[repoID]
-	_, isUnresolved := layers.unresolvedRoots[repoID]
+	unresolved, isUnresolved := layers.unresolvedRoots[repoID]
+	if legacy == nil && isUnresolved && unresolved.root != "" {
+		// A root_agents key is a PATH, and LegacyRootAgentForRepo falls back to
+		// hashing one it cannot resolve — which is no longer this project's
+		// identity now that an unresolved record is addressed by the identity
+		// it RECORDED (#3530). Master matched here by accident, because it
+		// addressed such a project BY that hash. Without this a project whose
+		// opt-in sits in root_agents the whole time resolves to "disabled"
+		// instead of "enabled, but its recorded path did not resolve" — the
+		// misreport #3264 exists to prevent.
+		recorded, recordedErr := m.legacyRootAgentForRecordedRoot(unresolved.root)
+		if recordedErr != nil {
+			// The LAST place an entry could be found, so an unknown here is an
+			// unknown for the whole verdict.
+			return rootAgentMaterializeVerdict{reason: rootAgentLegacyProbeUnanswered}
+		}
+		legacy = recorded
+	}
 	if legacy == nil && !isProject && !isUnresolved {
 		if len(layers.recordFailureIDs) > 0 {
 			return rootAgentMaterializeVerdict{reason: rootAgentRecordsUnreadable, unreadableRecords: layers.recordFailureIDs}
@@ -110,16 +228,80 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	}
 	resolution := layers.resolve(repoID, legacy)
 	if !resolution.Enabled {
-		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved}
+		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable, rootPathVanished: unresolved.pathVanished, rootProbeUnanswered: unresolved.rootProbeUnanswered, projectID: unresolved.projectID}
 	}
 	if legacy == nil && !isProject {
 		// Enabled on paper, but the recorded root did not resolve at daemon
 		// start and no legacy entry's per-tick retry covers the repo: nothing
 		// can create this root until a daemon start where the path resolves.
-		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, enabledSource: resolution.EnabledSource, rootUnresolved: true}
+		reason := rootAgentProjectUnresolved
+		if unresolved.rootProbeUnanswered && !unresolved.identityMismatch && !unresolved.markerUnreadable {
+			// …unless nobody established that. Guarded on the stronger flags
+			// as well as its own: established evidence outranks an absence of
+			// it, and a record can carry both if a later probe answered.
+			reason = rootAgentProjectRootProbeUnanswered
+		}
+		return rootAgentMaterializeVerdict{reason: reason, enabledSource: resolution.EnabledSource, rootUnresolved: true, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable, rootPathVanished: unresolved.pathVanished, rootProbeUnanswered: unresolved.rootProbeUnanswered, projectID: unresolved.projectID}
+	}
+	// Policy allows it and the snapshot's binding is healthy — and until #3714
+	// that was the whole answer, so a repo whose every create was refused at
+	// the identity boundary read as will-materialize and sent
+	// deliverToReemergingRoot to wait out targetDeliverWait for a root that was
+	// never coming. The record is consulted LAST on purpose: it can only turn a
+	// would-be will-materialize into a refusal, so no verdict that already had
+	// a cause changes, and every consumer that treats an unresolved root as
+	// "still the project's" (DeleteProject's live-session preflight) keeps the
+	// answer it had.
+	if refusal, ok := m.rootCreateRefusalFor(repoID, layers.projectRoots[repoID]); ok {
+		return rootAgentCreateRefusalVerdict(refusal, resolution.EnabledSource)
 	}
 	return rootAgentMaterializeVerdict{reason: rootAgentWillMaterialize}
 }
+
+// rootAgentCreateRefusalVerdict renders a standing create-boundary refusal as a
+// verdict, mapping its outcome class onto the narrowing flag that already
+// carries that cause. rootUnresolved stays FALSE throughout: the recorded root
+// resolved — that is why a create was attempted at all — and the flag means the
+// opposite (it did not resolve at daemon start). Only the rootAgentDisabled
+// clause reads it, and a disable outranks this verdict anyway.
+func rootAgentCreateRefusalVerdict(refusal rootCreateRefusal, enabledSource config.RootAgentSource) rootAgentMaterializeVerdict {
+	verdict := rootAgentMaterializeVerdict{
+		reason:          rootAgentProjectUnresolved,
+		projectID:       refusal.binding.projectID,
+		enabledSource:   enabledSource,
+		createRefusedAt: refusal.at,
+	}
+	switch refusal.class {
+	case rootCreateRefusalMismatch:
+		verdict.rootIdentityMismatch = true
+	case rootCreateRefusalRootGone:
+		// The gone clause is worded for a path that vanished while its identity
+		// was being verified, which is exactly what happened here — the create
+		// boundary IS that verification.
+		verdict.rootPathVanished = true
+	default:
+		// rootCreateRefusalMarkerUnreadable — and the fail-safe reading of a
+		// class that reached here unset, because this is the one clause that
+		// prescribes NO rebind. A wrong guess in the other direction would tell
+		// a user to rebind over a checkout that may be the original.
+		verdict.rootMarkerUnreadable = true
+	}
+	return verdict
+}
+
+// legacyRootAgentForRecordedRoot is config's shared recorded-root lookup, which
+// states the rule and its two limits; the daemon reads it from its start-of-day
+// config exactly as every other legacy lookup here does.
+func (m *Manager) legacyRootAgentForRecordedRoot(root string) (*config.RootAgentConfig, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), rootRepoProbeBudget)
+	defer cancel()
+	entry, _, err := legacyRootAgentForRecordedRootContext(ctx, m.cfg, root)
+	return entry, err
+}
+
+// legacyRootAgentForRecordedRootContext is the recorded-root half of the same
+// seam. A package var for the same reason; production assigns it once.
+var legacyRootAgentForRecordedRootContext = config.LegacyRootAgentForRecordedRootContext
 
 // rootAgentUnavailableDetail renders a refusing verdict as the clause a
 // consumer appends to its message: what stops the root, and what fixes it.
@@ -139,14 +321,32 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 		return "no root agent is configured for this repo — add a root_agents entry or a registered project's [root_agent], then restart the daemon"
 	case rootAgentRecordsUnreadable:
 		return fmt.Sprintf("no readable root-agent config covers this repo, and %d project registry record(s) (%s) cannot be read — one of them may be this repo's; repair or remove those record directories, then restart the daemon", len(v.unreadableRecords), strings.Join(v.unreadableRecords, ", "))
+	case rootAgentAttributionPending:
+		return "identity verification for its recorded project root is in progress — the daemon is confirming the checkout's registry marker on its ensure cadence; retry shortly"
 	case rootAgentProjectUnresolved:
-		return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the recorded project root does not currently resolve to a git repository; bring the path back and restart the daemon (all root-agent config, including any root_agents entry you add, loads at daemon start — an entry present at start then retries the path every tick)", v.enabledSource)
+		// The cause clause is shared verbatim with the snapshot-derived shapes;
+		// only the refusal clause distinguishes a live create-boundary refusal
+		// (#3714), which is empty for every other caller.
+		return rootProjectUnresolvedDetail(v) + rootCreateRefusalClause(v.createRefusedAt)
 	case rootAgentDisabled:
 		// A disable on a project whose recorded root is also unresolvable needs
 		// both remedies: enabling alone leaves a root the restarted daemon
 		// still cannot create (#3304 review).
 		pathClause := ""
-		if v.rootUnresolved {
+		switch {
+		case v.rootPathVanished:
+			pathClause = " — and its recorded project root vanished while its identity was being verified, so bring that path back before the restart too"
+		case v.rootMarkerUnreadable:
+			pathClause = " — and the checkout marker at its recorded project root cannot be read or holds an invalid id, so repair that marker before the restart too"
+		case v.rootIdentityMismatch:
+			pathClause = fmt.Sprintf(" — and the checkout at its recorded project root does not carry the project's registry marker (a different clone may occupy the path), so run `af projects rebind %s <path>` before the restart too if that checkout replaces the original", v.projectID)
+		case v.rootProbeUnanswered:
+			// Immediately before the generic clause it replaces, and after
+			// every ESTABLISHED cause above: this is the state in which
+			// nothing about the path was established, so it may not say the
+			// path is gone — but any real evidence outranks it (#3793).
+			pathClause = " — and whether its recorded project root is a git repository could not be established (git never answered the probe), so that path may need attention before the restart too; the daemon re-checks it on its ensure cadence"
+		case v.rootUnresolved:
 			pathClause = " — and its recorded project root does not currently resolve to a git repository, so bring that path back before the restart too"
 		}
 		if v.enabledSource == config.RootAgentSourceBuiltIn || v.enabledSource == "" {
@@ -162,6 +362,10 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 			registry = dir
 		}
 		return fmt.Sprintf("the project registry %s could not be listed at daemon start, so af fails every root agent closed rather than start one a personal config may disable; repair the registry — the daemon re-checks it on its ensure cadence", registry)
+	case rootAgentProjectRootProbeUnanswered:
+		return "could not establish whether its recorded project root is a git repository: git never answered the probe (the subprocess was killed, could not be started, or was abandoned mid-read), so af says nothing about that path rather than send you to repair one that may be fine; the daemon re-checks the recorded path on its ensure cadence"
+	case rootAgentLegacyProbeUnanswered:
+		return "could not establish whether a legacy root agent is configured for this repository: git never answered the probe (the subprocess was killed, could not be started, or was abandoned mid-read), so af refuses rather than report a repo whose root_agents entry it could not read as unconfigured; retry — the next request re-probes"
 	case rootAgentPersonalUnreadable:
 		path := "its personal project config"
 		if v.projectID != "" {
@@ -172,4 +376,30 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 		return fmt.Sprintf("its personal config %s cannot be loaded (read, parsed, or validated), so af fails closed rather than ignore a disable it cannot read; repair or remove it — the daemon re-checks it on its ensure cadence", path)
 	}
 	return ""
+}
+
+// rootProjectUnresolvedDetail is the cause half of a rootAgentProjectUnresolved
+// message: the three narrowing flags prescribe three different remedies, and a
+// verdict reaching it from the boot snapshot and one reaching it from a
+// create-boundary refusal (#3714) must read identically, so this is the one
+// place either is worded.
+func rootProjectUnresolvedDetail(v rootAgentMaterializeVerdict) string {
+	if v.rootPathVanished {
+		// Source-agnostic on purpose: an unknowable identity blocks the
+		// root whatever layer enables it.
+		return "its recorded project root vanished while its identity was being verified; bring the path back — the daemon re-checks and re-verifies it on its ensure cadence"
+	}
+	if v.rootMarkerUnreadable {
+		// Identity is unknowable, not disproven: no rebind advice — a
+		// transiently unreadable ORIGINAL checkout rebound over would be
+		// data loss.
+		return "the checkout marker at its recorded project root cannot be read or holds an invalid id (permissions, I/O, or corruption), so the checkout's identity cannot be verified and no root agent will start for this repo; repair the marker — the daemon re-checks it on its ensure cadence"
+	}
+	if v.rootIdentityMismatch {
+		// The path is PRESENT — "bring it back" is an impossible remedy.
+		// What blocks the root is identity: the checkout there does not
+		// carry the project's registry marker.
+		return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the checkout at the recorded project root does not carry the project's registry marker — a different clone may occupy the path; run `af projects rebind %s <path>` if that checkout replaces the original, then restart the daemon", v.enabledSource, v.projectID)
+	}
+	return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the recorded project root does not currently resolve to a git repository; bring the path back — the daemon re-checks it on its ensure cadence and resumes the project without a restart", v.enabledSource)
 }

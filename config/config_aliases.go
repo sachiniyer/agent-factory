@@ -26,10 +26,12 @@ var configKeyAliases = []configKeyAlias{
 	{canonical: "ssh.host_key_verification", legacy: "ssh_host_key_verification", section: "ssh", leaf: "host_key_verification"},
 	{canonical: "docker.mount_agent_credentials", legacy: "docker_mount_agent_credentials", section: "docker", leaf: "mount_agent_credentials"},
 	{canonical: "sandbox.ssh", legacy: "sandbox_ssh", section: "sandbox", leaf: "ssh"},
+	{canonical: "sandbox.binary", legacy: "sandbox_binary", section: "sandbox", leaf: "binary"},
 	{canonical: "network.listen_addr", legacy: "listen_addr", section: "network", leaf: "listen_addr"},
 	{canonical: "network.preview_listen_addr", legacy: "preview_listen_addr", section: "network", leaf: "preview_listen_addr"},
 	{canonical: "network.require_token", legacy: "require_token", section: "network", leaf: "require_token"},
 	{canonical: "network.require_loopback_token", legacy: "require_loopback_token", section: "network", leaf: "require_loopback_token"},
+	{canonical: "network.allow_unauthenticated_network", legacy: "allow_unauthenticated_network", section: "network", leaf: "allow_unauthenticated_network"},
 	{canonical: "network.cors_allowed_origins", legacy: "cors_allowed_origins", section: "network", leaf: "cors_allowed_origins"},
 }
 
@@ -44,14 +46,16 @@ type globalSettingsTables struct {
 		MountAgentCredentials bool `toml:"mount_agent_credentials"`
 	} `toml:"docker"`
 	Sandbox struct {
-		SSH string `toml:"ssh"`
+		SSH    string `toml:"ssh"`
+		Binary string `toml:"binary"`
 	} `toml:"sandbox"`
 	Network struct {
-		ListenAddr           string   `toml:"listen_addr"`
-		PreviewListenAddr    string   `toml:"preview_listen_addr"`
-		RequireToken         bool     `toml:"require_token"`
-		RequireLoopbackToken bool     `toml:"require_loopback_token"`
-		CORSAllowedOrigins   []string `toml:"cors_allowed_origins"`
+		ListenAddr                  string   `toml:"listen_addr"`
+		PreviewListenAddr           string   `toml:"preview_listen_addr"`
+		RequireToken                bool     `toml:"require_token"`
+		RequireLoopbackToken        bool     `toml:"require_loopback_token"`
+		AllowUnauthenticatedNetwork bool     `toml:"allow_unauthenticated_network"`
+		CORSAllowedOrigins          []string `toml:"cors_allowed_origins"`
 	} `toml:"network"`
 }
 
@@ -161,6 +165,19 @@ func marshalGlobalConfigTOML(cfg *Config, legacyShape map[string]any) ([]byte, e
 		_, marshaledFlat := marshaled.shape[alias.legacy]
 		_, sourceFlat := legacyShape[alias.legacy]
 		_, sourceGrouped := aliasGroupedValue(legacyShape, alias)
+		// Deliberately UNGUARDED, unlike the identical-looking calls in
+		// configset.go and migrate.go, which first test tomlRootDottedTable
+		// because a [section] header cannot re-open a table a root dotted key
+		// already opened. That hazard cannot reach here: `content` is
+		// marshalConfigTOML's canonical output, never the user's file, and the
+		// Config struct spells these fields flat (`toml:"listen_addr"`), so the
+		// document this edits contains no `network.x = ...` root dotted key for
+		// a header to collide with. Verified by probe on 2026-09-10 (#4159):
+		// marshalConfigTOML emits zero root-dotted alias-section keys.
+		//
+		// If a grouped/dotted spelling is ever added to the struct tags, or if
+		// this loop is repointed at file bytes, add the tomlRootDottedTable
+		// guard the other two call sites use.
 		if marshaledFlat || sourceFlat || sourceGrouped {
 			content = setTOMLScalar(content, alias.section, alias.leaf, encoded)
 		}
@@ -175,8 +192,19 @@ func marshalGlobalConfigTOML(cfg *Config, legacyShape map[string]any) ([]byte, e
 
 var configAliasWarnings sync.Map
 
+// warnLegacyConfigAliases names the deprecated flat spellings present in shape.
+// Every remedy clause comes from the shared deprecation table (deprecations.go),
+// so the warning can never point at a command that would not do what it says
+// (#3624).
 func warnLegacyConfigAliases(shape map[string]any, prettyPath string, format ConfigFormat) {
-	for _, alias := range configKeyAliases {
+	for _, deprecation := range configDeprecations() {
+		alias := deprecation.alias
+		if alias == nil {
+			// root_agents has its own warning, with its own presence test (an
+			// empty map is not a configured legacy entry). warnLegacyRootAgents
+			// reads the same table for its remedy.
+			continue
+		}
 		if _, present := shape[alias.legacy]; !present {
 			continue
 		}
@@ -185,14 +213,19 @@ func warnLegacyConfigAliases(shape map[string]any, prettyPath string, format Con
 			continue
 		}
 		if format == FormatJSON {
-			log.WarningLog.Printf("config %s: JSON config key %q remains supported; %q is TOML-only; retain the flat JSON spelling until the file is converted to %s", prettyPath, alias.legacy, alias.canonical, TomlConfigFileName)
+			// The flat key is the PERMANENT JSON spelling, not a deprecated one,
+			// so the remedy here is the format conversion rather than a rewrite.
+			// `af config migrate` performs that conversion on its way in, which
+			// is why it is still the verb to name.
+			log.WarningLog.Printf("config %s: JSON config key %q remains supported; %q is TOML-only; retain the flat JSON spelling until the file is converted to %s; run `af config migrate` to convert it now", prettyPath, alias.legacy, alias.canonical, TomlConfigFileName)
 			continue
 		}
-		if _, grouped := aliasGroupedValue(shape, alias); grouped {
-			log.WarningLog.Printf("config %s: deprecated config key %q; use %q; both are present, so the grouped value won", prettyPath, alias.legacy, alias.canonical)
+		_, grouped := aliasGroupedValue(shape, *alias)
+		if grouped {
+			log.WarningLog.Printf("config %s: deprecated config key %q; use %q; both are present, so the grouped value won; %s", prettyPath, alias.legacy, alias.canonical, deprecation.tomlRemedy(true))
 			continue
 		}
-		log.WarningLog.Printf("config %s: deprecated config key %q; use %q; the flat alias remains supported", prettyPath, alias.legacy, alias.canonical)
+		log.WarningLog.Printf("config %s: deprecated config key %q; use %q; the flat alias remains supported; %s", prettyPath, alias.legacy, alias.canonical, deprecation.tomlRemedy(false))
 	}
 }
 
@@ -226,3 +259,6 @@ func globalOnlyGroupedAliasInShape(shape map[string]any) (string, bool) {
 	}
 	return "", false
 }
+
+// marshalConfigTOML encodes the canonical config before grouped aliases are applied.
+func marshalConfigTOML(cfg *Config) ([]byte, error) { return toml.Marshal(cfg) }

@@ -222,3 +222,76 @@ func TestCommandQuotesEveryPiece(t *testing.T) {
 		t.Errorf("Command over-quoted safe pieces: %s", got)
 	}
 }
+
+// #3432: quoting an argument does not stop the COMMAND parsing it as a flag.
+// PositionalCommand is where that knowledge lives, so these pin its contract.
+func TestPositionalCommandTerminatesOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		argv        []string
+		positionals []string
+		want        string
+	}{
+		{
+			// The reported failure: a title beginning with "-" is valid, and the
+			// suggestion for it exited "unknown shorthand flag" without the terminator.
+			name:        "dash-leading value",
+			argv:        []string{"sessions", "kill"},
+			positionals: []string{"-worker"},
+			want:        "af sessions kill -- -worker",
+		},
+		{
+			name:        "value needing quotes",
+			argv:        []string{"sessions", "kill"},
+			positionals: []string{"my session; echo hi"},
+			want:        "af sessions kill -- 'my session; echo hi'",
+		},
+		{
+			// A safe value still reads cleanly: the terminator is the only addition.
+			name:        "safe value",
+			argv:        []string{"sessions", "restore"},
+			positionals: []string{"captain"},
+			want:        "af sessions restore -- captain",
+		},
+		{
+			// Flags belong BEFORE the terminator, which is the shape the force-reap
+			// suggestion needs.
+			name:        "flags before the terminator",
+			argv:        []string{"sessions", "restore", "--repo", "/src", "--force-reap"},
+			positionals: []string{"-w"},
+			want:        "af sessions restore --repo /src --force-reap -- -w",
+		},
+		{
+			// Nothing to terminate: a bare trailing "--" advertises nothing and invites
+			// a reader to paste it as a value.
+			name: "no positionals",
+			argv: []string{"daemon", "restart"},
+			want: "af daemon restart",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PositionalCommand("af", tc.argv, tc.positionals...); got != tc.want {
+				t.Fatalf("PositionalCommand = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The callers build argv with append (daemon/sandbox_preserve.go appends its
+// repo-scope flags), so appending the terminator in place would write through a
+// backing array the caller still owns.
+func TestPositionalCommandDoesNotMutateCallerArgv(t *testing.T) {
+	backing := make([]string, 0, 8)
+	backing = append(backing, "sessions", "kill")
+	sibling := append(backing, "SENTINEL")
+
+	if got := PositionalCommand("af", backing, "title"); got != "af sessions kill -- title" {
+		t.Fatalf("PositionalCommand = %q", got)
+	}
+	if sibling[2] != "SENTINEL" {
+		t.Fatalf("caller's slice was written through: %q", sibling)
+	}
+	if len(backing) != 2 {
+		t.Fatalf("caller's argv grew: %q", backing)
+	}
+}

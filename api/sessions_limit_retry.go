@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -10,38 +11,76 @@ import (
 // resumeFromLimitViaDaemon is the same daemon action the TUI's `c` key and the
 // web's Retry button call. Keeping the CLI seam at the request boundary makes
 // the daemon the sole owner of respawn, prompt delivery, and liveness changes.
-var resumeFromLimitViaDaemon = daemon.ResumeFromLimit
+var resumeFromLimitViaDaemon = routedResumeFromLimit
+
+// confirmHandoffDeliveryViaDaemon is the --delivered half (#4429): the
+// operator's attestation that the pending mission already landed, retiring the
+// obligation without a resend. A separate seam — not a field on the resume
+// request — so a pre-verb daemon refuses loudly instead of resending.
+var confirmHandoffDeliveryViaDaemon = routedConfirmHandoffDelivery
+
+var sessionsRetryLimitDelivered bool
 
 var sessionsRetryLimitCmd = &cobra.Command{
 	Use:   "retry-limit <title>",
-	Short: "Retry a session blocked at a usage limit",
-	Long: `Retry a session that is parked at a provider usage-limit wall.
+	Short: "Retry a usage-limit resume or inspected handoff",
+	Long: `Retry a session parked at a provider usage-limit wall, or explicitly retry
+a handoff whose mission delivery could not be confirmed.
 
 The daemon runs the same recovery action as the TUI's c key and the web's Retry
 button: it re-spawns an exited agent when necessary, re-delivers the pending
 prompt (or "continue" for an interactive session with no stored prompt), and
 clears the limit state after delivery succeeds.
 
-The command fails if the session is not currently blocked on a usage limit.
-Use 'af sessions list' to find sessions carrying the [limit] badge.
+Before retrying an unconfirmed handoff, inspect its pane: the first submission
+may already have landed, and this command is the operator's explicit decision to
+send the pending mission again. When the pane shows the incoming agent ALREADY
+acting on its mission, use --delivered instead: it retires the pending
+obligation and clears the leftover operation/startup flags WITHOUT sending the
+mission a second time.
+
+The command fails when neither recovery obligation exists. Use 'af sessions
+list' to find sessions carrying the [limit] badge; the TUI and web expose
+Retry handoff and Mark delivered for an unconfirmed handoff.
 
 Example:
-  af sessions retry-limit fix-auth`,
+  af sessions retry-limit fix-auth
+  af sessions retry-limit fix-auth --delivered`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
 
 		title := args[0]
-		if err := resumeFromLimitViaDaemon(daemon.ResumeFromLimitRequest{Title: title, RepoID: repoID}); err != nil {
+		if sessionsRetryLimitDelivered {
+			err = confirmHandoffDeliveryViaDaemon(daemon.ConfirmHandoffDeliveryRequest{Title: title, RepoID: repoID})
+		} else {
+			err = resumeFromLimitViaDaemon(daemon.ResumeFromLimitRequest{Title: title, RepoID: repoID})
+		}
+		warning := ""
+		if err != nil && apiclient.IsMutationCommitted(err) {
+			warning = err.Error()
+		} else if err != nil {
 			return jsonError(err)
 		}
 
-		return jsonOut(map[string]any{"ok": true, "title": title})
+		output := map[string]any{"ok": true, "title": title}
+		if sessionsRetryLimitDelivered {
+			output["delivered"] = true
+		}
+		if warning != "" {
+			output["warning"] = warning
+		}
+		return jsonOut(output)
 	},
+}
+
+func init() {
+	sessionsRetryLimitCmd.Flags().BoolVar(&sessionsRetryLimitDelivered, "delivered", false,
+		"Mark the pending handoff mission as delivered and retire it WITHOUT resending — use after inspecting the pane and confirming the incoming agent already received it")
 }

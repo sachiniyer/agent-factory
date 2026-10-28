@@ -75,7 +75,7 @@ func TestTaskMutations_LegacyEnablePersistsResolvedRepoBinding(t *testing.T) {
 	require.NoError(t, os.Symlink(otherRepoPath, bound))
 	otherRepo, err := config.RepoFromPath(otherRepoPath)
 	require.NoError(t, err)
-	otherTasks, err := task.LoadTasksForRepoID(otherRepo.ID)
+	otherTasks, _, err := task.LoadTasksForRepoIDWithBindingUpdates(otherRepo.ID)
 	require.NoError(t, err)
 	assert.Empty(t, otherTasks, "a later path rebind must not move the updated task to another project")
 }
@@ -209,7 +209,7 @@ func TestTaskArming_RefusedWatchTaskKeepsDurableQueue(t *testing.T) {
 
 	scheduler := newTaskScheduler()
 	scheduler.controlMu.Lock()
-	refused, reloadErr := reloadTaskAutomation(manager, scheduler, watchers)
+	refused, reloadErr := reloadTaskAutomation(manager, scheduler, watchers, everyWatchTask())
 	scheduler.controlMu.Unlock()
 	require.NoError(t, reloadErr)
 	require.NotEmpty(t, refused, "unsafe task must be refused instead of armed")

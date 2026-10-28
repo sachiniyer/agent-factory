@@ -1,11 +1,9 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	stdlog "log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,10 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -100,7 +99,7 @@ func TestRestoreLostSessions_RecoversLostInstance(t *testing.T) {
 	// require the state to be gone the instant the spawn returned — which is exactly
 	// the #1910 bug, since a spawn returning proves nothing about whether the runtime
 	// survives. Nor does elapsed time (#1917 round 6): only an observation does.
-	observeAlive(manager, repoID, inst)
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, hasState := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
@@ -155,9 +154,9 @@ func TestRestoreSession_RecoversLostInstanceOnDemand(t *testing.T) {
 			"backoff history (#1976)", st.consecutiveFailures)
 	}
 
-	// A poll then ANSWERS: the runtime is confirmed alive, and only now is the
-	// episode forgotten.
-	observeAlive(manager, repoID, inst)
+	// Polls then ANSWER, enough of them to be sustained: the runtime is confirmed
+	// alive, and only now is the episode forgotten.
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, hasState := manager.lostRestoreStates[key]
@@ -183,6 +182,42 @@ func TestRestoreSession_RecoversDeadInstanceOnDemand(t *testing.T) {
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running after manual restore", got)
 	}
+}
+
+func TestRestoreSession_DeadSnapshotYieldsToConcurrentSelfHeal(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "dead-healed", backend, true, session.Ready)
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveDead)))
+
+	snapshotTaken := make(chan struct{})
+	continueRestore := make(chan struct{})
+	previousHook := afterRestoreLivenessSnapshot
+	afterRestoreLivenessSnapshot = func() {
+		close(snapshotTaken)
+		<-continueRestore
+	}
+	t.Cleanup(func() {
+		afterRestoreLivenessSnapshot = previousHook
+	})
+
+	restoreDone := make(chan error, 1)
+	go func() {
+		_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "dead-healed", RepoID: repoID})
+		restoreDone <- err
+	}()
+
+	<-snapshotTaken
+	_, pollEpoch := inst.InFlightOpAndEpoch()
+	selfHealErr := inst.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(pollEpoch))
+	close(continueRestore)
+	require.NoError(t, selfHealErr, "the poll's self-heal must land after restore's stale Dead snapshot")
+
+	err := <-restoreDone
+	require.ErrorContains(t, err, "changed state before restore could start")
+	require.Zero(t, backend.recoverCalls(), "manual restore must not recover a session the poll found running")
+	require.Equal(t, session.LiveRunning, inst.GetLiveness(), "the stale Dead snapshot must not overwrite the self-heal")
+	require.Equal(t, session.OpNone, inst.GetInFlightOp(), "a refused restore must not raise a fence")
 }
 
 // TestRestoreLostSessions_GivesUpAtAttemptBudget pins the terminal half of the
@@ -350,15 +385,17 @@ func (failPtyFactory) Start(*exec.Cmd) (*os.File, error) {
 	return nil, errors.New("tmux spawn should not be reached when worktree is missing")
 }
 
-func (failPtyFactory) Close() {}
-
 // TestRestoreLostSessions_LogsVanishedWorktreeOnce covers the #1303
 // instrumentation: when a live registered Lost session points at a worktree
 // directory that disappeared and the branch is also gone, the daemon emits one
 // high-visibility ERROR with the diagnostic context and does not repeat it on
 // the next retry.
 func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	// This Manager's own error log (#3797). The assertion below COUNTS, which a
+	// shared sink breaks in both directions: another Manager's diagnostic reads
+	// as a broken once-only guard, and a once-only guard that genuinely stopped
+	// working can be masked by which Manager emitted what.
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	zeroRestoreBackoff(t)
 
 	worktreePath := filepath.Join(testguard.CanonicalTempDir(t), "repo-vanished")
@@ -405,10 +442,7 @@ func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
 	manager.instances[daemonInstanceKey(repoID, "vanished")] = inst
 	manager.mu.Unlock()
 
-	var buf bytes.Buffer
-	prevError := aflog.ErrorLog
-	aflog.ErrorLog = stdlog.New(&buf, "ERROR: ", 0)
-	t.Cleanup(func() { aflog.ErrorLog = prevError })
+	buf := ownLogs.errors
 
 	manager.RestoreLostSessions()
 	manager.RestoreLostSessions()
@@ -535,7 +569,7 @@ func (b *raceBackend) Recover(inst *session.Instance) error {
 	return nil
 }
 
-func (b *raceBackend) Kill(inst *session.Instance) error {
+func (b *raceBackend) Kill(inst *session.Instance, trustLiveGeneration bool) error {
 	b.mu.Lock()
 	b.kills++
 	b.mu.Unlock()
@@ -546,7 +580,7 @@ func (b *raceBackend) Kill(inst *session.Instance) error {
 	if b.killBlock != nil {
 		<-b.killBlock
 	}
-	return b.readyFakeBackend.Kill(inst)
+	return b.readyFakeBackend.Kill(inst, trustLiveGeneration)
 }
 
 func (b *raceBackend) counts() (kills, recovers int) {

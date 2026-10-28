@@ -68,6 +68,14 @@ type ProvisionSpec struct {
 	// Program is the agent program to run in the workspace (empty ⇒ the config
 	// default). Passed through to the sandbox's `af agent-server --program`.
 	Program string
+	// Host is the listed host the session was placed on (W6.3); empty means the
+	// repo's own ssh settings, or the default_host where the runtime allows it.
+	Host string
+	// WorkspaceRoot is the absolute directory on the target under which the
+	// per-session dir is created (a listed host's workspace_root, #5742). Empty
+	// means the default, "$HOME/.af-sessions". Only the ssh runtime sets it, from
+	// the host it resolved — never from the repo.
+	WorkspaceRoot string
 	// CallbackURL and CallbackToken let the agent INSIDE a sandbox call back into
 	// the daemon (#2999) — the reverse of the daemon-drives-sandbox direction. They
 	// are AF_DAEMON_URL / AF_DAEMON_TOKEN, which apiclient already reads, so no new
@@ -75,14 +83,32 @@ type ProvisionSpec struct {
 	//
 	// The token is per-session, scoped and revocable — never the operator's, which
 	// grants DeliverPrompt over every agent on the machine. The scope it currently
-	// carries is deliberately one route (SuggestSessionName): it does not include
-	// creating a session, which would start an agent on the host with a
+	// carries is deliberately read-only and self-scoped: the daemon admits only
+	// /v1/Snapshot (see sandboxConstrainedRoutes), answering with the caller's own
+	// session. It does not include creating a session, which would start an agent on the host with a
 	// caller-supplied program, nor the repo/path reads, whose caller-supplied paths
 	// are a host oracle (#3012 review). See HTTPRoute.sandboxAllowed for the rule
 	// and what widening it waits on. Empty means no callback was granted, which is
 	// the normal case for a local session and also what a refusal leaves behind.
 	CallbackURL   string
 	CallbackToken string
+	// CallbackSocket is the daemon-host unix socket the supervised connection's
+	// -R forward terminates on (#5571 W3.4): CallbackURL names a loopback port on
+	// the SANDBOX, and ssh carries that port to this socket. It is af's own
+	// dedicated sandbox-only endpoint, chosen by the daemon at mint — never a
+	// value from repo config or the sandbox. Empty means the credential has no
+	// carrier and the provisioner opens no -R.
+	CallbackSocket string
+	// CallbackRevalidate re-checks the minted credential's posture INSIDE
+	// provisioning, at the last step that can still keep a dead credential out
+	// of the launched agent-server's environment — after the clone/binary
+	// window (where a listener move or auth change lands) and before the
+	// callback env is committed to the host. Once that file is written the
+	// server's own process env is fixed, so a post-launch revalidation could
+	// only mark the daemon-side record while the agent kept being taught af
+	// verbs that all fail (#5571 W3.1, PR #5577 review). Set by
+	// mintForProvision next to the pair it validates; nil means nothing to check.
+	CallbackRevalidate func() error
 	// CloneURL is the git remote an off-box runtime clones the workspace from —
 	// the repo's `origin` for a real repo, or a file:// / bind-mounted path for a
 	// self-contained test. Empty for the in-process local runtime. On a fresh
@@ -97,6 +123,29 @@ type ProvisionSpec struct {
 	// Only off-box runtimes (docker/ssh/hook) honor it; the in-process local
 	// runtime never clones, so it is a no-op there.
 	RestoreBranch string
+	// GitUserName and GitUserEmail are the operator's committer identity on the
+	// daemon host, written into the off-box workspace's repo-local git config
+	// (#5571 W2.7). Empty falls back to a placeholder identity.
+	GitUserName  string
+	GitUserEmail string
+	// Branch is the git branch the daemon named for this session (its frozen
+	// branch_prefix over the title). Off-box runtimes hand it to the
+	// agent-server so the in-sandbox worktree uses exactly this name instead of
+	// re-deriving it from the host's own config, and the instance records it at
+	// create (#5571 W2.4). Empty leaves the agent-server to derive it.
+	Branch string
+	// AgentPolicy is the daemon-resolved operator policy (config.AgentPolicy as
+	// JSON) the runtime writes beside the session for the agent-server to read
+	// instead of its own host's config (#5571 W2.5). Empty means none.
+	AgentPolicy []byte
+	// SeedBundlePath, when set, seeds the sandbox workspace from a local git
+	// bundle (a W7.9 session move) instead of only a fresh clone: after cloning,
+	// the bundle is streamed to the sandbox and SeedRefs are fetched from it as
+	// local refs, so the session's branch and snapshot commit arrive exactly as
+	// they were. Off-box runtimes honour it; local never clones.
+	SeedBundlePath string
+	// SeedRefs are the refs fetched from SeedBundlePath (each as ref:ref).
+	SeedRefs []string
 	// Account scopes this session to a registered credential account (#3082), for
 	// the off-box kinds that can carry one. Zero value means unscoped.
 	//
@@ -106,6 +155,12 @@ type ProvisionSpec struct {
 	// container's `af` would look up an account that does not exist in it — so an
 	// off-box backend has to carry the resolved DIRECTORY and place it itself.
 	Account sessionenv.Account
+	// AccountSyncHost is the name of the LISTED host (global host list, W6.1) this
+	// provision may send Account's credentials to (#5571 W7.3). It is the only
+	// licence: set by the ssh runtime when the host resolved to a host-list entry,
+	// never from a repository's own config. Empty with a non-empty Account means
+	// the target is not licensed and the provision refuses rather than send.
+	AccountSyncHost string
 	// SessionEnvPassthrough contains exact global-only variable names approved
 	// for the agent. Sandboxed runtimes pass names, never values, to their
 	// version-matched agent-server.
@@ -134,6 +189,18 @@ type ProvisionResult struct {
 	// serialized by the runtime; docker/SSH latch answered outcomes and leave
 	// unknown outcomes retryable, while hook runs its idempotent delete once.
 	Teardown func() error
+	// Branch is the branch name the daemon passed the runtime (ProvisionSpec.Branch),
+	// recorded on the new Instance so surfaces show it from the first frame.
+	Branch string
+
+	// CallbackUnavailable carries the reason no callback credential was
+	// delivered to this sandbox (#5571 W3.1): the mint refused, or the grant
+	// died while provisioning. A non-empty value means the runtime deliberately
+	// still provisioned — a callback-less session is more useful than none —
+	// but the reason must reach the instance's durable record so every surface
+	// can render it rather than leaving the agent to discover af silently
+	// fails. Empty when a credential was delivered (or the kind injects none).
+	CallbackUnavailable string
 }
 
 // Runtime is the provision-and-expose seam (#1592 Phase 4 PR3): given a session
@@ -293,9 +360,9 @@ func ResolveRuntime(kind BackendKind) (Runtime, error) {
 }
 
 // localRuntime is the default in-process runtime: a git worktree + tmux agent on
-// the daemon's own box. Its Provision is exactly what defaultBackendFactory
-// returned for a non-remote session before Phase 4 — a bare LocalBackend, no
-// endpoint — so the local session contract stays unchanged.
+// the daemon's own box. Its Provision is a bare LocalBackend with no remote
+// endpoint — exactly what the pre-Phase-4 default factory returned for a
+// non-remote session, so the local session contract stays unchanged.
 type localRuntime struct{}
 
 func (localRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {

@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 )
 
 const vscodeStartGateExt = ".start"
@@ -36,7 +38,7 @@ func vscodeStartGatePath(socketPath string) string {
 func newGatedVSCodeCommand(binary string, args []string, gatePath string) *exec.Cmd {
 	gateArgs := []string{"-c", vscodeStartGateScript, "af-vscode-start", gatePath, binary}
 	gateArgs = append(gateArgs, args...)
-	return newDaemonChildCommand("/bin/sh", gateArgs...)
+	return systemdunit.NewBoundChildCommand("/bin/sh", gateArgs...)
 }
 
 func releaseVSCodeStartGate(path string) error {

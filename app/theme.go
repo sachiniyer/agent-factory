@@ -3,21 +3,17 @@ package app
 import (
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/ui"
 )
 
-func applyTheme(cfg config.ThemeConfig) {
-	ui.ApplyTheme(cfg)
+func applyTheme() {
+	ui.ApplyTheme()
 	t := ui.CurrentTheme()
-	hooksOverlayStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Accent).
-		Padding(1, 2)
+	hooksOverlayStyle = ui.DialogStyle()
 	splitDividerStyle = lipgloss.NewStyle().
-		Foreground(t.BackgroundSubtle)
-	titleStyle = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(t.Accent)
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Info)
-	keyStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	descStyle = lipgloss.NewStyle().Foreground(t.Foreground)
+		Foreground(t.Border)
+	titleStyle = ui.DialogTitleStyle()
+	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	keyStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+	descStyle = lipgloss.NewStyle().Foreground(t.Ink)
 }

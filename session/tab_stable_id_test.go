@@ -65,7 +65,7 @@ func TestTabIndexByID_ResolvesAfterClose(t *testing.T) {
 	requireIndex(t, inst, c.ID, 3)
 
 	// Close the middle tab a (ordinal 1); b and c shift down by one.
-	require.NoError(t, inst.CloseTab(1))
+	require.NoError(t, inst.CloseTabByID(a.ID))
 
 	// b and c still resolve to the tab the user grabbed, now at their NEW ordinals.
 	requireIndex(t, inst, b.ID, 1)
@@ -146,7 +146,7 @@ func TestEnsureBrokerFollowsTabAcrossClose(t *testing.T) {
 	defer log.Close()
 
 	inst, _ := raceMockInstance(t, "af_stable_broker", func() {})
-	_, err := inst.AddProcessTab("a", "a")
+	a, err := inst.AddProcessTab("a", "a")
 	require.NoError(t, err)
 	b, err := inst.AddProcessTab("b", "b")
 	require.NoError(t, err)
@@ -164,7 +164,7 @@ func TestEnsureBrokerFollowsTabAcrossClose(t *testing.T) {
 	assert.Equal(t, 1, nBrokers)
 
 	// Close the middle tab a (ordinal 1); b shifts to ordinal 1.
-	require.NoError(t, inst.CloseTab(1))
+	require.NoError(t, inst.CloseTabByID(a.ID))
 	requireIndex(t, inst, b.ID, 1)
 
 	// Ensuring a broker for b's NEW ordinal returns the SAME broker — it followed the
@@ -189,22 +189,26 @@ func TestTabTmuxByID_ResolvesTargetAtomically(t *testing.T) {
 	defer log.Close()
 
 	inst, _ := raceMockInstance(t, "af_stable_tmuxbyid", func() {})
-	_, err := inst.AddProcessTab("a", "a")
+	a, err := inst.AddProcessTab("a", "a")
 	require.NoError(t, err)
 	b, err := inst.AddProcessTab("b", "b")
 	require.NoError(t, err)
 
 	// b sits at ordinal 2; its id resolves to the tmux backing b.
-	tsBefore, ok := inst.TabTmuxByID(b.ID)
+	inst.mu.RLock()
+	tsBefore, ok := inst.tabTmuxByIDLocked(b.ID)
+	inst.mu.RUnlock()
 	require.True(t, ok, "a live tab's id must resolve to its tmux")
 	require.NotNil(t, tsBefore)
 
 	// Close the middle tab a; b shifts down to ordinal 1.
-	require.NoError(t, inst.CloseTab(1))
+	require.NoError(t, inst.CloseTabByID(a.ID))
 	requireIndex(t, inst, b.ID, 1)
 
 	// b's id STILL resolves to b's own tmux — it followed the tab, not the ordinal.
-	tsAfter, ok := inst.TabTmuxByID(b.ID)
+	inst.mu.RLock()
+	tsAfter, ok := inst.tabTmuxByIDLocked(b.ID)
+	inst.mu.RUnlock()
 	require.True(t, ok)
 	assert.Same(t, tsBefore, tsAfter, "a tab id must resolve to the same tmux across an ordinal shift")
 }
@@ -224,13 +228,21 @@ func TestTabTmuxByID_RefusesStaleAndEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	// Close a (ordinal 1). Tab b shifts into the ordinal a used to hold.
-	require.NoError(t, inst.CloseTab(1))
+	require.NoError(t, inst.CloseTabByID(a.ID))
 
-	_, ok := inst.TabTmuxByID(a.ID)
+	inst.mu.RLock()
+	_, ok := inst.tabTmuxByIDLocked(a.ID)
+	inst.mu.RUnlock()
 	assert.False(t, ok, "a closed tab's id must resolve to no tmux, not to the tab that took its ordinal")
-	_, ok = inst.TabTmuxByID("nonexistent-id")
+
+	inst.mu.RLock()
+	_, ok = inst.tabTmuxByIDLocked("nonexistent-id")
+	inst.mu.RUnlock()
 	assert.False(t, ok, "an unknown id must resolve to no tmux")
-	_, ok = inst.TabTmuxByID("")
+
+	inst.mu.RLock()
+	_, ok = inst.tabTmuxByIDLocked("")
+	inst.mu.RUnlock()
 	assert.False(t, ok, "an empty id must resolve to no tmux")
 }
 
@@ -243,17 +255,36 @@ func TestTabTmuxByID_NotStartedIsNotGone(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
+	inst, _ := raceMockInstance(t, "af_stable_tmuxnotstarted", func() {})
+	b, err := inst.AddProcessTab("b", "b")
+	require.NoError(t, err)
+
+	inst.SetStartedForTest(false)
+
+	inst.mu.RLock()
+	ts, exists := inst.tabTmuxByIDLocked(b.ID)
+	inst.mu.RUnlock()
+	assert.True(t, exists, "a real tab on a not-started instance EXISTS — it is not gone")
+	assert.Nil(t, ts, "a not-started instance has no live tmux to stream")
+}
+
+// TestSubscribeTab_NotStartedIsNotGone pins the not-started distinction the
+// id-native data plane's refusal must NOT over-reach into: a tab on a
+// not-yet-started instance is real — it simply has no live PTY yet. SubscribeTab
+// must therefore error on it without reporting ErrTabGone, so the data plane
+// answers "nothing to stream" rather than 404-ing the client off a tab that is
+// about to come up (#1779).
+func TestSubscribeTab_NotStartedIsNotGone(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
 	inst, _ := raceMockInstance(t, "af_stable_notstarted", func() {})
 	b, err := inst.AddProcessTab("b", "b")
 	require.NoError(t, err)
 
 	inst.SetStartedForTest(false)
 
-	ts, exists := inst.TabTmuxByID(b.ID)
-	assert.True(t, exists, "a real tab on a not-started instance EXISTS — it is not gone")
-	assert.Nil(t, ts, "a not-started instance has no live tmux to stream")
-
-	// And the data plane must not call it gone.
+	// The data plane must not call a not-started tab gone.
 	las := inst.AgentServer().(*localAgentServer)
 	_, err = las.SubscribeTab(b.ID, 0)
 	require.Error(t, err)
@@ -278,7 +309,7 @@ func TestSubscribeTab_RefusesStaleID(t *testing.T) {
 	las := inst.AgentServer().(*localAgentServer)
 
 	// Close a (ordinal 1); b shifts down into ordinal 1.
-	require.NoError(t, inst.CloseTab(1))
+	require.NoError(t, inst.CloseTabByID(a.ID))
 	requireIndex(t, inst, b.ID, 1)
 
 	// Subscribing by the CLOSED tab's id is refused as gone...
@@ -318,7 +349,7 @@ func TestInputResizeTab_RefuseStaleID(t *testing.T) {
 	require.NoError(t, err)
 
 	las := inst.AgentServer().(*localAgentServer)
-	require.NoError(t, inst.CloseTab(1)) // close a; b takes ordinal 1
+	require.NoError(t, inst.CloseTabByID(a.ID)) // close a; b takes ordinal 1
 
 	assert.ErrorIs(t, las.InputTab(a.ID, []byte("rm -rf /\n")), ErrTabGone,
 		"input to a closed tab's id must be refused, not typed into the tab at its old ordinal")
@@ -357,7 +388,7 @@ func TestTabTargetByID_ResolvesByIdentityAfterClose(t *testing.T) {
 	inst, bID := webTabRaceInstance()
 	aID, cID := inst.Tabs[1].ID, inst.Tabs[3].ID
 
-	require.NoError(t, inst.CloseTab(1)) // close a; b and c shift down one
+	require.NoError(t, inst.CloseTabByID(aID)) // close a; b and c shift down one
 
 	kind, url, ok := inst.TabTargetByID(bID)
 	require.True(t, ok, "b's id must still resolve after a lower tab closed")
@@ -411,7 +442,7 @@ func TestTabTargetByID_ConcurrentCloseNeverResolvesToAnotherTabsTarget(t *testin
 		go func() {
 			defer wg.Done()
 			<-start
-			_ = inst.CloseTab(1) // an UNRELATED, lower tab closes
+			_ = inst.CloseTabByID(inst.GetTabs()[1].ID) // an UNRELATED, lower tab closes
 		}()
 		go func() {
 			defer wg.Done()

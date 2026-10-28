@@ -22,6 +22,18 @@ func writeDaemonCodexRolloutFile(t *testing.T, codexHome, name string) {
 	require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta"}`+"\n"), 0644))
 }
 
+func writeDaemonCodexRolloutFileWithCwd(t *testing.T, codexHome, name, cwd string) {
+	t.Helper()
+	path := filepath.Join(codexHome, "sessions", "2026", "08", "10", name)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	data, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": cwd},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, append(data, '\n'), 0644))
+}
+
 func TestCaptureAgentConversationPersistsCodexRolloutID(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	codexHome := t.TempDir()

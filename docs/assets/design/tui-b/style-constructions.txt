@@ -1,0 +1,296 @@
+ui/err.go:34:var errStyle = lipgloss.NewStyle().Foreground(activeTheme.Dead)
+ui/config_target.go:256:		action, apiclient.RemoteTargetURL(), client.DaemonVersionPhrase(context.Background()), route, nothing)
+ui/tab_pane.go:17:var tabPaneStyle = lipgloss.NewStyle().
+ui/tab_pane.go:18:	Foreground(activeTheme.Ink)
+ui/theme.go:51:	windowStyle = lipgloss.NewStyle().
+ui/theme.go:52:		BorderForeground(activeTheme.Border).
+ui/theme.go:55:		BorderForeground(activeTheme.Border)
+ui/theme.go:57:		BorderForeground(activeTheme.Accent)
+ui/theme.go:60:		BorderForeground(activeTheme.Accent)
+ui/theme.go:62:		BorderForeground(activeTheme.Border)
+ui/theme.go:64:		BorderForeground(activeTheme.Accent)
+ui/theme.go:66:	paneHeaderStyle = lipgloss.NewStyle().
+ui/theme.go:68:		Foreground(activeTheme.Ink)
+ui/theme.go:69:	paneHeaderFocusedStyle = lipgloss.NewStyle().
+ui/theme.go:71:		Background(activeTheme.SurfaceRaised).
+ui/theme.go:72:		Foreground(activeTheme.Ink)
+ui/theme.go:73:	paneHeaderDimStyle = lipgloss.NewStyle().
+ui/theme.go:74:		Foreground(activeTheme.InkMuted)
+ui/theme.go:75:	paneHeaderInteractiveStyle = lipgloss.NewStyle().
+ui/theme.go:77:		Background(activeTheme.SurfaceRaised).
+ui/theme.go:78:		Foreground(activeTheme.Ink)
+ui/theme.go:80:	sectionHeaderStyle = lipgloss.NewStyle().
+ui/theme.go:82:		Foreground(activeTheme.Ink)
+ui/theme.go:83:	sectionHeaderSelectedStyle = lipgloss.NewStyle().
+ui/theme.go:85:		Background(activeTheme.SurfaceRaised).
+ui/theme.go:86:		Foreground(activeTheme.Ink)
+ui/theme.go:87:	windowIndicatorStyle = lipgloss.NewStyle().
+ui/theme.go:88:		Foreground(activeTheme.InkMuted)
+ui/theme.go:89:	mainTitle = lipgloss.NewStyle().
+ui/theme.go:90:		Background(activeTheme.Surface).
+ui/theme.go:91:		Bold(true).Underline(true).Foreground(activeTheme.Ink)
+ui/theme.go:92:	blurredTitle = lipgloss.NewStyle().
+ui/theme.go:93:		Background(activeTheme.Surface).
+ui/theme.go:94:		Foreground(activeTheme.Ink)
+ui/theme.go:95:	projectRowStyle = lipgloss.NewStyle().
+ui/theme.go:96:		Foreground(activeTheme.Ink)
+ui/theme.go:97:	projectRowActiveStyle = lipgloss.NewStyle().
+ui/theme.go:99:		Foreground(activeTheme.Accent)
+ui/theme.go:100:	projectRowSelectedStyle = lipgloss.NewStyle().
+ui/theme.go:101:		Background(activeTheme.SurfaceRaised).
+ui/theme.go:102:		Foreground(activeTheme.Ink)
+ui/theme.go:104:	automationsTitleStyle = lipgloss.NewStyle().
+ui/theme.go:106:		Foreground(activeTheme.Ink)
+ui/theme.go:107:	automationsTitleDimStyle = lipgloss.NewStyle().
+ui/theme.go:109:		Foreground(activeTheme.Ink)
+ui/theme.go:110:	automationsEnabledStyle = lipgloss.NewStyle().
+ui/theme.go:111:		Foreground(activeTheme.Ink)
+ui/theme.go:112:	automationsDisabledStyle = lipgloss.NewStyle().
+ui/theme.go:113:		Foreground(activeTheme.InkMuted)
+ui/theme.go:114:	automationItemTitleStyle = lipgloss.NewStyle().
+ui/theme.go:115:		Foreground(tree.InstanceTitleColor)
+ui/theme.go:116:	automationDetailStyle = lipgloss.NewStyle().
+ui/theme.go:117:		Foreground(activeTheme.InkMuted)
+ui/theme.go:118:	automationsHintStyle = lipgloss.NewStyle().
+ui/theme.go:119:		Foreground(activeTheme.InkMuted)
+ui/theme.go:121:	keyStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/theme.go:122:	descStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/theme.go:123:	sepStyle = lipgloss.NewStyle().Foreground(activeTheme.Border)
+ui/theme.go:124:	actionGroupStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/theme.go:125:	menuStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/theme.go:127:	tabPaneStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/theme.go:129:	taskPlaceholderStyle = lipgloss.NewStyle().
+ui/theme.go:130:		Foreground(activeTheme.InkMuted)
+ui/theme.go:131:	taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+ui/theme.go:133:	alarmStyle = lipgloss.NewStyle().
+ui/theme.go:134:		Background(activeTheme.Surface).
+ui/theme.go:135:		Foreground(activeTheme.Dead).
+ui/theme.go:137:	errStyle = lipgloss.NewStyle().Foreground(activeTheme.Dead)
+ui/task_pane.go:31:var taskPlaceholderStyle = lipgloss.NewStyle().
+ui/task_pane.go:32:	Foreground(activeTheme.InkMuted)
+ui/task_pane.go:36:var taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+ui/task_pane.go:156:	prompt.FocusedStyle.CursorLine = lipgloss.NewStyle()
+ui/task_pane.go:545:	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+ui/task_pane.go:546:	enabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/task_pane.go:547:	disabledStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/task_pane.go:549:	detailStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+ui/task_pane.go:550:	erroredStyle := lipgloss.NewStyle().Foreground(t.Dead)
+ui/task_pane.go:648:		noticeStyle := lipgloss.NewStyle().Foreground(t.Dead).Bold(true)
+ui/config_pane.go:118:	configTitleStyle    = lipgloss.NewStyle().Bold(true)
+ui/config_pane.go:119:	configHeadingStyle  = lipgloss.NewStyle().Bold(true).Foreground(activeTheme.Ink)
+ui/config_pane.go:120:	configKeyStyle      = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/config_pane.go:121:	configValueStyle    = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/config_pane.go:122:	configLocationStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
+ui/config_pane.go:123:	configPurposeStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/config_pane.go:124:	configSelectedStyle = lipgloss.NewStyle().Bold(true).Background(activeTheme.SurfaceRaised).Foreground(activeTheme.Ink)
+ui/config_pane.go:125:	configErrorStyle    = lipgloss.NewStyle().Foreground(activeTheme.Dead)
+ui/config_pane.go:126:	configOKStyle       = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/config_pane.go:127:	configNoticeStyle   = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/config_pane.go:128:	configHintStyle     = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/dialog.go:20:	return lipgloss.NewStyle().Bold(true).Foreground(theme.Roles().Ink)
+ui/dialog.go:24:	return lipgloss.NewStyle().Foreground(theme.Roles().Ink)
+ui/sidebar_model.go:94:var sectionHeaderStyle = lipgloss.NewStyle().
+ui/sidebar_model.go:96:	Foreground(activeTheme.Ink)
+ui/sidebar_model.go:98:var sectionHeaderSelectedStyle = lipgloss.NewStyle().
+ui/sidebar_model.go:100:	Background(activeTheme.SurfaceRaised).
+ui/sidebar_model.go:101:	Foreground(activeTheme.Ink)
+ui/sidebar_model.go:103:var windowIndicatorStyle = lipgloss.NewStyle().
+ui/sidebar_model.go:104:	Foreground(activeTheme.InkMuted)
+ui/sidebar_model.go:106:var mainTitle = lipgloss.NewStyle().
+ui/sidebar_model.go:107:	Background(activeTheme.Surface).
+ui/sidebar_model.go:108:	Bold(true).Underline(true).Foreground(activeTheme.Ink)
+ui/sidebar_model.go:112:var blurredTitle = lipgloss.NewStyle().
+ui/sidebar_model.go:113:	Background(activeTheme.Surface).
+ui/sidebar_model.go:114:	Foreground(activeTheme.Ink)
+ui/tabbed_window.go:19:var windowStyle = lipgloss.NewStyle().
+ui/tabbed_window.go:20:	BorderForeground(activeTheme.Border).
+ui/tabbed_window.go:25:	BorderForeground(activeTheme.Border)
+ui/tabbed_window.go:30:	BorderForeground(activeTheme.Accent)
+ui/tabbed_window.go:37:	BorderForeground(activeTheme.Accent)
+ui/tabbed_window.go:42:	BorderForeground(activeTheme.Border)
+ui/tabbed_window.go:46:	BorderForeground(activeTheme.Accent)
+ui/tabbed_window.go:48:var paneHeaderStyle = lipgloss.NewStyle().
+ui/tabbed_window.go:50:	Foreground(activeTheme.Ink)
+ui/tabbed_window.go:52:var paneHeaderFocusedStyle = lipgloss.NewStyle().
+ui/tabbed_window.go:54:	Background(activeTheme.SurfaceRaised).
+ui/tabbed_window.go:55:	Foreground(activeTheme.Ink)
+ui/tabbed_window.go:57:var paneHeaderDimStyle = lipgloss.NewStyle().
+ui/tabbed_window.go:58:	Foreground(activeTheme.InkMuted)
+ui/tabbed_window.go:61:var paneHeaderInteractiveStyle = lipgloss.NewStyle().
+ui/tabbed_window.go:63:	Background(activeTheme.SurfaceRaised).
+ui/tabbed_window.go:64:	Foreground(activeTheme.Ink)
+ui/task_pane_edit.go:232:	labelStyle := lipgloss.NewStyle().Bold(true)
+ui/task_pane_edit.go:233:	groupStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+ui/task_pane_edit.go:235:	errorStyle := lipgloss.NewStyle().Foreground(t.Dead).Bold(true)
+ui/task_pane_edit.go:237:	buttonStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/task_pane_edit.go:239:		Background(t.Accent).
+ui/task_pane_edit.go:240:		Foreground(t.Surface)
+ui/task_pane_edit.go:494:	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+ui/task_pane_edit.go:495:	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/task_pane_edit.go:496:	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/task_pane_edit.go:521:	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+ui/task_pane_edit.go:522:	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/projects.go:39:var projectsTitleStyle = lipgloss.NewStyle().
+ui/projects.go:41:	Foreground(activeTheme.Ink)
+ui/projects.go:43:var projectsTitleDimStyle = lipgloss.NewStyle().
+ui/projects.go:45:	Foreground(activeTheme.Ink)
+ui/projects.go:47:var projectsHintStyle = lipgloss.NewStyle().
+ui/projects.go:48:	Foreground(activeTheme.InkMuted)
+ui/projects.go:351:		lines = append(lines, projectsHintStyle.Foreground(activeTheme.Dead).Render(fitLine("  registry unreadable · list may be incomplete", p.rect.W)))
+ui/hooks_pane.go:162:	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+ui/hooks_pane.go:163:	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/hooks_pane.go:166:	descStyle := lipgloss.NewStyle().Foreground(t.Ink)
+app/render.go:271:var splitDividerStyle = lipgloss.NewStyle().
+app/render.go:272:	Foreground(ui.CurrentTheme().Border)
+ui/tree/render.go:73:var readyStyle = lipgloss.NewStyle()
+ui/tree/render.go:78:var deadStyle = lipgloss.NewStyle()
+ui/tree/render.go:83:var lostStyle = lipgloss.NewStyle()
+ui/tree/render.go:88:var archivedStyle = lipgloss.NewStyle()
+ui/tree/render.go:93:var limitStyle = lipgloss.NewStyle()
+ui/tree/render.go:132:var titleStyle = lipgloss.NewStyle()
+ui/tree/render.go:134:var listDescStyle = lipgloss.NewStyle()
+ui/tree/render.go:136:var selectedTitleStyle = lipgloss.NewStyle()
+ui/tree/render.go:138:var selectedDescStyle = lipgloss.NewStyle()
+ui/tree/render.go:142:var tabRowStyle = lipgloss.NewStyle()
+ui/tree/render.go:146:var tabRowActiveStyle = lipgloss.NewStyle()
+ui/tree/render.go:150:var tabRowSelectedStyle = lipgloss.NewStyle()
+ui/tree/render.go:185:	readyStyle = lipgloss.NewStyle().Foreground(t.Ready)
+ui/tree/render.go:186:	deadStyle = lipgloss.NewStyle().Foreground(t.Dead)
+ui/tree/render.go:187:	lostStyle = lipgloss.NewStyle().Foreground(t.Lost)
+ui/tree/render.go:188:	archivedStyle = lipgloss.NewStyle().Foreground(theme.Colors()["archived"])
+ui/tree/render.go:189:	limitStyle = lipgloss.NewStyle().Foreground(theme.Colors()["limit-reached"])
+ui/tree/render.go:192:	titleStyle = lipgloss.NewStyle().
+ui/tree/render.go:194:		Foreground(InstanceTitleColor)
+ui/tree/render.go:195:	listDescStyle = lipgloss.NewStyle().
+ui/tree/render.go:197:		Foreground(t.ForegroundMuted)
+ui/tree/render.go:198:	selectedTitleStyle = lipgloss.NewStyle().
+ui/tree/render.go:200:		Background(t.SelectionBackground).
+ui/tree/render.go:201:		Foreground(t.SelectionForeground)
+ui/tree/render.go:202:	selectedDescStyle = lipgloss.NewStyle().
+ui/tree/render.go:204:		Background(t.SelectionBackground).
+ui/tree/render.go:205:		Foreground(t.SelectionForeground)
+ui/tree/render.go:206:	tabRowStyle = lipgloss.NewStyle().
+ui/tree/render.go:207:		Foreground(InstanceTitleColor)
+ui/tree/render.go:208:	tabRowActiveStyle = lipgloss.NewStyle().
+ui/tree/render.go:209:		Foreground(InstanceTitleColor)
+ui/tree/render.go:210:	tabRowSelectedStyle = lipgloss.NewStyle().
+ui/tree/render.go:211:		Background(t.SelectionBackground).
+ui/tree/render.go:212:		Foreground(t.SelectionForeground)
+ui/tree/render.go:387:			titleS = titleS.Foreground(placeholderTitleColor)
+ui/tree/render.go:406:			titleS = titleS.Foreground(InstanceTitleColor)
+ui/tree/render.go:410:			descS = descS.Foreground(deletingTitleColor)
+ui/tree/render.go:423:		titleS = titleS.Foreground(InstanceTitleColor)
+ui/tree/render.go:424:		descS = descS.Foreground(deletingTitleColor)
+ui/tree/render.go:526:			descS = descS.Foreground(archiveWarningColor)
+ui/tree/render.go:589:			warningStyle := descS.Foreground(archiveWarningColor)
+ui/config_input_style.go:14:	input.PlaceholderStyle = configSelectedStyle.Foreground(t.InkMuted)
+ui/config_input_style.go:18:	input.Cursor.Style = lipgloss.NewStyle().Foreground(t.Accent).Background(t.Surface)
+ui/overlay/searchOverlay.go:264:	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+ui/overlay/searchOverlay.go:265:	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/overlay/searchOverlay.go:267:	overflowStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+ui/overlay/searchOverlay.go:268:	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+ui/overlay/searchOverlay.go:302:		statusStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/overlay/searchOverlay.go:308:				glyph, statusStyle = "●", statusStyle.Foreground(t.Ready)
+ui/overlay/searchOverlay.go:310:				glyph, statusStyle = "◆", statusStyle.Foreground(t.LimitReached)
+ui/overlay/searchOverlay.go:312:				glyph, statusStyle = "◌", statusStyle.Foreground(t.Lost)
+ui/overlay/searchOverlay.go:314:				glyph, statusStyle = "○", statusStyle.Foreground(t.Dead)
+ui/overlay/searchOverlay.go:316:				glyph, statusStyle = "▧", statusStyle.Foreground(t.Archived)
+ui/overlay/searchOverlay.go:320:			statusStyle = statusStyle.Background(t.SurfaceRaised)
+ui/overlay/confirmationOverlay.go:257:		critical[i] = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Dead).Render(critical[i])
+ui/overlay/confirmationOverlay.go:309:	hint := wrapOverlayLines(lipgloss.NewStyle().Bold(true).Render("esc")+" cancel", width)
+ui/overlay/confirmationOverlay.go:357:	bold := lipgloss.NewStyle().Bold(true).Render
+ui/overlay/confirmationOverlay.go:359:	primary := lipgloss.NewStyle().Bold(true).Foreground(t.Surface).Background(t.Accent).Render
+ui/overlay/selectionOverlay.go:111:	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+ui/overlay/selectionOverlay.go:112:	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/overlay/selectionOverlay.go:114:	overflowStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+ui/overlay/promptOverlay.go:66:	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
+ui/overlay/promptOverlay.go:125:	placeholder := lipgloss.NewStyle().Foreground(t.InkMuted)
+ui/caret.go:9:var caretStyle = lipgloss.NewStyle().Foreground(activeTheme.Surface).Background(activeTheme.Accent)
+ui/overlay/textOverlay.go:249:	return lipgloss.NewStyle().
+ui/overlay/textOverlay.go:250:		Foreground(ui.CurrentTheme().InkMuted).
+ui/overlay/projectPickerOverlay.go:214:	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+ui/overlay/projectPickerOverlay.go:215:	normalStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/overlay/projectPickerOverlay.go:217:	overflowStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+ui/overlay/projectPickerOverlay.go:218:	queryStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+ui/overlay/projectPickerOverlay.go:219:	countStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+ui/overlay/projectPickerOverlay.go:220:	addStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/overlay/projectPickerOverlay.go:221:	errStyle := lipgloss.NewStyle().Foreground(t.Dead)
+ui/overlay/projectPickerOverlay.go:237:	warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
+ui/menu.go:17:var keyStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/menu.go:19:var descStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/menu.go:21:var sepStyle = lipgloss.NewStyle().Foreground(activeTheme.Border)
+ui/menu.go:23:var actionGroupStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/menu.go:30:var menuStyle = lipgloss.NewStyle().
+ui/menu.go:31:	Foreground(activeTheme.Ink)
+ui/dialog_recovery.go:11:	styles.Body = styles.Body.Background(bg)
+ui/dialog_recovery.go:12:	styles.Title = styles.Title.Background(bg)
+ui/dialog_recovery.go:13:	styles.Error = styles.Error.Background(bg)
+ui/alarm.go:40:var alarmStyle = lipgloss.NewStyle().
+ui/alarm.go:41:	Background(activeTheme.Surface).
+ui/alarm.go:42:	Foreground(activeTheme.Dead).
+ui/automations.go:19:var automationsTitleStyle = lipgloss.NewStyle().
+ui/automations.go:21:	Foreground(activeTheme.Ink)
+ui/automations.go:23:var automationsTitleDimStyle = lipgloss.NewStyle().
+ui/automations.go:25:	Foreground(activeTheme.Ink)
+ui/automations.go:27:var automationsEnabledStyle = lipgloss.NewStyle().
+ui/automations.go:28:	Foreground(activeTheme.Ink)
+ui/automations.go:30:var automationsDisabledStyle = lipgloss.NewStyle().
+ui/automations.go:31:	Foreground(activeTheme.InkMuted)
+ui/automations.go:36:var automationsOverdueStyle = lipgloss.NewStyle().
+ui/automations.go:37:	Foreground(activeTheme.Dead)
+ui/automations.go:42:var automationsUnknownStyle = lipgloss.NewStyle().
+ui/automations.go:43:	Foreground(activeTheme.InkMuted)
+ui/automations.go:49:var automationItemTitleStyle = lipgloss.NewStyle().
+ui/automations.go:50:	Foreground(tree.InstanceTitleColor)
+ui/automations.go:55:var automationDetailStyle = lipgloss.NewStyle().
+ui/automations.go:56:	Foreground(activeTheme.InkMuted)
+ui/automations.go:58:var automationsHintStyle = lipgloss.NewStyle().
+ui/automations.go:59:	Foreground(activeTheme.InkMuted)
+ui/automations.go:363:		nameStyle = nameStyle.Bold(true).Background(activeTheme.SurfaceRaised).Foreground(activeTheme.Ink)
+ui/automations.go:364:		glyphStyle = glyphStyle.Background(activeTheme.SurfaceRaised)
+ui/automations.go:366:			glyphStyle = glyphStyle.Foreground(activeTheme.Ink)
+ui/automations.go:501:		style := lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/automations.go:503:			style = style.Foreground(activeTheme.Dead)
+ui/automations.go:509:		value := lipgloss.NewStyle().Foreground(activeTheme.Ink).Render(primary)
+app/session_control.go:170:	ctx, cancel := context.WithTimeout(context.Background(), killRPCTimeout)
+app/session_control.go:495:	ctx, cancel := context.WithTimeout(context.Background(), liveArmingTimeout)
+app/handle_actions.go:945:		return attachStreamFn(context.Background(), instance.Title, repoID, tabID, tabIdx)
+app/theme.go:14:	splitDividerStyle = lipgloss.NewStyle().
+app/theme.go:15:		Foreground(t.Border)
+app/theme.go:17:	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+app/theme.go:18:	keyStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Ink)
+app/theme.go:19:	descStyle = lipgloss.NewStyle().Foreground(t.Ink)
+ui/termpane/termpane.go:200:	ctx, cancel := context.WithCancel(context.Background())
+ui/selection_marker.go:9:	return lipgloss.NewStyle().Bold(true).Foreground(t.Accent).Background(t.SurfaceRaised).Render(marker)
+ui/config_pane_accounts.go:105:	accountStateOKStyle   = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/config_pane_accounts.go:106:	accountStateOffStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/config_pane_accounts.go:107:	accountRegisterStyle  = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+ui/config_pane_accounts.go:108:	accountAgentNameStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+app/kill_confirm.go:40:	ctx, cancel := context.WithTimeout(context.Background(), killGitTimeout)
+ui/schedule_picker.go:483:	labelStyle := lipgloss.NewStyle().Bold(true)
+ui/schedule_picker.go:484:	dimStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+ui/schedule_picker.go:485:	previewStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/schedule_picker.go:486:	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+ui/schedule_picker.go:487:	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.Ink)
+ui/schedule_picker.go:553:	plain := lipgloss.NewStyle().Foreground(t.Ink)
+ui/schedule_picker.go:593:		style := lipgloss.NewStyle().Foreground(t.Ink)
+ui/schedule_picker.go:598:			style = lipgloss.NewStyle().Foreground(t.Ink).Background(t.SurfaceRaised).Bold(true)
+ui/schedule_picker.go:601:			style = style.Background(t.SurfaceRaised).Foreground(t.Ink).Bold(true).Underline(true)
+ui/schedule_picker.go:615:	style := lipgloss.NewStyle().Foreground(t.Ink)
+ui/schedule_picker.go:617:		style = lipgloss.NewStyle().Bold(true).Underline(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+app/project_path_resolver.go:194:		ctx, cancel := context.WithTimeout(context.Background(), projectPathScanTimeout)
+app/project_path_resolver.go:241:	gather, cancelGather := context.WithTimeout(context.Background(), projectPathScanTimeout)
+app/project_path_resolver.go:342:		ctx, cancel := context.WithTimeout(context.Background(), registeredProjectProveTimeout)
+app/project_path_resolver.go:352:	gather, cancelGather := context.WithTimeout(context.Background(), registeredProjectProveTimeout)
+ui/theme/theme.go:105:	body := lipgloss.NewStyle().Foreground(c["ink"]).Background(c["surface"])
+ui/theme/theme.go:108:		Muted:    body.Foreground(c["ink-muted"]),
+ui/theme/theme.go:110:		Selected: body.Background(c["surface-raised"]).Bold(true),
+ui/theme/theme.go:111:		Focus:    body.Border(lipgloss.NormalBorder()).BorderForeground(c["accent"]),
+ui/theme/theme.go:112:		Dialog:   body.Background(c["surface-raised"]).Border(border(m["radius-dialog"])).BorderForeground(c["border"]).Padding(0, m["space-3"]),
+ui/theme/theme.go:113:		Error:    body.Foreground(c["dead"]),
+app/help.go:160:			keyBlock := lipgloss.NewStyle().
+app/help.go:165:			descBlock := lipgloss.NewStyle().Width(descWidth).Render(descStyle.Render(r.desc))
+app/help.go:412:			lipgloss.NewStyle().Bold(true).Render(h.instance.GetBranch()))),
+app/help.go:493:	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Ink)
+app/help.go:494:	keyStyle    = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Ink)
+app/help.go:495:	descStyle   = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Ink)

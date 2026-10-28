@@ -277,12 +277,17 @@ func linkCopiedFile(
 		return copiedEntry{}, fmt.Errorf(
 			"cannot move worktree across filesystems: failed to reproduce the hard link at %s: %w", destinationPath, err)
 	}
-	// Named and identified before anything else can fail, exactly like every
-	// other node this copier creates — cleanup can only remove what the manifest
-	// describes, so the OBSERVED identity is recorded even on the refusal below.
+	if err := copyTreeAfterLinkCreate(destinationPath); err != nil {
+		return copiedEntry{}, err
+	}
+	// Identify the node right after creating it, exactly like every other node
+	// this copier creates: the caller can only record what it can name and
+	// identify. When the identity cannot be learned the entry is omitted so the
+	// manifest stays consistent with the on-disk tree, matching the sibling
+	// helpers (copyDirectoryEntry, copySymlinkEntry, copyRegularFileAtWithIdentity).
 	destinationIdentity, err := identityAt(destination, name)
 	if err != nil {
-		return copiedEntry{name: name, source: sourceIdentity}, fmt.Errorf(
+		return copiedEntry{}, fmt.Errorf(
 			"cannot move worktree across filesystems: failed to identify hard link %s after creating it: %w",
 			destinationPath, err)
 	}

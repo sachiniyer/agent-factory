@@ -10,23 +10,71 @@ import assert from "node:assert/strict";
 
 import {
   canManageTabs,
+  restoreRequiresConfirmation,
   documentTitle,
   refreshIdleReasonAges,
+  retryActionForSession,
+  markDeliveredActionForSession,
   isActionableSession,
   isKillableSession,
+  sessionRow,
+  skippedRepoReasonLabel,
+  skippedRepoRepairHint,
+  SKIPPED_REPO_REASON,
   supportsTabManagement,
   tabBarSig,
   tabCreationUnavailableReason,
-  usesCondensedSessionChrome,
   canCreateTabKind,
   canCloseTabs,
   canMutateTabRoster,
 } from "./ui.js";
 import type { AppState } from "./ui.js";
-import { Liveness, type SessionData } from "./types.js";
+import { InFlightOp, Liveness, type SessionData } from "./types.js";
+
+// Minimal DOM for sessionRow units (the same hand-rolled approach as
+// phone-header.test.ts): createElement/createElementNS feed h() and icon(),
+// and click() runs a row's onclick the way real activation does.
+class RowElement extends EventTarget {
+  children: RowElement[] = [];
+  className = "";
+  textContent = "";
+  onclick: ((e: Event) => void) | null = null;
+  dataset: Record<string, string> = {};
+  attrs = new Map<string, string>();
+  constructor(readonly tagName = "div") { super(); }
+  append(...children: (RowElement | string)[]) {
+    for (const child of children) {
+      if (typeof child === "string") this.textContent += child;
+      else this.children.push(child);
+    }
+  }
+  replaceChildren() { this.children = []; this.textContent = ""; }
+  setAttribute(k: string, v: string) { this.attrs.set(k, v); }
+  getAttribute(k: string) { return this.attrs.get(k) ?? null; }
+  removeAttribute(k: string) { this.attrs.delete(k); }
+  click() { this.onclick?.(new Event("click")); this.dispatchEvent(new Event("click")); }
+}
+Object.assign(globalThis, {
+  document: Object.assign(new EventTarget(), {
+    createElement: (tag: string) => new RowElement(tag),
+    createElementNS: (_ns: string, tag: string) => new RowElement(tag),
+  }),
+});
 
 function sess(over: Partial<SessionData> = {}): SessionData {
   return { id: "a", title: "s", branch: "b", ...over };
+}
+
+/** A row under the given projection, with a counting open spy and inert actions. */
+function row(over: Partial<SessionData> = {}) {
+  const open = { calls: 0 };
+  const el = sessionRow(
+    sess(over),
+    false,
+    () => { open.calls += 1; },
+    () => new RowElement() as unknown as HTMLElement,
+  ) as unknown as RowElement;
+  return { el, open };
 }
 
 /** A minimal AppState carrying only the fields tabBarSig reads. */
@@ -57,13 +105,13 @@ test("relative idle ages refresh without a session event", () => {
       idleReason: "settled-after-pane-change",
       paneChurnAt: "2026-08-10T12:50:00Z",
     },
-    textContent: "pane changed · <1m ago · ",
+    textContent: " · pane changed · <1m ago",
     closest: () => row,
   };
   const root = { querySelectorAll: () => [idle] };
 
   refreshIdleReasonAges(root as unknown as ParentNode, new Date("2026-08-10T15:00:00Z"));
-  assert.equal(idle.textContent, "pane changed · 2h ago · ");
+  assert.equal(idle.textContent, " · pane changed · 2h ago");
   assert.equal(row.title, "worker — Ready; pane changed · 2h ago; archive incomplete");
 });
 
@@ -101,6 +149,174 @@ test("kill addressability is independent and fails closed", () => {
     false,
     "an id-less teardown capability fails closed",
   );
+});
+
+test("a managed-but-inert row is marked disabled and explains itself (#4394)", () => {
+  // can_kill without lifecycle_action — the observed shape: a pending account
+  // swap suppresses the verb while teardown stays available. Before the fix the
+  // row took NEITHER branch — no click handler AND no aria-disabled — so it
+  // drew its Kill button, looked live, and silently swallowed every click.
+  const { el, open } = row({ can_kill: true, pending_account_swap: {} });
+  assert.equal(el.getAttribute("aria-disabled"), "true", "an inert row must not read as live");
+  const actions = el.children[el.children.length - 1];
+  assert.equal(
+    actions.getAttribute("aria-disabled"),
+    "false",
+    "the row's disabled marker must not read onto its live Delete control",
+  );
+  el.click();
+  assert.equal(open.calls, 0, "a click on an inert row must not reach the open callback");
+  assert.match(
+    el.getAttribute("title") ?? "",
+    /cannot be opened · account swap in progress/,
+    "the title names why the row cannot be opened",
+  );
+});
+
+test("the inert reason names the suppressing condition the daemon projected", () => {
+  // Killable without the verb means lifecycleActionFor withheld it for one of
+  // the durable causes still on the wire; each gets its own short reason, and
+  // an unrecognized cause still refuses out loud rather than going silent.
+  for (const [over, reason] of [
+    // A kill tombstone is durable intent, not an active operation: a failed
+    // teardown leaves it as the retry handle, so the reason says pending.
+    [{ user_killed: true }, "cannot be opened · kill pending"],
+    [{ startup_state_unknown: true }, "cannot be opened · startup could not be confirmed"],
+    [{ pending_account_swap: {} }, "cannot be opened · account swap in progress"],
+    [{}, "cannot be opened"],
+  ] as const) {
+    const { el, open } = row({ can_kill: true, ...over });
+    assert.equal(el.getAttribute("aria-disabled"), "true", `${reason}: still marked inert`);
+    el.click();
+    assert.equal(open.calls, 0, `${reason}: no open on click`);
+    assert.match(el.getAttribute("title") ?? "", new RegExp(reason));
+  }
+});
+
+test("an actionable row still opens on click and carries no disabled marker", () => {
+  const { el, open } = row({ lifecycle_action: "archive", can_kill: true });
+  assert.equal(el.getAttribute("aria-disabled"), null);
+  assert.doesNotMatch(el.getAttribute("title") ?? "", /cannot be opened/);
+  el.click();
+  assert.equal(open.calls, 1, "the fix must not disable a row that CAN open");
+});
+
+test("an unmanaged inert row stays disabled without a managed-row reason", () => {
+  // A creating row has no session yet and no Kill button — the pre-existing
+  // aria-disabled case the fix must not regress or over-explain.
+  const { el, open } = row({ in_flight_op: InFlightOp.Creating });
+  assert.equal(el.getAttribute("aria-disabled"), "true");
+  el.click();
+  assert.equal(open.calls, 0);
+  assert.doesNotMatch(el.getAttribute("title") ?? "", /cannot be opened/);
+});
+
+test("Retry names an ambiguous handoff separately from a usage-limit retry", () => {
+  assert.deepEqual(
+    retryActionForSession(sess({
+      liveness: Liveness.Running,
+      pending_account_swap: {
+        manual: true,
+        replacement_panes_started: true,
+        mission_delivery_status: "could-not-confirm",
+      },
+    })),
+    {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane",
+    },
+  );
+  assert.deepEqual(
+    retryActionForSession(sess({
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Replacing,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane",
+    },
+  );
+  assert.deepEqual(
+    retryActionForSession(sess({
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Replacing,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "could-not-confirm",
+      startup_state_unknown: true,
+    })),
+    {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane",
+    },
+    "a startup-unknown ambiguous row is the #4429 wedge — the explicit retry's " +
+    "own readiness wait re-proves the binding before the composer is touched",
+  );
+  assert.deepEqual(
+    retryActionForSession(sess({ liveness: Liveness.LimitReached })),
+    { kind: "limit", label: "Retry limit", title: "Retry after the usage limit" },
+  );
+  assert.equal(retryActionForSession(sess({ liveness: Liveness.Ready })), null);
+});
+
+test("Mark delivered is offered exactly for confirmable pending deliveries", () => {
+  // The #4429 wedge: ambiguous verdict + fence + startup-unknown — the row no
+  // supported verb used to reach.
+  assert.deepEqual(
+    markDeliveredActionForSession(sess({
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Replacing,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+      startup_state_unknown: true,
+    })),
+    {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed — retire it without resending",
+    },
+  );
+  // The account-swap sibling's orphaned-respawn shape.
+  assert.deepEqual(
+    markDeliveredActionForSession(sess({
+      liveness: Liveness.Ready,
+      in_flight_op: InFlightOp.Respawning,
+      pending_account_swap: {
+        manual: true,
+        replacement_panes_started: true,
+        mission_delivery_status: "could-not-confirm",
+      },
+    })),
+    {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed — retire it without resending",
+    },
+  );
+  // Positive non-delivery belongs to automatic recovery, not an attestation.
+  assert.equal(
+    markDeliveredActionForSession(sess({
+      liveness: Liveness.Running,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "not-delivered",
+    })),
+    null,
+  );
+  // A lost runtime has no pane the mission could have landed in.
+  assert.equal(
+    markDeliveredActionForSession(sess({
+      liveness: Liveness.Lost,
+      startup_state_unknown: true,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    null,
+  );
+  assert.equal(markDeliveredActionForSession(sess({ liveness: Liveness.Ready })), null);
 });
 
 test("an unrelated status/title snapshot on the selected session keeps the SAME sig", () => {
@@ -229,26 +445,6 @@ test("archiving the selected session changes the sig — the bar must rebuild to
 
 test("no selection collapses to the empty sig", () => {
   assert.equal(tabBarSig(state({ selectedId: null })), "");
-});
-
-test("mobile session chrome condenses only for a real selection on the sessions surface (#2354)", () => {
-  const selected = state({ view: "sessions" });
-  assert.equal(usesCondensedSessionChrome(selected), true, "a selected session gives its row to hamburger + tabs");
-  assert.equal(
-    usesCondensedSessionChrome(state({ view: "tasks" })),
-    false,
-    "another top-level view keeps app navigation in flow",
-  );
-  assert.equal(
-    usesCondensedSessionChrome(state({ view: "sessions", selectedId: null })),
-    false,
-    "no selection keeps navigation",
-  );
-  assert.equal(
-    usesCondensedSessionChrome(state({ view: "sessions", selectedId: "gone" })),
-    false,
-    "a stale id must not hide navigation over the empty pane",
-  );
 });
 
 test("the signature is delimiter-safe: a tab name containing separators can't hide a change", () => {
@@ -464,4 +660,56 @@ test("the tab-bar sig changes when WHICH kind is creatable changes (#3060)", () 
     "premise: creation is available in both, so the reason cannot distinguish them",
   );
   assert.notEqual(tabBarSig(shellOnly), tabBarSig(vscodeOnly), "the bar must rebuild when the menu's kinds change");
+});
+
+test("restore skips confirmation only for known local backends (#4017)", () => {
+  for (const backend_type of [undefined, "", "local"]) {
+    assert.equal(restoreRequiresConfirmation(sess({ backend_type })), false);
+  }
+  for (const backend_type of ["docker", "ssh", "sandbox", "remote", "future-backend"]) {
+    assert.equal(restoreRequiresConfirmation(sess({ backend_type })), true);
+  }
+});
+
+// The skipped-repo reason/repair-hint helpers (#4742). The daemon stamps stable
+// reason codes (daemon/snapshot.go); the web must NOT reclassify them. The repair
+// hints mirror api/skipped_repos.go verbatim so the web sends the operator to the
+// SAME remedy the CLI does — a different hint here would drift the moment the CLI's
+// is refined. An unknown/empty reason is treated as corrupted, which is all an
+// older daemon ever sent.
+
+test("skippedRepoReasonLabel names each daemon reason and falls back to corrupted for unknown/empty (#4742)", () => {
+  assert.match(skippedRepoReasonLabel(SKIPPED_REPO_REASON.corrupted), /corrupted/i);
+  assert.match(skippedRepoReasonLabel(SKIPPED_REPO_REASON.unreadable), /could not be read/);
+  assert.match(skippedRepoReasonLabel(SKIPPED_REPO_REASON.newerSchema), /newer af/);
+  assert.match(skippedRepoReasonLabel(SKIPPED_REPO_REASON.rowsFailed), /could not be loaded/);
+  // An older daemon sent an empty reason; an unknown value is a future daemon's.
+  // Both must render as corrupted rather than as a missing/blank notice.
+  assert.match(skippedRepoReasonLabel(undefined), /corrupted/);
+  assert.match(skippedRepoReasonLabel(""), /corrupted/);
+  assert.match(skippedRepoReasonLabel("future-reason"), /corrupted/);
+});
+
+test("skippedRepoRepairHint sends the operator to the same remedy as the CLI for each reason (#4742)", () => {
+  // Verbatim mirror of api/skipped_repos.go's four hints — drift is the bug.
+  assert.equal(skippedRepoRepairHint(SKIPPED_REPO_REASON.unreadable),
+    "Make the file(s) readable by the user the af daemon runs as (check ownership, permissions and the disk), then restart the daemon so it re-reads them; do not delete them, they hold the hidden sessions.");
+  assert.match(skippedRepoRepairHint(SKIPPED_REPO_REASON.newerSchema), /Upgrade af to a version that understands the newer state file/);
+  assert.match(skippedRepoRepairHint(SKIPPED_REPO_REASON.rowsFailed), /Restore or delete the sessions the daemon could not load/);
+  assert.match(skippedRepoRepairHint(SKIPPED_REPO_REASON.corrupted), /Stop the af daemon, copy the corrupt file/);
+  // Unknown/empty → the corrupted remedy (the older-daemon default), never blank.
+  assert.equal(skippedRepoRepairHint(undefined), skippedRepoRepairHint(SKIPPED_REPO_REASON.corrupted));
+  assert.equal(skippedRepoRepairHint(""), skippedRepoRepairHint(SKIPPED_REPO_REASON.corrupted));
+  assert.equal(skippedRepoRepairHint("future-reason"), skippedRepoRepairHint(SKIPPED_REPO_REASON.corrupted));
+});
+
+test("each known reason gets a distinct label and hint, so the notice can tell failures apart", () => {
+  const reasons = Object.values(SKIPPED_REPO_REASON);
+  const labels = new Set(reasons.map(skippedRepoReasonLabel));
+  const hints = new Set(reasons.map(skippedRepoRepairHint));
+  // Four distinct codes → four distinct labels and four distinct hints. A collapsed
+  // notice would send every failure to the same remedy, which is the class of bug
+  // the per-reason split exists to prevent (#4783, #4876).
+  assert.equal(labels.size, reasons.length, "each reason has a unique label");
+  assert.equal(hints.size, reasons.length, "each reason has a unique repair hint");
 });

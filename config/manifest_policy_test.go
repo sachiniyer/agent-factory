@@ -218,13 +218,28 @@ func TestManifestFormatsAndTypesMatchSchemas(t *testing.T) {
 	}
 }
 
+// manifestDeferredSources names the sources a key still admits as write and
+// read locations but that cannot WIN resolution — the admitted-without-
+// precedence state the Sources⊆Precedence lock below otherwise rejects.
+// branch_prefix's personal layer is the interim case (#4539): a project-scoped
+// value stays writable and keeps loading so existing configs remain valid, but
+// the daemon names branches from its frozen startup-global prefix, so the
+// layer is deliberately absent from precedence until the real feature lands.
+var manifestDeferredSources = map[string]SourceSet{
+	"branch_prefix": sourcePersonalOnly,
+}
+
 func expectedPrecedence(entry ManifestEntry) []ConfigSource {
 	switch entry.Key {
 	case "post_worktree_commands", "remote_hooks":
 		return precedenceLegacyRepo
 	case "default_program", "program_overrides":
 		return precedenceGlobalRepoPersonal
-	case "branch_prefix", "on_archive_command", "root_agent":
+	case "branch_prefix":
+		// Global-only precedence while Sources still admits the personal layer
+		// for storage — see manifestDeferredSources (#4539).
+		return precedenceGlobal
+	case "on_archive_command", "root_agent", "default_accounts", "limit_account_candidates":
 		return precedenceGlobalPersonal
 	default:
 		if entry.Sources == sourceGlobalOnly {
@@ -236,11 +251,11 @@ func expectedPrecedence(entry ManifestEntry) []ConfigSource {
 
 func expectedMerge(entry ManifestEntry) MergePolicy {
 	switch entry.Key {
-	case "program_overrides", "limit_patterns", "root_agents", "keys":
+	case "program_overrides", "limit_patterns", "root_agents", "keys", "default_accounts":
 		return MergeMapByKey
-	case "theme", "docker", "ssh", "root_agent":
+	case "docker", "ssh", "root_agent":
 		return MergeTableByField
-	case "network.cors_allowed_origins", "post_worktree_commands":
+	case "network.cors_allowed_origins", "post_worktree_commands", "limit_account_candidates":
 		return MergeListReplace
 	default:
 		return MergeReplace
@@ -281,7 +296,7 @@ func TestManifestResolutionPoliciesAreComplete(t *testing.T) {
 			last = source
 		}
 		for source := SourceGlobal; source < configSourceCount; source++ {
-			if entry.Sources.Has(source) && !seen[source] {
+			if entry.Sources.Has(source) && !seen[source] && !manifestDeferredSources[entry.Key].Has(source) {
 				t.Errorf("%s: source %s is admitted but absent from precedence", entry.Key, source)
 			}
 		}
@@ -301,9 +316,8 @@ func TestManifestResolutionPoliciesAreComplete(t *testing.T) {
 }
 
 // TestManifestDerivedInRepoPolicyViews compares the generated compatibility
-// views directly with both schemas. This is the lock that replaces the three
-// old literals: allowed/global-only is source policy, while TOML-only is format
-// compatibility.
+// views directly with both schemas. This is the lock that replaces the two
+// old literals for allowed and global-only keys (both source policy).
 func TestManifestDerivedInRepoPolicyViews(t *testing.T) {
 	schemas := currentManifestSchemas()
 	globalFields := manifestSchemaFields(t, schemas[0])
@@ -319,8 +333,7 @@ func TestManifestDerivedInRepoPolicyViews(t *testing.T) {
 	}
 
 	wantGlobalOnly := make(map[string]bool)
-	wantTOMLOnly := make(map[string]bool)
-	for key, field := range globalFields {
+	for key := range globalFields {
 		if _, skipped := manifestSkippedKeys[key]; skipped {
 			continue
 		}
@@ -328,18 +341,11 @@ func TestManifestDerivedInRepoPolicyViews(t *testing.T) {
 			wantGlobalOnly[key] = true
 			if alias, ok := configAliasForCanonical(key); ok {
 				wantGlobalOnly[alias.legacy] = true
-				wantTOMLOnly[key] = true
 			}
-		}
-		if structTagName(field.Tag.Get("json")) == "-" {
-			wantTOMLOnly[key] = true
 		}
 	}
 	if !reflect.DeepEqual(inRepoGlobalOnlyKeys, wantGlobalOnly) {
 		t.Errorf("inRepoGlobalOnlyKeys = %v, want schema-derived %v", inRepoGlobalOnlyKeys, wantGlobalOnly)
-	}
-	if !reflect.DeepEqual(tomlOnlyGlobalKeys, wantTOMLOnly) {
-		t.Errorf("tomlOnlyGlobalKeys = %v, want format-derived %v", tomlOnlyGlobalKeys, wantTOMLOnly)
 	}
 }
 

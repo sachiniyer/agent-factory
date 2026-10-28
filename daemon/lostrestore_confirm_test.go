@@ -1,16 +1,13 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	stdlog "log"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -27,7 +24,19 @@ import (
 // probe got an ANSWER out of the runtime. Tests drive it explicitly because that,
 // not elapsed time, is what confirms a restore (#1917 round 6).
 func observeAlive(m *Manager, repoID string, inst *session.Instance) {
-	m.noteAliveObservation(repoID, inst)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.noteAliveObservationLocked(repoID, inst)
+}
+
+// confirmAlive drives the SUSTAINED liveness a restore takes (#3412). One answer
+// proves the agent came up, and the flap this fixes is the shape where that is all
+// it ever does — so tests that mean "and now the recovery is confirmed" call this,
+// and the count lives in one place rather than in each of them.
+func confirmAlive(m *Manager, repoID string, inst *session.Instance) {
+	for i := 0; i < lostRestoreConfirmObservations; i++ {
+		observeAlive(m, repoID, inst)
+	}
 }
 
 // diesOnSpawnBackend models the reported agent: its Recover SUCCEEDS — the spawn
@@ -61,15 +70,14 @@ func (b *diesOnSpawnBackend) recoverCount() int {
 func (b *diesOnSpawnBackend) Type() string { return "local" }
 
 func TestRestoreLostSessions_ImmediateExitLogsTerminalGiveUp(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	backend := &diesOnSpawnBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "always-exits", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
 
-	var errors bytes.Buffer
-	previous := aflog.ErrorLog
-	aflog.ErrorLog = stdlog.New(&errors, "ERROR: ", 0)
-	t.Cleanup(func() { aflog.ErrorLog = previous })
+	// This Manager's own log (#3797): a shared sink is written by every Manager
+	// in the binary, so an assertion on it can pass on another's output.
+	errors := ownLogs.errors
 
 	for i := 0; i < 2*lostRestoreMaxAttempts+4; i++ {
 		manager.RestoreLostSessions()
@@ -100,20 +108,19 @@ func TestRestoreLostSessions_ImmediateExitLogsTerminalGiveUp(t *testing.T) {
 }
 
 func TestRestoreLostSessions_ConfirmedAliveLogsTerminalSuccess(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "healed", backend, true, session.Lost)
 
-	var info bytes.Buffer
-	previous := aflog.InfoLog
-	aflog.InfoLog = stdlog.New(&info, "INFO: ", 0)
-	t.Cleanup(func() { aflog.InfoLog = previous })
+	// This Manager's own log (#3797): a shared sink is written by every Manager
+	// in the binary, so an assertion on it can pass on another's output.
+	info := ownLogs.info
 
 	manager.RestoreLostSessions()
 	if strings.Contains(info.String(), "restored after") {
 		t.Fatalf("spawn was logged as terminal recovery before liveness confirmation:\n%s", info.String())
 	}
-	observeAlive(manager, repoID, inst)
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 
 	want := fmt.Sprintf("restore of lost session %q (repo %s): restored after 1 attempt", inst.Title, repoID)
@@ -123,16 +130,15 @@ func TestRestoreLostSessions_ConfirmedAliveLogsTerminalSuccess(t *testing.T) {
 }
 
 func TestRestoreSession_FailureAfterPersistedGiveUpStaysTerminal(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, ownLogs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	newFailure := errors.New("agent still exits at startup")
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend(), failWith: newFailure}
 	inst := registerStarted(t, manager, repoID, repoPath, "still-broken", backend, true, session.Lost)
 	inst.SetLostRestoreFailure(lostRestoreMaxAttempts, errors.New("previous startup failure"))
 
-	var terminal bytes.Buffer
-	previous := aflog.ErrorLog
-	aflog.ErrorLog = stdlog.New(&terminal, "ERROR: ", 0)
-	t.Cleanup(func() { aflog.ErrorLog = previous })
+	// This Manager's own log (#3797): a shared sink is written by every Manager
+	// in the binary, so an assertion on it can pass on another's output.
+	terminal := ownLogs.errors
 
 	if _, _, err := manager.RestoreSession(RestoreSessionRequest{ID: inst.ID, RepoID: repoID}); !errors.Is(err, newFailure) {
 		t.Fatalf("RestoreSession error = %v, want %v", err, newFailure)
@@ -247,9 +253,9 @@ func TestRestoreLostSessions_ConfirmedAliveClearsRetryState(t *testing.T) {
 		t.Fatalf("status = %v, want Running after recovery", got)
 	}
 
-	// A poll gets an ANSWER out of the new runtime: THAT is the confirmation. No
-	// clock is advanced anywhere in this test.
-	observeAlive(manager, repoID, inst)
+	// Polls get ANSWERS out of the new runtime: THAT is the confirmation, and it
+	// takes several (#3412). No clock is advanced anywhere in this test.
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, stillTracked := manager.lostRestoreStates[key]
@@ -333,8 +339,8 @@ func TestRestoreLostSessions_ObservationConfirms_NotElapsedTime(t *testing.T) {
 			"life (a remote inside its loss grace reads non-Lost while dead)")
 	}
 
-	// One ANSWER, and it is confirmed.
-	observeAlive(manager, repoID, inst)
+	// Sustained ANSWERS, and it is confirmed.
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, tracked := manager.lostRestoreStates[key]
@@ -460,7 +466,7 @@ func TestRefreshInstanceStatus_RetiredProbeCannotConfirmReplacement(t *testing.T
 	}
 
 	inst.ClearIdleEvidence()
-	manager.armRestoreConfirmation(repoID, inst)
+	manager.armRestoreConfirmation(repoID, inst, lostRestoreAutomatic)
 	close(backend.releaseAlive)
 	select {
 	case <-pollDone:
@@ -470,7 +476,10 @@ func TestRefreshInstanceStatus_RetiredProbeCannotConfirmReplacement(t *testing.T
 
 	manager.mu.Lock()
 	state := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
-	confirmed := state != nil && manager.observedAliveSinceSpawnLocked(repoID, inst, state)
+	// The COUNT, not the confirmation predicate: this test is about a stale answer
+	// being recorded against the new boundary at all, and a bar of several
+	// observations would let one leaked answer pass unnoticed (#3412).
+	confirmed := state != nil && manager.observationsSinceSpawnLocked(repoID, inst, state) > 0
 	manager.mu.Unlock()
 	if confirmed {
 		t.Fatal("predecessor liveness was counted after replacement armed its confirmation boundary")

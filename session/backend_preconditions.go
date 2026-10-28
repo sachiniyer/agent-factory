@@ -2,10 +2,12 @@ package session
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // Backend preconditions (#1933). docker, ssh, and hook each need things to be true
@@ -26,7 +28,11 @@ import (
 // checked here without side effects:
 //
 //	local  — nothing; it is always usable.
-//	docker — docker.image set, the `docker` CLI on PATH, an `origin` to clone from.
+//	docker — docker.image set, the `docker` CLI on PATH, an `origin` to clone from,
+//	         and a LOCAL Docker engine (the in-container agent-server port is
+//	         published on the engine host's loopback and dialed from the daemon's,
+//	         so a remote engine is unreachable; this is the same side-effect-free
+//	         `docker context inspect` / DOCKER_HOST read the runtime fails on).
 //	ssh    — ssh.host set, the `ssh` CLI on PATH, a readable ssh.identity_file if
 //	         one is configured, an `origin` to clone from. (Host reachability is a
 //	         network fact this must not dial for.)
@@ -65,11 +71,22 @@ func BackendConfigError(kind BackendKind, cfg *config.ResolvedConfig) error {
 	switch kind {
 	case BackendDocker:
 		if cfg == nil || cfg.Docker == nil || strings.TrimSpace(cfg.Docker.Image) == "" {
-			return fmt.Errorf("backend=docker requires docker.image to be set in this repo's .agent-factory/config.json (the container image that carries git + tmux + the agent CLIs; the `af` binary is copied in automatically)")
+			return fmt.Errorf("backend=docker requires docker.image to be set in this repo's %s (the container image that carries git + tmux + the agent CLIs; the `af` binary is copied in automatically)", backendConfigFile(cfg))
 		}
 	case BackendSSH:
+		// A default_host stands in for the repo's [ssh] section (W6.3); chooseListedHost
+		// is the create-time half of the same rule.
+		// It goes through chooseListedHost itself, so a default create would refuse
+		// (use_ssh_config, a malformed entry) is not reported as configured.
+		if cfg != nil {
+			if _, entry, err := chooseListedHost("", cfg); err != nil {
+				return err
+			} else if entry != nil {
+				return nil
+			}
+		}
 		if cfg == nil || cfg.SSH == nil || strings.TrimSpace(cfg.SSH.Host) == "" {
-			return fmt.Errorf("backend=ssh requires ssh.host to be set in this repo's .agent-factory/config.json (the remote host the session's workspace + agent run on)")
+			return fmt.Errorf("backend=ssh requires ssh.host to be set in this repo's %s (the remote host the session's workspace + agent run on)", backendConfigFile(cfg))
 		}
 		// The address is a local, side-effect-free fact, so the picker must reflect
 		// it rather than offering a backend whose every create fails in the
@@ -84,14 +101,14 @@ func BackendConfigError(kind BackendKind, cfg *config.ResolvedConfig) error {
 		// (af executes the command on the daemon host, so a repo-settable version
 		// would be code execution from a clone; #2476).
 		if cfg == nil || strings.TrimSpace(cfg.SandboxSSH) == "" {
-			return fmt.Errorf("backend=sandbox requires sandbox.ssh to be set in the OPERATOR's global config " +
-				"(~/.agent-factory/config.toml, or `af config set sandbox.ssh '<your ssh command>'`) — the ssh " +
-				"invocation af runs to reach the sandbox host. It is global-only on purpose: af executes it on " +
-				"this machine, so a repository cannot choose it")
+			return fmt.Errorf("backend=sandbox requires sandbox.ssh to be set in the OPERATOR's global config "+
+				"(%s, or `af config set sandbox.ssh '<your ssh command>'`) — the ssh "+
+				"invocation af runs to reach the sandbox host. It is global-only on purpose: af executes it on "+
+				"this machine, so a repository cannot choose it", config.GlobalConfigFileForDisplay())
 		}
 	case BackendHook:
 		if cfg == nil || cfg.RemoteHooks == nil {
-			return fmt.Errorf("backend=hook requires remote_hooks to be configured in this repo's .agent-factory/config.json (the launch/delete commands that provision the session on your own infrastructure)")
+			return fmt.Errorf("backend=hook requires remote_hooks to be configured in this repo's %s (the launch/delete commands that provision the session on your own infrastructure)", backendConfigFile(cfg))
 		}
 	}
 	// BackendLocal needs nothing from the repo config, and an unregistered kind is
@@ -122,6 +139,20 @@ func BackendUnusableReason(kind BackendKind, cfg *config.ResolvedConfig, repoRoo
 		if originRemoteURL(repoRoot) == "" {
 			return missingOriginError(BackendDocker, repoRoot)
 		}
+		// A remote Docker engine is unreachable: the agent-server port is published
+		// on the engine host's loopback and the daemon dials its own. Provision
+		// refuses the same engine (ensureDockerEngineLocal), so the picker must too
+		// — the same resolveDockerEngineEndpoint call, so choose-time and
+		// create-time cannot disagree. Fails closed on a probe error, matching the
+		// runtime: a picker is a promise, and "I could not prove the engine is
+		// local" is not "available".
+		endpoint, local, err := resolveDockerEngineEndpoint(sessionenv.DockerCLIEnvironment(os.Environ(), "", nil))
+		if err != nil {
+			return dockerLocalityProbeError(err)
+		}
+		if !local {
+			return remoteDockerEngineError(endpoint)
+		}
 	case BackendSSH:
 		// Since #3052 this backend delegates every step to OpenSSH. The in-process
 		// x/crypto client needed no binary, so this check did not exist and its
@@ -135,9 +166,18 @@ func BackendUnusableReason(kind BackendKind, cfg *config.ResolvedConfig, repoRoo
 		// fact — so a repo whose key path is a typo must not be told the backend is
 		// usable and then fail deterministically at create (#3092). Same validator
 		// the runtime runs, so choose time and create time cannot disagree.
-		if cfg != nil && cfg.SSH != nil {
-			if err := verifySSHIdentityFile(*cfg.SSH); err != nil {
-				return err
+		if cfg != nil {
+			if _, entry, _ := chooseListedHost("", cfg); entry != nil {
+				// No repo [ssh] host, so a default create lands on the default host:
+				// check its key, not the (absent) repo one — the same call a host
+				// pick makes, so the two cannot disagree.
+				if err := verifySSHIdentityFile(sshConfigForHost(*entry)); err != nil {
+					return err
+				}
+			} else if cfg.SSH != nil {
+				if err := verifySSHIdentityFile(*cfg.SSH); err != nil {
+					return err
+				}
 			}
 		}
 		if originRemoteURL(repoRoot) == "" {
@@ -206,4 +246,17 @@ func sshCLIMissingError(err error) error {
 // the durable store), so neither can run in a repo that has no origin.
 func missingOriginError(kind BackendKind, repoRoot string) error {
 	return fmt.Errorf("backend=%s: repo %q has no `origin` remote to clone the workspace from; add one (GitHub is the durable workspace store) or push the repo first", kind, repoRoot)
+}
+
+// Keep remedies tied to the file read, even if files change after resolution.
+func backendConfigFile(cfg *config.ResolvedConfig) string {
+	if cfg != nil {
+		if cfg.InRepoConfigFile != "" {
+			return cfg.InRepoConfigFile
+		}
+		if cfg.ProjectRoot != "" {
+			return config.InRepoConfigFileName(cfg.ProjectRoot)
+		}
+	}
+	return config.InRepoConfigFileName("")
 }

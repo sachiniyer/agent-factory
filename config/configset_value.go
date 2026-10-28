@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"regexp"
 	"sort"
@@ -24,13 +25,6 @@ func canonicalizeConfigValue(key string, spec settableKeySpec, structured bool, 
 	if !structured {
 		return canonicalizeScalar(spec.kind, raw)
 	}
-	if key == "theme" && !strings.HasPrefix(strings.TrimSpace(raw), "{") {
-		var preset ThemeConfig
-		if err := preset.UnmarshalText([]byte(raw)); err != nil {
-			return "", "", err
-		}
-		return preset.Preset(), "theme = " + encodeTOMLString(preset.Preset()) + "\n", nil
-	}
 	return canonicalizeStructuredValue(key, raw)
 }
 
@@ -42,22 +36,18 @@ func canonicalizeStructuredValue(key, raw string) (canonical, encoded string, er
 	return canonicalizeStructuredValueAgainst(key, raw, nil, false)
 }
 
-// canonicalizeStructuredValueAgainst is the global writer's locked variant.
-// A partial theme object overlays the palette that is current inside the file
-// lock, never an unrelated preset. Whole program-overrides maps preserve an
-// omitted auto-detected default as an empty TOML tombstone so the loader cannot
-// seed that command back in after the user removed it.
-func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preserveBuiltInRemovals bool) (canonical, encoded string, err error) {
+// canonicalizeStructuredValueAgainst is the writers' locked variant. existing
+// is the program_overrides map already on the layer being written: a whole-map
+// write that omits an agent keeps that agent's "" tombstone, so replacing the
+// table cannot bring back the lower layer's override (#4699). reseedBuiltIns is
+// global-only: it also writes a tombstone for every omitted auto-detected
+// default so the loader cannot seed that command back in after the user
+// removed it. A personal project layer preserves only its own tombstones.
+func canonicalizeStructuredValueAgainst(key, raw string, existing map[string]string, reseedBuiltIns bool) (canonical, encoded string, err error) {
 	if strings.TrimSpace(raw) == "null" {
 		return "", "", fmt.Errorf("expected compact JSON for %s, got null", key)
 	}
 	holder := &Config{}
-	if key == "theme" {
-		holder.Theme = DefaultThemeConfig()
-		if current != nil {
-			holder.Theme = current.Theme
-		}
-	}
 	field, ok := writableConfigFieldByTomlKey(holder, key)
 	if !ok {
 		return "", "", fmt.Errorf("%q does not name a writable global config field", key)
@@ -78,24 +68,21 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 		return editorValue(value), encoded, nil
 	}
 
-	target := field.Addr().Interface()
-	var decodedTheme themeConfigJSON
-	if key == "theme" {
-		// ThemeConfig implements encoding.TextUnmarshaler for preset strings.
-		// Decode custom JSON through a method-free alias so an object retains its
-		// established field-by-field shape instead of being routed to that scalar
-		// hook and rejected.
-		decodedTheme = themeConfigJSON(holder.Theme)
-		target = &decodedTheme
+	// A whole-table write may omit a leaf — the loader supplies the compiled
+	// default for an absent one, so the typed form must seed the same defaults
+	// before decoding: a zero value left by an omitted member would read as a
+	// range violation below. An explicitly-written member still decodes over
+	// its seed, so a present-but-invalid value fails as strictly as the leaf
+	// form does.
+	if key == "web" {
+		field.Set(reflect.ValueOf(DefaultConfig().Web))
 	}
+	target := field.Addr().Interface()
 	if err := decodeCompactJSON(key, raw, target); err != nil {
 		return "", "", err
 	}
 	if err := rejectStructuredNulls(key, raw); err != nil {
 		return "", "", err
-	}
-	if key == "theme" {
-		field.Set(reflect.ValueOf(ThemeConfig(decodedTheme)))
 	}
 	if err := validateStructuredConfigValue(key, field); err != nil {
 		return "", "", err
@@ -103,7 +90,7 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 
 	canonical = editorValue(field)
 	encodedValue := field
-	if key == "program_overrides" && preserveBuiltInRemovals {
+	if key == "program_overrides" && (len(existing) > 0 || reseedBuiltIns) {
 		requested := field.Interface().(map[string]string)
 		onDisk := make(map[string]string, len(requested)+1)
 		for agent, command := range requested {
@@ -113,18 +100,18 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 		// them even if the corresponding executable is temporarily absent from
 		// PATH while another override is edited; otherwise the executable would
 		// silently reappear the next time detection succeeds.
-		if current != nil {
-			for agent, command := range current.ProgramOverrides {
-				if command == "" {
-					if _, present := requested[agent]; !present {
-						onDisk[agent] = ""
-					}
+		for agent, command := range existing {
+			if command == "" {
+				if _, present := requested[agent]; !present {
+					onDisk[agent] = ""
 				}
 			}
 		}
-		for agent := range DefaultConfig().ProgramOverrides {
-			if _, present := requested[agent]; !present {
-				onDisk[agent] = ""
+		if reseedBuiltIns {
+			for agent := range DefaultConfig().ProgramOverrides {
+				if _, present := requested[agent]; !present {
+					onDisk[agent] = ""
+				}
 			}
 		}
 		encodedValue = reflect.ValueOf(onDisk)
@@ -135,8 +122,6 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 	}
 	return canonical, encoded, nil
 }
-
-type themeConfigJSON ThemeConfig
 
 // rootAgentConfigJSON preserves JSON field presence while a structured value is
 // encoded. RootAgent.Enabled deliberately lacks omitempty for full Config
@@ -219,18 +204,6 @@ func writableConfigFieldByTomlKey(cfg *Config, key string) (reflect.Value, bool)
 
 func validateStructuredConfigValue(key string, field reflect.Value) error {
 	switch key {
-	case "theme":
-		for i := range field.NumField() {
-			if !field.Type().Field(i).IsExported() {
-				continue
-			}
-			raw := strings.TrimSpace(field.Field(i).String())
-			name := structTagName(field.Type().Field(i).Tag.Get("toml"))
-			if !themeHexColorRE.MatchString(raw) {
-				return fmt.Errorf("theme.%s must be a #RRGGBB color, got %q", name, field.Field(i).String())
-			}
-			field.Field(i).SetString("#" + strings.ToUpper(raw[1:]))
-		}
 	case "program_overrides":
 		for agent, command := range field.Interface().(map[string]string) {
 			if err := ValidateProgramEnum("program_overrides key", "program_overrides key", agent, command); err != nil {
@@ -243,6 +216,12 @@ func validateStructuredConfigValue(key string, field reflect.Value) error {
 			return err
 		}
 		field.Set(reflect.ValueOf(normalized))
+	case "default_accounts":
+		for agent, name := range field.Interface().(map[string]string) {
+			if err := ValidateDefaultAccountEntry("default_accounts key", agent, name); err != nil {
+				return err
+			}
+		}
 	case "limit_patterns":
 		for agent, pattern := range field.Interface().(map[string]string) {
 			if err := ValidateProgramEnum("limit_patterns key", "limit_patterns key", agent, pattern); err != nil {
@@ -252,6 +231,12 @@ func validateStructuredConfigValue(key string, field reflect.Value) error {
 				return fmt.Errorf("limit_patterns.%s is not a valid regular expression: %w", agent, err)
 			}
 		}
+	case "hosts":
+		for name, entry := range field.Interface().(map[string]HostConfig) {
+			if err := ValidateHostEntry(name, entry); err != nil {
+				return err
+			}
+		}
 	case "keys":
 		overrides, err := normalizeKeyOverrides(field.Interface().(map[string]any), "af config set keys")
 		if err != nil {
@@ -259,6 +244,19 @@ func validateStructuredConfigValue(key string, field reflect.Value) error {
 		}
 		if err := keys.ValidateOverrides(overrides); err != nil {
 			return err
+		}
+	case "web":
+		// The whole-table JSON form posts both leaves at once; each gets the
+		// same range check the leaf writer runs, under the leaf's own key name
+		// so a refusal names the field that was wrong.
+		web := field.Interface().(WebConfig)
+		for leaf, value := range map[string]float64{
+			"terminal_font_size_phone":   web.TerminalFontSizePhone,
+			"terminal_font_size_desktop": web.TerminalFontSizeDesktop,
+		} {
+			if err := validateWebTerminalFontSize(leaf, strconv.FormatFloat(value, 'g', -1, 64)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -440,6 +438,20 @@ func canonicalizeScalar(kind cfgValueKind, raw string) (canonical, encoded strin
 		// Canonical is the comma-joined trimmed elements — exactly the form the
 		// editor shows and `af config get` prints back, so a set→get round-trips.
 		return strings.Join(elems, ","), encoded, nil
+	case cfgFloat:
+		n, perr := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		if perr != nil {
+			return "", "", fmt.Errorf("expected a number, got %q", raw)
+		}
+		canonical = strconv.FormatFloat(n, 'g', -1, 64)
+		// The FILE spelling needs a fraction or exponent — a bare "8" would
+		// decode as a TOML integer, which a float64 field refuses at load.
+		// The canonical echo keeps the short "8" `config get` renders.
+		encoded = canonical
+		if !strings.ContainsAny(canonical, ".eE") && !math.IsNaN(n) && !math.IsInf(n, 0) {
+			encoded += ".0"
+		}
+		return canonical, encoded, nil
 	default:
 		return raw, encodeTOMLString(raw), nil
 	}
@@ -474,8 +486,9 @@ type byteRange struct {
 // for source ranges: unlike line regexes it sees a multiline array or inline
 // table as one expression, so replacing session_env_passthrough cannot strand
 // half of the old value in the file. Unrelated expressions stay byte-identical.
+// root_agent is a field-wise patch: omitted profile members are retained.
 func setTOMLStructured(content, key, definition string) (string, error) {
-	definition, err := preserveUnknownStructuredMembers(content, key, definition)
+	definition, err := preserveStructuredMembers(content, key, definition)
 	if err != nil {
 		return "", err
 	}
@@ -501,13 +514,72 @@ func setTOMLStructured(content, key, definition string) (string, error) {
 	return setTOMLScalar(cleaned, "", key, strings.TrimSuffix(strings.TrimPrefix(definition, prefix), "\n")), nil
 }
 
-// preserveUnknownStructuredMembers carries fields this binary does not know
+// canonicalStructuredTOMLValue returns the compact JSON form of the value
+// actually stored in a structured TOML definition. This is the read-back form
+// used by config set after a field-wise merge.
+func canonicalStructuredTOMLValue(content, key string) (string, error) {
+	var document map[string]any
+	if err := toml.Unmarshal([]byte(content), &document); err != nil {
+		return "", err
+	}
+	value, ok := document[key]
+	if !ok {
+		return "", fmt.Errorf("stored structured value %s is missing", key)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// projectStructuredCurrentValue returns the typed, writer-accepted form of a
+// structured personal-project value. root_agent needs its source shape as well
+// as its decoded value: enabled=false and program="" are meaningful when
+// explicitly present, while an omitted field must keep inheriting.
+func projectStructuredCurrentValue(cfg *ProjectConfig, key string) (string, bool) {
+	field, ok := taggedFieldByKey(reflect.ValueOf(cfg), key)
+	if !ok {
+		return "", false
+	}
+	if key != "root_agent" {
+		if key == "program_overrides" {
+			visible := make(map[string]string, field.Len())
+			iter := field.MapRange()
+			for iter.Next() {
+				if command := iter.Value().String(); command != "" {
+					visible[iter.Key().String()] = command
+				}
+			}
+			return editorValue(reflect.ValueOf(visible)), true
+		}
+		return editorValue(field), true
+	}
+	shapeValue, _ := cfg.source.topLevel(key)
+	shape, ok := shapeValue.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	var value rootAgentConfigJSON
+	if _, present := shape["enabled"]; present {
+		enabled := cfg.RootAgent.Enabled
+		value.Enabled = &enabled
+	}
+	if _, present := shape["program"]; present {
+		program := cfg.RootAgent.Program
+		value.Program = &program
+	}
+	return editorValue(reflect.ValueOf(value)), true
+}
+
+// preserveStructuredMembers retains omitted root_agent profile fields and
+// carries fields this binary does not know
 // from the old target table into its replacement. The loader deliberately
 // ignores such fields for rollback tolerance; dropping them during an edit of a
 // known sibling would make that tolerance destructive. Dynamic map keys remain
-// ordinary user values, so omission still removes them. Only unknown members
-// inside a typed struct (including a struct stored in a map) are retained.
-func preserveUnknownStructuredMembers(content, key, definition string) (string, error) {
+// ordinary user values, so omission still removes them. For other typed structs
+// (including structs stored in maps), only unknown members are retained.
+func preserveStructuredMembers(content, key, definition string) (string, error) {
 	var existingDoc, replacementDoc map[string]any
 	if err := toml.Unmarshal([]byte(content), &existingDoc); err != nil {
 		return "", err
@@ -525,9 +597,27 @@ func preserveUnknownStructuredMembers(content, key, definition string) (string, 
 	if !ok {
 		return definition, nil
 	}
-	merged, changed, err := mergeUnknownStructuredMembers(existing, replacement, field.Type(), key)
-	if err != nil {
-		return "", err
+	var merged any
+	var changed bool
+	if key == "root_agent" {
+		previous, oldOK := existing.(map[string]any)
+		next, newOK := replacement.(map[string]any)
+		if !oldOK || !newOK {
+			return "", fmt.Errorf("root_agent must be a table")
+		}
+		for member, value := range previous {
+			if _, supplied := next[member]; !supplied {
+				next[member] = value
+				changed = true
+			}
+		}
+		merged = next
+	} else {
+		var err error
+		merged, changed, err = mergeUnknownStructuredMembers(existing, replacement, field.Type(), key)
+		if err != nil {
+			return "", err
+		}
 	}
 	if !changed {
 		return definition, nil
@@ -668,8 +758,13 @@ func removeTOMLTopLevelValue(content, key string) (string, error) {
 				end := leadingTableCommentStart(data, start, currentBlock.start)
 				ranges = append(ranges, byteRange{start: currentBlock.start, end: end})
 			}
+			isTarget := len(parts) > 0 && parts[0] == key
+			blockStart := start
+			if isTarget && currentBlock != nil {
+				blockStart = leadingTableCommentStart(data, start, currentBlock.start)
+			}
 			currentTable = parts
-			currentBlock = &tableBlock{start: start, target: len(parts) > 0 && parts[0] == key}
+			currentBlock = &tableBlock{start: blockStart, target: isTarget}
 		case unstable.KeyValue:
 			if len(currentTable) == 0 && len(parts) > 0 && parts[0] == key {
 				raw := expr.Raw

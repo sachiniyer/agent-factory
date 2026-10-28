@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -93,25 +94,25 @@ func partitionByArchived(instances []*session.Instance) (live, archived []int) {
 
 var sectionHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(activeTheme.Foreground)
+	Foreground(activeTheme.Ink)
 
 var sectionHeaderSelectedStyle = lipgloss.NewStyle().
 	Bold(true).
-	Background(activeTheme.SelectionBackground).
-	Foreground(activeTheme.SelectionForeground)
+	Background(activeTheme.SurfaceRaised).
+	Foreground(activeTheme.Ink)
 
 var windowIndicatorStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundMuted)
+	Foreground(activeTheme.InkMuted)
 
 var mainTitle = lipgloss.NewStyle().
-	Background(AccentColor).
-	Foreground(activeTheme.Background)
+	Background(activeTheme.Surface).
+	Bold(true).Underline(true).Foreground(activeTheme.Ink)
 
-// blurredTitle is the title chip with tree focus elsewhere (#1024 PR 4 focus
-// ring): same shape, receded color.
+// blurredTitle keeps context in ink when focus is elsewhere; the active
+// heading alone has an underline.
 var blurredTitle = lipgloss.NewStyle().
-	Background(activeTheme.ForegroundDim).
-	Foreground(activeTheme.ForegroundStrong)
+	Background(activeTheme.Surface).
+	Foreground(activeTheme.Ink)
 
 // Sidebar is the unified left navigation pane with collapsible sections. It is
 // a VIEW over the store.Projection (#1024 PR 2): the instance/task/hook data —
@@ -149,11 +150,15 @@ type Sidebar struct {
 	seenSig    string
 	seenSelSeq uint64
 
-	// treeCollapsed is the title of the display-selected instance whose tab
-	// children the user explicitly collapsed (h/←). Cleared when the selection
-	// moves to a different instance, so every newly selected instance starts
-	// auto-expanded (collapse-by-default applies to non-selected instances).
-	treeCollapsed string
+	// treeCollapsed is the display-selected instance whose tab children the
+	// user explicitly collapsed (h/←). Matched by SESSION identity (sameSession:
+	// the stable ID, pointer for a legacy id-less row) so a #765 same-title
+	// kill+recreate swap — which mints a new instance and ID carrying the old
+	// title — is detected and the override cleared, while a same-session pointer
+	// replacement (instanceStartedMsg swapping a disk-built copy, #5651) keeps
+	// the user's fold. Every newly selected instance starts auto-expanded
+	// (collapse-by-default applies to non-selected instances).
+	treeCollapsed *session.Instance
 
 	// lastCursor* remember the identity of the last instance-section row the
 	// cursor rested on (tab -1 = the instance row itself). The reconcile's #969
@@ -172,6 +177,17 @@ type Sidebar struct {
 	// String() (rebuilds can shift indices between renders), scrolling
 	// minimally so the selected row stays visible.
 	scrollOffset int
+
+	// renderedStart/renderedEnd bracket the visibleItems indices the fitted
+	// window last put on screen — the only rows whose ▾ marker is visible.
+	// RowVerbTarget's resting-binding fallback consults them rather than the
+	// full item list: a bound row scrolled outside the window carries no ▾
+	// marker on screen, so no row verb may resolve to it (#4755 review).
+	// rebuildVisibleItems drops hasRendered because the bounds describe the
+	// OLD list; RowVerbTarget refits on demand (ensureRenderedWindow) so the
+	// check always answers against the rows the next frame will paint.
+	renderedStart, renderedEnd int
+	hasRendered                bool
 
 	// Rendering
 	renderer *tree.InstanceRenderer
@@ -217,6 +233,10 @@ func (s *Sidebar) SetSize(width, height int) {
 	s.width = width
 	s.height = height
 	s.renderer.SetWidth(s.contentWidth())
+	// The fitted window assumes the old allocation — a resize can move the
+	// bound row across the fold without any rebuild. Mark it stale so the
+	// next RowVerbTarget refits before answering (#4755 review).
+	s.hasRendered = false
 }
 
 // SetNamingPlaceholder threads the autocreate-name shadow text (#2470) from the
@@ -224,6 +244,12 @@ func (s *Sidebar) SetSize(width, height int) {
 // empty title, its row shows text as muted placeholder. (nil, "") clears it.
 func (s *Sidebar) SetNamingPlaceholder(inst *session.Instance, text string) {
 	s.renderer.SetNamePlaceholder(inst, text)
+}
+
+// SetNowForTest replaces the session row renderer's wall clock. Production
+// leaves the clock installed by NewSidebar intact.
+func (s *Sidebar) SetNowForTest(now func() time.Time) {
+	s.renderer.SetNowForTest(now)
 }
 
 // contentWidth is the effective row width inside the sidebar allocation: the
@@ -262,6 +288,12 @@ func (s *Sidebar) Blur() { s.focused = false }
 // (#1461). Empty restores the default "Agent Factory" label.
 func (s *Sidebar) SetProjectName(name string) { s.projectName = name }
 
+// ProjectName returns the active project's display name set by SetProjectName
+// (empty in registry mode, where the title chip falls back to "Agent Factory").
+// Read-only accessor for tests that assert the sidebar chip follows a project
+// switch or, symmetrically, a delete-of-active-project re-scope that clears it.
+func (s *Sidebar) ProjectName() string { return s.projectName }
+
 // HandleKey implements layout.Pane. Tree navigation stays routed through the
 // root model's global bindings in PR 4 (the keys also work when the workspace
 // pane has focus); per-pane routing arrives with the split (#1024 PR 5).
@@ -293,18 +325,45 @@ func (s *Sidebar) structureSig() string {
 	// a same-count swap.
 	_, archived := partitionByArchived(s.proj.GetInstances())
 	return fmt.Sprintf("%d|%s|%d|%t|%s|%v",
-		s.proj.Version(), selTitle, slots, expandable, s.treeCollapsed, archived)
+		s.proj.Version(), selTitle, slots, expandable, collapsedKey(s.treeCollapsed), archived)
 }
 
 // instanceExpanded reports whether inst's tab children are currently shown:
 // the display-selected instance auto-expands (matched by title so a #765
 // same-title swap keeps the subtree open) unless it is transient or the user
-// explicitly collapsed it. Everything else is collapsed — the keep-row-count-
-// manageable default for non-selected instances.
+// explicitly collapsed it. The collapse override is keyed by session identity
+// so a same-title kill+recreate swap (new ID) drops it — the old session's fold
+// cannot pass through to the replacement — while a pointer swap of the same
+// session keeps it. Everything else is collapsed — the keep-row-
+// count-manageable default for non-selected instances.
 func (s *Sidebar) instanceExpanded(inst *session.Instance) bool {
 	sel := s.proj.GetSelectedInstance()
 	if sel == nil || inst == nil || sel.Title != inst.Title {
 		return false
 	}
-	return tree.Expandable(inst) && s.treeCollapsed != inst.Title
+	return tree.Expandable(inst) && !sameSession(s.treeCollapsed, inst)
+}
+
+// sameSession reports whether a and b are the same logical session: the same
+// pointer, or the same non-empty stable ID. A legacy pre-#1195 row carries ID ""
+// and is only ever its own pointer, so two id-less instances never match.
+func sameSession(a, b *session.Instance) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a == b || (a.ID != "" && a.ID == b.ID)
+}
+
+// collapsedKey is the structure-signature form of the collapse override: the
+// session identity, so a same-session pointer replacement does not look like a
+// structural change.
+func collapsedKey(inst *session.Instance) string {
+	switch {
+	case inst == nil:
+		return ""
+	case inst.ID != "":
+		return "id:" + inst.ID
+	default:
+		return fmt.Sprintf("%p", inst)
+	}
 }

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -20,21 +20,31 @@ type HandoffSessionRequest struct {
 	// keeps the legacy title path.
 	ID string `json:"id"`
 	// To is the incoming agent (a supported agent enum name).
-	To string `json:"to"`
+	To      string `json:"to"`
+	Account string `json:"account,omitempty"`
 	// Brief optionally replaces the session's stored prompt as the mission handed
 	// to the incoming agent. It is what a user typed at handoff time, so it wins:
 	// more specific and more current than a prompt stored at create time.
 	Brief string `json:"brief"`
 }
 
+// AccountAwareHandoffMethod is the version-bound mutation endpoint used by
+// first-party clients. Its presence on the daemon that receives the request is
+// the capability check: a daemon predating account-aware handoffs cannot serve
+// this method, so it refuses before any legacy agent-only mutation can run.
+const AccountAwareHandoffMethod = "HandoffSessionV2"
+
 type HandoffSessionResponse struct {
-	OK bool `json:"ok"`
+	OK          bool   `json:"ok"`
+	FromAccount string `json:"from_account,omitempty"`
+	ToAccount   string `json:"to_account,omitempty"`
 	// From and To are the outgoing and incoming agents, echoed so a client can
 	// report the swap without re-reading the snapshot.
 	From string `json:"from"`
 	To   string `json:"to"`
 	// HeadSHA is the branch tip at swap time — the attribution boundary.
 	HeadSHA string `json:"head_sha,omitempty"`
+	MutationOutcome
 }
 
 func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffSessionResponse) error {
@@ -45,11 +55,19 @@ func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffS
 		return err
 	}
 	result, err := s.manager.HandoffSession(req)
-	if err != nil {
+	*resp = result
+	if !resp.record(err) {
 		return err
 	}
-	*resp = result
+	resp.OK = true
 	return nil
+}
+
+// HandoffSessionV2 binds account-aware admission and the destructive handoff to
+// one request. Keep the implementation in HandoffSession so legacy callers and
+// this versioned entry point share exactly one mutation path.
+func (s *controlServer) HandoffSessionV2(req HandoffSessionRequest, resp *HandoffSessionResponse) error {
+	return s.HandoffSession(req, resp)
 }
 
 // HandoffSession swaps a session's agent in place, keeping its workspace,
@@ -60,27 +78,26 @@ func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffS
 //  1. Resolve and preflight the exact launch command BEFORE touching anything.
 //     An unsupported backend, unknown/same target, missing executable, or env
 //     wrapper af cannot model must fail without having killed a working agent.
-//  2. Capture the branch tip. This is the attribution boundary, and it has to be
-//     read while the outgoing agent's work is the only work on the branch.
-//  3. Build the mission from the OUTGOING agent's perspective — it names who
-//     stopped and why — so it must be built before Program is rewritten.
-//  4. Raise OpReplacing, then rewrite Program + append the ledger entry.
-//  5. Swap the runtime using the prepared plan: stop the old agent, confirm it
-//     stopped, and launch the new one fresh while KEEPING the fence raised.
+//  2. Remember the outgoing identity and reason for the mission.
+//  3. Raise OpReplacing, then rewrite Program + append the provisional ledger.
+//  4. Stop the old agent using the prepared plan and confirm it stopped.
+//  5. Freeze the branch summary and ledger tip, then start the new runtime
+//     while KEEPING the fence raised. No incoming work can enter this capture.
 //  6. Wait for readiness, dismiss trust UI, and deliver the mission. A usage
 //     limit here atomically parks the incoming runtime with that mission pending.
 //  7. Settle the fence, then persist and begin generation-scoped capture.
 //
-// Rollback: if the runtime swap fails, step 4's state change is reverted, because
+// Rollback: if the runtime swap fails, step 3's state change is reverted, because
 // a record claiming the session runs claude while the pane still runs codex is
 // worse than no handoff at all — every subsequent decision keyed off
 // Instance.Program would be wrong. If the swap SUCCEEDS but readiness cannot be
 // established, the record becomes startup-unknown rather than claiming a
 // healthy incoming runtime. If readiness succeeds but the mission paste fails,
-// the exact rendered brief and OpReplacing fence remain durable for the daemon's
-// bounded retry path; neither failure is flattened into a false Running state.
+// the exact rendered brief and OpReplacing fence remain durable. Automatic
+// recovery proceeds only from mission-scoped proof that delivery did not occur;
+// neither failure is flattened into a false Running state.
 //
-// Locking mirrors resumeFromLimit exactly: per-(repo,title) target lock FIRST,
+// Locking mirrors resumeFromLimitOutcome exactly: per-(repo,title) target lock FIRST,
 // then the per-session op lock (#2006's canonical target-before-op order), with
 // a re-verification under both. The target lock is what serializes this swap's
 // prompt delivery against a concurrent DeliverPrompt to the same pane.
@@ -108,8 +125,16 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// see it, and only discovered the refusal after the user chose an agent and
 	// confirmed. Moving it into the predicate both sides already call is what stops
 	// the two from disagreeing about the same session again.
-	if err := instance.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
+	//
+	// The check sees the request's target: a handoff that names the account a
+	// committed swap already moved this session to is the retry that refusal
+	// advertises, not a second lifecycle action (#4393). Every other target —
+	// and every other lifecycle axis — still refuses.
+	if err := instance.ValidateHandoffRuntimeAction(req.To, req.Account); err != nil {
 		return HandoffSessionResponse{}, err
+	}
+	if strings.TrimSpace(req.Account) != "" {
+		return m.handoffAccount(req, instance, repoID)
 	}
 	target := strings.TrimSpace(req.To)
 	if err := instance.ValidateHandoffTarget(target); err != nil {
@@ -150,22 +175,108 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.ValidateHandoffTarget(target); err != nil {
 		return HandoffSessionResponse{}, err
 	}
+	// A scoped account belongs to one agent, so it can never be carried onto a
+	// different one unchanged (#4428). The capability question is judged on the
+	// command the plan froze, in exactly one place: an earlier enum check would
+	// misclassify an override in both directions — `program_overrides.aider =
+	// "codex"` would drop the scope onto a scopable launch, and
+	// `program_overrides.codex = "aider"` would refuse a --account no Aider
+	// namespace could ever honor (#4430 review). An incoming agent WITH an
+	// account namespace must be given its own account explicitly —
+	// handoffAccount owns that transaction, and this refusal names the flag
+	// that reaches it. One WITHOUT has no namespace the name could resolve in,
+	// so there is no identity to guess: the record drops the scope in the same
+	// mutation that rewrites the program, and the response reports the drop on
+	// from_account.
+	fromAccount, _ := instance.AccountSelection()
 	plan, err := instance.PrepareAgentSwap(target)
 	if err != nil {
+		// PrepareAgentSwap resolves the command BEFORE preflight checks it, so
+		// a failed plan carries no frozen answer — but the same resolution can
+		// be re-run without preflight, and must be when a scope is at stake: a
+		// target that is BOTH unlaunchable AND scopable-resolved still gets the
+		// refusal, because --account is the remedy the user can act on while
+		// the preflight detail would send them to install an agent they were
+		// never going to reach. The plan failed, so this resolution is the best
+		// available answer — the same one the failed plan computed — and a
+		// retry re-resolves anyway. Only a scopable resolution — or an
+		// unclassifiable one, which can never be proven safe for the scope
+		// either — earns the refusal; anything else leaves preflight to name
+		// the real blocker.
+		if fromAccount != "" {
+			effective := session.HandoffEffectiveAgentForPath(instance.Path, target)
+			if _, scopable := sessionenv.SupportsAccounts(effective); scopable {
+				return HandoffSessionResponse{}, scopedAccountHandoffRefusal(
+					req.Title, instance.CurrentAgentName(), fromAccount, target, effective)
+			}
+			// Unclassifiable earns the scope refusal for the same reason a
+			// scopable resolution does: the command can never carry this
+			// session's identity, so its classification — not the launch
+			// detail — is the blocker worth naming (#4430 review, D1).
+			if effective == "" {
+				return HandoffSessionResponse{}, fmt.Errorf(
+					"session %q is scoped to %s account %q, and %s resolves to a command af cannot classify as an agent — it cannot be proven to either carry or safely drop that scope; point program_overrides.%s at a literal agent command or choose another target",
+					req.Title, instance.CurrentAgentName(), fromAccount, target, target)
+			}
+		}
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)
+	}
+	// Unconditional on scopable(effective): gating this on effective != target
+	// would let a config flip between admission and the plan freeze slip a
+	// scopable command past the only check that sees it. The frozen command is
+	// the authority — a refusal here can never describe a launch the plan did
+	// not already commit to.
+	if fromAccount != "" {
+		if _, scopable := sessionenv.SupportsAccounts(plan.EffectiveAgent()); scopable {
+			return HandoffSessionResponse{}, scopedAccountHandoffRefusal(
+				req.Title, instance.CurrentAgentName(), fromAccount, target, plan.EffectiveAgent())
+		}
+		// "" means the resolved command is not a provable agent invocation — a
+		// wrapper like `npx codex` may launch a scopable agent underneath. The
+		// --account path refuses the same command because it cannot prove the
+		// target carries a scope; here the refusal is because af cannot prove
+		// the target does NOT carry one, and a durable pin is never dropped on
+		// an unproven answer (#4430 review, D1).
+		if plan.EffectiveAgent() == "" {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q, and %s resolves to a command af cannot classify as an agent — it cannot be proven to either carry or safely drop that scope; point program_overrides.%s at a literal agent command or choose another target",
+				req.Title, instance.CurrentAgentName(), fromAccount, target, target)
+		}
+		// The descope path clears the account inside the record transaction,
+		// but SwapAgent restarts only the agent pane: a sibling shell or
+		// process tab — and the VS Code editor, which the account-swap family
+		// already refuses for this class — keeps running under the dropped
+		// account's environment while the record reports ambient. One session
+		// cannot carry two identities, so refuse rather than split it; the
+		// account-capable target above is the alternative that keeps the tabs
+		// (#4430 review round 2).
+		if names := credentialBearingHandoffSiblings(instance); len(names) > 0 {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q and %s cannot carry that scope, but tab(s) %s still run under the dropped account's environment — close them first, or hand off to an account-capable target with --account",
+				req.Title, instance.CurrentAgentName(), fromAccount, target, strings.Join(names, ", "))
+		}
+		// The same fence must cover the processes whose close already committed:
+		// a PendingTabCleanup handle is a tmux session whose teardown was never
+		// confirmed, so its process can still be running under the dropped
+		// account's environment while the roster reports it gone (#4430 review).
+		// Closing again is impossible — the tab is already removed — so the
+		// remedy is the cleanup sweep the next daemon start runs, exactly the
+		// refusal the account-swap path gives for the same handle set.
+		if pending := instance.PendingTabCleanup(); len(pending) > 0 {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q and %s cannot carry that scope, but %d prior tab teardown(s) remain unconfirmed and may still run under the dropped account's environment — restart af to retry that cleanup, then retry the handoff, or hand off to an account-capable target with --account",
+				req.Title, instance.CurrentAgentName(), fromAccount, target, len(pending))
+		}
 	}
 
 	outgoing := instance.CurrentAgentName()
 
-	// The mission describes the outgoing agent's work, so build it before the
-	// swap rewrites who the outgoing agent is.
+	// Preserve intent before the swap; branch work is frozen only after stop.
 	reason := session.HandoffReasonManual
 	if instance.LimitReached() {
 		reason = session.HandoffReasonUsageLimit
 	}
-	brief := instance.BuildMissionBrief(target, req.Brief, reason)
-	mission := brief.Render()
-	headSHA := brief.Work.HeadSHA
+	var brief session.MissionBrief
 	conversationCapture := plan.ConversationCapture()
 
 	// Fence the close/start window before either the record or runtime changes.
@@ -174,11 +285,17 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.Transition(session.BeginHandoff()); err != nil {
 		return HandoffSessionResponse{}, err
 	}
-	entry, err := instance.RecordHandoffSwap(target, reason, headSHA, false)
+	entry, err := instance.RecordHandoffSwap(target, plan.EffectiveAgent(), reason, "", false)
 	if err != nil {
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, err
 	}
+
+	plan = plan.WithPostStopCapture(func() error {
+		var captureErr error
+		brief, captureErr = instance.CaptureHandoffBrief(&entry, req.Brief)
+		return captureErr
+	})
 
 	checkpoint, swapErr := instance.SwapAgent(plan)
 	if swapErr != nil {
@@ -188,12 +305,13 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		// already rejected by PrepareAgentSwap before teardown; this is the narrow
 		// runtime/infrastructure failure path.
 		if rbErr := instance.RevertHandoff(entry); rbErr != nil {
-			log.ErrorLog.Printf("handoff %q: swap failed (%v) AND the record could not be reverted (%v); "+
+			m.err().Printf("handoff %q: swap failed (%v) AND the record could not be reverted (%v); "+
 				"the session's recorded agent may not match its running one", req.Title, swapErr, rbErr)
 		}
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, fmt.Errorf("failed to hand %q off to %s: %w", req.Title, target, swapErr)
 	}
+	mission, headSHA := brief.Render(), brief.Work.HeadSHA
 	delivery := prepareHandoffDelivery(handoffDelivery{
 		repoID: repoID, key: key, title: req.Title, target: target, mission: mission,
 		instance: instance, conversationCapture: conversationCapture,
@@ -233,6 +351,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// instead of silently claiming an instruction-less agent is complete.
 	instance.SetPendingHandoffMission(mission)
 	checkpoint.PendingHandoffMission = mission
+	checkpoint.HandoffDeliveryStatus = session.PromptNotDelivered
 	// The process swap is already irreversible, so checkpoint its durable facts
 	// before the readiness wait. Memory stays fenced, but a daemon crash in this
 	// window must restore the incoming Program rather than lie that the outgoing
@@ -249,15 +368,19 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := m.persistHandoffCheckpointErr(repoID, instance, checkpoint); err != nil {
 		// Preserve the existing best-effort persist contract: delivery can still
 		// make the live agent useful, and the final settled write retries below.
-		log.WarningLog.Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
+		m.warn().Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
 	}
 
+	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA, FromAccount: fromAccount}
 	if err := m.deliverHandoffMission(delivery); err != nil {
-		return HandoffSessionResponse{}, err
+		// SwapAgent already installed the incoming runtime. Preserve the resolved
+		// identity and classify every later delivery/settlement failure as
+		// committed so callers cannot present it as a safe refusal to retry.
+		return response, &mutationCommittedError{err: err}
 	}
-	log.InfoLog.Printf("handoff: session %q swapped %s → %s at %s", instance.Title, outgoing, target, shortSHA(headSHA))
+	m.info().Printf("handoff: session %q swapped %s → %s at %s", instance.Title, outgoing, target, shortSHA(headSHA))
 
-	return HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA}, nil
+	return response, nil
 }
 
 func shortSHA(sha string) string {
@@ -269,6 +392,23 @@ func shortSHA(sha string) string {
 		return "(no commits)"
 	}
 	return sha
+}
+
+// scopedAccountHandoffRefusal is the one refusal a scoped session gets for a
+// scopable incoming agent, named at the RESOLVED agent so a program_overrides
+// redirect explains itself. Both admission sites emit it — the frozen plan's
+// EffectiveAgent when PrepareAgentSwap succeeded, and the same resolution
+// re-run when it failed (the refusal, not the preflight detail, is what the
+// user can act on there).
+func scopedAccountHandoffRefusal(title, current, account, target, effective string) error {
+	if effective != target {
+		return fmt.Errorf(
+			"session %q is scoped to %s account %q, and %q resolves to %s — specify a target account with --account before handing it off",
+			title, current, account, target, effective)
+	}
+	return fmt.Errorf(
+		"session %q is scoped to %s account %q; specify a target account with --account before handing it off to %s",
+		title, current, account, target)
 }
 
 // IsHandoffUnsupported reports whether err is the backend-restriction sentinel,

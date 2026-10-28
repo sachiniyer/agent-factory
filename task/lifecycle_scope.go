@@ -7,21 +7,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-// LoadTasksForRepoID returns tasks belonging to an already-resolved repo ID.
-// It is the path-independent counterpart to LoadTasksForRepo for daemon
-// lifecycle checks, including remote sessions with no local git worktree. Legacy
-// rows without a retained RepoID are resolved freshly and every proven binding
-// is committed before scope exclusion: a later symlink/worktree rebind therefore
-// cannot move an excluded task into the project after its target is archived.
-// An enabled targeted legacy row whose nonempty path cannot currently resolve
-// is an unknown relationship and returns an error rather than silently excluding
-// a possible blocker; disabled and untargeted rows cannot create that retry
-// state and remain non-blocking.
-func LoadTasksForRepoID(repoID string) ([]Task, error) {
-	filtered, _, err := LoadTasksForRepoIDWithBindingUpdates(repoID)
-	return filtered, err
-}
-
 // LoadTasksForRepoIDWithBindingUpdates also returns the authoritative task
 // projections whose legacy ProjectPath bindings this load durably backfilled.
 // Daemon callers publish those commits so push-only clients cannot retain a
@@ -104,6 +89,7 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, []Tas
 
 	var authoritative []Task
 	var updated []Task
+	var updatedRows []int
 	unresolved := make(map[string]repoResolution)
 	lockErr := config.WithFileLock(path, func() error {
 		current, err := loadTasksLocked(path)
@@ -118,7 +104,21 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, []Tas
 			resolved, ok := resolvedPaths[current[i].ProjectPath]
 			if ok && resolved.known {
 				current[i].RepoID = resolved.id
-				updated = append(updated, current[i])
+				// The daemon rewrote a row nobody asked it to touch, which is
+				// exactly the class of change a user cannot otherwise tell apart
+				// from one they made themselves (#3623). It happens at most once
+				// per legacy row — the backfill is skipped once RepoID is set — so
+				// it cannot crowd the bounded trail. The field is named directly
+				// rather than through changedFields, which covers only the fields a
+				// surface can patch; repo_id is derived and patchable by no one.
+				appendAudit(&current[i], ActorDaemonUpgrade, AuditUpdated, []string{"repo_id"}, nowFn())
+				// The ROW is recorded, not the record. These are published as
+				// EventTaskUpdated, and a copy taken here would carry the identity
+				// loadTasksLocked stamped against the PRE-write bytes — a version of
+				// the store that stops existing the moment this backfill saves, and
+				// so pairs with no later read (#3684 review). They are materialized
+				// after the write, off the re-identified slice.
+				updatedRows = append(updatedRows, i)
 				changed = true
 				continue
 			}
@@ -129,9 +129,17 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, []Tas
 			}
 		}
 		if changed {
-			if err := saveTasks(current); err != nil {
+			generation, err := writeTasks(current)
+			if err != nil {
 				return err
 			}
+			// Every record this transaction hands back — the authoritative list and
+			// the published binding updates alike — is re-identified against the file
+			// the write produced. See stampRowIdentity.
+			stampRowIdentity(current, generation)
+		}
+		for _, i := range updatedRows {
+			updated = append(updated, current[i])
 		}
 		authoritative = current
 		return nil

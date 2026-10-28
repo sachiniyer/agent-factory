@@ -84,9 +84,9 @@ func TestBackendSettingsAliasesUseGroupedPresence(t *testing.T) {
 					if parseCase.wantWarning {
 						want := "config backend-settings.toml: deprecated config key \"" + tc.legacyKey + "\"; use \"" + tc.canonical + "\"; "
 						if parseCase.both {
-							want += "both are present, so the grouped value won\n"
+							want += "both are present, so the grouped value won; run `af config migrate` to drop the flat spelling once the two agree\n"
 						} else {
-							want += "the flat alias remains supported\n"
+							want += "the flat alias remains supported; run `af config migrate` to rewrite it in place\n"
 						}
 						assert.Equal(t, want, warnings.String())
 					} else {

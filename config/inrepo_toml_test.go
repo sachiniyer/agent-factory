@@ -29,7 +29,7 @@ default_program = "aider"
 post_worktree_commands = ["npm install"]
 
 [program_overrides]
-codex = "/opt/codex --fast"
+codex = "codex --fast"
 
 [remote_hooks]
 launch_cmd = "l"
@@ -97,8 +97,7 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 		// the actionable "global setting" rejection rather than the generic
 		// "unknown key" one it got while it was missing from
 		// inRepoGlobalOnlyKeys. It exists in both config.json and config.toml
-		// (unlike [keys]/[theme]), so the message points at the resolved
-		// global config file, not config.toml.
+		// but the remedy must name the authoritative global TOML file.
 		home := t.TempDir()
 		t.Setenv("AGENT_FACTORY_HOME", home)
 		repoRoot := t.TempDir()
@@ -110,7 +109,7 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 		assert.Contains(t, err.Error(), "global setting")
 		assert.NotContains(t, err.Error(), "unknown key",
 			"a global-only key must not fall through to the generic unknown-key message")
-		assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)))
+		assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, TomlConfigFileName)))
 	})
 
 	t.Run("rejects grouped network settings as global-only", func(t *testing.T) {
@@ -145,7 +144,7 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 			"the keys rejection must not point at the ignored config.json path")
 	})
 
-	t.Run("rejecting the TOML-only theme table points at config.toml", func(t *testing.T) {
+	t.Run("retired theme table names appearance", func(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("AGENT_FACTORY_HOME", home)
 		repoRoot := t.TempDir()
@@ -153,8 +152,8 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 
 		_, _, err := LoadInRepoConfig(repoRoot)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "global setting")
-		assert.Contains(t, err.Error(), TomlConfigFileName)
+		assert.Contains(t, err.Error(), "retired")
+		assert.Contains(t, err.Error(), "appearance")
 		assert.NotContains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)),
 			"the theme rejection must not point at the ignored config.json path")
 	})

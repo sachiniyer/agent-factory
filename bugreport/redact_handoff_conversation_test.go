@@ -37,7 +37,7 @@ func TestRedactInstanceDataRedactsHandoffConversationIDs(t *testing.T) {
 		}},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	for i, h := range d.Tabs[0].Handoffs {
 		if h.From.ID != "" {
@@ -214,7 +214,7 @@ func TestRedactInstanceDataClearsEveryNestedConversationID(t *testing.T) {
 		}
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	visited := 0
 	walkConversations(t, reflect.ValueOf(&d).Elem(), "InstanceData", false, func(v reflect.Value, path string) {

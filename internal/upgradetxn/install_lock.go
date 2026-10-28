@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
@@ -56,6 +55,59 @@ func WithInstallLock(homeDir, executablePath string, fn func() error) (retErr er
 // explicitly and keeps the waiting form.
 func TryWithInstallLock(homeDir, executablePath string, fn func() error) (retErr error) {
 	return withInstallLock(homeDir, executablePath, true, fn)
+}
+
+// ErrPrepareLockUnavailable is returned by WithPrepareLock when the home-scoped
+// preparation lock could not be taken. The recovery hand-off treats this as
+// best-effort: a transient I/O failure on the lock file must not strand a
+// committed candidate the commit signal already authorised a hand-off for, so
+// the caller re-runs fn unlocked on this error rather than skipping the
+// hand-off — the interlock is defense-in-depth, not a gate.
+var ErrPrepareLockUnavailable = errors.New("upgrade preparation lock unavailable")
+
+// WithPrepareLock runs fn while holding the home-scoped preparation lock Prepare
+// takes (the same lock WithInstallLock acquires first), without the executable-keyed
+// lock. It serializes a caller against Prepare so a transaction cannot publish
+// active.json between a read this caller makes and an action that depends on the
+// read's result — the time-of-check-to-time-of-use window the recovery hand-off
+// closes (#5168): between confirming no other active transaction owns the home and
+// arming the post-commit daemon, a concurrent Prepare would otherwise land a
+// successor's active.json and let the hand-off start a daemon that defers to it.
+//
+// The lock blocks rather than failing: a Prepare in flight in the same home
+// should be waited out, not raced. Callers that must not block read the journal
+// directly. It does NOT take the executable-keyed lock the in-place installers
+// hold, because the caller is not swapping a binary — only excluding a
+// transaction publish, which is what the home lock is for.
+//
+// The lock is best-effort by design: a transient I/O failure on the lock file
+// (a broken or symlinked upgrade root, ESTALE on a networked home) returns
+// ErrPrepareLockUnavailable WITHOUT running fn. The recovery hand-off's commit
+// signal already authorised arming the post-upgrade daemon, so a caller that
+// must never strand a committed candidate re-runs fn unlocked on that error
+// rather than skipping the hand-off — the interlock is defense-in-depth, not a
+// gate (re-gating it on a transient read is the exact regression #5165 removed).
+//
+// Like Prepare and WithInstallLock, this materialises the upgrade root if it is
+// absent so a lock has a file to take. That is a write, so this belongs on paths
+// that already act on the transaction's home, never on a read-only probe.
+func WithPrepareLock(homeDir string, fn func() error) (retErr error) {
+	home, err := canonicalExistingDir(homeDir)
+	if err != nil {
+		return errors.Join(ErrPrepareLockUnavailable, fmt.Errorf("validate upgrade home: %w", err))
+	}
+	root := upgradeRoot(home)
+	if err := ensureLockRoot(root); err != nil {
+		return errors.Join(ErrPrepareLockUnavailable, err)
+	}
+	lock, err := acquireFileLock(filepath.Join(root, preparationLockName), false)
+	if err != nil {
+		return errors.Join(ErrPrepareLockUnavailable, fmt.Errorf("lock upgrade preparation: %w", err))
+	}
+	defer func() {
+		retErr = errors.Join(retErr, releaseFileLock(lock))
+	}()
+	return fn()
 }
 
 // ErrInstallLockBusy reports that another writer holds the upgrade locks.
@@ -149,7 +201,7 @@ func executableLockPath(executable string) string {
 // (#2948). Created 0600, it was openable by its creator alone: on a shared
 // install the first user to upgrade owned a lock nobody else could open, the
 // second user got EACCES, and — because a lock failure must never block an
-// install — writeExecutableInPlace logged it and swapped the binary UNLOCKED.
+// install — writeExecutableInPlaceWaiting logged it and swapped the binary UNLOCKED.
 // The cross-user interleave the executable key exists to prevent came back
 // silently, for everyone except the user who got there first.
 //
@@ -397,45 +449,6 @@ func withExecutableLock(executablePath string, nonblocking bool, fn func() error
 		retErr = errors.Join(retErr, releaseFileLock(lock))
 	}()
 	return fn()
-}
-
-// foreignTransactionOver returns the id of a transaction other than selfID that
-// has staged a preserved-previous binary beside executable, or "" when none has.
-//
-// It exists because a transaction is home-scoped while the executable is not.
-// Two AF homes sharing one `af` binary each keep their own journal, each take
-// their own per-home lock, and neither can see the other's — so both could hold
-// an active transaction over the same file. The executable lock serialises the
-// act of publishing, not the lifetime of what was published.
-//
-// There is no registry of AF homes to consult and none is needed:
-// binaryArtifactPaths stages the preserved and candidate binaries next to the
-// executable, so its directory is the one place every home's transaction over
-// that binary is visible.
-//
-// Matched on the preserved-PREVIOUS artifact, because that is the rollback
-// input a second transaction would put at risk. Read with ReadDir and a literal
-// prefix rather than filepath.Glob: an executable whose name contains a glob
-// metacharacter would otherwise match the wrong set.
-func foreignTransactionOver(executable, selfID string) (string, error) {
-	dir := filepath.Dir(executable)
-	prefix := "." + filepath.Base(executable) + ".af-upgrade-"
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", fmt.Errorf("inspect %s for other upgrade transactions: %w", dir, err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".previous") {
-			continue
-		}
-		id := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".previous")
-		if id == "" || id == selfID {
-			continue
-		}
-		return id, nil
-	}
-	return "", nil
 }
 
 // hasExtendedACL reports whether the path carries a POSIX access ACL, which

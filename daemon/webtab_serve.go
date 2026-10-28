@@ -250,6 +250,18 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 			writeVSCodeNoticePageRetry(w, "VS Code is still starting…", true)
 			return
 		}
+		// The session selected an account af could not resolve. Refusing IS the
+		// behaviour (an editor on the ambient identity under a session that reports
+		// an account is #3051's failure, #3870), so this is a state the operator
+		// fixes — render the cause into the pane, naming the account and the command
+		// that repairs it, rather than the JSON envelope an iframe cannot display.
+		// Non-retrying for the same reason as the exited case below: the supervisor
+		// replays this failure for a cooldown, so a refreshing page would only
+		// re-render it.
+		if errors.Is(err, errVSCodeAccountScope) {
+			writeVSCodeNoticePage(w, err.Error())
+			return
+		}
 		// An editor that started and then exited without ever listening is a broken
 		// install/config, not a transient state: render it INTO the pane like the
 		// other two, since the iframe shows this document and a raw JSON error

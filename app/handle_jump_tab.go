@@ -2,9 +2,11 @@ package app
 
 import (
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -40,6 +42,16 @@ func (m *home) showJumpTabPrompt() (tea.Model, tea.Cmd) {
 		return m, nil // nothing to jump within
 	}
 	m.promptOverlay = overlay.NewPromptOverlay("Jump to tab (number or name)", "")
+	// The widget is the naming form's initial-prompt field; handleStateJumpTab
+	// re-owns its keys (see below), so it must also own the copy that describes
+	// them. Inheriting the composer's told the operator "enter newline" while
+	// enter submitted, and "tab done" while tab did nothing (#4172).
+	m.promptOverlay.SetPlaceholder("Tab number or name…")
+	m.promptOverlay.SetHints("enter jump · esc cancel", "enter jump · esc cancel")
+	// One line of input deserves a one-line dialog (#5587): without compact the
+	// textarea fills the frame the layout fit gives it and the box renders as a
+	// screen of blank lines around a single field.
+	m.promptOverlay.SetCompact()
 	m.layoutPromptOverlay()
 	m.state = stateJumpTab
 	return m, nil
@@ -66,43 +78,48 @@ func (m *home) handleStateJumpTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// fall through to resolve
 	default:
 		m.promptOverlay.HandleKeyPress(msg)
+		// Say where the current query would land while it is still editable
+		// (#5587): the prompt used to hold its answer until Enter, so a miss
+		// cost the whole jump — type, submit, get told no, retype blind.
+		m.promptOverlay.SetStatus(m.jumpTabStatus(m.promptOverlay.Value()))
 		return m, nil
 	}
 	query := m.promptOverlay.Value()
 	m.promptOverlay = nil
 	m.state = stateDefault
 
-	// Resolved against the instance the jump will actually TARGET, and by CANONICAL
-	// NAME (#3067 review).
+	// Resolved against the instance the jump will actually TARGET (#3067 review).
 	//
 	// Two distinct mistakes were here. handleTabJump acts on the focused pane when
 	// there is one, so resolving against the sidebar selection could name a tab in a
 	// different session than the one about to move. And tree.TabLabels returns
-	// DECORATED text — "◆ Agent", "› Terminal" — which session/tab.go says in as many
-	// words is never resolved against: TabMatches keys on Name alone, so the label is
-	// free to be the pretty string. Matching the pretty string would accept glyphs
-	// nobody types and reject the name everything else in af accepts.
+	// DECORATED text — "◆ Agent", "› Terminal" — including glyphs nobody types. The
+	// prompt resolves the canonical Name first, then the undecorated session.TabLabel
+	// as a UI-local alias so the text a user sees remains discoverable without
+	// changing what name-based CLI and wire operations accept (#3997).
 	//
 	// Read at submit time rather than when the prompt opened: a tab can be created or
 	// closed while it is up, and a stale list would jump by an ordinal that no longer
 	// means what the user saw.
-	names := m.jumpTargetTabNames()
-	idx := ui.ResolveTabJump(query, names)
+	tabs := m.jumpTargetTabs()
+	idx := resolveTabJump(query, tabs)
 	if idx == 0 {
 		// Said out loud rather than swallowed. "No such tab" and "ambiguous" are both
 		// answers the user can act on; a prompt that closes with nothing happening is
 		// indistinguishable from a bug, which is the #3021 shape all over again.
-		m.errBox.SetNotice(jumpTabMiss(query, names))
-		return m, nil
+		// Through handleNotice, not errBox.SetNotice: it advances the notice
+		// generation and schedules the usual expiry, so the miss neither lingers
+		// forever nor gets erased early by an older notice's timer.
+		return m, m.handleNotice(jumpTabMiss(query, tabs))
 	}
 	return m.handleTabJump(idx)
 }
 
-// jumpTargetTabNames returns the canonical tab names of whichever instance a jump
-// would act on: the focused pane's, or the sidebar selection when no pane is
+// jumpTargetTabs returns the tabs of whichever instance a jump would act on: the
+// focused pane's, or the sidebar selection when no pane is
 // focused. Mirrors handleTabJump's own target choice deliberately — a resolver that
 // disagrees with the mover is how a jump lands somewhere the user did not name.
-func (m *home) jumpTargetTabNames() []string {
+func (m *home) jumpTargetTabs() []*session.Tab {
 	inst := m.store.GetSelectedInstance()
 	if p := m.focusedOpenPane(); p != nil && p.Instance() != nil {
 		inst = p.Instance()
@@ -110,20 +127,97 @@ func (m *home) jumpTargetTabNames() []string {
 	if inst == nil {
 		return nil
 	}
-	tabs := inst.GetTabs()
-	names := make([]string, 0, len(tabs))
-	for _, tab := range tabs {
-		names = append(names, tab.Name)
+	return inst.GetTabs()
+}
+
+// resolveTabJump preserves canonical names as the first-choice identity, then
+// accepts the undecorated display labels as a TUI-only discoverability alias. If
+// the name tier is ambiguous it stays ambiguous rather than letting a label pick a
+// different winner.
+func resolveTabJump(query string, tabs []*session.Tab) int {
+	names, labels := tabJumpNamesAndLabels(tabs)
+	if idx := ui.ResolveTabJump(query, names); idx != 0 {
+		return idx
 	}
-	return names
+	if ui.ResolveTabJumpCandidates(query, names) > 0 {
+		return 0
+	}
+	return ui.ResolveTabJump(query, labels)
+}
+
+// jumpTabStatus is the live answer the prompt shows while the query is being
+// typed (#5587): the tab Enter would land on, "more than one match" while the
+// query still names several, or "no match" once it names none. Empty stays
+// silent — the placeholder already says what to type. Resolved through the
+// same resolver Enter uses, so the line never promises a jump Enter refuses.
+func (m *home) jumpTabStatus(query string) string {
+	if strings.TrimSpace(query) == "" {
+		return ""
+	}
+	tabs := m.jumpTargetTabs()
+	if idx := resolveTabJump(query, tabs); idx != 0 {
+		if tab := tabs[idx-1]; tab != nil {
+			label := session.TabLabel(tab)
+			if tab.Name != "" && label != tab.Name {
+				return fmt.Sprintf("→ %s (%s)", label, tab.Name)
+			}
+			return "→ " + label
+		}
+	}
+	names, labels := tabJumpNamesAndLabels(tabs)
+	candidates := ui.ResolveTabJumpCandidates(query, names)
+	if candidates == 0 {
+		candidates = ui.ResolveTabJumpCandidates(query, labels)
+	}
+	if candidates > 1 {
+		return "more than one match"
+	}
+	return "no match"
 }
 
 // jumpTabMiss explains WHY nothing happened, distinguishing the two reasons so the
 // next keystroke can be the right one: a typo wants retyping, an ambiguous prefix
 // wants more characters.
-func jumpTabMiss(query string, labels []string) error {
-	if ui.ResolveTabJumpCandidates(query, labels) > 1 {
-		return fmt.Errorf("more than one tab matches %q; type more of the name", query)
+func jumpTabMiss(query string, tabs []*session.Tab) error {
+	names, labels := tabJumpNamesAndLabels(tabs)
+	candidates := ui.ResolveTabJumpCandidates(query, names)
+	if candidates == 0 {
+		candidates = ui.ResolveTabJumpCandidates(query, labels)
 	}
-	return fmt.Errorf("no tab matches %q", query)
+	available := tabJumpAvailableTabs(tabs)
+	if available != "" {
+		available = "; available tabs: " + available
+	}
+	if candidates > 1 {
+		return fmt.Errorf("more than one tab matches %q; type more of the name%s", query, available)
+	}
+	return fmt.Errorf("no tab matches %q%s", query, available)
+}
+
+func tabJumpNamesAndLabels(tabs []*session.Tab) ([]string, []string) {
+	names := make([]string, len(tabs))
+	labels := make([]string, len(tabs))
+	for i, tab := range tabs {
+		if tab != nil {
+			names[i] = tab.Name
+		}
+		labels[i] = session.TabLabel(tab)
+	}
+	return names, labels
+}
+
+func tabJumpAvailableTabs(tabs []*session.Tab) string {
+	available := make([]string, 0, len(tabs))
+	for _, tab := range tabs {
+		if tab == nil {
+			continue
+		}
+		label := session.TabLabel(tab)
+		if tab.Name != "" && label != tab.Name {
+			available = append(available, fmt.Sprintf("%s (%s)", label, tab.Name))
+		} else if label != "" {
+			available = append(available, label)
+		}
+	}
+	return strings.Join(available, ", ")
 }

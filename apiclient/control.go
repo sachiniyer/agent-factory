@@ -2,7 +2,9 @@ package apiclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -17,7 +19,7 @@ import (
 // shape, so a caller swaps `daemon.X(req)` for `client.X(req)` with no other
 // change and gets byte-identical results (the envelope guarantees parity). The
 // TUI is the first full consumer — it now routes create/kill/archive/restore/
-// tab/PR-info/task/poll-pause/limit-resume through here instead of net/rpc, so
+// tab/task/poll-pause/limit-resume through here instead of net/rpc, so
 // the gob control client stays only for CLI/internal callers.
 
 // CreateSession asks the daemon to create, start, and persist a session.
@@ -79,6 +81,19 @@ func (c *Client) DeleteProject(req daemon.DeleteProjectRequest) (daemon.DeletePr
 	return resp, err
 }
 
+// PruneSessions asks the daemon to enumerate reclaimable archived sessions —
+// strictly a read (#5136). This is the remote-daemon route for
+// `af sessions prune`: when --daemon-url/AF_DAEMON_URL names a remote, the
+// request must cross the wire — the local control socket would report the
+// WRONG host's archives.
+func (c *Client) PruneSessions(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
+	var resp daemon.PruneSessionsResponse
+	if err := c.call("PruneSessions", req, &resp); err != nil {
+		return daemon.PruneSessionsResponse{}, err
+	}
+	return resp, nil
+}
+
 // ResumeFromLimit asks the daemon to resume a usage-limit-blocked session
 // (#1146) — the action behind the TUI's `c` key and the web's Retry button.
 // The CLI reaches the same public handler over its gob control transport.
@@ -93,15 +108,45 @@ func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
 	return nil
 }
 
+// ConfirmHandoffDelivery asks the daemon to retire a pending handoff mission
+// on the operator's attestation that it already landed (#4429) — the "mark
+// delivered" exit for a sent-unverified or could-not-confirm verdict, and the
+// supported way out of a startup-unknown wedge. It never resends: a daemon
+// predating the verb refuses loudly (route not served) rather than run a retry
+// against a mission that may already be executing.
+func (c *Client) ConfirmHandoffDelivery(req daemon.ConfirmHandoffDeliveryRequest) error {
+	var resp daemon.ConfirmHandoffDeliveryResponse
+	err := c.call("ConfirmHandoffDelivery", req, &resp)
+	if IsRouteNotServed(err) {
+		return fmt.Errorf("this daemon does not support confirming a handoff delivery (upgrade the daemon), so the pending mission was left untouched")
+	}
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("delivery was not confirmed: %s", resp.Reason)
+	}
+	return nil
+}
+
 // HandoffSession asks the daemon to continue a session under a different agent,
 // in place (#2013) — the TUI's handoff action. Returns the swap the daemon
 // actually performed (outgoing agent, incoming agent, attribution boundary).
 func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 	var resp daemon.HandoffSessionResponse
-	if err := c.call("HandoffSession", req, &resp); err != nil {
+	err := c.call(daemon.AccountAwareHandoffMethod, req, &resp)
+	if IsRouteNotServed(err) {
+		return daemon.HandoffSessionResponse{}, daemon.ErrAccountHandoffUnsupported
+	}
+	if err != nil && !IsMutationCommitted(err) {
 		return daemon.HandoffSessionResponse{}, err
 	}
-	return resp, nil
+	requestedAccount := strings.TrimSpace(req.Account)
+	if requestedAccount != "" && resp.ToAccount != requestedAccount {
+		mismatch := &mutationCommittedError{detail: fmt.Sprintf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces", requestedAccount)}
+		return resp, errors.Join(err, mismatch)
+	}
+	return resp, err
 }
 
 // CreateTab asks the daemon to spawn, persist, and report a new tab. The
@@ -129,19 +174,30 @@ func (c *Client) CloseTab(req daemon.CloseTabRequest) (string, error) {
 	return resp.Name, nil
 }
 
-// There is deliberately no RenameTab/ReorderTab here (#1813). This is the Go
-// HTTP client, and its only consumer is the TUI; the tab rename/reorder verbs
-// are driven by the web client, which is TypeScript and calls the daemon's
-// /v1/RenameTab and /v1/ReorderTab routes directly (web/src/api.ts), and by the
-// CLI, which goes over the gob control socket (daemon.RenameTab). Adding
-// wrappers here purely for symmetry with CreateTab/CloseTab — which exist
-// because the TUI genuinely calls them (app/session_control.go) — would be dead
-// code whose only caller was its own test. Add them the day the TUI grows a
-// rename/reorder surface.
+// RenameTab asks the daemon to relabel one tab of an existing session and
+// persist the roster (daemon.Manager.RenameTab over /v1/RenameTab). It returns
+// the RESOLVED name — sanitized and collision-suffixed — which is what the
+// caller must render and what the other tab verbs now address the tab by.
+func (c *Client) RenameTab(req daemon.RenameTabRequest) (string, error) {
+	var resp daemon.RenameTabResponse
+	if err := c.call("RenameTab", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.Name, nil
+}
 
-// RefreshPRInfo asks the daemon to discover and project a session's GitHub PR.
-func (c *Client) RefreshPRInfo(req daemon.RefreshPRInfoRequest) error {
-	return c.call("RefreshPRInfo", req, &daemon.RefreshPRInfoResponse{})
+// ReorderTab asks the daemon to move one tab within a session's roster and
+// returns the moved tab's name and resolved final index (#1813). It is the
+// TUI's </> tab-move path — the same /v1/ReorderTab route the web's drag
+// reorder calls (web/src/api.ts) and `af sessions tab-reorder` reaches over the
+// gob control socket (daemon.ReorderTab), so all three surfaces permute one
+// roster through one method.
+func (c *Client) ReorderTab(req daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
+	var resp daemon.ReorderTabResponse
+	if err := c.call("ReorderTab", req, &resp); err != nil {
+		return daemon.ReorderTabResponse{}, err
+	}
+	return resp, nil
 }
 
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
@@ -157,9 +213,12 @@ func (c *Client) ResumeStatusPoll(req daemon.ResumeStatusPollRequest) error {
 	return c.call("ResumeStatusPoll", req, &daemon.ResumeStatusPollResponse{})
 }
 
-// AddTask asks the daemon to append a task and re-arm its schedule set.
-func (c *Client) AddTask(t task.Task) error {
-	return c.call("AddTask", daemon.AddTaskRequest{Task: t}, &daemon.AddTaskResponse{})
+// AddTask asks the daemon to append a task and re-arm its schedule set. actor
+// names the calling surface for the task's audit trail (#3623) — the TUI reaches
+// the daemon over these same HTTP routes the web UI uses, so the transport alone
+// cannot tell them apart and each client says which it is.
+func (c *Client) AddTask(t task.Task, actor task.Actor) error {
+	return c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &daemon.AddTaskResponse{})
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the
@@ -172,12 +231,36 @@ func (c *Client) AddTask(t task.Task) error {
 // atomically with the write — see task.ProjectExpectation (#3230). It is a
 // required parameter, not an option: dropping it silently reopens the
 // stale-authorization race the CAS exists to close.
-func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+//
+// actor names the calling surface for the audit trail — see AddTask.
+func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
 	var resp daemon.UpdateTaskResponse
-	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect}, &resp); err != nil {
+	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor)}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil
+}
+
+// ListTasks returns the daemon's task list, every record carrying both halves
+// of its schedule health: the derivation any reader can do, plus the LIVE
+// arming state only the process holding the scheduler can observe (#3623).
+//
+// It is a read for the arming half specifically. A caller that already reads
+// tasks.json itself — the TUI's automations rail does, every 750ms — keeps its
+// own repo-scoped records as the definition and adopts only the observation,
+// through task.ApplyLiveArming (#3626).
+func (c *Client) ListTasks(ctx context.Context) ([]task.Task, error) {
+	var resp daemon.ListTasksResponse
+	// Context-bound, and that is not optional for this one. ListTasks takes the
+	// task-control lock — the same lock every task mutation holds across its write
+	// AND its scheduler reload — so it can legitimately block for seconds behind a
+	// watch edit waiting out a SIGTERM-resistant watcher. The local socket carries
+	// no overall deadline by design (see callCtx), so an unbounded call here would
+	// wedge whatever goroutine is waiting on it (#3626 review).
+	if err := c.callCtx(ctx, "ListTasks", daemon.ListTasksRequest{}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Tasks, nil
 }
 
 // RemoveTask asks the daemon to delete a task and re-arm its schedule. expect
@@ -194,6 +277,39 @@ func (c *Client) TriggerTask(id string, expect task.ProjectExpectation) error {
 	return c.call("TriggerTask", daemon.TriggerTaskRequest{ID: id, Expect: expect}, &daemon.TriggerTaskResponse{})
 }
 
+// RestartTask asks the daemon to stop one enabled watch command and start a
+// single replacement, waiting until the old process tree is gone so an edited
+// script is re-read without double-emitting events. expect is the same required
+// project compare-and-swap as UpdateTask's (#3230).
+//
+// It completes the task set on this client. The other five twins predate it
+// because the TUI has no restart affordance, so `af tasks restart` was the one
+// verb with no HTTP path to a route the daemon has served since #2359. Routing
+// the CLI's task group at a remote daemon (#3730) is what needed it — and
+// RestartTask is the NEWEST of the six task routes, so it is the one a daemon
+// old enough to be missing any of them is missing first. That caller refuses on
+// RouteNotServedError rather than falling back to this machine.
+func (c *Client) RestartTask(id string, expect task.ProjectExpectation) error {
+	return c.call("RestartTask", daemon.RestartTaskRequest{ID: id, Expect: expect}, &daemon.RestartTaskResponse{})
+}
+
+// There is deliberately no ListOnComplete here (#3961). The daemon serves
+// /v1/ListOnComplete for the web, whose task modal renders the lifecycle choices
+// and their consequence text (web/src/api.ts listOnComplete); being TypeScript,
+// it has no way to read them but over the wire. Go does: the handler only zips
+// task.OnCompleteValues() together with task.OnCompleteHint(), both compiled-in
+// constants, so anything that links apiclient links those too and computes a
+// byte-identical answer with no round trip. The TUI takes exactly that path —
+// ui/task_pane.go builds the "On done" row from task.OnCompleteValues() and
+// ui/task_pane_edit.go renders the same hints — as does the CLI's
+// `af tasks add/update --on-complete`. A wrapper here would be dead code whose
+// only caller was its own test.
+//
+// Contrast ListBackends below, which IS a round trip: that answer is a property
+// of the daemon's host and repo, so computing it locally would describe the
+// wrong machine. A fixed enum carries no such host dependency. Add a wrapper the
+// day the choices stop being constants and start depending on daemon state.
+
 // SnapshotWithAlarms is Snapshot plus the persistent delivery-failure alarms
 // carried on the same authoritative response (#1238). It is the TUI's read
 // path: the session list and the alarm projection arrive from one call, so the
@@ -201,8 +317,17 @@ func (c *Client) TriggerTask(id string, expect task.ProjectExpectation) error {
 // drops the alarms) stays the read path for CLI/API callers that only need the
 // session list.
 func (c *Client) SnapshotWithAlarms(req daemon.SnapshotRequest) (daemon.SnapshotResponse, error) {
+	return c.SnapshotWithAlarmsCtx(context.Background(), req)
+}
+
+// SnapshotWithAlarmsCtx is SnapshotWithAlarms bounded by ctx. The local socket
+// carries no request deadline of its own, so a caller that must not park a
+// goroutine on a never-answered read — the rebind-conflict refresh, whose
+// deadline re-arms an inert form — bounds the transport itself rather than
+// only the wait on it (#4888 review).
+func (c *Client) SnapshotWithAlarmsCtx(ctx context.Context, req daemon.SnapshotRequest) (daemon.SnapshotResponse, error) {
 	var resp daemon.SnapshotResponse
-	if err := c.call("Snapshot", req, &resp); err != nil {
+	if err := c.callCtx(ctx, "Snapshot", req, &resp); err != nil {
 		return daemon.SnapshotResponse{}, err
 	}
 	return resp, nil
@@ -230,14 +355,72 @@ func (c *Client) ListBackends(req daemon.ListBackendsRequest) (daemon.ListBacken
 	return resp, nil
 }
 
-// There is deliberately no ListProjects here. The web reads the registry over HTTP
-// (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),
-// but the two GO consumers read it in-process: the TUI's switcher union
-// (app/switch_project.go buildProjectListFrom) and the CLI's `af projects list`
-// (api/projects.go) both call config.ListProjects(), the same file-locked read the
-// daemon writes through — a read of on-disk config needs no round trip. A wrapper
-// here would be dead code whose only caller was its own test. RegisterProject stays
-// because it is a WRITE, which must go through the daemon (the single writer, #960).
+// ListPrograms reports the daemon host's program catalog and the default a
+// program-less create resolves to for repoPath (#4889). For a remote target
+// this is the only honest answer — the remote daemon's default_program is
+// remote state the client's local config files cannot see.
+func (c *Client) ListPrograms(repoPath string) (daemon.ListProgramsResponse, error) {
+	var resp daemon.ListProgramsResponse
+	req := daemon.ListProgramsRequest{RepoPath: repoPath}
+	if err := c.call("ListPrograms", req, &resp); err != nil {
+		return daemon.ListProgramsResponse{}, err
+	}
+	return resp, nil
+}
+
+// ListAccounts reads the daemon host's registered accounts and their logged-in
+// state, plus the per-agent account defaults configured for repoPath (#3386).
+// HTTP twin of ListAccounts.
+//
+// repoPath is optional and only sharpens the defaults: the registry and the
+// roster are the daemon host's regardless of project.
+func (c *Client) ListAccounts(agent, repoPath string) (daemon.ListAccountsResponse, error) {
+	var resp daemon.ListAccountsResponse
+	req := daemon.ListAccountsRequest{Agent: agent, RepoPath: repoPath}
+	if err := c.call("ListAccounts", req, &resp); err != nil {
+		return daemon.ListAccountsResponse{}, err
+	}
+	return resp, nil
+}
+
+// There is deliberately no AccountLogin wrapper here (#3949), for the same
+// reason as ListProjects below: the daemon exposes the route and the web calls
+// it over HTTP directly, but it has no Go consumer. The config pane's Accounts
+// section reaches daemon.AccountLogin through the gob control client on the local
+// socket, and that is the honest shape rather than an oversight — its response
+// names a tmux session on the DAEMON'S host, so a client on another machine could
+// read the outcome but could never attach to the pane. That is why both the pane
+// and `af accounts login` refuse a remote daemon outright instead of pretending
+// otherwise. ListAccounts above stays because the create flow's account picker
+// has to ask the daemon the session will actually be created on
+// (app/account_picker.go), as does the config pane's Accounts section (#3950).
+//
+// RegisterAccount was removed alongside AccountLogin in #3949 when neither had
+// a Go consumer. Unlike login, registration needs no terminal on the daemon
+// host: #3950 deliberately restores it for the config pane's remote target.
+
+// QuotaReport reads the daemon host's per-agent usage/quota report (#2983) —
+// the web's usage section and a remote `af quota` both render it. HTTP twin of
+// daemon.QuotaReport: the daemon reads ITS host's session records, so the
+// answer describes the daemon a remote client is actually pointed at — the
+// local-records read `af quota` used to refuse for exactly that reason.
+func (c *Client) QuotaReport() (daemon.QuotaReportResponse, error) {
+	var resp daemon.QuotaReportResponse
+	if err := c.call("QuotaReport", daemon.QuotaReportRequest{}, &resp); err != nil {
+		return daemon.QuotaReportResponse{}, err
+	}
+	return resp, nil
+}
+
+// RegisterAccount creates an account's credential directory on the daemon host
+// without logging in, for the config pane's Accounts section.
+func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResponse, error) {
+	var resp daemon.RegisterAccountResponse
+	if err := c.call("RegisterAccount", daemon.RegisterAccountRequest{Agent: agent, Name: name}, &resp); err != nil {
+		return daemon.RegisterAccountResponse{}, err
+	}
+	return resp, nil
+}
 
 // RegisterProject registers a git checkout as a durable project through the
 // daemon (#2456) — the single-writer path the TUI's add-project action routes
@@ -249,4 +432,97 @@ func (c *Client) RegisterProject(path string) (config.Project, error) {
 		return config.Project{}, err
 	}
 	return resp.Project, nil
+}
+
+// SetProjectColor sets or clears (empty color) a registered project's display
+// color through the daemon — the single writer. HTTP twin of SetProjectColor.
+func (c *Client) SetProjectColor(req daemon.SetProjectColorRequest) (config.Project, error) {
+	var resp daemon.SetProjectColorResponse
+	if err := c.call("SetProjectColor", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
+// RebindProject moves a registered project's stable identity to the checkout at
+// path through the daemon — the single writer (#960) — which resolves the path
+// on its own filesystem, refuses a root another project owns, and publishes
+// projects.changed. HTTP twin of RebindProject.
+//
+// expectedRoot and expectedCheckoutID are the (root, checkout) pair the caller
+// showed the user; the daemon applies the rebind only while the registry still
+// records BOTH, and otherwise answers with a *ProjectReboundError (#4822 spec).
+// Both empty means no precondition.
+//
+// A guarded send goes to RebindProjectGuarded: the ROUTE is the capability
+// check, atomic with the mutation (#4888 review). A daemon that predates it
+// answers its marked catch-all 404 — definitive proof the precondition would
+// be ignored — mapped here to daemon.ErrGuardedRebindUnsupported; an
+// intermediary's unmarked 404 stays UnconfirmedHTTPResponseError, since a proxy
+// cannot prove the request did not reach a handler. No Ping probe decides:
+// it is never affine with the mutation it predicts.
+func (c *Client) RebindProject(id, expectedRoot, expectedCheckoutID, path string) (config.Project, error) {
+	method := "RebindProject"
+	if expectedRoot != "" || expectedCheckoutID != "" {
+		method = "RebindProjectGuarded"
+	}
+	var resp daemon.RebindProjectResponse
+	req := daemon.RebindProjectRequest{ID: id, Path: path, ExpectedRoot: expectedRoot, ExpectedCheckoutID: expectedCheckoutID}
+	if err := c.call(method, req, &resp); err != nil {
+		if method == "RebindProjectGuarded" && IsRouteNotServed(err) {
+			return config.Project{}, daemon.ErrGuardedRebindUnsupported
+		}
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
+// ProjectReboundError is the daemon's definitive refusal of a rebind whose
+// expected root no longer matched the registry: another rebind landed first
+// (apiproto.ErrorCodeProjectRebound, #4822). Nothing was written. Detail is the
+// daemon's message, which names the root the project is bound to now.
+type ProjectReboundError struct {
+	Detail string
+}
+
+func (e *ProjectReboundError) Error() string { return e.Detail }
+
+// IsProjectRebound reports whether err (or anything it wraps) is a
+// ProjectReboundError.
+func IsProjectRebound(err error) bool {
+	var rebound *ProjectReboundError
+	return errors.As(err, &rebound)
+}
+
+// SendPrompt asks the daemon to deliver a prompt to an existing session and
+// returns the delivery observation, HTTP twin of daemon.SendPromptWithStatus. A
+// daemon that predates the Status field answers without one; that proves only
+// that submission returned, so it reports could-not-confirm rather than a
+// manufactured "delivered".
+func (c *Client) SendPrompt(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
+	var resp daemon.SendPromptResponse
+	if err := c.call("SendPrompt", req, &resp); err != nil {
+		return session.PromptCouldNotConfirm, err
+	}
+	if !resp.Status.Valid() {
+		return session.PromptCouldNotConfirm, nil
+	}
+	return resp.Status, nil
+}
+
+// ListProjects reads the daemon's own project registry (HTTP twin of
+// config.ListProjects run on the daemon's host), so a remote `af projects list`
+// describes the targeted machine rather than this one.
+func (c *Client) ListProjects() ([]config.Project, error) {
+	return c.ListProjectsContext(context.Background())
+}
+
+// ListProjectsContext is ListProjects bound to ctx, for a caller (the TUI's
+// poll) that must be able to abandon the read.
+func (c *Client) ListProjectsContext(ctx context.Context) ([]config.Project, error) {
+	var resp daemon.ListProjectsResponse
+	if err := c.callCtx(ctx, "ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Projects, nil
 }

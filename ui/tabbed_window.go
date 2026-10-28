@@ -17,52 +17,51 @@ import (
 )
 
 var windowStyle = lipgloss.NewStyle().
-	BorderForeground(activeTheme.PaneBorderDefault).
-	Border(lipgloss.RoundedBorder())
+	BorderForeground(activeTheme.Border).
+	Border(lipgloss.NormalBorder())
 
 // blurredWindowStyle is the neutral pane frame for ordinary panes.
 var blurredWindowStyle = windowStyle.
-	BorderForeground(activeTheme.PaneBorderDefault)
+	BorderForeground(activeTheme.Border)
 
 // selectedWindowStyle marks the pane that matches the current sidebar
 // highlight, while the focus ring is elsewhere.
 var selectedWindowStyle = windowStyle.
-	BorderForeground(activeTheme.PaneBorderSelected)
+	BorderForeground(activeTheme.Accent)
 
 // interactiveWindowStyle marks the pane that owns the keyboard in
-// interactive mode (#1089, RFC §2.3): a green DOUBLE border still signals
+// interactive mode (#1089, RFC §2.3): an accent DOUBLE border still signals
 // "keystrokes go INTO this terminal" even when colors are unavailable.
 var interactiveWindowStyle = windowStyle.
-	Border(lipgloss.DoubleBorder()).
-	BorderForeground(activeTheme.PaneBorderInteractive)
+	Border(lipgloss.NormalBorder()).
+	BorderForeground(activeTheme.Accent)
 
 // previewWindowStyle marks a transient #1321 preview binding without
 // mutating the pane's committed store binding.
 var previewWindowStyle = windowStyle.
-	BorderForeground(activeTheme.PaneBorderPreview)
+	BorderForeground(activeTheme.Border)
 
 // dropTargetWindowStyle marks the pane currently under an active tab drag.
 var dropTargetWindowStyle = windowStyle.
-	BorderForeground(activeTheme.Warning)
+	BorderForeground(activeTheme.Accent)
 
 var paneHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(activeTheme.Foreground)
+	Foreground(activeTheme.Ink)
 
 var paneHeaderFocusedStyle = lipgloss.NewStyle().
 	Bold(true).
-	Background(activeTheme.SelectionBackground).
-	Foreground(activeTheme.SelectionForeground)
+	Background(activeTheme.SurfaceRaised).
+	Foreground(activeTheme.Ink)
 
 var paneHeaderDimStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundMuted)
+	Foreground(activeTheme.InkMuted)
 
-// paneHeaderInteractiveStyle matches the interactive frame: green header bar
-// on the pane whose terminal owns the keyboard.
+// paneHeaderInteractiveStyle uses raised selection with readable body ink.
 var paneHeaderInteractiveStyle = lipgloss.NewStyle().
 	Bold(true).
-	Background(activeTheme.Success).
-	Foreground(activeTheme.Background)
+	Background(activeTheme.SurfaceRaised).
+	Foreground(activeTheme.Ink)
 
 // paneHeaderRows is the height of the `title · tab` header line rendered
 // inside the pane frame. With the tab bar gone (#1024 PR 4) the header is
@@ -226,7 +225,7 @@ func (w *TabbedWindow) ContentSeq() uint64 {
 }
 
 // SetPreview applies a transient render binding without mutating the committed
-// pane binding. original is rendered in the preview header so the reversible
+// pane binding. original is retained for the preview details so the reversible
 // state is visible to the user.
 func (w *TabbedWindow) SetPreview(instance *session.Instance, tab int, original string) uint64 {
 	if w.preview != nil &&
@@ -255,6 +254,15 @@ func (w *TabbedWindow) ClearPreview() uint64 {
 	// HostHistory for a capture-only pane). Until then there is no truthful owner.
 	w.SetScrollOwnerResolving()
 	return w.bumpContentSeq()
+}
+
+// PreviewOrigin is the retained pane identity, disclosed in help rather than
+// repeating it in the one-line preview header.
+func (w *TabbedWindow) PreviewOrigin() string {
+	if w.preview == nil {
+		return ""
+	}
+	return w.preview.original
 }
 
 // Previewing reports whether the window is currently rendering a transient
@@ -292,13 +300,6 @@ func (w *TabbedWindow) JumpToTab(idx int) bool {
 	return true
 }
 
-// SelectTab sets the pane's tab to idx, clamped into range. Used after a tab
-// close to land on a neighbor.
-func (w *TabbedWindow) SelectTab(idx int) {
-	w.setActiveTab(idx)
-	w.ClampActiveTab()
-}
-
 // tabLabels returns the labels for the bound instance's tabs. The label
 // derivation lives in tree.TabLabels (#1024 PR 3), shared with the sidebar tree
 // and the 1-9 jump keys. Never empty.
@@ -319,9 +320,10 @@ func tabLabelFor(inst *session.Instance, idx int) string {
 
 // SetRect implements layout.Pane: the pane renders exactly r. The inner
 // TabPane gets the area inside the frame minus the header line; that inner
-// size is also what the instances' tmux sessions are resized to (see
-// GetPreviewSize), so the capture matches the visible area exactly — the full
-// workspace width, with no AdjustPreviewWidth-style right buffer (#1024 PR 4).
+// size is the live attachment's VIEW box — asserted as the pane's tmux size
+// only while the attachment owns the pane's dimensions (the focused
+// interactive pane; #4480) — so a viewer's layout change re-crops the render
+// without reflowing the session (see GetPreviewSize).
 func (w *TabbedWindow) SetRect(r layout.Rect) {
 	w.rect = r
 	iw, ih := w.innerSize()
@@ -514,6 +516,20 @@ func (w *TabbedWindow) ScrollDown() {
 	}
 }
 
+// ScrollHalfPageUp is the keyboard's half-page step (ctrl+u); the wheel's
+// one-line step stays on ScrollUp.
+func (w *TabbedWindow) ScrollHalfPageUp() {
+	if err := w.tab.ScrollHalfPageUp(w.effectiveInstance(), w.effectiveTab()); err != nil {
+		log.InfoLog.Printf("tabbed window failed to scroll up half a page: %v", err)
+	}
+}
+
+func (w *TabbedWindow) ScrollHalfPageDown() {
+	if err := w.tab.ScrollHalfPageDown(w.effectiveInstance(), w.effectiveTab()); err != nil {
+		log.InfoLog.Printf("tabbed window failed to scroll down half a page: %v", err)
+	}
+}
+
 // GetActiveTab returns the pane's current tab index.
 func (w *TabbedWindow) GetActiveTab() int {
 	return w.activeTab()
@@ -578,24 +594,29 @@ func (w *TabbedWindow) BeginScrollFill() {
 // tree selection, scroll mode — is set off with "—", and only the fragments
 // INSIDE each identity are joined with " · " (#2579). All three used to pick a
 // different mark for the same relationship, and with two sessions whose tab
-// labels match, `alpha · ◆ Agent · selected: beta · ◆ Agent` flattened into four
+// labels match, `alpha · ◆ Agent · cursor: beta · ◆ Agent` flattened into four
 // indistinguishable fragments. That clause is the only signal that the
 // workspace is not showing the row under the cursor, so it has to read at a
 // glance.
 func (w *TabbedWindow) renderHeader(width int) string {
 	var text string
+	bound := false
 	if w.preview != nil && w.preview.instance != nil {
 		inst := w.preview.instance
 		label := tabLabelFor(inst, w.preview.tab)
-		text = fmt.Sprintf(" Preview %s · %s — original %s ", inst.Title, label, w.preview.original)
+		text = fmt.Sprintf(" %s · %s · preview ", inst.Title, label)
 	} else if inst := w.boundInstance(); inst != nil {
 		label := tabLabelFor(inst, w.activeTab())
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
-		if w.selectionHint != "" {
-			text = fmt.Sprintf(" %s · %s — selected: %s ", inst.Title, label, w.selectionHint)
-		}
+		bound = true
 	} else {
-		text = " no session selected "
+		text = " Select a session "
+	}
+	if w.interactive {
+		text = strings.TrimSuffix(text, " ") + " · keyboard "
+	}
+	if bound && w.selectionHint != "" {
+		text = strings.TrimSuffix(text, " ") + fmt.Sprintf(" — cursor: %s ", w.selectionHint)
 	}
 	if w.IsInScrollMode() {
 		// Scroll mode is pane chrome, not terminal history. Keeping this cue in

@@ -2,24 +2,9 @@ package session
 
 import (
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
-
-// resolveProgramForInstance returns the actual tmux command for an instance.
-// Resolution chain: agent enum -> cfg.ProgramOverrides[agent] (if set) -> bare
-// agent name. Repo-resolved config wins when the path belongs to a repository;
-// otherwise the global config applies. A nil cfg preserves legacy free-form
-// Program values verbatim.
-func resolveProgramForInstance(i *Instance) string {
-	i.mu.RLock()
-	agent := i.Program
-	alreadyResolved := agent != "" && agent == i.preResolvedProgram
-	i.mu.RUnlock()
-	if alreadyResolved {
-		return agent
-	}
-	return resolveProgramForAgent(i, agent)
-}
 
 type launchProgramResolution struct {
 	command   string
@@ -78,15 +63,19 @@ func builtInProgramOverride(resolved *config.ResolvedConfig, agent, command stri
 	// First-run materialization writes DefaultConfig to config.toml, so the
 	// effective leaf is reported as global even though its exact value came from
 	// af's detected built-in. Compare against the built-in candidate from the same
-	// resolution instead of trusting the winner's location. A user/repo value is
-	// admitted only when it is byte-for-byte the command af independently detected
-	// for this process; a different path or argument remains undeclared.
+	// resolution instead of trusting the winner's location. The comparison is on
+	// parsed argv, not bytes (#5487): af versions disagree on whether the detected
+	// path was persisted quoted or bare, and those spellings are the same words.
+	// A user/repo value is admitted only when it runs the identical argv af
+	// independently detected for this process — a different path, an extra or
+	// reordered word, or anything the literal parse cannot prove (an expansion,
+	// an assignment prefix, an operator) remains undeclared.
 	for _, candidate := range value.Candidates {
 		if candidate.Layer != config.SourceBuiltIn.String() || !candidate.Present {
 			continue
 		}
 		builtIn, stringValue := candidate.Value.(string)
-		return stringValue && builtIn == command
+		return stringValue && sessionenv.LiteralCommandsEqual(builtIn, command)
 	}
 	return false
 }
@@ -95,27 +84,63 @@ func builtInProgramOverride(resolved *config.ResolvedConfig, agent, command stri
 // It resolves configuration before Instance.Program is rewritten, so an invalid
 // incoming override can be rejected while the outgoing process is still alive.
 func resolveProgramForAgent(i *Instance, agent string) string {
-	cfg := resolveConfigForInstance(i)
 	// Read the enum through the accessor, not the bare field: a handoff (#2013)
 	// rewrites Program in place while the instance is live and shared, so this
 	// is a genuinely concurrent read now. Every other reader of the field
 	// (ToInstanceData, ReconcileTabsFromData) already holds the instance lock.
-	return config.ResolveProgram(cfg, agent)
+	return resolveProgramForPath(i.Path, agent)
+}
+
+// resolveProgramForPath is the session-free half of resolveProgramForAgent: the
+// same repo-then-global config chain over an explicit path. The daemon's
+// account-list response resolves handoff targets through it for callers that
+// hold no Instance — a resolved command means the same thing whichever caller
+// asked (#4430 review).
+func resolveProgramForPath(path, agent string) string {
+	return config.ResolveProgram(resolveConfigForPath(path), agent)
+}
+
+// ResolveProgramForPath is the exported form of resolveProgramForPath for
+// out-of-package callers that must apply configured overrides before doing
+// their own resolution — a directly-invoked `af agent-server` resolves the
+// configured command's executable on its host, and the key-level override
+// lookup must happen first or the absolute path can no longer match
+// program_overrides entries (#5578 review).
+func ResolveProgramForPath(path, agent string) string {
+	return resolveProgramForPath(path, agent)
 }
 
 func resolveConfigForInstance(i *Instance) *config.Config {
+	return resolveConfigForPath(i.Path)
+}
+
+func resolveConfigForPath(path string) *config.Config {
+	return resolveConfigForPathResolving(path, config.ResolveConfigForRepo)
+}
+
+// resolveConfigForPathInspection is resolveConfigForPath's read-only twin:
+// the same repo-then-global precedence answered without the durable in-repo
+// load observation ResolveConfigForRepo records. List and picker endpoints
+// use it so a read cannot claim the runtime-load log and inrepo-config-hash
+// marker the operation that actually consumes the config owes (#4430 review
+// round 2).
+func resolveConfigForPathInspection(path string) *config.Config {
+	return resolveConfigForPathResolving(path, config.ResolveConfigForRepoInspection)
+}
+
+func resolveConfigForPathResolving(path string, resolveRepo func(*config.RepoContext) (*config.ResolvedConfig, error)) *config.Config {
 	var cfg *config.Config
-	if repo, err := config.RepoFromPath(i.Path); err == nil {
-		if resolved, rerr := config.ResolveConfigForRepo(repo); rerr == nil {
+	if repo, err := config.RepoFromPath(path); err == nil {
+		if resolved, rerr := resolveRepo(repo); rerr == nil {
 			cfg = &resolved.Config
 		} else {
-			log.WarningLog.Printf("failed to resolve repo config when resolving program for %q: %v", i.Title, rerr)
+			log.WarningLog.Printf("failed to resolve repo config when resolving program for path %q: %v", path, rerr)
 		}
 	}
 	if cfg == nil {
 		loaded, err := config.LoadConfig()
 		if err != nil {
-			log.WarningLog.Printf("failed to load config when resolving program for %q: %v", i.Title, err)
+			log.WarningLog.Printf("failed to load config when resolving program for path %q: %v", path, err)
 			loaded = nil
 		}
 		cfg = loaded

@@ -7,11 +7,7 @@
 <p align="center"><strong>Run a fleet of AI coding agents at once — isolated workspaces, one control plane.</strong></p>
 
 <p align="center">
-  <a href="docs/assets/demo.mp4"><img src="docs/assets/demo.gif" alt="Agent Factory demo video preview: three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run tests"></a>
-</p>
-
-<p align="center">
-  One daemon keeps local and off-box sessions, tabs, scheduled tasks, and usage-limit recovery visible from a dense TUI, the web UI, and a JSON CLI; launches can also be pinned to Claude or Codex credential accounts.
+  <a href="docs/assets/web/demo.mp4"><img src="docs/assets/web/demo-poster.png" alt="The Agent Factory web client in a browser: a rail of three sessions in one project, the selected agent's terminal beside it showing the work it did in an isolated git worktree, and the Tasks and Config views one tab away"></a>
 </p>
 
 <p align="center">
@@ -22,31 +18,30 @@
 
 <p align="center">
   <a href="https://sachiniyer.github.io/agent-factory/">Docs</a> ·
-  Demo: <a href="docs/assets/demo.mp4">MP4</a> · <a href="docs/assets/demo.webm">WebM</a> · <a href="docs/assets/demo.gif">GIF</a>
+  Web demo: <a href="docs/assets/web/demo.mp4">MP4</a> · <a href="docs/assets/web/demo.webm">WebM</a> · <a href="docs/assets/web/demo.gif">GIF</a>
 </p>
 
-Agent Factory (`af`) supervises Claude Code, Codex, Aider, Gemini, Amp,
-opencode, and Devin. A session gets its own branch and workspace by default, so
-parallel agents do not share a checkout.
-
-One agent in one terminal is easy. Several is not — they collide in the same
-checkout, you lose track of which is working and which is stuck waiting on you,
-and there is nowhere to look that shows all of them. Agent Factory normally
-gives each agent an isolated branch you review like any other, keeps the session
-under a background daemon, and puts the whole fleet on one screen — in your
-terminal or in a browser.
+Agent Factory (`af`) runs many AI coding agents — Claude Code, Codex, Aider,
+Gemini, Amp, opencode, and Devin — and gives each one its own git branch and git
+worktree, so parallel agents never share a checkout and every result comes back
+as a branch you review like any other. You drive the whole fleet from a browser,
+a terminal UI, or a JSON CLI, and all three read the same state. That state
+belongs to a background daemon, which keeps sessions running when you close the
+window, schedules recurring work, and serves the web client.
 
 ## Install
 
-Prerequisites: **tmux**, **git**, and at least one agent CLI on your `PATH`. No
-Go toolchain needed for the prebuilt path.
+Prerequisites: **tmux**, **git**, and at least one agent CLI on your `PATH`, on
+Linux, macOS, or WSL2. No Go toolchain needed for the prebuilt path.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh
 ```
 
 That puts `af` in `~/.local/bin` (override with `AF_INSTALL_DIR`, pin with
-`--version`). Or build from source with Go 1.25+:
+`--version <tag>`). If the installer reports that directory is not on your
+`PATH`, run `export PATH="$HOME/.local/bin:$PATH"` and add the same line to your
+shell profile for future terminals. Or build from source with Go 1.25+:
 
 ```bash
 git clone https://github.com/sachiniyer/agent-factory.git
@@ -54,163 +49,97 @@ cd agent-factory
 ./dev-install.sh
 ```
 
-## Quickstart
+## First five minutes
 
 ```bash
 cd your-project     # any git repo
-af doctor --setup   # verify tmux, git, agent CLIs, storage, daemon health
+af doctor --setup   # check tmux, git, agent CLIs, storage, daemon health
 af                  # open the TUI
 ```
 
-Press `n` to start a session and describe the task — the agent goes to work in a
-fresh worktree. `Enter` interacts with the selected session, `Ctrl-]` steps back
-out, `o` attaches full-screen and `Ctrl-w` detaches. `?` lists every key, and
-`af keys` prints the effective bindings.
+A session is an agent in its own git worktree (an isolated checkout on a new
+branch). In the terminal UI (TUI), press `n`, replace the suggested name, then
+`shift+tab` to describe the work in **Initial prompt**. Press Tab to keep the
+prompt, then Enter to create the session. Tab from the name opens the agent
+picker if you need a different agent.
 
-Now open **<http://localhost:8443>** — the same sessions, live, in a browser. The
-daemon serves the web UI on loopback by default: no token, no login screen.
+Dismiss **Session created** with Enter or Esc. Watch the Agent tab on the right;
+`●` means ready/idle, not proof that the task succeeded. Press Enter to type to
+the agent in place (Enter again if **Interactive pane** help appears), and
+`ctrl+]` to return to navigation. Handle any remaining agent sign-in or trust
+prompt in its pane before expecting work to start. Keep the session active for
+the browser step below. A doctor warning that autostart
+is not installed does not block this walkthrough.
 
-## The mental model
+Now open **<http://localhost:8443>**. The same sessions, live, in a browser: the
+daemon serves the web client on loopback with no token and no login screen.
+Use a browser on the machine running `af`, then select a session in the rail to
+open its terminal. If the page does not load, run
+`af daemon status` and check the `tcp listener` address and whether it is bound;
+open `http://` followed by the reported bound host and port, keeping any IPv6
+brackets. For a wildcard host, use `127.0.0.1` instead of `0.0.0.0`, or `[::1]`
+instead of `[::]`, when browsing on this machine; keep the reported port. An
+empty `network.listen_addr` disables the web listener. See [Web client](docs/web.md)
+for configuration and remote access.
 
-Three ideas carry the whole tool.
+The browser header offers **Sessions**, **Tasks** and **Config**, plus
+**Light · Dark · System** for appearance (System follows your OS). The selected
+terminal says **Keyboard** while it owns input; `ctrl+]` returns to navigation.
+After viewing the session in the browser, return to TUI navigation, press `a`
+and confirm with Enter to archive it.
 
-- **Session — one agent, one workspace.** A local session cuts a branch and git
-  worktree; an off-box backend provisions an isolated remote workspace instead.
-  The branch stays an ordinary git artifact you can diff, push, or open a PR
-  from. Pass `--here` when you deliberately want a local agent in your current
-  checkout instead.
-- **Tabs — more than one thing per session.** Every session has its agent tab,
-  and a local session can open more beside it in the same worktree: `t` chooses a
-  terminal or VS Code editor, while `af sessions tab-create` adds a named
-  long-running command or web view. Sessions on the docker, ssh, sandbox, and hook
-  backends run off-box, so they admit only external HTTPS web tabs — shell,
-  process, and VS Code tabs need a local worktree.
-- **Daemon — the thing that actually owns state.** A background daemon runs the
-  sessions, schedules tasks, serves the web UI, and is the single source of
-  truth. Opening the TUI starts one, as does any enabled task; read-only commands
-  like `af config list` and `af tasks list` leave it down. The
-  TUI, the browser, and the CLI are all thin clients reading the same daemon
-  state.
+## The mental model in five terms
 
-## Three ways to drive it
+- **Session** — one agent working on one task, with its own tabs and lifecycle.
+- **Worktree** — the isolated checkout and branch a session gets, so agents
+  never collide and the result is ordinary git work you can diff and merge.
+- **Daemon** — the background process that owns all state, keeps sessions alive
+  across restarts, and serves the web client; every surface is a thin client.
+- **Task** — a prompt the daemon delivers on its own, on a cron schedule or on
+  each line a watch command prints.
+- **Account** — a named credential home for an agent, so a session can be pinned
+  to a specific Claude, Codex, or Gemini login instead of your default one.
 
-- **TUI** — `af` in a git repo. The default: a live rail of every session, with
-  in-place interaction and full-screen attach.
-- **Web** — <http://localhost:8443>. The same sessions, tabs, projects, and tasks
-  in a browser, with real terminals. Bundled into the daemon and on by default.
+Each of those is one page in [Concepts](docs/concepts.md).
+
+## Three surfaces, one daemon
+
+- **Web** — <http://localhost:8443>: sessions, real terminals, tabs, tasks, and
+  config in a browser. Bundled into the daemon and on by default. →
+  [Web client](docs/web.md)
+- **TUI** — `af` in a git repo: a dense rail of every session, with in-place
+  interaction and full-screen attach. → [TUI](docs/tui.md)
 - **CLI** — `af sessions` and `af tasks` emit JSON, so scripts and other agents
-  can create, inspect, prompt, watch, archive, and restore sessions and manage
-  their tabs and scheduled tasks.
+  can create, prompt, watch, and archive sessions. → [CLI](docs/cli.md)
 
 ```bash
-af sessions list --live --max-age 24h --limit 50
 af sessions create --name fix-auth --prompt "Fix the login redirect loop"
-af sessions preview fix-auth
 af sessions watch fix-auth      # block until it goes idle
 af tasks add --name triage --prompt "Triage open issues" --cron "0 9 * * *"
 ```
 
-## Highlights
+## Beyond your laptop
 
-- **Web tabs** — give a session a browser view: `af sessions tab-create demo
-  --kind web --port 3000`. The daemon reverse-proxies loopback targets, so an
-  agent's dev server is visible even when you view the web UI over Tailscale or
-  SSH. Renders as an iframe in the web UI; the TUI shows a placeholder.
-- **VS Code tab** — `--kind vscode` opens a `code-server` editor rooted at the
-  session's worktree, one per session, viewed in the web UI. Requires
-  `code-server` (or `openvscode-server`) on your `PATH`; `af` does not bundle
-  either.
-- **Tasks** — run a prompt on a cron schedule, or on every stdout line of a
-  long-running watch command. Each run can create a fresh session or deliver into
-  an existing one. See [tasks](docs/tasks.md).
-- **Backends** — sessions run locally by default. Set a repo's `backend` key to
-  `docker` to run in a container (with `docker.image`), to `ssh` to run on
-  another machine (with `ssh.host`), to `sandbox` through the operator's
-  global `sandbox.ssh` command, or to `hook` to launch on your own infrastructure. See
-  [backends](docs/backends.md).
-- **Account scoping** — register separate Claude or Codex credential homes with
-  `af accounts add`, then select one for a local or docker session with
-  `--account`. `af` refuses an unproved fallback and never rotates accounts on its
-  own. See [`af accounts`](docs/reference/cli.md#af-accounts).
-- **Explicit idle and limit state** — state never relies on colour or motion:
-  static glyphs and text distinguish ready, lost, dead, archived, and
-  limit-blocked sessions, while an empty state cell means working. Ready rows
-  report only mechanical facts such as `delivery unknown` or `no change after
-  delivery`; limit walls can be retried, handed off, or resumed automatically
-  when opted in. The read-only `af quota` command reports observed walls and says
-  `not reported` where a provider exposes no quota API. See [usage
-  limits](docs/usage-limits.md).
-- **Agent plugins** — teach Codex, Claude Code, Gemini, or amp how to run and
-  schedule af sessions even when af did not launch that agent. For Codex, add
-  the marketplace with `codex plugin marketplace add sachiniyer/agent-factory`,
-  then install with `codex plugin add agent-factory@agent-factory`. See [agent
-  plugins](docs/agent-plugins.md).
-- **Auto-update** — `af` updates itself on launch, at most once every 6 hours,
-  and relaunches into the new build. Pin it with `auto_update = false`; track
-  early builds with `update_channel = "preview"`. `af upgrade` updates on demand.
-
-## Configuration
-
-TOML. Global defaults in `~/.agent-factory/config.toml`; per-repo settings in
-`.agent-factory/config.toml` inside the repository.
-
-```toml
-default_program = "claude"
-worktree_root = "sibling"
-
-[program_overrides]
-claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
-```
-
-## Platform support
-
-Linux and macOS are supported; Windows works through WSL2 (keep repos on the
-Linux filesystem). Native Windows is not a target. tmux is required everywhere.
-A fresh install has no autostart unit — run `af daemon install` to register one
-(a systemd user service on Linux, a launchd agent on macOS) so the daemon starts
-at login and task schedules keep running across reboots. Both are user-level
-units, so they cover login and reboot, not running while you are logged out.
-`af daemon status` reports whether one is installed and active, whether it owns
-the daemon that answered, and whether that daemon has applied the config on disk.
+Sessions can run in a container, on another machine over SSH, or on
+infrastructure you provision yourself, and the daemon itself can be reached from
+a second machine. → [Backends and remote access](docs/backends.md)
 
 ## Documentation
 
-- [Getting started](docs/getting-started.md) · [Why Agent Factory](docs/why-agent-factory.md) · [How it works](docs/how-it-works.md)
-- Concepts: [sessions & worktrees](docs/concepts/worktree-agents.md) ·
-  [the TUI](docs/concepts/tui.md) · [the web client](docs/web.md) ·
-  [the daemon](docs/concepts/daemon.md)
-- Guides: [CLI](docs/cli.md) · [configuration](docs/configuration.md) ·
-  [tasks](docs/tasks.md) · [agent plugins](docs/agent-plugins.md) ·
-  [backends](docs/backends.md) ·
-  [remote hooks](docs/remote-hooks.md) ·
-  [remote daemon access](docs/remote-http-auth.md) ·
-  [usage limits](docs/usage-limits.md) ·
-  [accounts](docs/reference/cli.md#af-accounts) ·
-  [quota](docs/reference/cli.md#af-quota)
-- Reference: [HTTP API](docs/http-api.md) · [CLI reference](docs/reference/cli.md) ·
-  [API reference](docs/reference/api.md)
-- [Comparison](docs/comparison.md) with tmux, manual worktrees, and peers.
-
-## Exposing it beyond localhost
-
-The web UI and HTTP API listen on `127.0.0.1:8443` and skip auth on loopback.
-Pointing `network.listen_addr` at a routable address exposes them to your network, so
-set `network.require_token = true` or keep it behind a VPN or proxy — the listener is
-plain HTTP. Turn the web UI off entirely with `network.listen_addr = ""`. See
-[remote daemon access](docs/remote-http-auth.md).
+Full docs: **<https://sachiniyer.github.io/agent-factory/>** — a **Use** section
+(getting started, concepts, the three surfaces, tasks, accounts, backends,
+configuration, troubleshooting) and a **Develop and maintain** section. Start at
+[Getting started](docs/getting-started.md), or
+[Troubleshooting](docs/troubleshooting.md) when something looks wrong.
 
 ## Maintenance
 
-This repo is autonomously maintained by Captain Claude, an AI maintainer running
-on Claude Code. The operating contract lives in [CLAUDE.md](CLAUDE.md).
+This repo is autonomously maintained by Captain Claude, an AI maintainer on
+Claude Code; the operating contract lives in [CLAUDE.md](CLAUDE.md).
 
 Filing an issue: include repro steps, expected vs. actual, `af version`, and your
-platform. `af bug-report` bundles versions, daemon health, tasks, redacted
-session state, and recent logs into one file.
-
-Agent Factory began as a fork of
-[claude-squad](https://github.com/smtg-ai/claude-squad) and has diverged
-substantially since.
+platform — `af bug-report` bundles all of that into one redacted file. Agent
+Factory began as a fork of [claude-squad](https://github.com/smtg-ai/claude-squad).
 
 ## License
 

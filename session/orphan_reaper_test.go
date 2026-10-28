@@ -49,13 +49,18 @@ func TestRunContainerOmitsHomeLabelWhenUnknown(t *testing.T) {
 
 // dockerExecStub builds a fake docker CLI for sweep tests: `info` returns an
 // engine id (per call, so a changed id can force an engine mismatch), `ps` returns
-// the given "<id>\t<slug>" lines, `rm` records the removed id.
+// the given "<id>\t<slug>" lines, `rm` records the removed id. `context inspect`
+// answers through the precedence fake because the sweep resolves the endpoint
+// selector before listing (#4413 review).
 func dockerExecStub(t *testing.T, infoIDs []string, psOutput string, removed *[]string) func() {
 	t.Helper()
 	infoCall := 0
-	return SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+	cli := &fakeDockerContextCLI{}
+	return SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
 		require.NotEmpty(t, args)
 		switch args[0] {
+		case "context":
+			return cli.exec(ctx, environ, args...)
 		case "info":
 			id := infoIDs[min(infoCall, len(infoIDs)-1)]
 			infoCall++
@@ -94,8 +99,11 @@ func TestSweepReapsOrphanSparesProtected(t *testing.T) {
 func TestSweepScopesQueryToHome(t *testing.T) {
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
 	var psArgs []string
-	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+	cli := &fakeDockerContextCLI{}
+	defer SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
 		switch args[0] {
+		case "context":
+			return cli.exec(ctx, environ, args...)
 		case "info":
 			return []byte("engine-1\n"), nil
 		case "ps":
@@ -128,6 +136,29 @@ func TestSweepLeavesUnknownStateForNextSweep(t *testing.T) {
 	assert.Equal(t, 0, got.Reaped)
 	assert.Equal(t, 1, got.Unknown)
 	assert.Empty(t, removed, "an unknown-state container must not be removed")
+}
+
+// TestSweepRefusesConflictingDockerSelectors: with DOCKER_HOST and
+// DOCKER_CONTEXT both set to different engines, the sweep must not follow
+// DOCKER_HOST into `docker ps`/`docker rm` — the selector refusal every other
+// docker caller gets through the resolver applies here too (#4413 review). The
+// only docker call permitted is the resolver's own `context inspect`.
+func TestSweepRefusesConflictingDockerSelectors(t *testing.T) {
+	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
+	conflictingDockerSelectorsForTest(t)
+	cli := &fakeDockerContextCLI{}
+	var calls [][]string
+	defer SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return cli.exec(ctx, environ, args...)
+	})()
+
+	got := SweepOrphanContainers("/home/af", nil)
+
+	assert.Equal(t, OrphanSweepResult{}, got, "an ambiguous selector set must skip the whole sweep")
+	require.Len(t, calls, 1, "nothing past the resolver's context inspect may run")
+	assert.Equal(t, "context", calls[0][0])
+	assert.Equal(t, "inspect", calls[0][1])
 }
 
 // TestSweepNoOpWithoutHomeOrDocker: an empty home disables the sweep, and a

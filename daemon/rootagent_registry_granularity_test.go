@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // These tests pin the #3297 granularity rule: a registry failure's blast
@@ -76,7 +74,7 @@ func TestEnsureRootAgentsIgnoresStrayRegistryFiles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewManager: %v", err)
 			}
-			manager.EnsureRootAgents()
+			manager.ensureRootAgentsAndWait()
 
 			if len(*seen) != tc.wantCreates {
 				t.Fatalf("want %d creates with a stray registry file, got %d — a stray hides nothing and must not change any root-agent outcome", tc.wantCreates, len(*seen))
@@ -111,16 +109,13 @@ func TestEnsureRootAgentsSuppressesOnlyTheCorruptRecord(t *testing.T) {
 	writePersonalRootAgent(t, healthyProject.ID, "enabled = true\nprogram = \"/opt/healthy\"")
 	corruptRegistryRecord(t, corruptProject.ID)
 
-	var warnings bytes.Buffer
-	prevWarning := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(prevWarning) })
+	warnings := captureWarnings(t)
 
 	manager, err := NewManager(config.DefaultConfig())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("want exactly the healthy project's root, got %d creates — one corrupt record must suppress only its own project", len(*seen))
@@ -149,7 +144,7 @@ func TestEnsureRootAgentsCorruptRecordKeepsLegacyOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("the legacy opt-in must survive its project's corrupt record (the accepted #3297 residue), got %d creates", len(*seen))

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"github.com/charmbracelet/lipgloss"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
@@ -11,7 +12,7 @@ import (
 // N-pane model has no selection-driven pane — content appears when the user
 // opens a tab as a pane (`s`), so the empty state must say exactly that.
 func EmptyWorkspace(r layout.Rect) string {
-	return emptyWorkspaceContent(r, []string{"no panes open — s opens the selected tab"})
+	return emptyWorkspaceContent(r, []string{"No panes · s open tab"})
 }
 
 // FirstRunWorkspace renders the zero-session onboarding state. It is distinct
@@ -20,9 +21,7 @@ func EmptyWorkspace(r layout.Rect) string {
 // footer already carries `? help` and `n new`, so the old four-line block only
 // repeated chrome and buried the one thing to do.
 func FirstRunWorkspace(r layout.Rect) string {
-	return emptyWorkspaceContent(r, []string{
-		"No sessions yet — press n to create one.",
-	})
+	return RecoveryScreen(r, "No sessions yet", "", "Press n to create one.", false)
 }
 
 // NoActiveProjectWorkspace renders the zero-session state in registry mode
@@ -40,11 +39,10 @@ func FirstRunWorkspace(r layout.Rect) string {
 // the refusal notice name the same key in the same words; see the app package's
 // switchProjectPickHint.
 func NoActiveProjectWorkspace(r layout.Rect, pickHint string) string {
-	line := "No project selected"
 	if pickHint != "" {
-		line += " — " + pickHint
+		pickHint = strings.ToUpper(pickHint[:1]) + pickHint[1:]
 	}
-	return emptyWorkspaceContent(r, []string{line + "."})
+	return RecoveryScreen(r, "No project selected", "", pickHint+".", false)
 }
 
 func emptyWorkspaceContent(r layout.Rect, lines []string) string {
@@ -66,4 +64,28 @@ func emptyWorkspaceContent(r layout.Rect, lines []string) string {
 	content := lipgloss.JoinVertical(lipgloss.Center, rendered...)
 	inner := lipgloss.Place(iw, ih, lipgloss.Center, lipgloss.Center, content)
 	return layout.ClampToRect(blurredWindowStyle.Render(inner), r)
+}
+
+// NoRegisteredProjectWorkspace offers registration rather than an empty picker.
+func NoRegisteredProjectWorkspace(r layout.Rect) string {
+	return RecoveryScreen(r, "No project registered", "", "Run af projects add <path> to register a checkout.", false)
+}
+
+// PaneGap renders the 1-col divider column between adjacent workspace panes
+// (§2.6, #1088) as a blank gap. Every pane already frames itself, so drawing a
+// │ here stacked a third bar between the two pane borders and every seam read
+// "│││" (#5279). The gap leaves "│ │" — the two pane frames still mark the
+// boundary, and the focused pane's frame stays the only line down the seam.
+// The column itself is unchanged: same rect, same cell count, so pane width
+// math and click targets do not move.
+func PaneGap(r layout.Rect) string {
+	if r.Empty() {
+		return ""
+	}
+	lines := make([]string, r.H)
+	blank := strings.Repeat(" ", r.W)
+	for i := range lines {
+		lines[i] = blank
+	}
+	return strings.Join(lines, "\n")
 }

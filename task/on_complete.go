@@ -62,3 +62,15 @@ func (t *Task) canonicalizeOnComplete() {
 func (t Task) SessionLifecycle() string {
 	return CanonicalOnComplete(t.OnComplete)
 }
+
+// OnCompleteHint describes the selected verb's consequence beside UI pickers.
+func OnCompleteHint(value string) string {
+	switch value {
+	case OnCompleteArchive:
+		return "archives the run's session — restorable"
+	case OnCompleteKill:
+		return "deletes the run's session and its branch — permanent"
+	default:
+		return "leaves the run's session in place"
+	}
+}

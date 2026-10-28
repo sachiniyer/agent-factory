@@ -1,0 +1,756 @@
+import { TerminalSoftInput } from "./terminal-soft-input.js";
+
+export const ARROW_SUFFIXES: Record<string, string> = { "←": "D", "↑": "A", "↓": "B", "→": "C" };
+export const SPECIAL_BYTES: Record<string, string> = { Esc: "\x1b", Tab: "\t", "^C": "\x03" };
+
+/** Phone terminal controls and xterm-compatible key encodings. */
+export function keyBytes(key: string, ctrl = false, alt = false, applicationCursor = false): string {
+  const sequence = userSequence(key);
+  if (sequence) return encodeSequence(sequence, (alt ? 2 : 0) | (ctrl ? 4 : 0), key);
+  if (ARROW_SUFFIXES[key]) {
+    const modifier = 1 + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+    // Modified arrows always use CSI, including in application-cursor mode.
+    return modifier > 1 ? `\x1b[1;${modifier}${ARROW_SUFFIXES[key]}`
+      : `\x1b${applicationCursor ? "O" : "["}${ARROW_SUFFIXES[key]}`;
+  }
+  // Ctrl+Tab has no legacy byte form: send Tab and consume the one-shot.
+  // Esc and ^C already encode control bytes; Alt prefixes all three with ESC.
+  if (SPECIAL_BYTES[key]) return (alt ? "\x1b" : "") + SPECIAL_BYTES[key];
+  // Xterm represents Backspace as DEL and Ctrl+Backspace as BS.
+  if (key === "\x7f") return (alt ? "\x1b" : "") + (ctrl ? "\x08" : key);
+  // Soft input has no physical layout identity. Apply the same complete ASCII
+  // control map as physical emissions without guessing across keyboard layouts.
+  const text = ctrl && key.length === 1 && key.charCodeAt(0) <= 127
+    ? ctrlModifiedEmission(key) ?? key : key;
+  return (alt ? "\x1b" : "") + text;
+}
+
+// The font-size pair (#5500) rides on the arrows page rather than earning a
+// third row: it is an occasional display control, not a PTY key, so it never
+// reaches sendUserInput — act() special-cases it before the byte path. Seven
+// keys keeps the row at the primary page's count, so the 44px/348px narrow
+// math already proven for that row holds here unchanged.
+export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→", "A−", "A+"]] as const;
+
+/** The font-size keys' accessible names — the glyph alone reads as letters. */
+const FONT_ZOOM_LABELS: Record<string, { delta: number; name: string }> = {
+  "A−": { delta: -1, name: "Decrease terminal text size" },
+  "A+": { delta: 1, name: "Increase terminal text size" },
+};
+
+export interface DecodedKeyBytes {
+  key: string;
+  ctrl: boolean;
+  alt: boolean;
+  applicationCursor: boolean;
+}
+
+interface UserSequence {
+  kind: "CSI" | "SS3";
+  parameters: string;
+  final: string;
+}
+
+interface PhysicalKeyInput {
+  key: string;
+  shiftKey: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+}
+
+interface UserInputMarker {
+  source: "user" | "keybar";
+  physical?: PhysicalKeyInput;
+}
+
+interface UserInputOptions {
+  physical?: PhysicalKeyInput;
+  keybar?: boolean;
+  /** Wait behind a just-committed IME composition xterm has not flushed yet.
+   *  Ignored for a terminal signal byte; see SIGNAL_BYTES. */
+  afterComposition?: boolean;
+}
+
+/**
+ * The termios signal characters — VINTR (^C), VQUIT (^\) and VSUSP (^Z). Each
+ * acts on the running program rather than on the line being typed, so none is
+ * ever held back to keep its place behind a just-committed composition (#4151).
+ *
+ * The fail direction decides it. Sent ahead of the commit, a signal only means
+ * the committed word arrives afterwards, unsubmitted. Held back, it is an
+ * interrupt the user watches not happen — and a queued byte is one a focus
+ * change can drop, which is exactly how #4043's deferral lost Ctrl+C.
+ *
+ * Deliberately absent, although they feel just as urgent:
+ *   - ^D is EOF only on an empty line, and the committed word decides whether
+ *     the line is empty. Sent first, it can end the program instead of flushing
+ *     the word.
+ *   - ESC switches mode in modal programs. Sent first, the committed word is
+ *     read as commands — `dd` deletes a line.
+ *   - LF and CR are positional text.
+ * Those need order, not speed. Both ^D and ESC are also already immediate on
+ * their normal path: xterm's CompositionHelper.keydown flushes a pending commit
+ * synchronously before handling any key it is allowed to see, so they reach the
+ * wire at once AND in order. Only keys af intercepts ahead of xterm miss that
+ * flush and need the deferral at all.
+ */
+const SIGNAL_BYTES: ReadonlySet<string> = new Set(["\x03", "\x1c", "\x1a"]);
+
+function userSequence(text: string): UserSequence | undefined {
+  if (text.length < 3 || text.charCodeAt(0) !== 27) return undefined;
+  const csi = /^\x1b\[([0-9;]*)([A-Za-z~])$/.exec(text);
+  if (csi) return { kind: "CSI", parameters: csi[1], final: csi[2] };
+  const ss3 = /^\x1bO([\x40-\x7e])$/.exec(text);
+  if (ss3) return { kind: "SS3", parameters: "", final: ss3[1] };
+  return undefined;
+}
+
+function encodeSequence(sequence: UserSequence, modifierBits: number, original: string,
+  replaceModifiers = false): string {
+  if (!modifierBits) return original;
+  if (sequence.kind === "SS3") return `\x1b[1;${modifierBits + 1}${sequence.final}`;
+  const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
+  parameters[0] ||= "1";
+  const encoded = Number(parameters[1] || "1");
+  const existingBits = !replaceModifiers && Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
+  parameters[1] = String((existingBits | modifierBits) + 1);
+  return `\x1b[${parameters.join(";")}${sequence.final}`;
+}
+
+/** Byte-only fallback for user-input paths that have no physical key event. */
+export function decodeKeyBytes(text: string): DecodedKeyBytes | undefined {
+  let sequenceText = text;
+  let prefixedAlt = false;
+  let sequence = userSequence(sequenceText);
+  if (!sequence && text.charCodeAt(0) === 27) {
+    sequenceText = text.slice(1);
+    sequence = userSequence(sequenceText);
+    prefixedAlt = sequence !== undefined;
+  }
+  if (sequence) {
+    // Xterm emits bare CSI Z for backtab even with Ctrl/Alt held. It has no
+    // modifier parameter form. Without a physical event, preserve it rather
+    // than guessing whether a sticky modifier participated.
+    if (sequence.kind === "CSI" && sequence.final === "Z") return undefined;
+    const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
+    const encoded = Number(parameters[1] || "1");
+    const modifierBits = Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
+    return {
+      key: sequenceText,
+      ctrl: (modifierBits & 4) !== 0,
+      alt: prefixedAlt || (modifierBits & 2) !== 0,
+      applicationCursor: sequence.kind === "SS3",
+    };
+  }
+  const alt = text.length > 1 && text.charCodeAt(0) === 27;
+  const character = alt ? text.slice(1) : text;
+  const codePoint = character.codePointAt(0);
+  if (codePoint === undefined || character.length !== (codePoint > 0xffff ? 2 : 1)) return undefined;
+  if (codePoint <= 31)
+    return { key: String.fromCharCode(codePoint + 64), ctrl: true, alt, applicationCursor: false };
+  return { key: character, ctrl: false, alt, applicationCursor: false };
+}
+
+function ctrlModifiedEmission(text: string): string | undefined {
+  if (text.length !== 1) return undefined;
+  const code = text.charCodeAt(0);
+  if (code <= 31) return text;
+  if (code === 127) return "\x08";
+  if (text === " ") return "\x00";
+  const upper = text.toUpperCase();
+  if (upper.length === 1) {
+    const upperCode = upper.charCodeAt(0);
+    if (upperCode >= 64 && upperCode <= 95) return String.fromCharCode(upperCode & 31);
+  }
+  if (code >= 51 && code <= 55) return String.fromCharCode(code - 24);
+  if (code === 56) return "\x7f";
+  // Ctrl+/ is US — the same byte as Ctrl+_ (xterm.js's ev.key "/" case,
+  // xtermjs/xterm.js#5457; the VT102-era alias readline binds as undo).
+  if (text === "/") return "\x1f";
+  return undefined;
+}
+
+function xtermAltControlAlias(text: string, physical: PhysicalKeyInput, stickyCtrl: boolean,
+  stickyAlt: boolean): string | undefined {
+  if (physical.metaKey || physical.key.length !== 1 || /^[A-Za-z ]$/.test(physical.key)) return undefined;
+  const control = ctrlModifiedEmission(physical.key);
+  if (control === undefined) return undefined;
+  // In xterm 5.5's default-key branch, Alt takes precedence over Ctrl for the
+  // printable digit/punctuation mapping. Letters and Space deliberately retain
+  // their Ctrl folds. Preserve that precedence whichever sticky modifier fills
+  // the missing half of a physical Ctrl+Alt chord.
+  if (physical.ctrlKey && !physical.altKey && stickyAlt && text === control)
+    return `\x1b${physical.key}`;
+  if (physical.altKey && !physical.ctrlKey && stickyCtrl && text === `\x1b${physical.key}`)
+    return text;
+  return undefined;
+}
+
+function mergePhysicalKeyBytes(text: string, physical: PhysicalKeyInput, stickyCtrl: boolean,
+  stickyAlt: boolean): string {
+  // A sticky modifier that is already physically held adds no information.
+  // Preserve xterm's bytes exactly; even an equivalent re-encoding can erase
+  // intentional platform aliases such as Alt+Arrow.
+  if ((!stickyCtrl || physical.ctrlKey) && (!stickyAlt || physical.altKey)) return text;
+  const ctrl = physical.ctrlKey || stickyCtrl;
+  const alt = physical.altKey || stickyAlt;
+  const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) |
+    (ctrl ? 4 : 0) | (physical.metaKey ? 8 : 0);
+  // Xterm 5.5 reserves physical Ctrl/Shift+Insert for clipboard handling and
+  // otherwise emits Insert only as bare CSI 2~, ignoring Alt. Preserve that
+  // contract; the caller still consumes a sticky modifier consulted here.
+  if (physical.key === "Insert") return text;
+  // PageUp/PageDown gain a modifier parameter only when Ctrl is effective in
+  // xterm 5.5; Alt and Meta alone deliberately retain the bare CSI 5~/6~ form.
+  if ((physical.key === "PageUp" || physical.key === "PageDown") && !ctrl) return text;
+  const sequence = userSequence(text);
+  if (sequence) {
+    // Xterm emits bare CSI Z for backtab even with Ctrl/Alt held.
+    if (sequence.kind === "CSI" && sequence.final === "Z") return text;
+    // The DOM event is authoritative here. Xterm aliases Alt-only arrows to
+    // Ctrl-looking bytes, so the sequence parameter cannot identify the chord.
+    return encodeSequence(sequence, modifierBits, text, true);
+  }
+  const arrow = ({ ArrowLeft: "D", ArrowUp: "A", ArrowDown: "B", ArrowRight: "C" } as const)
+    [physical.key as "ArrowLeft" | "ArrowUp" | "ArrowDown" | "ArrowRight"];
+  // macOS aliases Alt+Left/Right to ESC b/f. Those bytes have no cursor
+  // direction to merge into, so this is the one physical-identity recovery.
+  if (arrow && physical.altKey && (text === "\x1bb" || text === "\x1bf"))
+    return `\x1b[1;${modifierBits + 1}${arrow}`;
+
+  // Xterm has already evaluated named, scalar, and control keys. Retain that
+  // payload and apply only a missing sticky modifier to it.
+  const altAlias = xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt);
+  if (altAlias !== undefined) return altAlias;
+  const physicalAltPrefix = physical.altKey && text.length > 1 && text.charCodeAt(0) === 27;
+  let payload = physicalAltPrefix ? text.slice(1) : text;
+  if (stickyCtrl && !physical.ctrlKey) payload = ctrlModifiedEmission(payload) ?? payload;
+  return (physicalAltPrefix || (stickyAlt && !physical.altKey) ? "\x1b" : "") + payload;
+}
+
+type Modifier = "Ctrl" | "Alt";
+type State = "off" | "once" | "locked";
+export class StickyModifiers {
+  private values: Record<Modifier, State> = { Ctrl: "off", Alt: "off" };
+  private tapped: Record<Modifier, number> = { Ctrl: -Infinity, Alt: -Infinity };
+  state(key: Modifier): State { return this.values[key]; }
+  tap(key: Modifier, now: number): void {
+    this.values[key] = this.values[key] === "off" ? "once"
+      : this.values[key] === "once" && now - this.tapped[key] <= 350 ? "locked" : "off";
+    this.tapped[key] = now;
+  }
+  reset(): void {
+    this.values = { Ctrl: "off", Alt: "off" };
+    this.tapped = { Ctrl: -Infinity, Alt: -Infinity };
+  }
+  key(key: string, applicationCursor = false): string {
+    const ctrl = this.values.Ctrl !== "off";
+    const alt = this.values.Alt !== "off";
+    const result = keyBytes(key, ctrl, alt, applicationCursor);
+    this.consumeApplied(ctrl, alt);
+    return result;
+  }
+  input(text: string, source: "terminal" | "user" = "user", physical?: PhysicalKeyInput): string {
+    if (source === "terminal") return text;
+    const stickyCtrl = this.values.Ctrl !== "off";
+    const stickyAlt = this.values.Alt !== "off";
+    if (physical && (stickyCtrl || stickyAlt)) {
+      const result = mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
+      // A physically held equivalent already shaped xterm's bytes; only a
+      // sticky modifier absent from the DOM chord participates in this emission.
+      this.consumeApplied(stickyCtrl && !physical.ctrlKey, stickyAlt && !physical.altKey);
+      return result;
+    }
+    // Soft and deferred textarea input have no physical modifier identity. Their
+    // byte shapes are unambiguous here, so the encoder inverse remains a fallback.
+    const decoded = decodeKeyBytes(text);
+    if (decoded) {
+      const encode = (ctrl: boolean, alt: boolean) => keyBytes(decoded.key, decoded.ctrl || ctrl,
+        decoded.alt || alt, decoded.applicationCursor);
+      const result = encode(stickyCtrl, stickyAlt);
+      this.consumeApplied(stickyCtrl, stickyAlt);
+      return result;
+    }
+    // Unrecognized user controls pass through. No modifier was applied, so the
+    // one-shot remains armed for an input shape that can represent it.
+    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
+    return Array.from(text, char => this.key(char)).join("");
+  }
+  private consumeApplied(ctrl: boolean, alt: boolean): void {
+    // A one-shot is consumed when its modifier participates in encoding an
+    // accepted user emission, even if that terminal encoding is byte-identical.
+    // Pass-through input and a modifier already held physically do not spend it.
+    if (ctrl && this.values.Ctrl === "once") this.values.Ctrl = "off";
+    if (alt && this.values.Alt === "once") this.values.Alt = "off";
+  }
+}
+
+export function keybarPointerDown(event: Pick<Event, "preventDefault">, act?: () => void): void {
+  event.preventDefault(); // Cancel the browser's button-focus default before acting.
+  act?.();
+}
+
+/**
+ * True only for a click no pointer produced — assistive-tech activation,
+ * keyboard Enter, a programmatic `.click()`. A real tap's click can also
+ * arrive at detail:0 once the press's pointerdown was canceled (Chromium
+ * zeroes the click count along with the compatibility mouse events it
+ * suppresses), so detail alone misreads it as assistive — pointerType is the
+ * honest discriminator (#5426).
+ */
+export function keybarClickIsPointerless(event: { detail: number; pointerType?: string }): boolean {
+  return event.detail === 0 && !event.pointerType;
+}
+
+/**
+ * True while the sheet's opening-gesture marker is armed — whatever the
+ * backdrop click's own metadata reports (#5428). The marker arms only when a
+ * pointer gesture opened the sheet, and the click ending that gesture is the
+ * first click the fresh full-screen backdrop can receive; any genuinely new
+ * gesture disarms the marker at pointerdown before its click can arrive, so
+ * still-armed means this click IS the opening one. The event is deliberately
+ * not consulted: iOS Safari dispatches the trailing click as a plain
+ * MouseEvent with no pointer fields, or labels a touch click pointerType
+ * "mouse" (WebKit bug 282988) — either would fail an identity match and
+ * self-dismiss the sheet. Pointerless opens arm nothing, so every click
+ * still dismisses.
+ */
+export function keybarSheetClickIsOpeningGesture(
+  event: { pointerId?: number; pointerType?: string; detail?: number },
+  opening: { pointerId: number; pointerType: string } | undefined): boolean {
+  return opening !== undefined;
+}
+
+export class TerminalKeybar {
+  private arrows = false;
+  private readonly rows: HTMLElement[] = [];
+
+  private readonly modifiers = new StickyModifiers();
+  private readonly bar = document.createElement("div");
+  private readonly phone = window.matchMedia("(max-width: 768px)");
+  private readonly viewport = window.visualViewport;
+  private readonly observer: ResizeObserver;
+  private readonly textarea: (EventTarget & { value?: string }) | null;
+  private focused = false;
+  private physicalInput = false;
+  private readonly onKeyDown = (event: KeyboardEvent): void => {
+    this.physicalInput = event.key.length === 1 && !event.isComposing && event.keyCode !== 229;
+    // CompositionHelper emits textarea-diff input from a zero-delay callback,
+    // after onKey's synchronous user-input marker would normally be available.
+    if (event.keyCode === 229) this.markDeferredUserInput();
+  };
+  private readonly onKeyUp = (): void => { this.physicalInput = false; };
+  private readonly softInput: TerminalSoftInput;
+  private readonly buttons = new Map<Modifier, HTMLButtonElement>();
+  private readonly originalMaxHeight: string;
+  private userInput: UserInputMarker | undefined;
+  private userInputGeneration = 0;
+  private deferred229: { before: string; generation: number } | undefined;
+  private deferred229Generation = 0;
+  private readonly suppressedKeydowns = new WeakSet<Event>();
+  private pasteSheet: HTMLElement | undefined;
+  private pasteSheetArea: HTMLTextAreaElement | undefined;
+  private pasteSheetGesture: { pointerId: number; pointerType: string } | undefined;
+  // A pointerdown anywhere starts a NEW gesture — by definition later than the
+  // one whose trailing click the armed swallow exists for (#5428).
+  private readonly disarmPasteSheetGesture = (): void => { this.pasteSheetGesture = undefined; };
+  private disposed = false;
+
+  constructor(private readonly host: HTMLElement, private readonly input: (data: string) => void,
+    private readonly paste: (data: string) => void,
+    private readonly refit: () => void, private readonly applicationCursor: () => boolean,
+    private readonly fontSizeStep: (delta: number) => void) {
+    this.originalMaxHeight = host.style.maxHeight;
+    this.textarea = host.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
+    this.bar.className = "af-terminal-keybar";
+    this.bar.setAttribute("role", "group");
+    this.bar.setAttribute("aria-label", "Terminal keys");
+    for (const keys of KEYBAR_ROWS) {
+      const row = document.createElement("div");
+      row.className = "af-keybar-row";
+      this.rows.push(row);
+      for (const key of keys) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = key;
+        const zoom = FONT_ZOOM_LABELS[key];
+        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : zoom?.name ?? key);
+        const act = (event?: PointerEvent) => {
+          if (!this.focused || !this.phone.matches) return;
+          if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
+          // The A−/A+ keys step the shared terminal font size (#5500) — display
+          // state, not input — so they bypass the modifiers and the byte path
+          // entirely and leave an armed modifier armed for the next real key.
+          else if (zoom) this.fontSizeStep(zoom.delta);
+          else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
+          // The pointer that released on Paste is remembered through the read:
+          // if it falls back to the sheet, the tap's own trailing click must not
+          // dismiss it (#5428). A pointerless invocation arms nothing.
+          else if (key === "Paste") void this.requestPaste(
+            event?.pointerType ? { pointerId: event.pointerId, pointerType: event.pointerType } : undefined);
+          // Resolve and consume at source. The marker preserves these bytes
+          // without sending a keybar emission through the user decoder again.
+          else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
+          this.paint();
+        };
+        // #5426: pointerdown is activation-triggering only for a mouse; on the
+        // touch and pen input this bar exists for, transient activation arrives
+        // at the release — pointerup. navigator.clipboard.readText is
+        // activation-gated on exactly those engines, so Paste acts on the
+        // release instead of the press, while every other key still acts at
+        // pointerdown. Its preventDefault still runs either way — without it
+        // the tap would steal xterm's focus before the release ever arrives.
+        const onRelease = key === "Paste";
+        // The release must complete a press that started on THIS key — plain
+        // click semantics. pointerup is paired to its pointerdown by pointerId
+        // (a finger landing elsewhere and lifting on the key never pastes;
+        // touch and pen already route their pointerup to the down-target via
+        // implicit pointer capture, so the pairing binds the mouse case), the
+        // release must land inside the key's box (capture still delivers a
+        // slid-off release to it), and pointercancel — the browser taking the
+        // gesture for a scroll — withdraws the press.
+        let pressedId: number | undefined;
+        button.addEventListener("pointerdown", event => {
+          if (onRelease) pressedId = event.pointerId;
+          keybarPointerDown(event, onRelease ? undefined : act);
+        });
+        if (onRelease) {
+          button.addEventListener("pointerup", event => {
+            if (event.pointerId !== pressedId) return;
+            pressedId = undefined;
+            const rect = button.getBoundingClientRect();
+            if (event.clientX >= rect.left && event.clientX < rect.right &&
+              event.clientY >= rect.top && event.clientY < rect.bottom) act(event);
+          });
+          button.addEventListener("pointercancel", event => {
+            if (event.pointerId === pressedId) pressedId = undefined;
+          });
+          // A mouse press dragged off the key releases elsewhere — its stale
+          // id must not pair with a later release that lands on the key.
+          button.addEventListener("pointerleave", () => { pressedId = undefined; });
+        }
+        // Assistive activation has no pointer at all, so its click gets the
+        // act() the pointer events already gave a real tap — and the tap's
+        // own click, pointer-derived, must not fire a second one.
+        button.addEventListener("click", event => { if (keybarClickIsPointerless(event)) act(); });
+        if (key === "Ctrl" || key === "Alt") this.buttons.set(key, button);
+        row.append(button);
+      }
+      this.bar.append(row);
+    }
+    this.observer = new ResizeObserver(this.layout);
+    this.observer.observe(this.bar);
+    this.observer.observe(host);
+    this.phone.addEventListener("change", this.layout);
+    this.viewport?.addEventListener("resize", this.layout);
+    this.viewport?.addEventListener("scroll", this.layout);
+    window.addEventListener("resize", this.layout);
+    host.addEventListener("keydown", this.onKeyDown, true);
+    host.addEventListener("keyup", this.onKeyUp, true);
+    this.softInput = new TerminalSoftInput(host, this.textarea,
+      () => this.focused && this.phone.matches, () => this.physicalInput, data => this.sendUserInput(data),
+      () => this.modifiers.state("Ctrl") !== "off" || this.modifiers.state("Alt") !== "off",
+      event => !this.suppressedKeydowns.delete(event));
+    this.paint();
+  }
+
+  setFocused(focused: boolean): void {
+    this.focused = focused;
+    if (!focused) {
+      // The paste sheet's focus grab is an owned transition — keep armed sticky
+      // modifiers so an armed Ctrl/Alt survives the fallback and still applies
+      // to the next real key (#5380). A real pane switch still resets them.
+      if (!this.pasteSheet) this.modifiers.reset();
+      this.softInput.reset(); this.physicalInput = false; this.arrows = false;
+      this.deferred229 = undefined; this.deferred229Generation += 1;
+    }
+    this.paint();
+    this.layout();
+  }
+  transform(text: string): string {
+    const marker = this.userInput;
+    const source = marker || this.takeDeferred229(text) ? "user" : "terminal";
+    this.userInput = undefined;
+    this.userInputGeneration += 1;
+    const output = this.softInput.transform(text, (value, compositionTrailing) =>
+      this.focused && this.phone.matches && marker?.source !== "keybar"
+        ? this.modifiers.input(value, compositionTrailing ? "user" : source,
+          compositionTrailing ? undefined : marker?.physical) : value);
+    this.paint();
+    return output;
+  }
+  /** Mark xterm's synchronous onKey emission with its unaliased DOM identity. */
+  markUserInput(physical?: PhysicalKeyInput, keybar = false): void {
+    const generation = ++this.userInputGeneration;
+    this.userInput = {
+      source: keybar ? "keybar" : "user",
+      physical: physical ? {
+        key: physical.key, shiftKey: physical.shiftKey, altKey: physical.altKey,
+        ctrlKey: physical.ctrlKey, metaKey: physical.metaKey,
+      } : undefined,
+    };
+    const clear = () => {
+      if (this.userInputGeneration === generation) this.userInput = undefined;
+    };
+    // Synchronous onKey and term.input paths own only the current event turn.
+    queueMicrotask(clear);
+  }
+  /** Match xterm's deferred 229 textarea diff without marking an intervening reply. */
+  markDeferredUserInput(): void {
+    const before = this.textarea?.value;
+    if (before === undefined) return;
+    const generation = ++this.deferred229Generation;
+    this.deferred229 = { before, generation };
+    queueMicrotask(() => setTimeout(() => {
+      if (this.deferred229?.generation === generation) this.deferred229 = undefined;
+    }, 0));
+  }
+  /** Record that xterm's custom handler rejected this event before CompositionHelper. */
+  markKeydownSuppressed(event: KeyboardEvent): void {
+    this.suppressedKeydowns.add(event);
+  }
+  private takeDeferred229(text: string): boolean {
+    const pending = this.deferred229;
+    const value = this.textarea?.value;
+    if (!pending || value === undefined) return false;
+    const diff = value.replace(pending.before, "");
+    const expected = value.length > pending.before.length ? diff
+      : value.length < pending.before.length ? "\x7f"
+        : value !== pending.before ? value : undefined;
+    if (text !== expected) return false;
+    this.deferred229 = undefined;
+    this.deferred229Generation += 1;
+    return true;
+  }
+  sendUserInput(data: string, options: UserInputOptions = {}): void {
+    // Decided here, by the bytes, rather than by each caller's options: #4043 lost
+    // the interrupt by rewiring one caller onto the ordered path, and this makes
+    // that rewiring harmless.
+    if (options.afterComposition && !SIGNAL_BYTES.has(data) &&
+      this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
+    this.emitUserInput(data, options);
+  }
+  /** Send an xterm-suppressed physical key after any commit that it could not
+   *  flush. A terminal signal byte is sent at once instead (SIGNAL_BYTES). */
+  sendCustomUserInput(data: string, physical: PhysicalKeyInput): void {
+    this.sendUserInput(data, { physical, afterComposition: true });
+  }
+  private emitUserInput(data: string, options: UserInputOptions): void {
+    this.markUserInput(options.physical, options.keybar);
+    this.input(data);
+  }
+  /**
+   * The Paste bar key (#5380). `navigator.clipboard.readText` is invoked on the
+   * synchronous stack of the tap's activation-bearing event — pointerup, not
+   * pointerdown, which carries transient user activation for a mouse alone
+   * (#5426) — so the request lands inside the browser's user-activation window.
+   * iOS Safari answers with its own paste bubble and Android Chrome may ask
+   * for clipboard permission once; both are fine.
+   *
+   * Three failure shapes collapse into the one never-silent fallback: no
+   * readText at all (Firefox, an insecure context), a rejection (permission
+   * denied), and an empty read each open the paste sheet — the textarea route
+   * is how paste works on browsers that block readText.
+   */
+  async requestPaste(gesture?: { pointerId: number; pointerType: string }): Promise<void> {
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.readText) {
+      this.openPasteSheet(gesture);
+      return;
+    }
+    try {
+      const text = await clipboard.readText();
+      // The read outlives the tap: a terminal that was closed or that lost
+      // focus to another split while the read was in flight must not get a
+      // paste — or a modal — for a session it no longer owns.
+      if (this.disposed || !this.focused) return;
+      if (text) {
+        this.sendPaste(text);
+        return;
+      }
+    } catch { /* readText also rejects on denied permission. */ }
+    if (!this.disposed && this.focused) this.openPasteSheet(gesture);
+  }
+  /**
+   * Sends text through xterm's paste path: term.paste wraps the block in
+   * ESC[200~ … ESC[201~ when the application enabled bracketed paste, exactly
+   * as a desktop Ctrl+V does, and the delivery hold reads the wrapper as a
+   * draft. The emission is marked keybar-sourced so transform passes it
+   * through untouched — a paste is not a keystroke, so an armed sticky
+   * Ctrl/Alt neither rewrites the pasted text nor is consumed by it. And like
+   * other positional input it keeps its place behind a just-committed IME
+   * composition (#4151).
+   */
+  sendPaste(text: string): void {
+    if (this.disposed) return;
+    if (this.softInput.deferAfterPendingComposition(() => this.emitPaste(text))) return;
+    this.emitPaste(text);
+  }
+  private emitPaste(text: string): void {
+    this.markUserInput(undefined, true);
+    this.paste(text);
+  }
+  /**
+   * The never-silent fallback for requestPaste: a small sheet with a focused
+   * textarea. A long press inside opens the OS paste menu (or the user types),
+   * and Send routes the text through the same sendPaste path a direct
+   * clipboard read would. The card reuses the app's modal chrome classes;
+   * Escape, Cancel, and a backdrop tap all dismiss.
+   *
+   * `gesture` is the pointer that invoked Paste, when there was one: the sheet
+   * is appended while that gesture is still in flight, and the tap's own
+   * trailing click would otherwise hit-test the fresh backdrop and dismiss it
+   * inside the same gesture (#5428).
+   */
+  private openPasteSheet(gesture?: { pointerId: number; pointerType: string }): void {
+    if (this.pasteSheet) {
+      this.pasteSheetArea?.focus();
+      return;
+    }
+    // Never pop the sheet over a pane the user has already left.
+    if (this.disposed || !this.focused) return;
+    // Focusing the sheet blurs xterm's helper textarea — and a blur mid-flight
+    // drops a just-committed IME composition before its zero-delay finalizer
+    // reads it. Open behind that commit instead, the same deferral sendPaste
+    // takes, so the text the user finished lands before the sheet takes focus.
+    if (this.softInput.deferAfterPendingComposition(() => this.openPasteSheet(gesture))) return;
+    const title = document.createElement("h2");
+    title.className = "af-modal-title";
+    title.textContent = "Paste";
+    const hint = document.createElement("p");
+    hint.className = "af-modal-hint";
+    hint.textContent = "Couldn't read the clipboard — paste or type the text, then tap Send.";
+    const area = document.createElement("textarea");
+    area.className = "af-input af-textarea";
+    area.setAttribute("aria-label", "Text to paste");
+    area.placeholder = "Paste or type here";
+    // This field carries terminal text — disable the mobile keyboard's
+    // capitalization/correction/spellcheck, the same way xterm's helper
+    // textarea does, so `ls` doesn't arrive as `Ls`.
+    area.setAttribute("autocapitalize", "none");
+    area.setAttribute("autocorrect", "off");
+    area.spellcheck = false;
+    const body = document.createElement("div");
+    body.className = "af-modal-body";
+    body.append(hint, area);
+    const send = document.createElement("button");
+    send.type = "button";
+    send.className = "af-primary";
+    send.textContent = "Send";
+    send.disabled = true;
+    area.addEventListener("input", () => { send.disabled = !area.value; });
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "af-ghost";
+    cancel.textContent = "Cancel";
+    const foot = document.createElement("div");
+    foot.className = "af-modal-foot";
+    foot.append(cancel, send);
+    const card = document.createElement("div");
+    card.className = "af-modal-card";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+    card.setAttribute("aria-label", "Paste");
+    card.tabIndex = -1;
+    card.append(title, body, foot);
+    // A tap inside the card must not reach the backdrop's dismiss.
+    card.addEventListener("click", event => event.stopPropagation());
+    card.addEventListener("keydown", event => {
+      if (event.key === "Escape") this.closePasteSheet(false);
+      if (event.key === "Tab") {
+        // aria-modal says the rest of the page is inert — keep Tab inside the
+        // ring so focus cannot escape to controls behind the sheet.
+        const ring = [area, cancel, send].filter(el => !(el as HTMLButtonElement).disabled);
+        const at = ring.indexOf(document.activeElement as HTMLTextAreaElement | HTMLButtonElement);
+        event.preventDefault();
+        ring[(at + (event.shiftKey ? -1 : 1) + ring.length) % ring.length]?.focus();
+      }
+    });
+    const backdrop = document.createElement("div");
+    backdrop.className = "af-modal-backdrop";
+    backdrop.append(card);
+    backdrop.addEventListener("click", event => {
+      // The click that ends the opening gesture hit-tests a backdrop that did
+      // not exist when its pointerdown ran — swallowing it keeps the sheet
+      // open past its own tap (#5428). Consumed either way; a later, separate
+      // interaction always dismisses.
+      const opening = this.pasteSheetGesture;
+      if (keybarSheetClickIsOpeningGesture(event, opening)) {
+        this.pasteSheetGesture = undefined;
+        return;
+      }
+      this.closePasteSheet(false);
+    });
+    cancel.addEventListener("click", () => this.closePasteSheet(false));
+    send.addEventListener("click", () => this.closePasteSheet(true));
+    this.pasteSheet = backdrop;
+    this.pasteSheetArea = area;
+    this.pasteSheetGesture = gesture;
+    document.addEventListener("pointerdown", this.disarmPasteSheetGesture, true);
+    document.body.append(backdrop);
+    area.focus();
+  }
+  private closePasteSheet(send: boolean): void {
+    const area = this.pasteSheetArea;
+    this.pasteSheet?.remove();
+    this.pasteSheet = undefined;
+    this.pasteSheetArea = undefined;
+    this.pasteSheetGesture = undefined;
+    document.removeEventListener("pointerdown", this.disarmPasteSheetGesture, true);
+    if (send && area?.value) this.sendPaste(area.value);
+    // Focusing the sheet blurred the terminal's textarea; hand the focus back
+    // so the keybar returns to the session the text was sent to.
+    (this.textarea as { focus?: () => void } | null)?.focus?.();
+  }
+  private paint(): void {
+    this.rows.forEach((row, index) => { row.hidden = index !== (this.arrows ? 1 : 0); });
+    for (const [key, button] of this.buttons) {
+      const state = this.modifiers.state(key);
+      button.dataset.state = state;
+      button.setAttribute("aria-pressed", String(state !== "off"));
+      button.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next key" : "Double tap to lock");
+      button.title = state === "locked" ? `${key} locked · Tap to release` : `${key} · Double tap to lock`;
+      button.textContent = state === "locked" ? `▸ ${key}` : key;
+    }
+  }
+  private readonly layout = (): void => {
+    if (!this.focused || !this.phone.matches) {
+      this.bar.remove();
+      this.host.style.maxHeight = this.originalMaxHeight;
+      if (!this.phone.matches) { this.modifiers.reset(); this.paint(); }
+    } else {
+      if (!this.bar.isConnected) document.body.append(this.bar);
+      const bottom = this.viewport ? this.viewport.offsetTop + this.viewport.height : window.innerHeight;
+      this.bar.style.left = `${this.viewport?.offsetLeft ?? 0}px`;
+      const width = this.viewport?.width ?? window.innerWidth;
+      this.bar.style.width = `${width}px`;
+      // A media query would read the layout viewport; the bar is sized from the
+      // visual viewport, and the two disagree under pinch zoom — drive the
+      // narrow-keys rule off the width the bar actually gets (#5380).
+      this.bar.classList.toggle("af-keybar-narrow", width < 348);
+      this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
+      const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
+      this.host.style.maxHeight = `${height}px`;
+    }
+    this.refit();
+  };
+  dispose(): void {
+    this.disposed = true;
+    this.pasteSheet?.remove();
+    this.pasteSheet = undefined;
+    this.pasteSheetArea = undefined;
+    this.pasteSheetGesture = undefined;
+    document.removeEventListener("pointerdown", this.disarmPasteSheetGesture, true);
+    this.host.removeEventListener("keydown", this.onKeyDown, true);
+    this.host.removeEventListener("keyup", this.onKeyUp, true);
+    this.softInput.dispose();
+    this.observer.disconnect();
+    this.phone.removeEventListener("change", this.layout);
+    this.viewport?.removeEventListener("resize", this.layout);
+    this.viewport?.removeEventListener("scroll", this.layout);
+    window.removeEventListener("resize", this.layout);
+    this.host.style.maxHeight = this.originalMaxHeight;
+    this.bar.remove();
+  }
+}

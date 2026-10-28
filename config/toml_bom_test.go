@@ -71,9 +71,10 @@ func TestLoadConfig_BOMGlobalConfigFile(t *testing.T) {
 	assert.Equal(t, 30*60*1000, cfg.DaemonPollInterval)
 }
 
-// A BOM-only global config is still "effectively empty": re-materialize rather
-// than fail, mirroring the non-BOM empty-stub path (#864).
-func TestLoadConfig_BOMOnlyConfigMaterializes(t *testing.T) {
+// A BOM-only global config is still "effectively empty": it loads as in-memory
+// defaults rather than failing, mirroring the non-BOM empty-stub path
+// (#864/#4483 — the stub itself is left untouched).
+func TestLoadConfig_BOMOnlyConfigLoadsDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	require.NoError(t, os.WriteFile(filepath.Join(home, TomlConfigFileName), []byte(utf8BOM), 0o644))
@@ -141,7 +142,7 @@ func TestSetGlobalConfigValue_BOM_ScalarEdit(t *testing.T) {
 func TestSetGlobalConfigValue_BOM_StructuredEdit(t *testing.T) {
 	path := writeTempConfig(t, utf8BOM+"schema_version = 1\ndefault_program = \"claude\"\n")
 
-	_, err := SetGlobalConfigValue("theme", `{"accent":"#112233"}`)
+	_, err := SetGlobalConfigValue("program_overrides", `{"codex":"codex"}`)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(path)
@@ -150,7 +151,7 @@ func TestSetGlobalConfigValue_BOM_StructuredEdit(t *testing.T) {
 
 	cfg, err := LoadConfig()
 	require.NoError(t, err)
-	require.NotNil(t, cfg.Theme)
+	require.Equal(t, "codex", cfg.ProgramOverrides["codex"])
 }
 
 func TestUnsetGlobalConfigValue_BOM(t *testing.T) {

@@ -61,62 +61,18 @@ func intPtr(i int) *int       { return &i }
 // PR 3). It never spawns a daemon, so `af tasks list` keeps working with none
 // running. Both paths return the same shape (a JSON array of task.Task) so the
 // output is byte-identical regardless of source.
-func listTasks() ([]task.Task, error) {
+//
+// Against a REMOTE target it reads that daemon's tasks and does NOT fall back to
+// this machine's store — see api/tasksremote.go. verb names the command for the
+// refusal a daemon too old to serve the route earns.
+func listTasks(verb string) ([]task.Task, error) {
+	if apiclient.IsRemoteTarget() {
+		return remoteListTasks(verb)
+	}
 	if tasks, err := daemonListTasksNoSpawn(); err == nil {
 		return tasks, nil
 	}
 	return task.LoadTasks()
-}
-
-// getTaskByID returns the single task matching id, preferring the daemon's
-// authoritative snapshot and falling back to a disk read when no daemon is
-// reachable (#1029 PR 3). When a live snapshot is available the daemon is
-// authoritative: a miss returns not-found without re-reading disk. The
-// not-found message mirrors task.GetTask so output is unchanged.
-func getTaskByID(id string) (*task.Task, error) {
-	if tasks, err := daemonListTasksNoSpawn(); err == nil {
-		for i := range tasks {
-			if tasks[i].ID == id {
-				return &tasks[i], nil
-			}
-		}
-		return nil, fmt.Errorf("task with id %q not found", id)
-	}
-	return task.GetTask(id)
-}
-
-// enforceTaskScope refuses an id that belongs to a different project than the
-// resolved one (#1893). It is the shared gate for every id-taking task command;
-// before it, all four accepted --repo and silently discarded it.
-//
-// With no project context (rule 3 — outside a repo, e.g. a systemd unit) it is
-// a no-op: the id still resolves globally, matching the bare-title convenience
-// sessions already grant. That also means the extra lookup only happens when a
-// scope actually exists, so unscoped scripts keep their current failure modes.
-//
-// It returns the expectation the CALLER MUST PASS to the mutating RPC. This
-// check is client-side and the mutation is a separate daemon call carrying only
-// the id, so on its own it authorizes a record that may be rebound before the
-// mutation lands. The returned task.ProjectExpectation re-states the binding
-// under the daemon's lock, making the authorization atomic with the action.
-// Discarding it silently reopens the race — every mutating call site must thread
-// it through.
-func enforceTaskScope(id string) (task.ProjectExpectation, error) {
-	scope, err := resolveProjectScope(false)
-	if err != nil {
-		return task.ProjectExpectation{}, err
-	}
-	if scope.Repo == nil {
-		return task.ProjectExpectation{}, nil
-	}
-	t, err := getTaskByID(id)
-	if err != nil {
-		return task.ProjectExpectation{}, fmt.Errorf("failed to get task: %w", err)
-	}
-	if err := requireTaskInScope(t, scope); err != nil {
-		return task.ProjectExpectation{}, err
-	}
-	return task.ExpectProject(*t), nil
 }
 
 var tasksListAllFlag bool
@@ -130,7 +86,13 @@ var tasksListCmd = &cobra.Command{
 		"project. Run from outside a git repository with no --repo, there is no " +
 		"project context and every project's tasks are listed.\n\n" +
 		"This default changed in #1893: `af tasks list` inside a repository used to " +
-		"list every project's tasks. Pass --all for the old behavior.",
+		"list every project's tasks. Pass --all for the old behavior.\n\n" +
+		"With --daemon-url/AF_DAEMON_URL set, the list comes from that daemon and " +
+		"never from this machine's task store — a daemon that cannot be reached is " +
+		"an error, not a fall back to local rows. There is no project context " +
+		"against a remote daemon: your current directory names a repository here, " +
+		"which says nothing about the daemon's projects, so every project's tasks " +
+		"are listed and --repo is refused rather than silently matching nothing.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
@@ -140,7 +102,7 @@ var tasksListCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		tasks, err := listTasks()
+		tasks, err := listTasks("af tasks list")
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to load tasks: %w", err))
 		}
@@ -165,6 +127,7 @@ var (
 	taskAddTargetSessionFlag     string
 	taskAddMaxConcurrentRunsFlag int
 	taskAddOnCompleteFlag        string
+	taskAddHostFlag              string
 	taskAddProgramFlag           string
 )
 
@@ -179,16 +142,24 @@ var tasksAddCmd = &cobra.Command{
 		"binding is visible at creation rather than inferred later.\n\n" +
 		"Outside a git repository, --repo is required — the binding is never guessed. " +
 		"A current directory that resolves to a clone inside af's own home is refused " +
-		"as a stray checkout (#1891); pass --repo to name the intended project.",
+		"as a stray checkout (#1891); pass --repo to name the intended project.\n\n" +
+		"With --daemon-url/AF_DAEMON_URL set, the task is added to that daemon and " +
+		"--repo is required, naming a path on the DAEMON's host: it is sent as typed " +
+		"and resolved there, since a path on this machine says nothing about the " +
+		"daemon's filesystem. The success line names the daemon URL beside the path. " +
+		"An omitted --program is left to the daemon's own default_program rather " +
+		"than resolved from this machine's config.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		// resolveRepo already differentiates "--repo is required" (absent) from a
-		// provided-but-invalid path and names the offending path (#892), so
-		// surface its error verbatim instead of relabeling every failure as
-		// "required".
-		repo, err := resolveRepo()
+		// The project binding. Locally: resolveRepo, which already differentiates
+		// "--repo is required" (absent) from a provided-but-invalid path and names
+		// the offending path (#892), so surface its error verbatim instead of
+		// relabeling every failure as "required". Against a remote daemon: the
+		// operator-typed --repo, sent as typed for the daemon to resolve on its own
+		// filesystem (#3730) — see addProjectBinding.
+		repo, projectPath, err := addProjectBinding()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -214,14 +185,24 @@ var tasksAddCmd = &cobra.Command{
 		}
 
 		program := taskAddProgramFlag
-		if program == "" {
+		if program != "" {
+			if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
+				return jsonError(err)
+			}
+		} else if repo != nil {
+			// Local only — repo is nil against a remote daemon (addProjectBinding),
+			// and an absent --program then leaves Program EMPTY on purpose, which
+			// task.AddTaskChecked reads as "fall back to the configured
+			// default_program at run time". Resolving it here would resolve THIS
+			// machine's config — the repo-level .af/config.toml of a repository the
+			// daemon does not have, layered over the caller's own global default —
+			// and bake that answer into a record the daemon runs. The daemon's own
+			// default is the right one, and deferring is how it gets used.
 			cfg, err := config.ResolveConfigForRepo(repo)
 			if err != nil {
 				return jsonError(err)
 			}
 			program = cfg.DefaultProgram
-		} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
-			return jsonError(err)
 		}
 
 		id, err := task.GenerateID()
@@ -237,7 +218,8 @@ var tasksAddCmd = &cobra.Command{
 			TargetSession:     taskAddTargetSessionFlag,
 			MaxConcurrentRuns: taskAddMaxConcurrentRunsFlag,
 			OnComplete:        taskAddOnCompleteFlag,
-			ProjectPath:       repo.Root,
+			Host:              strings.TrimSpace(taskAddHostFlag),
+			ProjectPath:       projectPath,
 			Program:           program,
 			Enabled:           true,
 			CreatedAt:         time.Now(),
@@ -249,10 +231,19 @@ var tasksAddCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
+		// A host pick must reach a daemon that stores it: one that predates the
+		// field would drop it and every run would silently use the repo's default
+		// backend. The daemon's store refuses a name outside the global host list.
+		if s.Host != "" {
+			if err := requireHostPickOn(hostPickOnTask, s.Host); err != nil {
+				return jsonError(err)
+			}
+		}
+
 		// Route the write through the daemon: it owns scheduling and reloads its
 		// own scheduler/watchers in-process, so no separate reload poke is needed
 		// (#1029 PR 3). The on-disk tasks.json format is unchanged.
-		if err := daemonAddTask(s); err != nil {
+		if err := routedAddTask(s, task.ActorCLI); err != nil {
 			if !apiclient.IsMutationCommitted(err) {
 				return jsonError(fmt.Errorf("failed to add task: %w", err))
 			}
@@ -262,33 +253,47 @@ var tasksAddCmd = &cobra.Command{
 		// Echo the resolved binding, not just the id (#1891). The id alone left
 		// the caller no way to tell which project the task attached to, so a
 		// wrong binding stayed invisible until its worktrees showed up in the
-		// wrong place. project_path is the canonical main-worktree root — the
-		// same value --repo would take.
-		return jsonOut(map[string]any{"id": id, "project_path": repo.Root})
+		// wrong place. Locally project_path is the canonical main-worktree root —
+		// the same value --repo would take; against a remote daemon it is the path
+		// as typed, which is what that daemon stored (task.AddTaskChecked keeps
+		// ProjectPath verbatim and derives RepoID from it on its own host).
+		out := map[string]any{"id": id, "project_path": projectPath}
+		if url := apiclient.RemoteTargetURL(); url != "" {
+			// Name the machine the schedule now lives on, beside the path. A path
+			// alone is exactly what made #3730 invisible: `/home/me/proj` reads as
+			// this laptop's project whichever host it is a path ON, and the two
+			// hosts sharing a home layout is the common case for one operator's own
+			// boxes. The field is added ONLY for a remote target, so the local
+			// output shape is byte-identical to what scripts already parse.
+			out["daemon_url"] = url
+		}
+		return jsonOut(out)
 	},
 }
 
 var tasksRemoveCmd = &cobra.Command{
-	Use:   "remove <id>",
+	Use:   "remove <id-or-name>",
 	Short: "Remove a task in the current project",
 	Long: "Remove a task in the current project.\n\n" +
 		"The task must belong to the resolved project: --repo when given, otherwise " +
 		"the current directory's project. Removing another project's task requires " +
 		"naming it with --repo. Outside a git repository there is no project context " +
-		"and the id resolves globally.",
+		"and the id or name resolves globally.\n\n" +
+		taskIDOrNameDoc + "\n\n" +
+		"With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon " +
+		"and never in this machine's store. There is no project context against a " +
+		"remote daemon, so the id or name resolves across its projects and --repo is refused.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		if err := task.ValidateTaskID(args[0]); err != nil {
-			return jsonError(err)
-		}
-
-		// Resolve the project BEFORE the destructive call: --repo used to be
-		// accepted and dropped here, so `af tasks remove --repo /a <b-id>`
-		// deleted b's task and reported {"ok":true} (#1893).
-		expect, err := enforceTaskScope(args[0])
+		// Resolve BEFORE the destructive call: --repo used to be accepted and
+		// dropped here, so `af tasks remove --repo /a <b-id>` deleted b's task
+		// and reported {"ok":true} (#1893). The argument may be the task's id
+		// or its exact name (#4676); either way the resolution is refused
+		// rather than guess when it is not unambiguous.
+		resolved, expect, err := resolveTaskArg("af tasks remove", args[0])
 		if err != nil {
 			return jsonError(err)
 		}
@@ -296,7 +301,7 @@ var tasksRemoveCmd = &cobra.Command{
 		// Pass the expectation through: the check above authorized the record as
 		// it was a moment ago, and only the daemon can re-verify it atomically
 		// with the delete.
-		if err := daemonRemoveTask(args[0], expect); err != nil {
+		if err := routedRemoveTask(resolved.ID, expect); err != nil {
 			if !apiclient.IsMutationCommitted(err) {
 				return jsonError(fmt.Errorf("failed to remove task: %w", err))
 			}
@@ -308,41 +313,25 @@ var tasksRemoveCmd = &cobra.Command{
 }
 
 var tasksGetCmd = &cobra.Command{
-	Use:   "get <id>",
-	Short: "Get a task in the current project by ID",
-	Long: "Get a task in the current project by ID.\n\n" +
+	Use:   "get <id-or-name>",
+	Short: "Get a task in the current project by ID or name",
+	Long: "Get a task in the current project by ID or name.\n\n" +
 		"The task must belong to the resolved project: --repo when given, otherwise " +
 		"the current directory's project. Inspecting another project's task requires " +
 		"naming it with --repo. Outside a git repository there is no project context " +
-		"and the id resolves globally.",
+		"and the id or name resolves globally.\n\n" +
+		taskIDOrNameDoc + "\n\n" +
+		"With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon " +
+		"and never in this machine's store. There is no project context against a " +
+		"remote daemon, so the id or name resolves across its projects and --repo is refused.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		if err := task.ValidateTaskID(args[0]); err != nil {
-			return jsonError(err)
-		}
-
-		// Resolve the scope BEFORE the lookup so an invalid --repo reports the
-		// path it could not resolve rather than being masked by a not-found for
-		// the id (#892 semantics, and what "an explicit --repo always wins"
-		// means). The other id-taking commands get this ordering from
-		// enforceTaskScope; `get` checks inline to reuse the record it loads.
-		scope, err := resolveProjectScope(false)
+		s, _, err := resolveTaskArg("af tasks get", args[0])
 		if err != nil {
 			return jsonError(err)
-		}
-
-		s, err := getTaskByID(args[0])
-		if err != nil {
-			return jsonError(fmt.Errorf("failed to get task: %w", err))
-		}
-
-		if scope.Repo != nil {
-			if err := requireTaskInScope(s, scope); err != nil {
-				return jsonError(err)
-			}
 		}
 
 		return jsonOut(s)
@@ -350,23 +339,23 @@ var tasksGetCmd = &cobra.Command{
 }
 
 var tasksRunCmd = &cobra.Command{
-	Use:   "trigger <id>",
+	Use:   "trigger <id-or-name>",
 	Short: "Trigger a task in the current project to run immediately",
 	Long: "Trigger a task in the current project to run immediately.\n\n" +
 		"The task must belong to the resolved project: --repo when given, otherwise " +
 		"the current directory's project. Triggering another project's task requires " +
 		"naming it with --repo. Outside a git repository there is no project context " +
-		"and the id resolves globally.",
+		"and the id or name resolves globally.\n\n" +
+		taskIDOrNameDoc + "\n\n" +
+		"With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon " +
+		"and never in this machine's store. There is no project context against a " +
+		"remote daemon, so the id or name resolves across its projects and --repo is refused.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		if err := task.ValidateTaskID(args[0]); err != nil {
-			return jsonError(err)
-		}
-
-		expect, err := enforceTaskScope(args[0])
+		resolved, expect, err := resolveTaskArg("af tasks trigger", args[0])
 		if err != nil {
 			return jsonError(err)
 		}
@@ -376,7 +365,7 @@ var tasksRunCmd = &cobra.Command{
 		// daemon.RunTask CLI call (#1029 PR 3 / #1169-class fix). The
 		// expectation is re-verified against the same load that produces the
 		// fired record.
-		if err := daemonTriggerTask(args[0], expect); err != nil {
+		if err := routedTriggerTask(resolved.ID, expect); err != nil {
 			return jsonError(fmt.Errorf("failed to trigger task: %w", err))
 		}
 
@@ -385,27 +374,28 @@ var tasksRunCmd = &cobra.Command{
 }
 
 var tasksRestartCmd = &cobra.Command{
-	Use:   "restart <id>",
+	Use:   "restart <id-or-name>",
 	Short: "Restart an enabled watch task without process overlap",
 	Long: "Restart an enabled watch task in the current project. The command waits " +
 		"for the old process tree to exit before starting one replacement, so an " +
 		"edited script is re-read without double-emitting events.\n\n" +
 		"The task must belong to the resolved project: --repo when given, otherwise " +
 		"the current directory's project. Outside a git repository there is no " +
-		"project context and the id resolves globally.",
+		"project context and the id or name resolves globally.\n\n" +
+		taskIDOrNameDoc + "\n\n" +
+		"With --daemon-url/AF_DAEMON_URL set, the task is looked up on that daemon " +
+		"and never in this machine's store. There is no project context against a " +
+		"remote daemon, so the id or name resolves across its projects and --repo is refused.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		if err := task.ValidateTaskID(args[0]); err != nil {
-			return jsonError(err)
-		}
-		expect, err := enforceTaskScope(args[0])
+		resolved, expect, err := resolveTaskArg("af tasks restart", args[0])
 		if err != nil {
 			return jsonError(err)
 		}
-		if err := daemonRestartTask(args[0], expect); err != nil {
+		if err := routedRestartTask(resolved.ID, expect); err != nil {
 			return jsonError(fmt.Errorf("failed to restart task: %w", err))
 		}
 		return jsonOut(map[string]bool{"ok": true})
@@ -415,51 +405,68 @@ var tasksRestartCmd = &cobra.Command{
 var (
 	taskUpdateNameFlag              string
 	taskUpdatePromptFlag            string
+	taskUpdatePromptFileFlag        string
 	taskUpdateCronFlag              string
 	taskUpdateWatchCmdFlag          string
 	taskUpdateTargetSessionFlag     string
 	taskUpdateMaxConcurrentRunsFlag int
 	taskUpdateOnCompleteFlag        string
+	taskUpdateHostFlag              string
 	taskUpdateProjectPathFlag       string
 	taskUpdateEnabledFlag           string
 	taskUpdateProgramFlag           string
 )
 
 var tasksUpdateCmd = &cobra.Command{
-	Use:   "update <id>",
+	Use:   "update <id-or-name>",
 	Short: "Update a task in the current project",
 	Long: "Update a task in the current project.\n\n" +
 		"The task must belong to the resolved project: --repo when given, otherwise " +
 		"the current directory's project. Updating another project's task requires " +
 		"naming it with --repo. Outside a git repository there is no project context " +
-		"and the id resolves globally.\n\n" +
+		"and the id or name resolves globally.\n\n" +
+		taskIDOrNameDoc + "\n\n" +
 		"--repo scopes which task may be updated; it never re-binds one. Pass " +
 		"--project-path to move that task to another existing git repository. The " +
-		"new path becomes the task's working directory and project binding.",
+		"new path becomes the task's working directory and project binding.\n\n" +
+		"With --daemon-url/AF_DAEMON_URL set, the patch is applied on that daemon " +
+		"and never to this machine's store. There is no project context against a " +
+		"remote daemon, so the id or name resolves across its projects and --repo is " +
+		"refused; --project-path names a path on the DAEMON's host and is sent as " +
+		"typed for it to resolve.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		if err := task.ValidateTaskID(args[0]); err != nil {
-			return jsonError(err)
+		prompt := taskUpdatePromptFlag
+		fromFile := cmd.Flags().Changed("prompt-file")
+		if fromFile {
+			if cmd.Flags().Changed("prompt") || taskUpdatePromptFlag != "" {
+				return jsonError(errors.New("--prompt and --prompt-file are mutually exclusive"))
+			}
+			contents, err := os.ReadFile(taskUpdatePromptFileFlag)
+			if err != nil {
+				return jsonError(fmt.Errorf("read --prompt-file: %w", err))
+			}
+			prompt = string(contents)
+			if strings.TrimSpace(prompt) == "" {
+				return jsonError(errors.New("prompt must be non-empty"))
+			}
 		}
 
-		expect, err := enforceTaskScope(args[0])
+		resolved, expect, err := resolveTaskArg("af tasks update", args[0])
 		if err != nil {
 			return jsonError(err)
 		}
 
-		// Load the current record for the cross-field pre-checks below (the
-		// switch-to-cron-needs-a-prompt rule reads the stored prompt/trigger).
-		// This is a client-side nicety only — the WRITE ships a field-level
-		// patch, never this whole struct, so an out-of-band edit to a field the
-		// user is not changing survives (#1700). The daemon re-validates the
-		// merged result authoritatively.
-		s, err := task.GetTask(args[0])
-		if err != nil {
-			return jsonError(fmt.Errorf("failed to get task: %w", err))
-		}
+		// The record resolution just loaded serves the cross-field pre-checks
+		// below (the switch-to-cron-needs-a-prompt rule reads the stored
+		// prompt/trigger). This is a client-side nicety only — the WRITE ships
+		// a field-level patch, never this whole struct, so an out-of-band edit
+		// to a field the user is not changing survives (#1700). The daemon
+		// re-validates the merged result authoritatively.
+		s := resolved
 
 		// Accumulate only the fields the user actually passed. Each flag that is
 		// set becomes one non-nil patch field; everything else stays nil and is
@@ -469,17 +476,17 @@ var tasksUpdateCmd = &cobra.Command{
 		if taskUpdateNameFlag != "" {
 			patch.Name = strPtr(taskUpdateNameFlag)
 		}
-		if taskUpdatePromptFlag != "" {
+		if prompt != "" {
 			// Partial-update semantics keep `--prompt ""` as "leave
 			// unchanged", but whitespace-only values used to slip past
 			// the != "" check and be sent literally to tmux via
 			// send-keys (#568). Mirrors the trim-validation tasksAddCmd
 			// applies for #517.
-			if strings.TrimSpace(taskUpdatePromptFlag) == "" {
+			if strings.TrimSpace(prompt) == "" {
 				return jsonError(errors.New("prompt must be non-empty"))
 			}
-			s.Prompt = taskUpdatePromptFlag
-			patch.Prompt = strPtr(taskUpdatePromptFlag)
+			s.Prompt = prompt
+			patch.Prompt = strPtr(prompt)
 		}
 
 		if taskUpdateCronFlag != "" && taskUpdateWatchCmdFlag != "" {
@@ -555,6 +562,15 @@ var tasksUpdateCmd = &cobra.Command{
 		if cmd.Flags().Changed("on-complete") {
 			patch.OnComplete = strPtr(taskUpdateOnCompleteFlag)
 		}
+		// --host "" clears the pick, so this gates on the flag being passed too.
+		if cmd.Flags().Changed("host") {
+			patch.Host = strPtr(strings.TrimSpace(taskUpdateHostFlag))
+			if *patch.Host != "" {
+				if err := requireHostPickOn(hostPickOnTask, *patch.Host); err != nil {
+					return jsonError(err)
+				}
+			}
+		}
 		// --repo authorizes the task against its CURRENT project. Keep the new
 		// binding separate so a caller can say `--repo old --project-path new`
 		// without either path changing meaning. Resolve user shorthand at the CLI
@@ -568,21 +584,32 @@ var tasksUpdateCmd = &cobra.Command{
 			// here, so the whitespace is intent rather than a slip. Resolving a
 			// trimmed spelling would make such a repository unreachable — or
 			// worse, silently rebind the task to a different repository that
-			// happens to answer to the trimmed name. `af projects register`
+			// happens to answer to the trimmed name. `af projects add`
 			// passes its path argument through untrimmed for the same reason;
 			// the TUI editor trims because a text field offers no quoting with
 			// which to express the intent.
 			if strings.TrimSpace(taskUpdateProjectPathFlag) == "" {
 				return jsonError(errors.New("project path must be non-empty"))
 			}
-			absPath, err := config.ResolveUserPath(taskUpdateProjectPathFlag)
-			if err != nil {
-				return jsonError(fmt.Errorf("failed to resolve --project-path %q: %w", taskUpdateProjectPathFlag, err))
+			// Against a remote daemon the new binding is a path on ITS filesystem,
+			// so it ships as typed and the daemon resolves it (#3730). Expanding ~
+			// here would expand the caller's home, and the git probe below would
+			// reject a repository that exists perfectly well on the daemon's host.
+			if apiclient.IsRemoteTarget() {
+				patch.ProjectPath = strPtr(taskUpdateProjectPathFlag)
+			} else {
+				absPath, err := config.ResolveUserPath(taskUpdateProjectPathFlag)
+				if err != nil {
+					return jsonError(fmt.Errorf("failed to resolve --project-path %q: %w", taskUpdateProjectPathFlag, err))
+				}
+				if _, err := config.RepoFromPath(absPath); err != nil {
+					if config.RepoProbeUnanswered(err) {
+						return jsonError(fmt.Errorf("%s — retry, or pass a different --project-path: %w", config.RepoProbeUnansweredClaim("--project-path", absPath), err))
+					}
+					return jsonError(fmt.Errorf("--project-path %q is not a valid git repository: %w", absPath, err))
+				}
+				patch.ProjectPath = strPtr(absPath)
 			}
-			if _, err := config.RepoFromPath(absPath); err != nil {
-				return jsonError(fmt.Errorf("--project-path %q is not a valid git repository: %w", absPath, err))
-			}
-			patch.ProjectPath = strPtr(absPath)
 		}
 
 		// Only patch Enabled when --enabled was passed: an absent flag must
@@ -605,7 +632,7 @@ var tasksUpdateCmd = &cobra.Command{
 			patch.Program = strPtr(taskUpdateProgramFlag)
 		}
 
-		updated, err := daemonUpdateTask(args[0], patch, expect)
+		updated, err := routedUpdateTask(resolved.ID, patch, expect, task.ActorCLI)
 		if err != nil {
 			if !apiclient.IsMutationCommitted(err) {
 				return jsonError(fmt.Errorf("failed to update task: %w", err))
@@ -613,8 +640,10 @@ var tasksUpdateCmd = &cobra.Command{
 			warnCommittedTaskMutation(err)
 			// net/rpc discards the response body whenever the server returns an
 			// error, even for this definite committed outcome. Read the durable
-			// record back so the update command preserves its normal output.
-			stored, readErr := task.GetTask(args[0])
+			// record back so the update command preserves its normal output — from
+			// the host the write landed on, which for a remote target is the daemon,
+			// not this machine's store.
+			stored, readErr := updateTaskRecord(resolved.ID)
 			if readErr != nil {
 				// The mutation outcome is known even though the task's current value
 				// is not: another client may have removed it after this commit, or the
@@ -625,7 +654,7 @@ var tasksUpdateCmd = &cobra.Command{
 					"warning: task update committed, but its durable value could not be read back: %v; the final task value is unknown\n",
 					readErr)
 				return jsonOut(map[string]any{
-					"id":                 args[0],
+					"id":                 resolved.ID,
 					"mutation_committed": true,
 					"value_read_back":    false,
 				})

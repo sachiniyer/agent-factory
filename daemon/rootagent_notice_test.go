@@ -33,7 +33,7 @@ func TestEnsureRootAgentsMarksARootThatCameBackWithoutItsHistory(t *testing.T) {
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
@@ -44,7 +44,7 @@ func TestEnsureRootAgentsMarksARootThatCameBackWithoutItsHistory(t *testing.T) {
 	// never recorded a conversation, so there is nothing to resume — the case the
 	// carry (#2616) cannot rescue, and therefore the one that most needs saying.
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	second := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, second)
@@ -87,13 +87,13 @@ func TestEnsureRootAgentsLeavesNoNoticeWhenTheRootResumed(t *testing.T) {
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
 	seedRootConversation(t, first)
 
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	second := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, second)
@@ -197,13 +197,13 @@ func TestASecondHealCarriesTheUnacknowledgedNotice(t *testing.T) {
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first)
 	require.Empty(t, (*seen)[0].PendingRecreateNotice, "a first-ever root inherits no notice")
 
 	first.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 	second := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, second)
 	require.Equal(t, session.RootRecreateContextFresh, second.RootRecreateContext(),
@@ -211,7 +211,7 @@ func TestASecondHealCarriesTheUnacknowledgedNotice(t *testing.T) {
 
 	// tmux dies again before anyone opened the pane.
 	second.SetStatusForTest(session.Lost)
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	require.Len(t, *seen, 3)
 	require.Equal(t, session.RootRecreateContextFresh, (*seen)[2].PendingRecreateNotice,

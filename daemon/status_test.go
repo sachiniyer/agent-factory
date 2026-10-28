@@ -105,6 +105,21 @@ func newStatusTestManager(t *testing.T) (*Manager, string, string) {
 	return manager, repo.ID, repoPath
 }
 
+// newStatusTestManagerCapturingLogs is newStatusTestManager with the Manager's
+// three log levels captured to sinks of its own (#3797), for tests whose
+// assertions are about what THIS Manager logged.
+func newStatusTestManagerCapturingLogs(t *testing.T) (*Manager, managerLogs, string, string) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, logs := newManagerCapturingLogs(t, config.DefaultConfig())
+	return manager, logs, repo.ID, repoPath
+}
+
 func persistedStatus(t *testing.T, repoID, title string) session.Status {
 	t.Helper()
 	raw, err := config.LoadRepoInstances(repoID)

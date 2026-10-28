@@ -48,7 +48,7 @@ func truncateOverlayLine(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if lipgloss.Width(s) <= width {
+	if layout.Cells(s) <= width {
 		return s
 	}
 	out := xansi.Truncate(s, width, "…")

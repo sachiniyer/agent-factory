@@ -6,7 +6,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -57,6 +56,17 @@ func (m *home) setTransientFailure(err error) uint64 {
 	return m.transientNoticeID
 }
 
+// setTransientHint paints an ephemeral acknowledgment that must not become a
+// retrievable notice. Same bar, same generation token, same delayed clear —
+// but it never lands in the retained slot `E` reads, so answering "the store
+// is empty" does not fill it (#5351 review: a second `E` after the hint faded
+// used to open "Last notice" on the hint's own text).
+func (m *home) setTransientHint(err error) uint64 {
+	m.transientNoticeID++
+	m.errBox.SetHint(err)
+	return m.transientNoticeID
+}
+
 func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -70,11 +80,16 @@ func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 // showErrorDetails opens the last notice in full. It reads the RETAINED notice,
 // not the one currently painted: the bar drops a notice after 3 seconds, and
 // binding `E` to what is still on screen made the key silently dead in exactly
-// the case it exists for — a message the bar had to clip (#2618).
+// the case it exists for — a message the bar had to clip (#2618). With nothing
+// retained it still answers the key — a transient hint on the same bar — so the
+// user can tell "nothing to show" apart from "the key did nothing" (#5351).
 func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 	full, failure := m.errBox.RetainedNotice()
 	if full == "" {
-		return m, nil
+		// A hint, not a notice: acknowledging an empty store must leave it
+		// empty, or a second `E` after the fade would reopen the hint itself.
+		return m, m.clearTransientMessageAfterDelay(
+			m.setTransientHint(errors.New("No recent error")))
 	}
 	// af hiding a pane and saying how to get it back is designed behavior. Filing
 	// it under "Last error" would report af working as intended as a fault, which
@@ -85,8 +100,8 @@ func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 	}
 	m.textOverlay = overlay.NewTextOverlay(title + "\n\n" + full)
 	m.textOverlayDismissAnyKey = false
-	m.textOverlayScrollable = true
 	m.textOverlayDismissPolicy = nil
+	m.textOverlayPendingSeenMask = 0
 	m.replayHelpDismissKey = false
 	m.layoutTextOverlay()
 	m.state = stateHelp
@@ -98,9 +113,12 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 }
 
 // confirmActionWithDetail is confirmAction for a dialog whose copy splits into
-// consequences (message) and elaboration (detail). The overlay then guarantees
-// the consequences render or refuses the confirm outright, rather than clipping
-// the tail and collecting a 'y' for something it never showed (#1973).
+// consequences (message) and elaboration (detail). The overlay then keeps every
+// line reachable by scrolling — and refuses the confirm only when the window
+// cannot show even one body row — rather than clipping the tail and collecting
+// a 'y' for something it never showed (#1973, #5171).
+// The callback may return a follow-up tea.Cmd as its result; handleStateConfirm
+// schedules that command on the event loop instead of executing it inline.
 func (m *home) confirmActionWithDetail(message, detail string, action tea.Cmd) tea.Cmd {
 	m.state = stateConfirm
 	m.confirmationOverlay = overlay.NewConfirmationOverlay(message)
@@ -156,6 +174,16 @@ func (m *home) View() string {
 		return ui.TerminalTooSmall(m.termWidth, m.termHeight)
 	}
 
+	if m.recovery != nil {
+		return ui.RecoveryScreen(layout.Rect{W: m.termWidth, H: m.termHeight}, m.recovery.condition, m.recovery.detail, m.recovery.action, true)
+	}
+
+	if m.snapshotUnavailable && m.state == stateDefault {
+		return ui.RecoveryScreen(layout.Rect{W: m.termWidth, H: m.termHeight},
+			"Cannot reach the daemon", "Previous sessions are retained · retrying automatically.",
+			"Check the daemon connection.", true)
+	}
+
 	// The left rail stacks the tree over the bottom-aligned automations
 	// section, separated by a horizontal rule (#1087); the workspace panes
 	// take the full height beside it (#1090), divided evenly with 1-col
@@ -168,12 +196,19 @@ func (m *home) View() string {
 	if m.lastLayout.ProjectsVisible {
 		railParts = append(railParts, m.renderProjectsRule(), m.projects.View())
 	}
-	rail := lipgloss.JoinVertical(lipgloss.Left, railParts...)
+	// layout's joins, not lipgloss's, for every seam of the frame (#3614). Each
+	// block is already exactly Rect-sized by the §2.6 contract, so there is
+	// nothing to align — but lipgloss re-measures anyway, and pads every line out
+	// to its block's widest by lipgloss.Width. That is precisely the measure
+	// ClampToRect withholds cells from when a row's true width cannot be known, so
+	// lipgloss puts them straight back and the row leaves the frame 2 cells past
+	// the rectangle it was just clamped into. Measured; see layout/join.go.
+	rail := layout.JoinVertical(railParts...)
 	cols := []string{rail}
 	if len(m.visiblePanes) == 0 {
 		switch {
-		// Session count FIRST, and the order is load-bearing. "no panes open" and
-		// "no project selected" answer different questions — why is this area
+		// Session count FIRST, and the order is load-bearing. "No panes open" and
+		// "No project selected" answer different questions — why is this area
 		// blank, versus what af is scoped to — and they are not alternatives: a
 		// user who closed their panes has panes to reopen whatever the project
 		// state is, so sending them off to pick a project would be a worse answer
@@ -187,6 +222,10 @@ func (m *home) View() string {
 		// re-prioritizing this message would paper over it in the wrong layer.
 		case m.store.NumInstances() > 0:
 			cols = append(cols, ui.EmptyWorkspace(m.lastLayout.Workspace))
+		case m.repoRoot == "" && m.projects.Degraded():
+			cols = append(cols, ui.RecoveryScreen(m.lastLayout.Workspace, "Cannot load projects", "The project registry is unavailable.", "Check the project registry.", true))
+		case m.repoRoot == "" && !m.projects.HasProjects():
+			cols = append(cols, ui.NoRegisteredProjectWorkspace(m.lastLayout.Workspace))
 		case m.repoRoot == "":
 			// The empty rail, which is all #2830 is about: no sessions, and no
 			// active project to create one in, so `n` cannot work from any focused
@@ -207,7 +246,7 @@ func (m *home) View() string {
 			cols = append(cols, w.View())
 		}
 	}
-	top := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
+	top := layout.JoinHorizontal(cols...)
 	// Stack the delivery-failure alarm banner (#1238) above everything when
 	// raised, so it is visible without navigating and the layout reserved its
 	// row in relayout.
@@ -216,8 +255,11 @@ func (m *home) View() string {
 		viewParts = append(viewParts, banner)
 	}
 	m.menu.SetStatusText(m.dragStatusText())
+	hint, hideHint := m.noticeDetailsHint()
+	m.errBox.SetDetailsHint(hint)
+	m.errBox.HideDetailsHint(hideHint)
 	viewParts = append(viewParts, top, m.statusBar.View())
-	mainView := lipgloss.JoinVertical(lipgloss.Left, viewParts...)
+	mainView := layout.JoinVertical(viewParts...)
 
 	if m.state == stateHelp {
 		if m.textOverlay == nil {
@@ -242,8 +284,12 @@ func (m *home) View() string {
 		if m.projectPickerOverlay == nil {
 			log.ErrorLog.Printf("project picker overlay is nil")
 		}
-		return placeOverlay(m.projectPickerOverlay.Render(), mainView)
-	} else if m.state == stateSelectProgram || m.state == stateSelectHandoffAgent || m.state == stateSelectBackend {
+		fg := m.projectPickerOverlay.Render()
+		m.projectPickerOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
+		return placeOverlay(fg, mainView)
+	} else if m.state == stateSelectProgram || m.state == stateSelectHandoffAgent ||
+		m.state == stateSelectBackend || m.state == stateSelectAccount ||
+		m.state == stateSelectHandoffResolve {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
@@ -258,10 +304,10 @@ func (m *home) View() string {
 		fg := m.selectionOverlay.Render()
 		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
 		return placeOverlay(fg, mainView)
-	} else if m.state == statePromptInput || m.state == stateJumpTab {
-		// Both states drive the same promptOverlay — the naming form's initial-prompt
-		// field and the jump-to-tab prompt (#3021). They differ in who owns the answer,
-		// not in how a single line of text is drawn.
+	} else if m.state == statePromptInput || m.state == stateJumpTab || m.state == stateRenameTab {
+		// These states drive the same promptOverlay — the naming form's initial-prompt
+		// field, the jump-to-tab prompt (#3021), and the rename-tab prompt. They differ
+		// in who owns the answer, not in how a single line of text is drawn.
 		if m.promptOverlay == nil {
 			log.ErrorLog.Printf("prompt overlay is nil")
 			return mainView

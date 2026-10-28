@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -54,14 +55,34 @@ import (
 // behavior, not a bug. Exceeding this means the holder is wedged, not busy.
 //
 // A var so tests can shorten it; production never reassigns.
-var opLockTimeout = 30 * time.Second
+var opLockTimeout = apiproto.OperationLockTimeout
+
+// operationClockOrigin lets Snapshot expose elapsed time from the daemon's
+// monotonic clock without putting a wall-clock timestamp on the wire. Clients
+// compare readings from this process only; a daemon restart resets the origin.
+var operationClockOrigin = time.Now()
+
+func operationClockMilliseconds() int64 {
+	return time.Since(operationClockOrigin).Milliseconds()
+}
 
 // opLockPollInterval is how often lockWithin re-attempts a contended op lock.
 var opLockPollInterval = 5 * time.Millisecond
 
+// afterOperationLockPollSleep is a test seam for delaying a waiter between its
+// bounded sleep and TryLock. Production leaves it as a no-op.
+var afterOperationLockPollSleep = func(*sync.Mutex) {}
+
 // lockWithin acquires mu, giving up after d and reporting whether it got the
 // lock. It preserves mutual exclusion exactly — a true result means the caller
 // holds the lock and must Unlock it, the same contract as mu.Lock().
+//
+// It also reports how long the acquisition actually WAITED, and zero is a
+// distinct answer rather than a rounded one: the first TryLock either succeeds —
+// uncontended, nobody was ahead of us — or the lock was genuinely held by a peer
+// and the wait is at least one poll interval. #3600's restore refusals are
+// decided after this wait, so they need to say whether there was one; a caller
+// that does not care ignores it.
 //
 // It polls TryLock because sync.Mutex has no timed acquire. The cost is a wakeup
 // every opLockPollInterval while contended, and the loss of the mutex's
@@ -70,11 +91,16 @@ var opLockPollInterval = 5 * time.Millisecond
 // acceptable here and nowhere near the hot path: the bounded acquirers are
 // user-initiated lifecycle operations, the poll cost lasts only as long as the
 // contention, and the alternative it replaces is waiting forever.
-func lockWithin(mu *sync.Mutex, d time.Duration) bool {
+//
+// A successful TryLock is checked against the deadline AFTER acquisition. A
+// waiter can be suspended between Sleep and TryLock; accepting that late win
+// would make the projected timeout advisory rather than an admission bound.
+func lockWithin(mu *sync.Mutex, d time.Duration) (bool, time.Duration) {
 	if mu.TryLock() {
-		return true
+		return true, 0
 	}
-	deadline := time.Now().Add(d)
+	start := time.Now()
+	deadline := start.Add(d)
 	for {
 		wait := opLockPollInterval
 		if remaining := time.Until(deadline); remaining < wait {
@@ -83,27 +109,39 @@ func lockWithin(mu *sync.Mutex, d time.Duration) bool {
 		if wait > 0 {
 			time.Sleep(wait)
 		}
+		afterOperationLockPollSleep(mu)
 		if mu.TryLock() {
-			return true
+			now := time.Now()
+			waited := now.Sub(start)
+			if !now.Before(deadline) {
+				mu.Unlock()
+				return false, waited
+			}
+			return true, waited
 		}
 		if !time.Now().Before(deadline) {
-			return false
+			return false, time.Since(start)
 		}
 	}
 }
 
 // lockSessionOperationWithin takes the per-session operation lock with the same
-// bound for archive and both manual restore paths. Each caller has registered in
-// killsInFlight but has not mutated the session yet, so timeout is a known no-op:
-// the requested action did not start, the deferred guard cleanup can run, and a
-// later kill or retry remains possible (#2641).
-func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*sync.Mutex, error) {
+// bound for archive and both manual restore paths. No caller has mutated the
+// session yet, so timeout is a known no-op: the requested action did not start
+// and a later kill or retry remains possible (#2641).
+//
+// All three callers take this lock BEFORE claiming anything, so their wait holds
+// no lifecycle state: the row is unclaimed and unfenced for its whole duration,
+// which is what keeps the Kill it advertises admissible. It returns how long it
+// waited so those callers can say so in a refusal decided at the END of the wait.
+func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*sync.Mutex, time.Duration, error) {
 	opLock := m.opLockFor(key)
-	if !lockWithin(opLock, opLockTimeout) {
-		log.WarningLog.Printf("%s of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", operation, title, opLockTimeout)
-		return nil, fmt.Errorf("%s of session %q timed out after %s waiting for another operation on it to finish; the requested %s did not start and made no changes — retry", operation, title, opLockTimeout, operation)
+	acquired, waited := lockWithin(opLock, opLockTimeout)
+	if !acquired {
+		m.warn().Printf("%s of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", operation, title, opLockTimeout)
+		return nil, waited, fmt.Errorf("%s of session %q timed out after %s waiting for another operation on it to finish; the requested %s did not start and made no changes — retry", operation, title, opLockTimeout, operation)
 	}
-	return opLock, nil
+	return opLock, waited, nil
 }
 
 // killWatchdogDelay is how long a kill may run before the watchdog reports the

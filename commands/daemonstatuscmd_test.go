@@ -242,6 +242,78 @@ func TestCollectDaemonStatusUnitScopeFailureStaysUnknown(t *testing.T) {
 	require.Empty(t, info.AutostartActive)
 }
 
+// TestCollectDaemonStatusReadFailureShapeKeepsUnit pins the read-failure shape
+// the real AutostartUnitServesHome produces when the unit file path is present
+// per stat but not readable as a file: a directory at the path (EISDIR), a
+// chmod 0000 file on a box where af is not root, or a broken mount that answers
+// stat but not read. In that shape os.Stat succeeds so h.AutostartUnit is true,
+// while os.ReadFile fails with a non-IsNotExist error, so AutostartUnitServesHome
+// returns (false, false, err) — installed=false on a present file.
+//
+// collectDaemonStatus's scope-unknown fallback must keep AutostartUnit=true on
+// the stat-based h.AutostartUnit, not downgrade it to false on the read-based
+// installed return. Without that, status prints "autostart: no unit for this
+// home" next to "supervision: unknown (cannot tell whether the installed unit
+// serves this home)" — a self-contradiction, and a JSON autostart_unit=false
+// that scripts/lifecycle.sh (lines 484, 653) gates upgrade assertions on.
+//
+// Contrast TestCollectDaemonStatusUnitScopeFailureStaysUnknown, which stubs the
+// parse-failure shape (installed=true) that AutostartUnitServesHome returns only
+// AFTER a successful read; this test stubs the pre-read shape that masks the bug.
+func TestCollectDaemonStatusReadFailureShapeKeepsUnit(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	previousHealth := daemonHealthFn
+	previousScope := autostartUnitServesHomeFn
+	previousSupervision := daemonStatusSupervisionFn
+	t.Cleanup(func() {
+		daemonHealthFn = previousHealth
+		autostartUnitServesHomeFn = previousScope
+		daemonStatusSupervisionFn = previousSupervision
+	})
+	// Stat-based existence is true: the file is present, just unreadable.
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{ServingPID: 42, AutostartUnit: true}
+	}
+	// The real read-failure shape, proven by the daemon-package reproduction: a
+	// present file that cannot be read returns (false, false, err) — installed
+	// is false BEFORE the parser ever runs, unlike the post-read parse-failure
+	// shape that returns installed=true.
+	autostartUnitServesHomeFn = func(string) (bool, bool, error) {
+		return false, false, errors.New("failed to read the autostart unit /h/agent-factory-daemon.service: read /h/agent-factory-daemon.service: is a directory")
+	}
+	daemonStatusSupervisionFn = func() daemon.SupervisionInfo {
+		t.Fatal("an unscoped unit must not be attributed through the service manager")
+		return daemon.SupervisionInfo{}
+	}
+
+	info := collectDaemonStatus()
+	require.True(t, info.AutostartUnit,
+		"the unit file is stat-present even though its home scope is unreadable; AutostartUnit must stay true")
+	require.Equal(t, "unknown", info.Supervised,
+		"an unreadable unit cannot be proven to own the responder, so supervision is unknown")
+	require.Contains(t, info.SupervisionDetail, "is a directory",
+		"the read-failure cause must reach the operator as the supervision detail")
+	require.Empty(t, info.AutostartEnabled, "no service-manager state is queried for an unscoped unit")
+	require.Empty(t, info.AutostartActive)
+
+	// The human report must not contradict itself: it must not claim "no unit
+	// for this home" while the supervision line says it cannot tell whether the
+	// INSTALLED unit serves this home.
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	printDaemonStatusHuman(cmd, info)
+	got := out.String()
+	require.Contains(t, got, "autostart:      installed",
+		"a stat-present unit must be reported as installed, not absent")
+	require.NotContains(t, got, "no unit for this home",
+		"the unit file exists by stat; status must not claim it is absent")
+	require.Contains(t, got, "supervision:    unknown")
+	require.Contains(t, got, "is a directory")
+}
+
 func TestPrintDaemonStatusHumanNamesPIDMismatchAndStaleConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
@@ -293,15 +365,14 @@ func TestPrintDaemonStatusHumanNotRunning(t *testing.T) {
 	}
 }
 
-// TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart is the
-// #2168 Phase 0 status surface, and it flips what #2090 asserted here.
+// TestCollectDaemonStatusReportsRefusalWithoutClaimingItCannotStart is the
+// #5137 status surface, and it flips what #2168 Phase 0 asserted here.
 //
-// #2090 printed "not running and cannot start" on this config and suppressed the
-// on-demand line. Both are now false: the daemon starts and serves. Keeping them
-// would be a status command lying about a live capability — the same fabricated
-// negative in the other direction. What survives is the exposure, reported as a
-// warning alongside the ordinary on-demand wording.
-func TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart(t *testing.T) {
+// The disk posture is a non-loopback listen_addr with the token off and no
+// opt-in: the daemon STILL starts (the refusal is listener-scoped, so the
+// on-demand line stays true), but ExposureWarning now carries the refusal
+// reason — ListenerBindRefusal verbatim — not a warn-and-serve notice.
+func TestCollectDaemonStatusReportsRefusalWithoutClaimingItCannotStart(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
@@ -309,9 +380,16 @@ func TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart(t *testi
 
 	info := collectDaemonStatus()
 	require.False(t, info.Running)
-	require.NotEmpty(t, info.ExposureWarning, "an exposed listener must be reported, not implied")
-	require.Contains(t, info.ExposureWarning, "network.require_token")
+	require.NotEmpty(t, info.ExposureWarning, "a refused listener must be reported, not implied")
+	require.Contains(t, info.ExposureWarning, "refused")
 	require.Contains(t, info.ExposureWarning, "0.0.0.0:8443")
+	for _, fix := range []string{
+		"network.require_token true", "af token show",
+		"network.listen_addr 127.0.0.1:8443", "network.allow_unauthenticated_network true",
+	} {
+		require.Contains(t, info.ExposureWarning, fix,
+			"the status surface must carry the same three fixes as every other refusal surface")
+	}
 
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
@@ -319,11 +397,61 @@ func TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart(t *testi
 	printDaemonStatusHuman(cmd, info)
 	got := out.String()
 	require.Contains(t, got, "starts on demand",
-		"the on-demand promise is true again — this config starts fine")
+		"the on-demand promise is still true — the refusal is scoped to the TCP listener")
 	require.NotContains(t, got, "cannot start",
-		"there is no config the daemon refuses to start under any more")
-	require.Contains(t, got, "warning:", "the exposure still has to reach the operator")
+		"there is still no config the daemon refuses to start under")
+	require.Contains(t, got, "warning:", "the refusal still has to reach the operator")
 	require.Contains(t, got, "DeliverPrompt")
+}
+
+// TestCollectDaemonStatusOptedInExposureWarns covers the opted-in half: with
+// allow_unauthenticated_network = true the listener DOES bind and serve
+// unauthenticated, so ExposureWarning carries the serving-exposure notice —
+// "af serves" — and not the refusal.
+func TestCollectDaemonStatusOptedInExposureWarns(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
+		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = false\nallow_unauthenticated_network = true\n"), 0600))
+
+	info := collectDaemonStatus()
+	require.NotEmpty(t, info.ExposureWarning, "a serving unauthenticated exposure is still reported")
+	require.Contains(t, info.ExposureWarning, "0.0.0.0:8443")
+	require.Contains(t, info.ExposureWarning, "af serves")
+	require.NotContains(t, info.ExposureWarning, "refused",
+		"an opted-in listener is serving, not refused — the notice must not conflate them")
+}
+
+// TestPrintDaemonStatusHumanRefusedListener pins the lifecycle rendering: a
+// configured-but-refused TCP listener prints "(refused)" with the shared reason,
+// not "(not bound)" — the refused state is a decision, and a bare not-bound
+// would send the operator debugging a port that was never attempted.
+func TestPrintDaemonStatusHumanRefusedListener(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	printDaemonStatusHuman(cmd, daemonStatusInfo{
+		Running: true,
+		Listeners: &daemon.DaemonListenerStatus{
+			HTTPUnixBound:     true,
+			TCPConfigured:     true,
+			TCPListenAddr:     "0.0.0.0:8443",
+			TCPBound:          false,
+			TCPRefusalReason:  "network.listen_addr \"0.0.0.0:8443\" is reachable from the network … refused",
+			PreviewConfigured: false,
+		},
+		ControlSocket:     "/h/daemon.sock",
+		ControlSocketFile: true,
+	})
+
+	got := out.String()
+	require.Contains(t, got, "tcp listener:   0.0.0.0:8443 (refused)",
+		"a refused listener is a decision — the line must say so")
+	require.Contains(t, got, "refused:      network.listen_addr",
+		"the refusal reason the lifecycle recorded must reach the operator")
+	require.NotContains(t, got, "(not bound)",
+		"a refused listener is not 'not bound' — that phrase belongs to a bind that was attempted")
 }
 
 // TestCollectDaemonStatusSafeConfigIsUnwarned is the other direction: a user who
@@ -355,4 +483,29 @@ func TestCollectDaemonStatusAuthenticatedNetworkBindIsUnwarned(t *testing.T) {
 		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = true\n"), 0600))
 
 	require.Empty(t, collectDaemonStatus().ExposureWarning)
+}
+
+// TestPrintDaemonStatusHumanMarksUnverifiablePID pins the third pid-file
+// verdict on the status surface: a pid naming a live af daemon whose home
+// could not be bound is inconclusive — not verified (a kill hint could name
+// another home's daemon), and not "unverified" stale (the file may name this
+// home's own live daemon on platforms that cannot read a peer's frame).
+func TestPrintDaemonStatusHumanMarksUnverifiablePID(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	printDaemonStatusHuman(cmd, daemonStatusInfo{
+		Running:           false,
+		ControlSocket:     "/h/daemon.sock",
+		ControlSocketFile: false,
+		PID:               4242,
+		PIDUnverifiable:   true,
+	})
+
+	got := out.String()
+	require.Contains(t, got, "pid:            4242 (live af daemon, home unproven)")
+	require.NotContains(t, got, "(unverified)",
+		"a live af daemon with an unproven home is inconclusive, not stale-unverified")
+	require.NotContains(t, got, "(verified)")
 }

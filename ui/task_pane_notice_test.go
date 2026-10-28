@@ -42,7 +42,7 @@ func TestTaskPaneWatchRunNowNoticeVisibleInListMode(t *testing.T) {
 	assert.False(t, tp.HasPendingTrigger(), "a watch task must not queue a doomed run")
 
 	out := tp.String()
-	assert.Contains(t, out, "not on manual trigger",
+	assert.Contains(t, out, "not manually",
 		"r on a watch task in list mode must explain why manual run is unavailable")
 }
 
@@ -54,8 +54,8 @@ func TestTaskPaneWatchRunNowNoticeUnclippedAt80Cols(t *testing.T) {
 	pressRune(tp, "r")
 
 	out := tp.String()
-	assert.Contains(t, out, "watch tasks run on their watch command's output")
-	assert.Contains(t, out, "not on manual trigger")
+	assert.Contains(t, out, "Watch tasks run on output")
+	assert.Contains(t, out, "not manually")
 	assert.NotContains(t, out, "…", "the notice must fit at 80 cols, not be ellipsized")
 	for _, line := range strings.Split(out, "\n") {
 		assert.LessOrEqual(t, lipgloss.Width(line), 80, "no rendered line may exceed the pane width")
@@ -69,7 +69,7 @@ func TestTaskPaneWatchRunNowNoticeWrapsWhenNarrow(t *testing.T) {
 	pressRune(tp, "r")
 
 	out := tp.String()
-	assert.Contains(t, out, "not on manual trigger",
+	assert.Contains(t, out, "not manually",
 		"a narrow pane must wrap the notice, not truncate its tail")
 	for _, line := range strings.Split(out, "\n") {
 		assert.LessOrEqual(t, lipgloss.Width(line), 46, "no rendered line may exceed the pane width")
@@ -82,10 +82,10 @@ func TestTaskPaneWatchRunNowNoticeWrapsWhenNarrow(t *testing.T) {
 func TestTaskPaneWatchRunNowNoticeIsTransient(t *testing.T) {
 	tp := watchTaskPane(t, 80, 20)
 	pressRune(tp, "r")
-	assert.Contains(t, tp.String(), "not on manual trigger")
+	assert.Contains(t, tp.String(), "not manually")
 
 	pressRune(tp, "j")
-	assert.NotContains(t, tp.String(), "not on manual trigger",
+	assert.NotContains(t, tp.String(), "not manually",
 		"the notice must clear on the next keypress")
 }
 
@@ -109,7 +109,7 @@ func TestTaskPaneWatchRunNowNoticeSurvivesAClampedList(t *testing.T) {
 
 	pressRune(tp, "r")
 	out := tp.String()
-	assert.Contains(t, out, "not on manual trigger",
+	assert.Contains(t, out, "not manually",
 		"the notice must stay on screen when the list is clamped to the pane height")
 	assert.Len(t, strings.Split(out, "\n"), 10, "the pane must still fit its height")
 }
@@ -135,5 +135,5 @@ func TestTaskPaneRunNowStillTriggersNonWatchTask(t *testing.T) {
 	if assert.NotNil(t, tsk) {
 		assert.Equal(t, "cronny", tsk.ID)
 	}
-	assert.NotContains(t, tp.String(), "not on manual trigger")
+	assert.NotContains(t, tp.String(), "not manually")
 }

@@ -21,11 +21,11 @@ type killAnotherSessionBackend struct {
 	onKill func() error
 }
 
-func (b *killAnotherSessionBackend) Kill(instance *session.Instance) error {
+func (b *killAnotherSessionBackend) Kill(instance *session.Instance, trustLiveGeneration bool) error {
 	if err := b.onKill(); err != nil {
 		return err
 	}
-	return b.FakeBackend.Kill(instance)
+	return b.FakeBackend.Kill(instance, trustLiveGeneration)
 }
 
 // liveProjectRoots mirrors the "active projects" derivation the TUI and web use
@@ -61,7 +61,7 @@ func TestDeleteProject_ArchivesAllSessionsRestorableRepoUntouched(t *testing.T) 
 	// registerArchivable rewrites the per-repo file each call, so persist ALL
 	// in-memory instances together — otherwise the second seed clobbers the first
 	// on disk and the reconcile inside archive drops the in-memory-only session.
-	require.NoError(t, manager.SaveInstances())
+	require.NoError(t, manager.storage.SaveInstances(manager.InstancesSnapshot()))
 
 	// Precondition: the repo is an active project with 2 live sessions.
 	require.True(t, liveProjectRoots(manager.Snapshot(repoID))[repoPath])
@@ -103,7 +103,7 @@ func TestDeleteProject_ArchivesAllSessionsRestorableRepoUntouched(t *testing.T) 
 func TestDeleteProjectTreatsHookFailureAsCommittedArchiveWarning(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
-	require.NoError(t, manager.SaveInstances())
+	require.NoError(t, manager.storage.SaveInstances(manager.InstancesSnapshot()))
 	writeOnArchiveCommand(t, "printf 'project prune failed'; exit 17")
 
 	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
@@ -122,7 +122,7 @@ func TestControlDeleteProjectPartialFailurePreservesCommittedHookWarning(t *test
 	manager, repoID, repoPath := newStatusTestManager(t)
 	_, _ = registerArchivable(t, manager, repoID, repoPath, "alpha")
 	_, _ = registerArchivable(t, manager, repoID, repoPath, "beta")
-	require.NoError(t, manager.SaveInstances())
+	require.NoError(t, manager.storage.SaveInstances(manager.InstancesSnapshot()))
 	writeOnArchiveCommand(t, "printf 'project prune failed'; exit 17")
 
 	orig := archivePersist
@@ -405,7 +405,7 @@ func TestDeleteProject_RootAgentsWriteFailureIsFatal(t *testing.T) {
 	inst, src := registerArchivable(t, manager, repoID, repoPath, "worker")
 
 	orig := deregisterRootAgents
-	deregisterRootAgents = func(string) ([]string, error) { return nil, fmt.Errorf("forced config write failure") }
+	deregisterRootAgents = func(...string) ([]string, error) { return nil, fmt.Errorf("forced config write failure") }
 	t.Cleanup(func() { deregisterRootAgents = orig })
 
 	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
@@ -458,7 +458,7 @@ func TestDeleteProject_ConcurrentlyArchivedTargetIsSuccess(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerArchivable(t, manager, repoID, repoPath, "alpha")
 	beta, betaSrc := registerArchivable(t, manager, repoID, repoPath, "beta")
-	require.NoError(t, manager.SaveInstances())
+	require.NoError(t, manager.storage.SaveInstances(manager.InstancesSnapshot()))
 
 	// Stand in for the race deterministically. Targets are archived in sorted
 	// order, so flipping "beta" to Archived during "alpha"'s archive commit puts it
@@ -503,7 +503,7 @@ func TestDeleteProject_DoesNotArchiveSameTitleReplacement(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerArchivable(t, manager, repoID, repoPath, "alpha")
 	beta, _ := registerArchivable(t, manager, repoID, repoPath, "beta")
-	require.NoError(t, manager.SaveInstances())
+	require.NoError(t, manager.storage.SaveInstances(manager.InstancesSnapshot()))
 
 	originalBetaID := beta.ID
 	var replacement *session.Instance
@@ -564,7 +564,7 @@ func TestDeleteProject_GenuineArchiveFailureStillReportsPartialFailure(t *testin
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerArchivable(t, manager, repoID, repoPath, "alpha")
 	beta, betaSrc := registerArchivable(t, manager, repoID, repoPath, "beta")
-	require.NoError(t, manager.SaveInstances())
+	require.NoError(t, manager.storage.SaveInstances(manager.InstancesSnapshot()))
 
 	// beta is genuinely busy: another destructive op holds it, so its archive fails
 	// for real and it stays LIVE.
@@ -626,7 +626,7 @@ func TestDeleteProject_ConcurrentlyKilledExternalTargetIsSuccess(t *testing.T) {
 				},
 			}
 			alpha := registerExternal("alpha", alphaBackend)
-			require.NoError(t, manager.SaveInstances())
+			require.NoError(t, manager.storage.SaveInstances(manager.InstancesSnapshot()))
 
 			result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
 			require.NoError(t, concurrentKillErr, "the competing kill must complete before DeleteProject reaches beta")

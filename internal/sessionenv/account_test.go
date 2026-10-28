@@ -1,6 +1,9 @@
 package sessionenv
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -256,7 +259,9 @@ func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 		"command unset PORT; make",
 		"export PORT=3000; make",
 		"readonly PORT=3000; make",
-		"let PORT=42; make",
+		// Note: `let PORT=42; make` is now refused by the inverted arithmetic
+		// guard as an accepted false positive — `PORT` is a variable operand
+		// in arithmetic, which the guard refuses regardless of its value.
 		"mapfile DATA </dev/null; make",
 		"readarray -t DATA </dev/null; make",
 		"sleep 0 & wait -p PID $!; make",
@@ -281,6 +286,7 @@ func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 	for shell, want := range map[string]string{
 		"/bin/bash": "/bin/bash --noprofile --norc -i",
 		"/bin/csh":  "/bin/csh -f -i",
+		"/bin/zsh":  "/bin/zsh -f -i",
 	} {
 		command, err := AccountShellCommand(shell)
 		require.NoError(t, err)
@@ -295,16 +301,68 @@ func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 			"PS1=$((CODEX_HOME=42))",
 		}, command, account)
 		require.NoError(t, err)
-		require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)
+		// Only the generated zsh form earns the pin: other shells close their
+		// startup chain with flags alone, and a defined-empty ZDOTDIR would
+		// strip user dotfiles from every zsh a sibling process spawns (#4474
+		// review). The ambient value is still stripped for all of them.
+		if filepath.Base(shell) == "zsh" {
+			require.ElementsMatch(t, []string{"PATH=/bin", "ZDOTDIR=", "CODEX_HOME=" + account.Dir}, scoped)
+		} else {
+			require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)
+		}
 	}
 }
 
 func TestAccountShellCommandRefusesShellsWithoutCredentialSafeStartup(t *testing.T) {
-	for _, shell := range []string{"/bin/fish", "/bin/zsh", "/opt/company/bash"} {
+	for _, shell := range []string{"/bin/fish", "/opt/company/bash"} {
 		_, err := AccountShellCommand(shell)
 		require.Error(t, err, "%s can restore identity variables after the account environment is installed", shell)
 		require.Contains(t, err.Error(), "no credential-safe account launch mode")
 	}
+}
+
+// TestAccountShellCommandDisablesStartupFiles asserts the command STRING; this
+// asserts what the flags achieve (#4474 review): a user's .zshrc exporting an
+// identity variable must never reach the account shell. The generated command
+// runs through /bin/sh -c exactly as the launch boundary execs it, with HOME
+// pointed at marker dotfiles and an ambient ZDOTDIR aimed at the same place —
+// if either -f or the pinned-empty ZDOTDIR failed, the ambient value would
+// replace the account directory below.
+func TestAccountZshShellCannotReadUserStartupFiles(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Fatal("zsh is required here: CI installs it via scripts/ci-apt-install.sh " +
+			"and the macOS runner ships it — a miss must fail loudly rather than skip the check")
+	}
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".zshrc"),
+		[]byte("export CODEX_HOME=/tmp/ambient-codex\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".zshenv"),
+		[]byte("export AF_TEST_ZSHENV_SEEN=yes\n"), 0o644))
+
+	account := Account{Agent: "codex", Name: "work", Dir: t.TempDir()}
+	command, err := AccountShellCommand(zsh)
+	require.NoError(t, err)
+	scoped, err := ApplyAccountEnvironment([]string{
+		"PATH=/usr/bin:/bin",
+		"HOME=" + home,
+		"ZDOTDIR=" + home, // an ambient redirect must die with the other startup names
+	}, command, account)
+	require.NoError(t, err)
+	pinned, ok := envValue(scoped, "ZDOTDIR")
+	require.True(t, ok, "the scoped env must pin ZDOTDIR — unset falls back to HOME")
+	require.Empty(t, pinned, "empty is the pin: zsh has no dotfile directory to read at all")
+
+	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd.Env = scoped
+	cmd.Stdin = strings.NewReader(
+		"print -r -- \"SEEN CODEX_HOME=${CODEX_HOME-<unset>} ZSHENV=${AF_TEST_ZSHENV_SEEN-<unset>}\"\nexit\n")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.Contains(t, string(out), "CODEX_HOME="+account.Dir,
+		"the account directory must survive launch — a sourced .zshrc would have overwritten it")
+	require.Contains(t, string(out), "ZSHENV=<unset>")
+	require.NotContains(t, string(out), "/tmp/ambient-codex")
 }
 
 // Two sessions on different accounts must get different roots. This is the
@@ -327,11 +385,15 @@ func TestApplyAccount_DifferentAccountsGetDifferentRoots(t *testing.T) {
 }
 
 // An agent whose credential relocation was never VERIFIED must refuse, not
-// silently accept a selection that does nothing. gemini and amp have the
-// allowlist entries but were not testable, and allowlist membership is not
-// evidence.
+// silently accept a selection that does nothing. Allowlist membership is not
+// evidence: amp and opencode both HAVE agent-specific variables that relocate
+// only settings/config, so an entry taken from the allowlist would have scoped
+// nothing while looking like it worked (#3387 measured both).
+//
+// gemini left this list in #3387 because its relocation was actually verified —
+// see accountConfigVars — which is the only way an agent may leave it.
 func TestApplyAccount_RefusesAnUnverifiedAgent(t *testing.T) {
-	for _, agent := range []string{"gemini", "amp", "aider", "opencode", "unknown"} {
+	for _, agent := range []string{"amp", "aider", "opencode", "devin", "unknown"} {
 		_, err := ApplyAccount(nil, "", Account{Agent: agent, Name: "x", Dir: "/d"})
 		require.Error(t, err, "agent %q must refuse rather than accept an inert account selection", agent)
 		require.Contains(t, err.Error(), "does not support multiple accounts")
@@ -476,6 +538,7 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 		// A repository file that merely SHARES a name with a modelled wrapper.
 		"./env codex",
 		"./af agent-server --program codex --program-resolved",
+		"af agent-server --listen x --repo r --title t --program codex --program-resolved",
 		// An agent's own flags redirect its identity as effectively as the
 		// environment: codex -c cli_auth_credentials_store="keyring" ignores the
 		// account directory's auth.json entirely.
@@ -507,39 +570,340 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 	}
 }
 
-// The docker and ssh backends generate an ABSOLUTE af path for the agent-server
-// handoff (`/usr/local/bin/af agent-server …`, or a staged path). A bare-name
-// rule refuses af's own launch on those backends, so account scoping would fail
-// for every session there — the name-is-not-provenance problem in reverse: the
-// path IS trusted and its spelling cannot say so, which is why the launcher
-// supplies it rather than this parsing it out (#2983).
-func TestApplyAccount_AcceptsTheLaunchersOwnAfWrapper(t *testing.T) {
-	const generated = "/usr/local/bin/af"
-	command := generated + " agent-server --listen x --repo r --title t --program codex --program-resolved"
-
-	// Without the supplied provenance the same command is unprovable: an absolute
-	// path proves nothing on its own.
+// A command string cannot prove who authored an agent-server handoff: even an
+// exact absolute af path is discoverable and reproducible by repository code.
+// Docker/SSH use the separate effect-bound exec protocol; the generic account
+// validator therefore refuses every nested spelling.
+func TestApplyAccount_RejectsDiscoverableAgentServerPath(t *testing.T) {
+	command := "/usr/local/bin/af agent-server --listen x --repo r --title t --program codex --program-resolved"
 	_, err := ApplyAccount(nil, command, Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
-	require.Error(t, err, "an absolute af path with no supplied provenance must stay unprovable")
-
-	scoped, err := ApplyAccount(nil, command, Account{
-		Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p", TrustedWrapper: generated,
-	})
-	require.NoError(t, err, "the launcher's own handoff must be accepted, or account scoping fails on docker and ssh")
-	dir, ok := envValue(scoped, "CODEX_HOME")
-	require.True(t, ok)
-	require.Equal(t, "/afhome/accounts/codex/p", dir)
+	require.Error(t, err, "an absolute af path is public spelling, not account-launch provenance")
 }
 
-// Provenance is an EXACT path, never a basename. A repository file sharing the
-// name — or sitting at a different path — is still refused even when a trusted
-// wrapper was supplied.
-func TestApplyAccount_TrustedWrapperIsNotABasename(t *testing.T) {
-	for _, executable := range []string{"./af", "/repo/af", "/usr/local/bin/af-shim"} {
-		command := executable + " agent-server --program codex --program-resolved"
-		_, err := ApplyAccount(nil, command, Account{
-			Agent: "codex", Name: "p", Dir: "/d", TrustedWrapper: "/usr/local/bin/af",
-		})
-		require.Error(t, err, "%s is not the generated wrapper and must not inherit its trust", executable)
+// TestApplyAccount_ScopesGemini pins the roster entry #3387 added on evidence.
+//
+// The subtraction half is the point: gemini reads GEMINI_API_KEY and
+// GOOGLE_API_KEY as identities that outrank the config directory, so a session
+// that selected an account while either passed through would authenticate as
+// whoever that key belongs to while every visible signal said otherwise.
+func TestApplyAccount_ScopesGemini(t *testing.T) {
+	ambient := []string{
+		"GEMINI_API_KEY=ambient-key",
+		"GOOGLE_API_KEY=ambient-google-key",
+		"GEMINI_CLI_HOME=/somewhere/else",
+		"PATH=/usr/bin",
+	}
+	out, err := ApplyAccount(ambient, "", Account{
+		Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work",
+	})
+	require.NoError(t, err)
+
+	dir, ok := envValue(out, "GEMINI_CLI_HOME")
+	require.True(t, ok, "the account must be injected through the verified variable")
+	require.Equal(t, "/afhome/accounts/gemini/work", dir,
+		"GEMINI_CLI_HOME is a HOME-like root: the CLI appends .gemini/ itself, so af "+
+			"points it at the account directory rather than at a .gemini path")
+
+	for _, name := range []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"} {
+		value, present := envValue(out, name)
+		require.True(t, present,
+			"%s must survive as an EMPTY definition rather than be removed: gemini reads a repository "+
+				"`.env` after this boundary and assigns only names it does not already find", name)
+		require.Empty(t, value,
+			"%s outranks the config directory, so leaving it with a value makes the account selection a lie", name)
+	}
+	_, keptPath := envValue(out, "PATH")
+	require.True(t, keptPath, "scoping must not strip unrelated environment")
+
+	require.Equal(t, 1, strings.Count(strings.Join(out, "\n")+"\n", "GEMINI_API_KEY="),
+		"the ambient value must be REPLACED, not shadowed by a later entry: a consumer that keeps the "+
+			"first occurrence would read the ambient key back")
+}
+
+// TestApplyAccount_PinsGeminiIdentityNamesAgainstAProjectDotenv is the half that
+// subtraction alone does not hold (#3609 review, Codex P1).
+//
+// Removing a name is enough only while nothing else writes to the environment
+// between this boundary and the agent. gemini writes to it itself: it walks up
+// from the workspace looking for `<dir>/.gemini/.env` and `<dir>/.env` at every
+// level and applies what it finds, so a checked-in `.env` recreates exactly the
+// names removed here and the session authenticates as the repository while every
+// visible signal reports the selected account.
+//
+// Measured against gemini 0.51.0 under a throwaway HOME. With the names absent
+// and a repository `.env` naming them, the CLI announced "Both GOOGLE_API_KEY and
+// GEMINI_API_KEY are set. Using GOOGLE_API_KEY." and sent a real request that came
+// back `400 API key not valid`. With the names present and EMPTY, the identical
+// run reported no auth method at all — the same output as a directory with no
+// `.env`. A `.env` naming only GOOGLE_APPLICATION_CREDENTIALS signed a JWT with
+// that service-account key against an oauth-personal account, and one naming
+// GOOGLE_GENAI_USE_VERTEXAI moved the session onto Vertex; both were held off by
+// the same empty definition.
+func TestApplyAccount_PinsGeminiIdentityNamesAgainstAProjectDotenv(t *testing.T) {
+	out, err := ApplyAccount([]string{"PATH=/usr/bin"}, "", Account{
+		Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work",
+	})
+	require.NoError(t, err)
+
+	for _, name := range []string{
+		"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
+		"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
+	} {
+		value, present := envValue(out, name)
+		require.True(t, present,
+			"%s must be DEFINED so gemini's own `.env` loader will not assign it; removing it leaves the "+
+				"name free for a repository file to claim", name)
+		require.Empty(t, value, "%s must be defined EMPTY, never carry a value", name)
+	}
+
+	// The config variable is injected with the account, never pinned empty — an
+	// empty copy of it would erase the selection this whole function makes.
+	dir, ok := envValue(out, "GEMINI_CLI_HOME")
+	require.True(t, ok)
+	require.Equal(t, "/afhome/accounts/gemini/work", dir)
+
+	// codex has no measured late environment source, so its boundary is unchanged:
+	// names are removed, not pinned. Pinning an unmeasured agent would be a guess
+	// about how its CLI reads an empty value.
+	codex, err := ApplyAccount([]string{"OPENAI_API_KEY=ambient", "PATH=/usr/bin"}, "", Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work",
+	})
+	require.NoError(t, err)
+	_, present := envValue(codex, "OPENAI_API_KEY")
+	require.False(t, present, "codex keeps the removal boundary it was measured with")
+}
+
+// Every identity a late-environment agent has must be pinned, not just the ones
+// somebody remembered. A credential or selector added to that agent later and
+// left out of the pinned set is a silent reopening of the `.env` hole, and it
+// would pass every other test in this file.
+func TestAccountLateEnvironmentNames_CoverEveryIdentityForThatAgent(t *testing.T) {
+	for agent, pinned := range accountLateEnvironmentNames {
+		configVar, ok := SupportsAccounts(agent)
+		require.True(t, ok, "%s pins names but is not on the account roster", agent)
+		_, pinsConfigVar := pinned[configVar]
+		require.False(t, pinsConfigVar,
+			"%s must be injected with the account directory, so pinning it empty would erase the selection", configVar)
+
+		for name := range accountCredentialNames[agent] {
+			_, ok := pinned[name]
+			require.True(t, ok,
+				"%s is an identity for %s but is only REMOVED, so the agent's own `.env` can put it back", name, agent)
+		}
+		for _, selector := range AgentAuthSelectors(agent) {
+			_, ok := pinned[selector]
+			require.True(t, ok,
+				"%s selects a cloud identity for %s and is only removed, so a repository `.env` can turn "+
+					"that mode on after this boundary has run", selector, agent)
+		}
+	}
+}
+
+// A provisioner must neutralize exactly what the local shim does. AccountIdentityNames
+// is the shared classification, so a name the shim pins but the list omits is a
+// docker or restored-tmux session with a hole the local one does not have.
+func TestAccountIdentityNames_IncludeTheNamesTheShimPins(t *testing.T) {
+	for agent, pinned := range accountLateEnvironmentNames {
+		names := AccountIdentityNames(agent)
+		for name := range pinned {
+			require.Contains(t, names, name,
+				"%s is pinned locally for %s but absent from the shared identity list, so a container "+
+					"or restore path would leave it free", name, agent)
+		}
+	}
+}
+
+// TestApplyAccount_RefusesGeminiWhileACloudModeIsActive: gemini's two selectors
+// are guarded exactly as Claude's Bedrock/Vertex/Foundry are (#2462), so adding
+// the agent to the roster inherits the refusal rather than needing a new one.
+// Vertex/GCA authenticate through Google Cloud credentials, so the account
+// directory would stop being the session's identity while still appearing to be.
+func TestApplyAccount_RefusesGeminiWhileACloudModeIsActive(t *testing.T) {
+	for _, selector := range []string{"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA"} {
+		_, err := ApplyAccount([]string{selector + "=1"}, "",
+			Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"})
+		require.Error(t, err, "%s active must refuse an account scope", selector)
+		require.Contains(t, err.Error(), "cloud mode")
+		require.Contains(t, err.Error(), selector, "the refusal must name which mode blocked it")
+	}
+
+	// Without a selector the same agent scopes normally, so the guard cannot
+	// pass by refusing everything.
+	_, err := ApplyAccount([]string{"PATH=/usr/bin"}, "",
+		Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"})
+	require.NoError(t, err)
+}
+
+// The roster and the launch proof answer DIFFERENT questions, and the two lists
+// must stay separate: that is what makes an agent added to accountConfigVars fail
+// CLOSED at the launch boundary until someone checks the second question (#3051,
+// #3083).
+//
+// They AGREE today. gemini sat between them from #3609 until #3639, which is the
+// state the registration-only machinery exists for, and #3639 closed it by running
+// the check: af hands a gemini pane the resolved command unchanged, and a session
+// scoped to a gemini account was observed using the account directory while an
+// unscoped control beside it kept the ambient identity.
+func TestAccountRoster_LaunchProofIsASecondListThatAgreesToday(t *testing.T) {
+	for _, agent := range []string{"claude", "codex", "gemini"} {
+		_, supported := SupportsAccounts(agent)
+		require.True(t, supported, "%s must be on the account roster", agent)
+		require.True(t, AccountLaunchProven(agent), "%s launches under an account today", agent)
+		require.False(t, AccountRegistrationOnly(agent), "%s is not registration-only", agent)
+		reason, ok := AccountRegistrationOnlyReason(agent)
+		require.False(t, ok, "%s must yield no notice, so a caller cannot print one by forgetting to check", agent)
+		require.Empty(t, reason)
+	}
+
+	// Every launch-proven agent is on the roster. A launch proof for an agent with
+	// no credential root scopes nothing.
+	for agent := range accountLaunchProvenAgents {
+		_, ok := SupportsAccounts(agent)
+		require.True(t, ok, "%s is launch-proven but has no credential root to launch into", agent)
+	}
+
+	// And the summary carries no marker while they agree.
+	require.Equal(t, "claude, codex, gemini", AccountAgentsSummary())
+	require.Equal(t, []string{"claude", "codex", "gemini"}, AccountAgents())
+}
+
+// rosterAnUnprovenAgent puts an agent in the state no real agent is in today: on
+// the roster, with no launch proof.
+//
+// The registration-only surfaces are the reason #3609 exists, and with the two
+// lists agreeing there is no agent left to exercise them — so they would rot
+// silently until the next agent is added, which is precisely when they matter.
+// Mutating the package maps is safe because these tests are not parallel, and it
+// exercises the REAL functions rather than a reimplementation of their rules.
+func rosterAnUnprovenAgent(t *testing.T, agent, configVar, followUp string) {
+	t.Helper()
+	_, exists := accountConfigVars[agent]
+	require.False(t, exists, "%s is a real rostered agent; pick a name no agent uses", agent)
+	accountConfigVars[agent] = configVar
+	if followUp != "" {
+		accountLaunchProofFollowUps[agent] = followUp
+	}
+	t.Cleanup(func() {
+		delete(accountConfigVars, agent)
+		delete(accountLaunchProofFollowUps, agent)
+	})
+}
+
+// The registration-only state still describes itself honestly when an agent enters
+// it. This is the machinery #3609 added, kept alive after #3639 emptied it.
+func TestAccountRegistrationOnly_DescribesAnUnprovenRosterEntry(t *testing.T) {
+	const followUp = "https://github.com/sachiniyer/agent-factory/issues/9999"
+	rosterAnUnprovenAgent(t, "probeagent", "PROBEAGENT_HOME", followUp)
+
+	require.False(t, AccountLaunchProven("probeagent"),
+		"adding an agent to the roster must NOT admit it at the launch boundary")
+	require.True(t, AccountRegistrationOnly("probeagent"))
+
+	reason, ok := AccountRegistrationOnlyReason("probeagent")
+	require.True(t, ok)
+	require.Contains(t, reason, "probeagent", "the sentence must name which agent it is about")
+	require.Contains(t, reason, followUp, "a state the operator cannot act on must name the follow-up")
+	require.NotContains(t, reason, "does not support",
+		"registration works, so calling it unsupported is the false half of the contradiction")
+
+	// And it reaches the list a user reads, so `af accounts add` succeeding cannot
+	// be contradicted by a bare "supported: …" elsewhere.
+	require.Contains(t, AccountAgentsSummary(), "probeagent ("+AccountRegistrationOnlyMarker+")")
+	require.NotContains(t, AccountAgentsSummary(), "gemini ("+AccountRegistrationOnlyMarker+")")
+
+	// The bare list stays bare: its callers index account directories by these
+	// names, and a marked name would look up a path that does not exist.
+	require.Contains(t, AccountAgents(), "probeagent")
+	require.NotContains(t, AccountAgents(), "probeagent ("+AccountRegistrationOnlyMarker+")")
+}
+
+// A registration-only agent must name the issue that lifts the state.
+//
+// The map is empty today. It is the guard for the NEXT agent: rostering one
+// without a launch proof and without filing the follow-up leaves the operator with
+// a refusal and nowhere to go, which is the dead end #3609's review objected to.
+func TestAccountRegistrationOnly_NamesItsFollowUp(t *testing.T) {
+	for _, agent := range AccountAgents() {
+		if !AccountRegistrationOnly(agent) {
+			continue
+		}
+		require.NotEmpty(t, accountLaunchProofFollowUps[agent],
+			"%s is on the roster with no launch proof, so af tells operators to wait — record the issue "+
+				"they should watch in accountLaunchProofFollowUps", agent)
+	}
+
+	// A follow-up recorded for an agent that is NOT registration-only is stale: it
+	// points at an issue that has already been answered.
+	for agent := range accountLaunchProofFollowUps {
+		require.True(t, AccountRegistrationOnly(agent),
+			"%s is not registration-only, so its follow-up entry is stale and would never print", agent)
+	}
+}
+
+// A reason for an agent in neither state is empty rather than a sentence about
+// nothing, and the unsupported-agent refusal still names the alternatives.
+func TestAccountAgentsSummary_NamesTheAlternativesInARefusal(t *testing.T) {
+	_, err := ApplyAccount(nil, "", Account{Agent: "aider", Name: "work", Dir: "/d"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "supported: claude, codex, gemini")
+
+	reason, ok := AccountRegistrationOnlyReason("aider")
+	require.False(t, ok, "an agent that is not on the roster at all is not registration-only")
+	require.Empty(t, reason)
+}
+
+// Admission and the ZDOTDIR pin are one predicate: the exact generated zsh
+// command is admitted AND pinned, every other zsh execution is refused, and no
+// other command is pinned. Three review rounds on #4474 found the pin wrong in
+// both directions while it tried to follow zsh into longer commands — missing
+// on `nice /bin/zsh -f -i`, stranded outside a sudo that drops ZDOTDIR, and
+// leaking into code-server through `printf '%s\n' /bin/zsh -f -i`. The sets
+// below are the rule, not a list of those incidents: whatever the command, an
+// admitted zsh is a pinned zsh.
+func TestApplyAccountEnvironment_AdmitsZshOnlyAsThePinnedGeneratedLaunch(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: t.TempDir()}
+	// Canaries: the generated form is the only zsh af itself launches — shell
+	// tabs, their extra tmux windows, and an account swap's replacement — and
+	// all three must keep working (#4471).
+	for _, shell := range []string{"/bin/zsh", "/usr/bin/zsh"} {
+		command, err := AccountShellCommand(shell)
+		require.NoError(t, err, shell)
+		require.True(t, IsAccountShellCommand(command), command)
+		scoped, err := ApplyAccountEnvironment([]string{"PATH=/bin"}, command, account)
+		require.NoError(t, err, command)
+		pinned, ok := envValue(scoped, "ZDOTDIR")
+		require.True(t, ok && pinned == "", "%q is the admitted zsh launch and must pin ZDOTDIR empty", command)
+	}
+	for _, command := range []string{
+		"nice /bin/zsh -f -i",
+		"exec /bin/zsh -f -i",
+		"/bin/zsh -f -i; true",
+		"echo hi; nice /bin/zsh -f -i",
+		"env PATH=/bin /bin/zsh -f -i",
+		"nohup /usr/bin/zsh -f -i",
+		"sudo --preserve-env=HOME,CODEX_HOME -u root /bin/zsh -f -i",
+		"printf '%s\\n' /bin/zsh -f -i; code-server",
+		"/bin/zsh -f -i < ./repo-script",
+		"/bin/zsh -f -i <<'EOF'\nexport CODEX_HOME=/other\ncodex\nEOF",
+		"cat ./repo-script | /bin/zsh -f -i",
+		"/bin/zsh -f -i >/dev/null",
+	} {
+		_, err := ApplyAccountEnvironment([]string{"PATH=/bin"}, command, account)
+		require.Error(t, err, "%q runs zsh with an environment af did not hand it directly", command)
+	}
+	// No zsh launch, no pin: code-server ("") and process panes keep the
+	// environment their own zsh children need to read ~/.zshenv and ~/.zshrc.
+	for _, command := range []string{
+		"",
+		"make -j4",
+		"echo zsh",
+		"/bin/bash --noprofile --norc -i",
+		"/bin/csh -f -i",
+		"/bin/sh -i",
+	} {
+		scoped, err := ApplyAccountEnvironment([]string{"PATH=/bin", "ZDOTDIR=/home/u/.config/zsh"}, command, account)
+		require.NoError(t, err, command)
+		_, ok := envValue(scoped, "ZDOTDIR")
+		require.False(t, ok, "%q launches no zsh and must neither pin nor keep ZDOTDIR", command)
 	}
 }

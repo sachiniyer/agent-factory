@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // killGitTimeout bounds the local git metadata reads the kill confirmation runs.
-// handleKill is synchronous on the Bubble Tea Update loop, so a wedged git (a
-// hung network mount, a D-state process holding the worktree) would freeze the
-// whole TUI without a deadline (#2030). The reads are local and offline (status,
+// The reads run off the event loop (#4848), but the kill dialog withholds its
+// confirm until they return, so a wedged git (a hung network mount, a D-state
+// process holding the worktree) would leave it pending forever without a
+// deadline (#2030). The reads are local and offline (status,
 // log, rev-parse, symbolic-ref), so this only trips on a genuine stall; it is
 // generous enough that a slow-but-progressing read on a cold cache still
 // completes. Mirrors session/git's localGitTimeout reasoning (#1917).
@@ -72,8 +74,8 @@ func runKillGit(dir string, args ...string) ([]byte, error) {
 }
 
 // This file holds the kill-confirmation copy and the data-loss detection behind
-// it. handleKill (handle_actions.go) assembles these into the confirmation the
-// user consents to. The governing rule (#2022): show the bare, safe-looking
+// it. assessKillLoss (kill_check.go) runs the checks off the event loop and
+// openKillConfirm assembles them into the confirmation the user consents to. The governing rule (#2022): show the bare, safe-looking
 // prompt ONLY with positive evidence there is no unmerged work to lose; unknown
 // or unverifiable warns. Forgetting must be safe.
 
@@ -102,16 +104,26 @@ const unmergedKillConfirmKey = "k"
 // mirrors the reserved-title guard the create path already applies
 // (app/handle_input.go). #1237 made root self-heal ~2 min after a kill, so the
 // copy names that recovery rather than the pre-#1237 "until the daemon restarts".
-func killConfirmMessage(title, warning string, reserved bool) string {
+func killConfirmMessage(title, warning string, reserved bool, impact *session.WorktreeCleanupImpact) string {
 	var message string
 	if reserved {
 		message = fmt.Sprintf(
 			"[!] '%s' is the daemon-managed root agent, not a scratch session.\n"+
 				"Killing it stops scheduled and watch-task delivery to '%s' until it\n"+
 				"self-heals (~2 min) or you restart the daemon.\n\n"+
-				"Kill the root agent anyway?", title, title)
+				"Delete the root session and its af-owned resources?", title, title)
 	} else {
-		message = fmt.Sprintf("[!] Kill session '%s'?", title)
+		message = fmt.Sprintf("Delete session '%s'?\nPermanently delete the session.", title)
+	}
+	if impact != nil {
+		switch {
+		case impact.RemoveWorktree && impact.DeleteBranch:
+			message += "\nIts af-owned worktree and branch are removed. Uncommitted changes and unpushed commits in them are lost. Archive to keep them."
+		case impact.RemoveWorktree:
+			message += "\nIts af-owned worktree is removed; the pre-existing branch is kept. Uncommitted changes and commits reachable only from this worktree are lost. Archive to keep them."
+		default:
+			message += "\nYour checkout and branch are kept."
+		}
 	}
 	if warning != "" {
 		message += "\n\n" + warning
@@ -135,8 +147,8 @@ func killConfirmMessage(title, warning string, reserved bool) string {
 // the user gets a data-loss warning must not depend on their status preferences.
 // `normal` rather than `all` because this is a boolean: `normal` collapses an
 // untracked directory to a single `?? dir/` entry instead of walking every file
-// under it, which matters on a path that runs synchronously on the Bubble Tea
-// Update loop (#2030).
+// under it, which matters on a path the kill dialog waits on before it lets the
+// user confirm (#2030, #4848).
 func killConfirmationWarning(wt string) string {
 	out, err := runKillGit(wt, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
@@ -168,8 +180,7 @@ func killConfirmationWarning(wt string) string {
 //     that work is actually being lost.
 //   - ("", false) when we have POSITIVE evidence there is nothing to lose: no
 //     commits beyond base, or every such commit is already pushed to a remote or
-//     carried by a merged PR (branch -D deletes only the LOCAL branch, so
-//     pushed/merged commits survive the kill).
+//     reachable from base (branch -D deletes only the LOCAL branch).
 //
 // The check is deliberately offline (no `git fetch`): a kill confirmation must
 // stay as fast as the existing status check and is no place to touch the
@@ -182,7 +193,7 @@ func killConfirmationWarning(wt string) string {
 // not whichever branch the agent has left checked out at HEAD. The fully
 // qualified local ref must resolve before an empty warning can be returned;
 // missing or unverifiable deletion targets fail closed (#2199).
-func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState string, deleteBranch bool) (string, bool) {
+func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA string, deleteBranch bool) (string, bool) {
 	if strings.TrimSpace(worktreePath) == "" {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("no worktree path")), false
 	}
@@ -192,9 +203,9 @@ func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState st
 	// those commits reachable only through the worktree's HEAD. Cleanup removes
 	// that worktree, so a branch-only check would silently orphan them (#2210
 	// review). Assess both independently and preserve every warning in the
-	// confirmation. They run concurrently because this path blocks the Bubble Tea
-	// event loop: adding a second serial chain would multiply the existing bounded
-	// Git-read latency and violate #2030's whole-confirmation responsiveness gate.
+	// confirmation. They run concurrently because the kill dialog withholds its
+	// confirm until this returns: a second serial chain would multiply the bounded
+	// Git-read latency the user waits through (#2030's responsiveness gate).
 	type warningResult struct {
 		line   string
 		severe bool
@@ -203,7 +214,7 @@ func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState st
 	detachedResult := make(chan warningResult, 1)
 	if deleteBranch {
 		go func() {
-			line, severe := branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState)
+			line, severe := branchCommitWarning(worktreePath, branchName, recordedBaseSHA)
 			branchResult <- warningResult{line: line, severe: severe}
 		}()
 	} else {
@@ -229,7 +240,7 @@ func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState st
 // unmergedCommitWarning. branchName is the GitWorktree's canonical branch —
 // the exact ref Cleanup deletes — not Instance.Branch, which can be empty or
 // stale on legacy/restored records (#2209 review).
-func branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState string) (string, bool) {
+func branchCommitWarning(worktreePath, branchName, recordedBaseSHA string) (string, bool) {
 	branchName = strings.TrimSpace(branchName)
 	if branchName == "" {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("no session branch name")), false
@@ -238,7 +249,7 @@ func branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState stri
 	if _, err := runKillGit(worktreePath, "rev-parse", "--verify", "--quiet", branchRef+"^{commit}"); err != nil {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("session branch could not be resolved: %w", err)), false
 	}
-	base, baseLabel, ok := resolveKillBase(worktreePath, recordedBaseSHA)
+	base, _, ok := resolveKillBase(worktreePath, recordedBaseSHA)
 	if !ok {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("base branch/commit could not be determined")), false
 	}
@@ -253,12 +264,6 @@ func branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState stri
 	if countGitLines(uniqueOut) == 0 {
 		return "", false // nothing beyond base — kill loses no committed work
 	}
-	// A merged PR means the work landed in the base's history (even a squash,
-	// whose original commits branch -D would orphan, preserves the diff), so it
-	// survives the kill.
-	if strings.EqualFold(strings.TrimSpace(prState), "MERGED") {
-		return "", false
-	}
 	// Of the session's commits, those NOT reachable from any remote-tracking ref
 	// are the ones that exist only here. branch -D orphans exactly these.
 	localOut, err := runKillGit(worktreePath, "log", "--oneline", base+".."+branchRef, "--not", "--remotes")
@@ -269,7 +274,7 @@ func branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState stri
 	if localOnly == 0 {
 		return "", false // every commit is pushed somewhere — recoverable
 	}
-	return unmergedSevereLine(branchName, localOnly, baseLabel), true
+	return unmergedSevereLine(branchName, localOnly), true
 }
 
 // detachedHeadCommitWarning reports commits that lose their final surviving ref
@@ -356,15 +361,11 @@ func resolveKillBase(worktreePath, recordedBaseSHA string) (base, baseLabel stri
 // unmergedSevereLine is the #2022 data-loss headline: it names the exact branch
 // and count of commits that would be permanently deleted and that the loss is
 // final. It is the critical (never-clipped, #1973) line of the confirmation.
-func unmergedSevereLine(branchName string, n int, baseLabel string) string {
+func unmergedSevereLine(branchName string, n int) string {
 	commitWord, pronoun := "commits", "them"
-	where := "that aren't merged or pushed anywhere"
+	where := "not reachable from any remote-tracking ref"
 	if n == 1 {
 		commitWord, pronoun = "commit", "it"
-		where = "that isn't merged or pushed anywhere"
-	}
-	if baseLabel != "" {
-		where = fmt.Sprintf("not on %s and not pushed anywhere", baseLabel)
 	}
 	return fmt.Sprintf("Branch %q has %d %s %s. Killing permanently deletes %s — this cannot be undone.", branchName, n, commitWord, where, pronoun)
 }

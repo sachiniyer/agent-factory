@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"fmt"
 	stdlog "log"
 	"os"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/stretchr/testify/assert"
@@ -270,6 +270,34 @@ func TestGetClaudeCommand(t *testing.T) {
 			{"bash type function", "claude is a function\nclaude () \n{ \n    echo hi\n}", ""},
 			{"bash type builtin", "claude is a shell builtin", ""},
 			{"empty output", "\n\n", ""},
+			// Quote characters that belong to the alias VALUE itself must not
+			// be stripped as if they were the shell's `...' wrapper. bash's
+			// `type` re-quotes embedded single quotes and wraps the value in
+			// `...', so a value whose own boundary is a quote (e.g. `alias
+			// claude="claude --prompt 'hi'"`) must parse with balanced
+			// quotes — the cutset trim formerly used here ate the value's
+			// own boundary quotes and left an unbalanced quote in the
+			// persisted ProgramOverrides entry.
+			{"bash alias value ending in double-quoted arg", "claude is aliased to `claude --model \"opusplan\"'", "claude --model \"opusplan\""},
+			{"bash alias value with re-quoted apostrophes", "claude is aliased to `claude --prompt \"'hi'\"'", "claude --prompt \"'hi'\""},
+			{"bash alias value with adjacent apostrophes", "claude is aliased to `claude --prompt 'hi''", "claude --prompt 'hi'"},
+			{"bash alias value starting with double-quoted path", "claude is aliased to `\"/opt/my claude/claude\" --flag'", "\"/opt/my claude/claude\" --flag"},
+			{"bash alias value starting with single-quoted path", "claude is aliased to `'/opt/my claude/claude' --flag'", "'/opt/my claude/claude' --flag"},
+			// The curly-quote wrapper some locales render must also strip
+			// exactly one pair, preserving a value boundary quote.
+			{"bash alias unicode wrapper with value quote", "claude is aliased to ‘claude --model \"opus\"’", "claude --model \"opus\""},
+			// The "name=value" and "name -> value" alternatives serialize the
+			// value in an ASCII " or ' wrapper pair that is a wrapper, not part
+			// of the value; the wrapper must be stripped so the composed
+			// override does not treat the whole value as one quoted executable
+			// name (#5526).
+			{"equals format double-quoted", `claude="/opt/claude --model opus"`, "/opt/claude --model opus"},
+			{"equals format single-quoted", `claude='/opt/claude --model opus'`, "/opt/claude --model opus"},
+			{"arrow format double-quoted", `claude -> "/opt/claude --model opus"`, "/opt/claude --model opus"},
+			{"arrow format single-quoted", `claude -> '/opt/claude --model opus'`, "/opt/claude --model opus"},
+			// A value whose own boundary quote belongs to it (no serialization
+			// wrapper) is returned unchanged for the assignment form too.
+			{"equals format unquoted with value quotes", `claude=claude --prompt 'hi'`, "claude --prompt 'hi'"},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
@@ -277,57 +305,6 @@ func TestGetClaudeCommand(t *testing.T) {
 			})
 		}
 	})
-}
-
-// TestGetClaudeCommandMemoized pins the #883 fix: repeated probes that share
-// the same SHELL/PATH/HOME must source the rc only once, while a changed HOME
-// re-probes under a new cache key. A heavy interactive rc otherwise ran the
-// bash probe up to four times per TUI startup.
-func TestGetClaudeCommandMemoized(t *testing.T) {
-	bashPath := requireBash(t)
-
-	// A .bashrc that records every interactive sourcing into a marker file and
-	// defines a claude alias, so the probe both succeeds and is countable.
-	writeCountingBashrc := func(homeDir, marker string) {
-		bashrc := "case $- in\n    *i*) ;;\n      *) return;;\nesac\n" +
-			"echo x >> '" + marker + "'\n" +
-			"alias claude='/custom/bin/claude'\n"
-		require.NoError(t, os.WriteFile(filepath.Join(homeDir, ".bashrc"), []byte(bashrc), 0644))
-	}
-	sourceCount := func(marker string) int {
-		data, err := os.ReadFile(marker)
-		if os.IsNotExist(err) {
-			return 0
-		}
-		require.NoError(t, err)
-		return strings.Count(string(data), "x")
-	}
-
-	home1 := t.TempDir()
-	marker1 := filepath.Join(t.TempDir(), "sourced")
-	writeCountingBashrc(home1, marker1)
-
-	t.Setenv("SHELL", bashPath)
-	t.Setenv("PATH", t.TempDir()) // no claude on PATH — the alias is the only source
-	t.Setenv("HOME", home1)
-
-	for i := 0; i < 3; i++ {
-		result, err := GetClaudeCommand()
-		require.NoError(t, err)
-		assert.Equal(t, "/custom/bin/claude", result)
-	}
-	assert.Equal(t, 1, sourceCount(marker1), "stable env should probe (source the rc) exactly once")
-
-	// Changing HOME must invalidate the cache and probe again.
-	home2 := t.TempDir()
-	marker2 := filepath.Join(t.TempDir(), "sourced")
-	writeCountingBashrc(home2, marker2)
-	t.Setenv("HOME", home2)
-
-	result, err := GetClaudeCommand()
-	require.NoError(t, err)
-	assert.Equal(t, "/custom/bin/claude", result)
-	assert.Equal(t, 1, sourceCount(marker2), "a changed HOME should re-probe under a new cache key")
 }
 
 func TestDefaultConfig(t *testing.T) {
@@ -359,7 +336,7 @@ func TestDefaultConfig(t *testing.T) {
 		assert.False(t, cfg.RequireLoopbackToken)
 		assert.Equal(t, 1000, cfg.DaemonPollInterval)
 		assert.Equal(t, UpdateChannelStable, cfg.UpdateChannel)
-		assert.Equal(t, DefaultThemeConfig(), cfg.Theme)
+		assert.Equal(t, "system", cfg.Appearance)
 		assert.NotEmpty(t, cfg.BranchPrefix)
 		assert.True(t, strings.HasSuffix(cfg.BranchPrefix, "/"))
 		assert.Equal(t, WorktreeRootSibling, cfg.WorktreeRoot)
@@ -369,8 +346,7 @@ func TestDefaultConfig(t *testing.T) {
 		require.NotNil(t, cfg.ProgramOverrides)
 		override, ok := cfg.ProgramOverrides[tmux.ProgramClaude]
 		require.True(t, ok, "expected program_overrides[claude] to be populated by auto-detect")
-		assert.Contains(t, override, "claude")
-		assert.Contains(t, override, "--dangerously-skip-permissions")
+		assert.Equal(t, ShellQuotePath(stub)+" "+DetectedClaudePermissionsFlag, override)
 	})
 
 	t.Run("default_program is enum even when claude is not on PATH", func(t *testing.T) {
@@ -966,10 +942,9 @@ func TestLoadConfig(t *testing.T) {
 		// an operator who wants auth finds the key already there to flip.
 		assert.Contains(t, string(data), `require_token = false`)
 		assert.Contains(t, string(data), `worktree_root = 'sibling'`)
-		// Keep the automatic default in the table shape older TOML-era binaries
-		// understand; only an explicit named choice is compacted to a scalar.
-		assert.Contains(t, string(data), `[theme]`)
-		assert.Contains(t, string(data), `accent = '#88C0D0'`)
+		// New configs expose only fixed appearance modes.
+		assert.NotContains(t, string(data), `[theme]`)
+		assert.Contains(t, string(data), `appearance = 'system'`)
 		assert.NotContains(t, string(data), `theme = 'nord'`)
 
 		// The materialized file must reload cleanly through the TOML path.
@@ -996,12 +971,13 @@ func TestLoadConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), ConfigFileName)
 	})
 
-	t.Run("re-materializes defaults from an empty config.json stub (#864)", func(t *testing.T) {
-		// An empty config.json is the fingerprint of a failed first-run write
-		// from a pre-TOML af, not a user's settings. It must NOT wedge startup
-		// with the #758 "config is empty" hard error; instead the stub is
-		// dropped and defaults regenerated as config.toml so the next run
-		// parses cleanly.
+	t.Run("recovers defaults in memory from an empty config.json stub (#864/#4483)", func(t *testing.T) {
+		// An empty config.json is ambiguous: the fingerprint of a failed
+		// first-run write from a pre-TOML af, or a live file mid-rewrite. It
+		// must NOT wedge startup with the #758 "config is empty" hard error —
+		// and the load must not unlink it either (#4483): a read never
+		// deletes user data, so defaults come back in memory and the stub is
+		// left for whoever holds it.
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 		fastShell(t)
 		configDir, err := GetConfigDir()
@@ -1016,12 +992,13 @@ func TestLoadConfig(t *testing.T) {
 		require.NotNil(t, cfg)
 		assert.Equal(t, defaultProgram, cfg.DefaultProgram)
 
-		// The empty stub is dropped and defaults land in config.toml; the
-		// stale config.json must not linger to trip the duplicate-config path.
-		assert.NoFileExists(t, configPath, "the empty config.json stub must be removed")
-		data, err := os.ReadFile(filepath.Join(configDir, TomlConfigFileName))
+		// The stub stays exactly as found — still there, still empty — and no
+		// config.toml is materialized over it.
+		data, err := os.ReadFile(configPath)
 		require.NoError(t, err)
-		assert.NotEmpty(t, data, "defaults must be regenerated as a non-empty config.toml")
+		assert.Empty(t, data, "the load must not delete or rewrite the stub (#4483)")
+		assert.NoFileExists(t, filepath.Join(configDir, TomlConfigFileName),
+			"nothing is materialized over a file that may be mid-rewrite")
 	})
 
 	t.Run("empty config.json is NOT dropped when config.toml already exists", func(t *testing.T) {
@@ -1102,11 +1079,7 @@ codex = "/opt/codex/bin/codex --quiet"
 		assert.Equal(t, 2000, cfg.DaemonPollInterval)
 		assert.Equal(t, "test/", cfg.BranchPrefix)
 		assert.Equal(t, WorktreeRootSubdirectory, cfg.WorktreeRoot)
-		assert.Equal(t, "#ABCDEF", cfg.Theme.Accent)
-		assert.Equal(t, "#010203", cfg.Theme.Foreground)
-		assert.Equal(t, "#AABBCC", cfg.Theme.PaneBorderPreview)
-		assert.Equal(t, DefaultThemeConfig().Success, cfg.Theme.Success,
-			"omitted theme fields keep their Nord defaults")
+		assert.Equal(t, "system", cfg.Appearance)
 		assert.Equal(t, "/home/me/.local/bin/claude --dangerously-skip-permissions",
 			cfg.ProgramOverrides[tmux.ProgramClaude])
 		assert.Equal(t, "/opt/codex/bin/codex --quiet",
@@ -1160,8 +1133,8 @@ codex = "/opt/codex/bin/codex --quiet"
 		assert.True(t, cfg.RequireLoopbackToken)
 	})
 
-	t.Run("invalid theme color warns and falls back", func(t *testing.T) {
-		var warnings bytes.Buffer
+	t.Run("retired theme color migrates to system", func(t *testing.T) {
+		var warnings logtest.Buffer
 		prevWarning := log.WarningLog
 		log.WarningLog = stdlog.New(&warnings, "", 0)
 		t.Cleanup(func() { log.WarningLog = prevWarning })
@@ -1175,10 +1148,9 @@ error = "#cc9393"
 		cfg, err := LoadConfig()
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
-		assert.Equal(t, DefaultThemeConfig().Accent, cfg.Theme.Accent)
-		assert.Equal(t, "#CC9393", cfg.Theme.Error)
-		assert.Contains(t, warnings.String(), "theme.accent")
-		assert.Contains(t, warnings.String(), "not a #RRGGBB color")
+		assert.Equal(t, "system", cfg.Appearance)
+		assert.Contains(t, warnings.String(), "appearance")
+		assert.Contains(t, warnings.String(), "migrated retired theme")
 	})
 
 	t.Run("loads legacy config.toml without schema_version as current schema", func(t *testing.T) {

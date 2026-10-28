@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/stretchr/testify/require"
 )
 
 // unsafeTeardownBackend starts fine but its teardown can never complete SAFELY: it
@@ -23,7 +25,7 @@ import (
 // so a double that returns a plain error would no longer model this case at all.
 type unsafeTeardownBackend struct{ readyFakeBackend }
 
-func (b unsafeTeardownBackend) Kill(*session.Instance) error {
+func (b unsafeTeardownBackend) Kill(*session.Instance, bool) error {
 	return fmt.Errorf("kill: tab %q: %w", "agent", session.ErrPaneMayBeLive)
 }
 
@@ -192,8 +194,8 @@ func TestRestoreLostSessions_ObservedAliveThenDied_StartsFreshEpisode(t *testing
 		t.Fatalf("recover calls = %d, want 1", got)
 	}
 
-	// A poll ANSWERS: the runtime is confirmed alive. It dies much later.
-	observeAlive(manager, repoID, inst)
+	// Polls ANSWER, sustained: the runtime is confirmed alive. It dies much later.
+	confirmAlive(manager, repoID, inst)
 	inst.SetStatusForTest(session.Lost)
 
 	manager.RestoreLostSessions()
@@ -370,6 +372,42 @@ func TestKillSession_GhostWorktreeTimeout_RetainsTheRecord(t *testing.T) {
 		"its worktree may be half-deleted and this record is the only handle anything has on the leftovers")
 }
 
+func TestKillSession_GhostDeletionRetainsLegacyAccountLimitEvidence(t *testing.T) {
+	manager, repoID := newGhostKillManager(t, "legacy-limit", "af_legacy-limit")
+	resetAt := time.Now().Add(time.Hour).UTC().Round(0)
+	record := recordFor(t, repoID, "legacy-limit")
+	if record == nil {
+		t.Fatal("setup: legacy ghost record is missing")
+	}
+	record.Program = tmux.ProgramClaude
+	record.Account = "work"
+	record.AccountAutoSelected = false
+	record.Liveness = session.LiveLimitReached
+	record.LimitResetAt = resetAt
+	record.AccountLimitObservations = nil
+	raw, err := json.Marshal([]session.InstanceData{*record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveRepoInstances(repoID, raw); err != nil {
+		t.Fatalf("persist legacy ghost row: %v", err)
+	}
+
+	stubGhostTmux(t, tmux.PaneStateKnown, nil)
+	stubGhostWorktree(t, git.CleanupSettled, nil)
+	if _, err := manager.KillSession(KillSessionRequest{Title: "legacy-limit", RepoID: repoID}); err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+	observations, err := loadAccountLimitLedger()
+	if err != nil {
+		t.Fatalf("load retained account-limit evidence: %v", err)
+	}
+	if len(observations) != 1 || observations[0].Agent != tmux.ProgramClaude ||
+		observations[0].Account != "work" || !observations[0].ResetAt.Equal(resetAt) {
+		t.Fatalf("retained observations = %+v, want legacy claude/work limit through %v", observations, resetAt)
+	}
+}
+
 // unsafeKillBackend fails to START and cannot clean up safely afterwards: its Kill
 // reports the shape a wedged tmux / cut-off worktree removal produces, so the
 // create's cleanup leaves the workspace on disk.
@@ -379,7 +417,7 @@ func (b unsafeKillBackend) Start(*session.Instance, bool) error {
 	return fmt.Errorf("agent program exited immediately")
 }
 
-func (b unsafeKillBackend) Kill(*session.Instance) error {
+func (b unsafeKillBackend) Kill(*session.Instance, bool) error {
 	return fmt.Errorf("%w: leaving the workspace untouched", session.ErrPaneMayBeLive)
 }
 
@@ -396,7 +434,7 @@ func (b *retryFailedCreateBackend) Start(*session.Instance, bool) error {
 	return fmt.Errorf("agent program exited immediately")
 }
 
-func (b *retryFailedCreateBackend) Kill(instance *session.Instance) error {
+func (b *retryFailedCreateBackend) Kill(instance *session.Instance, trustLiveGeneration bool) error {
 	b.mu.Lock()
 	b.killCalls++
 	call := b.killCalls
@@ -404,7 +442,7 @@ func (b *retryFailedCreateBackend) Kill(instance *session.Instance) error {
 	if call == 1 {
 		return fmt.Errorf("%w: leaving the workspace untouched", session.ErrPaneMayBeLive)
 	}
-	return b.readyFakeBackend.Kill(instance)
+	return b.readyFakeBackend.Kill(instance, trustLiveGeneration)
 }
 
 // TestCreateSession_UnsafeCleanup_KeepsTheRecordAndTheTitle is round-3 finding (3).
@@ -552,7 +590,7 @@ func TestDeleteSessionRecord_EndpointDeadButWorkspaceGone_ClearsTheTombstone(t *
 	}
 
 	endpointDead := fmt.Errorf("kill agent: dial tcp: connection refused")
-	deleted, err := manager.deleteSessionRecord(repoID, "remote-ish", "", endpointDead)
+	deleted, err := manager.deleteSessionRecord(repoID, "remote-ish", "", endpointDead, session.InstanceData{})
 
 	if err != nil {
 		t.Fatalf("a teardown error that is NOT about workspace state must not block the delete: the "+
@@ -584,7 +622,7 @@ func TestDeleteSessionRecord_UnknownState_StillBlocks(t *testing.T) {
 	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "unknown-state")
 
 	unknown := fmt.Errorf("kill %q: tab %q: %w", "unknown-state", "agent", session.ErrPaneMayBeLive)
-	deleted, err := manager.deleteSessionRecord(repoID, "unknown-state", "", unknown)
+	deleted, err := manager.deleteSessionRecord(repoID, "unknown-state", "", unknown, session.InstanceData{})
 
 	if err == nil {
 		t.Fatal("an unknown-STATE teardown must still block the record delete: the workspace may " +
@@ -596,6 +634,21 @@ func TestDeleteSessionRecord_UnknownState_StillBlocks(t *testing.T) {
 	if rec := recordFor(t, repoID, "unknown-state"); rec == nil {
 		t.Fatal("the record must survive a refused delete")
 	}
+}
+
+func TestDeleteSessionRecord_DiscardsUnkeyedLimitEvidence(t *testing.T) {
+	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "malformed-evidence")
+	evidence := session.InstanceData{AccountLimitObservations: []session.AccountLimitObservationData{
+		{Agent: "", Account: "work", ResetAt: time.Now().Add(time.Hour)},
+		{Agent: "claude", Account: "", ResetAt: time.Now().Add(time.Hour)},
+	}}
+
+	deleted, err := manager.deleteSessionRecord(repoID, "malformed-evidence", "", nil, evidence)
+	require.NoError(t, err,
+		"evidence without a complete agent/account key cannot exclude an identity and must not retain a completed teardown forever")
+	require.True(t, deleted)
+	require.Nil(t, recordFor(t, repoID, "malformed-evidence"),
+		"discarding unusable evidence must let the completed session deletion settle")
 }
 
 // TestKillSession_GhostUnsafeTeardown_DoesNotPromiseAnAutomaticRetry is round-5

@@ -46,31 +46,58 @@ func IsAccountCommandValidationError(err error) bool {
 // base words. Relative executable spellings are resolved again from the pane's
 // workdir, so their arguments can be declared but their identity cannot. Any
 // other base arguments stay undeclared.
+//
+// When the positional extension (GeneratedArgsBetween) cannot describe the
+// rewrite — an insertion that lands words mid-command, the shape a codex resume
+// splice produces when the base already carries af's own flag (#5433) — and
+// trustedBaseArgs records the base's af-authored declaration, the proof merges
+// that recorded declaration through GeneratedArgsByInsertion the same way the
+// tmux-level rewrite path (rewriteProgramCmdByAf) keeps its pane declaration
+// across the same splice. Without it the swap would treat af's own words
+// (af's resume splice operands and the injected flag) as undeclared user
+// arguments and the account boundary would refuse the swap.
+//
+// A base whose exec builtin carries the `--` separator declares nothing, for the
+// same reason ValidateAccountCommand refuses it: dash runs no such command, so a
+// proof about it would describe a pane that exits 127 (#3557). Producer and
+// consumer share stripExecPrefix so neither can drift into accepting it alone.
 func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (AccountLaunchProof, bool) {
 	added, ok := GeneratedArgsBetween(base, final)
 	if !ok {
-		return AccountLaunchProof{}, false
+		// GeneratedArgsBetween fails when the rewrite is an insertion rather
+		// than a positional extension: a contiguous block of new words landed
+		// amid the base's words instead of after them (a codex resume splice
+		// ahead of af's own startup flag, #5433). With a recorded base
+		// declaration in trustedBaseArgs, re-derive the declaration as a
+		// splice the way rewriteProgramCmdByAf does at the tmux layer:
+		// GeneratedArgsByInsertion verifies the base's post-executable words
+		// are exactly the declared ones and splices the inserted block into
+		// the declaration at the point it landed. Without trusted base args
+		// (no built-in override and no pane recording) nothing is provable,
+		// so the refusal stays — this never vouches for user-authored words.
+		if trustedBaseArgs == nil {
+			return AccountLaunchProof{}, false
+		}
+		merged, mergeOK := GeneratedArgsByInsertion(base, final, trustedBaseArgs)
+		if !mergeOK {
+			return AccountLaunchProof{}, false
+		}
+		// The insertion branch is reached only with a pane-recorded declaration
+		// (trustedBaseArgs from the pane fallback), so the executable provenance
+		// is the pane's recording, not the base's first word: an untrusted
+		// absolute override records an empty TrustedExecutable deliberately, and
+		// inferring the path here would launder a repository-controlled executable
+		// into the account boundary's trust. The caller seeds the recorded
+		// provenance; this function does not infer it from the base string.
+		return AccountLaunchProof{GeneratedArgs: merged}, true
 	}
 	proof := AccountLaunchProof{GeneratedArgs: added}
 	if trustedBaseArgs == nil {
 		return proof, true
 	}
 
-	call, ok := singleSimpleCall(base)
-	if !ok || !callIsLiteral(call) || len(call.Assigns) > 0 {
-		return AccountLaunchProof{}, false
-	}
-	words, ok := literalCommandArgs(call.Args)
-	if !ok || len(words) == 0 {
-		return AccountLaunchProof{}, false
-	}
-	if words[0] == "exec" {
-		words = words[1:]
-		if len(words) > 0 && words[0] == "--" {
-			words = words[1:]
-		}
-	}
-	if len(words) == 0 {
+	words, ok := accountBaseWords(base)
+	if !ok {
 		return AccountLaunchProof{}, false
 	}
 	if len(words) < len(trustedBaseArgs)+1 {
@@ -89,12 +116,34 @@ func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (A
 	return proof, true
 }
 
+// accountBaseWords parses base the way the account boundary proves a launch: a
+// single literal simple call whose `exec` builtin prefix (and its never-portable
+// `--` separator) is stripped, returning the resulting flat word list. Shared
+// by the positional-extension and insertion branches of GenerateAccountLaunchProof
+// so the executable-trust and trailing-arg decisions cannot drift apart. An
+// empty result or ok=false means the base is not a provable simple call and
+// nothing can be declared from it.
+func accountBaseWords(base string) ([]string, bool) {
+	call, ok := singleSimpleCall(base)
+	if !ok || !callIsLiteral(call) || len(call.Assigns) > 0 {
+		return nil, false
+	}
+	stripped, execSeparator := stripExecPrefix(call.Args)
+	if execSeparator {
+		return nil, false
+	}
+	words, ok := literalCommandArgs(stripped)
+	if !ok || len(words) == 0 {
+		return nil, false
+	}
+	return words, true
+}
+
 // ValidateAccountCommand applies the command-shape half of the account
 // boundary before launch.
 func ValidateAccountCommand(command string, account Account) error {
 	proof := commandProof{
 		agent:             account.Agent,
-		trustedWrapper:    account.TrustedWrapper,
 		trustedExecutable: account.TrustedExecutable,
 		generated:         account.GeneratedArgs,
 	}
@@ -107,6 +156,14 @@ func ValidateAccountCommand(command string, account Account) error {
 	if provable {
 		return nil
 	}
+	if CommandUsesExecSeparator(command) {
+		return accountCommandValidationErrorf(
+			"account %q cannot scope agent %q: its program begins with `exec --`, and af runs that program through "+
+				"/bin/sh, where the separator is not portable; dash — /bin/sh on Debian and Ubuntu — gives its exec "+
+				"builtin no options, so it takes `--` as the command name and the pane exits 127 with "+
+				"`exec: --: not found`. Remove the `--`: af accepts the same program written `exec <agent> …`",
+			account.Name, account.Agent)
+	}
 	if args, ok := undeclaredAccountArguments(command, proof); ok {
 		return accountCommandValidationErrorf(
 			"account %q cannot scope agent %q: its resolved program contains undeclared arguments %s; "+
@@ -115,8 +172,50 @@ func ValidateAccountCommand(command string, account Account) error {
 	}
 	return accountCommandValidationErrorf(
 		"account %q cannot scope agent %q: its program could not be proven to be a direct %s invocation free of "+
-			"identity assignments, and an unverifiable program is not evidence that the account would be used",
-		account.Name, account.Agent, account.Agent)
+			"identity assignments, and an unverifiable program is not evidence that the account would be used%s",
+		account.Name, account.Agent, account.Agent, programPathHint(command, account))
+}
+
+// programPathHint names the fix when the program's executable is written with a
+// path. executableIsAgent accepts a bare name resolved through PATH — the
+// operator's configuration — and an absolute path only when it is af's own
+// detected executable, so `~/bin/claude` and `/home/me/bin/claude` are both
+// refused. The default message gives no hint for that, and "use an absolute
+// path" would be the wrong advice.
+func programPathHint(command string, account Account) string {
+	call, ok := singleSimpleCall(command)
+	if !ok {
+		return ""
+	}
+	args, _ := stripExecPrefix(call.Args)
+	if len(args) == 0 {
+		return ""
+	}
+	var executable strings.Builder
+	for _, part := range args[0].Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			executable.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			executable.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, nested := range p.Parts {
+				if lit, ok := nested.(*syntax.Lit); ok {
+					executable.WriteString(lit.Value)
+				}
+			}
+		}
+	}
+	text := executable.String()
+	if !strings.Contains(text, "/") && !strings.HasPrefix(text, "~") {
+		return ""
+	}
+	if account.TrustedExecutable != "" && text == account.TrustedExecutable {
+		return "" // the path is accepted; the refusal has another cause
+	}
+	return fmt.Sprintf("; the program is written with a path (%s), which an account-scoped agent does not accept — "+
+		"use the bare command name `%s` and put its directory on PATH (a leading ~ is not expanded, and an absolute path is refused too)",
+		text, account.Agent)
 }
 
 // ValidateAccountEnvironmentCommand protects a shell/process sibling's selected
@@ -139,8 +238,33 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 		overrideNames[name] = struct{}{}
 	}
 	if commandMutatesAccountEnvironment(command, overrideNames) {
+		if option, ok := accountEnvironmentInvalidSetOptionName(command); ok {
+			return accountCommandValidationErrorf(
+				"account %q cannot scope sibling environment for agent %q: its command gives `set` the "+
+					"option name %q, but %q is not a bash `set -o`/`set +o` option name; bash aborts its "+
+					"option scan at an unrecognized name, so af cannot prove what the shell did with the "+
+					"rest of the `set` line. Use a recognized bash option name such as pipefail or errexit",
+				account.Name, account.Agent, option, option)
+		}
+		if accountEnvironmentArithmeticNonConstant(command, overrideNames) {
+			return accountCommandValidationErrorf(
+				"account %q cannot scope sibling environment for agent %q: its command contains shell arithmetic "+
+					"whose operand is not a numeric constant — `(( x ))`, `let x`, `[[ x -eq 0 ]]`, `${arr[x]}`, "+
+					"and similar forms all re-evaluate a stored variable's value as fresh arithmetic, so af cannot "+
+					"prove what the expression evaluates to or whether it rewrites an identity or shell-startup "+
+					"variable. Use a literal numeric operand or move the arithmetic out of the agent invocation string",
+				account.Name, account.Agent)
+		}
 		return accountCommandValidationErrorf(
 			"account %q cannot scope sibling environment for agent %q: its command sets an identity or shell-startup variable itself, which can override the account directory",
+			account.Name, account.Agent)
+	}
+	if commandFeedsProvenShell(command) {
+		return accountCommandValidationErrorf(
+			"account %q cannot scope sibling environment for agent %q: its command gives an interactive shell input "+
+				"other than the terminal (a pipe, input redirection, here-document, or coprocess), and that shell would "+
+				"run the supplied text as commands, which can override the account directory; start the shell without "+
+				"redirecting its input",
 			account.Name, account.Agent)
 	}
 	return nil
@@ -151,12 +275,10 @@ func undeclaredAccountArguments(command string, proof commandProof) ([]string, b
 	if !ok || len(call.Assigns) > 0 || !callIsLiteral(call) {
 		return nil, false
 	}
-	words := call.Args
-	if len(words) > 0 && wordEquals(words[0], "exec") {
-		words = words[1:]
-		if len(words) > 0 && wordEquals(words[0], "--") {
-			words = words[1:]
-		}
+	words, execSeparator := stripExecPrefix(call.Args)
+	if execSeparator {
+		// The refusal is about the separator, not about the arguments behind it.
+		return nil, false
 	}
 	stripped, ok := stripDeclaredSuffixForDiagnostics(words, proof.generated)
 	if !ok || len(stripped) < 2 {
@@ -194,4 +316,103 @@ func quoteArguments(args []string) string {
 		quoted[idx] = strconv.Quote(arg)
 	}
 	return strings.Join(quoted, " ")
+}
+
+// accountEnvironmentInvalidSetOptionName reports the unrecognized long option
+// name that makes a bare `set -o`/`set +o` (or a cluster containing `o`) fail
+// closed in setOptionTaint, when that bare `set` call is the source of the
+// taint. It reuses the same option scan, so a refusal can name the offending
+// option instead of the generic "sets an identity or shell-startup variable"
+// message, which is false for this class — `set -o extendedglob; npm run dev`
+// sets no variable at all. A `set` reached only through a wrapper
+// (exec/command/env/...) takes the generic refusal unchanged.
+func accountEnvironmentInvalidSetOptionName(command string) (string, bool) {
+	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
+		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
+		if err != nil {
+			continue
+		}
+		var option string
+		syntax.Walk(file, func(node syntax.Node) bool {
+			call, ok := node.(*syntax.CallExpr)
+			if !ok || len(call.Args) < 2 || !isBareName(call.Args[0], "set") {
+				return true
+			}
+			if reason := setOptionTaint(call.Args[1:]); reason.kind == setTaintUnrecognized {
+				option = reason.option
+				return false
+			}
+			return true
+		})
+		if option != "" {
+			return option, true
+		}
+	}
+	return "", false
+}
+
+// accountEnvironmentArithmeticNonConstant reports whether a sibling refusal
+// fired SOLELY because of the inverted arithmetic guard in
+// commandMutatesAccountEnvironment — that is, whether the command contains an
+// arithmetic context whose operand is not provably a numeric constant (a
+// variable reference, parameter expansion, or command substitution inside
+// `(( ))`, `$(( ))`, `let`, a numeric `[[ ]]` operator, an `${arr[i]}`
+// subscript or `${x:offset:length}` slice, an `arr[i]=v` indexed assignment, or
+// a C-style for loop), AND no node-level identity or shell-startup mutation is
+// independently reachable by the walk in EITHER parse variant. It reuses the
+// same arithmetic scan and the same node walk, so the cause detected here
+// matches the cause that fired the refusal.
+//
+// C is checked across BOTH variants rather than only in the variant where the
+// arithmetic guard fires: bash may parse a form whose inverted-guard arm runs
+// while POSIX parses the same form so the letMutates/Assignment arms re-derive
+// the identity mutation, e.g. `let 'CODEX_HOME[0]=42'; codex` (the bash
+// LetClause's arithmetic arm fires; the POSIX bare-`let` CallExpr is caught by
+// letMutatesAccountEnvironment). The refusal-message decision needs "did the
+// walk find an identity mutation at all", so both variants are inspected.
+//
+// Used to render a refusal that names the real cause instead of the generic
+// "sets an identity or shell-startup variable itself" message, which is false
+// for this class: `(( x = 1 )); codex`, `let 'total += 1'`, and
+// `x=42; [[ x -eq 0 ]]; codex` set no variable at all. When the walk does
+// independently catch an identity or shell-startup mutation (`let
+// CODEX_HOME=42; codex`, `let 'CODEX_HOME[0]=42'; codex`, …) the generic
+// message is accurate, so this helper returns false and the caller keeps the
+// generic refusal.
+func accountEnvironmentArithmeticNonConstant(command string, names map[string]struct{}) bool {
+	bFires, cFires := false, false
+	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
+		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
+		if err != nil {
+			continue
+		}
+		if fileHasArithmeticContextWithVariableOperand(file) {
+			bFires = true
+		}
+		if fileMutatesAccountIdentities(file, names) {
+			cFires = true
+		}
+		if bFires && cFires {
+			break
+		}
+	}
+	return bFires && !cFires
+}
+
+// fileMutatesAccountIdentities reports whether the node walk in
+// commandMutatesAccountEnvironment — the walk that runs AFTER the inverted
+// arithmetic guard — independently catches an identity or shell-startup
+// mutation in this parsed file. It is the same walk; factored here so the
+// refusal-message decision can ask "was the inverted guard the SOLE reason?"
+// without touching commandMutatesAccountEnvironment's signature.
+func fileMutatesAccountIdentities(file syntax.Node, names map[string]struct{}) bool {
+	mutates := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if nodeMutatesAccountEnvironment(node, names, nil) {
+			mutates = true
+			return false
+		}
+		return true
+	})
+	return mutates
 }

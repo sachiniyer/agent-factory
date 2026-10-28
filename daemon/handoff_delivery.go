@@ -32,9 +32,65 @@ func prepareHandoffDelivery(delivery handoffDelivery) handoffDelivery {
 	return delivery
 }
 
+// A handoff mission is complete only when the runtime reports PromptDelivered.
+// Every other verdict keeps the durable delivery obligation; a nil transport
+// error means the submission call returned, not that the mission landed. The
+// obligation alone never authorizes replay: automatic retry additionally needs
+// mission-scoped PromptNotDelivered evidence and a runtime whose startup state
+// is known. An explicit operator retry may override ambiguous delivery only
+// after pane inspection, but no retry may touch the composer until it first
+// replaces its admitting verdict with a durable PromptCouldNotConfirm fence.
+// Missing evidence or unknown startup remains pending for inspection.
+func handoffDeliveryResultError(status session.PromptDeliveryStatus, err error) error {
+	if err != nil {
+		return err
+	}
+	if status == session.PromptDelivered {
+		return nil
+	}
+	return fmt.Errorf("%w: prompt submission reported %s", task.ErrPromptDelivery, status)
+}
+
+// beginHandoffMissionDelivery durably changes the exact mission's retry verdict
+// to ambiguous before submission. A crash after the composer is touched can
+// therefore never reload positive permission to send the instruction again.
+//
+// It is the pre-submission boundary of task.WaitForReadyAndSubmitPrompt, so it
+// runs only after readiness has proved the incoming runtime (#4429): a crash
+// inside the readiness wait reloads the verdict that admitted the attempt.
+func (m *Manager) beginHandoffMissionDelivery(delivery handoffDelivery) error {
+	previous := delivery.instance.PendingHandoffDeliveryStatus()
+	if err := delivery.instance.BeginPendingHandoffMissionDelivery(delivery.mission); err != nil {
+		return err
+	}
+	if err := m.persistSettlement(delivery.repoID, delivery.key, delivery.instance); err != nil {
+		// Submission did not begin, so the verdict that admitted this attempt is
+		// still true — put THAT back, not positive non-delivery. An explicit
+		// retry is admitted by an ambiguous verdict, and turning it into
+		// not-delivered here would hand automatic recovery a mission that may
+		// already have landed. The failed settlement retry snapshots current
+		// state when it runs.
+		_ = delivery.instance.RecordPendingHandoffMissionDelivery(delivery.mission, previous)
+		return fmt.Errorf("could not record the handoff mission attempt before submission; mission was not submitted: %w", err)
+	}
+	return nil
+}
+
+// waitAndSubmitHandoffMission runs the readiness wait and the submission with
+// the attempt marker between them. beginErr is non-nil only when the marker
+// could not be made durable: nothing was submitted, the admitting verdict was
+// put back, and the caller must not record the returned status over it.
+func (m *Manager) waitAndSubmitHandoffMission(delivery handoffDelivery) (status session.PromptDeliveryStatus, err, beginErr error) {
+	status, err = task.WaitForReadyAndSubmitPrompt(context.Background(), delivery.instance, delivery.mission, func() error {
+		beginErr = m.beginHandoffMissionDelivery(delivery)
+		return beginErr
+	})
+	return status, err, beginErr
+}
+
 func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
-	settle := func(event session.TransitionEvent, clearPending bool) error {
-		if err := delivery.instance.Transition(event); err != nil {
+	settle := func(transition func() error, clearPending bool) error {
+		if err := transition(); err != nil {
 			return err
 		}
 		if clearPending && !delivery.instance.ClearPendingHandoffMission(delivery.mission) {
@@ -60,9 +116,18 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		return perr
 	}
 
-	serr := task.WaitForReadyAndSendPrompt(context.Background(), delivery.instance, delivery.mission)
+	status, serr, beginErr := m.waitAndSubmitHandoffMission(delivery)
+	if beginErr != nil {
+		return beginErr
+	}
+	if evidenceErr := delivery.instance.RecordPendingHandoffMissionDelivery(delivery.mission, status); evidenceErr != nil {
+		return errors.Join(serr, evidenceErr)
+	}
+	serr = handoffDeliveryResultError(status, serr)
 	if serr == nil {
-		if err := settle(session.CommitHandoff(), true); err != nil {
+		if err := settle(func() error {
+			return delivery.instance.Transition(session.CommitHandoff())
+		}, true); err != nil {
 			return fmt.Errorf(
 				"handed %q off to %s and delivered its mission, but could not settle the replacement fence: %w",
 				delivery.title, delivery.target, err)
@@ -76,7 +141,9 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		// context — not the old create prompt or bare override — because the
 		// normal limit-resume path replays exactly Instance.Prompt.
 		delivery.instance.SetPrompt(delivery.mission)
-		if terr := settle(session.ParkHandoff(limitErr.ResetAt), true); terr != nil {
+		if terr := settle(func() error {
+			return m.parkHandoffAtLimit(delivery.instance, limitErr.ResetAt)
+		}, true); terr != nil {
 			return fmt.Errorf(
 				"handed %q off to %s, which hit a usage limit before its mission could be delivered, and failed to park the handoff: %w",
 				delivery.title, delivery.target, errors.Join(serr, terr))
@@ -109,9 +176,36 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 	// delivery constructor already cleared every predecessor-scoped limit, so the
 	// retry cannot be diverted into the outgoing provider's reset schedule.
 	m.captureAgentConversationAsync(delivery.repoID, delivery.key, delivery.instance, delivery.conversationCapture)
+	if status == session.PromptNotDelivered {
+		// Positive non-delivery keeps the replacement fence: automatic recovery
+		// owns the resend, and the row stays inert until that lands or exhausts.
+		if evidenceErr := m.persistSettlement(delivery.repoID, delivery.key, delivery.instance); evidenceErr != nil {
+			serr = errors.Join(serr, evidenceErr)
+		}
+		return fmt.Errorf(
+			"handed %q off to %s, but its mission brief could not be delivered (%w); "+
+				"the exact mission remains pending behind the replacement fence; automatic redelivery requires "+
+				"positive evidence that this mission did not land "+
+				"(the outgoing provider's limit state was cleared at the runtime boundary)",
+			delivery.title, delivery.target, serr)
+	}
+	// Ambiguous verdicts (sent-unverified, could-not-confirm): the readiness
+	// wait already proved the incoming runtime is live and answering, so the
+	// swap is complete and the replacement fence settles on that proof — not on
+	// the prompt verdict (#4429). What stays pending is the MISSION alone: the
+	// durable obligation, its recorded verdict, and the operator's
+	// confirm-or-retry exits. Keeping the fence here instead would leave the
+	// row inert exactly when its owner needs to inspect and act on it.
+	if err := settle(func() error {
+		return delivery.instance.Transition(session.CommitHandoff())
+	}, false); err != nil {
+		return fmt.Errorf(
+			"handed %q off to %s, but its mission delivery stayed unconfirmed (%w) and the replacement fence could not be settled: %w",
+			delivery.title, delivery.target, serr, err)
+	}
 	return fmt.Errorf(
-		"handed %q off to %s, but its mission brief could not be delivered (%w); "+
-			"the exact mission remains pending behind the replacement fence for a readiness-based retry "+
-			"(the outgoing provider's limit state was cleared at the runtime boundary)",
+		"handed %q off to %s, but could not confirm whether its mission brief landed (%w); "+
+			"the swap is settled and the exact mission remains pending — inspect the pane, then "+
+			"`af sessions retry-limit` resends it or `af sessions retry-limit --delivered` retires it",
 		delivery.title, delivery.target, serr)
 }

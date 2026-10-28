@@ -1,16 +1,19 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/rpc"
+	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
@@ -106,7 +109,7 @@ func DaemonSocketPath() (string, error) {
 
 // EnsureDaemon starts the daemon if the control socket is not already serving.
 func EnsureDaemon() error {
-	return ensureDaemonWithLauncher(launchDaemonProcessFn)
+	return ensureDaemonWithLauncherUntil(launchDaemonProcessFn, time.Time{})
 }
 
 var launchDaemonProcessAtFn = launchDaemonProcessAt
@@ -117,21 +120,30 @@ var launchDaemonProcessAtFn = launchDaemonProcessAt
 // still-running old process for os.Executable can resolve to a deleted inode,
 // while execPath is the freshly written binary path the new daemon must run.
 func EnsureDaemonFromPath(execPath string) error {
-	return ensureDaemonWithPolicy(func() error {
+	return ensureDaemonWithPolicyUntil(func() error {
 		return launchDaemonProcessAtFn(execPath)
-	}, false)
+	}, false, time.Time{})
 }
 
 func ensureDaemonWithLauncher(launch func() error) error {
-	return ensureDaemonWithPolicy(launch, true)
+	return ensureDaemonWithLauncherUntil(launch, time.Time{})
 }
 
-func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
-	ensureDaemonMu.Lock()
+func ensureDaemonWithLauncherUntil(launch func() error, deadline time.Time) error {
+	return ensureDaemonWithPolicyUntil(launch, true, deadline)
+}
+
+func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline time.Time) error {
+	if !lockEnsureDaemonUntil(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 	defer ensureDaemonMu.Unlock()
 
-	if err := pingDaemon(); err == nil {
+	if err := pingDaemonUntil(deadline); err == nil {
 		return nil
+	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
 	}
 	// #2212 R1: before spawning a daemon, defer to an in-progress upgrade rather
 	// than racing its recovery actor with a rival daemon. A client defers to BOTH
@@ -142,10 +154,13 @@ func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 	// bounded, so a bad journal can never wedge this launch path (which fronts
 	// every af invocation).
 	if homeDir, ok := configHomeDir(); ok {
-		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
+		switch decision, gateErr := checkUpgradeGateUntil(homeDir, false, deadline); decision {
 		case upgradeGateInProgress, upgradeGateRestoringPrevious:
 			return gateErr
 		}
+	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
 	}
 	if preferUnit {
 		configDir, configErr := config.GetConfigDir()
@@ -157,39 +172,75 @@ func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 			case ownerErr != nil:
 				log.WarningLog.Printf("could not determine daemon supervision owner; using ad-hoc launch: %v", ownerErr)
 			case owner == OwnerUnit:
-				return ensureDaemonThroughUnit(launch)
+				return ensureDaemonThroughUnitUntil(launch, deadline)
 			}
 		}
 	}
-	return ensureDaemonAdHoc(launch)
+	return ensureDaemonAdHocUntil(launch, deadline)
 }
 
-func ensureDaemonThroughUnit(launch func() error) error {
-	unitDeadline := time.Now().Add(ensureUnitStartTimeout)
-
-	unitErr := runEnsureUnitStartCommand(unitDeadline)
-	if unitErr == nil {
-		unitErr = waitForDaemonReady(unitDeadline)
-		if unitErr == nil {
-			return nil
+func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error {
+	// The ONLY condition under which an ad-hoc launch remains legitimate on a
+	// unit-claimed home: the service manager the installed unit belongs to
+	// provably cannot exist in this environment — no systemd/launchd as init,
+	// or a platform with no autostart support. There is no supervision to
+	// escape, and the fallback keeps af usable on systemd-less boxes and
+	// containers (#2373). Every other outcome below — a refused, hung,
+	// bus-unreachable, or UNINVOKABLE start — instead returns an error: a
+	// manager that COULD run the unit makes an ad-hoc spawn an unsupervised
+	// escapee that outlives the transient failure, greets the unit's next
+	// start with an already-served socket (whose ExecStart exits 0 by
+	// design), and leaves the daemon permanently outside Restart=on-failure
+	// protection (#4470).
+	presence, probeErr := probeUnitSupervisor(autostartGOOS)
+	switch presence {
+	case supervisorAbsent:
+		if admissionDeadlineExpired(deadline) {
+			return daemonAdmissionDeadlineError()
 		}
+		log.WarningLog.Printf("installed daemon service cannot run in this environment; falling back to an ad-hoc daemon: %v", probeErr)
+		if err := ensureDaemonAdHocUntil(launch, deadline); err != nil {
+			return fmt.Errorf("installed daemon service unavailable: %v; ad-hoc fallback failed: %w", probeErr, err)
+		}
+		// The ad-hoc fallback brought up a reachable daemon. EnsureDaemon's
+		// contract is "daemon reachable when I return nil", and every caller
+		// (callDaemon, withDaemonHTTP, attach) hard-returns on a non-nil
+		// result and skips the RPC — so a non-nil supervision-degradation
+		// return after a working fallback broke the first client action on
+		// hosts without a systemd user bus, self-healing only on the second
+		// call (#2373). The degradation is still surfaced where the user
+		// looks: the warning above, and af doctor / af daemon status carry a
+		// supervision-owner row. Report success.
+		return nil
+	case supervisorUnreachable:
+		// The manager provably runs this system — only this process's ability
+		// to invoke it failed (e.g. a PATH that omits the binary). `af daemon
+		// adopt` would hit the same wall, so the remedy is an environment
+		// that can reach the manager.
+		return unreachableSupervisorRefusal(autostartGOOS, probeErr)
 	}
-	log.WarningLog.Printf("failed to start daemon through its installed service; falling back to an ad-hoc daemon: %v", unitErr)
-	if err := ensureDaemonAdHoc(launch); err != nil {
-		return fmt.Errorf("installed daemon service failed: %v; ad-hoc fallback failed: %w", unitErr, err)
+
+	unitDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
+	if startErr := runEnsureUnitStartCommand(unitDeadline); startErr != nil {
+		return unitStartRefusal(autostartGOOS, startErr)
 	}
-	// The ad-hoc fallback brought up a reachable daemon. EnsureDaemon's contract is
-	// "daemon reachable when I return nil", and every caller (callDaemon,
-	// withDaemonHTTP, attach) hard-returns on a non-nil result and skips the RPC —
-	// so returning a supervision-degradation error here failed the first client
-	// action on any host without a systemd user bus even though the daemon was
-	// serving, self-healing only on the second call (#2373). The degradation is
-	// still surfaced where the user looks: the warning above, and af doctor /
-	// af daemon status carry a supervision-owner row. Report success.
+	// The manager accepted the start — but "accepted" is not "serving":
+	// after an on-failure kill the unit holds ExecStart for RestartSec, so a
+	// serving socket can legitimately be several seconds out. Wait on the
+	// whole readiness budget, not the bounded start share: an ad-hoc spawn
+	// in this window races the pending ExecStart to the socket, wins it as
+	// an unsupervised process, and is exactly the escape that left the unit
+	// inactive while an impostor served the home for hours (#4470).
+	if err := waitForUnitDaemonReady(deadline); err != nil {
+		return unitReadinessRefusal(autostartGOOS, err)
+	}
 	return nil
 }
 
-func ensureDaemonAdHoc(launch func() error) error {
+func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 	// A previous daemon version may have a PID file but no control socket. Stop
 	// it before launching the control-plane daemon so we do not run duplicate
 	// scheduler and session-monitor loops. StopDaemon is also how an
@@ -201,40 +252,150 @@ func ensureDaemonAdHoc(launch func() error) error {
 	// once the previous one is gone. A spurious spawn that races a still-live
 	// holder can never become a second daemon: the child fails fast on the
 	// exclusive startup lock (see RunDaemon / acquireHomeLock).
-	if _, err := StopDaemon(); err != nil {
+	if _, err := stopDaemonUntil(deadline); err != nil {
 		log.WarningLog.Printf("failed to stop stale daemon before launch: %v", err)
 	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 
-	// No auth-posture pre-flight here any more (#2168 Phase 0). This used to load
-	// the config and return the #2090 refusal before spawning, because a spawned
-	// daemon's stderr is discarded (startDaemonChild) and the refusal would
-	// otherwise reach the user only as the 5s "did not become ready" timeout
-	// below. There is nothing left to pre-flight: a tokenless network bind starts
-	// and serves, so this path can no longer predict a startup failure — and
-	// keeping the check would turn the very config the owner chose to allow into
-	// an `af` that refuses to run at all.
+	// No auth-posture pre-flight here (#2168 Phase 0, kept through #5137). This
+	// used to load the config and return the #2090 refusal before spawning,
+	// because a spawned daemon's stderr is discarded (startDaemonChild) and the
+	// refusal would otherwise reach the user only as the 5s "did not become
+	// ready" timeout below. There is still nothing to pre-flight: #5137 scopes
+	// the refusal to the TCP LISTENER — the daemon starts and its unix sockets
+	// work under every config — so this path can no longer predict a startup
+	// failure, and keeping the check would turn a listener posture into an `af`
+	// that refuses to run at all.
 	//
-	// The exposure is still reported, on surfaces the user is actually looking
-	// at: `af config set` warns at write time, the daemon warns once when the
-	// listener binds (startHTTPServer), and `af doctor` / `af daemon status`
-	// carry a row for it.
+	// The posture is still reported, on surfaces the user is actually looking
+	// at: `af config set` refuses the unsafe write outright (or warns when the
+	// opt-in makes it a real exposure), the daemon logs the refused bind at
+	// ERROR and reports the exposure notice when it binds an opted-in listener
+	// (startHTTPServer), and `af doctor` / `af daemon status` carry a row for
+	// each.
 
+	// Scope the spawn marker to this launch before the launcher runs: a
+	// stubbed or early-failing launcher must not let a marker from an earlier
+	// spawn attribute someone else's exit to this attempt.
+	lastDaemonSpawnPID = 0
 	if err := launch(); err != nil {
 		return err
 	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 
-	return waitForDaemonReady(time.Now().Add(daemonReadyTimeout))
+	err := waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout))
+	if err != nil && lastDaemonSpawnPID != 0 && !pidLooksAlive(lastDaemonSpawnPID) {
+		// The detached child already exited: the actionable cause is in the
+		// daemon's own log — the fail-closed startup paths (an unwritable
+		// daemon.pid, a refused bind) log at ERROR before exiting — not in
+		// this process's stderr, which a detached child never had. Name the
+		// resolved log path and quote its last ERROR line so the user is not
+		// left with only "did not become ready" while #5196 (persisting the
+		// startup error for status/doctor) is still pending. Pure diagnostic:
+		// no persisted state, and nothing here mutates the outcome.
+		err = describeExitedDaemonSpawn(err)
+	}
+	if err != nil && admissionDeadlineExpired(deadline) {
+		// Same deadline-identity rule as the unit path: a readiness wait that
+		// consumed the whole admission window must still read as a deadline to
+		// callDaemon's lifecycle-fallback guard (Codex on #4475).
+		return fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+	}
+	return err
+}
+
+// describeExitedDaemonSpawn points a readiness failure at the daemon log
+// after the spawned child has already exited. The daemon's startup failure
+// is recorded at ERROR level in its agent-factory.log (commands/root.go
+// logs `failed to start daemon` before the process exits), so the returned
+// error names the resolved log path and, when one was written since the
+// spawn, quotes the last ERROR line.
+func describeExitedDaemonSpawn(err error) error {
+	logPath := daemonLogPathFn()
+	if logPath == "" {
+		return err
+	}
+	if line := lastDaemonLogErrorLine(logPath, lastDaemonSpawnLogOffset); line != "" {
+		return fmt.Errorf("%w — the spawned daemon exited during startup; the startup failure is recorded in %s (last error logged: %q)", err, logPath, line)
+	}
+	// No new ERROR line since the spawn marker: the child either died
+	// before logging or could not open the log at all — log.Initialize
+	// falls back to stderr, which a detached spawn discards. Name the log
+	// path as the diagnostic target without claiming a record exists there.
+	return fmt.Errorf("%w — the spawned daemon exited during startup without logging a failure; its log would be at %s (child stderr is discarded, so check the home is writable and has free space)", err, logPath)
+}
+
+// daemonLogErrorQuoteCap bounds the quoted ERROR line so a long failure
+// message does not flood the caller's error text.
+const daemonLogErrorQuoteCap = 600
+
+// lastDaemonLogErrorLine returns the last log line carrying the ERROR level
+// marker written at or after offset — the spawn marker's log-size snapshot —
+// so the quote is the failing daemon's own startup error, not a stale line
+// from an earlier run. "" means nothing quotable (no log, no new content, or
+// a file that shrank below the recorded offset).
+func lastDaemonLogErrorLine(logPath string, offset int64) string {
+	f, err := os.Open(logPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	if offset < 0 || offset > info.Size() {
+		offset = 0
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return ""
+	}
+	const tailCap = 256 << 10
+	data, err := io.ReadAll(io.LimitReader(f, tailCap))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	if offset > 0 {
+		// The offset can land mid-line (the log's last byte was not a
+		// newline); drop the partial first line rather than quote a
+		// fragment. A '\n' immediately before the offset means the first
+		// line read is complete and must be kept.
+		var prev [1]byte
+		if _, err := f.ReadAt(prev[:], offset-1); err != nil || prev[0] != '\n' {
+			i := strings.IndexByte(string(data), '\n')
+			if i < 0 {
+				return ""
+			}
+			data = data[i+1:]
+		}
+	}
+	last := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "] ERROR:") {
+			last = strings.TrimSpace(line)
+		}
+	}
+	if len(last) > daemonLogErrorQuoteCap {
+		last = last[:daemonLogErrorQuoteCap] + "…"
+	}
+	return last
 }
 
 func waitForDaemonReady(deadline time.Time) error {
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := pingDaemon(); err == nil {
+		if err := pingDaemonUntil(deadline); err == nil {
 			return nil
 		} else {
 			lastErr = err
 		}
-		time.Sleep(50 * time.Millisecond)
+		if !waitUntilAdmissionDeadline(deadline, 50*time.Millisecond) {
+			break
+		}
 	}
 	if lastErr == nil {
 		lastErr = errors.New("readiness deadline elapsed before the daemon could be probed")
@@ -247,6 +408,11 @@ func pingDaemon() error {
 	return err
 }
 
+func pingDaemonUntil(deadline time.Time) error {
+	var resp PingResponse
+	return callDaemonNoEnsureBefore("Ping", PingRequest{}, &resp, deadline, true)
+}
+
 // pingDaemonResponse pings the daemon and returns its full reply, so callers
 // that need the reported version (`af doctor`'s skew check) read it from the
 // same probe that establishes liveness. Never ensures a daemon: doctor is
@@ -257,43 +423,58 @@ func pingDaemonResponse() (PingResponse, error) {
 	return resp, err
 }
 
-// daemonAdmissionRetryWait bounds how long RPC clients wait for a transient
-// lifecycle admission refusal before surfacing it. It mirrors
-// daemonReadyTimeout, the wait callers already tolerated pre-#829 when
-// EnsureDaemon polled for the socket: a local restore or probation release
-// completes inside this window so calls just work, while a stuck transition
-// fails fast with its actionable message instead of hanging the caller.
-// daemonAdmissionRetryPoll is the retry cadence.
-const (
-	daemonAdmissionRetryWait = daemonReadyTimeout
-	daemonAdmissionRetryPoll = 100 * time.Millisecond
-)
-
-func callDaemon(method string, req any, resp any) error {
-	if err := EnsureDaemon(); err != nil {
-		return err
-	}
-	err := callDaemonNoEnsure(method, req, resp)
-	// A warming daemon rejects state-dependent RPCs until restore completes;
-	// an upgrade candidate rejects mutations until its validator releases
-	// probation. Both are alive and retryable, so callers share one bounded
-	// retry rather than growing per-call-site lifecycle logic.
-	deadline := time.Now().Add(daemonAdmissionRetryWait)
-	for IsDaemonAdmissionRetryable(err) && time.Now().Before(deadline) {
-		time.Sleep(daemonAdmissionRetryPoll)
-		err = callDaemonNoEnsure(method, req, resp)
-	}
-	return err
+func callDaemonNoEnsure(method string, req any, resp any) error {
+	return callDaemonNoEnsureUntil(method, req, resp, time.Time{})
 }
 
-func callDaemonNoEnsure(method string, req any, resp any) error {
+type daemonCallAttempt struct {
+	err            error
+	requestStarted bool
+}
+
+// callDaemonNoEnsureUntil bounds only the retry dial. Once a daemon accepts the
+// RPC, handler execution keeps its historical method-specific lifetime: session
+// creation and other legitimate operations may outlive the admission window.
+func callDaemonNoEnsureUntil(method string, req any, resp any, deadline time.Time) error {
+	return callDaemonNoEnsureAttemptBefore(method, req, resp, deadline, false).err
+}
+
+func callDaemonNoEnsureBefore(method string, req any, resp any, deadline time.Time, boundRPC bool) error {
+	return callDaemonNoEnsureAttemptBefore(method, req, resp, deadline, boundRPC).err
+}
+
+// callDaemonNoEnsureAttemptUntil retains whether net/rpc started the request.
+// A failed dial proves that the handler never ran and is therefore the only
+// transport failure callDaemon may replay. Once Client.Call starts, a lost
+// response is ambiguous: the handler may already have committed its mutation.
+func callDaemonNoEnsureAttemptUntil(method string, req any, resp any, deadline time.Time) daemonCallAttempt {
+	return callDaemonNoEnsureAttemptBefore(method, req, resp, deadline, false)
+}
+
+func callDaemonNoEnsureAttemptBefore(method string, req any, resp any, deadline time.Time, boundRPC bool) daemonCallAttempt {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
-		return err
+		return daemonCallAttempt{err: err}
 	}
-	conn, err := net.DialTimeout("unix", socketPath, daemonDialTimeout)
+	dialTimeout := daemonDialTimeout
+	if !deadline.IsZero() {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return daemonCallAttempt{err: daemonAdmissionDeadlineError()}
+		}
+		if remaining < dialTimeout {
+			dialTimeout = remaining
+		}
+	}
+	conn, err := net.DialTimeout("unix", socketPath, dialTimeout)
 	if err != nil {
-		return err
+		return daemonCallAttempt{err: err}
+	}
+	if boundRPC && !deadline.IsZero() {
+		if err := conn.SetDeadline(deadline); err != nil {
+			_ = conn.Close()
+			return daemonCallAttempt{err: err}
+		}
 	}
 	client := rpc.NewClient(conn)
 	defer client.Close()
@@ -304,9 +485,9 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 		// new CLI does not read "failed" and retry a durable task change into a
 		// duplicate. Skew-only; see committedFromLegacyRPCError.
 		if committed := committedFromLegacyRPCError(err); committed != nil {
-			return committed
+			return daemonCallAttempt{err: committed, requestStarted: true}
 		}
-		return err
+		return daemonCallAttempt{err: err, requestStarted: true}
 	}
 	// A committed mutation answers OK and reports itself in the response
 	// envelope: net/rpc reduces a concrete error to rpc.ServerError and keeps
@@ -317,10 +498,13 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 		CommittedOutcome() (bool, string)
 	}); ok {
 		if committed, warning := carrier.CommittedOutcome(); committed {
-			return &rpcMutationCommittedError{err: errors.New(warning)}
+			return daemonCallAttempt{
+				err:            &rpcMutationCommittedError{err: errors.New(warning)},
+				requestStarted: true,
+			}
 		}
 	}
-	return nil
+	return daemonCallAttempt{requestStarted: true}
 }
 
 // committedPrefixes are the wire strings a pre-#3036 daemon uses to mark a
@@ -354,174 +538,11 @@ func committedFromLegacyRPCError(err error) error {
 
 type rpcMutationCommittedError struct{ err error }
 
+var _ apiproto.MutationCommittedError = (*rpcMutationCommittedError)(nil)
+
 func (e *rpcMutationCommittedError) Error() string           { return e.err.Error() }
 func (e *rpcMutationCommittedError) Unwrap() error           { return e.err }
 func (e *rpcMutationCommittedError) MutationCommitted() bool { return true }
-
-// RequestApplyConfig asks a RUNNING daemon to apply the on-disk global config to
-// itself in place (#2480). It deliberately never STARTS a daemon: a config write
-// with no daemon running has nothing to apply live and takes effect on the next
-// start, so this uses the no-ensure path and returns the dial error when none is
-// reachable (the caller treats that as "saved, nothing running to apply").
-func RequestApplyConfig() (ApplyConfigResponse, error) {
-	var resp ApplyConfigResponse
-	err := callDaemonNoEnsure("ApplyConfig", ApplyConfigRequest{}, &resp)
-	return resp, err
-}
-
-// SetGlobalConfigValue writes one global config key through a running daemon's
-// SetConfigValue — the same admission-gated handler the web form posts to — so
-// every first-class save surface consults the same lifecycle predicate
-// (upgrade probation, quiescing) and a refusal lands BEFORE anything reaches
-// disk (#3231). The daemon applies an accepted write to itself in place and
-// reports the per-key effect notice, so callers echo its answer rather than
-// computing their own.
-//
-// With no daemon answering the control socket it falls back to the direct
-// local write (config.SetGlobalConfigValue) — `af config set` must keep
-// working with the daemon stopped. The fallback is decided by the DIAL, never
-// by the daemon's answer: once a daemon has answered, an error (validation or
-// admission refusal) is final, because writing locally after a refusal would
-// reopen exactly the split #3231 closes. It never STARTS a daemon, like
-// RequestApplyConfig.
-func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
-	var resp SetConfigValueResponse
-	if socketPath, err := DaemonSocketPath(); err == nil {
-		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
-			client := rpc.NewClient(conn)
-			defer client.Close()
-			// The flat alias is the version-skew wire spelling: an older daemon's
-			// SetConfigValue allowlist predates the grouped TOML name, while a new
-			// daemon canonicalizes the same alias before writing. Normalize its
-			// echo so new callers always see the canonical public key.
-			wireKey := config.LegacyConfigKey(key)
-			callErr := client.Call(controlServiceName+".SetConfigValue",
-				SetConfigValueRequest{Key: wireKey, Value: value}, &resp)
-			if callErr == nil && resp.Result != nil {
-				resp.Result.Key = config.CanonicalConfigKey(resp.Result.Key)
-			}
-			if callErr == nil || !isRPCMethodMissing(callErr) {
-				return resp, callErr
-			}
-			// A daemon old enough to lack SetConfigValue (pre-#1960) expects its
-			// clients to write locally and poke ApplyConfig; fall through to that
-			// sequence. Skew-only — delete once the oldest supported daemon
-			// serves SetConfigValue.
-		}
-	}
-	// A failed dial does not prove "no upgrade in flight": the hand-off leaves a
-	// window with NO daemon on the socket — the quiescing daemon has exited and
-	// the committed candidate has not bound yet — and a local write landing there
-	// bypasses the very admission this function exists to consult, mutating
-	// config after the candidate validated (and loaded) it. The durable upgrade
-	// journal covers that window; consult it exactly as EnsureDaemon does, and
-	// refuse the fallback only while a forward upgrade or rollback restore is
-	// provably live (fail-open otherwise — a bad journal must not wedge
-	// `af config set`, same doctrine as the launch path).
-	if homeDir, ok := configHomeDir(); ok {
-		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
-		case upgradeGateInProgress:
-			return SetConfigValueResponse{}, fmt.Errorf(
-				"config change refused during daemon upgrade handoff: %w; retry after the upgrade finishes", gateErr)
-		case upgradeGateRestoringPrevious:
-			return SetConfigValueResponse{}, fmt.Errorf(
-				"config change refused while rollback restores the previous daemon: %w; retry after rollback recovery finishes", gateErr)
-		}
-	}
-	result, err := config.SetGlobalConfigValue(key, value)
-	if err != nil {
-		return SetConfigValueResponse{}, err
-	}
-	resp = SetConfigValueResponse{Result: result}
-	applyResp, applyErr := RequestApplyConfig()
-	applied := applyErr == nil
-	if applied {
-		resp.Applied = applyResp.Applied
-		resp.Pending = applyResp.Pending
-		resp.Warnings = applyResp.Warnings
-	}
-	// Mirror the notice logic of controlServer.SetConfigValue: a socket key whose
-	// live rebind failed did not apply, so it reports deferred, not applied.
-	if applied && slices.Contains(applyResp.FailedListenerKeys, result.Key) {
-		resp.RestartNotice = config.ListenerRebindDeferredNotice(result.Key)
-	} else {
-		resp.RestartNotice = config.EffectNotice(result.Key, applied)
-	}
-	return resp, nil
-}
-
-// UnsetGlobalConfigValue routes a global alias removal through a running
-// daemon's mutation-admission gate. With no daemon it performs the same locked
-// local edit and best-effort live apply used by SetGlobalConfigValue.
-func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
-	var resp UnsetConfigValueResponse
-	if socketPath, err := DaemonSocketPath(); err == nil {
-		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
-			client := rpc.NewClient(conn)
-			defer client.Close()
-			callErr := client.Call(controlServiceName+".UnsetConfigValue",
-				UnsetConfigValueRequest{Key: key}, &resp)
-			if callErr == nil || !isRPCMethodMissing(callErr) {
-				return resp, callErr
-			}
-		}
-	}
-	if homeDir, ok := configHomeDir(); ok {
-		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
-		case upgradeGateInProgress:
-			return UnsetConfigValueResponse{}, fmt.Errorf(
-				"config change refused during daemon upgrade handoff: %w; retry after the upgrade finishes", gateErr)
-		case upgradeGateRestoringPrevious:
-			return UnsetConfigValueResponse{}, fmt.Errorf(
-				"config change refused while rollback restores the previous daemon: %w; retry after rollback recovery finishes", gateErr)
-		}
-	}
-	result, err := config.UnsetGlobalConfigValue(key)
-	if err != nil {
-		return UnsetConfigValueResponse{}, err
-	}
-	resp.Result = result
-	applyResp, applyErr := RequestApplyConfig()
-	applied := applyErr == nil
-	if applied {
-		resp.Applied = applyResp.Applied
-		resp.Pending = applyResp.Pending
-		resp.Warnings = applyResp.Warnings
-	}
-	resp.RestartNotice = config.EffectNotice(result.Key, applied)
-	return resp, nil
-}
-
-// isRPCMethodMissing reports whether a net/rpc call failed because the serving
-// daemon does not register the method at all — the version-skew case, distinct
-// from a handler that ran and refused. net/rpc flattens both into
-// rpc.ServerError, so the stable "can't find" prefixes are the only signal.
-func isRPCMethodMissing(err error) bool {
-	var srv rpc.ServerError
-	if !errors.As(err, &srv) {
-		return false
-	}
-	return strings.HasPrefix(string(srv), "rpc: can't find method") ||
-		strings.HasPrefix(string(srv), "rpc: can't find service")
-}
-
-// RequestApplyTheme asks a RUNNING daemon to reload only the palette. Like the
-// full apply path it never starts a daemon; a later daemon start reads the file.
-// No daemon and a pre-ApplyTheme daemon are therefore benign. Once a daemon
-// answers the socket, however, its refusal is final: ping distinguishes that
-// active answer from absence so the caller cannot mount a TUI with a palette
-// newer than the one the daemon is still serving to web clients.
-func RequestApplyTheme() (ApplyThemeResponse, error) {
-	var resp ApplyThemeResponse
-	err := callDaemonNoEnsure("ApplyTheme", ApplyThemeRequest{}, &resp)
-	if err == nil || isRPCMethodMissing(err) {
-		return resp, nil
-	}
-	if _, pingErr := pingDaemonResponse(); pingErr != nil {
-		return resp, nil
-	}
-	return resp, err
-}
 
 // CreateSession asks the daemon to create, start, and persist a session.
 func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
@@ -534,6 +555,15 @@ func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 		return nil, err
 	}
 	return &resp.Instance, err
+}
+
+// PingCapabilities asks the daemon for its Ping reply, ensuring one is running
+// like every other control call. A client reads a capability bit from it before
+// sending a field an older daemon would silently drop (HostPick).
+func PingCapabilities() (PingResponse, error) {
+	var resp PingResponse
+	err := callDaemon("Ping", PingRequest{}, &resp)
+	return resp, err
 }
 
 // ListBackends asks the daemon which runtimes a create against req.RepoPath may
@@ -550,6 +580,17 @@ func ListBackends(req ListBackendsRequest) (ListBackendsResponse, error) {
 	var resp ListBackendsResponse
 	if err := callDaemon("ListBackends", req, &resp); err != nil {
 		return ListBackendsResponse{}, err
+	}
+	return resp, nil
+}
+
+// CheckHost asks the daemon to probe a listed host (empty: every listed host)
+// and record its readiness. It dials the host, so unlike ListBackends it is not
+// free; the daemon refuses a name outside the global host list.
+func CheckHost(req CheckHostRequest) (CheckHostResponse, error) {
+	var resp CheckHostResponse
+	if err := callDaemon("CheckHost", req, &resp); err != nil {
+		return CheckHostResponse{}, err
 	}
 	return resp, nil
 }
@@ -604,8 +645,7 @@ func ReorderTab(req ReorderTabRequest) (string, int, error) {
 }
 
 // The TUI's control + read path moved onto the HTTP apiclient in #1592 Phase 2
-// PR3, so the net/rpc client wrappers only the TUI called — SetPRInfo (later
-// replaced by HTTP RefreshPRInfo in #3296), PauseStatusPoll, ResumeStatusPoll
+// PR3, so the net/rpc client wrappers only the TUI called — PauseStatusPoll, ResumeStatusPoll
 // (here) and ResumeFromLimit /
 // SnapshotWithAlarms (in limit.go / snapshot.go) — are gone.
 // The controlServer handlers stay: the gob control socket still SERVES every
@@ -622,24 +662,18 @@ func ReorderTab(req ReorderTabRequest) (string, int, error) {
 // (#1029 PR 2).
 var ErrDaemonUnavailable = errors.New("daemon not available")
 
-// PreviewSession captures one session tab through the daemon's sole Preview
-// handler. Unlike ListTasksNoSpawn, previewing a live terminal is an active
-// read: it ensures the daemon is running and waits through daemon warm-up, just
-// like the other session control calls.
-func PreviewSession(req PreviewRequest) (content string, gone, tabGone bool, err error) {
-	resp, err := PreviewSessionSnapshot(req)
-	if err != nil {
-		return "", false, false, err
-	}
-	return resp.Content, resp.Gone, resp.TabGone, nil
-}
-
-// PreviewSessionSnapshot is PreviewSession returning the WHOLE response, mirroring
-// apiclient.PreviewSnapshot on the remote side.
+// PreviewSessionSnapshot captures one session tab through the daemon's sole
+// Preview handler and returns the WHOLE response, mirroring
+// apiclient.PreviewSnapshot on the remote side. Unlike ListTasksNoSpawn,
+// previewing a live terminal is an active read: it ensures the daemon is
+// running and waits through daemon warm-up, just like the other session control
+// calls.
 //
-// It exists because both transports already decode every field and only these
-// wrappers narrowed them away — so a caller that needs to know a capture was
-// partial (#3169) had no way to ask, on either path.
+// It returns everything because both transports already decode every field and
+// only the old narrowing wrappers threw them away — so a caller that needs to
+// know a capture was partial (#3169) had no way to ask, on either path. That
+// narrowing wrapper (PreviewSession) kept no callers once api/sessions.go moved
+// here, and #3734 removed it.
 func PreviewSessionSnapshot(req PreviewRequest) (PreviewResponse, error) {
 	var resp PreviewResponse
 	if err := callDaemon("Preview", req, &resp); err != nil {
@@ -649,12 +683,22 @@ func PreviewSessionSnapshot(req PreviewRequest) (PreviewResponse, error) {
 }
 
 // KillSession asks the daemon to kill a session and remove it from storage.
+//
+// callDaemon classifies the committed outcome generically. On the committed
+// path the kill's durable tombstone landed but a post-commit
+// teardown/storage/delete follow-up failed, and the tombstoned row is retained
+// for the asynchronous reap — that is NOT a clean failure a caller may freely
+// retry. Preserve the committed error (do not swallow it as nil) so the CLI's
+// apiclient.IsMutationCommitted branch reports it as success-with-warning,
+// the way ArchiveSession preserves its committed error for the same outcome
+// class (#3252).
 func KillSession(req KillSessionRequest) error {
 	var resp KillSessionResponse
-	if err := callDaemon("KillSession", req, &resp); err != nil {
-		return err
+	err := callDaemon("KillSession", req, &resp)
+	if err != nil && !isMutationCommitted(err) {
+		return err // clean failure → caller hard-fails
 	}
-	return nil
+	return err // success (nil) OR committed path → caller classifies via IsMutationCommitted
 }
 
 // ArchiveSession asks the daemon to archive a session (#1028) and returns the
@@ -671,28 +715,24 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	return resp.ArchivedPath, err
 }
 
-// ResumeFromLimit asks the daemon to retry a session parked at a usage-limit
-// wall. The TUI and web reach the identical controlServer handler over HTTP;
-// this wrapper gives the CLI its existing gob-control-socket transport without
-// duplicating the recovery action.
-func ResumeFromLimit(req ResumeFromLimitRequest) error {
-	var resp ResumeFromLimitResponse
-	if err := callDaemon("ResumeFromLimit", req, &resp); err != nil {
-		return err
-	}
-	if !resp.OK {
-		return fmt.Errorf("resume was not performed: %s", resp.Reason)
-	}
-	return nil
-}
-
-// HandoffSession asks the daemon to continue a session under a different agent,
-// in place (#2013): swap the agent program, keep the worktree and branch, and
-// deliver a mission brief to the incoming agent.
-func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
-	var resp HandoffSessionResponse
-	if err := callDaemon("HandoffSession", req, &resp); err != nil {
-		return HandoffSessionResponse{}, err
+// PruneSessions asks the daemon to evaluate archived sessions against a
+// prune request (#5136). Slice 1 is strictly read-only — a dry-run listing of
+// the reclaimable sessions; the apply call lands in the follow-up issue.
+//
+// The read must NOT spawn a daemon (#5136 Codex round 6): a launch writes
+// sockets, locks, and logs and runs session recovery — far more side effects
+// than a listing justifies. The no-ensure attempt dials the existing socket
+// only; a dial that never reached the handler reports as ErrDaemonUnavailable
+// (raw dial errors would leak socket paths into user-facing output), while a
+// handler-side error — validation, readiness — stays verbatim.
+func PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
+	var resp PruneSessionsResponse
+	attempt := callDaemonNoEnsureAttemptUntil("PruneSessions", req, &resp, time.Time{})
+	if attempt.err != nil {
+		if !attempt.requestStarted {
+			return PruneSessionsResponse{}, ErrDaemonUnavailable
+		}
+		return PruneSessionsResponse{}, attempt.err
 	}
 	return resp, nil
 }
@@ -735,10 +775,56 @@ func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
 	return resp.Project, nil
 }
 
-// SendPrompt asks the daemon to send a prompt to an existing session.
-func SendPrompt(req SendPromptRequest) error {
-	_, err := SendPromptWithStatus(req)
-	return err
+// ErrGuardedRebindUnsupported is returned for a guarded rebind sent to a
+// daemon that predates the precondition: that daemon drops expected_root and
+// expected_checkout_id as unknown fields and would apply the rebind
+// unconditionally — exactly the silent last-writer-wins the caller asked a
+// precondition to prevent (#4822 spec). Refusing, with a message that names
+// the upgrade path, beats believing the precondition was honored.
+var ErrGuardedRebindUnsupported = errors.New("this daemon predates guarded rebinds — upgrade it, or rebind from the daemon host")
+
+// callRebindProjectRPC sends a rebind under the method name the caller's guard
+// picked. A var so tests can stand in a pre-guard daemon's "can't find method"
+// answer without a real socket.
+var callRebindProjectRPC = func(method string, req RebindProjectRequest, resp *RebindProjectResponse) error {
+	return callDaemon(method, req, resp)
+}
+
+// RebindProject asks the daemon to move a registered project's stable identity
+// to the checkout at req.Path (`af projects rebind`) — the same single-writer
+// registry path RegisterProject takes, so a running client is told through
+// projects.changed rather than discovering the move on a later read.
+//
+// A request carrying expected_root or expected_checkout_id is guarded (#4822)
+// and goes to RebindProjectGuarded: the METHOD NAME is the capability check,
+// atomic with the mutation. A daemon that lacks the method answers "can't find
+// method" — definitive proof the precondition would be ignored — which this
+// maps to ErrGuardedRebindUnsupported. No Ping probe decides: a probe is never
+// affine with the mutation it predicts (#4888 review). An unguarded request —
+// the explicit CLI form — keeps last-writer-wins on every daemon vintage.
+func RebindProject(req RebindProjectRequest) (config.Project, error) {
+	method := "RebindProject"
+	if req.ExpectedRoot != "" || req.ExpectedCheckoutID != "" {
+		method = "RebindProjectGuarded"
+	}
+	var resp RebindProjectResponse
+	if err := callRebindProjectRPC(method, req, &resp); err != nil {
+		if method == "RebindProjectGuarded" && isRPCMethodNotFoundErr(err) {
+			return config.Project{}, ErrGuardedRebindUnsupported
+		}
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
+// SetProjectColor asks the daemon to set or clear a registered project's
+// display color (`af projects color`).
+func SetProjectColor(req SetProjectColorRequest) (config.Project, error) {
+	var resp SetProjectColorResponse
+	if err := callDaemon("SetProjectColor", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
 }
 
 // SendPromptWithStatus asks the daemon to send a prompt and returns the
@@ -756,28 +842,17 @@ func SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, 
 	return resp.Status, nil
 }
 
-// DeliverPrompt asks the daemon to deliver a prompt to a target session,
-// auto-creating it when missing. It returns the recorded status ("started" or
-// "sent"). Unlike a bare CreateSession-then-SendPrompt from the caller, the
-// whole create-or-send decision runs under the daemon's per-target lock, so
+// DeliverPromptWithStatus asks the daemon to deliver a prompt to a target
+// session, auto-creating it when missing, and returns both the task lifecycle
+// status ("started", "sent", or a task-only park) and the delivery
+// observation. Unlike a bare CreateSession-then-SendPrompt, the whole
+// create-or-send decision runs under the daemon's per-target lock, so
 // concurrent deliveries to the same shared target never drop a prompt (#865).
-func DeliverPrompt(req DeliverPromptRequest) (string, error) {
-	status, _, err := DeliverPromptWithStatus(req)
-	return status, err
-}
-
-// DeliverPromptWithStatus returns both the task lifecycle status and the
-// delivery observation. Older daemons omit DeliveryStatus, which is honest
-// could-not-confirm rather than an inferred success.
+// Older daemons omit DeliveryStatus, which is honest could-not-confirm rather
+// than an inferred success.
 func DeliverPromptWithStatus(req DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
-	var resp DeliverPromptResponse
-	if err := callDaemon("DeliverPrompt", req, &resp); err != nil {
-		return "", session.PromptCouldNotConfirm, err
-	}
-	if !resp.DeliveryStatus.Valid() {
-		resp.DeliveryStatus = session.PromptCouldNotConfirm
-	}
-	return resp.Status, resp.DeliveryStatus, nil
+	result, err := deliverPromptForTaskRPC(req)
+	return result.status, result.deliveryStatus, err
 }
 
 // ListTasksNoSpawn returns the daemon's authoritative task list WITHOUT
@@ -799,18 +874,21 @@ func ListTasksNoSpawn() ([]task.Task, error) {
 // every callDaemon path it ensures the daemon is running first, so adding a task
 // also brings the scheduler up — a task is not schedulable without a running
 // daemon.
-func AddTask(t task.Task) error {
+// actor names the calling surface for the task's audit trail (#3623); pass
+// task.ActorUnknown from a caller that has no surface to name.
+func AddTask(t task.Task, actor task.Actor) error {
 	var resp AddTaskResponse
-	return callDaemon("AddTask", AddTaskRequest{Task: t}, &resp)
+	return callDaemon("AddTask", AddTaskRequest{Task: t, Actor: string(actor)}, &resp)
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the
 // given id and re-arm its schedule, returning the merged record (#1700). Only
 // the patch's non-nil fields are written, so a single-field edit never clobbers
 // a concurrent edit another client made to a different field.
-func UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+// actor names the calling surface for the task's audit trail (#3623).
+func UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
 	var resp UpdateTaskResponse
-	if err := callDaemon("UpdateTask", UpdateTaskRequest{ID: id, Update: update, Expect: expect}, &resp); err != nil {
+	if err := callDaemon("UpdateTask", UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor)}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil
@@ -836,6 +914,52 @@ func RestartTask(id string, expect task.ProjectExpectation) error {
 func TriggerTask(id string, expect task.ProjectExpectation) error {
 	var resp TriggerTaskResponse
 	return callDaemon("TriggerTask", TriggerTaskRequest{ID: id, Expect: expect}, &resp)
+}
+
+// ListAccounts reads the registered accounts and their logged-in state from the
+// daemon that owns them.
+func ListAccounts(req ListAccountsRequest) (ListAccountsResponse, error) {
+	var resp ListAccountsResponse
+	if err := callDaemon("ListAccounts", req, &resp); err != nil {
+		return ListAccountsResponse{}, err
+	}
+	return resp, nil
+}
+
+// QuotaReport reads the daemon host's per-agent usage/quota report (#2983) —
+// the same records→quota.Build read `af quota` makes locally, served so a
+// remote or UI client cannot paint a different answer.
+func QuotaReport(req QuotaReportRequest) (QuotaReportResponse, error) {
+	var resp QuotaReportResponse
+	if err := callDaemon("QuotaReport", req, &resp); err != nil {
+		return QuotaReportResponse{}, err
+	}
+	return resp, nil
+}
+
+// RegisterAccount creates an account's credential directory through the daemon,
+// without logging in.
+func RegisterAccount(req RegisterAccountRequest) (RegisterAccountResponse, error) {
+	var resp RegisterAccountResponse
+	if err := callDaemon("RegisterAccount", req, &resp); err != nil {
+		return RegisterAccountResponse{}, err
+	}
+	return resp, nil
+}
+
+// AccountLogin asks the daemon to open an agent's own login flow in a bare tmux
+// session scoped to one account, registering the account if it does not exist.
+//
+// callDaemon carries the warm-up retry and EnsureDaemon, so running the verb on
+// a box whose daemon is not up yet starts it and waits rather than failing —
+// which matters here because a login is often the very first thing a new install
+// does.
+func AccountLogin(req AccountLoginRequest) (AccountLoginResponse, error) {
+	var resp AccountLoginResponse
+	if err := callDaemon("AccountLogin", req, &resp); err != nil {
+		return AccountLoginResponse{}, err
+	}
+	return resp, nil
 }
 
 // SpawnConfigAgent asks the daemon to start a config agent in a bare tmux session

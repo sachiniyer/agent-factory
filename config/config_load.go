@@ -25,12 +25,19 @@ import (
 //     with no error. This is the first-run path and must keep working.
 //   - A contentless config file (zero-byte or, for TOML, an empty document such
 //     as whitespace/BOM/comments only)
-//     with no other config present is the fingerprint of a failed/partial
-//     first-run write (#864, a regression of #838): the stub is removed and
-//     defaults regenerated rather than wedging every future startup. A
-//     contentless config.toml sitting beside a real config.json is instead a
-//     hand-made shadow and stays a loud error, so re-materializing can never
-//     silently discard the config.json's settings.
+//     with no other config present is ambiguous: it is either the fingerprint
+//     of a failed/partial first-run write (#864, a regression of #838) or a
+//     LIVE file whose in-place rewrite is half done (#4483) — shell `>` and
+//     in-place editors truncate first, producing exactly this shape, and
+//     nothing about the file can tell the two apart. A read must never
+//     delete user data, so the load NEVER removes or rewrites the stub: it
+//     returns defaults in memory with a warning. The failed-write case
+//     still recovers — startup runs on defaults rather than wedging — and
+//     the stub heals on the next config write; a writer that was mid-edit
+//     keeps its file. A contentless config.toml sitting beside a real
+//     config.json is instead a hand-made shadow and stays a loud error, so
+//     re-materializing can never silently discard the config.json's
+//     settings.
 //   - A file exists but cannot be read (permission denied, disk error), or is
 //     non-empty yet fails to parse → an error naming the file and the
 //     underlying cause is returned. Defaults are NOT substituted, since doing
@@ -43,6 +50,49 @@ import (
 // This mirrors the error-propagation contract already adopted by
 // LoadRepoConfig, where only os.IsNotExist yields defaults.
 func LoadConfig() (*Config, error) {
+	cfg, _, err := LoadConfigWithDigest()
+	return cfg, err
+}
+
+// LoadConfigWithDigest is LoadConfig plus the digest of the config.toml bytes it
+// parsed, for the one caller that has to prove WHICH file it loaded: a live
+// config apply, whose save then compares the digest against the bytes it wrote
+// to decide whether it may claim the daemon is serving this save's value (#4247).
+//
+// The digest is Known only on the canonical path — the single os.ReadFile of
+// config.toml in loadConfig below. Every other path (first-run materialization,
+// a legacy config.json conversion, an empty stub answered from memory) leaves it
+// unknown, because none of them parsed a config.toml a save could have written.
+// Unknown never matches, so those loads confirm nothing rather than confirming
+// wrongly.
+//
+// The digest describes what was READ, which is the question a save is asking.
+// persistAppearanceMigration below may rewrite the file afterwards; that does not
+// change which bytes this load parsed, and so does not change what the running
+// daemon is serving.
+func LoadConfigWithDigest() (*Config, ConfigDigest, error) {
+	if policy := activeAgentPolicy(); policy != nil {
+		return policy.globalConfig(), ConfigDigest{}, nil
+	}
+	var digest ConfigDigest
+	cfg, err := loadConfig(&digest)
+	if err != nil {
+		return nil, ConfigDigest{}, err
+	}
+	// All successful normal paths converge here after releasing conversion locks,
+	// including a concurrent winner adopted by conversion or materialization.
+	cfg, err = persistAppearanceMigration(cfg)
+	if err != nil {
+		return nil, ConfigDigest{}, err
+	}
+	return cfg, digest, nil
+}
+
+// loadConfig reports into readDigest, when non-nil, the digest of the canonical
+// config.toml read — and only there. Every other return leaves it untouched at
+// its unknown zero value, which is the honest answer: no config.toml a save
+// wrote was parsed on those paths.
+func loadConfig(readDigest *ConfigDigest) (*Config, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config directory: %w", err)
@@ -60,6 +110,19 @@ func LoadConfig() (*Config, error) {
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyTomlPath := prettyHomePath(tomlPath)
 
+	// A DANGLING symlink reads as ENOENT, which would send this straight past
+	// the JSON branch into materializeDefaultConfig — whose exclusive create then
+	// fails EEXIST on the link itself, and whose failed reread falls through to
+	// an in-memory DefaultConfig with no error at all. af would start on defaults
+	// while the operator believes it is reading their dotfiles config, silently
+	// changing every setting including the listener (#3660 review).
+	//
+	// It is the same broken link AtomicWriteFileFollowingLink refuses, so it is
+	// refused the same way, naming both ends.
+	if err := RefuseDanglingConfigLink(tomlPath); err != nil {
+		return nil, err
+	}
+
 	// 1. config.toml is canonical whenever it exists.
 	tomlData, tomlErr := os.ReadFile(tomlPath)
 	if tomlErr == nil {
@@ -69,21 +132,40 @@ func LoadConfig() (*Config, error) {
 			// materializes TOML: it is either a failed first-run write (#864)
 			// or a hand-made stub. Disambiguate by config.json — with a real
 			// config.json beside it, re-materializing would silently discard
-			// those settings, so keep the loud shadow error; with no
-			// config.json it is a failed first-run stub, so drop it and
-			// re-materialize, exactly as the JSON path does for an empty
-			// config.json.
+			// those settings, so keep the loud shadow error.
 			if jsonExists {
 				return parseConfigTOML(tomlData, prettyTomlPath)
 			}
-			if rmErr := os.Remove(tomlPath); rmErr != nil && !os.IsNotExist(rmErr) {
-				return nil, fmt.Errorf("failed to remove empty config file %s: %w", prettyTomlPath, rmErr)
+			// A SYMLINK is never a failed first-run write — that path creates a
+			// regular file — so the #864 ambiguity this branch disambiguates does
+			// not arise, and removing it would unlink the operator's dotfiles
+			// arrangement just for starting af (#3660 review). Contentless through
+			// a link is a hand-made stub by construction: report it loudly and
+			// leave the link alone.
+			if info, lerr := os.Lstat(tomlPath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+				return parseConfigTOML(tomlData, prettyTomlPath)
 			}
-			return materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
+			// What remains is either a failed first-run stub or a live file
+			// whose in-place rewrite is half done — and no property of the
+			// file distinguishes them (#4483). Removing it here unlinked the
+			// writer's descriptor: its content landed in an unlinked inode
+			// and re-materialized defaults won, silently replacing the user's
+			// entire config while LoadConfig returned nil. A read must never
+			// delete user data, so the stub is left for whoever holds it and
+			// the load answers defaults in memory — which is also all #864's
+			// failed write ever needed to keep startup from wedging.
+			return emptyConfigStubLoad(prettyTomlPath)
 		}
 		if jsonExists {
 			log.WarningLog.Printf("both %s and %s exist; %s is canonical and %s is ignored — delete or rename %s to silence this warning",
 				prettyTomlPath, prettyConfigPath, prettyTomlPath, prettyConfigPath, prettyConfigPath)
+		}
+		// The canonical read, and the only one a save can be compared against:
+		// tomlData is the whole file, and parseLoadedConfigTOML parses this
+		// buffer rather than reading again. A shadowing config.json changes
+		// nothing here — it is ignored, loudly, and config.toml still decides.
+		if readDigest != nil {
+			*readDigest = digestConfigBytes(tomlData)
 		}
 		return parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)
 	}
@@ -91,7 +173,15 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file %s: %w", prettyTomlPath, tomlErr)
 	}
 
-	// 2. No config.toml. Read the legacy config.json.
+	// 2. No config.toml. Read the legacy config.json. A DANGLING config.json
+	// symlink reads as ENOENT here too, which would fall through to
+	// materializeDefaultConfig as if no file existed — af would start on
+	// defaults without stopping or naming the link, diverging from the
+	// dangling-config.toml behavior the tomlPath guard above guarantees.
+	// Refuse it the same way, naming both ends (#3660 review).
+	if err := RefuseDanglingConfigLink(configPath); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -101,18 +191,17 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
 	}
 
-	// A zero-byte config.json with no config.toml is a failed first-run write
-	// from a pre-TOML af (#864). Drop the stub and materialize fresh defaults
-	// as config.toml rather than wedging on the #758 "config is empty" error.
+	// A zero-byte config.json with no config.toml is the same ambiguous shape:
+	// a failed first-run write from a pre-TOML af (#864), or a live file whose
+	// in-place rewrite is half done (#4483). Same rule — a read never deletes:
+	// defaults in memory, the file untouched. If a writer completes it, the
+	// next load parses and converts it as usual.
 	if len(data) == 0 {
-		if rmErr := os.Remove(configPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			return nil, fmt.Errorf("failed to remove empty config file %s: %w", prettyConfigPath, rmErr)
-		}
-		return materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
+		return emptyConfigStubLoad(prettyConfigPath)
 	}
 
 	// 3. A real config.json with no config.toml → one-time conversion.
-	return convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath)
+	return convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath)
 }
 
 // ReadOnlyConfigLoad is a no-write config snapshot for diagnostics.
@@ -122,6 +211,12 @@ type ReadOnlyConfigLoad struct {
 	Missing      bool
 	LegacyJSON   bool
 	ShadowedJSON bool
+	// EmptyStub identifies a contentless config file startup accepts: an
+	// effectively-empty, unshadowed config.toml, or a zero-byte legacy
+	// config.json with no config.toml. Startup resolves the same state to
+	// in-memory defaults without modifying the file (#4483 — a read never
+	// deletes user data), and Config contains those defaults for diagnostics.
+	EmptyStub bool
 }
 
 // LoadConfigReadOnly reads and validates the active global config without
@@ -138,21 +233,70 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyTomlPath := prettyHomePath(tomlPath)
 
+	// The same refusal the startup path makes, and for a sharper reason here: a
+	// dangling link reads as ENOENT, which this would report as Missing — so
+	// `af config validate` would exit 0 and `af doctor` would advise starting af
+	// to write defaults, while af itself refuses to start on that very link. A
+	// diagnostic that disagrees with the thing it diagnoses is worse than no
+	// diagnostic (#3660 review).
+	if err := RefuseDanglingConfigLink(tomlPath); err != nil {
+		return ReadOnlyConfigLoad{Path: tomlPath}, err
+	}
+
 	tomlData, tomlErr := os.ReadFile(tomlPath)
 	if tomlErr == nil {
+		// Recognize the same empty-stub candidate startup resolves to defaults.
+		// A shadowed config.json or a hand-made symlink stays a loud parse error.
+		jsonExists := fileExists(configPath)
+		if isEffectivelyEmptyToml(tomlData) && !jsonExists {
+			if info, lerr := os.Lstat(tomlPath); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+				cfg := DefaultConfig()
+				// Diagnostics agree with startup: the stub resolves to these
+				// same in-memory defaults via emptyConfigStubLoad, which owes
+				// the missing-claude advice validateConfig owns (#5588).
+				warnMissingClaudeOverride(cfg.ProgramOverrides)
+				return ReadOnlyConfigLoad{
+					Path:      tomlPath,
+					EmptyStub: true,
+					Config:    cfg,
+				}, nil
+			}
+		}
 		cfg, err := parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)
 		return ReadOnlyConfigLoad{
 			Config:       cfg,
 			Path:         tomlPath,
-			ShadowedJSON: fileExists(configPath),
+			ShadowedJSON: jsonExists,
 		}, err
 	}
 	if !os.IsNotExist(tomlErr) {
 		return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("failed to read config file %s: %w", prettyTomlPath, tomlErr)
 	}
 
+	// The same refusal the config.json read below needs: a dangling
+	// config.json symlink reads as ENOENT, which would otherwise report
+	// Missing — the exact diagnostic/startup divergence the tomlPath guard
+	// above was written to close, reproduced on the legacy path. Refuse it
+	// the same way, naming both ends (#3660 review).
+	if err := RefuseDanglingConfigLink(configPath); err != nil {
+		return ReadOnlyConfigLoad{Path: configPath}, err
+	}
+
 	data, err := os.ReadFile(configPath)
 	if err == nil {
+		// A zero-byte config.json is the same empty stub startup resolves to
+		// defaults: leaving it for the parser would report "invalid" for a
+		// state af accepts and runs past (#4483 review — diagnostics must agree
+		// with startup or they diagnose a file af does not have).
+		if len(data) == 0 {
+			cfg := DefaultConfig()
+			warnMissingClaudeOverride(cfg.ProgramOverrides)
+			return ReadOnlyConfigLoad{
+				Path:      configPath,
+				EmptyStub: true,
+				Config:    cfg,
+			}, nil
+		}
 		cfg, parseErr := parseLoadedConfigJSON(data, prettyConfigPath, configPath)
 		return ReadOnlyConfigLoad{
 			Config:     cfg,
@@ -167,11 +311,46 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	return ReadOnlyConfigLoad{Path: tomlPath, Missing: true}, nil
 }
 
+// emptyConfigStubLoad resolves a contentless, regular, unshadowed config file
+// to in-memory defaults (#4483). It performs NO filesystem mutation — the
+// file may be an in-place rewrite mid-flight, and deleting or rewriting it
+// would destroy whatever its writer is about to land. The returned config
+// carries the same source bookkeeping materializeDefaultConfig gives a
+// create-race loser, so provenance and the appearance-migration no-op check
+// see an identical shape. The warning names the file and the remedy; a stub
+// left by a crashed first-run write heals on the next config write.
+func emptyConfigStubLoad(prettyPath string) (*Config, error) {
+	log.WarningLog.Printf("%s is empty — af is running on built-in defaults; the file was left untouched because it may be an edit in progress. Write your settings to it, or delete it and restart af to regenerate defaults", prettyPath)
+	cfg := DefaultConfig()
+	cfg.source.builtIn = snapshotConfig(cfg)
+	// The same probed-shell-value notice materializeDefaultConfig gives the
+	// defaults it writes: the values being returned are identical, so the
+	// alias-carrying-`exec --` case is reported here too (#3566 parity). The
+	// missing-claude advice validateConfig owns is owed here for the same
+	// reason: these defaults carry no configured override to gate it (#5588).
+	warnGlobalShellValues(cfg, prettyPath)
+	warnMissingClaudeOverride(cfg.ProgramOverrides)
+	return cfg, nil
+}
+
 // fileExists reports whether path exists (any stat error other than
 // not-exist — e.g. permission denied — counts as "exists" so a shadowed
 // config.json is still flagged rather than silently assumed gone).
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
+	return err == nil || !os.IsNotExist(err)
+}
+
+// pathOccupied is fileExists for choosing a name NOBODY else holds. It uses
+// Lstat, so a symlink counts as occupied even when it dangles.
+//
+// fileExists follows links, which is right where the question is "can af read a
+// config here" but wrong where the question is "is this name free". A dangling
+// <config>.bak link reports ENOENT through Stat, so the backup would be written
+// straight over the link — destroying a filesystem entry the user made, and
+// breaking the one promise this function exists to keep (#3660 review).
+func pathOccupied(path string) bool {
+	_, err := os.Lstat(path)
 	return err == nil || !os.IsNotExist(err)
 }
 
@@ -182,12 +361,21 @@ func fileExists(path string) bool {
 // error only if an absurd number of backups already exist, in which case the
 // caller leaves config.json in place with a warning rather than clobbering.
 func availableBackupPath(base string) (string, error) {
-	if !fileExists(base) {
+	return availableBackupPathWith(base, pathOccupied)
+}
+
+// availableBackupPathWith is availableBackupPath with the occupancy question
+// injected, so a caller holding a directory open can ask IT rather than ask a
+// path that something else can repoint between the question and the write
+// (#3697). The naming rule, the ordering rule and the error are one
+// implementation either way; only who answers "is this name taken" differs.
+func availableBackupPathWith(base string, occupied func(string) bool) (string, error) {
+	if !occupied(base) {
 		return base, nil
 	}
 	for i := 1; i < 1000; i++ {
 		candidate := fmt.Sprintf("%s.%d", base, i)
-		if !fileExists(candidate) {
+		if !occupied(candidate) {
 			return candidate, nil
 		}
 	}
@@ -266,15 +454,25 @@ var convertRaceHookForTest func()
 // run); a crash after it leaves both files, and LoadConfig's canonical-toml
 // rule resolves that to config.toml with a warning. The rename is therefore
 // best-effort — a failure is logged, not fatal.
-func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
+func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
 	var result *Config
-	lockErr := WithFileLock(tomlPath, func() error {
+	lockErr := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		if convertRaceHookForTest != nil {
 			convertRaceHookForTest()
 		}
 		// The winner of a concurrent conversion already wrote config.toml.
 		// (Our writes are atomic, so a non-empty config.toml here is complete.)
-		if td, err := os.ReadFile(tomlPath); err == nil {
+		// Read the LOCKED file: reopening the link would resolve it again, and a
+		// link that moved since acquisition would answer this question about a
+		// file the lock does not cover (#3688).
+		//
+		// Unlike the writers, this branch deliberately does NOT re-confirm and
+		// refuse. It is a LOAD — the value it produces is the config af starts
+		// on — and the rest of the load path reads through the link outside any
+		// lock, so refusing here would make a moved link the one arrangement
+		// that stops af from starting at all, over a window that opens once per
+		// install (#3696 review).
+		if td, err := locked.read(); err == nil {
 			if !isEffectivelyEmptyToml(td) {
 				cfg, perr := parseLoadedConfigTOML(td, prettyTomlPath, tomlPath)
 				if perr != nil {
@@ -294,10 +492,28 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			return fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
 		}
 		if os.IsNotExist(err) || len(data) == 0 {
-			// The racer renamed config.json to .bak (and its config.toml is
-			// gone/incomplete), or the file is an empty first-run stub — either
-			// way there is nothing to convert, so materialize fresh defaults.
-			cfg, mErr := materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
+			// config.json vanished/was truncated under the lock. A concurrent
+			// af converter that won already wrote config.toml and was adopted by
+			// locked.read() above — and even if that read missed,
+			// materializeDefaultConfig's O_CREATE|O_EXCL create fails EEXIST on
+			// the winner's config.toml — so this branch is only reached when an
+			// external process (in-place editor, rm, mv) made config.json
+			// empty/gone in the inter-read window. The conversion lock
+			// serializes af converters, not external editors, so this window is
+			// not closed by acquiring the lock.
+			//
+			// An in-place rewrite may be mid-flight (#4483): the writer
+			// truncated config.json first and has not written its content yet.
+			// Installing a canonical config.toml of built-in defaults here
+			// shadows the user's config.json on the next load — the same
+			// in-place-rewrite threat loadConfig's pre-lock zero-byte path
+			// declines to write for. A read never deletes user data, and a read
+			// never installs a canonical file that shadows an in-flight one
+			// either: answer defaults in memory and write nothing, leaving
+			// config.json for whoever holds it. If a writer completes it, the
+			// next load parses and converts it as usual. (Mirrors loadConfig's
+			// pre-lock path.)
+			cfg, mErr := emptyConfigStubLoad(prettyConfigPath)
 			if mErr != nil {
 				return mErr
 			}
@@ -312,12 +528,17 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 
 		legacyMetadata, _ := metadataForSource(data, prettyConfigPath, FormatJSON)
 		tomlBytes, err := marshalGlobalConfigTOML(cfg, legacyMetadata.shape)
+		if err == nil && len(appearanceMigrationKeys(legacyMetadata.shape)) > 0 {
+			tomlBytes, err = preserveJSONUnknownTOML(tomlBytes, legacyMetadata.shape)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to marshal config %s as TOML: %w", prettyConfigPath, err)
 		}
-		if err := AtomicWriteFile(tomlPath, tomlBytes, 0644); err != nil {
+		if err := locked.write(tomlBytes, 0644); err != nil {
 			return fmt.Errorf("failed to write %s during conversion: %w", prettyTomlPath, err)
 		}
+
+		warnAppearanceMigration(prettyConfigPath, appearanceMigrationKeys(legacyMetadata.shape), cfg.Appearance)
 
 		// Never overwrite an existing backup: a downgrade can regenerate a
 		// defaults config.json that a *second* conversion would otherwise
@@ -382,6 +603,16 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 
 	defaultCfg := DefaultConfig()
 	defaultCfg.source.builtIn = snapshotConfig(defaultCfg)
+	// This path writes the defaults and returns them WITHOUT going through
+	// validateConfig, so the first load after a first run is the one load that
+	// would otherwise say nothing about a probed claude alias carrying `exec --`
+	// (#3566 review). Everything here came from the defaults, so the value also
+	// matches af's probe and the warning carries its "check that alias too" note
+	// alongside the path of the file it is about to create. The missing-claude
+	// advice is owed for the same reason — these defaults have a claude override
+	// only when the probe found one (#5588).
+	warnGlobalShellValues(defaultCfg, prettyTomlPath)
+	warnMissingClaudeOverride(defaultCfg.ProgramOverrides)
 	created, saveErr := writeConfigIfMissing(tomlPath, defaultCfg)
 	if saveErr != nil {
 		log.WarningLog.Printf("failed to save default config: %v", saveErr)
@@ -390,11 +621,30 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 	if !created {
 		// Lost the create race: a concurrent process wrote config.toml after
 		// our read. Treat its file as authoritative.
-		if data, err := os.ReadFile(tomlPath); err == nil && !isEffectivelyEmptyToml(data) {
-			return parseLoadedConfigTOML(data, prettyTomlPath, tomlPath)
+		if data, err := os.ReadFile(tomlPath); err == nil {
+			if !isEffectivelyEmptyToml(data) {
+				return parseLoadedConfigTOML(data, prettyTomlPath, tomlPath)
+			}
+			// The winner's file is contentless. Through a SYMLINK that is the
+			// hand-made-stub case the steady-state path reports loudly, and the
+			// verdict must not depend on whether the link was installed before
+			// startup or during it — the same arrangement cannot mean "loud
+			// error" one moment and "silent defaults" the next (#3660 review).
+			if info, lerr := os.Lstat(tomlPath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+				return parseConfigTOML(data, prettyTomlPath)
+			}
 		}
 		// The concurrent file vanished or is empty; fall back to in-memory
-		// defaults without another write attempt.
+		// defaults without another write attempt — UNLESS what actually
+		// occupies the path is a broken link. The earlier check cannot cover
+		// this: check-then-act is not atomic, and materializeRaceHookForTest
+		// exists because another process really can install one in this window.
+		// The exclusive create then reports EEXIST on the link and the reread
+		// fails, which would land right back on silent defaults — the exact
+		// outcome RefuseDanglingConfigLink was added to stop (#3660 review).
+		if err := RefuseDanglingConfigLink(tomlPath); err != nil {
+			return nil, err
+		}
 	}
 	if created {
 		data, err := marshalGlobalConfigTOML(defaultCfg, nil)

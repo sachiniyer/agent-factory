@@ -76,21 +76,6 @@ func TestCleanupRetryRetiresAnUnusableHandle(t *testing.T) {
 		"an unusable handle still reports unknown workspace state, so the record is retained")
 }
 
-// A cause that heals leaves no backoff behind for the next unrelated failure.
-func TestCleanupRetrySuccessClearsTheStreak(t *testing.T) {
-	var retry CleanupRetry
-	now := time.Unix(1_800_000_000, 0)
-	for i := 0; i < cleanupRetryEscalationThreshold+2; i++ {
-		retry.RecordFailure(now, errors.New("transient"))
-	}
-	require.False(t, retry.Due(now))
-
-	retry.RecordSuccess()
-	assert.True(t, retry.Due(now), "a healed cause starts clean")
-	assert.Zero(t, retry.Failures())
-	assert.False(t, retry.Retired())
-}
-
 // CleanupHandleUnusable must not fire on the ordinary retained-record error, or
 // every transient failure would be retired.
 func TestCleanupHandleUnusableIsNarrow(t *testing.T) {

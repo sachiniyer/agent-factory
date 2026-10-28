@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -24,7 +23,7 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 	cmdExec, _ := raceHookExec(map[string]bool{agentName: true}, nil)
 	cmdExec.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
 		if strings.Contains(cmd.String(), "display-message") {
-			return []byte("7 11 1 1 0 1 0 0 1 0"), nil
+			return []byte("7 11 1 1 0 1 0 0 1 80 24"), nil
 		}
 		for i, arg := range cmd.Args {
 			if arg == "-t" && i+1 < len(cmd.Args) {
@@ -37,7 +36,7 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 	repoPath := "/tmp/preview-tab-identity-" + agentName
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		repoPath, existingDir(t, filepath.Join(t.TempDir(), "wt")), agentName,
 		agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -107,7 +106,7 @@ func TestPreview_TabIDSurvivesConcurrentOrdinalShift(t *testing.T) {
 			require.Equal(t, 2, resolved)
 
 			closed := make(chan error, 1)
-			go func() { closed <- inst.CloseTab(1) }()
+			go func() { closed <- inst.CloseTabByID(snapshot[1].ID) }()
 			require.NoError(t, <-closed)
 			requireIndex(t, inst, b.ID, 1)
 			requireIndex(t, inst, c.ID, 2)
@@ -142,34 +141,33 @@ func TestPreview_InvalidOrdinalAndStaleIDReturnErrors(t *testing.T) {
 	require.ErrorIs(t, err, ErrTabGone, "a closed stable id must be refused")
 }
 
-// TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture covers the remote-runtime
-// compatibility bridge. Its private wire is ordinal-shaped, so the daemon must
-// retain the roster read lock from ID resolution through the bounded capture.
-func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
+// TestPreviewByIDAsOrdinalDoesNotHoldRosterAcrossCapture covers the remote
+// compatibility bridge. Its private wire is ordinal-shaped, so a capture that
+// raced a close must be discarded and retried against the tab's new ordinal —
+// but the roster lock must NOT be held through the capture, or a wedged host
+// stalls every roster writer (W4.1).
+func TestPreviewByIDAsOrdinalDoesNotHoldRosterAcrossCapture(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
 	inst := previewIdentityInstance(t, "af_preview_remote_bridge")
-	_, err := inst.AddProcessTab("a", "a")
+	a, err := inst.AddProcessTab("a", "a")
 	require.NoError(t, err)
 	b, err := inst.AddProcessTab("b", "b")
 	require.NoError(t, err)
 
-	closeDone := make(chan error, 1)
+	var seen []int
 	content, err := inst.previewByIDAsOrdinal(b.ID, func(idx int) (string, error) {
-		require.Equal(t, 2, idx)
-		go func() { closeDone <- inst.CloseTab(1) }()
-		select {
-		case err := <-closeDone:
-			t.Fatalf("tab close completed during the capture critical section: %v", err)
-		case <-time.After(25 * time.Millisecond):
+		seen = append(seen, idx)
+		if len(seen) == 1 {
+			// A writer completes while the capture is in flight.
+			require.NoError(t, inst.CloseTabByID(a.ID))
 		}
 		return "remote-b", nil
 	})
 	require.NoError(t, err)
 	require.Equal(t, "remote-b", content)
-	require.NoError(t, <-closeDone)
-	requireIndex(t, inst, b.ID, 1)
+	require.Equal(t, []int{2, 1}, seen, "the raced capture is discarded and retried at the new ordinal")
 }
 
 // #3169 review: a producer that does not answer the combined capture shape must

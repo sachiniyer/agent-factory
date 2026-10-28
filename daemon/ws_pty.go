@@ -96,8 +96,11 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, r, http.StatusServiceUnavailable, err)
 		return
 	}
-	id := r.PathValue("id")
-	repoID := r.URL.Query().Get("repo_id")
+	target, err := streamTargetFromQuery(r.PathValue("id"), r.URL.Query())
+	if err != nil {
+		writeHTTPError(w, r, http.StatusBadRequest, err)
+		return
+	}
 	since, err := parseSince(r.URL.Query().Get("since"))
 	if err != nil {
 		writeHTTPError(w, r, http.StatusBadRequest, err)
@@ -108,7 +111,7 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	as, instance, err := cs.manager.agentServerForStream(id, repoID)
+	as, instance, err := cs.manager.agentServerForStreamTarget(target)
 	if err != nil {
 		writeHTTPError(w, r, http.StatusNotFound, err)
 		return
@@ -120,7 +123,7 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 	// re-resolves per operation and is safe while that runtime's roster remains
 	// immutable; bindTab documents that capability boundary. Without a ?tab_id=
 	// (legacy client) the binding pins ?tab=, preserving positional behavior.
-	binding, err := cs.bindTab(as, instance, r.URL.Query().Get("tab_id"), tab)
+	binding, err := bindTab(as, instance, r.URL.Query().Get("tab_id"), tab)
 	if err != nil {
 		writeHTTPError(w, r, httpStatusForTab(err), err)
 		return
@@ -204,73 +207,28 @@ func (b ordinalTabBinding) resize(rows, cols uint16) error {
 	return b.as.Resize(b.tab, rows, cols)
 }
 
-// resolvingTabBinding carries an id-addressed connection to a runtime with NO
-// id-native plane — the remote agent-server, whose wire protocol is ordinal-shaped
-// (its brokers and channels are keyed by index), so the id cannot be pushed all the
-// way down the way it can locally.
-//
-// It re-resolves the id to a CURRENT ordinal on every operation rather than pinning
-// the one it saw at bind time. Pinning would mean that if the addressed tab shifts
-// mid-connection, later input/resize keep hitting the old index — the positional
-// misroute the stable id exists to prevent, reintroduced on this path (#1779). This
-// The resolve and remote ordinal lookup are not one atomic step, but this site is
-// exempt from #2200's shifting-roster race: remote workspaces advertise
-// TabManagement=false and the headless agent-server's tab roster is fixed for its
-// lifetime, so there is no close/reorder writer on either side. If remote tabs ever
-// become mutable, their wire protocol must gain an id-native plane before that
-// capability is enabled. A tab that no longer resolves is ErrTabGone — the op is
-// refused, not re-pointed.
-type resolvingTabBinding struct {
-	as       session.AgentServer
-	instance *session.Instance
-	tabID    string
-}
-
-func (b resolvingTabBinding) resolve() (int, error) {
-	idx, ok := b.instance.TabIndexByID(b.tabID)
-	if !ok {
-		return 0, fmt.Errorf("session %q tab id %q: %w", b.instance.Title, b.tabID, session.ErrTabGone)
-	}
-	return idx, nil
-}
-
-func (b resolvingTabBinding) subscribe(since session.Seq) (session.PTYSubscription, error) {
-	idx, err := b.resolve()
-	if err != nil {
-		return nil, err
-	}
-	return b.as.Subscribe(idx, since)
-}
-
-func (b resolvingTabBinding) input(p []byte) error {
-	idx, err := b.resolve()
-	if err != nil {
-		return err
-	}
-	return b.as.Input(idx, p)
-}
-
-func (b resolvingTabBinding) resize(rows, cols uint16) error {
-	idx, err := b.resolve()
-	if err != nil {
-		return err
-	}
-	return b.as.Resize(idx, rows, cols)
-}
-
 // bindTab chooses how this connection addresses its tab. A ?tab_id= binds the
-// id-native plane when the runtime has one (the local agent-server), which is the
-// race-free path; a runtime without one re-resolves the id per operation. Either
-// way an id-addressed connection NEVER pins an ordinal. No ?tab_id= at all is a
-// legacy client: pin the ordinal it asked for, exactly as before #1738.
-func (cs *controlServer) bindTab(as session.AgentServer, instance *session.Instance, tabID string, tab int) (ptyTabBinding, error) {
+// agent-server's id-native plane — every AgentServer implements it (the local
+// runtime directly; the remote one natively when the sandbox advertises
+// tab-id-addressing, and through a per-operation id→ordinal bridge inside the
+// session package for an older sandbox) — so an id-addressed connection NEVER pins
+// an ordinal. No ?tab_id= at all is a legacy client: pin the ordinal it asked
+// for, exactly as before #1738.
+//
+// Package-level rather than a controlServer method: it uses no controlServer
+// state, and the headless agent-server binds the exact same decision
+// (agentserver_headless.go's streamHandler) — one selection rule, two servers.
+// instance is unused now that no runtime needs a daemon-side roster to resolve
+// an id (#5571 W4.4); the parameter is kept so callers stay unchanged.
+func bindTab(as session.AgentServer, _ *session.Instance, tabID string, tab int) (ptyTabBinding, error) {
 	if tabID == "" {
 		return ordinalTabBinding{as: as, tab: tab}, nil
 	}
-	if ta, ok := as.(session.TabAddressableServer); ok {
-		return idTabBinding{as: ta, tabID: tabID}, nil
+	ta, ok := as.(session.TabAddressableServer)
+	if !ok {
+		return nil, fmt.Errorf("tab id %q cannot be addressed: this agent-server has no stable-id plane", tabID)
 	}
-	return resolvingTabBinding{as: as, instance: instance, tabID: tabID}, nil
+	return idTabBinding{as: ta, tabID: tabID}, nil
 }
 
 // httpStatusForTab maps a tab-addressing failure to its status: a stale/unknown
@@ -544,9 +502,12 @@ func (cs *controlServer) streamInfoHandler(w http.ResponseWriter, r *http.Reques
 		writeHTTPError(w, r, http.StatusServiceUnavailable, err)
 		return
 	}
-	id := r.PathValue("id")
-	repoID := r.URL.Query().Get("repo_id")
-	as, _, err := cs.manager.agentServerForStream(id, repoID)
+	target, err := streamTargetFromQuery(r.PathValue("id"), r.URL.Query())
+	if err != nil {
+		writeHTTPError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	as, _, err := cs.manager.agentServerForStreamTarget(target)
 	if err != nil {
 		writeHTTPError(w, r, http.StatusNotFound, err)
 		return
@@ -560,18 +521,22 @@ func (cs *controlServer) streamInfoHandler(w http.ResponseWriter, r *http.Reques
 	if ep.URL != "" {
 		resp.URL = ep.URL // a remote/container runtime's own authed URL (Phase 4)
 	} else {
-		resp.URL = localStreamPath(id, repoID)
+		resp.URL = localStreamPath(target)
 	}
 	writeHTTPSuccess(w, r, resp)
 }
 
 // localStreamPath builds the relative stream URL for a local session, escaping
-// the id and carrying repo_id through so the client dials the same session the
-// info request named.
-func localStreamPath(id, repoID string) string {
-	p := "/v1/sessions/" + url.PathEscape(id) + "/stream"
-	if repoID != "" {
-		p += "?repo_id=" + url.QueryEscape(repoID)
+// the id and carrying the address shape (repo_id, or by=id) through so the
+// client dials the same session the info request named.
+func localStreamPath(target streamTarget) string {
+	if target.idOnly {
+		return "/v1/sessions/" + url.PathEscape(target.stableID) + "/stream?" +
+			agentproto.StreamAddressQueryParam + "=" + agentproto.StreamAddressByID
+	}
+	p := "/v1/sessions/" + url.PathEscape(target.title) + "/stream"
+	if target.repoID != "" {
+		p += "?repo_id=" + url.QueryEscape(target.repoID)
 	}
 	return p
 }
@@ -599,4 +564,22 @@ func parseTab(raw string) (int, error) {
 		return 0, fmt.Errorf("invalid tab index %q", raw)
 	}
 	return v, nil
+}
+
+// streamTargetFromQuery reads the route's address shape. by=id with a repo_id
+// is contradictory — one names the id namespace, the other the title namespace
+// — so it is refused rather than silently resolved as either.
+func streamTargetFromQuery(idOrTitle string, q url.Values) (streamTarget, error) {
+	repoID := q.Get("repo_id")
+	switch by := q.Get(agentproto.StreamAddressQueryParam); by {
+	case "":
+		return authoritativeStreamTarget(idOrTitle, repoID), nil
+	case agentproto.StreamAddressByID:
+		if repoID != "" {
+			return streamTarget{}, fmt.Errorf("%s=%s cannot be combined with repo_id", agentproto.StreamAddressQueryParam, by)
+		}
+		return streamTarget{stableID: idOrTitle, idOnly: true}, nil
+	default:
+		return streamTarget{}, fmt.Errorf("unknown %s=%q; want %q or none", agentproto.StreamAddressQueryParam, by, agentproto.StreamAddressByID)
+	}
 }

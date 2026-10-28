@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,6 +114,78 @@ func TestCreateSession_ParksOnUsageLimitBanner(t *testing.T) {
 	}
 }
 
+func TestCreateSessionFencesLimitObservationThroughRosterPublication(t *testing.T) {
+	base := time.Now()
+	manager, _, limited, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+	installLimitBannerBackend(t)
+	if err := limited.BeginLimitResume(); err != nil {
+		t.Fatalf("begin subject limit resume: %v", err)
+	}
+	defer limited.EndLimitResume()
+
+	observed := make(chan struct{})
+	releaseCreate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCreate) }) }
+	previousHook := testHookCreateLimitObservedBeforePublication
+	testHookCreateLimitObservedBeforePublication = func() {
+		close(observed)
+		<-releaseCreate
+	}
+	t.Cleanup(func() {
+		release()
+		testHookCreateLimitObservedBeforePublication = previousHook
+	})
+
+	createDone := make(chan error, 1)
+	go func() {
+		_, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+			Title: "work-limit", RepoPath: limited.Path, Program: "claude",
+			Account: "work", Prompt: "continue",
+		})
+		createDone <- err
+	}()
+	select {
+	case <-observed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("account-scoped create did not reach its limit publication boundary")
+	}
+
+	type admissionResult struct {
+		swap *autoAccountSwap
+		err  error
+	}
+	admissionDone := make(chan admissionResult, 1)
+	go func() {
+		manager.accountLimitMu.Lock()
+		defer manager.accountLimitMu.Unlock()
+		swap, err := manager.admitAccountSwap(limited, manager.Config())
+		admissionDone <- admissionResult{swap: swap, err: err}
+	}()
+	select {
+	case result := <-admissionDone:
+		release()
+		<-createDone
+		t.Fatalf("swap admission crossed an unpublished create limit: swap=%+v err=%v", result.swap, result.err)
+	case <-time.After(100 * time.Millisecond):
+		// The create owns the publication fence from observation through insertion.
+	}
+
+	release()
+	if err := <-createDone; err != nil {
+		t.Fatalf("limit-parked account create: %v", err)
+	}
+	select {
+	case result := <-admissionDone:
+		if result.swap != nil || result.err == nil {
+			t.Fatalf("published limit evidence did not refuse candidate: swap=%+v err=%v", result.swap, result.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("swap admission stayed blocked after the create published its row")
+	}
+}
+
 // stubParkedCreate swaps createSessionForTask for one that reports a session
 // parked at a usage-limit wall (LiveLimitReached), the shape CreateSession
 // returns after PR4's park branch. Restored on cleanup.
@@ -202,7 +275,7 @@ func TestResumeFromLimit_ParkedTaskSessionReDeliversTaskPrompt(t *testing.T) {
 	inst.Prompt = "run the nightly report"
 	inst.SetLimitReached(time.Now())
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "nightly-task", RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "nightly-task", RepoID: repoID}); err != nil {
 		t.Fatalf("resume of a parked task session failed: %v", err)
 	}
 

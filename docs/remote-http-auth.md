@@ -1,5 +1,9 @@
 # Remote daemon access: HTTP and tokens
 
+For anyone who wants to reach their daemon — the web client, the TUI, or the API —
+from a second machine. After this page you will know the two ways to do that, why
+one of them is the recommendation, and exactly when a token is required.
+
 By default the Agent Factory daemon is reachable **only** from the machine it
 runs on. Local clients use a Unix socket whose `0600` permissions are the entire
 auth story (see the [HTTP API guide](http-api.md#authentication)), and the
@@ -96,9 +100,17 @@ TLS termination or a private network (see
 ### 1. Point the listener at the network
 
 `network.listen_addr` is a **global-only** key (a cloned repo must never be able to open
-a network port). Set it with `af config set network.listen_addr <host:port>`, or
-hand-edit your global config directly. Change the default loopback address to a
-routable one:
+a network port). From the default `network.require_token=false`, the CLI order matters:
+the write guard refuses to *create* a tokenless network posture, so turn the token on
+first, then move the address — the reverse sequence fails at the first command:
+
+```console
+$ af config set network.require_token true
+$ af config set network.listen_addr 0.0.0.0:8443
+```
+
+Or hand-edit your global config directly — the TOML block lands atomically, so key
+order inside it does not matter:
 
 ```toml
 # ~/.agent-factory/config.toml
@@ -108,11 +120,12 @@ listen_addr = "0.0.0.0:8443"   # routable — reachable from the network (opt-in
 require_token = true            # STRONGLY recommended: the default is false (no token)
 ```
 
-Set `network.require_token = true` in the same edit. It defaults to `false`, so a network
-bind without it serves an **unauthenticated** control plane to everyone who can
-route to the port. af allows that and warns — it does not stop you — so omit the
-token only if the network is one you fully trust (a private tailnet/VPN) or an
-authenticating proxy sits in front.
+It defaults to `false`, so a network
+bind without it would serve an **unauthenticated** control plane to everyone who can
+route to the port — and af **refuses the listener** rather than serve that. Omit
+the token only on a network you fully trust (a private tailnet/VPN) or behind an
+authenticating proxy, and say so with `network.allow_unauthenticated_network = true`
+— the explicit opt-in that lets the refused bind proceed.
 
 `af config set network.listen_addr` rebinds the listener in place — no restart; a raw
 hand-edit of the block above still needs `af daemon restart`.
@@ -126,10 +139,10 @@ daemon HTTP TCP listener enabled on 0.0.0.0:8443 (plain HTTP — terminate TLS a
   listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests …
 ```
 
-Had you left `network.require_token` at its `false` default, the daemon would still have
-bound the port — and logged a warning instead of that last line, because nothing
-would be authenticating anyone. See [the tokenless network
-warning](#the-tokenless-network-warning).
+Had you left `network.require_token` at its `false` default without the opt-in,
+the daemon would not have bound the port at all — it would have logged the
+refusal at ERROR and kept the unix sockets serving. See [the unauthenticated
+network listener](#the-unauthenticated-network-listener).
 
 ### 2. Read the token
 
@@ -158,8 +171,19 @@ fallback):
 
 | Flag | Env var | Meaning |
 |---|---|---|
-| `--daemon-url` | `AF_DAEMON_URL` | The daemon's URL: `http://host:port` or `ws://host:port` (the two are equivalent). A `wss://`/`https://` URL is rejected with an HTTP-only error — af serves no TLS; terminate it at a proxy and point af at the proxy's plaintext backend, or use a private network. |
+| `--daemon-url` | `AF_DAEMON_URL` | The daemon's URL: `http://host:port` or `ws://host:port` (the two are equivalent). `https://host` / `wss://host` are accepted too (the same pair) for a daemon behind a TLS front such as `tailscale serve` or a reverse proxy; the certificate is verified against the system CAs and there is no option to skip verification. The daemon itself serves plaintext HTTP. |
 | `--token` | `AF_DAEMON_TOKEN` | The bearer token from `af token show`. |
+
+### Save the target once
+
+`af target set <url> [--token-stdin]` stores the URL (and, read from stdin so it
+never reaches argv, the token) in this machine's af home with `0600`
+permissions. Precedence is `--daemon-url`/`--token`, then `AF_DAEMON_URL`/
+`AF_DAEMON_TOKEN`, then the saved target. The saved token is only ever sent to
+the saved URL, never to a host named by a flag or env var. `af target show`
+prints which target an invocation uses and why (never the token); `af target
+clear` forgets it. A saved file that is unreadable, malformed or readable by
+other users is refused rather than falling back to the local daemon.
 
 Flags take precedence over the environment. When `--daemon-url` (or
 `AF_DAEMON_URL`) is unset, `af` uses the local Unix socket exactly as before —
@@ -183,6 +207,24 @@ live panes, full-screen attach — is byte-identical to the local path. Only the
 transport differs, so once connected the client behaves exactly like a local
 one.
 
+**The TUI's config editor follows the target too.** Pressing `,` in a
+remote-targeted session shows the *daemon host's* config values, and its header
+reads `<daemon URL> · <that host's config.toml path>` — the daemon first, because
+the header is clipped to the overlay's width and which *machine* you are editing
+outranks which file; and never abbreviated to `~`, since two of your own boxes
+usually share a home layout and `~/.agent-factory/config.toml` would read as the
+file on your laptop. Saving a
+row writes it on the daemon, through the same admission-gated handler `af config
+set --daemon-url` and the web form use; a daemon too old to serve those routes is
+refused by name and version, and af never falls back to reading or writing your
+own machine's config for a remote target. The config *assistant* (`C`) is
+local-only and says so: it hand-edits the config file next to it, which is your
+machine's, so it refuses a remote target instead of quietly editing the wrong
+host. The editor’s
+Accounts section also lists and registers accounts on that daemon; login stays
+local-only, with the CLI's refusal naming the remote daemon inside the Accounts
+section (#3950).
+
 An invalid or missing token is rejected with a **401** on every request and on
 the WebSocket handshake; a remote read surfaces that error rather than silently
 falling back to a local disk scan (there is no local disk on the other end).
@@ -190,12 +232,14 @@ falling back to a local disk scan (there is no local disk on the other end).
 ### Migrating from the old TLS listener
 
 Earlier versions served this listener over TLS and pinned a self-signed
-certificate. TLS was **removed** — af is HTTP-only now. If you have a stale
+certificate. TLS was **removed** — the daemon itself is HTTP-only now; a TLS front is reached with `https://`. If you have a stale
 config:
 
-- **`wss://` / `https://` daemon URLs** → change them to `http://` (or `ws://`).
-  A TLS-scheme `--daemon-url` fails fast with a clear message pointing you at
-  `http://`, rather than mysteriously hanging.
+- **`wss://` / `https://` daemon URLs** → fine when something in front of the
+  daemon serves a certificate your system trusts (`tailscale serve`, a reverse
+  proxy). They are verified against the system CAs; a pinned self-signed
+  certificate no longer works — use `http://` over a private network, or a TLS
+  front with a real certificate.
 - **`--tls-fingerprint` / `AF_DAEMON_TLS_FINGERPRINT`** → **removed.** Drop them;
   there is no certificate to pin.
 - **`tls_cert` / `tls_key` config keys** → **removed.** An old config that still
@@ -281,13 +325,13 @@ peer's real transport address — never from a header:
 | Peer | Default (`network.require_token` unset/`false`) | `network.require_token = true` |
 |---|---|---|
 | **Loopback** (`127.0.0.1` / `::1`) — a browser or client on the **same machine** | **No token** | **No token** on a loopback bind (unless `network.require_loopback_token = true`) |
-| **Network** — any other source address | **No token** — served to anyone who can reach the port | **Token required** (401 without it) |
+| **Network** — any other source address | **No token** — but the bind is refused unless `network.allow_unauthenticated_network` opts in | **Token required** (401 without it) |
 
 > **A non-loopback `network.listen_addr` should set `network.require_token = true`.** That
 > combination — `network.listen_addr` on a routable interface *and* the tokenless default
-> — is an unauthenticated control plane. af **serves it** and warns once at daemon
-> start (see [the tokenless network warning](#the-tokenless-network-warning)); the
-> decision is yours to make.
+> — would be an unauthenticated control plane, so af **refuses the listener**
+> unless `network.allow_unauthenticated_network` opts in (see
+> [the unauthenticated network listener](#the-unauthenticated-network-listener)).
 
 ### Why token-less by default
 
@@ -300,10 +344,12 @@ connects. The web client reads the daemon's answer from `/v1/auth-info` and skip
 its login screen whenever no token is required.
 
 The trade-off is deliberate: `af` ships open rather than closed, and the
-loopback-only `network.listen_addr` is what bounds the blast radius — the tokenless
-posture is only ever allowed to front a listener nothing off-box can reach.
-Exposing the daemon to a network is an explicit act, and it carries the token
-with it: af will not start a network listener without one.
+loopback-only `network.listen_addr` is what bounds the blast radius — out of the
+box, the tokenless posture fronts a listener nothing off-box can reach.
+Exposing the daemon to a network is an explicit act: a tokenless network bind is
+refused unless `network.require_token` authenticates it or
+`network.allow_unauthenticated_network` opts the exposure in (see
+[the unauthenticated network listener](#the-unauthenticated-network-listener)).
 
 ### Loopback is exempt even with the token on
 
@@ -407,62 +453,115 @@ require_token = true
 request — no rebind, no restart (a raw hand-edit still needs `af daemon restart`).
 Network peers must then present the token
 (401 without it); loopback peers stay exempt on a loopback bind unless you also
-set `network.require_loopback_token = true`. The web client picks the change up on its
-next load and shows its paste-token login. Get the credential with
+set `network.require_loopback_token = true`. The web client has no polling
+loop, so an idle, already-open client stays in the app until an event or a
+reconnect triggers a Snapshot resync; only that resync's 401 flips
+`authRequired` and routes to the paste-token form — an arbitrary request such
+as a config edit surfaces a tab error instead and leaves the app running. The
+login therefore appears on the next Snapshot resync after the flip, not
+immediately. Get the credential with
 `af token show`.
 
 Set it whenever `network.listen_addr` is anything but loopback, unless you genuinely
-trust every host that can route to the port. af will not stop you either way —
-it warns once and serves. Remember the token still travels over plain HTTP, so
+trust every host that can route to the port. Without it — or without the
+`network.allow_unauthenticated_network` opt-in — af refuses to bind the listener
+at all (see below). Remember the token still travels over plain HTTP, so
 pair it with TLS termination or a private network.
 
-### The tokenless network warning
+### The unauthenticated network listener
 
 Leaving the default `network.require_token = false` while binding `network.listen_addr` to a
 routable interface would mean anyone who can reach the port has full control with
 no credential — including `DeliverPrompt`, which types instructions into a running
 agent and submits them, so it is remote code execution, not just data exposure.
 
-**This is allowed.** #2090 briefly made it a startup refusal — the daemon would
-not come up at all — and #2168 reversed that: af assumes you know your network
-and will do the right thing. What you get instead is one warning line in the
-daemon log when the listener binds:
+**af refuses to bind that listener.** #2090 briefly made it a startup refusal —
+the daemon would not come up at all — #2168 reversed that to warn-and-serve, and
+#5137 landed between them: the **TCP listener** is refused, never the daemon. The
+daemon starts and its unix sockets keep working, so the TUI, CLI, and sessions
+are unaffected; what you get is one ERROR line in the daemon log:
 
 ```
-WARNING: network.listen_addr "0.0.0.0:8443" is reachable from the network and network.require_token
-is false, so af serves its full control API — including DeliverPrompt, which runs
-instructions through your agents — to anyone who can reach that address, with no
-authentication and no TLS · set network.require_token = true to require a bearer token
-(`af token show` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this
-machine only
+ERROR: network.listen_addr "0.0.0.0:8443" is reachable from the network and network.require_token
+is false, so af's full control API — including DeliverPrompt, which runs
+instructions through your agents — would be served to anyone who can reach that
+address, with no authentication and no TLS · the TCP listener is refused; the
+daemon itself still starts and the unix control socket still works, so the TUI,
+CLI, and sessions are unaffected · fix one of: `af config set
+network.require_token true` to require a bearer token (`af token show` prints it),
+`af config set network.listen_addr 127.0.0.1:8443` to serve this machine only, or
+`af config set network.allow_unauthenticated_network true` to accept the risk
+explicitly
 ```
 
-It is emitted **once per daemon start**, not per request. `af config set` prints
-the same caution at the moment you write either key, `af doctor` carries a
-`listener` warning row for it, and `af daemon status` repeats it — but nothing
-refuses, and nothing rewrites the address you chose.
+`af doctor` carries a `listener` **FAIL** row for the refused posture, `af daemon
+status` prints it as `tcp listener: <addr> (refused)` with the same reason, and
+`af config set` / `af config unset` **refuse to write** a combination that would
+be refused — with the same message — unless the write itself completes a valid
+combination. "Non-loopback" means anything that is not `127.0.0.0/8`, `::1`, or
+`localhost`: wildcards (`0.0.0.0`, `[::]`, `:8443`), private and routable
+addresses, hostnames, and Tailscale `100.64.0.0/10` addresses all count — a
+tailnet is a network like any other and gets no special case.
 
-The warning is scoped to network binds: the ordinary loopback default is tokenless
-too and says nothing — nothing off-box can reach it, which is exactly what makes
-the tokenless default safe.
+The three fixes, any one of which lets the listener bind:
+
+- `af config set network.require_token true` — require the bearer token from
+  network peers (`af token show` prints it). Recommended.
+- `af config set network.listen_addr 127.0.0.1:8443` — serve this machine only.
+- `af config set network.allow_unauthenticated_network true` — accept the risk
+  explicitly. The listener then binds and serves the control API
+  unauthenticated, and af says so once: an exposure notice in the daemon log, a
+  `listener` warning row in `af doctor`, and the same notice in `af daemon
+  status`. `af config set` warns rather than refusing on the writes that reach
+  this posture.
+
+The refusal is scoped to network binds: the ordinary loopback default is
+tokenless too and binds normally — nothing off-box can reach it, which is
+exactly what makes the tokenless default safe. It is also scoped to the
+**control** listener: `network.preview_listen_addr` has its own origin model
+(never the control API) and is unaffected.
 
 Note that `network.require_loopback_token = true` does **not** substitute for the token. It
 only withdraws the loopback exemption, and while `network.require_token` is `false` the
-token is disabled for *every* peer, so that exemption is already moot. A network
-bind that you want authenticated needs `network.require_token = true`.
+token is disabled for *every* peer, so that exemption is already moot — and it does
+not rescue a refused bind. A network bind that you want authenticated needs
+`network.require_token = true`.
 
-**Upgrading from a version that refused?** If your config explicitly sets a
-non-loopback `network.listen_addr` with `network.require_token = false`, your daemon starts again
-— including under the autostart unit, which previously crash-looped against the
-refusal (#2168). It is serving an unauthenticated control plane, deliberately;
-if that was never what you wanted, set `network.require_token = true`.
+**Upgrading?** If your config already carries a non-loopback
+`network.listen_addr` with `network.require_token = false` and no opt-in, the daemon
+still starts — the install never breaks — but the web/HTTP listener stays
+refused until you pick one of the three fixes. `af doctor` and `af daemon status`
+name the posture and the fixes.
+
+One caveat covers the whole mixed-version window: the refusal lives in this
+build, so it only protects what this build runs. A daemon binary that predates
+it still binds and serves the tokenless network posture its config asks for —
+the *running* daemon is the one that decides. If `af daemon status` shows a
+listener `bound` on a network address, take that at face value and restart the
+daemon (`af daemon restart`) so the refusing build owns the socket. Guarding a
+newer CLI's writes to an *older* remote daemon, the upgrade supervisor's
+listener expectations, and live-vs-disk drift reporting in `af daemon status`
+and `af doctor` are tracked as follow-ups (#5183, #5184, #5185).
 
 On a network you fully trust — a private Tailscale tailnet, a locked-down VPN —
-a tokenless listener may feel reasonable, but af no longer distinguishes trusted
-networks from untrusted ones at bind time: bind loopback and reach it over the
-tailnet with SSH port-forwarding (Option 1), or set the token.
+a tokenless listener may feel reasonable, and `network.allow_unauthenticated_network = true`
+is the deliberate way to say so. If you would rather not open an unauthenticated
+port at all, bind loopback and reach it over the tailnet with SSH
+port-forwarding (Option 1), or set the token.
 
 ---
+
+## Which verbs follow the target
+
+With `--daemon-url`, `AF_DAEMON_URL` or a saved target (`af target set`), every `af` verb does one of three things, and none of them answers about the wrong machine without saying so:
+
+| Verbs | With a remote target |
+|---|---|
+| `af` (the TUI), `sessions`, `tasks`, `projects`, `proposal`, `quota`, `daemon status`, global `config set` / `config unset` | **Follow the target.** They read and write that daemon over its API and never fall back to this machine. `af daemon status` reports the target's health route (version, phase, boot id), not this machine's sockets or autostart unit. |
+| `token show` / `token rotate`, `daemon restart` / `install` / `uninstall` / `adopt`, `doctor`, `reset`, `config get` / `list` / `validate` / `migrate`, `config set` / `unset --project`, `accounts`, `hosts` | **Refuse**, naming the daemon they declined to act on, because they read or change a file, process or unit that exists only on the machine they run on and no daemon API stands in for it. Run them on the daemon host (for example over ssh). |
+| `target`, `upgrade`, `bug-report`, `version`, `keys`, `debug`, `api`, `sessions whoami` | **Act on this client** by design: its binary, its saved target, its terminal or tmux pane, or this build's static catalogs. |
+
+A skew error against a remote daemon names that daemon and a remedy you can run from the client: `the daemon at http://box:8443 is out of date … ssh box 'af upgrade && af daemon restart'`. A new verb has to pick one of the three: `commands/targetclass_test.go` fails the build for a verb with no class.
 
 ## Rotating the token
 
@@ -539,10 +638,10 @@ plaintext backend.
 - **The default is tokenless — auth is opt-in.** `network.require_token` defaults to
   `false`, so what protects a stock install is the loopback-only `network.listen_addr`,
   not a credential. Pointing `network.listen_addr` at a network would serve an
-  unauthenticated control plane. af allows it and warns once at daemon start, so
-  the guard is you — set `network.require_token = true` (or put the listener behind a
-  private network/proxy). See [the tokenless network
-  warning](#the-tokenless-network-warning).
+  unauthenticated control plane, so af refuses the listener unless you set
+  `network.require_token = true` or opt in with
+  `network.allow_unauthenticated_network`. See [the unauthenticated network
+  listener](#the-unauthenticated-network-listener).
 - **Rotate on suspected exposure.** `af token rotate` invalidates the old token
   for new connections at once — no restart, no downtime for live sessions.
 
@@ -550,7 +649,7 @@ plaintext backend.
 
 - [HTTP API guide](http-api.md) — the local Unix-socket surface and the
   `{data,error}` envelope the remote listener mirrors.
-- [The daemon](concepts/daemon.md) — the single-writer model behind every
+- [The daemon](daemon.md) — the single-writer model behind every
   transport.
 - [Configuration](configuration.md) — the global config file the keys above live
   in.

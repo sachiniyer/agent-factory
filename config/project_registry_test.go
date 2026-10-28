@@ -581,7 +581,7 @@ func TestProjectRegistryRefusesNewerMetadata(t *testing.T) {
 	dir := filepath.Join(home, ProjectRegistryDirName, id)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	metadata := `{
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "prj_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "checkout_id": "chk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "root": "/repo",

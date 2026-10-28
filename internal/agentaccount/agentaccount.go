@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/afhome"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
@@ -39,23 +40,42 @@ var nameRule = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 // printed next step does not run is worse than no guidance: the operator
 // concludes the account is broken, when the only thing wrong was af's sentence.
 //
-// Verified 2026-08-07:
-//   - `claude auth --help` lists `login  Sign in to your Anthropic account`,
-//     and `login` is absent from `claude --help`'s command list.
-//   - `codex --help` lists `login  Manage login` at the top level.
+// THE FLOW HAS TO BE BROWSER-FREE, which is what shapes codex's entry (#3854).
+// af runs these in a tmux pane on the DAEMON's host, which is headless and
+// usually remote: a browser-callback login there either opens a browser nobody
+// is sitting in front of, or waits for an OAuth redirect to the daemon's own
+// localhost that the operator's machine can never reach. The device-code shape —
+// print a URL and a short code, poll while the human signs in from any device —
+// is the one that fits. Where the agent expresses that as a FLAG it belongs
+// here; where it expresses it as an environment variable it belongs in
+// sessionenv.AccountLoginEnvironment, which is why gemini and claude add nothing
+// to their words.
+//
+// Verified 2026-08-07, re-verified 2026-09-04 against the installed CLIs before
+// af started RUNNING these rather than printing them (#3384), and again for
+// #3854:
+//   - claude 2.1.261: `claude auth --help` lists `login  Sign in to your
+//     Anthropic account`, and `login` is absent from `claude --help`. Its
+//     `login` takes --claudeai/--console/--email/--sso and NO browser-free flag,
+//     so the lever is environmental — see AccountLoginEnvironment.
+//   - codex-cli 0.153.2: `codex --help` lists `login  Manage login` at the top
+//     level, and `codex login --help` lists `--device-auth`. (--with-api-key and
+//     --with-access-token read a secret from stdin and are deliberately out of
+//     scope: af never handles credential material.)
+//   - gemini 0.51.0: there is NO login or auth subcommand — `gemini --help`
+//     lists only mcp, extensions, skills, hooks, gemma and the default query
+//     command. Its sign-in is the interactive picker the bare CLI raises on a
+//     home with no credentials, which is why its entry is EMPTY rather than
+//     absent: empty means "run the agent itself", absent means "af knows of no
+//     flow", and the two must not collapse. `af accounts add gemini` has printed
+//     exactly this invocation since #3609.
 //
 // An agent added to accountConfigVars without an entry here gets no printed
 // command rather than a guessed one (#3057 review).
 var loginCommands = map[string][]string{
 	"claude": {"auth", "login"},
-	"codex":  {"login"},
-}
-
-// LoginCommand returns the agent's login invocation words, and whether one is
-// known. A false result means "say nothing", never "guess".
-func LoginCommand(agent string) ([]string, bool) {
-	words, ok := loginCommands[agent]
-	return words, ok
+	"codex":  {"login", "--device-auth"},
+	"gemini": {},
 }
 
 // ErrUnsupportedAgent reports an agent whose credential relocation was never
@@ -85,7 +105,7 @@ func ValidateName(name string) error {
 func Dir(home, agent, name string) (string, error) {
 	if _, ok := sessionenv.SupportsAccounts(agent); !ok {
 		return "", fmt.Errorf("%w: %s (supported: %s)",
-			ErrUnsupportedAgent, agent, strings.Join(sessionenv.AccountAgents(), ", "))
+			ErrUnsupportedAgent, agent, sessionenv.AccountAgentsSummary())
 	}
 	if err := ValidateName(name); err != nil {
 		return "", err
@@ -129,7 +149,14 @@ func Register(home, agent, name string) (string, error) {
 	// loser of the race is refused rather than silently joined to the winner's
 	// credentials. MkdirAll cannot do this: it treats an existing directory as
 	// success and reports nothing (#3057 review).
-	if err := os.MkdirAll(filepath.Dir(dir), dirMode); err != nil {
+	//
+	// The PARENT, though, is still a MkdirAll, and afhome.MkdirAll rather than
+	// os.MkdirAll: this is <af-home>/accounts/<agent>, so
+	// MkdirAll re-creates the whole home as an ancestor. Register is reachable
+	// from the daemon's account routes (#3835), which is a daemon-owned write
+	// that runs nowhere near the atomic-write seam (#3850). Not config's
+	// re-export: this package deliberately depends on no heavy af package.
+	if err := afhome.MkdirAll(filepath.Dir(dir), dirMode); err != nil {
 		return "", fmt.Errorf("create account directory %s: %w", dir, err)
 	}
 	// The RESERVATION is the serialization point, not the account directory.
@@ -187,6 +214,18 @@ func Register(home, agent, name string) (string, error) {
 	// operator's shell had.
 	if err := os.Chmod(dir, dirMode); err != nil {
 		return "", fmt.Errorf("secure account directory %s: %w", dir, err)
+	}
+	// And LAST, the questions the agent's own login flow would otherwise ask
+	// about this directory, answered in the account's own settings (#3858).
+	//
+	// Here rather than in the login pane because registration is the moment af
+	// decides what this directory IS, and every route to a gemini account passes
+	// through it: `af accounts add`, `af accounts login`, and the daemon's
+	// account route all call Register. It is idempotent for the same reason the
+	// rest of Register is — it reads before it writes, and answers only what the
+	// account has not answered for itself.
+	if err := answerLoginPrompts(agent, dir); err != nil {
+		return "", err
 	}
 	return dir, nil
 }
@@ -250,7 +289,9 @@ const reservationDir = ".names"
 // merely deferred.
 func reserveName(home, agent, name string) (string, error) {
 	dir := filepath.Join(home, DirName, agent, reservationDir)
-	if err := os.MkdirAll(dir, dirMode); err != nil {
+	// Through the home guard for the same reason Register's own create is: this
+	// is <af-home>/accounts/<agent>/.names (#3850).
+	if err := afhome.MkdirAll(dir, dirMode); err != nil {
 		return "", fmt.Errorf("create account reservation directory %s: %w", dir, err)
 	}
 	// The reservation path gets the SAME ancestor check as the account directory.
@@ -407,7 +448,7 @@ func Resolve(explicit, project, global string) string {
 // against it would start an unauthenticated agent while the UI reported the
 // selected account — the silent-wrong-identity outcome this whole feature exists
 // to prevent.
-func Selected(home, agent, name, trustedWrapper string) (sessionenv.Account, error) {
+func Selected(home, agent, name string) (sessionenv.Account, error) {
 	if strings.TrimSpace(name) == "" {
 		return sessionenv.Account{}, nil
 	}
@@ -435,6 +476,6 @@ func Selected(home, agent, name, trustedWrapper string) (sessionenv.Account, err
 			name, agent, agent, name)
 	}
 	return sessionenv.Account{
-		Agent: agent, Name: name, Dir: dir, TrustedWrapper: trustedWrapper,
+		Agent: agent, Name: name, Dir: dir,
 	}, nil
 }

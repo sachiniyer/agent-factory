@@ -1,7 +1,6 @@
 package git
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -20,6 +19,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // archiveTestWorktree creates a real git repo with one commit and a registered
@@ -152,7 +152,7 @@ func TestMoveWorktree_FallbackRepairsRegistration(t *testing.T) {
 	}
 	t.Cleanup(func() { worktreeMoveFast = prev })
 
-	var info, warnings bytes.Buffer
+	var info, warnings logtest.Buffer
 	previousInfo := aflog.InfoLog
 	previousWarning := aflog.WarningLog
 	aflog.InfoLog = stdlog.New(&info, "INFO: ", 0)
@@ -196,7 +196,7 @@ func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *test
 	}
 	t.Cleanup(func() { renamePath = prevRename })
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
@@ -272,7 +272,7 @@ func TestRelocate_CopySucceedsCleanupFails_NoErrorNoRetryOrphan(t *testing.T) {
 	renamePath = func(_, _ string) error { return syscall.EXDEV }
 	t.Cleanup(func() { renamePath = prevRename })
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
@@ -353,7 +353,7 @@ func TestMoveWorktree_UnverifiedCleanupPathOmitsDeleteAdvice(t *testing.T) {
 	renamePath = func(_, _ string) error { return syscall.EXDEV }
 	t.Cleanup(func() { renamePath = previousRename })
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	originalWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = originalWarning })
@@ -406,7 +406,7 @@ func TestMoveWorktree_CleanupErrorRechecksQuarantineIdentity(t *testing.T) {
 	renamePath = func(_, _ string) error { return syscall.EXDEV }
 	t.Cleanup(func() { renamePath = previousRename })
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	originalWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = originalWarning })
@@ -482,7 +482,7 @@ func TestRestoreWorktreeTo_SubmoduleRepairFailureIsBestEffort(t *testing.T) {
 		return errors.New("forced submodule repair failure")
 	}
 	t.Cleanup(func() { worktreeRepairSubmodules = prevSubmoduleRepair })
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })

@@ -15,7 +15,8 @@ import (
 // into the global config.toml with three deliberate properties:
 //
 //  1. Comment/ordering-preserving: it does a SURGICAL in-place edit of the file
-//     text (see setTOMLScalar) rather than re-marshaling the Config struct.
+//     text (see setTOMLScalar in toml_scalar_edit.go) rather than re-marshaling
+//     the Config struct.
 //     toml.Marshal regenerates the file and would strip the comments, blank
 //     lines, and key ordering of a file the README tells users to hand-edit —
 //     an external-user footgun. Only the target value's bytes change.
@@ -25,7 +26,9 @@ import (
 //  3. Validated with the loader's own rules BEFORE writing: the same
 //     ValidateProgramEnum / enum / range checks the loader applies, plus a final
 //     parseConfigTOML gate on the edited bytes, so `config set` can never write
-//     a config that then fails to load.
+//     a config that then fails to load — and, since #3662, a value-drift gate
+//     next to it, because a config that loads is not yet a config that still
+//     MEANS what it meant (see rewrite_guard.go).
 //
 // config.toml is user-hand-editable state read by the daemon and TUI at
 // startup (not daemon-exclusively-owned like instances.json), so the write is a
@@ -51,6 +54,10 @@ const (
 	// MAY contain commas (post_worktree_commands, shell commands) cannot, and stays
 	// hand-edited.
 	cfgStringList
+	// cfgFloat is a fractional scalar — today the [web] terminal font sizes
+	// (#5500), whose 6.5 phone pitch no integer kind can carry. It is written as a
+	// real TOML float (8 → "8.0") so the file stays unambiguous about the type.
+	cfgFloat
 )
 
 // settableKeySpec describes one settable key (or one dynamic family such as
@@ -67,9 +74,24 @@ type settableKeySpec struct {
 	// family may support both forms: program_overrides accepts a whole JSON map,
 	// while program_overrides.<agent> keeps its convenient scalar leaf writer.
 	structured bool
+	// subkeys admits a fixed set of scalar leaves below a structured table. It is
+	// distinct from dynamic: root_agent.enabled and root_agent.program are real
+	// schema fields, while an arbitrary root_agent.<name> must still be rejected.
+	subkeys map[string]settableLeafSpec
+	// parent is populated only on a resolved fixed subkey. It carries the
+	// manifest/scoping key through the shared scalar writer without pretending
+	// the parent is a dynamic family.
+	parent string
 	// validate runs the loader's own validation on the parsed value before the
 	// write, returning the loader's error verbatim where possible. leaf is the
 	// sub-key for a dynamic family (the program name), else the key itself.
+	validate func(leaf, value string) error
+}
+
+// settableLeafSpec is the typed writer contract for one fixed leaf of a
+// structured table.
+type settableLeafSpec struct {
+	kind     cfgValueKind
 	validate func(leaf, value string) error
 }
 
@@ -81,9 +103,22 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"default_program": {kind: cfgString, validate: func(_, v string) error {
 		return ValidateProgramEnum("default_program", "default_program", v, "")
 	}},
-	"auto_update":                    {kind: cfgBool},
+	"appearance":  {kind: cfgString, validate: func(_, value string) error { return ValidateAppearance(value) }},
+	"auto_update": {kind: cfgBool},
+	// The staged-artifact escape hatch (#3864). A plain bool: it only widens what
+	// an upgrade may set aside when it cannot read the owning home, and there is
+	// nothing in the value for a validator to catch.
+	"upgrade_clear_unverifiable_artifacts": {kind: cfgBool},
+	// The opt-in profiling endpoint (#3651). A plain bool: the daemon decides where
+	// it is served (unix socket only) and there is nothing here for a value to get
+	// wrong, so no validator.
+	"debug_pprof":                    {kind: cfgBool},
 	"network.require_token":          {kind: cfgBool, section: "network"},
 	"network.require_loopback_token": {kind: cfgBool, section: "network"},
+	// The #5137 risk-acceptance valve. A plain bool — every guard for it lives
+	// in the resulting-posture check (listenerWriteRefusal), which refuses the
+	// write when the edit would leave a tokenless non-loopback bind without it.
+	"network.allow_unauthenticated_network": {kind: cfgBool, section: "network"},
 	"network.listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error {
 		return validateListenAddrValue(v)
 	}},
@@ -115,6 +150,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// where the binary is actually run, and already lives there.
 	"vscode_server_binary":           {kind: cfgString},
 	"limit_auto_resume":              {kind: cfgBool},
+	"limit_account_candidates":       {kind: cfgStringList, validate: validateLimitAccountCandidatesValue},
 	"global_agent_skills":            {kind: cfgBool},
 	"docker.mount_agent_credentials": {kind: cfgBool, section: "docker"},
 	"ssh.host_key_verification": {kind: cfgString, section: "ssh", validate: func(_, v string) error {
@@ -127,14 +163,20 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// Free-form: any ssh invocation the operator already uses. Its usability is
 	// checked at create time (BackendConfigError), like ssh.host — not here.
 	"sandbox.ssh": {kind: cfgString, section: "sandbox"},
+	// Daemon-local path streamed to remote hosts; a bad file surfaces at create.
+	"sandbox.binary": {kind: cfgString, section: "sandbox"},
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},
 	"daemon_poll_interval": {kind: cfgDuration, validate: func(_, v string) error { return validateDaemonPollIntervalValue(v) }},
-	"log_max_size_mb":      {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
-	"log_max_backups":      {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
-	"branch_prefix":        {kind: cfgString},
-	"on_archive_command":   {kind: cfgString},
+	"watcher_events_per_minute": {kind: cfgInt, validate: func(_, v string) error {
+		return requirePositiveInt("watcher_events_per_minute", v)
+	}},
+	"log_max_size_mb":    {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
+	"log_max_backups":    {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
+	"branch_prefix":      {kind: cfgString},
+	"on_archive_command": {kind: cfgString},
+	"move_cmd":           {kind: cfgString},
 	"worktree_root": {kind: cfgString, validate: func(_, v string) error {
 		if !validateWorktreeRootValue(v) {
 			return fmt.Errorf("worktree_root must be one of [%s, %s], got %q", WorktreeRootSubdirectory, WorktreeRootSibling, v)
@@ -156,6 +198,15 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"program_overrides": {kind: cfgString, section: "program_overrides", dynamic: true, structured: true, validate: func(leaf, v string) error {
 		return ValidateProgramEnum("program_overrides key", "program_overrides key", leaf, v)
 	}},
+	// The project-scoped credential identity (#3386). A dynamic family keyed by
+	// AGENT, so `af config set default_accounts.codex work --project <path>` is the
+	// gesture, and the whole map is still writable as compact JSON by the config
+	// panes. The validator is the loader's own, so a shape a hand-edit would be
+	// rejected for is rejected at the command that took it — existence of the
+	// account is checked at create time instead, where a missing one matters.
+	"default_accounts": {kind: cfgString, section: "default_accounts", dynamic: true, structured: true, validate: func(leaf, v string) error {
+		return ValidateDefaultAccountEntry("default_accounts key", leaf, v)
+	}},
 	"limit_patterns": {kind: cfgString, section: "limit_patterns", dynamic: true, structured: true, validate: func(leaf, v string) error {
 		if err := ValidateProgramEnum("limit_patterns key", "limit_patterns key", leaf, v); err != nil {
 			return err
@@ -165,11 +216,33 @@ var settableKeySpecs = map[string]settableKeySpec{
 		}
 		return nil
 	}},
-	"theme":                   {structured: true},
+	// The named host list (#5571 W6.1): a whole compact-JSON table of
+	// name → {host,user,port,identity_file,workspace_root}, and the default's name.
+	// A default is only meaningful against the list, so the cross-check (a default
+	// naming a listed host) runs where both are known — the loader and the whole-
+	// table writer; the leaf writer checks the name's shape.
+	"hosts": {structured: true},
+	"default_host": {kind: cfgString, validate: func(_, v string) error {
+		if v == "" {
+			return nil
+		}
+		return ValidateHostName(v)
+	}},
 	"session_env_passthrough": {structured: true},
 	"root_agents":             {structured: true},
-	"root_agent":              {structured: true},
-	"keys":                    {structured: true},
+	"root_agent": {structured: true, subkeys: map[string]settableLeafSpec{
+		"enabled": {kind: cfgBool},
+		"program": {kind: cfgString},
+	}},
+	// The browser client's display preferences (#5500). The leaf form —
+	// `af config set web.terminal_font_size_phone 8` — is what the web terminal's
+	// +/- controls write through SetConfigValue, and the compact-JSON whole-table
+	// form is what the config panes post back.
+	"web": {structured: true, subkeys: map[string]settableLeafSpec{
+		"terminal_font_size_phone":   {kind: cfgFloat, validate: validateWebTerminalFontSize},
+		"terminal_font_size_desktop": {kind: cfgFloat, validate: validateWebTerminalFontSize},
+	}},
+	"keys": {structured: true},
 }
 
 func requirePositiveInt(name, v string) error {
@@ -251,13 +324,16 @@ func isCommaListKey(key string) bool {
 // SettableKeys returns the sorted, human-facing list of keys `config set`
 // accepts; dynamic families are rendered as prefix.<name>.
 func SettableKeys() []string {
-	out := make([]string, 0, len(settableKeySpecs)+2)
+	out := make([]string, 0, len(settableKeySpecs)+4)
 	for k, s := range settableKeySpecs {
 		if !s.dynamic || s.structured {
 			out = append(out, k)
 		}
 		if s.dynamic {
 			out = append(out, k+".<name>")
+		}
+		for leaf := range s.subkeys {
+			out = append(out, k+"."+leaf)
 		}
 	}
 	sort.Strings(out)
@@ -269,15 +345,61 @@ type SetResult struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	Path  string `json:"path"`
-	// RequiresRestart is always true: config.toml is read at startup, so a
-	// change applies to af and the daemon on their next start, exactly like a
-	// hand-edit.
+	// RequiresRestart is true for every ordinary write: config.toml is read at
+	// startup, so a change applies to af and the daemon on their next start,
+	// exactly like a hand-edit. The exception is a project-scoped branch_prefix
+	// (#4539): stored but never applied, so no restart can apply it and the
+	// field reports false rather than promising one.
 	RequiresRestart bool `json:"requires_restart"`
 	// Warnings are non-fatal notes about what the write actually means, printed
 	// after the echo. The write SUCCEEDED — a warning never blocks or changes the
-	// value. Today the only one is the tokenless-network-listener exposure
-	// (exposureWarning).
+	// value. Today they are the tokenless-network-listener exposure
+	// (exposureWarning) and, on a project-scoped write, the stored-but-ignored
+	// branch_prefix notice (#4539).
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// listenerWriteRefusal names the one `af config` refusal that is not a syntax
+// or drift problem: a write that would LEAVE the control-plane listener in the
+// #5137 refused posture — non-loopback listen_addr, require_token false, and
+// no allow_unauthenticated_network opt-in.
+//
+// cfg is the config the edit RESULTS in — parsed from the bytes about to be
+// written inside the file lock — so the judgment covers the pairing, never one
+// key alone (#2412: two racing writers can each turn on one half of the
+// exposure). A write that lands the refused combination is refused with the
+// SAME message the daemon would emit at bind (ListenerBindRefusal), and the
+// file is left untouched: refusing the write is refusing to create a config
+// the daemon must then refuse to serve.
+//
+// The gate is scoped to the two keys a write can use to CREATE the refused
+// posture — network.listen_addr pointed at the network, and require_token
+// turned off. An unrelated write on an already-refused config (a hand-edit
+// left one) is allowed: it did not create the posture, it leaves it no worse,
+// and refusing it would strand every other config edit behind an unrelated
+// fix — while every remediation write lands a safe resulting config and is
+// therefore allowed.
+//
+// network.allow_unauthenticated_network is deliberately NOT gated. The only
+// write of it that lands on a refused resulting posture is the REVOCATION —
+// setting it false, or unsetting it, under a non-loopback tokenless bind —
+// and refusing that write would keep the very listener it is revoking serving
+// unauthenticated. `af doctor`'s own remediation for an opted-in exposure is
+// `af config set network.allow_unauthenticated_network false`; it must land so
+// the daemon's next apply can retire the listener into the refused state the
+// operator just asked for.
+//
+// network.require_loopback_token is deliberately absent too: it is inert while
+// require_token is false (tokenDisabled short-circuits the gate), so it neither
+// creates nor rescues the exposure. network.preview_listen_addr is a separate
+// listener that never serves the control plane, so it is governed by its own
+// notice (PreviewListenerExposureNotice) and stays warning-only.
+func listenerWriteRefusal(key string, resulting *Config) string {
+	switch canonicalConfigKey(key) {
+	case "network.listen_addr", "network.require_token":
+		return ListenerBindRefusal(resulting)
+	}
+	return ""
 }
 
 // exposureWarning returns a warning when cfg — the config that RESULTS from
@@ -291,54 +413,59 @@ type SetResult struct {
 // before the file lock, which two racing writers could each read stale. See
 // scalarWrite.apply.
 //
-// It exists because this is now easy to do by accident. Before `listen_addr`
-// became settable, exposing the listener took a deliberate hand-edit; now it is
-// one command that exits 0 and prints nothing. The daemon already knows this
-// pairing is dangerous and warns about exactly it (daemon/httpserver.go) — but
-// only into the log, at the next daemon start, which is neither where nor when
-// the user is looking. This says it at the moment they type it.
-//
-// It WARNS and nothing more: it does not refuse (that would break scripting) and
-// does not auto-set require_token (silently changing a key the user did not name
-// is worse than the surprise it prevents). The user stays in control; they just
-// stop being surprised.
-//
-// Warning is now the ONLY response anywhere: #2090 briefly made the daemon
-// refuse to start on this pairing, and #2168 Phase 0 reversed that by owner
-// decision ("assume users are safe and will do the right thing"). #2168 Phase 2
-// had proposed escalating THIS warning into a refusal as well; that was dropped
-// with the rest. So this is the notice a user gets when they type the command,
-// and the daemon repeats it once when the listener binds (startHTTPServer) — it
-// no longer forecasts a failure, because there is not going to be one.
+// Since #5137 this warning only ever describes an OPTED-IN exposure: a write
+// whose result would be refused outright never reaches it — listenerWriteRefusal
+// already refused that write with the shared remediation message. What is left
+// for the warning is the combination that IS going to serve unauthenticated —
+// non-loopback listen_addr, token off, and allow_unauthenticated_network = true
+// — so the operator sees the risk they just accepted stated plainly, once.
 //
 // Both directions of the pairing warn, because either key can create the
 // exposure: pointing listen_addr at the network while the token is off, or
 // turning the token off while listen_addr is already on the network. Setting
 // any OTHER key stays silent even on an already-exposed config — this speaks to
 // the change the user just made, and warning on every unrelated `config set`
-// would train them to ignore it.
+// would train them to ignore it. Setting network.allow_unauthenticated_network
+// itself stays silent too: opting in IS the acknowledgement, so warning about
+// it would be noise.
+//
+// network.preview_listen_addr is the parallel surface for the web-tab preview
+// listener (#1856). It has NO "other half" pairing: the preview origin never
+// serves the control plane, and its own credential is the per-tab hostname, so
+// the notice depends on preview_listen_addr ALONE and does NOT gate on
+// network.require_token (see PreviewListenerExposureNotice). That notice replaces
+// the control-plane text and the ListenerServesUnauthenticatedNetwork gate for
+// this case, and warns whenever the resulting preview bind is network-reachable
+// — matching this emitter's "warn on every exposed write of the changed key"
+// discipline, so an operator moving an ALREADY network-bound preview between
+// two non-loopback addresses is still warned (the apply-time transition emitter
+// in daemon/config_apply.go handles the once-per-transition INTO exposure, and
+// is not transition-gated for "still exposed, just moving"). The flat alias
+// spelling "preview_listen_addr" canonicalizes to "network.preview_listen_addr"
+// before the switch, so both CLI spellings warn.
 //
 // The exposure test is ListenerServesUnauthenticatedNetwork — the SAME predicate
-// the daemon's refusal uses, itself built on the IsLoopbackListenAddr the token
-// gate derives from. Two definitions of "is this exposed" drifting apart is
-// precisely how a security check rots, so there is only one.
+// the daemon's refusal builds on, itself built on the IsLoopbackListenAddr the
+// token gate derives from. Two definitions of "is this exposed" drifting apart
+// is precisely how a security check rots, so there is only one.
 func exposureWarning(cfg *Config, key string) string {
 	if cfg == nil {
 		return ""
 	}
 	key = canonicalConfigKey(key)
-	if key != "network.listen_addr" && key != "network.require_token" {
+	switch key {
+	case "network.listen_addr", "network.require_token":
+		return ListenerExposureNotice(cfg)
+	case "network.preview_listen_addr":
+		// PreviewListenerExposureNotice is itself non-transition-gated: it returns
+		// a notice whenever cfg.PreviewListenAddr is non-empty and non-loopback,
+		// so a write that moves an already-exposed preview between two non-loopback
+		// addresses still warns — parity with the control-plane case above, which
+		// warns on every exposed write of the changed key.
+		return PreviewListenerExposureNotice(cfg)
+	default:
 		return ""
 	}
-	addr := cfg.ListenAddr
-	if !ListenerServesUnauthenticatedNetwork(addr, cfg.RequireToken) {
-		return ""
-	}
-	return fmt.Sprintf("WARNING: network.listen_addr %q is reachable from the network and network.require_token is false, which puts a "+
-		"plain-HTTP control plane with no authentication in front of anyone who can reach it — including "+
-		"DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. "+
-		"Run `af config set network.require_token true` to require a token (`af token show` prints it), or set network.listen_addr "+
-		"back to a loopback address such as 127.0.0.1:8443, or \"\" to turn the web server off.", addr)
 }
 
 // resolveSettable maps a user key ("default_program" or "program_overrides.claude")
@@ -361,8 +488,15 @@ func resolveSettable(key string) (section, leaf string, spec settableKeySpec, ok
 	}
 	if i := strings.IndexByte(key, '.'); i > 0 {
 		prefix, rest := key[:i], key[i+1:]
-		if s, found := settableKeySpecs[prefix]; found && s.dynamic && rest != "" && !strings.Contains(rest, ".") {
-			return prefix, rest, s, true
+		if s, found := settableKeySpecs[prefix]; found && rest != "" && !strings.Contains(rest, ".") {
+			if s.dynamic {
+				return prefix, rest, s, true
+			}
+			if leafSpec, allowed := s.subkeys[rest]; allowed {
+				return prefix, rest, settableKeySpec{
+					kind: leafSpec.kind, section: prefix, parent: prefix, validate: leafSpec.validate,
+				}, true
+			}
 		}
 	}
 	return "", "", settableKeySpec{}, false
@@ -374,23 +508,42 @@ func resolveSettable(key string) (section, leaf string, spec settableKeySpec, ok
 // guarantees the written file still loads. Returns an actionable error for an
 // unknown key, a wrong-typed or invalid value, or an I/O failure.
 func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
+	result, _, err := SetGlobalConfigValueWithDigest(key, rawValue)
+	return result, err
+}
+
+// SetGlobalConfigValueWithDigest is SetGlobalConfigValue plus the digest of the
+// config.toml bytes this save left on disk, for the callers that then ask a
+// running daemon to apply them: comparing this against the digest the apply's
+// own load reports is how a save decides whether it may claim the daemon is
+// serving THIS save's value (#4247).
+//
+// The digest is returned BESIDE SetResult rather than on it. SetResult crosses
+// the net/rpc control socket and is the `af config set --json` payload, and gob
+// encodes every exported field whatever its json tag says — so a digest hung on
+// SetResult would silently become part of two wire contracts to serve a
+// comparison that never leaves this process. config.ConfigDigest's own fields
+// are unexported for the same reason.
+func SetGlobalConfigValueWithDigest(key, rawValue string) (*SetResult, ConfigDigest, error) {
+	if err := RetiredThemeKeyError(key); err != nil {
+		return nil, ConfigDigest{}, err
+	}
 	if key == "auto_yes" {
-		return nil, RemovedAutoYesError()
+		return nil, ConfigDigest{}, RemovedAutoYesError()
 	}
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
-		return nil, fmt.Errorf("%q is not a settable config key. Settable keys: %s",
-			key, strings.Join(SettableKeys(), ", "))
+		return nil, ConfigDigest{}, unsettableConfigKeyError(key, "")
 	}
 	key = canonicalConfigKey(key)
 	structured := spec.structured && section == ""
 	canonical, encoded, err := canonicalizeConfigValue(key, spec, structured, rawValue)
 	if err != nil {
-		return nil, fmt.Errorf("invalid value for %s: %w", key, err)
+		return nil, ConfigDigest{}, fmt.Errorf("invalid value for %s: %w", key, err)
 	}
 	if !structured && spec.validate != nil {
 		if err := spec.validate(leaf, canonical); err != nil {
-			return nil, err
+			return nil, ConfigDigest{}, err
 		}
 	}
 
@@ -400,11 +553,11 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	// PRECONDITION only — the loaded values are deliberately not carried into the
 	// write. See scalarWrite.apply for why (#2412).
 	if _, err := LoadConfig(); err != nil {
-		return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
+		return nil, ConfigDigest{}, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 	}
 	configDir, err := GetConfigDir()
 	if err != nil {
-		return nil, err
+		return nil, ConfigDigest{}, err
 	}
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyPath := prettyHomePath(tomlPath)
@@ -413,15 +566,19 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 		rawStructured: rawValue, clear: spec.kind == cfgStringList && canonical == ""}
 
 	var result *SetResult
-	writeErr := WithFileLock(tomlPath, func() error {
+	var digest ConfigDigest
+	writeErr := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		var err error
-		result, err = write.apply(tomlPath, prettyPath)
+		result, digest, err = write.apply(locked, prettyPath)
 		return err
 	})
 	if writeErr != nil {
-		return nil, writeErr
+		return nil, ConfigDigest{}, writeErr
 	}
-	return result, nil
+	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+	}
+	return result, digest, nil
 }
 
 // SetProjectConfigValue is the per-project counterpart of SetGlobalConfigValue
@@ -433,6 +590,9 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 // A key that is settable but does not admit the personal layer (a global-only or
 // repo-contract key) is rejected with an actionable message, never written.
 func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
+	if err := RetiredThemeKeyError(key); err != nil {
+		return nil, err
+	}
 	if key == "auto_yes" {
 		return nil, RemovedAutoYesError()
 	}
@@ -440,7 +600,7 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	section, leaf, spec, err := resolveProjectSettable(key)
+	section, leaf, spec, err := resolveProjectSettable(selector, key)
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +621,8 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 		return nil, err
 	}
 	prettyPath := prettyHomePath(path)
-	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured}
+	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured,
+		rawStructured: rawValue}
 
 	var result *SetResult
 	writeErr := WithFileLock(path, func() error {
@@ -472,6 +633,22 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	if writeErr != nil {
 		return nil, writeErr
 	}
+	// The same note the global write produces (#3386). A per-project account
+	// default is the shape this key exists for, so it is the one that most needs
+	// to say "that account is not registered yet" at the moment it is typed.
+	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+	}
+	// A project-scoped branch_prefix is written and kept — existing configs stay
+	// valid — but it is never applied (#4539); say so on the write itself. And
+	// because no restart can ever apply it (the daemon names branches from its
+	// frozen global prefix), the write bypasses the generic restart
+	// result/notice: printing "restart them to apply" for a value that can
+	// never take effect would contradict the warning.
+	if warn := projectBranchPrefixWriteWarning(key); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+		result.RequiresRestart = false
+	}
 	return result, nil
 }
 
@@ -479,21 +656,52 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 // the key admits the personal-project layer in the manifest. The manifest is the
 // single authority on which keys may live where, so the write path checks it
 // before editing rather than maintaining a second per-project allowlist.
-func resolveProjectSettable(key string) (section, leaf string, spec settableKeySpec, err error) {
+func resolveProjectSettable(selector, key string) (section, leaf string, spec settableKeySpec, err error) {
 	key = canonicalConfigKey(key)
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
-		return "", "", settableKeySpec{}, fmt.Errorf("%q is not a settable config key. Settable keys: %s",
-			key, strings.Join(SettableKeys(), ", "))
+		return "", "", settableKeySpec{}, unsettableConfigKeyError(key, selector)
 	}
 	scopeKey := key
 	if spec.dynamic && section != "" {
 		scopeKey = section
 	}
+	if spec.parent != "" {
+		scopeKey = spec.parent
+	}
 	if !isProjectPersonalKey(scopeKey) {
 		return "", "", settableKeySpec{}, projectScopeError(scopeKey)
 	}
 	return section, leaf, spec, nil
+}
+
+// unsettableConfigKeyError keeps the complete allowlist while making the
+// useful recovery local: if the user tried an unsupported leaf of a writable
+// table, name the parent table's accepted compact-JSON form.
+func unsettableConfigKeyError(key, projectSelector string) error {
+	key = canonicalConfigKey(key)
+	hint := ""
+	if i := strings.IndexByte(key, '.'); i > 0 {
+		parent := key[:i]
+		if spec, ok := settableKeySpecs[parent]; ok && spec.structured && manifestKeyIsTable(parent) {
+			projectFlag := ""
+			if projectSelector != "" && isProjectPersonalKey(parent) {
+				projectFlag = " --project " + ShellQuotePath(projectSelector)
+			}
+			hint = fmt.Sprintf(" Set the whole table with `af config set %s '<compact-json>'%s`.", parent, projectFlag)
+		}
+	}
+	return fmt.Errorf("%q is not a settable config key.%s Settable keys: %s",
+		key, hint, strings.Join(SettableKeys(), ", "))
+}
+
+func manifestKeyIsTable(key string) bool {
+	for _, entry := range Manifest() {
+		if entry.Key == key {
+			return entry.Type == "table"
+		}
+	}
+	return false
 }
 
 // projectScopeError explains why a settable key cannot be a per-project personal
@@ -522,8 +730,7 @@ type scalarWrite struct {
 	// structured replaces a whole table/list value rather than one scalar line.
 	structured bool
 	// rawStructured retains the user's structured JSON until the global file
-	// lock is held. Theme omissions must merge with the palette current inside
-	// that lock, and default program-removal tombstones are encoded there too.
+	// lock is held, so program-removal tombstones use the current snapshot.
 	rawStructured string
 	// clear removes the key line instead of writing it. Set for an empty list
 	// value (`af config set cors_allowed_origins ""`): a nil/absent list and an
@@ -559,40 +766,72 @@ type scalarWrite struct {
 // into a snapshot of the other one, because parseConfigTOML has already
 // produced the exact config this write lands on. Whichever racer writes second
 // now sees the full pairing and warns.
-func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
-	current, err := os.ReadFile(tomlPath)
+//
+// The second return is the digest of the bytes this write left on disk — the
+// evidence a save needs to tell whether a later apply loaded ITS file or one a
+// competing writer replaced (#4247). It is taken from `updated` at the moment
+// locked.write commits it, so nothing can have re-read or re-encoded it in
+// between.
+func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, ConfigDigest, error) {
+	// Every byte read and written here is the file the caller's lock covers,
+	// reached through the directory it holds open. Reading by path instead would
+	// let a retarget between acquisition and write compute the edit against one
+	// file and land it on another (#3688, #3697); locked.link is only what the
+	// user is shown.
+	current, err := locked.read()
 	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+		return nil, ConfigDigest{}, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
 	current = stripUTF8BOM(current)
 	updated := string(current)
+	// What this file MEANS today, read inside the lock. A structured write merges
+	// its new table onto it; the value-drift guard below compares the rewrite
+	// against it. A file with no settings has no meaning to preserve — nothing to
+	// merge onto and nothing to protect — so it stays unguarded on the defaults.
+	before := DefaultConfig()
+	guarded := !isEffectivelyEmptyToml(current)
+	if guarded {
+		if before, err = parseConfigTOML(current, prettyPath); err != nil {
+			return nil, ConfigDigest{}, fmt.Errorf("refusing to write: the current config does not load: %w", err)
+		}
+	}
+	var existingOverrides map[string]string
+	if before != nil {
+		existingOverrides = before.ProgramOverrides
+	}
 	if w.structured {
-		base := DefaultConfig()
-		if !isEffectivelyEmptyToml(current) {
-			base, err = parseConfigTOML(current, prettyPath)
-			if err != nil {
-				return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
-			}
-		}
-		if w.key == "theme" && !strings.HasPrefix(strings.TrimSpace(w.rawStructured), "{") {
-			w.canonical, w.encoded, err = canonicalizeConfigValue(w.key, settableKeySpec{}, true, w.rawStructured)
-		} else {
-			w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, base, true)
-		}
+		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, existingOverrides, true)
 		if err != nil {
-			return nil, fmt.Errorf("invalid value for %s: %w", w.key, err)
+			return nil, ConfigDigest{}, fmt.Errorf("invalid value for %s: %w", w.key, err)
 		}
 	}
 	switch {
 	case w.structured:
 		updated, err = setTOMLStructured(updated, w.key, w.encoded)
 		if err != nil {
-			return nil, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)
+			return nil, ConfigDigest{}, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)
 		}
 	case w.clear:
 		updated, _ = deleteTOMLScalar(updated, w.section, w.leaf)
 	default:
-		updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+		// If the target table is already opened at the root by a top-level
+		// dotted key (program_overrides.codex = …) rather than a [section]
+		// header, TOML forbids re-opening it with a header, so a NEW leaf
+		// has to join the table in the same dotted form. Without this guard
+		// the insert appends a [section] block over the dotted table and the
+		// pre-write parse gate refuses bytes that were valid before the edit
+		// (mirroring the migrate guard in migrate.go). section == "" targets
+		// the root block and is left untouched. When the leaf already exists
+		// as a dotted key we skip the rerouting: setTOMLScalar's own
+		// dottedKeyRe and tomlScalarLineMatches handle updates — including
+		// keys written with whitespace or quotes around the dot — and calling
+		// in with section="" would disable that syntax-aware matching.
+		if w.section != "" && tomlRootDottedTable(updated, w.section) &&
+			!tomlRootDottedLeafExists(updated, w.section, w.leaf) {
+			updated = insertTOMLDottedLeaf(updated, w.section, w.leaf, w.encoded)
+		} else {
+			updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+		}
 	}
 	// If this file already carries the flat compatibility spelling, keep it in
 	// sync inside the same lock. A rolled-back binary ignores the new table, so
@@ -600,7 +839,7 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 	// operator's setting. Grouped-only files stay grouped-only; no deprecated key
 	// is invented for a new install.
 	if alias, ok := configAliasForCanonical(w.key); ok {
-		if metadata, err := metadataForSource(current, tomlPath, FormatTOML); err == nil {
+		if metadata, err := metadataForSource(current, locked.link, FormatTOML); err == nil {
 			if _, present := metadata.shape[alias.legacy]; present {
 				if w.clear {
 					updated, _ = deleteTOMLScalar(updated, "", alias.legacy)
@@ -612,6 +851,15 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 	}
 	updated = setTOMLScalar(updated, "", SchemaVersionField, strconv.Itoa(GlobalConfigSchemaVersion))
 
+	// A host list and its default are one fact. The loader drops a default that
+	// names no listed host (sanitizeHosts), so a write that leaves one dangling
+	// would report success for a setting that never takes effect; refuse it here,
+	// against the bytes this write produces, before sanitization hides it.
+	if w.key == "hosts" || w.key == "default_host" {
+		if err := ValidateHostsInTOML([]byte(updated)); err != nil {
+			return nil, ConfigDigest{}, fmt.Errorf("invalid value for %s: %w", w.key, err)
+		}
+	}
 	// Final gate: the edited bytes must parse and validate exactly as the loader
 	// would, so `config set` can never leave an unloadable config. The parsed
 	// result is also the config this write RESULTS in — the same values
@@ -620,20 +868,61 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 	// what the exposure judgment below is made against.
 	resulting, err := parseConfigTOML([]byte(updated), prettyPath)
 	if err != nil {
-		return nil, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+		return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
 	}
-	if err := AtomicWriteFile(tomlPath, []byte(updated), 0644); err != nil {
-		return nil, err
+	// resulting is the config this write produces, and CurrentValue reads it
+	// below to echo the post-write refresh form for a structured key. For
+	// root_agent that render is presence-aware — it consults the on-disk shape
+	// so an absent [root_agent] table shows {} rather than the zero-struct
+	// {"enabled":false} — but parseConfigTOML keeps no source (it is a
+	// values-only parse, not a loader), so attach the post-edit bytes' shape
+	// here. This makes resulting match what LoadConfig will return for these
+	// bytes — the property the comment above already claims for the field
+	// values; the shape is the half CurrentValue additionally needs. Only
+	// structured writes reach CurrentValue below, so the attach is gated to
+	// them; metadataForSource cannot fail on the bytes parseConfigTOML just
+	// accepted.
+	if w.structured {
+		if err := attachConfigSource(resulting, []byte(updated), locked.link, FormatTOML); err != nil {
+			return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+		}
 	}
+	// Second gate, and the one the parse cannot give: the edit must have landed
+	// on the right line. A surgical edit that hit a decoy inside somebody's
+	// multiline value produces valid TOML that MEANS something else (#3662), so
+	// anything but the key asked for — plus the machine-managed schema marker
+	// written just above — is a refusal that names what would have moved.
+	if guarded {
+		if drift := configRewriteDrift(before, resulting, w.key, SchemaVersionField); drift != "" {
+			return nil, ConfigDigest{}, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
+		}
+	}
+	// #5137: refuse to leave the file in a posture the daemon will refuse to
+	// bind — a non-loopback listen_addr with the token off and no explicit
+	// opt-in. Judged on `resulting` (the locked bytes' meaning), so two racing
+	// writers each touching one half of the pairing still converge on the
+	// refusal rather than each seeing a stale safe half (#2412). The message is
+	// ListenerBindRefusal's own, so the write refusal and the daemon's bind
+	// refusal read identically. Nothing is written.
+	if refusal := listenerWriteRefusal(w.key, resulting); refusal != "" {
+		return nil, ConfigDigest{}, fmt.Errorf("refusing to write: %s", refusal)
+	}
+	if err := locked.write([]byte(updated), 0644); err != nil {
+		return nil, ConfigDigest{}, err
+	}
+	// Hashed from the same bytes that were just committed, not from a re-read of
+	// the file: a re-read would be a readback, and could only report what some
+	// LATER writer left there.
+	digest := digestConfigBytes([]byte(updated))
 	value := w.canonical
 	if w.structured {
 		value, _ = CurrentValue(resulting, w.key)
 	}
-	result := &SetResult{Key: w.key, Value: value, Path: tomlPath, RequiresRestart: true}
+	result := &SetResult{Key: w.key, Value: value, Path: locked.link, RequiresRestart: true}
 	if warn := exposureWarning(resulting, w.key); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
 	}
-	return result, nil
+	return result, digest, nil
 }
 
 // applyProject is the personal-project counterpart of apply. It reuses the same
@@ -650,325 +939,62 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 	}
 	current = stripUTF8BOM(current)
 	updated := string(current)
+	var before *ProjectConfig
+	guarded := !isEffectivelyEmptyToml(current)
+	if guarded {
+		if before, err = parseProjectConfig(current, path); err != nil {
+			return nil, fmt.Errorf("refusing to write: the current personal project config does not load: %w", err)
+		}
+	}
+	var existingOverrides map[string]string
+	if before != nil {
+		existingOverrides = before.ProgramOverrides
+	}
 	if w.structured {
+		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, existingOverrides, false)
+		if err != nil {
+			return nil, fmt.Errorf("invalid value for %s: %w", w.key, err)
+		}
 		updated, err = setTOMLStructured(updated, w.key, w.encoded)
 		if err != nil {
 			return nil, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)
 		}
 	} else {
-		updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+		// See apply: a table opened at the root by a dotted key cannot be
+		// re-opened with a [section] header, so a NEW leaf must join it in
+		// the dotted form the migrate path uses. Skip the rerouting when the
+		// leaf already exists: setTOMLScalar's own dottedKeyRe handles
+		// updates even when the existing key uses whitespace or quoting.
+		if w.section != "" && tomlRootDottedTable(updated, w.section) &&
+			!tomlRootDottedLeafExists(updated, w.section, w.leaf) {
+			updated = insertTOMLDottedLeaf(updated, w.section, w.leaf, w.encoded)
+		} else {
+			updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+		}
 	}
-	if _, err := parseProjectConfig([]byte(updated), path); err != nil {
+	resulting, err := parseProjectConfig([]byte(updated), path)
+	if err != nil {
 		return nil, fmt.Errorf("internal error: edited personal project config would not load (no changes written): %w", err)
+	}
+	if guarded {
+		if drift := projectRewriteDrift(before, resulting, w.key); drift != "" {
+			return nil, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
+		}
+	}
+	value := w.canonical
+	if w.structured {
+		_, err = canonicalStructuredTOMLValue(updated, w.key)
+		if err != nil {
+			return nil, fmt.Errorf("internal error: cannot read back %s from %s (no changes written): %w", w.key, prettyPath, err)
+		}
+		var ok bool
+		value, ok = projectStructuredCurrentValue(resulting, w.key)
+		if !ok {
+			return nil, fmt.Errorf("internal error: cannot read back %s from %s (no changes written)", w.key, prettyPath)
+		}
 	}
 	if err := AtomicWriteFile(path, []byte(updated), 0644); err != nil {
 		return nil, err
 	}
-	return &SetResult{Key: w.key, Value: w.canonical, Path: path, RequiresRestart: true}, nil
-}
-
-// setTOMLScalar returns content with [section] leaf set to encoded, changing only
-// the target value's bytes. If the key exists its value (and only its value) is
-// replaced, preserving any trailing inline comment. It recognizes both TOML
-// spellings of a table entry — a leaf under a [section] header AND a top-level
-// dotted key (section.leaf = …) — and edits whichever is present, so a
-// hand-edited dotted-key file is never left with a duplicate. If the key is
-// absent it is inserted with minimal disturbance — appended to the end of its
-// section's content block, i.e. after the section's last non-blank line
-// (comments included) and before any trailing blanks preceding the next section
-// or EOF (#1687), or for a root key the pre-section block; if the section itself
-// is absent a new [section] block is appended. section == "" targets the root
-// block.
-func setTOMLScalar(content, section, leaf, encoded string) string {
-	newLine := leaf + " = " + encoded
-
-	if strings.TrimSpace(content) == "" {
-		if section == "" {
-			return newLine + "\n"
-		}
-		return "[" + section + "]\n" + newLine + "\n"
-	}
-
-	hadTrailingNewline := strings.HasSuffix(content, "\n")
-	ls := strings.Split(content, "\n")
-	if hadTrailingNewline && len(ls) > 0 && ls[len(ls)-1] == "" {
-		ls = ls[:len(ls)-1]
-	}
-
-	keyRe := regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
-
-	// TOML also lets a hand-editor write a table entry as a top-level dotted key
-	// (program_overrides.claude = "…") instead of under a [program_overrides]
-	// header. For a dynamic key we must recognize that form too, or we would
-	// miss the existing key and append a duplicate — corrupting the file (a
-	// valid config never has both forms, so at most one matches). dotted whitespace
-	// around the '.' is allowed by TOML, so tolerate it.
-	var dottedKeyRe *regexp.Regexp
-	if section != "" {
-		dottedKeyRe = regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(section) + `\s*\.\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
-	}
-
-	curSection := ""
-	firstHeaderIdx := -1
-	targetHeaderIdx := -1
-	// lastContentIdxInTarget tracks the last non-blank line of the target
-	// section INCLUDING comment lines, so a missing key is appended at the END
-	// of the section's content block (the documented contract). Tracking only
-	// key=value lines (the pre-#1687 behavior) left it at -1 for a comment-only
-	// section, which inserted the new key immediately after the [section] header
-	// and ABOVE the section's comments (#1687). Blank lines never update it, so
-	// trailing blanks before the next header / EOF are excluded and the insert
-	// lands at the end of the content, not spilling past it.
-	lastContentIdxInTarget := -1
-
-	rebuild := func() string {
-		out := strings.Join(ls, "\n")
-		if hadTrailingNewline {
-			out += "\n"
-		}
-		return out
-	}
-
-	for i, line := range ls {
-		if name, ok := tomlHeaderName(line); ok {
-			if firstHeaderIdx == -1 {
-				firstHeaderIdx = i
-			}
-			if name == section && targetHeaderIdx == -1 {
-				targetHeaderIdx = i
-			}
-			curSection = name
-			continue
-		}
-		// Top-level dotted form (section.leaf = …). Only valid at the root: the
-		// same text under another header would name a different key.
-		if dottedKeyRe != nil && curSection == "" {
-			if m := dottedKeyRe.FindStringSubmatch(line); m != nil {
-				if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
-					ls = updated
-					return rebuild()
-				}
-			}
-			if tomlScalarLineMatches(line, section, leaf) {
-				if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
-					ls = updated
-					return rebuild()
-				}
-			}
-			if updated, ok := setTOMLInlineTableMember(line, section, leaf, encoded); ok {
-				ls[i] = updated
-				return rebuild()
-			}
-		}
-		if curSection != section {
-			continue
-		}
-		if m := keyRe.FindStringSubmatch(line); m != nil {
-			if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
-				ls = updated
-				return rebuild()
-			}
-		}
-		if tomlScalarLineMatches(line, "", leaf) {
-			if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
-				ls = updated
-				return rebuild()
-			}
-		}
-		if strings.TrimSpace(line) != "" {
-			lastContentIdxInTarget = i
-		}
-	}
-
-	// Key not found — insert.
-	insertAt := func(idx int, s string) {
-		ls = append(ls, "")
-		copy(ls[idx+1:], ls[idx:])
-		ls[idx] = s
-	}
-
-	switch {
-	case section == "":
-		switch {
-		case lastContentIdxInTarget != -1:
-			insertAt(lastContentIdxInTarget+1, newLine)
-		case firstHeaderIdx != -1:
-			insertAt(firstHeaderIdx, newLine)
-		default:
-			ls = append(ls, newLine)
-		}
-	case targetHeaderIdx == -1:
-		// Section absent: append a fresh block, separated by one blank line.
-		if len(ls) > 0 && ls[len(ls)-1] != "" {
-			ls = append(ls, "")
-		}
-		ls = append(ls, "["+section+"]", newLine)
-	default:
-		if lastContentIdxInTarget != -1 {
-			insertAt(lastContentIdxInTarget+1, newLine)
-		} else {
-			insertAt(targetHeaderIdx+1, newLine)
-		}
-	}
-	return rebuild()
-}
-
-// deleteTOMLScalar removes the [section] leaf line from content, changing only
-// that one line and preserving every other comment, blank line, and key. It is
-// the inverse of setTOMLScalar and recognizes the same two spellings of a table
-// entry — a leaf under a [section] header AND a top-level dotted key
-// (section.leaf = …) — removing whichever is present. section == "" targets a
-// root-block key. Returns the edited content and whether a line was removed; an
-// absent key leaves content untouched and reports false. An emptied [section]
-// header is left in place (a present-but-empty table resolves to no leaves).
-func deleteTOMLScalar(content, section, leaf string) (string, bool) {
-	if strings.TrimSpace(content) == "" {
-		return content, false
-	}
-
-	hadTrailingNewline := strings.HasSuffix(content, "\n")
-	ls := strings.Split(content, "\n")
-	if hadTrailingNewline && len(ls) > 0 && ls[len(ls)-1] == "" {
-		ls = ls[:len(ls)-1]
-	}
-
-	keyRe := regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
-	var dottedKeyRe *regexp.Regexp
-	if section != "" {
-		dottedKeyRe = regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(section) + `\s*\.\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
-	}
-
-	curSection := ""
-	removeAt := -1
-	removeThrough := -1
-	rebuild := func() string {
-		out := strings.Join(ls, "\n")
-		if hadTrailingNewline && out != "" {
-			out += "\n"
-		}
-		return out
-	}
-	for i, line := range ls {
-		if name, ok := tomlHeaderName(line); ok {
-			curSection = name
-			continue
-		}
-		// Top-level dotted form (section.leaf = …), valid only at the root.
-		if dottedKeyRe != nil && curSection == "" && (dottedKeyRe.MatchString(line) || tomlScalarLineMatches(line, section, leaf)) {
-			removeAt = i
-			removeThrough = tomlAssignmentEnd(ls, i)
-			break
-		}
-		if curSection == "" && section != "" {
-			if updated, ok := deleteTOMLInlineTableMember(line, section, leaf); ok {
-				ls[i] = updated
-				return rebuild(), true
-			}
-		}
-		if curSection != section {
-			continue
-		}
-		if keyRe.MatchString(line) || tomlScalarLineMatches(line, "", leaf) {
-			removeAt = i
-			removeThrough = tomlAssignmentEnd(ls, i)
-			break
-		}
-	}
-	if removeAt < 0 {
-		return content, false
-	}
-
-	kept := preservedTOMLAssignmentComments(ls, removeAt, removeThrough)
-	kept = append(kept, ls[removeThrough+1:]...)
-	ls = append(ls[:removeAt], kept...)
-	return rebuild(), true
-}
-
-// TOML's two multiline string delimiters. They are scanned as three-byte UNITS
-// rather than as three individual quotes, which is the whole of #3455: a
-// per-quote toggle reads a triple quote as open-close-open and leaves the
-// scanner believing it is inside a string, so a '#' after the delimiter never
-// registers as a comment.
-const (
-	tomlMultilineBasic   = `"""`
-	tomlMultilineLiteral = `'''`
-)
-
-// splitTrailingComment separates a TOML value from a trailing inline comment,
-// tracking string state so a '#' inside a string is not mistaken for a comment.
-// It returns the value part and the comment part (including the whitespace that
-// preceded the '#'), so the comment can be reattached byte-for-byte.
-//
-// The scan begins OUTSIDE every string, which is right for a line that opens
-// whatever strings it contains: a single-line assignment's value, or an inline
-// table. The closing line of a MULTILINE assignment is the other case — the
-// string it ends was opened on an earlier line — and that one needs
-// scanTrailingComment with the delimiter still open.
-func splitTrailingComment(rest string) (value, comment string) {
-	value, comment, _ = scanTrailingComment(rest, "")
-	return value, comment
-}
-
-// scanTrailingComment splits one line of a TOML value, resuming inside the
-// string that `open` closes ("" when the line begins outside every string), and
-// reports the delimiter still open when the line ends so the caller can carry
-// the state to the next line.
-//
-// Carrying that state is what makes the closing delimiter of a multiline string
-// read as the CLOSE it is rather than the open of a new string. It also covers
-// the same defect one level down, where a multiline string is an ELEMENT of a
-// multiline array and holds its state open across the element boundary.
-func scanTrailingComment(rest, open string) (value, comment, stillOpen string) {
-	for i := 0; i < len(rest); {
-		if open != "" {
-			// Basic strings process backslash escapes, so an escaped quote is
-			// content and cannot close anything. Literal strings process none
-			// at all, which is exactly what lets a lone backslash sit inside
-			// one.
-			if open[0] == '"' && rest[i] == '\\' {
-				i += 2
-				continue
-			}
-			if !strings.HasPrefix(rest[i:], open) {
-				i++
-				continue
-			}
-			i += len(open)
-			if len(open) == 3 {
-				// TOML lets a multiline string's content end with one or two of
-				// its own quote characters, so the delimiter is the LAST three
-				// of the run: `"""a""""` is the string `a"`. Consuming the whole
-				// run keeps a stray quote from opening a phantom string that
-				// would swallow the comment after it.
-				for i < len(rest) && rest[i] == open[0] {
-					i++
-				}
-			}
-			open = ""
-			continue
-		}
-		switch {
-		case strings.HasPrefix(rest[i:], tomlMultilineBasic):
-			open = tomlMultilineBasic
-			i += len(tomlMultilineBasic)
-		case strings.HasPrefix(rest[i:], tomlMultilineLiteral):
-			open = tomlMultilineLiteral
-			i += len(tomlMultilineLiteral)
-		case rest[i] == '"':
-			open = `"`
-			i++
-		case rest[i] == '\'':
-			open = `'`
-			i++
-		case rest[i] == '#':
-			j := i
-			for j > 0 && (rest[j-1] == ' ' || rest[j-1] == '\t') {
-				j--
-			}
-			return rest[:j], rest[j:], ""
-		default:
-			i++
-		}
-	}
-	return rest, "", open
+	return &SetResult{Key: w.key, Value: value, Path: path, RequiresRestart: true}, nil
 }

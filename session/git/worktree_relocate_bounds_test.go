@@ -1,7 +1,6 @@
 package git
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	stdlog "log"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // Which relocate path an archive/restore takes, and what it does when a bounded
@@ -59,7 +59,7 @@ func TestMoveWorktree_SubmodulesUseDesignedFallbackWithoutWarning(t *testing.T) 
 	}
 	t.Cleanup(func() { worktreeMoveFast = realFastMove })
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	previousWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = previousWarning })
@@ -216,9 +216,7 @@ func TestRelocate_SourceIdentityProbeIsBounded(t *testing.T) {
 		<-probeDone
 		relocationPathIdentity = previousIdentity
 	})
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { relocationIdentityTimeout = previousTimeout })
+	useRelocationIdentityTimeoutForTest(t, 100*time.Millisecond)
 
 	done := make(chan error, 1)
 	go func() { done <- gw.MoveWorktree(dest) }()
@@ -226,7 +224,7 @@ func TestRelocate_SourceIdentityProbeIsBounded(t *testing.T) {
 	case err := <-done:
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		assert.True(t, gw.cleanupHasStalled())
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(3 * relocationIdentityTimeout):
 		t.Fatal("the pre-move source identity probe ignored the relocation bound")
 	}
 }

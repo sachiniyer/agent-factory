@@ -23,7 +23,7 @@ import (
 // fails loud. Reachable from convertJSONToTOML and read-only diagnostics now
 // that first-run and lost-race materialization write TOML.
 func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
-	return parseConfigJSON(data, prettyConfigPath, true)
+	return parseConfigJSON(data, prettyConfigPath, true, true)
 }
 
 // parseConfigForConversion is the frozen JSON reader on the one path that is
@@ -31,10 +31,10 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 // write-aware root_agents notice after its atomic TOML write; suppressing the
 // generic read-only notice here avoids two contradictory warnings.
 func parseConfigForConversion(data []byte, prettyConfigPath string) (*Config, error) {
-	return parseConfigJSON(data, prettyConfigPath, false)
+	return parseConfigJSON(data, prettyConfigPath, false, false)
 }
 
-func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents bool) (*Config, error) {
+func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents, warnShellValues bool) (*Config, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("config file %s is empty; delete it to regenerate defaults, or add valid JSON", prettyConfigPath)
 	}
@@ -51,6 +51,7 @@ func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents bool) 
 		return nil, err
 	}
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatJSON); err == nil {
+		config.Appearance = migratedAppearance(metadata.shape)
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
 		if warnRootAgents {
 			warnLegacyRootAgents(metadata.shape, prettyConfigPath)
@@ -66,18 +67,18 @@ func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents bool) 
 		known := knownJSONConfigKeys()
 		for key := range topLevel {
 			switch {
-			case key == "auto_yes":
+			case key == "auto_yes" || key == "theme" || key == "appearance":
 				// Compatibility warning emitted above. Do not follow it with the
 				// generic unknown-key warning for the same removed setting.
 			case key == "keys":
 				log.WarningLog.Printf("config %s: \"keys\" is ignored in config.json — the keymap is TOML-only; move it to a [keys] table in %s", prettyConfigPath, TomlConfigFileName)
 			case !known[key]:
-				log.WarningLog.Printf("config %s: unknown key %q is not recognized by this version of af and will be dropped on conversion to %s", prettyConfigPath, key, TomlConfigFileName)
+				log.WarningLog.Printf("config %s: unknown key %q is ignored by this version of af", prettyConfigPath, key)
 			}
 		}
 	}
 
-	return validateConfig(config, prettyConfigPath)
+	return validateConfig(config, prettyConfigPath, warnShellValues)
 }
 
 // parseConfigTOML validates and unmarshals raw config.toml bytes on top of
@@ -108,16 +109,6 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	config := DefaultConfig()
 	config.source.builtIn = snapshotConfig(config)
-	// A table is a custom palette, not the named default it overlays. Clear the
-	// preset metadata before decoding so a later save preserves the user's table
-	// rather than collapsing it to theme = "nord".
-	var shape map[string]any
-	if err := toml.Unmarshal(decodedData, &shape); err == nil {
-		if _, isTable := shape["theme"].(map[string]any); isTable {
-			config.Theme.preset = ""
-			config.Theme.explicitPreset = false
-		}
-	}
 	if err := toml.Unmarshal(decodedData, config); err != nil {
 		return nil, tomlParseError("config file "+prettyConfigPath, err)
 	}
@@ -130,13 +121,14 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatTOML); err == nil {
 		applyGroupedConfigAliases(config, tables, metadata.shape)
+		config.Appearance = migratedAppearance(metadata.shape)
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
 		warnLegacyRootAgents(metadata.shape, prettyConfigPath)
 		warnLegacyConfigAliases(metadata.shape, prettyConfigPath, FormatTOML)
 	}
 	warnUnknownTomlKeys(decodedData, prettyConfigPath)
 
-	return validateConfig(config, prettyConfigPath)
+	return validateConfig(config, prettyConfigPath, true)
 }
 
 // stripUTF8BOM removes a leading UTF-8 BOM. TOML 1.0 says a BOM should be
@@ -194,7 +186,7 @@ func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
 	}
 	for _, keyErr := range strictErr.Errors {
 		key := keyErr.Key()
-		if removedAutoYesKeyPath(key) {
+		if removedAutoYesKeyPath(key) || (len(key) > 0 && key[0] == "theme") {
 			// Compatibility warning emitted by parseConfigTOML. Avoid a second,
 			// generic warning that loses the migration recipe.
 			continue
@@ -232,7 +224,7 @@ func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
 // validateConfig applies the format-independent semantic checks shared by
 // parseConfig and parseConfigTOML: enum validation hard-errors, range checks
 // warn and fall back to defaults.
-func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
+func validateConfig(config *Config, prettyConfigPath string, warnShellValues bool) (*Config, error) {
 	if config.SchemaVersion == LegacySchemaVersion {
 		config.SchemaVersion = GlobalConfigSchemaVersion
 	}
@@ -254,14 +246,37 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 			return nil, err
 		}
 	}
+	if err := validateDefaultAccounts(
+		fmt.Sprintf("Config issue in %s", prettyConfigPath), config.DefaultAccounts); err != nil {
+		return nil, err
+	}
+	// Beside the program-override KEY check above: warn about the SHAPE of a
+	// value this file hands to /bin/sh -c (#3566). Each of the three config
+	// sources warns for the keys it admits — this one is the only source of
+	// sandbox.ssh and root_agents, and the operator's own layer for
+	// on_archive_command.
+	if warnShellValues {
+		warnGlobalShellValues(config, prettyConfigPath)
+	}
+
 	normalizedSessionEnv, err := sessionenv.NormalizeExtraNames(config.SessionEnvPassthrough)
 	if err != nil {
 		return nil, fmt.Errorf("Config issue in %s: session_env_passthrough: %w", prettyConfigPath, err)
 	}
 	config.SessionEnvPassthrough = normalizedSessionEnv
+	normalizedCandidates, err := normalizeLimitAccountCandidates(config.LimitAccountCandidates)
+	if err != nil {
+		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
+	}
+	config.LimitAccountCandidates = normalizedCandidates
 
 	sanitizeLimitPatterns(config)
-	sanitizeThemeColors(config, prettyConfigPath)
+	sanitizeHosts(config)
+	config.Appearance = NormalizeAppearance(config.Appearance)
+	config.Web.TerminalFontSizePhone = sanitizeWebTerminalFontSize(
+		"web.terminal_font_size_phone", config.Web.TerminalFontSizePhone, defaultWebTerminalFontSizePhone, prettyConfigPath)
+	config.Web.TerminalFontSizeDesktop = sanitizeWebTerminalFontSize(
+		"web.terminal_font_size_desktop", config.Web.TerminalFontSizeDesktop, defaultWebTerminalFontSizeDesktop, prettyConfigPath)
 	config.LimitRetryInterval = sanitizeLimitRetryInterval(config.LimitRetryInterval, prettyConfigPath)
 	config.WorktreeRoot = normalizeWorktreeRoot(config.WorktreeRoot, prettyConfigPath)
 	config.DetachKeys = sanitizeDetachKeys(config.DetachKeys, prettyConfigPath)
@@ -269,6 +284,10 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 	if config.DaemonPollInterval <= 0 {
 		log.WarningLog.Printf("daemon_poll_interval=%d is non-positive; using default %dms", config.DaemonPollInterval, defaultDaemonPollInterval)
 		config.DaemonPollInterval = defaultDaemonPollInterval
+	}
+	if config.WatcherEventsPerMinute <= 0 {
+		log.WarningLog.Printf("watcher_events_per_minute=%d is non-positive; using default %d", config.WatcherEventsPerMinute, DefaultWatcherEventsPerMinute)
+		config.WatcherEventsPerMinute = DefaultWatcherEventsPerMinute
 	}
 
 	if config.LogMaxSizeMB <= 0 {
@@ -298,8 +317,8 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 		config.SSHHostKeyVerification = SSHHostKeyStrict
 	}
 
-	// The [keys] keymap hard-errors on any problem (unknown action, bad key
-	// string, reserved key, conflict) rather than warn-and-default: a keymap
+	// Removed actions are ignored on upgrade. Other [keys] problems (unknown
+	// action, bad key string, reserved key, conflict) remain hard errors: a keymap
 	// that silently falls back to defaults is indistinguishable from a dead
 	// keyboard binding at runtime, which is far harder to debug than a load
 	// error naming the file and action (#1026).
@@ -312,14 +331,35 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 	// keybinding typo would keep a user from running the very commands they'd
 	// use to debug it. The binding is validated wherever it is actually
 	// consumed.
+	discardRemovedPRKeyBindings(config.Keys, prettyConfigPath)
 	overrides, err := normalizeKeyOverrides(config.Keys, prettyConfigPath)
 	if err != nil {
 		return nil, err
 	}
+	// A shift+<rune> override Bubble Tea can never emit (Key has no Shift
+	// field, so Shift+A is emitted as "A", never "shift+a") was, before this
+	// change, a silently dead binding. Apply the "warn now, reject later"
+	// policy (#4599): warn for each one on load and drop it, so a config that
+	// already contains one upgrades without refusing to start over a binding
+	// that was already inert — including in the daemon's config reads
+	// (control_server.go, taskrun.go), which go through this same LoadConfig.
+	// The hard error for an existing dead binding stays a separate, later
+	// change. keys.ValidateOverrides below still hard-errors every other
+	// defect, and `af config set keys` (which calls keys.ValidateOverrides
+	// directly) still rejects writing a NEW dead binding.
+	overrides = discardDeadShiftRuneOverrides(config.Keys, overrides, prettyConfigPath)
 	if err := keys.ValidateOverrides(overrides); err != nil {
 		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
 	}
 	config.keyOverrides = overrides
+
+	// The missing-claude advice is a property of the MERGED config, not the
+	// probe: DefaultConfig ran it before this file's program_overrides.claude
+	// was decoded, so gating there would tell an operator who already set the
+	// override to set it again (#5588). It runs last so a config that fails
+	// validation — and so never becomes effective — earns no advice. The
+	// no-file load paths make the same call on their in-memory defaults.
+	warnMissingClaudeOverride(config.ProgramOverrides)
 
 	return config, nil
 }

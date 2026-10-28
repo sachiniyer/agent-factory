@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "instances": [
+    {
+      "id": "adc8f1bf-d978-4397-9dd3-2a70dc42bd34",
+      "title": "alpha",
+      "path": "/repo/alpha",
+      "branch": "siyer/alpha",
+      "status": 6,
+      "tabs": [{"kind": "agent", "title": "agent"}]
+    },
+    {
+      "id": "b0e2c3a4-1111-2222-3333-444455556666",
+      "title": "beta",
+      "path": "/repo/alpha",
+      "branch": "siyer/beta",
+      "status": 0,
+      "tabs": []
+    }
+  ]
+}

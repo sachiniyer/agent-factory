@@ -75,8 +75,8 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(warnBuf.String(), "root_agents is the legacy path map"),
 		"one JSON-to-TOML conversion must emit one migration notice")
 	assert.Contains(t, warnBuf.String(), "conversion wrote")
-	assert.NotContains(t, warnBuf.String(), "no file was rewritten",
-		"the conversion warning must describe the write that just occurred")
+	assert.NotContains(t, warnBuf.String(), "leaves this one in place",
+		"the conversion warning must describe the write that just occurred, not the read-only remedy")
 
 	// config.toml is now canonical; config.json is moved aside to .bak.
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)

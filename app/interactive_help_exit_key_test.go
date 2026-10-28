@@ -14,7 +14,7 @@ import (
 //
 // The first-run interactive help is dismissed by ANY key, and the dismiss key is
 // then replayed into the pane so it is not swallowed (#1576). The overlay's last
-// line reads "Press ctrl+] to return to navigation." — so ctrl+] is the key the
+// line reads "Press ctrl+] to navigate." — so ctrl+] is the key the
 // screen puts in front of the user, and pressing it is the most natural thing to
 // do while reading.
 //

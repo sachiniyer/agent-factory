@@ -14,6 +14,9 @@ import (
 func renderClean(t *testing.T, inst *session.Instance) string {
 	t.Helper()
 	r := NewInstanceRenderer()
+	r.SetNowForTest(func() time.Time {
+		return time.Date(2026, time.July, 5, 10, 0, 0, 0, time.Local)
+	})
 	r.SetWidth(80)
 	out := r.Render(inst, 1, false, false, false)
 	return ansiEscape.ReplaceAllString(out, "")
@@ -26,8 +29,7 @@ func TestRender_LimitBadgeWithResetTime(t *testing.T) {
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "worker", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
 	// 2:30pm local today, so the badge omits the date.
-	now := time.Now()
-	reset := time.Date(now.Year(), now.Month(), now.Day(), 14, 30, 0, 0, time.Local)
+	reset := time.Date(2026, time.July, 5, 14, 30, 0, 0, time.Local)
 	inst.SetLimitReached(reset)
 
 	clean := renderClean(t, inst)

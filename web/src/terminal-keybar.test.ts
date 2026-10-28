@@ -1,0 +1,902 @@
+import assert from "node:assert/strict";
+import { test, type TestContext } from "node:test";
+import {
+  ARROW_SUFFIXES, decodeKeyBytes, KEYBAR_ROWS, keyBytes, keybarClickIsPointerless, keybarPointerDown,
+  keybarSheetClickIsOpeningGesture, SPECIAL_BYTES, StickyModifiers, TerminalKeybar,
+} from "./terminal-keybar.js";
+import { TerminalSoftInput } from "./terminal-soft-input.js";
+
+const KEY_BYTES_NAMED_KEYS = Object.freeze([...Object.keys(ARROW_SUFFIXES), ...Object.keys(SPECIAL_BYTES)]);
+
+/** The complete intended keyBytes key domain: named keys plus one Unicode scalar. */
+function* keyBytesDomain(): Generator<string> {
+  yield* KEY_BYTES_NAMED_KEYS;
+  for (let codePoint = 0; codePoint <= 0x10ffff; codePoint++) {
+    if (codePoint < 0xd800 || codePoint > 0xdfff) yield String.fromCodePoint(codePoint);
+  }
+}
+
+test("terminal key bytes match physical keys", () => {
+  for (const [key, bytes] of Object.entries({ Esc: "\x1b", Tab: "\t", "←": "\x1b[D", "↑": "\x1b[A", "↓": "\x1b[B", "→": "\x1b[C", "^C": "\x03" })) {
+    assert.equal(keyBytes(key), bytes);
+  }
+  for (const [key, bytes] of [["c", "\x03"], ["X", "\x18"], ["d", "\x04"]]) assert.equal(keyBytes(key, true), bytes);
+  assert.equal(keyBytes("x", false, true), "\x1bx");
+  assert.equal(keyBytes("↑", false, false, true), "\x1bOA");
+  assert.equal(keyBytes("ß", true), "ß");
+});
+
+test("sticky Ctrl encodes every supported soft-keyboard digit chord", () => {
+  for (const [digit, expected] of [
+    ["3", "\x1b"], ["4", "\x1c"], ["5", "\x1d"],
+    ["6", "\x1e"], ["7", "\x1f"], ["8", "\x7f"],
+  ] as const) {
+    const state = new StickyModifiers();
+    state.tap("Ctrl", 0);
+    assert.equal(state.input(digit, "user"), expected);
+    assert.equal(state.state("Ctrl"), "off");
+  }
+});
+
+// Xterm's legacy Ctrl fold for one produced character — transcribed from
+// evaluateKeyboardEvent's default branch in @xterm/xterm
+// (node_modules/@xterm/xterm/src/common/input/Keyboard.ts): Ctrl alone maps
+// keyCodes 65-90 (a letter, either case) to 0x01-0x1a, 32 (Space) to NUL,
+// 51-55 ("3"-"7") to 0x1b-0x1f, 56 ("8") to DEL, and 219-221 ("[", "\", "]")
+// to ESC/FS/GS; produced keys "_" (Ctrl+Shift+Minus), "@" (Ctrl+Shift+2) and
+// "^" (Ctrl+Shift+6) fold to US/NUL/RS, and "/" folds to US — the slash alias
+// is upstream's fix for xtermjs/xterm.js#5457, landed after our pinned 5.5.0.
+// A key xterm gives no Ctrl encoding keeps its own character.
+const XTERM_CTRL_KEY_BYTES: Record<string, string> = {
+  " ": "\x00", "@": "\x00",
+  "3": "\x1b", "4": "\x1c", "5": "\x1d", "6": "\x1e",
+  "/": "\x1f", "7": "\x1f", "_": "\x1f",
+  "8": "\x7f",
+  "[": "\x1b", "\\": "\x1c", "]": "\x1d", "^": "\x1e",
+};
+
+test("sticky Ctrl agrees with xterm's legacy Ctrl encoding for every printable ASCII key", () => {
+  for (let code = 0x20; code <= 0x7e; code++) {
+    const key = String.fromCharCode(code);
+    const folded: string | undefined = /^[A-Za-z]$/.test(key)
+      ? String.fromCharCode(key.toUpperCase().charCodeAt(0) & 31)
+      : XTERM_CTRL_KEY_BYTES[key];
+    const expected = folded ?? key;
+    assert.equal(keyBytes(key, true), expected, `keyBytes ${JSON.stringify(key)}`);
+
+    const soft = new StickyModifiers();
+    soft.tap("Ctrl", 0);
+    assert.equal(soft.input(key, "user"), expected, `soft ${JSON.stringify(key)}`);
+    assert.equal(soft.state("Ctrl"), "off");
+
+    const merged = new StickyModifiers();
+    merged.tap("Ctrl", 0);
+    assert.equal(merged.input(key, "user", {
+      key, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
+    }), expected, `merged ${JSON.stringify(key)}`);
+    assert.equal(merged.state("Ctrl"), "off");
+  }
+});
+
+test("one shot consumes only the next non-composed character", () => {
+  const state = new StickyModifiers();
+  state.tap("Ctrl", 0);
+  assert.equal(state.input("cd"), "\x03d");
+  assert.equal(state.input("c"), "c");
+  state.tap("Alt", 1000);
+  assert.equal(state.input("é中"), "\x1bé中");
+  assert.equal(state.input("x"), "x");
+});
+
+test("double tap locks; tap unlocks; slow second tap cancels; reset clears both", () => {
+  const state = new StickyModifiers();
+  state.tap("Ctrl", 0); state.tap("Ctrl", 100);
+  assert.equal(state.state("Ctrl"), "locked");
+  assert.equal(state.input("cx"), "\x03\x18");
+  state.tap("Ctrl", 200);
+  assert.equal(state.input("c"), "c");
+  state.tap("Alt", 1000); state.tap("Alt", 2000);
+  assert.equal(state.state("Alt"), "off");
+  state.tap("Ctrl", 3000); state.tap("Alt", 3000);
+  assert.equal(state.input("c"), "\x1b\x03");
+  state.tap("Ctrl", 4000); state.reset();
+  assert.equal(state.state("Ctrl"), "off");
+});
+
+test("terminal escape sequences and control bytes do not consume a character modifier", () => {
+  const state = new StickyModifiers(); state.tap("Ctrl", 0);
+  assert.equal(state.input("\x1b[A", "terminal"), "\x1b[A");
+  assert.equal(state.input("\x03", "terminal"), "\x03");
+  assert.equal(state.input("c"), "\x03");
+});
+
+test("accepted soft controls consume one-shots while terminal replies do not", () => {
+  const state = new StickyModifiers();
+  state.tap("Ctrl", 0);
+  assert.equal(state.input("\r", "user"), "\r");
+  assert.equal(state.state("Ctrl"), "off");
+  assert.equal(state.input("a"), "a");
+  assert.equal(state.state("Ctrl"), "off");
+
+  state.tap("Ctrl", 1000);
+  assert.equal(state.input("\x1b[?1;2c", "terminal"), "\x1b[?1;2c");
+  assert.equal(state.state("Ctrl"), "once");
+  assert.equal(state.input("a"), "\x01");
+});
+
+test("hardware arrow input applies and consumes sticky modifiers", () => {
+  for (const [modifier, arrow, bytes] of [
+    ["Ctrl", "\x1b[A", "\x1b[1;5A"],
+    ["Alt", "\x1bOD", "\x1b[1;3D"],
+  ] as const) {
+    const state = new StickyModifiers();
+    state.tap(modifier, 0);
+    assert.equal(state.input(arrow, "user"), bytes);
+    assert.equal(state.state(modifier), "off");
+    assert.equal(state.input("a", "user"), "a");
+  }
+});
+
+test("sticky modifiers combine with xterm hardware arrow modifier bits", () => {
+  for (const [modifier, arrow, bytes] of [
+    ["Ctrl", "\x1b[1;2A", "\x1b[1;6A"],
+    ["Alt", "\x1b[1;5D", "\x1b[1;7D"],
+  ] as const) {
+    const state = new StickyModifiers();
+    state.tap(modifier, 0);
+    assert.equal(state.input(arrow, "user"), bytes);
+    assert.equal(state.state(modifier), "off");
+  }
+
+  const reply = new StickyModifiers();
+  reply.tap("Ctrl", 0);
+  assert.equal(reply.input("\x1b[1;2A", "terminal"), "\x1b[1;2A");
+  assert.equal(reply.state("Ctrl"), "once");
+});
+
+test("hardware modifier identity survives xterm arrow aliases", () => {
+  for (const [sticky, bytes, physical, expected] of [
+    ["Ctrl", "\x1b[1;5A", { key: "ArrowUp", altKey: true }, "\x1b[1;7A"],
+    ["Ctrl", "\x1bb", { key: "ArrowLeft", altKey: true }, "\x1b[1;7D"],
+    ["Alt", "\x1b[1;5C", { key: "ArrowRight", ctrlKey: true }, "\x1b[1;7C"],
+    ["Alt", "\x1b[1;14H", { key: "Home", shiftKey: true, ctrlKey: true, metaKey: true }, "\x1b[1;16H"],
+  ] as const) {
+    const event = Object.assign({ shiftKey: false, altKey: false, ctrlKey: false, metaKey: false }, physical);
+    const bare = new StickyModifiers();
+    assert.equal(bare.input(bytes, "user", event), bytes);
+    const state = new StickyModifiers();
+    state.tap(sticky, 0);
+    const actual = state.input(bytes, "user", event);
+    assert.equal(actual, expected);
+    assert.equal(state.state(sticky), "off");
+  }
+});
+
+test("sticky no-op preserves xterm's physical Alt aliases and remains armed", () => {
+  for (const [bytes, physical] of [
+    ["\x1b[1;5A", { key: "ArrowUp", altKey: true }],
+    ["\x1bb", { key: "ArrowLeft", altKey: true }],
+  ] as const) {
+    const event = Object.assign({ shiftKey: false, altKey: false, ctrlKey: false, metaKey: false }, physical);
+    const state = new StickyModifiers();
+    state.tap("Alt", 0);
+    assert.equal(state.input(bytes, "user", event), bytes);
+    assert.equal(state.state("Alt"), "once");
+    assert.equal(state.input("a", "user"), "\x1ba");
+  }
+});
+
+test("physical modifier merging follows xterm's Ctrl and Alt precedence", () => {
+  for (const [sticky, bytes, physical, expected] of [
+    ["Alt", "\x00", { key: " ", ctrlKey: true }, "\x1b\x00"],
+    ["Alt", "\x1b", { key: "3", ctrlKey: true }, "\x1b3"],
+    ["Alt", "\x1c", { key: "4", ctrlKey: true }, "\x1b4"],
+    ["Alt", "\x1b", { key: "[", ctrlKey: true }, "\x1b["],
+    ["Alt", "\x1f", { key: "_", shiftKey: true, ctrlKey: true }, "\x1b_"],
+    ["Alt", "\x7f", { key: "8", ctrlKey: true }, "\x1b8"],
+    ["Ctrl", "\x1b3", { key: "3", altKey: true }, "\x1b3"],
+    ["Ctrl", "\x1b[", { key: "[", altKey: true }, "\x1b["],
+    ["Ctrl", "\x1b ", { key: " ", altKey: true }, "\x1b\x00"],
+    ["Ctrl", "z", { key: "x" }, "\x1a"], // Emitted/layout text wins over the DOM key label.
+  ] as const) {
+    const event = Object.assign({ shiftKey: false, altKey: false, ctrlKey: false, metaKey: false }, physical);
+    const state = new StickyModifiers();
+    state.tap(sticky, 0);
+    assert.equal(state.input(bytes, "user", event), expected);
+    assert.equal(state.state(sticky), "off");
+  }
+});
+
+test("sticky Alt prefixes user-origin hardware controls", () => {
+  for (const control of ["\t", "\x1b"] as const) {
+    const state = new StickyModifiers();
+    state.tap("Alt", 0);
+    assert.equal(state.input(control, "user"), "\x1b" + control);
+    assert.equal(state.state("Alt"), "off");
+  }
+});
+
+test("the decoder closes over the complete keyBytes domain", () => {
+  const booleans = [false, true];
+  const namedKeys = new Set(KEY_BYTES_NAMED_KEYS);
+  let keys = 0;
+  for (const key of keyBytesDomain()) {
+    keys++;
+    const codePoint = key.codePointAt(0);
+    const scalar = codePoint !== undefined && key.length === (codePoint > 0xffff ? 2 : 1);
+    // Outside the 7-bit control-fold range, Ctrl and cursor mode are identity
+    // dimensions. Check both extrema once, then walk their full Cartesian
+    // product using those proven equivalence classes instead of 35M encodes.
+    if (!namedKeys.has(key) && scalar && codePoint > 127) {
+      const plain = keyBytes(key, false, false, false);
+      const prefixed = keyBytes(key, false, true, false);
+      if (keyBytes(key, true, false, true) !== plain || keyBytes(key, true, true, true) !== prefixed)
+        assert.fail(`non-ASCII encoder dimensions changed for ${JSON.stringify(key)}`);
+      const decodedPlain = decodeKeyBytes(plain);
+      const decodedPrefixed = decodeKeyBytes(prefixed);
+      assert.ok(decodedPlain && decodedPrefixed, `decode Unicode scalar U+${codePoint.toString(16)}`);
+      const mergedPlain = keyBytes(decodedPlain.key, decodedPlain.ctrl, decodedPlain.alt, decodedPlain.applicationCursor);
+      const mergedAlt = keyBytes(decodedPlain.key, decodedPlain.ctrl, true, decodedPlain.applicationCursor);
+      const retainedAlt = keyBytes(decodedPrefixed.key, decodedPrefixed.ctrl,
+        decodedPrefixed.alt, decodedPrefixed.applicationCursor);
+      if (mergedPlain !== plain || mergedAlt !== prefixed || retainedAlt !== prefixed)
+        assert.fail(`Unicode inverse changed for U+${codePoint.toString(16)}`);
+      for (const ctrl of booleans) for (const alt of booleans) for (const applicationCursor of booleans) {
+        for (const stickyCtrl of booleans) for (const stickyAlt of booleans) {
+          const expected = alt || stickyAlt ? prefixed : plain;
+          const actual = alt ? retainedAlt : stickyAlt ? mergedAlt : mergedPlain;
+          if (actual !== expected)
+            assert.fail(JSON.stringify({ key, ctrl, alt, applicationCursor, stickyCtrl, stickyAlt }));
+        }
+      }
+      continue;
+    }
+    for (const ctrl of booleans) for (const alt of booleans) for (const applicationCursor of booleans) {
+      const encoded = keyBytes(key, ctrl, alt, applicationCursor);
+      const decoded = decodeKeyBytes(encoded);
+      assert.ok(decoded, `decode ${JSON.stringify({ key, ctrl, alt, applicationCursor, encoded })}`);
+      assert.equal(keyBytes(decoded.key, decoded.ctrl, decoded.alt, decoded.applicationCursor), encoded);
+      for (const stickyCtrl of booleans) for (const stickyAlt of booleans) {
+        const expected = keyBytes(key, ctrl || stickyCtrl, alt || stickyAlt, applicationCursor);
+        const actual = keyBytes(decoded.key, decoded.ctrl || stickyCtrl,
+          decoded.alt || stickyAlt, decoded.applicationCursor);
+        if (actual !== expected) {
+          // Terminal bytes have genuine aliases (DEL is both Backspace and
+          // Ctrl+8). The byte-only fallback may choose any preimage whose base
+          // and merged encodings agree; hardware identity bypasses this path.
+          const aliases = [...KEY_BYTES_NAMED_KEYS,
+            ...Array.from({ length: 128 }, (_, code) => String.fromCharCode(code))];
+          const equivalent = aliases.some(alias => booleans.some(aliasCtrl => booleans.some(aliasAlt =>
+            booleans.some(aliasCursor => keyBytes(alias, aliasCtrl, aliasAlt, aliasCursor) === encoded &&
+              keyBytes(alias, aliasCtrl || stickyCtrl, aliasAlt || stickyAlt, aliasCursor) === actual))));
+          assert.ok(equivalent,
+            JSON.stringify({ key, ctrl, alt, applicationCursor, stickyCtrl, stickyAlt, expected, actual }));
+        }
+      }
+    }
+  }
+  assert.equal(keys, KEY_BYTES_NAMED_KEYS.length + 0x110000 - 0x800,
+    "named encoder keys plus every Unicode scalar");
+});
+
+test("sticky modifiers merge into recognized user CSI and SS3 sequence shapes", () => {
+  for (const [modifier, input, expected] of [
+    ["Ctrl", "\x1b[H", "\x1b[1;5H"],
+    ["Ctrl", "\x1b[F", "\x1b[1;5F"],
+    ["Ctrl", "\x1b[3~", "\x1b[3;5~"],
+    ["Alt", "\x1b[2~", "\x1b[2;3~"],
+    ["Ctrl", "\x1b[5~", "\x1b[5;5~"],
+    ["Alt", "\x1b[6~", "\x1b[6;3~"],
+    ["Ctrl", "\x1bOP", "\x1b[1;5P"],
+    ["Alt", "\x1b[15~", "\x1b[15;3~"],
+    ["Ctrl", "\x1b[1;10H", "\x1b[1;14H"],
+  ] as const) {
+    const bare = new StickyModifiers();
+    assert.equal(bare.input(input, "user"), input);
+    const armed = new StickyModifiers();
+    armed.tap(modifier, 0);
+    assert.equal(armed.input(input, "user"), expected, JSON.stringify(input));
+    assert.equal(armed.state(modifier), "off");
+  }
+
+  const prefixedAlt = new StickyModifiers();
+  prefixedAlt.tap("Ctrl", 0);
+  assert.equal(prefixedAlt.input("\x1b\x1b[H", "user"), "\x1b[1;7H");
+});
+
+test("terminal-origin CSI replies bypass sequence rewriting", () => {
+  const state = new StickyModifiers();
+  state.tap("Ctrl", 0);
+  assert.equal(state.input("\x1b[1;2H", "terminal"), "\x1b[1;2H");
+  assert.equal(state.state("Ctrl"), "once");
+});
+
+test("terminal-origin control replies bypass decoding", () => {
+  const state = new StickyModifiers();
+  state.tap("Alt", 0);
+  assert.equal(state.input("\x18", "terminal"), "\x18");
+  assert.equal(state.state("Alt"), "once");
+});
+
+test("sticky modifiers combine with complementary hardware letter chords", () => {
+  for (const [sticky, hardware, expected] of [
+    ["Alt", "\x18", "\x1b\x18"],
+    ["Ctrl", "\x1bx", "\x1b\x18"],
+    ["Alt", "\x03", "\x1b\x03"],
+    ["Ctrl", "\x1bC", "\x1b\x03"],
+  ] as const) {
+    const bare = new StickyModifiers();
+    assert.equal(bare.input(hardware, "user"), hardware);
+    const armed = new StickyModifiers();
+    armed.tap(sticky, 0);
+    assert.equal(armed.input(hardware, "user"), expected);
+    assert.equal(armed.state(sticky), "off");
+  }
+});
+
+test("sticky modifiers encode known xterm user control bytes", () => {
+  for (const [sticky, input, expected] of [
+    ["Alt", "\r", "\x1b\r"],
+    ["Alt", "\x7f", "\x1b\x7f"],
+    ["Ctrl", "\x7f", "\x08"],
+  ] as const) {
+    const state = new StickyModifiers();
+    state.tap(sticky, 0);
+    assert.equal(state.input(input, "user"), expected);
+    assert.equal(state.state(sticky), "off");
+    assert.equal(state.input("a", "user"), "a");
+  }
+});
+
+test("backtab has no generic sticky CSI encoding", () => {
+  for (const sticky of ["Ctrl", "Alt"] as const) {
+    const state = new StickyModifiers();
+    state.tap(sticky, 0);
+    assert.equal(state.input("\x1b[Z", "user", {
+      key: "Tab", shiftKey: true, altKey: false, ctrlKey: false, metaKey: false,
+    }), "\x1b[Z");
+    assert.equal(state.state(sticky), "off");
+    assert.equal(state.input("a", "user"), "a");
+  }
+});
+
+test("physical Insert keeps xterm's bare encoding while consuming sticky modifiers", () => {
+  for (const sticky of ["Ctrl", "Alt"] as const) {
+    const state = new StickyModifiers();
+    state.tap(sticky, 0);
+    assert.equal(state.input("\x1b[2~", "user", {
+      key: "Insert", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
+    }), "\x1b[2~");
+    assert.equal(state.state(sticky), "off");
+    assert.equal(state.input("a", "user"), "a");
+  }
+});
+
+test("physical PageUp and PageDown keep xterm's Alt-only form and encode Ctrl", () => {
+  for (const [key, input, ctrlInput] of [
+    ["PageUp", "\x1b[5~", "\x1b[5;5~"], ["PageDown", "\x1b[6~", "\x1b[6;5~"],
+  ] as const) {
+    const physical = { key, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false };
+    const alt = new StickyModifiers();
+    alt.tap("Alt", 0);
+    assert.equal(alt.input(input, "user", physical), input);
+    assert.equal(alt.state("Alt"), "off");
+    assert.equal(alt.input("a", "user"), "a");
+
+    const ctrl = new StickyModifiers();
+    ctrl.tap("Ctrl", 0);
+    assert.equal(ctrl.input(input, "user", {
+      key, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
+    }), ctrlInput);
+    assert.equal(ctrl.state("Ctrl"), "off");
+  }
+});
+
+test("a deferred 229 marker ignores parser replies before its textarea diff", () => {
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const textarea = { value: "ab" };
+  const keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
+    modifiers, textarea, rows: [], buttons: new Map(), focused: true,
+    phone: { matches: true }, userInput: undefined, inputSource: "terminal", userInputGeneration: 0,
+    deferred229Generation: 0,
+    softInput: { transform: (text: string, apply: (value: string) => string) => apply(text) },
+  }) as unknown as Pick<TerminalKeybar, "markDeferredUserInput" | "transform">;
+
+  keybar.markDeferredUserInput();
+  textarea.value = "a";
+  assert.equal(keybar.transform("\x1b[?1;2c"), "\x1b[?1;2c");
+  assert.equal(modifiers.state("Ctrl"), "once");
+  assert.equal(keybar.transform("\x7f"), "\x08");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("the onKey marker carries physical identity into its matching onData", () => {
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
+    modifiers, textarea: { value: "" }, rows: [], buttons: new Map(), focused: true,
+    phone: { matches: true }, userInput: undefined, userInputGeneration: 0,
+    deferred229Generation: 0,
+    softInput: { transform: (text: string, apply: (value: string) => string) => apply(text) },
+  }) as unknown as Pick<TerminalKeybar, "markUserInput" | "transform">;
+
+  keybar.markUserInput({
+    key: "ArrowUp", shiftKey: false, altKey: true, ctrlKey: false, metaKey: false,
+  });
+  assert.equal(keybar.transform("\x1b[1;5A"), "\x1b[1;7A");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("custom hardware input carries physical identity into its matching onData", () => {
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  modifiers.tap("Alt", 0);
+  let output = "";
+  let keybar: TerminalKeybar;
+  keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
+    modifiers, textarea: { value: "" }, rows: [], buttons: new Map(), focused: true,
+    phone: { matches: true }, userInput: undefined, userInputGeneration: 0,
+    deferred229Generation: 0,
+    softInput: { transform: (text: string, apply: (value: string) => string) => apply(text) },
+    input: (text: string) => { output = keybar.transform(text); },
+  }) as unknown as TerminalKeybar;
+
+  keybar.sendUserInput("\x03", { physical: {
+    key: "c", shiftKey: false, altKey: false, ctrlKey: true, metaKey: false,
+  } });
+  assert.equal(output, "\x1b\x03");
+  assert.equal(modifiers.state("Ctrl"), "once", "the physically held Ctrl did not consult sticky Ctrl");
+  assert.equal(modifiers.state("Alt"), "off", "sticky Alt participated in the interrupt emission");
+});
+
+// A keybar wired to a real TerminalSoftInput, with the two pieces of pinned
+// xterm 5.5.0 behaviour that decide what a composition window delivers modelled
+// as xterm actually does them. `writes` is the wire, in order.
+//
+//   - The finalizer (CompositionHelper._finalizeComposition(true),
+//     CompositionHelper.ts:152-171) is a setTimeout(0) scheduled at
+//     compositionend. It reads the textarea INSIDE that timer, and sends only
+//     when the read is non-empty.
+//   - The blur handler (Terminal._handleTextAreaBlur, Terminal.ts:289-292)
+//     empties the textarea SYNCHRONOUSLY, and nothing flushes the composition
+//     first. So a blur in the window discards the commit: the finalizer still
+//     runs, but reads "".
+//
+// Listeners are registered in the order the app registers them: xterm's in
+// term.open (terminal.ts:569), then the soft input's (the keybar, :570), then
+// terminal.ts's own blur listener (:605), which is what calls setFocused(false).
+function composingKeybar(t: TestContext) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const writes: string[] = [];
+  let keybar: TerminalKeybar;
+  textarea.addEventListener("compositionend", () => setTimeout(() => {
+    const input = textarea.value;
+    if (input.length > 0) writes.push(keybar.transform(input));
+  }, 0));
+  textarea.addEventListener("blur", () => { textarea.value = ""; });
+  const softInput = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
+  keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
+    modifiers: new StickyModifiers(), textarea, rows: [], buttons: new Map(), focused: true,
+    phone: { matches: true }, userInput: undefined, userInputGeneration: 0,
+    deferred229Generation: 0, softInput, physicalInput: false, arrows: false,
+    // setFocused repaints and re-lays-out the bar; neither is under test here.
+    paint: () => {}, layout: () => {},
+    input: (text: string) => { writes.push(keybar.transform(text)); },
+    // The terminal wires paste to xterm's term.paste, which emits the
+    // bracketed block through onData — the same transform funnel as input.
+    paste: (text: string) => { writes.push(keybar.transform(`\x1b[200~${text}\x1b[201~`)); },
+  }) as unknown as TerminalKeybar;
+  textarea.addEventListener("blur", () => keybar.setFocused(false));
+  let disposed = false;
+  t.after(() => { if (!disposed) softInput.dispose(); });
+  return {
+    keybar, writes, textarea,
+    blur(): void { textarea.dispatchEvent(new Event("blur")); },
+    commit(text: string): void {
+      textarea.dispatchEvent(new Event("compositionstart"));
+      textarea.value = text;
+      textarea.dispatchEvent(Object.assign(new Event("compositionend"), { data: text }));
+    },
+    dispose(): void { disposed = true; softInput.dispose(); },
+  };
+}
+
+const physicalKey = (key: string, ctrlKey = false, shiftKey = false) =>
+  ({ key, shiftKey, altKey: false, ctrlKey, metaKey: false });
+
+test("custom suppressed text waits behind a pending composition commit", t => {
+  // Shift+Enter's LF is positional: it must follow the word the user just
+  // committed, or the newline lands before it. That ordering is what the
+  // post-composition deferral exists for.
+  const { keybar, writes, commit } = composingKeybar(t);
+  commit("字");
+  keybar.sendCustomUserInput("\n", physicalKey("Enter", false, true));
+  assert.deepEqual(writes, [], "the newline must not overtake xterm's finalizer");
+  t.mock.timers.tick(0);
+  assert.deepEqual(writes, ["字", "\n"]);
+});
+
+test("a terminal signal byte is never queued behind a pending commit (#4151)", async t => {
+  // ^C, ^\ and ^Z act on the running program, not on the line being typed.
+  // Waiting is the failure — the user watches an interrupt not happen — and a
+  // queued byte is one a focus change could once discard. Arriving ahead of the
+  // commit only means the committed word lands afterwards, unsubmitted.
+  for (const [signal, key] of [["\x03", "c"], ["\x1c", "\\"], ["\x1a", "z"]] as const) {
+    await t.test(JSON.stringify(signal), st => {
+      const { keybar, writes, commit } = composingKeybar(st);
+      commit("字");
+      keybar.sendCustomUserInput(signal, physicalKey(key, true));
+      assert.deepEqual(writes, [signal], "the signal must reach the wire synchronously");
+      st.mock.timers.tick(0);
+      assert.deepEqual(writes, [signal, "字"], "the committed text still arrives, after the signal");
+    });
+  }
+});
+
+test("EOF and Escape keep their place behind a pending commit", async t => {
+  // Deliberately NOT signal bytes. ^D is EOF only on an empty line, and the
+  // committed word decides whether the line is empty: sent first, it can end
+  // the program instead of flushing the word. Escape switches mode in modal
+  // programs: sent first, the committed word is read as commands.
+  for (const [control, key] of [["\x04", "d"], ["\x1b", "Escape"]] as const) {
+    await t.test(JSON.stringify(control), st => {
+      const { keybar, writes, commit } = composingKeybar(st);
+      commit("字");
+      keybar.sendCustomUserInput(control, physicalKey(key, control === "\x04"));
+      assert.deepEqual(writes, [], "the control must not overtake the commit");
+      st.mock.timers.tick(0);
+      assert.deepEqual(writes, ["字", control]);
+    });
+  }
+});
+
+test("an interrupt pressed during a pending commit survives an immediate focus loss", t => {
+  // The #4151 repro: Ctrl+C, then focus loss before the next macrotask. The
+  // interrupt used to sit on a timer that the blur cleared unrun. It is never
+  // queued now, so the blur has nothing of it to cancel — while xterm's blur
+  // still discards the commit, as it always has.
+  const { keybar, writes, commit, blur } = composingKeybar(t);
+  commit("字");
+  keybar.sendCustomUserInput("\x03", physicalKey("c", true));
+  blur();
+  t.mock.timers.tick(0);
+  assert.deepEqual(writes, ["\x03"], "the interrupt arrives; the discarded commit does not");
+});
+
+test("a blur that discards the commit also cancels the text queued behind it", t => {
+  // xterm's blur empties the textarea before its finalizer reads it, so the
+  // committed word never reaches the wire. A newline queued behind that word
+  // must not be sent on its own: it would land in the PTY as an orphaned LF,
+  // detached from the text it was ordered after.
+  const { keybar, writes, commit, blur, textarea } = composingKeybar(t);
+  commit("字");
+  keybar.sendCustomUserInput("\n", physicalKey("Enter", false, true));
+  blur();
+  assert.equal(textarea.value, "", "xterm's blur empties the textarea synchronously");
+  t.mock.timers.tick(0);
+  assert.deepEqual(writes, [], `the blur left an orphaned key on the wire: ${JSON.stringify(writes)}`);
+});
+
+test("custom text never overtakes earlier custom text still queued", t => {
+  // xterm's finalizer, then this soft input's range release, then the queued
+  // newline — each a separate macrotask, so a real browser can dispatch a key
+  // between the release and the newline. That key finds no pending commit, but
+  // it must still wait behind the newline rather than overtake it.
+  const { keybar, writes, commit } = composingKeybar(t);
+  commit("字");
+  setTimeout(() => keybar.sendCustomUserInput("\r", physicalKey("Enter")), 0);
+  keybar.sendCustomUserInput("\n", physicalKey("Enter", false, true));
+  t.mock.timers.tick(0);
+  t.mock.timers.tick(0);
+  assert.deepEqual(writes, ["字", "\n", "\r"]);
+});
+
+test("teardown cancels custom input still queued behind a commit", t => {
+  // The terminal the queued key would write to is going away.
+  const { keybar, writes, commit, dispose } = composingKeybar(t);
+  commit("字");
+  keybar.sendCustomUserInput("\n", physicalKey("Enter", false, true));
+  dispose();
+  t.mock.timers.tick(0);
+  assert.ok(!writes.includes("\n"), `a disposed terminal still received input: ${JSON.stringify(writes)}`);
+});
+
+test("pointerdown prevents focus transfer before acting", () => {
+  let prevented = false;
+  keybarPointerDown({ preventDefault() { prevented = true; } }, () => assert.equal(prevented, true));
+});
+
+test("pointerdown still cancels the focus steal when the key acts on release (#5426)", () => {
+  // Paste's action moved to pointerup so its clipboard read lands inside the
+  // touch activation the press never carries; the preventDefault that stops
+  // the tap stealing xterm's focus is unconditional.
+  let prevented = false;
+  keybarPointerDown({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+});
+
+test("the assistive click gate ignores a pointer-derived detail:0 click (#5426)", () => {
+  // Assistive activation — a screen reader, keyboard Enter, a programmatic
+  // .click() — arrives as a detail:0 click with no pointerType. But a real
+  // tap's click is ALSO detail:0 once its pointerdown was canceled (Chromium
+  // zeroes the count with the compat mouse events), so detail alone would let
+  // a tap act twice. pointerType separates them.
+  assert.equal(keybarClickIsPointerless({ detail: 0 }), true);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "" }), true);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "touch" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 0, pointerType: "mouse" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 1, pointerType: "mouse" }), false);
+  assert.equal(keybarClickIsPointerless({ detail: 1 }), false);
+});
+
+test("the paste sheet's backdrop dismiss ignores the opening gesture's click whatever its metadata (#5428)", () => {
+  const opening = { pointerId: 2, pointerType: "touch" };
+  // iOS Safari <18.2 dispatches the tap's trailing click as a plain MouseEvent
+  // — no pointer fields at all.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0 }, opening), true);
+  // Safari 18.2 can label a touch click pointerType "mouse" (WebKit 282988).
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 1, pointerType: "mouse" }, opening), true);
+  // The Chromium shape — same pointer identity — is of course covered too.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 2, pointerType: "touch" }, opening), true);
+  // A pointerless open arms nothing, so no click is ever swallowed; and once
+  // a fresh gesture's pointerdown disarms the marker, its click closes.
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0 }, undefined), false);
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 0, pointerId: 2, pointerType: "touch" }, undefined), false);
+  assert.equal(keybarSheetClickIsOpeningGesture(
+    { detail: 1, pointerId: 9, pointerType: "touch" }, undefined), false);
+});
+
+test("one-row keybar uses seven primary targets and a replacement arrows row at 360px, narrowing to 40px keys at 320px", async () => {
+  const { KEYBAR_ROWS } = await import("./terminal-keybar.js");
+  // The A−/A+ zoom pair rides the arrows page's end (#5500) — display controls,
+  // not PTY keys — keeping both pages at the seven-target budget the geometry
+  // model below already closes on.
+  assert.deepEqual(KEYBAR_ROWS, [["Ctrl", "Alt", "Esc", "Tab", "^C", "Paste", "Arrows"], ["More keys", "←", "↑", "↓", "→", "A−", "A+"]]);
+  // ≥348px of room: 44px targets + 4px gaps + padding. Below that the keybar's
+  // narrow rule lets keys shrink to a 40px floor (#5380), so at 320px the same
+  // model must still close.
+  for (const row of KEYBAR_ROWS) {
+    assert.ok(row.length * 44 + (row.length - 1) * 4 + 16 <= 360);
+    assert.ok(row.length * 40 + (row.length - 1) * 4 + 16 <= 320);
+  }
+});
+
+test("keyBytes drops ctrl/alt for arrows and specials", () => {
+  assert.notEqual(keyBytes("←", false, true), "\x1b[D");
+  assert.notEqual(keyBytes("Tab", false, true), "\t");
+});
+
+test("an armed one-shot survives a keybar arrow press and hits the NEXT letter", () => {
+  const m = new StickyModifiers();
+  m.tap("Ctrl", 0);
+  // Bar keys use the explicit source path; xterm replies keep input().
+  assert.equal(m.key("←"), "\x1b[1;5D");
+  assert.equal(m.state("Ctrl"), "off");
+  assert.equal(m.input("l"), "l");
+});
+
+test("bar keys consume every one-shot consulted by their encoding", () => {
+  for (const [modifier, key, bytes] of [
+    ["Ctrl", "↑", "\x1b[1;5A"], ["Alt", "←", "\x1b[1;3D"],
+    ["Alt", "Tab", "\x1b\t"], ["Alt", "Esc", "\x1b\x1b"],
+    ["Alt", "^C", "\x1b\x03"],
+  ] as const) {
+    const state = new StickyModifiers();
+    state.tap(modifier, 0);
+    assert.equal(state.key(key), bytes);
+    assert.equal(state.state(modifier), "off");
+    assert.equal(state.input("ls"), "ls");
+  }
+
+  for (const [key, bytes] of [["Tab", "\t"], ["Esc", "\x1b"], ["^C", "\x03"]] as const) {
+    const state = new StickyModifiers();
+    state.tap("Ctrl", 0);
+    assert.equal(state.key(key), bytes);
+    assert.equal(state.state("Ctrl"), "off");
+  }
+
+  const split = new StickyModifiers();
+  split.tap("Ctrl", 0); split.tap("Alt", 0);
+  assert.equal(split.key("Tab"), "\x1b\t");
+  assert.equal(split.state("Alt"), "off");
+  assert.equal(split.state("Ctrl"), "off");
+  assert.equal(split.input("a"), "a");
+});
+
+test("locked Ctrl survives an arrow and combined modifiers use CSI in both cursor modes", () => {
+  const state = new StickyModifiers();
+  state.tap("Ctrl", 0); state.tap("Ctrl", 100);
+  assert.equal(state.key("↑", true), "\x1b[1;5A");
+  assert.equal(state.state("Ctrl"), "locked");
+  state.tap("Alt", 200);
+  assert.equal(state.key("←"), "\x1b[1;7D");
+  assert.equal(state.state("Alt"), "off");
+  assert.equal(state.state("Ctrl"), "locked");
+  for (const app of [false, true]) {
+    for (const [key, suffix] of [["↑", "A"], ["↓", "B"], ["→", "C"], ["←", "D"]]) {
+      assert.equal(keyBytes(key, true, true, app), `\x1b[1;7${suffix}`);
+      assert.equal(keyBytes(key, false, false, app), `\x1b${app ? "O" : "["}${suffix}`);
+    }
+  }
+});
+
+test("resolved bar keys pass through xterm transform without applying locked modifiers twice", () => {
+  const state = new StickyModifiers();
+  state.tap("Ctrl", 0); state.tap("Ctrl", 100);
+  state.tap("Alt", 0); state.tap("Alt", 100);
+  for (const [key, bytes] of [["↑", "\x1b[1;7A"], ["Tab", "\x1b\t"], ["Esc", "\x1b\x1b"], ["^C", "\x1b\x03"]]) {
+    assert.equal(state.input(state.key(key)), bytes);
+    assert.equal(state.state("Ctrl"), "locked");
+    assert.equal(state.state("Alt"), "locked");
+  }
+});
+
+// A keybar wired for the Paste key's unit tests (#5380). node --test has no
+// DOM, so the paste sheet is a spy — openPasteSheet's own element building is
+// browser territory — and `paste` plays the terminal's term.paste callback:
+// it wraps the text in the bracketed-paste block xterm emits when the mode is
+// on, then pushes it through transform, the same funnel the real onData uses.
+function pastingKeybar(modifiers = new StickyModifiers()) {
+  const writes: string[] = [];
+  const pastes: string[] = [];
+  const sheetOpens: number[] = [];
+  const keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
+    modifiers, textarea: { value: "" }, rows: [], buttons: new Map(), focused: true,
+    phone: { matches: true }, userInput: undefined, userInputGeneration: 0,
+    deferred229Generation: 0, physicalInput: false, arrows: false,
+    softInput: {
+      transform: (text: string, apply: (value: string) => string) => apply(text),
+      deferAfterPendingComposition: () => false,
+      reset: () => {},
+    },
+    input: (text: string) => { writes.push(keybar.transform(text)); },
+    paste: (text: string) => {
+      pastes.push(text);
+      writes.push(keybar.transform(`\x1b[200~${text}\x1b[201~`));
+    },
+    openPasteSheet: () => { sheetOpens.push(1); },
+    closePasteSheet: () => {},
+    paint: () => {},
+    layout: () => {},
+    disposed: false,
+  }) as unknown as TerminalKeybar;
+  return { keybar, writes, pastes, sheetOpens };
+}
+
+test("the Paste key calls readText on the tap's stack and sends the clipboard through term.paste", async t => {
+  const reads: number[] = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { readText: () => (reads.push(1), Promise.resolve("deploy --to prod")) },
+  });
+  t.after(() => { delete (navigator as { clipboard?: unknown }).clipboard; });
+  const { keybar, writes, pastes, sheetOpens } = pastingKeybar();
+  const pending = keybar.requestPaste();
+  assert.equal(reads.length, 1, "readText was invoked inside the tap handler, not deferred");
+  await pending;
+  assert.deepEqual(pastes, ["deploy --to prod"], "term.paste saw the clipboard text exactly once");
+  assert.deepEqual(writes, ["\x1b[200~deploy --to prod\x1b[201~"],
+    "the bracketed block reached the wire untouched");
+  assert.equal(sheetOpens.length, 0);
+});
+
+test("a rejected, empty, throwing, or missing clipboard read opens the paste sheet", async t => {
+  const clipboards: unknown[] = [
+    { readText: () => Promise.reject(new Error("denied")) },
+    { readText: () => Promise.resolve("") },
+    { readText: () => { throw new Error("no activation"); } },
+    undefined, // Firefox and insecure contexts expose no readText at all.
+  ];
+  for (const clipboard of clipboards) {
+    if (clipboard === undefined) delete (navigator as { clipboard?: unknown }).clipboard;
+    else Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+    const { keybar, writes, pastes, sheetOpens } = pastingKeybar();
+    await keybar.requestPaste();
+    assert.equal(sheetOpens.length, 1, `the sheet opened for ${JSON.stringify(clipboard) ?? "no clipboard"}`);
+    assert.deepEqual(pastes, []);
+    assert.deepEqual(writes, []);
+  }
+  delete (navigator as { clipboard?: unknown }).clipboard;
+});
+
+test("the paste sheet's send path delivers its text through term.paste", () => {
+  const { keybar, writes, pastes } = pastingKeybar();
+  // The sheet's Send button calls sendPaste with the textarea's value — the
+  // same term.paste path a direct clipboard read takes. The DOM wiring is
+  // browser territory; this is the exact call the button makes.
+  keybar.sendPaste("pasted\ntext");
+  assert.deepEqual(pastes, ["pasted\ntext"]);
+  assert.deepEqual(writes, ["\x1b[200~pasted\ntext\x1b[201~"]);
+});
+
+test("sticky modifiers neither rewrite a paste nor are consumed by it", () => {
+  const modifiers = new StickyModifiers();
+  modifiers.tap("Ctrl", 0);
+  const { keybar, writes, pastes } = pastingKeybar(modifiers);
+  keybar.sendPaste("cd");
+  assert.deepEqual(pastes, ["cd"]);
+  assert.deepEqual(writes, ["\x1b[200~cd\x1b[201~"], "the pasted text passed through verbatim");
+  assert.equal(modifiers.state("Ctrl"), "once",
+    "the paste ignored the armed modifier rather than spending it");
+  // The next real keystroke — marked user input, as term.onKey marks it —
+  // still sees the one-shot.
+  keybar.markUserInput();
+  assert.equal(keybar.transform("c"), "\x03");
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("a clipboard read settling after disposal pastes nothing and opens no sheet", async t => {
+  for (const settle of ["resolve", "reject"] as const) {
+    let resolve!: (v: string) => void;
+    let reject!: (e: Error) => void;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: () => new Promise<string>((res, rej) => { resolve = res; reject = rej; }) },
+    });
+    const { keybar, writes, pastes, sheetOpens } = pastingKeybar();
+    const pending = keybar.requestPaste();
+    (keybar as unknown as { disposed: boolean }).disposed = true;
+    if (settle === "resolve") resolve("late"); else reject(new Error("denied"));
+    await pending;
+    assert.deepEqual(pastes, [], `${settle}: no term.paste after dispose`);
+    assert.deepEqual(writes, []);
+    assert.equal(sheetOpens.length, 0, `${settle}: no orphan sheet after dispose`);
+  }
+  delete (navigator as { clipboard?: unknown }).clipboard;
+});
+
+test("a clipboard read settling after the terminal lost focus pastes nothing and opens no sheet", async t => {
+  // The tap starts a read that outlives it: focusing another split blurs this
+  // terminal without disposing it, and the late clipboard text must not land
+  // in a shell the user already left.
+  for (const settle of ["resolve", "reject"] as const) {
+    let resolve!: (v: string) => void;
+    let reject!: (e: Error) => void;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: () => new Promise<string>((res, rej) => { resolve = res; reject = rej; }) },
+    });
+    const { keybar, writes, pastes, sheetOpens } = pastingKeybar();
+    const pending = keybar.requestPaste();
+    keybar.setFocused(false);
+    if (settle === "resolve") resolve("late"); else reject(new Error("denied"));
+    await pending;
+    assert.deepEqual(pastes, [], `${settle}: no term.paste after focus moved`);
+    assert.deepEqual(writes, []);
+    assert.equal(sheetOpens.length, 0, `${settle}: no orphan sheet after focus moved`);
+  }
+  delete (navigator as { clipboard?: unknown }).clipboard;
+});
+
+test("the paste sheet's focus grab keeps armed sticky modifiers", t => {
+  // Focusing the sheet's textarea blurs xterm's helper, which drives
+  // setFocused(false) — but the fallback must not silently spend the armed
+  // Ctrl/Alt the next real key still expects (#5380). A genuine blur with no
+  // sheet still resets.
+  for (const sheetOpen of [false, true]) {
+    const modifiers = new StickyModifiers();
+    modifiers.tap("Ctrl", 0);
+    const { keybar } = pastingKeybar(modifiers);
+    if (sheetOpen) (keybar as unknown as { pasteSheet: unknown }).pasteSheet = {};
+    keybar.setFocused(false);
+    assert.equal(modifiers.state("Ctrl"), sheetOpen ? "once" : "off",
+      sheetOpen ? "the owned sheet blur keeps the armed modifier" : "a real blur still resets");
+  }
+});
+
+test("a paste waits behind a pending composition commit like other positional input", t => {
+  const { keybar, writes, commit } = composingKeybar(t);
+  commit("字");
+  keybar.sendPaste("tail");
+  assert.deepEqual(writes, [], "the paste must not overtake xterm's finalizer");
+  t.mock.timers.tick(0);
+  assert.deepEqual(writes, ["字", "\x1b[200~tail\x1b[201~"]);
+});

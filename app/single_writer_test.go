@@ -15,7 +15,7 @@ import (
 // the TUI could write its whole-list view of instances.json and overwrite a
 // daemon-authored record (e.g. an out-of-band tab). That is now impossible by
 // construction: the TUI has NO instances.json write path at all. This drives
-// every TUI mutation that used to persist — quit, new tab, PR refresh — and asserts
+// every TUI mutation that used to persist — quit, new tab — and asserts
 // the TUI's instances file stays empty: with nothing to write, nothing can be
 // clobbered.
 func TestTUIHasNoInstancesWritePath(t *testing.T) {
@@ -35,13 +35,6 @@ func TestTUIHasNoInstancesWritePath(t *testing.T) {
 	defer createRestore()
 	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell)
 	require.Equal(t, 3, inst.TabCount(), "the daemon-created tab must appear locally")
-
-	// PR-info refresh: the TUI sends identity only; the daemon owns the write.
-	prRestore := SetPRInfoRefresherForTest(func(daemon.RefreshPRInfoRequest) error { return nil })
-	defer prRestore()
-	refresh := refreshPRInfoCmd(inst, h.repoID, true)
-	require.NotNil(t, refresh)
-	_ = refresh()
 
 	// After every previously-persisting path, the TUI's instances.json is still
 	// empty — the TUI never wrote it, so an out-of-band daemon record can never be

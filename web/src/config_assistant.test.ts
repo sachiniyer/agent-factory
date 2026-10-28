@@ -44,13 +44,13 @@ test("a genuine not-built 503 still reads as not built — in the daemon's words
 test("a messageless 503 falls back to an observed, actionable line", () => {
   const copy = spawnFailureCopy(new ApiError(503, ""));
   assert.equal(copy.status, "Unavailable");
-  assert.equal(copy.error, "The daemon reported the config assistant unavailable. Close and try again.");
+  assert.equal(copy.error, "Assistant unavailable. Close and retry.");
 });
 
 test("a transport failure stays the Offline surface", () => {
   const copy = spawnFailureCopy(new ApiError(0, "cannot reach the daemon: Failed to fetch"));
   assert.equal(copy.status, "Offline");
-  assert.equal(copy.error, "Could not reach the daemon. Close and try again.");
+  assert.equal(copy.error, "Daemon unreachable. Close and retry.");
 });
 
 test("any other failure keeps its own message under Failed to start", () => {

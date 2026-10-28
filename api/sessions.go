@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"strings"
 	"time"
 
 	xansi "github.com/charmbracelet/x/ansi"
@@ -20,7 +18,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/preflight"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 
 	"github.com/spf13/cobra"
 )
@@ -32,17 +29,31 @@ var SessionsCmd = &cobra.Command{
 }
 
 var (
-	createSessionViaDaemon  = daemon.CreateSession
-	killSessionViaDaemon    = daemon.KillSession
-	archiveSessionViaDaemon = daemon.ArchiveSession
-	restoreSessionViaDaemon = daemon.RestoreSession
+	createSessionViaDaemon  = routedCreateSession
+	killSessionViaDaemon    = routedKillSession
+	archiveSessionViaDaemon = routedArchiveSession
+	restoreSessionViaDaemon = routedRestoreSession
+	pruneSessionsViaDaemon  = func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
+		// A remote --daemon-url/AF_DAEMON_URL target must receive the prune —
+		// the local control socket would report THIS host's archives for a
+		// command the operator aimed elsewhere (#5136 review).
+		if !apiclient.IsRemoteTarget() {
+			return daemon.PruneSessions(req)
+		}
+		client, err := apiclient.NewTargeted()
+		if err != nil {
+			return daemon.PruneSessionsResponse{}, err
+		}
+		return client.PruneSessions(req)
+	}
 	sessionsArchiveSelf     bool
-	sendPromptViaDaemon     = daemon.SendPromptWithStatus
+	sessionsArchivePush     bool
+	sendPromptViaDaemon     = routedSendPrompt
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
-	createTabViaDaemon      = daemon.CreateTab
-	closeTabViaDaemon       = daemon.CloseTab
-	renameTabViaDaemon      = daemon.RenameTab
-	reorderTabViaDaemon     = daemon.ReorderTab
+	createTabViaDaemon      = routedCreateTab
+	closeTabViaDaemon       = routedCloseTab
+	renameTabViaDaemon      = routedRenameTab
+	reorderTabViaDaemon     = routedReorderTab
 	previewSessionViaDaemon = func(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
 		if !apiclient.IsRemoteTarget() {
 			return daemon.PreviewSessionSnapshot(req)
@@ -81,9 +92,20 @@ func listSessions(repoID string) ([]session.InstanceData, error) {
 // daemon applies them before transfer; applying the same pure filter here keeps
 // daemonless disk fallback useful and prevents a rolled-back daemon that ignores
 // unknown JSON fields from silently widening a filtered command.
+//
+// When the daemon succeeded but dropped a repo at startup due to a corrupted
+// instances.json (#603), the snapshot carries the dropped repo in
+// SkippedRepos. listSessions refuses naming those repos rather than silently
+// serving a partial list, mirroring diskListSessions (#730's loud corrupt-file
+// contract extended to the wire surface #1029 PR 2 introduced). Scoped to the
+// request by the daemon, so `--repo X` reports only X's drop and an all-repo
+// list reports every drop.
 func listSessionsRequest(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
-	data, fallBack, err := snapshotRead(req)
+	data, skipped, fallBack, err := snapshotRead(req)
 	if err == nil {
+		if len(skipped) > 0 {
+			return nil, skippedReposError(skipped)
+		}
 		return daemon.FilterSnapshotInstances(req, data)
 	}
 	if !fallBack {
@@ -99,13 +121,20 @@ func listSessionsRequest(req daemon.SnapshotRequest) ([]session.InstanceData, er
 // getSessionByTitle returns the single session matching title across ALL repos,
 // preferring the daemon's live snapshot and falling back to the disk scan when no
 // daemon is reachable (#1029 PR 2). When a live snapshot is available the daemon
-// is authoritative: a miss returns not-found without re-reading disk.
+// is authoritative: a miss returns not-found without re-reading disk — UNLESS the
+// daemon dropped a repo at startup due to a corrupted instances.json (#603), in
+// which case a miss caveats naming the dropped repos the same way
+// findInstanceByTitle does on the disk path (#730), so a session hidden behind a
+// corrupted file is not reported as a clean not-found.
 //
 // Titles are unique per-repo, so this unscoped lookup resolves only when exactly
 // one session matches; several matches return ErrAmbiguousTitle. Callers with a
 // repo in hand should use getSessionByTitleInScope instead.
-func getSessionByTitle(title string) (*session.InstanceData, error) {
-	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+//
+// The second return is the ambiguity-widening notice (empty when clean); see
+// warnIncompleteTitleWidening and #3511.
+func getSessionByTitle(title string) (*session.InstanceData, string, error) {
+	data, skipped, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 	if err == nil {
 		var matches []session.InstanceData
 		for i := range data {
@@ -117,7 +146,7 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 		// repoID, and only a title held by two distinct PROJECTS is ambiguous.
 		paths := session.DedupeSorted(repoPathsOf(matches))
 		if len(paths) > 1 {
-			return nil, session.AmbiguousTitleError(title, repoPathsOf(matches))
+			return nil, "", session.AmbiguousTitleError(title, repoPathsOf(matches))
 		}
 		if len(matches) > 0 {
 			// One snapshot match is not proof of uniqueness: the snapshot mirrors
@@ -135,40 +164,64 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 			// it needs the guard on the daemon's side of the wire (a resolve-by-title
 			// RPC that runs findSession, or a Snapshot that carries unrestorable
 			// rows); the destructive paths already resolve through findSession.
+			var notice string
 			if !apiclient.IsRemoteTarget() {
-				extra, gaps, err := diskRepoPathsForTitle(title, paths)
-				if err == nil && len(extra) > 1 {
-					return nil, session.AmbiguousTitleError(title, extra)
+				// Count distinct PROJECTS by repoID (the storage map key,
+				// never empty), not by Path: the snapshot carries no repoID,
+				// so its primary check above keys on Path and DedupeSorted
+				// drops an empty-Path row, collapsing two distinct repos to
+				// zero and silently returning one of them. The widening
+				// reads the repoID-keyed storage map and so recovers what the
+				// snapshot dropped. The error message keeps the
+				// human-readable repo Paths the user passes to --repo.
+				repoIDs, repoPaths, unreadable, corrupted, err := diskRepoPathsForTitle(title, paths)
+				if err == nil && len(repoIDs) > 1 {
+					return nil, "", session.AmbiguousTitleError(title, repoPaths)
 				}
-				warnIncompleteTitleWidening(title, gaps, err)
+				notice = warnIncompleteTitleWidening(title, unreadable, corrupted, err)
 			}
-			return &matches[0], nil
+			return &matches[0], notice, nil
 		}
-		// Mirror findInstanceByTitle's clean-miss error so output is unchanged.
-		return nil, fmt.Errorf("session %q %w", title, errTitleNotFound)
+		// Mirror findInstanceByTitle's miss: a clean miss (no repo was dropped)
+		// returns errTitleNotFound; a miss with a corrupted repo that may be
+		// hiding the title caveats naming the dropped repos instead, so a hidden
+		// session is not reported as a clean not-found (#730, #603 over the wire).
+		if len(skipped) > 0 {
+			return nil, "", fmt.Errorf("session %q not found; %s", title, skippedReposSuffix(skipped))
+		}
+		return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 	}
 	// Remote target: no local disk fallback; surface the error (see snapshotRead).
 	if !fallBack {
-		return nil, err
+		return nil, "", err
 	}
 	got, _, err := findInstanceByTitle(title)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	view := got.ForClientRead()
-	return &view, nil
+	return &view, "", nil
 }
 
 // whoamiSession returns the session whose TmuxName matches tmuxName, preferring
-// the daemon's live snapshot and falling back to the disk scan when no daemon
-// is reachable (#1029 PR 2).
+// the daemon's live snapshot and falling back to the disk scan when no daemon is
+// reachable (#1029 PR 2). When the daemon dropped a repo at startup due to a
+// corrupted instances.json (#603), a no-match caveats naming the dropped repos
+// rather than reporting a clean "not found", mirroring diskWhoami (#730).
 func whoamiSession(tmuxName string) (*session.InstanceData, error) {
-	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+	data, skipped, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 	if err == nil {
 		for i := range data {
 			if data[i].TmuxName == tmuxName {
 				return &data[i], nil
 			}
+		}
+		// A match short-circuits above, so nothing here weakens a found session.
+		// The absence claim caveats when the daemon dropped a repo at startup —
+		// a corrupted file may be hiding the matching session — mirroring
+		// diskWhoami's not-found-with-corruption behavior.
+		if len(skipped) > 0 {
+			return nil, fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, skippedReposSuffix(skipped))
 		}
 		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName)
 	}
@@ -180,32 +233,32 @@ func whoamiSession(tmuxName string) (*session.InstanceData, error) {
 	return diskWhoami(tmuxName)
 }
 
-// currentTmuxName returns the tmux session name of the calling process. Held in
-// a var so `whoami`/`archive --self` tests can resolve a session without a real
-// tmux server.
-var currentTmuxName = func() (string, error) {
-	out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
-	if err != nil {
-		return "", fmt.Errorf("not running inside a tmux session: %w", err)
-	}
-	name := strings.TrimSpace(string(out))
-	if name == "" {
-		return "", fmt.Errorf("could not determine tmux session name")
-	}
-	return name, nil
-}
-
 // resolveSelfSession identifies the caller's own af session the same way
 // `af sessions whoami` does: match the current tmux session name against the
 // stored instances. Shared by the whoami command and `sessions archive --self`
 // so the two cannot drift.
+//
+// A sandbox credential is bound to its session (#5571 W3.2), so when the daemon
+// reports a bound caller that row is the answer: the narrowed projection a
+// sandbox receives withholds TmuxName, and matching on it would never find the
+// caller. Otherwise — operator credential, older daemon — the tmux path is
+// unchanged.
 func resolveSelfSession() (*session.InstanceData, error) {
+	if apiclient.HasDaemonToken() {
+		if row, ok, err := callerSessionFn(); err == nil && ok {
+			return &row, nil
+		}
+	}
 	tmuxName, err := currentTmuxName()
 	if err != nil {
 		return nil, err
 	}
 	return whoamiSession(tmuxName)
 }
+
+// callerSessionFn resolves the credential-bound session; a var so tests can
+// substitute the daemon.
+var callerSessionFn = apiclient.CallerNoSpawn
 
 var (
 	sessionsListAllFlag      bool
@@ -224,7 +277,10 @@ var sessionsListCmd = &cobra.Command{
 		"project. Run from outside a git repository with no --repo, there is no " +
 		"project context and every project's sessions are listed. Lifecycle, age, " +
 		"and limit filters compose and are applied by the daemon before transfer. " +
-		"With no filter flags, the complete list and its existing order are unchanged.",
+		"With no filter flags, the complete list and its existing order are unchanged.\n\n" +
+		"Every row names its own integers. liveness_name is the one --status matches, " +
+		"and it round-trips exactly; status_name only names the legacy status integer " +
+		"and is not a filter value. tabs[].kind_name uses the tab_kinds[].kind words.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
@@ -303,9 +359,13 @@ those projects instead of guessing between them.`,
 		if err != nil {
 			return jsonError(err)
 		}
-		data, err := getSessionByTitleInScope(repoID, args[0])
+		data, notice, err := getSessionByTitleInScope(repoID, args[0])
 		if err != nil {
 			return jsonError(err)
+		}
+		// Bare payload stays byte-identical to before #1029 (#3511).
+		if envelopeOutput {
+			return jsonOut(sessionGetPayload(data, notice))
 		}
 		return jsonOut(data)
 	},
@@ -322,6 +382,7 @@ var (
 	createHereFlag    bool
 	createInPlaceFlag bool
 	createBackendFlag string
+	createHostFlag    string
 )
 
 func resolveCreateTitle(args []string, nameFlag string) (string, error) {
@@ -351,6 +412,12 @@ var sessionsCreateCmd = &cobra.Command{
 	Short: "Create a new session",
 	Long: `Create a new session running an agent in its own git worktree.
 
+With --prompt, unconfirmed or incomplete delivery adds a warning field to the
+JSON session result. Outside --json mode, it also prints the warning on stderr.
+The session remains created;
+inspect its pane before retrying, since an unverified prompt may already have
+run. Creation still exits successfully and does not automatically resend.
+
 With --here (alias --in-place) the session instead attaches to the repo's
 existing working tree at its current branch: no worktree or branch is created,
 the agent runs in the repo root, and killing the session never removes the
@@ -368,98 +435,21 @@ pointing at one).`,
 
 		inPlace := createHereFlag || createInPlaceFlag
 
-		// resolveRepo already differentiates "--repo is required" (absent) from a
-		// provided-but-invalid path and names the offending path (#892), so
-		// surface its error verbatim instead of relabeling every failure as
-		// "required".
-		repo, err := resolveRepo()
-		if err != nil {
-			if inPlace {
-				return jsonError(fmt.Errorf("--here requires a git repository to attach to: %w", err))
-			}
-			return jsonError(err)
+		var workspace, program string
+		if apiclient.IsRemoteTarget() {
+			workspace, program, err = remoteCreateInputs(inPlace)
+		} else {
+			workspace, program, err = localCreateInputs(createTitle, inPlace)
 		}
-		workspace := repo.WorkspacePath()
-
-		if !git.IsGitRepo(workspace) {
-			return jsonError(fmt.Errorf("path %s is not a git repository", workspace))
-		}
-
-		// Fail fast on the reserved root-agent title (#1106) before any
-		// daemon round trip. The authoritative gate lives in the daemon's
-		// reserveCreate; this mirrors its message for a snappier CLI error.
-		if session.IsReservedTitle(createTitle) {
-			return jsonError(fmt.Errorf("session title %q is reserved for the daemon-managed root agent; pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)", createTitle))
-		}
-
-		// Best-effort per-repo pre-check to fail fast on duplicate titles
-		// before we spend time creating a tmux session and git worktree we'd
-		// just have to tear down. The authoritative race-safe check still
-		// happens inside the daemon under the per-repo file lock.
-		exists, err := repoHasInstanceTitle(repo.ID, createTitle)
-		if err != nil {
-			return jsonError(err)
-		}
-		if exists {
-			return jsonError(fmt.Errorf("session with title %q already exists", createTitle))
-		}
-
-		cfg, err := config.ResolveConfigForRepo(repo)
 		if err != nil {
 			return jsonError(err)
 		}
 
-		program := createProgramFlag
-		if program == "" {
-			program = cfg.DefaultProgram
-		} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
-			return jsonError(err)
-		}
-		// Validate --backend up front so a typo fails on the client with a clear
-		// message rather than after a daemon round trip (#1592 Phase 4 PR3). An
-		// empty flag defers to the repo's `backend` config key.
-		if _, err := session.ParseBackendKind(createBackendFlag); err != nil {
-			return jsonError(err)
-		}
-		if inPlace && createBackendFlag != "" && createBackendFlag != config.BackendLocal {
-			return jsonError(fmt.Errorf("--here runs in the local working tree and is incompatible with --backend %s", createBackendFlag))
-		}
-
-		// Backend resolution now runs BEFORE preflight, because it decides
-		// whether preflight applies at all (#2592): a docker/ssh/hook session
-		// runs tmux and the agent inside the sandbox, so refusing the create
-		// for a missing local `claude` blocks a session that would have
-		// worked. The RAW flag goes in, not the parsed kind —
-		// ParseBackendKind turns "" into BackendLocal, and passing that
-		// through would override the repo's `backend` key with a default the
-		// user never typed.
-		local, err := session.LocalPrereqsRequired(session.InstanceOptions{
-			Backend: session.BackendKind(createBackendFlag),
-		}, workspace)
-		if err != nil {
-			return jsonError(err)
-		}
-		if local {
-			if err := preflightLocalSession(&cfg.Config, program); err != nil {
+		if createHostFlag != "" {
+			if err := requireHostPickSupport(createHostFlag); err != nil {
 				return jsonError(err)
 			}
 		}
-
-		// Validate the account BEFORE the daemon makes a worktree and starts tmux.
-		// The shim lookup stays as the fail-closed final check, but it runs in the
-		// pane and deliberately prints only a generic message, so a typo'd account
-		// would otherwise fail after mutation with nothing naming the cause or the
-		// fix (#3051 review).
-		if createAccountFlag != "" {
-			home, herr := config.GetConfigDir()
-			if herr != nil {
-				return jsonError(herr)
-			}
-			if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag, ""); aerr != nil {
-				return jsonError(aerr)
-			}
-		}
-
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
 			Title:    createTitle,
 			RepoPath: workspace,
@@ -468,6 +458,9 @@ pointing at one).`,
 			Prompt:   createPromptFlag,
 			InPlace:  inPlace,
 			Backend:  createBackendFlag,
+			// A remote daemon owns the account and preflight answers (#5744).
+			ValidateFirst: apiclient.IsRemoteTarget(),
+			Host:          createHostFlag,
 		})
 		if err != nil {
 			return jsonError(err)
@@ -498,15 +491,26 @@ pointing at one).`,
 				// cleaning up after a failed create, which is when it most has to be
 				// pasteable (#3420). A safe title still prints unquoted.
 				//
-				// `--` because quoting cannot answer option parsing: `--name=-worker` is a
-				// valid title, and `af sessions kill '-worker'` still exits "unknown
-				// shorthand flag". shellsuggest quotes an argument and deliberately leaves
-				// option termination to the call site, which is the convention
-				// daemon/sandbox_preserve.go's kill suggestion already states.
-				shellsuggest.Command("af", "sessions", "kill", "--", data.Title)))
+				// PositionalCommand, not Command, because quoting cannot answer option
+				// parsing: `--name=-worker` is a valid title, and `af sessions kill
+				// '-worker'` still exits "unknown shorthand flag". The terminator lives in
+				// that helper so no call site has to remember it (#3432).
+				shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, data.Title)))
+		}
+		// The same check for the host pick, on what came BACK: the capability probe
+		// above is the primary guard, but a proxy can route the create to a
+		// different daemon than the one that answered Ping, and a row that does not
+		// carry the picked host was not placed on it.
+		if createHostFlag != "" && data.Host != createHostFlag {
+			return jsonError(fmt.Errorf(
+				"session %q was created but the daemon did not record host %q — it was not placed on that host. "+
+					"The running daemon predates host picks; upgrade it (af daemon restart after an upgrade) and recreate. "+
+					"Remove the misplaced session with `%s`",
+				data.Title, createHostFlag,
+				shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, data.Title)))
 		}
 
-		return jsonOut(data)
+		return reportCreatedSession(data, createPromptFlag)
 	},
 }
 
@@ -519,21 +523,55 @@ var (
 )
 
 // previewTabMissErr is the message for a tab-level miss — an --tab-id that no
-// longer resolves, or a --tab that is not a slot.
+// longer resolves, a --tab-name that resolved then closed mid-capture, or a
+// --tab that is not a slot.
 //
 // Both local and remote previews are daemon-resolved and report the miss through
 // TabGone, so a user cannot tell which machine resolved the selector. It names
 // the FLAG the user passed, which neither the daemon's session-oriented error nor
 // a bare "gone" can do.
 //
-// A --tab-name miss is deliberately NOT here: it is answered with the session's
-// roster, which only the side holding the tab list can produce.
+// The branches mirror ResolveTabIndex's selector precedence (id, then name, then
+// ordinal, session/tab.go), so the message names the first selector the user
+// supplied. A --tab-name that does NOT match is a typo answered by the session's
+// roster up front (ErrTabNameNotFound, daemon/preview.go) and never reaches here;
+// the --tab-name branch below is for the other miss class the daemon also routes
+// in: a name that DID resolve and was then closed mid-capture, which the daemon
+// maps to TabGone selector-agnostically. Without this branch the function falls
+// through to --tab with its default 0, blaming a flag the user never passed and a
+// slot (the agent tab) that is provably still present.
 func previewTabMissErr() error {
 	if previewTabIDFlag != "" {
 		return fmt.Errorf("--tab-id %q matches no tab in this session; it may have been closed",
 			previewTabIDFlag)
 	}
+	if previewTabNameFlag != "" {
+		return fmt.Errorf("--tab-name %q matches no live tab in this session; it may have been closed mid-capture",
+			previewTabNameFlag)
+	}
 	return fmt.Errorf("--tab %d is not a slot in this session", previewTabFlag)
+}
+
+// previewGoneErr words a Gone preview. A tab whose own pane is gone while the
+// session lives (TabPaneGone, #4647) must name the tab and say the session is
+// still running; only a plain Gone — the session's own runtime — says it stopped.
+func previewGoneErr(title string, snapshot daemon.PreviewResponse) error {
+	if !snapshot.TabPaneGone {
+		return fmt.Errorf("session %q is no longer running", title)
+	}
+	var tab string
+	switch {
+	case previewTabIDFlag != "":
+		tab = fmt.Sprintf("%q", previewTabIDFlag)
+	case previewTabNameFlag != "":
+		tab = fmt.Sprintf("%q", previewTabNameFlag)
+	default:
+		tab = fmt.Sprintf("tab %d", previewTabFlag)
+	}
+	if previewTabIDFlag != "" || previewTabNameFlag != "" {
+		tab = "tab " + tab
+	}
+	return fmt.Errorf("%s of session %q has no pane — its tmux session is gone; the session itself is still running", tab, title)
 }
 
 var sessionsPreviewCmd = &cobra.Command{
@@ -601,7 +639,7 @@ parse it rather than render it.`,
 			return jsonError(previewTabMissErr())
 		}
 		if snapshot.Gone {
-			return jsonError(fmt.Errorf("session %q is no longer running", args[0]))
+			return jsonError(previewGoneErr(args[0], snapshot))
 		}
 		content := snapshot.Content
 		if previewPlainFlag {
@@ -653,202 +691,6 @@ parse it rather than render it.`,
 	},
 }
 
-var sessionsKillCmd = &cobra.Command{
-	Use:   "kill <title>",
-	Short: "Permanently destroy a session and prune its worktree branch",
-	Long: `Permanently destroy a session: tear down tmux, remove the worktree,
-delete the stored session record, and prune the session branch when Agent
-Factory owns it.
-
-For normal "done with this session" cleanup, prefer:
-  af sessions archive <title>
-
-Kill always destroys the session, including any uncommitted or unmerged work on
-its branch — there is no undo. To keep a session restorable instead, archive it.
---force is accepted but has no effect (kept for backward compatibility).`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		log.Initialize(false)
-		defer log.Close()
-
-		// Honor --repo scoping (#761). An empty repoID preserves the prior
-		// all-repo search; a non-empty one confines the kill to that repo so a
-		// same-titled session in a different repo is never destroyed by
-		// mistake. Mirrors sessionsListCmd's resolveRepoID() usage.
-		repoID, err := resolveRepoID()
-		if err != nil {
-			return jsonError(err)
-		}
-
-		// --force is accepted for backward compatibility but
-		// is a no-op: it is intentionally NOT forwarded to the daemon, whose
-		// KillSessionRequest no longer carries a force field (#1579).
-		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID}); err != nil {
-			return jsonError(err)
-		}
-
-		return jsonOut(map[string]bool{"ok": true})
-	},
-}
-
-var sessionsArchiveCmd = &cobra.Command{
-	Use:   "archive [title]",
-	Short: "Finish with a session by archiving it for later restore",
-	Long: `Archive is the default way to finish with a session: tear down its tmux
-and move its git worktree out to the global archive directory
-(<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/), preserving the branch and any
-uncommitted changes. The session is not deleted — it becomes a quiescent
-"archived" row that survives restarts and can be brought back later with
-'af sessions restore <title>'.
-
-Archive is refused while any enabled task targets the session. The error names
-every blocking task; disable or retarget them, then archive again. Agent Factory
-never silently restores the target or disables its automation as a side effect.
-While a session is archiving or archived, task writes that would newly enable it
-as a target are likewise refused until the session is restored.
-
-With --self, archive the current session (resolved via whoami) instead of a
-named one — use it from inside a session when your work is done. --self and a
-<title> argument are mutually exclusive.
-
-Not available for remote or in-place (--here) sessions: archive relocates the
-worktree, which those don't own. The relocated worktree path is printed on
-success.`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		log.Initialize(false)
-		defer log.Close()
-
-		title := ""
-		if len(args) == 1 {
-			title = args[0]
-		}
-
-		// --self resolves the caller's own session the way whoami does; it is
-		// mutually exclusive with a positional <title>. The remote/in-place
-		// guard needs no special handling here: --self routes through the same
-		// daemon RPC as the title path, so the daemon still rejects a
-		// non-relocatable worktree.
-		var repoID string
-		var sessionID string
-		if sessionsArchiveSelf {
-			if title != "" {
-				return jsonError(fmt.Errorf("cannot combine --self with a <title> argument; --self archives the current session"))
-			}
-			data, err := resolveSelfSession()
-			if err != nil {
-				return jsonError(fmt.Errorf("--self must be run from inside an af session: %w", err))
-			}
-			title = data.Title
-			// The resolved row's STABLE ID is the identity to act on, so send it:
-			// the daemon resolves by id first and reports the repo id from the
-			// row's own storage key, which is the authoritative one. Deriving
-			// identity from a path instead is unsound for a worktree-less row —
-			// its Worktree is empty, so sessionRepoID falls back to the recorded
-			// workspace Path, and that path is mutable. Remove the checkout and
-			// --self can no longer find its own session; let another repository
-			// reuse the path and a same-titled session THERE is archived instead.
-			// Under #3358 the row is pinned under the bare repository's id while
-			// no field of InstanceData carries it, so the path is not even a
-			// lossy spelling of the right answer.
-			sessionID = data.ID
-			// Scope by the RESOLVED session's OWN repo, never cwd/--repo. An
-			// agent that cd'd into another repo must still archive ITS OWN
-			// session — scoping by cwd would archive a same-titled namesake in
-			// the wrong repo, or fail "instance not found" while leaving the
-			// caller's real session alive. Mirror Storage's root→repoID
-			// derivation (#667), shared with whoami via sessionRepoID so the
-			// two cannot drift.
-			// A worktree-less session (remote backend) leaves repoID empty so
-			// the resolved title is matched all-repo and the daemon's remote
-			// guard still fires with its own clear message.
-			// This stays the fallback for a pre-#1195 row that has no id at all;
-			// when the id is present the daemon ignores it.
-			repoID = sessionRepoID(data)
-		} else {
-			if title == "" {
-				return jsonError(fmt.Errorf("a session <title> is required (or pass --self to archive the current session)"))
-			}
-			// Honor --repo scoping (#761 class), mirroring kill: an empty repoID
-			// preserves the all-repo search; a non-empty one confines the archive
-			// to that repo so a same-titled session in another repo is never
-			// touched.
-			var err error
-			repoID, err = resolveRepoID()
-			if err != nil {
-				return jsonError(err)
-			}
-		}
-
-		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
-		warning := ""
-		if err != nil && apiclient.IsMutationCommitted(err) {
-			warning = err.Error()
-		} else if err != nil {
-			return jsonError(err)
-		}
-
-		result := map[string]any{"ok": true, "title": title, "archived_path": archivedPath}
-		if warning != "" {
-			result["warning"] = warning
-		}
-		return jsonOut(result)
-	},
-}
-
-var sessionsRestoreCmd = &cobra.Command{
-	Use:   "restore <title>",
-	Short: "Restore an archived, lost, or dead session",
-	Long: `Restore a session that is currently archived, lost, or dead.
-
-Archived sessions are moved back next to the repository, re-registered,
-re-spawned, and marked running. Lost/dead sessions are recovered in place,
-rebuilding a missing worktree when possible and resuming the recorded agent
-conversation when required.
-
-Fails if the session is not restorable, or if its origin repository is gone.
-The restored worktree path is printed on success.
-
-For a sandbox session (docker/ssh/hook) whose sandbox still ANSWERS but whose
-agent is gone, restore first pushes the sandbox's work to origin, because
-recovery re-clones from there and anything unpushed would be destroyed. If that
-push fails, or if af cannot tell whether the sandbox is gone or merely
-unreachable, the restore REFUSES and the session stays recoverable.
-
---force-reap replaces the sandbox anyway, without the push. It discards whatever
-that sandbox has not pushed, so it is for a sandbox you know is expendable. It
-applies to this one session and this one command; there is no global equivalent.`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		log.Initialize(false)
-		defer log.Close()
-
-		repoID, err := resolveRepoID()
-		if err != nil {
-			return jsonError(err)
-		}
-
-		forceReap, err := cmd.Flags().GetBool("force-reap")
-		if err != nil {
-			return jsonError(err)
-		}
-
-		worktreePath, err := restoreSessionViaDaemon(daemon.RestoreSessionRequest{Title: args[0], RepoID: repoID, ForceReap: forceReap})
-		warning := ""
-		if err != nil && apiclient.IsMutationCommitted(err) {
-			warning = err.Error()
-		} else if err != nil {
-			return jsonError(err)
-		}
-
-		result := map[string]any{"ok": true, "title": args[0], "worktree_path": worktreePath}
-		if warning != "" {
-			result["warning"] = warning
-		}
-		return jsonOut(result)
-	},
-}
-
 // resolveAttachTarget resolves the {title, repoID} pair `sessions attach` hands
 // to the daemon's WS PTY stream.
 //
@@ -887,18 +729,53 @@ func resolveAttachTarget(title string) (string, string, error) {
 	return instance.Title, repoID, nil
 }
 
+// closeLogForOutputMode is the deferred close for commands whose success path
+// returns nil without going through jsonOut (attach hands the terminal over, so
+// it writes no envelope). Under --json stderr must stay empty on success, so the
+// free-form "wrote logs to ..." note is suppressed; the bare path still prints it
+// (#5649).
+func closeLogForOutputMode() {
+	if envelopeOutput {
+		log.CloseQuiet()
+		return
+	}
+	log.Close()
+}
+
 var sessionsAttachCmd = &cobra.Command{
 	Use:   "attach <title>",
 	Short: "Attach to a session's terminal",
-	Long:  "Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-w).",
+	Long:  "Attach to a running session's tmux terminal. Detach with the configured detach key (default: ctrl+w).",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
-		defer log.Close()
+		defer closeLogForOutputMode()
 
 		title, repoID, err := resolveAttachTarget(args[0])
 		if err != nil {
 			return jsonError(err)
+		}
+
+		// Apply the configured detach key BEFORE the attach dials. `af sessions
+		// attach` recognizes the detach key CLIENT-side in this process —
+		// apiclient's stdin pump matches tmux.DetachKeyByte live (see
+		// apiclient/trailingDetachKeyLen) — so the global must be armed from
+		// the user's config here, exactly what the TUI does at startup
+		// (app's newHome). Without this, the matcher ran with the hardcoded
+		// default ctrl+w regardless of detach_keys, so a user who customized
+		// the key could not detach with it (ctrl+w tore them out instead),
+		// even though this command's Long help promises "the configured detach
+		// key". config.ApplyConfiguredDetachKey is the shared wiring site so
+		// the CLI and TUI paths cannot drift apart again.
+		//
+		// A config load failure is warned, not fatal: attach only needs the
+		// detach key from config, and the global already defaults to ctrl+w,
+		// so the user can still attach (with the documented default detach)
+		// while a broken config is surfaced rather than silently ignored.
+		if appConfig, cfgErr := config.LoadConfig(); cfgErr != nil {
+			log.WarningLog.Printf("failed to load config for detach key: %v; using default detach key", cfgErr)
+		} else {
+			config.ApplyConfiguredDetachKey(appConfig.DetachKeys)
 		}
 
 		// EVERY session — local or remote — attaches CLIENT-side over the daemon's
@@ -926,7 +803,7 @@ var sessionsAttachCmd = &cobra.Command{
 		// The CLI attaches the agent tab (index 0), which is structurally always
 		// first and never shifts, so a positional address is unambiguous — no stable
 		// tab id needed here (#1738).
-		detached, err := client.AttachStream(cmd.Context(), title, repoID, "", 0)
+		detached, err := client.AttachStream(cmd.Context(), apiclient.StreamSession{Title: title, RepoID: repoID}, "", 0)
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to attach: %w", err))
 		}
@@ -939,6 +816,9 @@ var sessionsWhoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "Identify the current Agent Factory session",
 	Long: "Returns the session info for the current tmux session by matching the tmux session name against stored sessions.\n\n" +
+		"Requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. " +
+		"When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; " +
+		"otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error.\n\n" +
 		"Identity is not scoped: you are the session you are, in whatever project it " +
 		"belongs to. --repo therefore acts as an assertion — it checks that the " +
 		"resolved session really is in that project, and errors if it is not.",
@@ -987,4 +867,119 @@ var sessionsWhoamiCmd = &cobra.Command{
 		}
 		return jsonOut(*data)
 	},
+}
+
+// localCreateInputs is the client-side half of a LOCAL create: it resolves the
+// repo against this machine's disk and runs every pre-check that fails faster
+// here than after a daemon round trip. Returns the workspace path and program.
+func localCreateInputs(createTitle string, inPlace bool) (string, string, error) {
+	// resolveRepo already differentiates "--repo is required" (absent) from a
+	// provided-but-invalid path and names the offending path (#892), so
+	// surface its error verbatim instead of relabeling every failure as
+	// "required".
+	repo, err := resolveRepo()
+	if err != nil {
+		if inPlace {
+			return "", "", fmt.Errorf("--here requires a git repository to attach to: %w", err)
+		}
+		return "", "", err
+	}
+	workspace := repo.WorkspacePath()
+
+	if err := requireGitRepoWorkspace(workspace); err != nil {
+		return "", "", err
+	}
+
+	// Fail fast on the reserved root-agent title (#1106) before any daemon
+	// round trip, through the daemon's own refusal rather than a copy of its
+	// message: what is reserved is the derived tmux name, not the spelling (#3732).
+	if err := session.ReservedTitleRefusalFor(createTitle, workspace); err != nil {
+		return "", "", err
+	}
+
+	// Best-effort per-repo pre-check to fail fast on duplicate titles
+	// before we spend time creating a tmux session and git worktree we'd
+	// just have to tear down. The authoritative race-safe check still
+	// happens inside the daemon under the per-repo file lock.
+	// repoHasLiveInstanceTitle skips archived rows so a create targeting
+	// a title held only by an archived session reaches the daemon, which
+	// reclaims the title (renameArchivedForReuseLocked).
+	exists, err := repoHasLiveInstanceTitle(repo.ID, createTitle)
+	if err != nil {
+		return "", "", err
+	}
+	if exists {
+		return "", "", (fmt.Errorf("session with title %q already exists", createTitle))
+	}
+
+	cfg, err := config.ResolveConfigForRepo(repo)
+	if err != nil {
+		return "", "", err
+	}
+
+	program := createProgramFlag
+	if program == "" {
+		program = cfg.DefaultProgram
+	} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
+		return "", "", err
+	}
+	// Validate --backend up front so a typo fails on the client with a clear
+	// message rather than after a daemon round trip (#1592 Phase 4 PR3). An
+	// empty flag defers to the repo's `backend` config key.
+	if _, err := session.ParseBackendKind(createBackendFlag); err != nil {
+		return "", "", err
+	}
+	if createHostFlag != "" && createBackendFlag != "" && createBackendFlag != config.BackendSSH {
+		return "", "", fmt.Errorf("--host places the session on a listed host over ssh and is incompatible with --backend %s; drop one of them", createBackendFlag)
+	}
+	if createHostFlag != "" {
+		// The same refusal every pick surface gives, before the daemon reserves
+		// anything. This machine's global list is the daemon's (a local create).
+		if err := config.ValidateHostPick(cfg.Hosts, createHostFlag); err != nil {
+			return "", "", err
+		}
+	}
+	if inPlace && createHostFlag != "" {
+		return "", "", fmt.Errorf("--here runs in the local working tree and is incompatible with --host")
+	}
+	if inPlace && createBackendFlag != "" && createBackendFlag != config.BackendLocal {
+		return "", "", (fmt.Errorf("--here runs in the local working tree and is incompatible with --backend %s", createBackendFlag))
+	}
+
+	// Backend resolution now runs BEFORE preflight, because it decides
+	// whether preflight applies at all (#2592): a docker/ssh/hook session
+	// runs tmux and the agent inside the sandbox, so refusing the create
+	// for a missing local `claude` blocks a session that would have
+	// worked. The RAW flag goes in, not the parsed kind —
+	// ParseBackendKind turns "" into BackendLocal, and passing that
+	// through would override the repo's `backend` key with a default the
+	// user never typed.
+	local, err := session.LocalPrereqsRequired(session.InstanceOptions{
+		Backend: session.BackendKind(createBackendFlag),
+		Host:    createHostFlag,
+	}, workspace)
+	if err != nil {
+		return "", "", err
+	}
+	if local {
+		if err := preflightLocalSession(&cfg.Config, program); err != nil {
+			return "", "", err
+		}
+	}
+
+	// Validate the account BEFORE the daemon makes a worktree and starts tmux.
+	// The shim lookup stays as the fail-closed final check, but it runs in the
+	// pane and deliberately prints only a generic message, so a typo'd account
+	// would otherwise fail after mutation with nothing naming the cause or the
+	// fix (#3051 review).
+	if createAccountFlag != "" {
+		home, herr := config.GetConfigDir()
+		if herr != nil {
+			return "", "", herr
+		}
+		if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag); aerr != nil {
+			return "", "", aerr
+		}
+	}
+	return workspace, program, nil
 }

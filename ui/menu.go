@@ -14,32 +14,21 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-var keyStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundDim)
+var keyStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
-var descStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundMuted)
+var descStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
-var sepStyle = lipgloss.NewStyle().Foreground(activeTheme.BackgroundSubtle)
+var sepStyle = lipgloss.NewStyle().Foreground(activeTheme.Border)
 
-var actionGroupStyle = lipgloss.NewStyle().Foreground(AccentColor)
+var actionGroupStyle = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 
-// separator joins hints WITHIN a group; verticalSeparator divides the groups.
-//
-// " · " is the repo-wide separator for fragments on one line (CLAUDE.md copy
-// conventions); this row rendered " • " instead (#2399). Because this is the
-// SHARED menu renderer rather than one overlay, the drift showed up throughout
-// ordinary navigation, which is why it was worth a change to a load-bearing
-// string.
-//
-// It is width-neutral, and that is not incidental — the hint row is clamped and
-// shed by width (hintDropOrder), so a separator one cell wider would silently
-// drop a hint at some terminal size. U+00B7 and U+2022 are both East Asian
-// Ambiguous, which lipgloss.Width counts as one cell each, so the row measures
-// identically. TestMenuSeparatorIsWidthNeutral pins that rather than trusting it.
+// Hints and action groups use the same middle-dot separator. Its three-cell
+// width preserves the existing width-based shedding and pointer geometry.
 var separator = " · "
-var verticalSeparator = " │ "
+var verticalSeparator = separator
 
 var menuStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.Purple)
+	Foreground(activeTheme.Ink)
 
 // MenuState represents different states the menu can be in
 type MenuState int
@@ -63,6 +52,12 @@ type Menu struct {
 	height, width int
 	state         MenuState
 	instance      *session.Instance
+
+	// dropOrder is the hint-shedding priority String() applies when the row
+	// is wider than the bar. Every option set uses the shared hintDropOrder
+	// except the compact resting-row menu, whose primary verb (restore) must
+	// shed last rather than in the live row's position (#4755 review).
+	dropOrder [][]keys.KeyName
 
 	// focusRegion is the focus-ring region the hints are rendered for
 	// (layout.RegionTree / RegionAutomations / a layout.PaneRegion id). The
@@ -106,6 +101,11 @@ type Menu struct {
 	// StateNewInstance. False for the repo default, which is not a choice the user
 	// needs confirmed — it is what every create did before the field existed.
 	namingHasBackend bool
+	// namingHasAccount: the session being named is scoped to one of the agent's
+	// registered credential accounts (#3844), so the account hint renders its "✓"
+	// variant. Only meaningful in StateNewInstance. False for the ambient
+	// identity, which is what every create did before the field existed.
+	namingHasAccount bool
 
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
@@ -118,15 +118,16 @@ type Menu struct {
 	origin layout.Point
 }
 
-var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
+var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
 
-// newInstanceMenuOptions are the naming-form hints. The third and fourth slots
-// are the form's optional fields — the initial prompt (#1936) and the backend
-// (#1933) — and each swaps its verb once the field holds a non-default value;
-// newInstanceOptions picks the variants, mirroring the archive/restore swap in
-// addInstanceOptions.
+// newInstanceMenuOptions are the naming-form hints. The third, fourth and fifth
+// slots are the form's optional fields — the initial prompt (#1936), the backend
+// (#1933) and the account (#3844) — and each swaps its verb once the field holds
+// a non-default value; newInstanceOptions picks the variants, mirroring the
+// archive/restore swap in addInstanceOptions.
 var newInstanceMenuOptions = []keys.KeyName{
-	keys.KeySubmitName, keys.KeyChangeProgram, keys.KeySetPrompt, keys.KeySetBackend, keys.KeyCancelName,
+	keys.KeySubmitName, keys.KeyChangeProgram, keys.KeySetPrompt, keys.KeySetBackend,
+	keys.KeySetAccount, keys.KeyCancelName,
 }
 
 // automationsMenuOptions are the status-bar hints while the in-rail
@@ -145,7 +146,7 @@ var automationsMenuOptions = []keys.KeyName{
 // verbs here (as the pre-#1620 fall-through footer did) would advertise keys that
 // do nothing.
 var projectsMenuOptions = []keys.KeyName{
-	keys.KeySwitchProjectRow, keys.KeyDeleteProject, keys.KeySearch, keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
+	keys.KeySwitchProjectRow, keys.KeySearch, keys.KeyDeleteProject, keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
 }
 
 // projectsRowVerbs are the entries of projectsMenuOptions that act on the
@@ -281,6 +282,7 @@ func (m *Menu) SetStatusText(text string) {
 // updateOptions updates the menu options based on current state, focus
 // region, and instance
 func (m *Menu) updateOptions() {
+	m.dropOrder = hintDropOrder
 	// Interactive mode outranks everything: the terminal owns the keyboard,
 	// the bar owns nothing but the way out.
 	if m.interactive {
@@ -326,11 +328,11 @@ func (m *Menu) updateOptions() {
 	switch m.state {
 	case StateEmpty:
 		m.options = defaultMenuOptions
-		// Groups: creation (n, N) | search (/) | system (?, q)
+		// Groups: creation (n) | search (/) | system (?, q)
 		m.groups = []menuGroup{
-			{start: 0, end: 2, isAction: true},
-			{start: 2, end: 3, isAction: false},
-			{start: 3, end: 5, isAction: false},
+			{start: 0, end: 1, isAction: true},
+			{start: 1, end: 2, isAction: false},
+			{start: 2, end: 4, isAction: false},
 		}
 	case StateDefault:
 		if m.instance != nil {
@@ -340,9 +342,9 @@ func (m *Menu) updateOptions() {
 			// When there is no instance, show the empty state
 			m.options = defaultMenuOptions
 			m.groups = []menuGroup{
-				{start: 0, end: 2, isAction: true},
-				{start: 2, end: 3, isAction: false},
-				{start: 3, end: 5, isAction: false},
+				{start: 0, end: 1, isAction: true},
+				{start: 1, end: 2, isAction: false},
+				{start: 2, end: 4, isAction: false},
 			}
 		}
 	case StateNewInstance:
@@ -356,10 +358,12 @@ func (m *Menu) updateOptions() {
 // newInstanceOptions returns the naming-form hints with each optional field's slot
 // reading "… ✓" once that field holds a non-default value: "initial prompt ✓" once
 // the pending prompt holds text (#1936), "backend ✓" once a backend other than the
-// repo default is picked (#1933). Both overlays are modal, so the status bar is the
-// only surface that can tell the user what is attached before they press Enter.
+// repo default is picked (#1933), "account ✓" once the create is scoped to a
+// registered account rather than the ambient identity (#3844). Every one of those
+// overlays is modal, so the status bar is the only surface that can tell the user
+// what is attached before they press Enter.
 func (m *Menu) newInstanceOptions() []keys.KeyName {
-	if !m.namingHasPrompt && !m.namingHasBackend {
+	if !m.namingHasPrompt && !m.namingHasBackend && !m.namingHasAccount {
 		return newInstanceMenuOptions
 	}
 	opts := make([]keys.KeyName, len(newInstanceMenuOptions))
@@ -370,6 +374,9 @@ func (m *Menu) newInstanceOptions() []keys.KeyName {
 		}
 		if name == keys.KeySetBackend && m.namingHasBackend {
 			opts[i] = keys.KeyEditBackend
+		}
+		if name == keys.KeySetAccount && m.namingHasAccount {
+			opts[i] = keys.KeyEditAccount
 		}
 	}
 	return opts
@@ -398,17 +405,40 @@ func (m *Menu) SetNamingBackend(picked bool) {
 	m.updateOptions()
 }
 
+// SetNamingAccount records whether the session being named is scoped to a
+// registered credential account (rather than the ambient identity), and rebuilds
+// the hints if that changed. Same purpose as the two above, and the stakes are
+// higher: the account field decides WHICH identity's quota the session spends,
+// and its picker is modal, so this bar is the only thing that says so before
+// Enter (#3844).
+func (m *Menu) SetNamingAccount(picked bool) {
+	if m.namingHasAccount == picked {
+		return
+	}
+	m.namingHasAccount = picked
+	m.updateOptions()
+}
+
 func (m *Menu) addInstanceOptions() {
 	// Archive/restore and explicit teardown are separate capabilities. A retained
 	// startup-unknown row cannot safely reuse its runtime binding, but its stable
 	// record must still expose Kill so the user can remove it.
 	lifecycleAction := session.LifecycleActionNone
 	canKill := false
+	canRetryHandoff := false
 	if m.instance != nil {
 		lifecycleAction = m.instance.LifecycleAction()
 		canKill = m.instance.CanKill()
+		// The `c` key resolves a pending handoff delivery either way it can go —
+		// resend or mark-delivered — so the bar advertises it for a confirmable
+		// row too (#4429). Pressing it there opens the resolve picker, which is
+		// where the verb is named.
+		canRetryHandoff = m.instance.CanRetryPendingManualAccountSwapDelivery() ||
+			m.instance.CanRetryPendingHandoffMissionDelivery() ||
+			m.instance.CanConfirmPendingHandoffDelivery() ||
+			m.instance.CanConfirmPendingManualAccountSwapDelivery()
 	}
-	if lifecycleAction == session.LifecycleActionNone {
+	if lifecycleAction == session.LifecycleActionNone && !canRetryHandoff {
 		m.options = []keys.KeyName{keys.KeyNew}
 		if canKill {
 			m.options = append(m.options, keys.KeyKill)
@@ -420,15 +450,52 @@ func (m *Menu) addInstanceOptions() {
 		return
 	}
 
-	// Instance management group. `a` archives a LIVE row; a resting
-	// (Archived/Lost/Dead) row instead advertises the dedicated `r` restore key
-	// (#1605) — the two verbs no longer share the `a` binding, so the footer
-	// shows exactly the one action the selected row supports.
-	mgmtVerb := keys.KeyArchive
+	// A resting (Archived/Lost/Dead) row has no live surface: nothing to attach
+	// to, no tab roster the TUI may edit. Feeding it the full instance menu
+	// advertises verbs that cannot run — and worse, the width drop order sheds
+	// `r restore` long before those dead verbs (`t`, `w`, `1-9`), so at a real
+	// bar width the footer lies both ways (#4755). Give it its own compact
+	// menu: the lifecycle verbs a resting row can actually take plus the global
+	// keys. `c` still advertises for a pending handoff delivery that outlived
+	// its session — retry/confirm remain meaningful there.
 	if lifecycleAction == session.LifecycleActionRestore {
-		mgmtVerb = keys.KeyRestore
+		m.options = []keys.KeyName{keys.KeyNew}
+		if canKill {
+			m.options = append(m.options, keys.KeyKill)
+		}
+		m.options = append(m.options, keys.KeyRestore)
+		if canRetryHandoff {
+			m.options = append(m.options, keys.KeyLimitRetry)
+		}
+		// Only an archived row owns no pane surface — pruneDeadPanes closes
+		// its panes on sight. A Lost/Dead row still has one: ui/tab_pane.go
+		// renders its fallback content, and handleOpenPane's only refusals
+		// (a nil binding, an in-flight op) cannot hold on a settled resting
+		// row — so `s` works there and the footer must say so (#5260).
+		if !m.instance.IsArchived() {
+			m.options = append(m.options, keys.KeyOpenPane)
+		}
+		m.options = append(m.options, keys.KeyHelp, keys.KeyQuit)
+		m.groups = []menuGroup{
+			{start: 0, end: len(m.options), isAction: false},
+		}
+		// On this row restore IS the verb — it sheds last, after the
+		// destructive and conditional neighbors, so the bar keeps naming it
+		// through the supported widths instead of repeating the lie that
+		// hid it (review on #4755).
+		m.dropOrder = restingHintDropOrder
+		return
 	}
-	mgmtGroup := []keys.KeyName{keys.KeyNew, keys.KeyKill, mgmtVerb}
+
+	// Instance management group for a live row (`a` archives it; the resting
+	// row's `r` restore key is handled by the compact menu above, #1605/#4755).
+	mgmtGroup := []keys.KeyName{keys.KeyNew}
+	if canKill {
+		mgmtGroup = append(mgmtGroup, keys.KeyKill)
+	}
+	if lifecycleAction == session.LifecycleActionArchive {
+		mgmtGroup = append(mgmtGroup, keys.KeyArchive)
+	}
 
 	// Action group: enter interacts in-pane, o attaches full-screen (#1089).
 	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeyAttach}
@@ -440,15 +507,14 @@ func (m *Menu) addInstanceOptions() {
 		actionGroup = append(actionGroup, keys.KeyShiftDown)
 	}
 
-	// Usage-limit retry (#1146): advertised only when the selected session is
-	// actually blocked at a limit wall — c re-spawns (if the agent exited) and
-	// resumes it. Kept off the bar for every normal session so it never clutters
-	// the hints.
+	// Retry (#1146): advertised for a usage-limit wall or an inspected account or
+	// agent handoff whose mission submission could not be confirmed. All re-enter
+	// the same durable recovery transaction; normal sessions keep the hint hidden.
 	// Not while an operation owns the session (#2997): a resume already in flight
 	// keeps the row LiveLimitReached by design — the fence preserves liveness — so
 	// LimitReached() alone would keep advertising `c` for a retry that
 	// RuntimeActionResumeLimit then refuses as busy.
-	if m.instance != nil && m.instance.LimitReached() && m.instance.GetInFlightOp() == session.OpNone {
+	if m.instance != nil && ((m.instance.LimitReached() && m.instance.GetInFlightOp() == session.OpNone) || canRetryHandoff) {
 		actionGroup = append(actionGroup, keys.KeyLimitRetry)
 		// Handoff (#2013) is the OTHER answer to a limit wall: `c` waits for this
 		// agent's window to reset, `H` continues the work under a different one.
@@ -458,22 +524,38 @@ func (m *Menu) addInstanceOptions() {
 		// legitimate whenever an agent is stuck — but a limit is the case where a
 		// user needs to be TOLD the option exists, and every other session keeps an
 		// uncluttered bar.
-		if m.instance.Capabilities().Handoff {
+		if m.instance.LimitReached() && m.instance.Capabilities().Handoff {
 			actionGroup = append(actionGroup, keys.KeyHandoff)
 		}
 	}
 
-	// Tab group: create, close, and number-jump (#930 PR 4). The tab CYCLE key
-	// is gone — Tab now cycles the focus ring (#1024 PR 4); tabs are reached
-	// via the tree, the 1-9 jump keys and the unbounded g prompt. Backends without
-	// tab management block
-	// `t` (new tab) and `w` (close tab) — those handlers reject them with an
-	// error — so only advertise the tab keys that actually work: number-jump
-	// (#988).
-	tabGroup := []keys.KeyName{keys.KeyNewTab, keys.KeyCloseTab, keys.KeyJumpTab}
-	if m.instance != nil && !m.instance.Capabilities().TabManagement {
-		tabGroup = []keys.KeyName{keys.KeyJumpTab}
+	// Tab group: create, close, rename, and number-jump (#930 PR 4). The tab
+	// CYCLE key is gone — Tab now cycles the focus ring (#1024 PR 4); tabs are
+	// reached via the tree, the 1-9 jump keys and the unbounded g prompt.
+	// Backends without tab management block `t` (new tab) and `w` (close tab) —
+	// those handlers reject them with an error — so only advertise the tab keys
+	// that actually work: number-jump (#988). R joins the gated set for
+	// consistency: a remote roster's agent tab refuses the rename, and the
+	// handler still answers a web tab there without the hint.
+	var tabGroup []keys.KeyName
+	if m.instance == nil || m.instance.Capabilities().TabManagement {
+		tabGroup = append(tabGroup, keys.KeyNewTab)
 	}
+	if m.instance == nil || m.instance.TabRosterMutable() {
+		tabGroup = append(tabGroup, keys.KeyCloseTab, keys.KeyRenameTab)
+	}
+	// </> move the current tab within the roster (session.tab.reorder, #1813).
+	// It shares `t`/`w`'s gates: the TUI only mutates rosters it keeps current,
+	// and the snapshot's ReconcileTabsFromData skips non-TabManagement backends
+	// (app/sync.go), so an off-box or archived row would advertise a move whose
+	// result another client's reorder could silently diverge — or that the
+	// daemon refuses outright to keep the archived roster intact for restore.
+	// The hint exists only when a move does: the agent tab is pinned to slot 0,
+	// so a second movable tab must be present before either direction can act.
+	if m.instance != nil && m.instance.TabRosterMutable() && m.instance.TabCount() >= 3 {
+		tabGroup = append(tabGroup, keys.KeyMoveTabLeft, keys.KeyMoveTabRight)
+	}
+	tabGroup = append(tabGroup, keys.KeyJumpTab)
 
 	// Pane group (#1088/#1321): s opens the selected tab as a workspace pane
 	// (or focuses its pane when already open); S commits a preview alongside
@@ -585,9 +667,9 @@ func centerStart(box, content int) int {
 // The full instance row is wider than common terminals, so something has to go
 // — and before this priority existed the CLAMP
 // decided, silently cutting the RIGHT edge, i.e. `? help` and `q quit` first:
-// exactly the hints a lost user needs (#1083 play-test). New, help, quit, and
-// kill are deliberately absent from this list: `n new` is the tree-focus
-// affordance, help/quit are the global escape hatches, and `D kill` is the
+// exactly the hints a lost user needs (#1083 play-test). New, help and quit
+// remain visible. Delete sheds only below the minimum; `n new` is the tree-focus
+// affordance, help/quit are the global escape hatches, and `D delete session` is the
 // selected-instance affordance the containerized TUI driver uses to distinguish
 // a real row cursor from the sticky single-instance display selection (#1174/#1422
 // redo).
@@ -600,21 +682,37 @@ func centerStart(box, content int) int {
 // than losing the way out of the form. Submit/change-program/cancel stay absent
 // — those are the form's three load-bearing verbs.
 //
-// #1933's backend hint took the same row to ~91 cells, so it sheds BEFORE the
+// #1933's backend hint took the same row to 95 cells, so it sheds BEFORE the
 // prompt hint — deliberately, and not because it matters less in the abstract.
 // An 80-column bar can advertise exactly one of the two, #1936 committed that it
 // would be the prompt (TestMenuNewInstanceDropsPromptHintBeforeTheWayOut pins the
 // 80-column case), and taking an affordance away from users who already have it is
 // worse than a new field arriving unadvertised at that one width. The field itself
-// still works when its hint is shed, and the help overlay names all three fields
+// still works when its hint is shed, and the help overlay names every field
 // at every width so the narrow case is not a dead end.
+//
+// #3844's account hint takes the row to 112 and sheds FIRST, by the same rule
+// applied once more: it is the newest of the optional fields, so shedding it is
+// the only drop that takes nothing away from a user who already had it.
 var hintDropOrder = [][]keys.KeyName{
+	{keys.KeySetAccount, keys.KeyEditAccount},
 	{keys.KeySetBackend, keys.KeyEditBackend},
 	{keys.KeySetPrompt, keys.KeyEditPrompt},
+	// R rename tab is the newest affordance on the instance row, so it sheds
+	// before every hint that already lived there — the same rule the
+	// account/backend/prompt hints above follow: a new chip arriving
+	// unadvertised at narrow widths costs less than evicting an affordance a
+	// user already has. The key still works when its hint is shed, and the
+	// help overlay names it at every width.
+	{keys.KeyRenameTab},
 	{keys.KeyShiftUp, keys.KeyShiftDown},
+	// The tab-move pair sheds right after the scroll pair: it advertises a
+	// convenience the other surfaces also carry, so a narrow bar loses nothing
+	// the user cannot still reach — the roster keeps its order, and the
+	// drag/CLI paths remain.
+	{keys.KeyMoveTabLeft, keys.KeyMoveTabRight},
 	{keys.KeyAttach},
 	{keys.KeySearch},
-	{keys.KeyNewRemote},
 	{keys.KeyHooks},
 	{keys.KeyArchive},
 	{keys.KeyRestore},
@@ -631,7 +729,7 @@ var hintDropOrder = [][]keys.KeyName{
 	// looking at it, so tab/pane discovery goes first and these two outlast it.
 	// Handoff before retry: retry is the primary action, handoff its alternative.
 	//
-	// They are IN this list at all because they have to be. `c retry limit` used
+	// They are IN this list at all because they have to be. `c retry` used
 	// to be absent, which read as "never drop it" but actually meant the row had
 	// no give left once everything below it was gone — so at ~45 cells it rendered
 	// 48 cells into the bar and the exact-rect clamp cut the RIGHT edge, taking
@@ -641,12 +739,32 @@ var hintDropOrder = [][]keys.KeyName{
 	// fit and lets the row degrade honestly below that, instead of overflowing.
 	//
 	// Why not shed help/quit instead, to keep retry/handoff at any width: the
-	// floor forbids it. new+kill+help+quit is 32 cells; adding retry+handoff
-	// needs 61. Below ~61 something in that set must go, and #1083 settled which
+	// floor forbids it. new+delete+help+quit is 42 cells; adding retry+handoff
+	// needs 71. Below ~71 something in that set must go, and #1083 settled which
 	// — help and quit are the escape hatches a lost user needs most, and they are
 	// deliberately absent from this list entirely.
 	{keys.KeyHandoff},
 	{keys.KeyLimitRetry},
+	// Below the 42-cell minimum, keep new/help/quit visible; the full
+	// Delete session label remains available in general help.
+	{keys.KeyKill},
+}
+
+// restingHintDropOrder is the compact resting-row menu's shed order (#4755
+// review): `r restore` is the one verb that row exists to offer, so it sheds
+// LAST — after delete, the conditional handoff retry, and `s open pane`
+// (#5260). The pane hint is a Lost/Dead row's second verb — the diagnostic
+// surface that row alone keeps — so it outlives everything except restore;
+// on an archived row it is not offered at all and this slot is a no-op. The
+// shared order above serves the live row, where restore is an early shed and
+// delete the last; applied to the resting menu it hid the primary hint at
+// realistic widths while keeping `D`. n/?/q stay the undroppable floor, as
+// everywhere.
+var restingHintDropOrder = [][]keys.KeyName{
+	{keys.KeyKill},
+	{keys.KeyLimitRetry},
+	{keys.KeyOpenPane},
+	{keys.KeyRestore},
 }
 
 func (m *Menu) String() string {
@@ -658,12 +776,12 @@ func (m *Menu) String() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, line)
 	}
 
-	// Render the full hint row; while it exceeds the bar width, drop options
+	// Keep context-specific hints within the bar width, dropping options
 	// in priority order and re-render. Whatever still doesn't fit after the
 	// drop list is exhausted is clamped by the status bar as before.
 	drop := make(map[keys.KeyName]bool)
 	line, spans := m.renderHints(drop)
-	for _, ks := range hintDropOrder {
+	for _, ks := range m.dropOrder {
 		if lipgloss.Width(line) <= m.width {
 			break
 		}
@@ -707,7 +825,8 @@ type hintSpan struct {
 // helpLabel covers only the DEFAULT binding by design, so a [keys] rebind of
 // scroll_up would have shown a label naming a key that no longer scrolls.
 var hintPairs = map[keys.KeyName]keys.KeyName{
-	keys.KeyShiftUp: keys.KeyShiftDown,
+	keys.KeyShiftUp:     keys.KeyShiftDown,
+	keys.KeyMoveTabLeft: keys.KeyMoveTabRight,
 }
 
 // renderHints renders the option row, skipping dropped options, and reports
@@ -740,13 +859,25 @@ func (m *Menu) renderHints(drop map[keys.KeyName]bool) (string, []hintSpan) {
 		}
 		binding := keys.GlobalKeyBindings[k]
 
+		// A fully-suppressed binding advertises a key no press can hit — its
+		// Help().Key is "" once keys.buildMaps shrinks its active keys to zero
+		// (an override taking the action's only default, #1461). Render nothing
+		// rather than an empty-glyph chip; a surviving partner, if any, falls
+		// through to a normal single-key hint below. This mirrors appendHintSpan,
+		// which already registers no click zone for a zero-key binding.
+		if len(binding.Keys()) == 0 {
+			continue
+		}
+
 		// A pair collapses only when its partner is the very next option, still
-		// rendered, and in the same group — otherwise the chip would claim a key
-		// the row is not actually offering.
+		// rendered, still pressable, and in the same group — otherwise the chip
+		// would claim a key the row is not actually offering (or collapse over
+		// an empty partner glyph, leaving a dangling slash).
 		partner, paired := hintPairs[k]
 		if paired {
 			paired = i+1 < len(m.options) && m.options[i+1] == partner &&
-				!drop[partner] && groupOf(i) == groupOf(i+1)
+				!drop[partner] && groupOf(i) == groupOf(i+1) &&
+				len(keys.GlobalKeyBindings[partner].Keys()) > 0
 		}
 
 		var (

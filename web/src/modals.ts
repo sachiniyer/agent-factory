@@ -1,3 +1,4 @@
+import { handoffAccountChoices } from "./handoff_accounts.js";
 // The web client's modal overlays (#1592 Phase 5 PR5): the new-session form, the
 // send-prompt box, and the kill/archive confirms — the write surface that
 // completes the v1 loop (list → attach → type → create/kill). They mirror the
@@ -16,92 +17,25 @@
 // innerHTML with markup and no inline handlers, so the daemon's default-src 'self'
 // policy holds.
 
+import { AccountSelection } from "./account_selection.js";
 import type { CreateSessionInput, DirectoryListing } from "./api.js";
+import {
+  type AccountChoice,
+  accountAgentFor,
+  accountAgentSupported,
+  accountChoices,
+  accountDefaultFor,
+  accountNotice,
+  accountSelectable,
+} from "./account_scope.js";
 import { type BackendCatalog, type BackendChoice, REPO_DEFAULT, backendChoices, backendNotice, backendSelectable } from "./backends.js";
 import { type DirectoryPickerHandle, directoryPicker } from "./dirpicker.js";
 import { h } from "./dom.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, handoffAgentChoices, programChoices } from "./programs.js";
+import type { AccountsResponse } from "./types.js";
 
-/** A live modal: its root element plus in-place patch controls index.ts drives
- *  around the async submit. close() removes it from the DOM. */
-export interface ModalHandle {
-  el: HTMLElement;
-  setBusy(busy: boolean): void;
-  setError(msg: string | null): void;
-  close(): void;
-}
-
-/** Builds the shared modal chrome: a backdrop, a titled card, a body slot, an
- *  error line, and a footer with a cancel + a primary action button. Returns the
- *  pieces the specific modals wire their behavior onto. Clicking the backdrop or
- *  pressing Escape cancels; Enter is left to the form's own submit. */
-export function modalChrome(opts: {
-  title: string;
-  confirmLabel: string;
-  confirmClass: string;
-  onCancel: () => void;
-}): {
-  handle: ModalHandle;
-  body: HTMLElement;
-  confirmBtn: HTMLButtonElement;
-  cancelBtn: HTMLButtonElement;
-  errorLine: HTMLElement;
-} {
-  const body = h("div", { class: "af-modal-body" });
-  const errorLine = h("p", { class: "af-modal-error", role: "alert" });
-  errorLine.hidden = true;
-
-  const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
-  const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
-  const footer = h("div", { class: "af-modal-foot" }, cancelBtn, confirmBtn);
-
-  const card = h(
-    "div",
-    { class: "af-modal-card", role: "dialog" },
-    h("h2", { class: "af-modal-title" }, opts.title),
-    body,
-    errorLine,
-    footer,
-  );
-  card.setAttribute("aria-modal", "true");
-  card.setAttribute("aria-label", opts.title);
-  // Programmatically focusable, but NOT in the tab order (-1, not 0). Every modal
-  // that opens with a text field focuses that field; one that deliberately does
-  // not (add-project with its picker, #2788) still has to put focus INSIDE the
-  // dialog, or Tab and Enter keep driving the control behind the overlay that
-  // opened it. Focusing the card itself is the dialog-pattern answer: it is
-  // announced (role/aria-modal/aria-label above) and raises no virtual keyboard.
-  card.tabIndex = -1;
-  // Stop a click inside the card from bubbling to the backdrop's cancel handler.
-  card.addEventListener("click", (e) => e.stopPropagation());
-
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
-
-  cancelBtn.addEventListener("click", () => opts.onCancel());
-
-  const handle: ModalHandle = {
-    el: backdrop,
-    setBusy(busy: boolean) {
-      confirmBtn.disabled = busy;
-      cancelBtn.disabled = busy;
-      card.classList.toggle("af-modal-busy", busy);
-    },
-    setError(msg: string | null) {
-      if (msg) {
-        errorLine.textContent = msg;
-        errorLine.hidden = false;
-      } else {
-        errorLine.textContent = "";
-        errorLine.hidden = true;
-      }
-    },
-    close() {
-      backdrop.remove();
-    },
-  };
-  return { handle, body, confirmBtn, cancelBtn, errorLine };
-}
+import { modalChrome, field, defaultsDisclosure, type ModalHandle } from "./components.js";
+export { modalChrome, field, type ModalHandle } from "./components.js";
 
 /** Wraps the card's content in a <form> so Enter submits and the browser handles
  *  focus, calling onSubmit with preventDefault already applied. */
@@ -119,10 +53,10 @@ export function asForm(card: HTMLElement, onSubmit: () => void): void {
   });
 }
 
-/** The new-session modal: title, project picker, program, backend, and initial
- *  prompt. Projects are the distinct repo roots derived from the current sessions
- *  (like the TUI's zero-config picker). onSubmit fires with the collected form
- *  values.
+/** The new-session modal: title, project picker, program, backend, account, and
+ *  initial prompt. Projects are the distinct repo roots derived from the current
+ *  sessions (like the TUI's zero-config picker). onSubmit fires with the collected
+ *  form values.
  *
  *  loadBackends fetches the picked project's backend catalog (#1933), and
  *  loadPrograms the agent catalog (#1970). Both are passed in rather than imported
@@ -130,7 +64,18 @@ export function asForm(card: HTMLElement, onSubmit: () => void): void {
  *  the project changes: each catalog's default is a per-repo fact, so the choices
  *  must follow the project picker. If either rejects, its field degrades to "repo
  *  default" alone — the exact behavior before these fields existed, so a catalog
- *  failure can never block a create. */
+ *  failure can never block a create.
+ *
+ *  loadAccounts fetches the daemon host's credential-account registry (#3844). The
+ *  registry itself is not per-project — accounts live in the daemon's home, not in a
+ *  repo — but the DEFAULT it reports is (#3386): `default_accounts` admits the
+ *  machine-local per-project config layer, so which account a create here would use
+ *  depends on which project is picked. It is therefore re-run with the other two
+ *  whenever the project changes. What is per-selection instead is which slice of the
+ *  registry applies: an account belongs to one agent, so the offered rows follow the
+ *  PROGRAM field, and the resolution of a "repo default" program comes from the
+ *  program catalog. A rejection degrades that field to the ambient identity alone,
+ *  which is what every create did before it existed. */
 export function newSessionModal(
   projects: string[],
   defaultProject: string | null,
@@ -139,6 +84,7 @@ export function newSessionModal(
     onCancel: () => void;
     loadBackends: (repoPath: string) => Promise<BackendCatalog>;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+    loadAccounts: (repoPath: string) => Promise<AccountsResponse>;
     // #2470: fetch a random, readable session name from the daemon (the wordlist
     // is Go-only) to show as shadow text; an empty submit adopts it.
     suggestName: () => Promise<string>;
@@ -192,12 +138,34 @@ export function newSessionModal(
   // here, so a backend added server-side shows up with no change to the web.
   const backendSelect = h("select", { class: "af-input" });
   backendSelect.setAttribute("aria-label", "Backend");
-  const backendHint = h("p", { class: "af-modal-hint" });
+  const backendHint = h("p", { class: "af-modal-hint af-backend-hint" });
   // Announce the notice when it changes: the reason a choice is unusable must
   // reach a screen reader, not only sighted users scanning under the select.
   backendHint.setAttribute("role", "status");
 
   let choices: BackendChoice[] = backendChoices(null);
+
+  // The account field (#3844): which of the agent's registered credential accounts
+  // the session runs as. Its options come from the daemon's ListAccounts registry,
+  // never from a list here, so an account registered a second ago is offered with
+  // no change to the web.
+  const accountSelect = h("select", { class: "af-input" });
+  accountSelect.setAttribute("aria-label", "Account");
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint" });
+  // Announced for the same reason the backend hint is: the reason a choice is
+  // unusable — or the fact that one has no credential yet — must reach a screen
+  // reader, not only sighted users scanning under the select.
+  accountHint.setAttribute("role", "status");
+
+  // The registry as the daemon reports it, and the agent slice currently offered.
+  // null means unknown: block while pending, disclose daemon inheritance on failure.
+  let accounts: AccountsResponse | null = null;
+  let accountsFailed = false;
+  let programCatalog: ProgramCatalog | null = null;
+  let accountRows: AccountChoice[] = accountChoices(null, "");
+  const accountSelection = new AccountSelection();
+  let programsPending = false;
+
   // Mirrors the chrome's busy flag. An async availability refresh can land at ANY
   // time — including mid-submit — and it must never be the thing that decides
   // whether Create is clickable.
@@ -210,9 +178,37 @@ export function newSessionModal(
   //   projects  — nothing to create in (set once, before any catalog lands).
   //   backend   — the selection is unusable or unverified.
   // A bare `confirmBtn.disabled = …` anywhere else silently drops the other two.
+  const defaults = defaultsDisclosure();
+  const accountBlock = h("div", { class: "af-defaults-account" }, field("Account", accountSelect), accountHint);
+  const accountSlot = h("div", { class: "af-defaults-account-slot" });
   const syncSubmitState = (): void => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
-    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value);
+    accountHint.textContent = accountNotice(accountRows, accountSelect.value);
+    if (accountSelection.namedChoicePending && !programsPending && (accountsFailed || programCatalog === null)) {
+      accountHint.textContent = "Cannot verify the selected account. Reopen this form to try again.";
+    }
+    const choiceLabel = (select: HTMLSelectElement) => (select.selectedOptions[0]?.textContent ?? "Loading…")
+      .replace(/^Repo default \((.*)\)$/, "$1 (default)")
+      .replace(/^Use configured default \((.*)\)$/, "$1 (default)");
+    // Ambiguity, unavailable choices and explicit overrides must remain in view.
+    const accountNeedsChoice = !!accountHint.textContent || accountSelection.picked
+      || (accountRows.length > 2 && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog)));
+    defaults.setSummary([`Program: ${choiceLabel(programSelect)}`, `Backend: ${choiceLabel(backendSelect)}`,
+      ...(accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`])]);
+    const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
+    if (accountBlock.parentElement !== accountParent) {
+      const focused = document.activeElement as HTMLElement | null;
+      const ownsFocus = !!focused && accountBlock.contains(focused);
+      accountParent.append(accountBlock);
+      if (ownsFocus) focused.focus();
+    }
+    accountSlot.hidden = !accountNeedsChoice;
+    if (backendHint.textContent || programSelect.value !== PROGRAM_REPO_DEFAULT || backendSelect.value !== REPO_DEFAULT) defaults.el.open = true;
+    confirmBtn.disabled = busy
+      || projects.length === 0
+      || !backendSelectable(choices, backendSelect.value)
+      || !accountSelectable(accountRows, accountSelect.value)
+      || ((accounts === null || programsPending || !accountAgentFor(programSelect.value, programCatalog)) && accountSelection.namedChoicePending);
   };
 
   // Route the chrome's setBusy through the same writer. index.ts drives busy around
@@ -239,6 +235,34 @@ export function newSessionModal(
 
   backendSelect.addEventListener("change", syncSubmitState);
 
+  /** Rebuilds the account options for the agent the PROGRAM field currently names.
+   *
+   *  The previous pick is deliberately NOT carried across an agent change, which is
+   *  where this differs from the backend and program fields above. Those re-select a
+   *  prior value when it is still offered; an account name that survives into another
+   *  agent's registry is a DIFFERENT IDENTITY with the same spelling, and silently
+   *  keeping it is the exact outcome this feature exists to prevent. Same agent, same
+   *  pick; different agent, back to the ambient identity. */
+  const renderAccounts = (): void => {
+    const agent = accountAgentFor(programSelect.value, programCatalog);
+    // Wait for both per-project facts before judging whether a choice exists.
+    const knownAccounts = programsPending ? null : accounts;
+    accountRows = accountChoices(knownAccounts, agent, accountsFailed);
+    const selected = accountSelection.render(knownAccounts, agent, accountsFailed);
+    accountSelect.replaceChildren();
+    for (const choice of accountRows) {
+      accountSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    accountSelect.value = selected;
+    syncSubmitState();
+  };
+
+  accountSelect.addEventListener("change", () => {
+    accountSelection.pick(accountSelect.value);
+    syncSubmitState();
+  });
+  programSelect.addEventListener("change", renderAccounts);
+
   const renderPrograms = (): void => {
     const previous = programSelect.value;
     programSelect.replaceChildren();
@@ -248,6 +272,11 @@ export function newSessionModal(
     // Same rule as the backend picker: keep the user's pick across a project switch
     // when it is still offered, else fall back to the repo default, which always is.
     programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
+    // The account list is scoped to whichever agent the program now names, so it is
+    // rebuilt here rather than only on a user change: a project switch that moves
+    // the repo default from claude to codex changes the registry without anyone
+    // touching the account field.
+    renderAccounts();
   };
 
   // A per-load token: a slow catalog for the project the user just left must not
@@ -257,6 +286,10 @@ export function newSessionModal(
   let loadSeq = 0;
   const loadCatalogsFor = (repoPath: string): void => {
     const seq = ++loadSeq;
+    accounts = null;
+    programsPending = true;
+    accountsFailed = false;
+    renderAccounts();
 
     // The program enum is global, so this is asked even with no project picked —
     // repoPath only sharpens which agent "repo default" resolves to.
@@ -266,6 +299,8 @@ export function newSessionModal(
         if (seq !== loadSeq) {
           return;
         }
+        programsPending = false;
+        programCatalog = catalog;
         programs = programChoices(catalog);
         renderPrograms();
       })
@@ -276,8 +311,33 @@ export function newSessionModal(
         // Degrade to "repo default" only — the same contract as the backend field:
         // an unreachable catalog costs the user the choice, never the session, since
         // sending no program is exactly what "repo default" means on the wire.
+        programsPending = false;
+        programCatalog = null;
         programs = programChoices(null);
         renderPrograms();
+      });
+
+    // The registry is the daemon host's, but the DEFAULT it reports is the picked
+    // project's (#3386), so this rides the same per-load token as the two catalogs:
+    // a slow answer for the project the user just left must not preselect an
+    // account for the one they just picked. A failed load keeps creation available
+    // but explicitly discloses that the daemon default, if any, will apply.
+    void callbacks
+      .loadAccounts(repoPath)
+      .then((registry) => {
+        if (seq !== loadSeq) {
+          return;
+        }
+        accounts = registry;
+        renderAccounts();
+      })
+      .catch(() => {
+        if (seq !== loadSeq) {
+          return;
+        }
+        accounts = null;
+        accountsFailed = true;
+        renderAccounts();
       });
 
     if (repoPath === "") {
@@ -310,17 +370,13 @@ export function newSessionModal(
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
 
-  body.append(
-    field("Title", titleInput),
-    field("Project", projectSelect),
-    field("Program", programSelect),
-    field("Backend", backendSelect),
-    backendHint,
-    field("Prompt", promptArea),
-  );
+  defaults.body.append(field("Program", programSelect), field("Backend", backendSelect), backendHint,
+    accountBlock);
+  body.append(field("Title", titleInput), field("Project", projectSelect), field("Prompt", promptArea), accountSlot, defaults.el);
 
   renderPrograms();
   renderChoices();
+  renderAccounts();
   loadCatalogsFor(projectSelect.value);
 
   // Ask for the autocreate name once, on open. Repo-agnostic (the daemon avoids
@@ -363,41 +419,13 @@ export function newSessionModal(
       // REPO_DEFAULT ("") when the user did not choose — createSession then omits
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
+      // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
+      // `account` entirely and the daemon applies its default, if any (#3844).
+      account: accountSelect.value,
     });
   });
 
   queueMicrotask(() => titleInput.focus());
-  return handle;
-}
-
-/** The send-prompt modal: a textarea whose text is sent to the named session. */
-export function promptModal(
-  sessionTitle: string,
-  callbacks: { onSubmit: (text: string) => void; onCancel: () => void },
-): ModalHandle {
-  const { handle, body } = modalChrome({
-    title: `Send prompt to ${sessionTitle}`,
-    confirmLabel: "Send",
-    confirmClass: "af-primary",
-    onCancel: callbacks.onCancel,
-  });
-
-  const area = h("textarea", { class: "af-input af-textarea", placeholder: "Prompt", rows: 4 });
-  area.setAttribute("aria-label", "Prompt");
-  body.append(area);
-
-  const card = handle.el.firstElementChild as HTMLElement;
-  asForm(card, () => {
-    const text = area.value.trim();
-    if (text === "") {
-      handle.setError("Enter a prompt to send.");
-      return;
-    }
-    handle.setError(null);
-    callbacks.onSubmit(text);
-  });
-
-  queueMicrotask(() => area.focus());
   return handle;
 }
 
@@ -414,8 +442,11 @@ export function promptModal(
 export function handoffModal(
   sessionTitle: string,
   currentAgent: string,
+  recordedProgram: string,
   callbacks: {
-    onSubmit: (target: string) => void;
+    onSubmit: (target: string, account?: string) => void;
+    loadAccounts?: () => Promise<AccountsResponse>;
+    currentAccount?: string;
     onCancel: () => void;
     loadPrograms: () => Promise<ProgramCatalog>;
   },
@@ -427,11 +458,77 @@ export function handoffModal(
     onCancel: callbacks.onCancel,
   });
 
+  let accounts: AccountsResponse = { entries: [], agents: [] };
+  let accountsLoaded = !callbacks.loadAccounts;
+  let accountsFailed = false;
+  // A scoped session needs a named account only for a target that can carry
+  // one; a target outside the daemon's roster drops the scope instead (#4428).
+  // The capability question is judged on the command the target LAUNCHES — the
+  // daemon's resolved_agents, not the enum — so codex→aider drops the scope
+  // rather than demanding an account no Aider registry could honor (#4430
+  // review). A registry that failed to load cannot prove a target unscopable,
+  // so it is treated as requiring one — the daemon refuses the carry either way.
+  const resolvedAgent = (agent: string): string => accounts.resolved_agents?.[agent] ?? agent;
+  const scopableTarget = (agent: string): boolean => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
+  // "The current agent" is judged on resolved identity, not enum name: with
+  // program_overrides.aider = "codex" running a codex pane, the aider ENUM is
+  // the same-agent target (its command resolves to the running codex) while
+  // the codex enum — resolving to aider — is a cross-agent handoff the
+  // daemon's resolved-identity guard permits (#4430 review). A target whose
+  // command is not a provable agent invocation resolves to "", and then only
+  // the RECORDED enum decides sameness — currentAgent is token-scanned from
+  // the running command, and a wrapper's arguments can name a different agent
+  // entirely (`./collect codex` under aider's enum), which would offer the
+  // session's own override as a handoff that kills and restarts it (#4430
+  // review round 6). HandoffTargetIsCurrent does the same on the daemon.
+  const isCurrentAgent = (agent: string): boolean =>
+    handoffTargetIsCurrent(currentAgent, agent, resolvedAgent(agent), recordedProgram);
+  const requiresAccount = (agent: string): boolean =>
+    isCurrentAgent(agent) || (!!callbacks.currentAccount && scopableTarget(agent));
+  let accountRows: ReturnType<typeof handoffAccountChoices> = [];
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
+  const accountSelect = h("select", { class: "af-input" });
+  accountSelect.setAttribute("aria-label", "New account");
+  const syncAccountSelection = (): void => {
+    const target = agentSelect.value;
+    const resolved = resolvedAgent(target);
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target)
+      ? (resolved !== target
+          ? `${target} launches ${resolved}, which cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`
+          : `${target} cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`)
+      : (resolved !== "" && resolved !== target
+          ? `${target} launches ${resolved} — the account must be a ${resolved} account. `
+          : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
+    confirmBtn.disabled = !accountsLoaded || !agentSelect.value || (requiresAccount(agentSelect.value) && !accountSelect.value);
+  };
+  const refreshAccounts = (): void => {
+    const agent = agentSelect.value;
+    // Account rows come from the RESOLVED namespace, not the requested enum:
+    // the daemon registers --account against the resolved command's agent, so
+    // an `aider` target redirected to `codex` is honestly served by codex's
+    // registry — hiding those rows made the target unreachable even though the
+    // daemon accepts the handoff (#4430 review round 3). An empty resolution
+    // (a command af cannot prove is an agent) matches no rows.
+    const choices = handoffAccountChoices(accounts, resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : "");
+    accountRows = choices;
+    accountSelect.replaceChildren();
+    if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
+    else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
+    for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
+    const fallback = accounts.defaults?.[resolvedAgent(agent)];
+    const selected = choices.find((choice) => choice.value === fallback && choice.logged_in)
+      ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : undefined);
+    accountSelect.value = selected?.value ?? "";
+    accountSelect.disabled = choices.length === 0;
+    syncAccountSelection();
+  };
   const agentSelect = h("select", { class: "af-input" });
   agentSelect.setAttribute("aria-label", "New agent");
   // Nothing to pick until the catalog lands; Hand off is disabled until it does.
   confirmBtn.disabled = true;
 
+  let catalogChoices: ProgramChoice[] | null = null;
   const renderChoices = (choices: ProgramChoice[]): void => {
     agentSelect.replaceChildren();
     for (const choice of choices) {
@@ -440,23 +537,63 @@ export function handoffModal(
     confirmBtn.disabled = choices.length === 0;
   };
 
+  // Both async replies recompute eligibility: their arrival order must not
+  // leave a same-agent row with an empty account picker selected.
+  const refreshAgentChoices = (): void => {
+    if (catalogChoices === null || !accountsLoaded) return;
+    const hasAccount = (agent: string): boolean => handoffAccountChoices(accounts, resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : "").length > 0;
+    // The same-agent row spells the account change through the enum whose
+    // resolved command IS the running agent — usually currentAgent's own
+    // enum, but an override pointing its name elsewhere (the codex enum
+    // resolving to aider while aider launches the codex pane) makes a
+    // different enum the same-agent target (#4430 review). handoffSameAgentTarget
+    // declines the row entirely when the daemon's resolved_agents proves no
+    // enum still resolves to the runtime — overrides moved after launch — so
+    // the label cannot promise an account-only swap the daemon would honor as
+    // a cross-agent handoff (#4430 review round 7).
+    const currentTarget = handoffSameAgentTarget(
+      catalogChoices.map(choice => choice.value), currentAgent, recordedProgram,
+      accounts.resolved_agents);
+    // A scoped session keeps every target it can honestly reach: an agent with
+    // a registered account to name, or one KNOWN to have no account support,
+    // which drops the scope rather than needing it (#4428). A target whose
+    // resolved command af cannot classify ("") is not offered — the daemon
+    // refuses the drop on an unproven answer, so the row could only error
+    // (#4430 review, D1).
+    const choices = catalogChoices.filter(choice => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || (resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value))));
+    if (accountsLoaded && !accountsFailed && currentTarget && hasAccount(currentTarget)) {
+      choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
+    }
+    const previous = agentSelect.value;
+    renderChoices(choices);
+    if (choices.some(choice => choice.value === previous)) agentSelect.value = previous;
+    refreshAccounts();
+    if (accountsLoaded) handle.setError(choices.length === 0
+      ? (callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to.")
+      : null);
+  };
+
   body.append(
     field("New agent", agentSelect),
+    field("New account", accountSelect),
+    accountHint,
     h(
       "p",
       { class: "af-modal-text" },
-      "The new agent starts fresh with a summary of the work so far. Same worktree and branch — nothing is discarded.",
+      "Start a new agent with a summary. Keep the worktree and branch.",
     ),
   );
 
   void callbacks
     .loadPrograms()
     .then((catalog) => {
-      const choices = handoffAgentChoices(catalog, currentAgent);
-      renderChoices(choices);
-      if (choices.length === 0) {
-        handle.setError("No other agent is available to hand off to.");
-      }
+      // The current agent is NOT excluded here: "same agent" is a resolved-
+      // identity question refreshAgentChoices answers per render — an enum
+      // whose name equals currentAgent can still resolve to a different
+      // agent and must stay offerable (#4430 review).
+      catalogChoices = handoffAgentChoices(catalog, "");
+      refreshAgentChoices();
     })
     .catch(() => {
       // A handoff needs a concrete target and the web cannot read the enum itself —
@@ -466,6 +603,20 @@ export function handoffModal(
       handle.setError("Could not load the agent list. Try again.");
     });
 
+  agentSelect.addEventListener("change", refreshAccounts);
+  accountSelect.addEventListener("change", syncAccountSelection);
+  if (callbacks.loadAccounts) {
+    void callbacks.loadAccounts().then((result) => {
+      accounts = result; accountsLoaded = true; refreshAgentChoices();
+    }).catch(() => {
+      accountsLoaded = true;
+      accountsFailed = true;
+      refreshAgentChoices();
+      handle.setError(callbacks.currentAccount
+        ? "Could not load accounts. Try again to choose a registered target account."
+        : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+    });
+  }
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
     const target = agentSelect.value;
@@ -474,17 +625,90 @@ export function handoffModal(
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit(target);
+    if (!accountsLoaded || (requiresAccount(target) && !accountSelect.value)) {
+      handle.setError("Pick another registered account."); return;
+    }
+    callbacks.onSubmit(target, accountSelect.value);
   });
 
   queueMicrotask(() => agentSelect.focus());
   return handle;
 }
 
+/**
+ * Is `target` the agent this session already runs? Mirrors the daemon's
+ * HandoffTargetIsCurrent: a provable resolved command decides; an opaque one
+ * (resolved "") falls back to the RECORDED enum, because the token-scanned
+ * current identity can name a different agent than the enum when a wrapper's
+ * arguments spoof one — `./collect codex` under aider's enum means `--to aider`
+ * relaunches that same wrapper (#4430 review round 6).
+ */
+export function handoffTargetIsCurrent(
+  currentAgent: string,
+  target: string,
+  resolved: string,
+  recordedProgram: string,
+): boolean {
+  if (resolved !== "") {
+    return currentAgent !== "" && resolved === currentAgent;
+  }
+  return recordedProgram !== "" && recordedProgram === target;
+}
+
+/**
+ * Which catalog enum spells this session's "same agent, another account"
+ * target — the enum whose resolved command IS the running agent. When
+ * resolvedAgents was reported and no enum resolves to the runtime, there is
+ * no honest spelling: configuration moved after launch (a live codex pane
+ * whose codex enum now resolves to gemini), and falling back to the bare
+ * currentAgent would send `to=<enum>` — a CROSS-agent handoff labeled
+ * "another account" (#4430 review round 7). The bare-name fallback serves
+ * only older daemons whose wire carried no resolved_agents at all.
+ */
+export function handoffSameAgentTarget(
+  catalogValues: string[],
+  currentAgent: string,
+  recordedProgram: string,
+  resolvedAgents: Record<string, string> | undefined,
+): string | undefined {
+  const matched = catalogValues.find((value) =>
+    handoffTargetIsCurrent(currentAgent, value, resolvedAgents?.[value] ?? value, recordedProgram));
+  if (matched !== undefined) return matched;
+  return resolvedAgents === undefined ? currentAgent : undefined;
+}
+
+export interface DeletionWorkspace {
+  archived: boolean;
+  offBox: boolean;
+  externalWorktree: boolean;
+  branchCreatedByUs: boolean;
+}
+
+/** Deletion consequences, selected from the same workspace ownership facts as teardown. */
+export function deletionConfirmationBody(opts: DeletionWorkspace): string {
+  if (opts.archived && opts.offBox) {
+    return "Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again.";
+  }
+  if (opts.archived && !opts.externalWorktree) {
+    return opts.branchCreatedByUs
+      ? "Permanently deletes the session, archived worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Restore instead to keep the session."
+      : "Permanently deletes the session and archived worktree. Your branch and its commits stay. Uncommitted changes are lost. Restore instead to keep the session.";
+  }
+  if (opts.offBox) {
+    return "Permanently removes the sandbox. Unpushed commits and uncommitted changes are lost. Archive publishes the branch first.";
+  }
+  if (opts.externalWorktree) {
+    return "Permanently deletes the session record and runtime. Your checkout and branch stay.";
+  }
+  return opts.branchCreatedByUs
+    ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them."
+    : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them.";
+}
+
 /** A session-lifecycle confirm modal (kill, archive, or restore). Kill is
  *  destructive; archive/restore are the reversible pair (#1932). */
 export function confirmModal(
-  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; onConfirm: () => void; onCancel: () => void },
+  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; immediateRestore?: boolean; isRoot?: boolean; archived: boolean; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   // Restore is the reverse of archive (#1932): non-destructive, so it reads as a
   // primary (not danger) confirm, mirroring archive's own class. The web routes it
@@ -493,40 +717,93 @@ export function confirmModal(
   // archive confirm already prints.
   const copy = {
     kill: {
-      title: `Kill ${opts.sessionTitle}?`,
-      confirmLabel: "Kill",
+      title: `Delete session ${opts.sessionTitle}?`,
+      confirmLabel: "Delete session",
       confirmClass: "af-danger",
-      body: "This permanently destroys the session and prunes its branch. This can't be undone.",
+      body: deletionConfirmationBody(opts),
     },
     archive: {
       title: `Archive ${opts.sessionTitle}?`,
       confirmLabel: "Archive",
       confirmClass: "af-primary",
-      body: "This tears down the session's terminal and moves its worktree to the archive. You can restore it later.",
+      body: "Local: move the worktree to the archive. Sandboxes: publish work, then remove the sandbox. Restore anytime.",
     },
     restore: {
       title: `Restore ${opts.sessionTitle}?`,
       confirmLabel: "Restore",
       confirmClass: "af-primary",
-      body: "This moves the session's worktree back next to its repo and re-spawns the agent, returning it to the live rail.",
+      body: "Restore the worktree and agent. Sandboxes push work before replacement; restore refuses if preservation is uncertain.",
     },
   }[opts.action];
 
-  const { handle, body } = modalChrome({
-    title: copy.title,
-    confirmLabel: copy.confirmLabel,
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.immediateRestore ? `Restore ${opts.sessionTitle}` : copy.title,
+    confirmLabel: opts.immediateRestore ? "Retry restore" : copy.confirmLabel,
     confirmClass: copy.confirmClass,
     onCancel: opts.onCancel,
   });
 
-  body.append(h("p", { class: "af-modal-text" }, copy.body));
-
+  body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
   const card = handle.el.firstElementChild as HTMLElement;
+  if (opts.immediateRestore) {
+    // Mount directly in progress state; the action is already authorized by the
+    // Restore gesture. A refused attempt keeps the existing inline retry surface.
+    const progress = h("p", { class: "af-modal-text", role: "status", id: "af-restore-progress" }, "Restoring session…");
+    body.append(progress);
+    card.tabIndex = -1;
+    card.setAttribute("aria-describedby", progress.id);
+    let isBusy = false;
+    card.addEventListener("keydown", event => {
+      if (isBusy && event.key === "Tab") {
+        event.preventDefault();
+        event.stopPropagation();
+        card.focus();
+      }
+    });
+    const setBusy = handle.setBusy;
+    handle.setBusy = (busy) => {
+      isBusy = busy;
+      // Move off a retry control before disabling it, including subsequent attempts.
+      if (busy && card.isConnected) card.focus();
+      setBusy(busy);
+      card.setAttribute("aria-busy", String(busy));
+      progress.textContent = busy ? "Restoring session…" : "";
+      confirmBtn.textContent = busy ? "Restoring…" : "Retry restore";
+    };
+    const setError = handle.setError;
+    handle.setError = (message) => {
+      setError(message);
+      if (message && card.isConnected) confirmBtn.focus();
+    };
+  }
+
+  let acknowledgment: HTMLInputElement | undefined;
+  if (opts.action === "kill" && opts.isRoot) {
+    body.append(h("p", { class: "af-modal-text af-modal-danger" },
+      `“${opts.sessionTitle}” is the daemon-managed root agent. Deleting it stops scheduled and watch-task delivery to it until it self-heals (usually about two minutes) or you restart the daemon.`));
+    acknowledgment = h("input", { type: "checkbox", class: "af-config-check", required: true });
+    body.append(h("label", { class: "af-modal-text" }, acknowledgment, " I understand that deleting this root session interrupts task delivery."));
+  }
   asForm(card, () => {
+    if (acknowledgment && !acknowledgment.checked) {
+      handle.setError("Acknowledge the interruption to root task delivery before deleting this session.");
+      return;
+    }
     handle.setError(null);
     opts.onConfirm();
   });
 
+  if (acknowledgment) {
+    const checkbox = acknowledgment;
+    const focusAcknowledgment = () => {
+      if (card.isConnected) (checkbox.disabled ? card : checkbox).focus({ preventScroll: true });
+    };
+    // The shared mount hook focuses the card, including a retained failed modal.
+    // Root consent starts at its required field; disabled fields fall back to the
+    // card's existing tabindex=-1. Initial construction can precede mounting.
+    card.addEventListener("focus", () => { if (!checkbox.disabled) focusAcknowledgment(); });
+    queueMicrotask(focusAcknowledgment);
+  }
   return handle;
 }
 
@@ -534,22 +811,28 @@ export function confirmModal(
  *  the real git repo is untouched, while the durable project registration is
  *  removed. */
 export function confirmDeleteProjectModal(
-  opts: { projectLabel: string; sessionCount: number; onConfirm: () => void; onCancel: () => void },
+  opts: { projectLabel: string; sessionCount: number; inPlaceCount: number; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   const word = opts.sessionCount === 1 ? "session" : "sessions";
   const { handle, body } = modalChrome({
     title: `Delete project ${opts.projectLabel}?`,
     confirmLabel: "Delete project",
-    confirmClass: "af-danger",
+    confirmClass: "af-primary",
     onCancel: opts.onCancel,
   });
 
-  // A registered project with no live sessions (#2456) has nothing to archive — the
-  // delete just drops its registry record. Say so, rather than "Archive 0 sessions".
-  const message =
-    opts.sessionCount === 0
-      ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched — you can add it again anytime."
-      : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched — restore any of them to bring the project back.`;
+  let message = opts.sessionCount === 0
+    ? "No live sessions to archive. Remove the project; the repo stays and you can add it again."
+    : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
+  if (opts.inPlaceCount > 0) {
+    const inPlaceWord = opts.inPlaceCount === 1 ? "session is" : "sessions are";
+    message = `${opts.inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
+    if (opts.sessionCount > 0) message += ` Archive ${opts.sessionCount} regular ${word}; restore those sessions anytime.`;
+    message += " Remove the project; the repo stays.";
+  }
+  if (opts.sessionCount === 0 && opts.inPlaceCount === 0) {
+    message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
+  }
   body.append(h("p", { class: "af-modal-text" }, message));
 
   const card = handle.el.firstElementChild as HTMLElement;
@@ -589,11 +872,53 @@ export function addProjectModal(callbacks: {
   loadDirectory?: (path: string) => Promise<DirectoryListing>;
   errorText?: (e: unknown) => string;
 }): ModalHandle {
-  const { handle, body, confirmBtn } = modalChrome({
+  return checkoutPathModal({
     title: "Add project",
     confirmLabel: "Add project",
+    hint: "Enter an absolute repo path on the daemon host (~ works).",
+    ...callbacks,
+  });
+}
+
+/** The rebind-project modal: repoints a registered project's stable identity at
+ *  the checkout it should track now (`af projects rebind` — the repair after the
+ *  checkout was moved or recloned). Same path field + #2788 host browser as the
+ *  add modal — a moved checkout is found by browsing exactly the same way. The
+ *  daemon validates (unknown id, not a git repo, a root another project owns)
+ *  and its message renders inline. */
+export function rebindProjectModal(opts: {
+  projectLabel: string;
+  onSubmit: (path: string) => void;
+  onCancel: () => void;
+  loadDirectory?: (path: string) => Promise<DirectoryListing>;
+  errorText?: (e: unknown) => string;
+}): ModalHandle {
+  const { projectLabel, ...shared } = opts;
+  return checkoutPathModal({
+    title: `Rebind project ${projectLabel}`,
+    confirmLabel: "Rebind",
+    hint: "Enter the checkout this project should track now — an absolute repo path on the daemon host (~ works).",
+    ...shared,
+  });
+}
+
+/** The shared body of the add/rebind project modals: a daemon-host path field
+ *  with the #2788 directory browser above it. Both are one path input + a
+ *  submit; what differs is the copy (title, confirm label, hint). */
+function checkoutPathModal(opts: {
+  title: string;
+  confirmLabel: string;
+  hint: string;
+  onSubmit: (path: string) => void;
+  onCancel: () => void;
+  loadDirectory?: (path: string) => Promise<DirectoryListing>;
+  errorText?: (e: unknown) => string;
+}): ModalHandle {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.title,
+    confirmLabel: opts.confirmLabel,
     confirmClass: "af-primary",
-    onCancel: callbacks.onCancel,
+    onCancel: opts.onCancel,
   });
 
   const pathInput = h("input", {
@@ -604,7 +929,7 @@ export function addProjectModal(callbacks: {
   });
   pathInput.setAttribute("aria-label", "Repository path");
 
-  const { loadDirectory, errorText } = callbacks;
+  const { loadDirectory, errorText } = opts;
   let picker: DirectoryPickerHandle | null = null;
   if (loadDirectory && errorText) {
     picker = directoryPicker({
@@ -626,7 +951,7 @@ export function addProjectModal(callbacks: {
       h(
         "div",
         { class: "af-modal-field" },
-        h("span", { class: "af-modal-label" }, "Browse the daemon host"),
+        h("span", { class: "af-modal-label" }, "Browse host"),
         picker.el,
       ),
     );
@@ -637,7 +962,7 @@ export function addProjectModal(callbacks: {
     h(
       "p",
       { class: "af-modal-hint" },
-      "An absolute path to a git checkout on the daemon host (~ is expanded there). It becomes an empty project you can create sessions into.",
+      opts.hint,
     ),
   );
 
@@ -649,11 +974,11 @@ export function addProjectModal(callbacks: {
   asForm(card, () => {
     const path = pathInput.value.trim();
     if (path === "") {
-      handle.setError("Enter a repository path, or pick one above.");
+      handle.setError("Enter or choose a repo path.");
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit(path);
+    opts.onSubmit(path);
   });
 
   // With no picker, focus the sole input so the user can type immediately,
@@ -682,9 +1007,7 @@ export function addProjectModal(callbacks: {
 }
 
 /** A labeled field row: a caption above its control. */
-export function field(label: string, control: HTMLElement): HTMLElement {
-  return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
-}
+
 
 /** A friendly project label: the repo's basename with its parent for context. */
 export function projectLabel(root: string): string {
@@ -692,4 +1015,36 @@ export function projectLabel(root: string): string {
   const base = parts[parts.length - 1] || root;
   const parent = parts.length >= 2 ? parts[parts.length - 2] : "";
   return parent ? `${base}  (${parent}/${base})` : base;
+}
+
+/** Target-specific task deletion; failures retain the open confirmation. */
+export function removeTaskModal(name: string, onConfirm: () => void, onCancel: () => void): ModalHandle {
+  const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
+  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "Delete the task and stop future runs. Keep existing sessions."));
+  asForm(handle.el.firstElementChild as HTMLElement, onConfirm);
+  return handle;
+}
+
+/** The "mark delivered" attestation for an ambiguous handoff mission (#4429).
+ *  The modal IS the confirmation: the daemon will retire the pending mission
+ *  WITHOUT resending it, so the copy makes the operator's claim — the pane
+ *  already shows the incoming agent acting on its brief — the explicit
+ *  precondition, and names the alternative (Retry sends it again). Failures
+ *  retain the open confirmation so a stale click surfaces the daemon's refusal
+ *  rather than looking like it landed. */
+export function markDeliveredModal(sessionTitle: string, onConfirm: () => void, onCancel: () => void): ModalHandle {
+  const { handle, body } = modalChrome({
+    title: `Mark ${sessionTitle} delivered?`,
+    confirmLabel: "Mark delivered",
+    confirmClass: "af-primary",
+    onCancel,
+  });
+  body.append(
+    h("p", { class: "af-modal-text" },
+      "Confirm only if the pane already shows the incoming agent acting on its handoff mission. " +
+      "This retires the pending delivery and clears the leftover operation state WITHOUT sending the mission again. " +
+      "If the pane does not show it, cancel and use Retry instead — that submits the mission a second time."),
+  );
+  asForm(handle.el.firstElementChild as HTMLElement, onConfirm);
+  return handle;
 }

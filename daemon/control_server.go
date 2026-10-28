@@ -7,24 +7,50 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/peercred"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/task"
 )
 
 type controlServer struct {
-	manager      *Manager
-	scheduler    *taskScheduler
-	watchers     *watcherSupervisor
-	shutdownCh   chan struct{}
-	shutdownOnce sync.Once
+	manager    *Manager
+	scheduler  *taskScheduler
+	watchers   *watcherSupervisor
+	shutdownCh chan struct{}
+	// shutdownOnce is shared by every per-connection controlServer
+	// startControlServer builds: one Shutdown must fire once for the whole
+	// listener, not once per connection. It is nil on servers that cannot shut
+	// anything down (the HTTP server, most tests) — Shutdown returns before it
+	// is read.
+	shutdownOnce *sync.Once
+	httpRequests *httpRequestDrain
+	// requester is the kernel-verified identity of the process on the other
+	// end of THIS connection: the SO_PEERCRED/LOCAL_PEERPID pid, resolved to
+	// its (pid, start-stamp) instance by the accept loop while the peer
+	// provably still exists and holds the socket. Resolving at accept — not
+	// in the handler — is what keeps a peer that exited and had its pid
+	// recycled mid-request from lending a stranger the exemption (#5182).
+	// Teardown handlers register it so the reaper exempts the caller still
+	// blocked on their reply. nil on read failure (the pre-#5182 posture).
+	// The HTTP server shares ONE controlServer across connections, so it
+	// leaves this nil and the per-request context carries the same identity
+	// instead (see httpPeerRequesterContextKey).
+	requester *proctree.Process
+	// pendingReplies holds this connection's requester unregistrations until
+	// the reply they belong to is written — each is keyed by its call's reply
+	// pointer, which gobServerCodec.WriteResponse hands back as the body it
+	// just serialized, so only that call's response releases its exemption
+	// (Close drains whatever a dead connection leaves — see
+	// trackTeardownRequester, #5182). nil on the shared HTTP controlServer,
+	// where the per-request context drains instead.
+	pendingReplies *pendingUntracks
 }
 
 const (
@@ -35,6 +61,10 @@ const (
 
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
+	resp.AccountHandoff = true
+	resp.HostPick = true
+	resp.DeliverHostPick = true
+	resp.TaskHost = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
@@ -50,13 +80,24 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 			RequireToken:         s.manager.cfg.RequireToken,
 			RequireLoopbackToken: s.manager.cfg.RequireLoopbackToken,
 		}
+		// The #5183 upgrade-probation floor is enforcement OUTSIDE the file:
+		// while it holds, the control listener's gate demands the bearer token
+		// even though the loaded config reads tokenless. Report what the socket
+		// enforces — otherwise status and doctor would call a floored socket
+		// unauthenticated. Read from the same paired publication the gate reads
+		// (authPosturePair), never a separate flag.
+		if s.manager.tokenFloorArmed() {
+			resp.BootConfig.RequireToken = true
+		}
 	}
 	return nil
 }
 
 // ReleaseUpgradeProbation lifts this daemon's upgrade probation once its
 // previous-binary supervisor has validated it (#2212 R2). A release for a
-// non-matching or non-probationary transaction is refused. It is deliberately NOT
+// non-matching or non-probationary transaction is refused; one that arrives
+// while the instance restore is still running is accepted and takes effect when
+// the restore completes (#5693). It is deliberately NOT
 // gated on requireMutationAdmission — probation is exactly what it lifts, so
 // gating it on admission would deadlock. (Authority rests on the control socket
 // being owner-only and already privileged, NOT on the transaction id being
@@ -106,11 +147,13 @@ func (s *controlServer) ResumeStatusPoll(req ResumeStatusPollRequest, resp *Resu
 }
 
 // reloadTaskSchedules re-arms the daemon's cron scheduler and watcher
-// supervisor from tasks.json. It is the shared refresh the ReloadTasks poke and
-// the task CRUD RPCs (Add/Update/RemoveTask) both invoke after a write, so one
-// daemon call owns both steps and no separate ReloadTasks poke is needed for
-// CRUD. The steps are not transactional: persistence happens first, and update
-// callers receive a machine-readable committed outcome if the refresh fails.
+// supervisor from tasks.json. It is the ReloadTasks poke's own entry point, and
+// the only FULL watcher re-arm reachable over the control plane: the task CRUD
+// RPCs (Add/Update/RemoveTask) share the locked half below but scope it to the
+// row they wrote, so one daemon call still owns both steps and no separate
+// ReloadTasks poke is needed for CRUD (#3837). The steps are not transactional:
+// persistence happens first, and update callers receive a machine-readable
+// committed outcome if the refresh fails.
 //
 // During warm-up (#829) the scheduler and watcher supervisor have not started
 // yet; RunDaemon reloads both from tasks.json right after the restore completes,
@@ -122,7 +165,7 @@ func (s *controlServer) reloadTaskSchedules() error {
 		return err
 	}
 	defer unlock()
-	return s.reloadTaskSchedulesLocked()
+	return s.reloadTaskSchedulesLocked(everyWatchTask())
 }
 
 func (s *controlServer) lockTaskControl() (func(), error) {
@@ -133,7 +176,10 @@ func (s *controlServer) lockTaskControl() (func(), error) {
 	return s.scheduler.controlMu.Unlock, nil
 }
 
-func (s *controlServer) reloadTaskSchedulesLocked() error {
+// scope is how much of the watcher supervisor this refresh may touch: the CRUD
+// callers name the one task they wrote, ReloadTasks and daemon start pass the
+// full re-arm. See watchScope (#3837).
+func (s *controlServer) reloadTaskSchedulesLocked(scope watchScope) error {
 	if s.scheduler == nil {
 		return fmt.Errorf("this daemon does not host a task scheduler")
 	}
@@ -141,7 +187,7 @@ func (s *controlServer) reloadTaskSchedulesLocked() error {
 		return nil
 	}
 	if s.manager != nil {
-		refused, err := reloadTaskAutomation(s.manager, s.scheduler, s.watchers)
+		refused, err := reloadTaskAutomation(s.manager, s.scheduler, s.watchers, scope)
 		if err != nil {
 			return err
 		}
@@ -155,7 +201,7 @@ func (s *controlServer) reloadTaskSchedulesLocked() error {
 	}
 	// Nil only in tests that exercise the scheduler alone.
 	if s.watchers != nil {
-		return s.watchers.Reload()
+		return s.watchers.ReloadScoped(scope)
 	}
 	return nil
 }
@@ -198,6 +244,28 @@ func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) e
 	return nil
 }
 
+// ExplainConfig returns one global config key's provenance — the same
+// config.ResolvedValue `af config get <key> --explain` prints — so the TUI and
+// web config surfaces answer "which layer supplied this value" through the
+// identical resolver rather than growing a second precedence implementation
+// (#4803, the UI half of #2216's explain ask).
+//
+// Like GetConfig it is deliberately NOT gated on requireManagerReady: the trace
+// is resolved from the on-disk sources fresh per call, so it describes the file
+// as it is now — including a hand-edit made since the daemon started — and the
+// answer stays available while the daemon warms up. That is also why
+// RunningValueChecked reports false: the explanation is about the FILE the user
+// edits, the same contract the CLI prints ("running daemon value not checked").
+func (s *controlServer) ExplainConfig(req ExplainConfigRequest, resp *ExplainConfigResponse) error {
+	value, err := config.ExplainGlobalValue(req.Key)
+	if err != nil {
+		return err
+	}
+	resp.Explanation = value
+	resp.Scope = "global"
+	return nil
+}
+
 // SetConfigValue writes one config key on the caller's behalf, through
 // config.SetGlobalConfigValue — the identical validated, file-locked, atomic
 // path a daemonless `af config set` uses. The daemon adds nothing: no second
@@ -219,34 +287,52 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	result, err := config.SetGlobalConfigValue(req.Key, req.Value)
+	result, wroteDigest, err := config.SetGlobalConfigValueWithDigest(req.Key, req.Value)
 	if err != nil {
 		return err
 	}
 	resp.Result = result
 	// Apply the write to the running daemon in place (#2480) so the web form need
 	// not tell the user to restart for a hot-reloadable key. Best-effort: the write
-	// already succeeded on disk, so an apply failure just means the change waits for
-	// the next daemon start.
-	daemonApplied := false
-	var applyResult ApplyConfigResult
+	// already succeeded on disk; report a live apply failure separately so the
+	// operator knows the running daemon has not adopted the saved config.
+	// A nil manager is the in-daemon "no daemon was reached" answer; it is stated
+	// explicitly because an unset DaemonApply reports unknown, not no-daemon
+	// (#4482).
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if s.manager != nil {
 		if applied, aerr := s.manager.ApplyConfig(); aerr == nil {
-			applyResult = applied
 			resp.Applied = applied.Applied
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
-			daemonApplied = true
+			outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applied.FailedListenerKeys}
+			// A successful apply claims "applied" only if the daemon loaded THIS
+			// save's file: a competing write can land between the writer's
+			// file-lock release and the apply's load (#4247). Both digests are
+			// taken in this process — one by the write, one by the apply's own
+			// load — so the comparison needs nothing read back.
+			confirmSavedConfigDigest(&outcome, &resp.Warnings, wroteDigest, applied.Digest)
+		} else {
+			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+aerr.Error())
+			outcome.DaemonApply = config.DaemonApplyFailed
 		}
 	}
-	// The per-key effect notice (#2480). A socket key (listen_addr / preview_listen_addr,
-	// #2480 PR2) whose live rebind FAILED did not apply — the daemon kept the old
-	// listener — so override the class-based "applied" with the honest deferred
-	// notice; the address + reason ride in resp.Warnings.
-	if slices.Contains(applyResult.FailedListenerKeys, result.Key) {
-		resp.RestartNotice = config.ListenerRebindDeferredNotice(result.Key)
-	} else {
-		resp.RestartNotice = config.EffectNotice(result.Key, daemonApplied)
+	resp.Warnings = completeConfigSaveWarnings(outcome, result.Warnings, resp.Warnings)
+	resp.ApplyOutcome = outcome.StatusForKey(result.Key)
+	// The per-key effect notice (#2480). A socket key (network.listen_addr /
+	// network.preview_listen_addr, #2480 PR2) whose live rebind FAILED did not apply —
+	// the daemon kept the old listener — so it must not be reported as applied; the
+	// address + reason ride in resp.Warnings. That used to be an override branch
+	// right here, which is how the unset surfaces came to be written without it
+	// (#3397); passing the whole outcome moves the decision into config.EffectNotice,
+	// which is the only place it is now made.
+	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
+	// Where the daemon is accepting NOW for a listener key (#3722) — read after the
+	// apply, so it reports the rebind's actual outcome rather than the request's
+	// intent. For a listener key this is the reply's most actionable field: the
+	// caller may well have been talking over the listener it just moved.
+	if s.manager != nil {
+		resp.ListenerAddr = s.manager.ListenerAddress(result.Key)
 	}
 	return nil
 }
@@ -281,217 +367,13 @@ func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigRespo
 	return nil
 }
 
-// ListTasks returns the full task list read from tasks.json (#1029 PR 3).
-// Deliberately NOT gated on requireManagerReady: task state lives on disk,
-// independent of the instance restore, so a read is always safe and always
-// current even while the daemon is warming up.
-func (s *controlServer) ListTasks(_ ListTasksRequest, resp *ListTasksResponse) error {
-	tasks, err := task.LoadTasks()
-	if err != nil {
-		return err
-	}
-	resp.Tasks = tasks
-	return nil
-}
-
-// AddTask persists a new task and re-arms the schedule set (#1029 PR 3). The
-// write goes through task.AddTask (config.WithFileLock + saveTasks) — the same
-// path clients used to call directly — so the on-disk format is unchanged; the
-// difference is the daemon now owns it and refreshes its own scheduler/watchers
-// in the same call.
-func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error {
-	if err := s.requireMutationAdmission(); err != nil {
-		return err
-	}
-	unlock, err := s.lockTaskControl()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	var validate func(task.Task) error
-	targetLocked := false
-	if s.manager != nil {
-		s.manager.taskTargetMu.Lock()
-		targetLocked = true
-		defer func() {
-			if targetLocked {
-				s.manager.taskTargetMu.Unlock()
-			}
-		}()
-		repoID := taskRepoIDForValidation(req.Task.ProjectPath)
-		validation := s.manager.prepareTaskTargetValidation(
-			repoID, req.Task.TargetSession, req.Task.Enabled,
-		)
-		validate = func(candidate task.Task) error {
-			return s.manager.validateEnabledTaskTarget(candidate, validation)
-		}
-	}
-	created, err := task.AddTaskChecked(req.Task, validate)
-	if targetLocked {
-		s.manager.taskTargetMu.Unlock()
-		targetLocked = false
-	}
-	if err != nil {
-		return err
-	}
-	resp.OK = true
-	// The task-file write is the durable commit. Publish it before the
-	// non-transactional scheduler/watch reload so other clients never remain
-	// stale when that follow-up fails.
-	s.manager.publishEvent(agentproto.EventTaskCreated, created)
-	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
-		// Returned as an ERROR, not through the envelope: net/rpc does not send
-		// the response body when a handler errors, and the HTTP route turns this
-		// into an error envelope carrying the shared committed code — which is
-		// what every existing consumer reads. The envelope covers the handlers
-		// that answer OK; these answer with an error (#3036).
-		return &mutationCommittedError{err: fmt.Errorf(
-			"%s %w", taskAddCommittedErrorPrefix, reloadErr)}
-	}
-	return nil
-}
-
-func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskResponse) error {
-	if err := s.requireMutationAdmission(); err != nil {
-		return err
-	}
-	unlock, err := s.lockTaskControl()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	var validate func(task.Task) (string, error)
-	targetLocked := false
-	if s.manager != nil {
-		s.manager.taskTargetMu.Lock()
-		targetLocked = true
-		defer func() {
-			if targetLocked {
-				s.manager.taskTargetMu.Unlock()
-			}
-		}()
-		// Legacy rows have no retained RepoID. Resolve the current authoritative
-		// ProjectPath before UpdateTaskChecked takes the tasks-file lock (git must
-		// never run under that lock), then lend that identity to validation. The
-		// task-control lock makes this stable against every supported writer; the
-		// path equality check fails closed if an out-of-band edit races us.
-		existing, getErr := task.GetTask(req.ID)
-		if getErr != nil {
-			return getErr
-		}
-		legacyPath := ""
-		legacyRepoID := ""
-		if existing.RepoID == "" && req.Update.ProjectPath == nil {
-			legacyPath = existing.ProjectPath
-			legacyRepoID = taskRepoIDForValidation(legacyPath)
-		}
-		validationRepoID := existing.RepoID
-		if req.Update.ProjectPath != nil {
-			validationRepoID = taskRepoIDForValidation(*req.Update.ProjectPath)
-		} else if validationRepoID == "" {
-			validationRepoID = legacyRepoID
-		}
-		validationTarget := existing.TargetSession
-		if req.Update.TargetSession != nil {
-			validationTarget = *req.Update.TargetSession
-		}
-		validationEnabled := existing.Enabled
-		if req.Update.Enabled != nil {
-			validationEnabled = *req.Update.Enabled
-		}
-		validation := s.manager.prepareTaskTargetValidation(
-			validationRepoID, validationTarget, validationEnabled,
-		)
-		validateTargetRelationship := req.Update.Enabled != nil ||
-			req.Update.TargetSession != nil || req.Update.ProjectPath != nil
-		validate = func(candidate task.Task) (string, error) {
-			if candidate.RepoID == "" && candidate.ProjectPath == legacyPath {
-				candidate.RepoID = legacyRepoID
-			}
-			if validateTargetRelationship {
-				if err := s.manager.validateEnabledTaskTarget(candidate, validation); err != nil {
-					return "", err
-				}
-			}
-			return candidate.RepoID, nil
-		}
-	}
-	merged, err := task.UpdateTaskChecked(req.ID, req.Update, req.Expect, validate)
-	if targetLocked {
-		s.manager.taskTargetMu.Unlock()
-		targetLocked = false
-	}
-	if err != nil {
-		return err
-	}
-	resp.OK = true
-	resp.Task = merged
-	// Publish at the durable commit boundary, before the non-transactional
-	// schedule refresh. If refresh fails, the caller receives the committed
-	// outcome below and every other client still learns to refetch this value.
-	// The payload is the authoritative merged record, not the partial patch.
-	s.manager.publishEvent(agentproto.EventTaskUpdated, merged)
-	reloadErr := s.reloadTaskSchedulesLocked()
-	if reloadErr == nil {
-		return nil
-	}
-	// See AddTask: an erroring handler sends no response body, so the error is
-	// the only channel that reaches both transports.
-	return &mutationCommittedError{err: fmt.Errorf(
-		"%s %w", taskUpdateCommittedErrorPrefix, reloadErr)}
-}
-
-func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
-	if err := s.requireMutationAdmission(); err != nil {
-		return err
-	}
-	unlock, err := s.lockTaskControl()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
-		return err
-	}
-	resp.OK = true
-	// Removal is already durable at this point. Announce that commit even when
-	// the scheduler/watch reload cannot apply it in-process.
-	s.manager.publishEvent(agentproto.EventTaskRemoved, task.Task{ID: req.ID})
-	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
-		// Returned as an ERROR, not through the envelope: net/rpc does not send
-		// the response body when a handler errors, and the HTTP route turns this
-		// into an error envelope carrying the shared committed code — which is
-		// what every existing consumer reads. The envelope covers the handlers
-		// that answer OK; these answer with an error (#3036).
-		return &mutationCommittedError{err: fmt.Errorf(
-			"%s %w", taskRemoveCommittedErrorPrefix, reloadErr)}
-	}
-	return nil
-}
-
-// TriggerTask fires a task NOW through the shared RunTask firing path — the same
-// entrypoint the in-daemon scheduler uses (#1029 PR 3). This unifies the CLI
-// `af tasks trigger`, the TUI run-now, and the cron scheduler on one
-// daemon-owned firing path, replacing the old in-process daemon.RunTask CLI call
-// (#1169-class fix). RunTask preserves the guards: watch tasks and disabled
-// tasks are refused.
-func (s *controlServer) TriggerTask(req TriggerTaskRequest, resp *TriggerTaskResponse) error {
-	if err := s.requireMutationAdmission(); err != nil {
-		return err
-	}
-	if err := RunTask(req.ID, req.Expect); err != nil {
-		return err
-	}
-	resp.OK = true
-	return nil
-}
-
 // Shutdown acknowledges a request to terminate the daemon, then asynchronously
 // signals the main loop to tear down after a short grace period. The grace
 // lets the RPC response flush back to the caller before the listener closes.
 func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
 	resp.OK = true
-	if s.shutdownCh == nil {
+	resp.PID = os.Getpid()
+	if s.shutdownCh == nil || s.shutdownOnce == nil {
 		return nil
 	}
 	s.shutdownOnce.Do(func() {
@@ -545,10 +427,47 @@ func (s *controlServer) CreateSession(req CreateSessionRequest, resp *CreateSess
 	return s.createSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error {
+func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) (retErr error) {
+	managerDelegated := false
+	defer func() {
+		if !managerDelegated {
+			retErr = taskPreflightError(req.TaskOrigin, req.TaskID, req.TaskRepoID, retErr)
+		}
+	}()
+
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// Reject a program that runs no recognized agent BEFORE the create proceeds —
+	// the one boundary a raw RPC caller can reach without the upstream enum
+	// validation every shipped client applies (see validateCreateProgram for why
+	// this gate is at the RPC boundary, not Manager.CreateSession, which the
+	// root-agent ensure loop calls with command strings that must NOT be trimmed).
+	// trimProgramEnumIfBare normalizes only a bare enum with surrounding whitespace
+	// into Instance.Program (the form the opaque same-target guard and
+	// ResolveProgram's exact program_overrides lookup care about); it preserves
+	// arbitrary command strings verbatim so an intentional trailing space survives.
+	if err := validateCreateProgram(req.Program); err != nil {
+		return err
+	}
+	// A remote client sends the project path as typed; expand ~ against this
+	// daemon's home before anything resolves it.
+	// A still-relative path would resolve against the DAEMON's working directory
+	// and could silently pick a different checkout, so it is refused (#5743).
+	if strings.TrimSpace(req.RepoPath) != "" {
+		resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
+		if err != nil {
+			return err
+		}
+		req.RepoPath = resolved
+	}
+	if req.ValidateFirst {
+		if err := validateCreateFirst(req); err != nil {
+			return err
+		}
+	}
+	req.Program = trimProgramEnumIfBare(req.Program)
+	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)
 	// A committed retained create (#3233) lands in the envelope with the
 	// retained projection in Instance; a genuine failure returns unchanged.
@@ -653,28 +572,19 @@ func (s *controlServer) ReorderTab(req ReorderTabRequest, resp *ReorderTabRespon
 	return nil
 }
 
-func (s *controlServer) SetPRInfo(req SetPRInfoRequest, resp *SetPRInfoResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	if err := s.manager.SetPRInfo(req); err != nil {
-		return err
-	}
-	resp.OK = true
-	return nil
-}
-
-func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
+func (s *controlServer) KillSession(req *KillSessionRequest, resp *KillSessionResponse) error {
 	return s.killSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest, resp *KillSessionResponse) error {
+func (s *controlServer) killSession(ctx context.Context, req *KillSessionRequest, resp *KillSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// A caller tearing down its OWN session is still blocked on this reply
+	// inside the pane tree being reaped; register the kernel-verified
+	// requester so teardown spares it (#5182). Unregistered on return — the
+	// reply is in flight and the exemption is over.
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -683,7 +593,7 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	// exact session, never the request's own id, which under a cross-repo title
 	// collision could point at a different (or gone) session (#1592 Phase 5 PR5 +
 	// follow-up: the write-path analogue of the id-keyed read/stream paths).
-	killed, err := s.manager.killSessionRequestedBy(req, rpcRequester(ctx))
+	killed, err := s.manager.killSessionRequestedBy(*req, rpcRequester(ctx), nil)
 	if !resp.record(err) {
 		return err
 	}
@@ -699,22 +609,31 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	return nil
 }
 
-func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+func (s *controlServer) ArchiveSession(req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+	return s.archiveSession(context.Background(), req, resp)
+}
+
+func (s *controlServer) archiveSession(ctx context.Context, req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// The `af sessions archive --self` caller this issue is about (#5182):
+	// register the kernel-verified requester before its own pane tree is
+	// reaped, and unregister when the reply is on the wire.
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
 	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
 	// commits it, and publishes the full projection inside its operation lock. That
 	// keeps lifecycle event order identical to operation order (#2680).
-	archivedPath, _, err := s.manager.ArchiveSession(req)
+	archivedPath, archived, err := s.manager.ArchiveSession(*req)
 	if !resp.record(err) {
 		return err
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
+	resp.ArchivedWorkspace = archived.ArchivedWorkspace
 	return nil
 }
 
@@ -734,11 +653,28 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 	// Publish the identity the manager actually resolved, not the request's
 	// potentially stale title/repo pair. This is the same one-shot resolution the
 	// restore body used, so the event cannot name a same-title sibling.
-	s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	// Publish only when the restore actually completed. A committed-but-unfinished
+	// restore (err recorded above, a mutationCommittedError) did NOT restore the
+	// session — its own marker tells the caller "the session is NOT restored; retry
+	// the restore" — so session.restored, which means the synchronous restore call
+	// completed, must not fire. Unlike killSession there is no late worker that owns
+	// this event, so an abandoned committed-but-unfinished restore yields zero
+	// restored events — correct, because the operation did not complete.
+	if err == nil {
+		s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	}
 	return nil
 }
 
 func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreSessionResponse) error {
+	if req.ExpectedDaemonBootID != "" {
+		if s.manager == nil || s.manager.lifecycle == nil {
+			return fmt.Errorf("cannot verify the daemon process for restore admission")
+		}
+		if actual := s.manager.lifecycle.snapshot().bootID; actual != req.ExpectedDaemonBootID {
+			return fmt.Errorf("daemon process changed before restore admission; refresh and retry")
+		}
+	}
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
@@ -751,7 +687,18 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
-	s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	// Publish only when the restore actually completed. A committed-but-unfinished
+	// restore (err recorded above, a mutationCommittedError) did NOT restore the
+	// session — its own marker tells the caller "the session is NOT restored; retry
+	// the restore" — so session.restored, which means the synchronous restore call
+	// completed, must not fire. Unlike killSession there is no late worker that owns
+	// this event, so an abandoned committed-but-unfinished restore yields zero
+	// restored events — correct, because the operation did not complete. The auto
+	// Lost-restore loop's EndRecoverFence publishes session.updated with the true Lost
+	// liveness (restore.go) as the runtime-status substitute.
+	if err == nil {
+		s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	}
 	return nil
 }
 
@@ -771,86 +718,6 @@ func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptRespon
 	return nil
 }
 
-// DeleteProject deletes a project (a repo grouping of sessions, #1735):
-// archive-then-remove, reversible. The manager archives every live session
-// (restorable), tears down in-place sessions (repo untouched), and drops the
-// repo's root_agents opt-in. It publishes one archived/killed event per affected
-// session — so every client's rail moves the sessions exactly as a per-session
-// archive/kill would — plus a projects-changed signal for clients keying a
-// projects view. On a partial failure it still publishes what DID happen before
-// surfacing the error, so the rail never lags reality.
-func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProjectResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	result, err := s.manager.DeleteProject(req)
-	for _, k := range result.Killed {
-		s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: k.ID, Title: k.Title})
-	}
-	if len(result.Archived) > 0 || len(result.Killed) > 0 || result.Deregistered {
-		s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
-	}
-	if err != nil {
-		return err
-	}
-	resp.OK = true
-	resp.ArchivedCount = len(result.Archived)
-	resp.KilledCount = len(result.Killed)
-	resp.Deregistered = result.Deregistered
-	resp.Warning = strings.Join(result.Warnings, "\n")
-	return nil
-}
-
-// RegisterProject records a git checkout as a durable, sessionless project in
-// the #2355 registry (#2456). The daemon is the single writer (#960): the CLI,
-// web, and TUI all route their add-project action here rather than writing the
-// registry in-process, so one process owns the store and — for a web or remote
-// client — the path is resolved on the daemon's filesystem, not the caller's.
-//
-// config.RegisterProject does the work (expand ~, resolve the git root,
-// validate, persist, idempotent) under its own file lock, so this handler adds
-// only the admission gate and the projects-changed publish. It does NOT take a
-// manager lock: the registry is independent of the session roster, and
-// RegisterProject's own lock already serializes concurrent registrations.
-//
-// The publish rides the same EventProjectsChanged signal DeleteProject uses, so
-// a client showing a projects view re-fetches and the new empty project appears
-// without a manual refresh. It is emitted only on a successful, genuinely new or
-// re-confirmed registration — an error returns before it, and an idempotent
-// re-registration still publishes (harmless: the re-fetch is a no-op diff).
-func (s *controlServer) RegisterProject(req RegisterProjectRequest, resp *RegisterProjectResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	project, err := config.RegisterProject(req.Path)
-	if err != nil {
-		return err
-	}
-	s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
-	resp.OK = true
-	resp.Project = project
-	return nil
-}
-
-// ListProjects returns every durable project in this daemon's #2355 registry
-// (#2456). It is a pure config read: config.ListProjects walks the registry
-// directory with no lock and no manager, so — like ListBackends — this handler
-// takes no admission gate and answers even while the daemon is still restoring
-// sessions (a client building its project list must not have to wait on the
-// session restore for the registry, which is independent of it). The read is the
-// half of #2491 the LOCAL union needs; see ListProjectsRequest.
-func (s *controlServer) ListProjects(_ ListProjectsRequest, resp *ListProjectsResponse) error {
-	projects, err := config.ListProjects()
-	if err != nil {
-		return err
-	}
-	resp.Projects = projects
-	return nil
-}
-
 // validateRPCRepoID enforces the RepoID shape for RPC requests that allow an
 // empty value to mean "search all repos". A non-empty RepoID must satisfy
 // config.ValidateRepoID so it cannot escape the per-repo file scope through
@@ -865,16 +732,30 @@ func validateRPCRepoID(repoID string) error {
 	return nil
 }
 
-func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPromptResponse) error {
+func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPromptResponse) (retErr error) {
+	managerDelegated := false
+	defer func() {
+		if !managerDelegated {
+			retErr = taskPreflightError(req.TaskOrigin, "", req.TaskRepoID, retErr)
+		}
+	}()
+
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	status, deliveryStatus, err := s.manager.DeliverPromptWithStatus(req)
-	if err != nil {
+	managerDelegated = true
+	status, deliveryStatus, promptRetained, err := s.manager.deliverPromptWithOutcome(req)
+	// A committed retained auto-create (#3357) — the absent-target branch
+	// routed through Manager.CreateSession, which provisioned a sandbox but
+	// could not confirm its teardown/startup — lands in the envelope so the
+	// marker survives the net/rpc hop that would otherwise flatten it to a
+	// plain rpc.ServerError string. A genuine failure returns unchanged.
+	if !resp.record(err) {
 		return err
 	}
 	resp.Status = status
 	resp.DeliveryStatus = deliveryStatus
+	resp.PromptRetained = promptRetained
 	return nil
 }
 
@@ -895,17 +776,25 @@ func daemonSpawnLockTarget() (string, error) {
 // at the same time. No-op in production.
 var testHookSpawnPingPassed = func() {}
 
-// bindControlServerExclusive re-checks for a live daemon and binds the
-// control socket while holding an exclusive cross-process file lock, making
-// the ping→bind sequence atomic across processes. RunDaemon's top-of-function
-// ping guard rejects the common duplicate-daemon cases, but two daemons
-// starting near-simultaneously can both pass that ping before either binds;
+// bindControlServerExclusive re-checks for a live daemon, publishes this
+// daemon's PID file, and binds the control socket — all while holding an
+// exclusive cross-process file lock, making the ping→publish→bind sequence
+// atomic across processes. RunDaemon's top-of-function ping guard rejects
+// the common duplicate-daemon cases, but two daemons starting
+// near-simultaneously can both pass that ping before either binds;
 // the second startControlServer would then unlink and rebind the socket path,
 // orphaning the first daemon — alive and looping, but unreachable (#718).
 //
-// The lock is held only for the ping+bind window, not the daemon lifetime,
-// and flock is released by the kernel if the holder dies, so a crashed
-// spawner cannot wedge future spawns.
+// The PID write belongs inside the lock, between the two ends of the
+// sequence: after the under-lock ping, the final existing-daemon check — a
+// pre-home-lock legacy daemon that slipped the top ping keeps its PID file,
+// which an earlier write-then-alreadyRunning-exit would have overwritten
+// and then deleted — and before the bind, so a Ping can never succeed for
+// a daemon whose daemon.pid does not yet exist (#5188).
+//
+// The lock is held only for the ping→publish→bind window, not the daemon
+// lifetime, and flock is released by the kernel if the holder dies, so a
+// crashed spawner cannot wedge future spawns.
 //
 // Returns alreadyRunning=true when a live daemon answered the under-lock
 // ping; the caller must exit cleanly (a non-zero exit would trip the
@@ -921,9 +810,34 @@ func bindControlServerExclusive(manager *Manager, scheduler *taskScheduler, watc
 			alreadyRunning = true
 			return nil
 		}
+		// daemon.pid is published at exactly this point — after the
+		// spawn-locked ping proves no daemon is answering (a pre-home-lock
+		// legacy daemon that slipped the top-of-runDaemon ping keeps its
+		// PID file: overwriting it here and then unlinking it on the
+		// alreadyRunning exit would strip a live daemon's management
+		// handle), and before the control socket below can accept its
+		// first Ping, so a successful readiness probe structurally implies
+		// the file exists (#5188). The write is FAIL-CLOSED: a daemon that
+		// cannot publish its identity would serve while invisible to
+		// StopDaemon, Health, `af daemon status`, and doctor, which is
+		// worse than not serving. The caller sees the returned error on a
+		// foreground start; a detached spawn's cause lands in the daemon
+		// log (persisting it for status/doctor is #5196).
+		if err := writeDaemonPIDFile(); err != nil {
+			return err
+		}
 		testHookSpawnPingPassed()
 		var serverErr error
 		closeFn, serverErr = startControlServer(manager, scheduler, watchers, shutdownCh)
+		if serverErr != nil {
+			// daemon.pid was published above, but runDaemon's removal
+			// defer only registers on the success path — without this
+			// cleanup the file keeps naming a process that is about to
+			// exit (#5188). Still under the spawn lock, so nothing else
+			// could have published; the unlink removes exactly the file
+			// this process wrote.
+			removeDaemonPIDFile()
+		}
 		return serverErr
 	})
 	if lockErr != nil {
@@ -933,7 +847,8 @@ func bindControlServerExclusive(manager *Manager, scheduler *taskScheduler, watc
 }
 
 // startControlServer registers the control RPC service on the Unix socket and
-// returns a cleanup function that closes the listener (which also unlinks the
+// returns a cleanup function that closes the listener and accepted connections,
+// then joins methods already dispatched (the listener close also unlinks the
 // socket file). When shutdownCh is non-nil, the Shutdown RPC will close it on the
 // first invocation, allowing the daemon main loop to exit on RPC request.
 // scheduler may be nil for servers that do not host task schedules (tests);
@@ -944,7 +859,7 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+	if err := requireDaemonHomePresent("daemon control socket", socketPath); err != nil {
 		return nil, err
 	}
 	_ = os.Remove(socketPath)
@@ -958,34 +873,127 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 		return nil, err
 	}
 
-	server := rpc.NewServer()
-	if err := server.RegisterName(controlServiceName, &controlServer{
-		manager:    manager,
-		scheduler:  scheduler,
-		watchers:   watchers,
-		shutdownCh: shutdownCh,
-	}); err != nil {
+	// Every accepted connection gets its own rpc.Server because its
+	// controlServer carries that connection's kernel-verified requester
+	// identity (#5182): SO_PEERCRED/LOCAL_PEERPID names the process that
+	// CONNECTED, resolved to its (pid, start-stamp) instance at accept, and
+	// teardown handlers register it so the reaper exempts the caller still
+	// blocked on their reply. shutdownOnce is shared by all of them — one
+	// Shutdown still fires once for the whole listener. Registration runs once
+	// eagerly so a service misconfiguration fails at bind time, not per
+	// connection.
+	shutdownOnce := &sync.Once{}
+	newConnServer := func(requester *proctree.Process, pending *pendingUntracks) (*rpc.Server, error) {
+		server := rpc.NewServer()
+		err := server.RegisterName(controlServiceName, &controlServer{
+			manager:        manager,
+			scheduler:      scheduler,
+			watchers:       watchers,
+			shutdownCh:     shutdownCh,
+			shutdownOnce:   shutdownOnce,
+			requester:      requester,
+			pendingReplies: pending,
+		})
+		return server, err
+	}
+	if _, err := newConnServer(nil, nil); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
 
+	var (
+		connectionsMu sync.Mutex
+		connections   = make(map[net.Conn]struct{})
+		closing       bool
+		serveWG       sync.WaitGroup
+		closeOnce     sync.Once
+		closeErr      error
+	)
+	serveWG.Add(1)
 	go func() {
+		defer serveWG.Done()
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			go server.ServeConn(conn)
+			connectionsMu.Lock()
+			if closing {
+				connectionsMu.Unlock()
+				_ = conn.Close()
+				continue
+			}
+			connections[conn] = struct{}{}
+			serveWG.Add(1)
+			connectionsMu.Unlock()
+			// The kernel's record of who CONNECTED — the only requester
+			// identity a teardown handler may trust (#5182). The pid is
+			// resolved to its (pid, start-stamp) instance HERE, synchronously
+			// in the accept loop while the peer provably still owns the slot:
+			// a lookup deferred even to the freshly spawned goroutine could
+			// land after the peer exited and its pid was recycled by another
+			// pane-tree process, which would then inherit an exemption meant
+			// for the dead caller (Codex on #5186). A read failure degrades to
+			// no requester (the pre-#5182 posture): the connection still works,
+			// teardown proceeds, and the caller is reaped as it always was.
+			var requester *proctree.Process
+			if peerPID, credErr := peercred.ConnPID(conn); credErr != nil {
+				log.WarningLog.Printf("daemon control connection: cannot read peer credentials, teardown requester exemption disabled: %v", credErr)
+			} else if proc, lookupErr := proctree.Lookup(peerPID); lookupErr != nil {
+				log.WarningLog.Printf("daemon control connection: cannot resolve peer pid %d, teardown requester exemption disabled: %v", peerPID, lookupErr)
+			} else {
+				requester = &proc
+			}
+			go func() {
+				defer serveWG.Done()
+				pending := &pendingUntracks{}
+				connServer, err := newConnServer(requester, pending)
+				if err != nil {
+					log.WarningLog.Printf("daemon control connection: cannot register RPC service: %v", err)
+					return
+				}
+				// Our own codec, not ServeConn's built-in one: WriteResponse
+				// releases one parked unregister per reply written, so an
+				// exemption outlives only the response it is for — never the
+				// whole connection (Codex on #5186).
+				connServer.ServeCodec(newGobServerCodec(conn, pending))
+				// Backstop for a codec path that returned without Close: any
+				// unregister still parked is for a reply the client will never
+				// read.
+				pending.drain()
+				connectionsMu.Lock()
+				delete(connections, conn)
+				connectionsMu.Unlock()
+			}()
 		}
 	}()
 
 	return func() error {
-		// Closing the listener also unlinks the socket file (net's default
-		// unlink-on-close for unix listeners it created). Deliberately no
-		// explicit os.Remove here: between the close-unlink and an explicit
-		// Remove, a new daemon can pass its ping check and bind a fresh
-		// socket at the same path, and the Remove would delete the new
-		// daemon's socket, orphaning it — the same race class as #718/#767.
-		return listener.Close()
+		closeOnce.Do(func() {
+			connectionsMu.Lock()
+			closing = true
+			accepted := make([]net.Conn, 0, len(connections))
+			for conn := range connections {
+				accepted = append(accepted, conn)
+			}
+			connectionsMu.Unlock()
+
+			// Closing the listener also unlinks the socket file (net's default
+			// unlink-on-close for unix listeners it created). Deliberately no
+			// explicit os.Remove here: between the close-unlink and an explicit
+			// Remove, a new daemon can pass its ping check and bind a fresh
+			// socket at the same path, and the Remove would delete the new
+			// daemon's socket, orphaning it — the same race class as #718/#767.
+			closeErr = listener.Close()
+			// Closing accepted connections stops them from admitting another RPC.
+			// net/rpc's ServeConn waits for methods already dispatched before it
+			// returns; joining our ServeConn goroutines therefore joins every call
+			// that passed mutation admission before shutdown quiesced the daemon.
+			for _, conn := range accepted {
+				_ = conn.Close()
+			}
+			serveWG.Wait()
+		})
+		return closeErr
 	}, nil
 }

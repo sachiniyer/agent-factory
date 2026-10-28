@@ -74,6 +74,42 @@ type projectAddedMsg struct {
 	err  error
 }
 
+// projectReboundMsg reports completion of an async rebind-project (the picker's
+// `b` verb). Unlike add, the picker stays open while the daemon answers so a
+// rejection can be corrected inline; root is the NEW root the registration now
+// points at. token is the picker request it answers (overlay.RebindRequest):
+// only the picker still waiting on that token may show the result.
+type projectReboundMsg struct {
+	token     uint64
+	projectID string
+	// oldRepoID and oldRoot name the row as it was when the rebind was sent, so
+	// a success can tell whether it moved the project the TUI is scoped to.
+	// oldRegistryRoot is the root the REGISTRATION recorded then — what "did
+	// the record move" is judged against (oldRoot is the row's display root,
+	// which an aggregated row can take from another source).
+	oldRepoID       string
+	oldRoot         string
+	oldRegistryRoot string
+	name            string
+	root            string
+	err             error
+}
+
+// rebindConflictSnapshotMsg carries the cross-repo session snapshot fetched
+// OFF the event loop after a "rebound elsewhere" refusal (#4888 review): local
+// API calls carry no response deadline, so a stalled one must not freeze Update
+// while the refused rebind waits to re-arm. token and projectID re-check reply
+// ownership at apply time — the picker that asked may be gone or replaced —
+// and refusal carries the daemon's own text for the re-arm when the fresh list
+// no longer names the record.
+type rebindConflictSnapshotMsg struct {
+	token     uint64
+	projectID string
+	refusal   error
+	data      []session.InstanceData
+	fetchErr  error
+}
+
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async
 // archive / restore (#1028). On success the row's new status arrives via the
 // next daemon Snapshot reconcile (which re-partitions it into / out of the
@@ -98,7 +134,15 @@ type runOnEventLoopMsg struct {
 }
 
 type instanceStartedMsg struct {
-	instance *session.Instance
-	started  *session.Instance
-	err      error
+	draft     *sessionStartRequest
+	rawPrompt string
+	instance  *session.Instance
+	started   *session.Instance
+	err       error
+	// account is the credential account the create ASKED for (#3844), empty for
+	// the ambient identity. The handler compares it with the account the daemon
+	// reports on the session it returned: a daemon predating account support drops
+	// the field silently, and the UI must never go on to report an identity the
+	// session does not have.
+	account string
 }

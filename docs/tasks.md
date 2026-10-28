@@ -1,5 +1,10 @@
 # Tasks
 
+For anyone who wants an agent to start work without being asked. After this page
+you will be able to run a prompt on a cron schedule or on every line a watch
+command prints, choose whether each run gets a fresh session, and tell whether a
+task is actually firing.
+
 A task delivers a prompt to an AI agent session automatically. Every task has exactly one **trigger** — a cron schedule (`cron_expr`) or a long-running watch script (`watch_cmd`) — and one **delivery mode**: create a fresh session per fire, or send the prompt into an existing session (`target_session`).
 
 Tasks are hosted by the agent-factory daemon, which starts automatically whenever `af` runs and an enabled task exists. There are no per-task OS scheduler units — see [Daemon lifecycle](#daemon-lifecycle) and [Migration notes](#migration-notes).
@@ -12,6 +17,119 @@ Tasks are hosted by the agent-factory daemon, which starts automatically wheneve
 | **`watch_cmd`** | each stdout line → create a session with the rendered prompt | each stdout line → send the rendered prompt into the session |
 
 When `target_session` is set, the session title is looked up in the task's own repo (a same-titled session in an unrelated repo can never receive the prompt). If no session with that title exists at fire time, it is **auto-created** with the task's `project_path`/`program` and the rendered prompt as its initial prompt — same behavior as `af sessions send-prompt --create`.
+
+## Worked examples
+
+Run these from the repository you want the task to own, with Claude installed
+and signed in. Each command creates an enabled task and returns its id and
+`project_path`; check that path before leaving it running. Cron times use the
+daemon's timezone. These are independent examples: enable only the ones you
+want to keep, and use `af tasks remove <id>` when finished.
+
+### Cron → new session
+
+```bash
+af tasks add --name "Daily triage" --program claude --cron "0 9 * * 1-5" --prompt "Review recent commits and write a triage summary; do not edit code"
+```
+
+At 09:00 each weekday, a new session appears with a title based on Daily triage.
+Its first prompt asks for the summary. Each fire gets a separate worktree and
+conversation; the task records `started` after startup, not after the review
+finishes. Completed sessions stay available for inspection by default.
+
+### Cron → existing session
+
+```bash
+af tasks add --name "Daily captain check" --program claude --cron "0 9 * * 1-5" --target-session captain --prompt "Review recent commits and summarize what changed since your last check; do not edit code"
+```
+
+At the same weekday time, the prompt arrives in this project's `captain`
+session, preserving its conversation and worktree. If it does not exist, the
+first fire creates it. Later deliveries record `sent`; they do not create a
+new session for each check. The program flag selects the agent for creation,
+not a replacement for the agent already running in the target.
+
+### Watch command → new session
+
+```bash
+af tasks add --name "Review events" --program claude --watch-cmd 'while sleep 300; do date -u +%Y-%m-%dT%H:%M:%SZ; done' --prompt "At {{line}}, review the latest commit and summarize it; do not edit code" --max-concurrent-runs 1
+```
+
+Five minutes after the watcher starts, and every five minutes afterwards, it
+emits a timestamp. Each line becomes a prompt with that timestamp substituted
+for `{{line}}`, delivered to a new session. One session may run at a time;
+further events queue until it finishes. Replace this demonstration clock with
+your own event source when ready; the [script contract](#script-contract)
+explains stdout, stderr, and queue limits.
+
+### Watch command → existing session
+
+```bash
+af tasks add --name "Captain events" --program claude --watch-cmd 'while sleep 300; do date -u +%Y-%m-%dT%H:%M:%SZ; done' --target-session captain --prompt "Checkpoint {{line}}: summarize progress since the last checkpoint; do not edit code"
+```
+
+Each timestamp becomes another prompt in this project's `captain` session,
+auto-created on the first event if missing. Deliveries happen in order and
+reuse the conversation. There is no concurrency cap here: that flag applies
+only to watch tasks creating a session per event. A silent watcher produces
+no prompt, even while its state says `watching`.
+
+## Versioned task prompts
+
+Repository-owned prompts live in `.agent-factory/tasks/`. The Master Health
+Watch prompt is [master-health-watch.md](https://github.com/sachiniyer/agent-factory/blob/master/.agent-factory/tasks/master-health-watch.md),
+for task `4ab7ba4f`. `examples/tasks/` contains watch scripts, not task prompt
+copies. The daemon still stores the delivered prompt; it does not automatically
+reload this file. Edit the file in a PR, review the diff, and apply it only after
+merge from the updated master checkout.
+
+With an `af` build containing `--prompt-file`, Captain runs this on the
+maintainer's box (not from a feature worktree):
+
+```bash
+cd /home/siyer/Desktop/claude-squad
+# First bring this master checkout to the reviewed, merged commit.
+AF_DAEMON_URL= af tasks update 4ab7ba4f --repo /home/siyer/Desktop/claude-squad --prompt-file /home/siyer/Desktop/claude-squad/.agent-factory/tasks/master-health-watch.md
+```
+
+`--prompt-file <path>` reads the caller's local file verbatim, preserving trailing
+newlines, and is mutually exclusive with `--prompt`. Missing, unreadable, empty,
+and whitespace-only files are rejected before any write. For remote updates the
+file is still read on the caller's machine. The empty `AF_DAEMON_URL`
+above clears any remote target in the environment.
+
+The live task will be **behind origin/master from merge until Captain
+applies it**. The comparison is expected to report drift during that window.
+Run the read-only comparison from your session worktree's repository root:
+
+```bash
+# Build a binary so its exit 1 (drift) and exit 2 (tooling) stay distinct;
+# go run wraps both as exit 1.
+prompt_drift_bin=$(mktemp)
+go build -o "$prompt_drift_bin" ./scripts/prompt-drift &&
+  "$prompt_drift_bin" 4ab7ba4f .agent-factory/tasks/master-health-watch.md
+prompt_drift_status=$?
+rm -f "$prompt_drift_bin"
+printf 'prompt-drift exit: %s\n' "$prompt_drift_status"
+```
+
+The [helper](https://github.com/sachiniyer/agent-factory/blob/master/scripts/prompt-drift/main.go)
+runs `git fetch origin master` in the invoking repository, then reads the
+expected bytes with `git show origin/master:<repo-relative-prompt-file>`.
+It never reads the working file, so a stale checkout cannot manufacture drift.
+It uses `af tasks get <id> --json` to read the live prompt and compares exact
+bytes. Exit 0 is silent on equality; exit 1 starts with `FINDING:` for real
+drift; exit 2 starts with `TOOLING:` when fetching, reading the ref, or reading
+or decoding the task fails. Failure diagnostics preserve command stderr,
+including the task error envelope that `af` writes there.
+
+The watch reports drift and tooling findings separately, with command output
+as evidence, through its existing dedupe and issue conventions, and continues
+its existing checks. The helper never applies changes or executes prompt
+contents. Captain applies PR-reviewed prompt edits only after merge with
+`af tasks update --prompt-file`; the watch never runs `af tasks update`.
+Tests use temporary Git repositories and a stub `af`, including an intentionally
+stale working file and error envelopes on stderr; they never execute the watch.
 
 ## Task fields
 
@@ -31,7 +149,17 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 | `repo_id` | The owning project's id, resolved once when the task is bound and retained. Derived, not editable — it is recomputed only when `project_path` changes. It exists so that deleting the recorded directory cannot strand the task outside its own project; rows created before this field fall back to resolving `project_path` |
 | `program` | Agent to run (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`). Empty = configured `default_program` |
 | `enabled` | Disabled tasks never fire; their watch script is stopped |
-| `last_run_at` / `last_run_status` | Set by the daemon: `started` (session created), `sent` (prompt delivered into a session), `parked: usage limit` (the session hit a plan usage-limit wall at startup and is parked, not failed — see [usage-limits.md](usage-limits.md#task-runs-park-dont-fail)), and for watch tasks `stopped` / `errored` (see below) |
+| `last_run_at` / `last_run_status` | Set by the daemon: `started` (session created — also what a watch earns back once a re-armed run stays healthy for a full crash window, see below), `sent` (prompt delivered into a session), `parked: usage limit` (a created or targeted session is waiting at a plan usage-limit wall, not failed — see [usage-limits.md](usage-limits.md#task-runs-park-dont-fail)), and for watch tasks `stopped`, `errored` — a crash-loop give-up reads `errored: gave up after N failures in W (last: <exit>): <newest output line>` — or `dropped: event rate limit exceeded` (see below) |
+| `dropped_events` | Cumulative source events this watch task lost without delivering or queueing them: events past `watcher_events_per_minute`, and undelivered events the durable replay queue could not accept (no queue available, a failed append, or a stop while the queue was unreadable). Each one records `last_run_status` as `dropped: event rate limit exceeded`, whatever the cause, unless the watcher has since stopped or errored — that newer terminal status is preserved rather than clobbered by the drop. Daemon-owned and not editable. It does not count the separately bounded durable queue's overflow or expiry |
+| `audit` | Bounded trail (last 20 entries) of mutations to this task: `{at, actor, action, fields}`, where `action` is `created` / `updated` / `enabled` / `disabled` and `actor` is the surface that made it (`cli`, `tui`, `api`, `daemon-upgrade`, `unknown`). Written by the task store inside the same locked write that commits the change; never a client input. See [Is it actually firing?](#is-it-actually-firing) |
+| `overdue` / `missed_occurrences` | **Derived at read time, never stored.** Whether an enabled cron task has gone more than one slack window past its most recent scheduled occurrence, and how many fires the schedule has had since — both measured from the latest of its last run, its last enable or retime, and its creation. Absent (`false` / `0`) on a task that is on schedule |
+| `missed_occurrences_capped` | **Derived at read time, never stored.** The count above hit the derivation's cap (10000) and is a *floor*, not an exact number |
+| `unschedulable` | **Derived at read time, never stored.** The scheduler cannot derive a next run from this task's cron expression — it does not parse, or nothing matches within its search horizon. Such a task is not overdue (nothing was ever due) and is not healthy either |
+| `unschedulable_reason` | **Derived at read time, never stored.** Which shape it is — `no-trigger`, `invalid-expression`, or `no-occurrence` — straight from the classifier below, so a surface that cannot call it words the verdict the same way instead of re-deriving one from `cron_expr`. Absent unless `unschedulable` is set |
+| `unassessable` | **Derived at read time, never stored.** No lateness verdict could be reached: there is no instant to measure from, or none the schedule can be evaluated against. Unknown, not healthy |
+| `next_run_at` | **Derived at read time, never stored.** When the daemon's *live* scheduler entry will next fire this task — read off what is armed, not recomputed from `cron_expr`. Absent when the task is not armed, and that absence is itself the signal |
+| `next_run_far` | **Derived at read time, never stored.** `true` when the task is enabled and `next_run_at` is more than 60 days away; absent otherwise |
+| `arming` | **Derived at read time, never stored.** `armed`, `not-armed`, or absent when no running daemon answered (nothing observed it — which is not the same as "not armed") |
 
 A task with both triggers set is always invalid. An enabled task must have exactly one; a disabled task with neither is tolerated as a draft. An enabled cron task must carry a non-empty prompt — there is no event line to fall back to. Watch tasks are exempt (empty prompt defaults to the emitted line). Disabled drafts are tolerated regardless of prompt.
 
@@ -45,9 +173,15 @@ An **all-whitespace** `target_session` means the same thing as an empty one — 
 
 `cron_expr` is a standard 5-field expression (`minute hour day-of-month month day-of-week`) with Vixie semantics, including the DOM/DOW OR rule when both fields are restricted. The daemon evaluates expressions in-process — what you write is exactly what is evaluated, with no conversion to OS timer formats.
 
+Run this from the git repository the task should work on. The add command
+returns JSON containing the task's `id` and `project_path`; check the project,
+then replace `<id>` below with that returned id — or just use the task's name
+(`"Daily triage"` here), which every id-taking verb also accepts.
+
 ```bash
 af tasks add --name "Daily triage" --prompt "Triage open issues" --cron "0 9 * * 1-5"
 af tasks trigger <id>     # run a cron task immediately
+af tasks trigger "Daily triage"   # same thing, by name
 ```
 
 `af tasks trigger` (and the TUI `r` key) work for cron tasks only — a watch task has no event line to render its prompt with, so manual triggers are refused.
@@ -67,17 +201,37 @@ af tasks add --name "gh-issues" --watch-cmd "./watch-issues.sh" \
 - **Each newline-terminated stdout line is one event.** Lines over 64KB are truncated to the cap (the remainder is discarded with a logged note). Unterminated trailing output at exit is not an event. Silence is fine — a quiet watcher is healthy; there is no output timeout.
 - **stderr** appends to `~/.agent-factory/logs/task-<id>.log`, size-capped by the same `log_max_size_mb`/`log_max_backups` rotation as the main log. Use it for all logging — anything on stdout becomes an event.
 - **Environment**: the script receives `AF_TASK_ID`, `AF_TASK_NAME`, and `AF_PROJECT_PATH` on top of the daemon's environment.
-- **Exit 0 = intentional stop.** The task's status becomes `stopped` and the script is not restarted until the next daemon start, task edit, re-enable, or explicit `af tasks restart <id>`.
+- **Exit 0 = intentional stop.** The task's status becomes `stopped` and the script is not restarted until a gesture that names **this** task — see [Re-arming a stopped watcher](#re-arming-a-stopped-watcher).
 - **Non-zero exit = failure.** The script is restarted with exponential backoff, 1s doubling to a 5-minute cap. A run that stays healthy for 10 minutes resets the backoff.
-- **Crash-loop breaker**: 5 or more non-zero exits within 10 minutes set the status to `errored` and stop restarts. Re-arm by editing the task, toggling it, or restarting the daemon.
-- **Rate limit**: at most 10 events per minute per task. Excess events are dropped — never silently: a warning is logged with a running drop counter. Rate-dropped events are not queued for replay (the limit is protective policy against a chatty script, not an outage signal). This is a limit on the event *rate*, and is independent of `max_concurrent_runs`, which bounds in-flight *sessions* and queues rather than drops — the two are never the binding constraint at the same time (see [Limiting concurrent sessions](#limiting-concurrent-sessions)).
+- **Crash-loop breaker**: 5 or more non-zero exits within 10 minutes set the status to `errored: gave up after N failures in W (last: <exit>): <newest output line>` — naming the give-up and the run's last diagnostic line — and stop restarts, again until a gesture that names this task — [Re-arming a stopped watcher](#re-arming-a-stopped-watcher).
+- **Stale status recovery**: when a watch does run again (after `af tasks restart`, re-enable, or a daemon restart), a stale `stopped`/`errored` `last_run_status` clears to `started` once the new run has stayed **continuously alive for a full 10-minute crash window** — the same budget the breaker counts, so a still-crash-looping watch never clears its own failure. The clear is a compare-and-swap over the whole task row the run was re-armed over: it is replaced only while the stored record is still exactly that row, so anything committed in the window — a fresh `errored: not armed — …` refusal, a `sent`, `dropped:`, or `parked:` outcome, or any other edit — is never clobbered. The cost of that gate is that a stale terminal status can legitimately display for up to 10 minutes after a healthy re-arm. And a script that exits 0 by design never stays alive for a window, so a stale `errored` on it clears only on its next delivery.
+- **Rate limit**: at most `watcher_events_per_minute` events per minute per task (default: 10). Excess events are dropped — never silently: the cumulative count is stored as `dropped_events`, returned by `af tasks list`, and logged. A dropped event records `last_run_status` as `dropped: event rate limit exceeded` rather than leaving the loss indistinguishable from `sent`; later successful deliveries may update that status (and a newer `stopped`/`errored:` terminal status is preserved against the drop), but the cumulative count remains. Rate-dropped events are not queued for replay (the limit is protective policy against a chatty script, not an outage signal). This is a limit on the event *rate*, and is independent of `max_concurrent_runs`, which bounds in-flight *sessions* and queues rather than drops — the two are never the binding constraint at the same time (see [Limiting concurrent sessions](#limiting-concurrent-sessions)).
 - **Prompt rendering**: an empty `prompt` delivers the raw line; otherwise `{{line}}` is substituted. An event whose rendered prompt is empty is dropped with an error log.
 - **Ordering**: deliveries are serialized per task in emission order. A slow delivery backpressures the script's stdout rather than reordering events, and replayed events (below) land before newer live ones.
 - **Process tree**: each script runs in its own process group. On stop the group gets SIGTERM, then SIGKILL after 5 seconds — backgrounded children do not outlive the watcher. Scripts should treat SIGTERM as "clean up and exit".
-- **Delivery failures are queued and replayed**: an event whose delivery fails — the target session unreachable, e.g. during a tmux outage — is appended to a durable per-task queue under `~/.agent-factory/events/` instead of dropped, and replayed **in emission order, before newer live events**, once deliveries succeed again (rate-limited by the same 10/min window). The backlog survives daemon restarts and reloads. Semantics and bounds:
+- **Daemon death**: the script's lifetime is bound to the daemon that started it, even when the daemon dies uncleanly (SIGKILL, OOM, a crash). A small `af` process leads the script's process group and watches a pipe only the daemon holds; when the daemon is gone, that group gets the same SIGTERM, then SIGKILL after 5 seconds. A replacement armed inside that grace can briefly run beside a stale copy that is still ignoring its SIGTERM — bounded by the grace and ended by the SIGKILL — rather than waiting out the drain. That `af` process is the watch command's parent in `ps` (`af __watch-lifeline …`); it never reads or writes the script's output. This guarantee lapses while the daemon is running degraded — when its own binary cannot be resolved, when the resolved binary does not answer the lifeline protocol, or for up to a minute after a failed probe while the daemon waits to retry it. A run started in one of those windows is spawned directly and can outlive an unclean daemon death; the daemon log warns on each such degradation and notes when the lifeline re-arms.
+- **Deliberately detached processes**: anything the script moves out of its process group — `setsid` on Linux, or a program that daemonizes itself into its own session — is not part of the watch command, and the stop, reload and daemon-death kills above do not reach it. Two conditions apply:
+  - **Close the watcher's output.** A detached process must not keep the script's stdout or stderr: redirect both (`setsid cmd >/dev/null 2>&1 &`, or to a file of its own). While it holds either, the watcher keeps reading it, so stopping, reloading or editing the task — and a graceful daemon shutdown — waits until that process exits.
+  - **Under the installed systemd service, leave the scope too.** On Linux, when the daemon runs as `agent-factory-daemon.service`, each watch command runs in a transient scope bound to the service, and `setsid` changes the process group but not the scope. Stopping the service, or losing it to a crash, SIGKILL or OOM, stops the scope and everything in it; a restart (which `af upgrade` uses) currently leaves the old scope running with whatever escaped into it. Rely on neither: to outlive the daemon there, start the process in its own unit, for example `systemd-run --user --collect cmd`.
+- **Delivery failures are queued and replayed**: an event whose delivery fails — the target session unreachable, e.g. during a tmux outage — is appended to a durable per-task queue under `~/.agent-factory/events/` instead of dropped, and replayed **in emission order, before newer live events**, once deliveries succeed again (under the same configured rate window). The backlog survives daemon restarts and reloads. Semantics and bounds:
   - **At-least-once**: a daemon crash mid-replay redelivers at most one event. Prompts should tolerate a rare duplicate.
   - **Bounds**: at most 500 events / 256KB queued per task — overflow drops the *oldest* with a logged count; events older than **72h** are expired at replay time, also logged. Sources worth watching re-emit on their next poll, so scripts that poll should still track their own cursor (see `examples/tasks/gh-issue-poll.sh`).
+  - **Usage-limit park**: when `target_session` is already `[limit]`, the event is retained for replay instead of typed into the pane. This known, bounded recovery wait is exempt from the 72h expiry and oldest-event overflow policy. At the same 500-event / 256KB threshold, the daemon backpressures the watch command's stdout until replay makes room, keeping AF's disk use bounded without dropping distinct events. The on-disk park marker and backlog both survive daemon restarts; as with every watcher restart, scripts should retain their own source cursor for output not yet read from the pipe.
   - **Disabled vs deleted**: a disabled task keeps its backlog and replays it on re-enable; a deleted task's queue is removed.
+
+### Re-arming a stopped watcher
+
+Both terminal states — `stopped` (exit 0) and `errored` (crash-loop breaker) — are **durable**. Exactly these re-arm one:
+
+- `af tasks restart <id>` — the explicit, synchronous re-arm.
+- `af tasks update <id> --enabled true` (or a disable followed by an enable).
+- an edit to that task's `watch_cmd`, `project_path`, or `name` — a different process to run, so it starts.
+- a daemon start.
+- the daemon's `ReloadTasks` route, which re-arms every watch task at once (unadvertised; the TUI and CLI do not need it, since their writes reload in the same call).
+
+Nothing else does. In particular, **writing some other task does not re-arm it**: until #3837 every add/update/remove ran a store-wide reconcile that dropped stopped watchers and started fresh ones with their failure count and backoff chain reset, so on a box with routine task churn a permanently broken script spawned forever and its `errored` status flapped in and out of the TUI. Adding, editing or deleting an unrelated task now leaves a stopped watcher exactly where it stopped.
+
+An ordinary edit to the stopped task itself — `prompt`, `target_session`, `program` — is not a re-arm either; it patches the delivery fields the next event will use, and the watcher stays down.
 
 Edits to delivery fields (`prompt`, `target_session`, `program`) apply from the next event without restarting the script; edits to `watch_cmd`, `project_path`, or `name` restart it. Editing the contents of a script at the same `watch_cmd` path is intentionally not polled. Run `af tasks restart <id>` after that edit: the command synchronously stops and joins the old process group, then starts exactly one replacement from the current script. A disable update uses the same stop-and-join path, so a subsequent enable cannot overlap the old watcher.
 
@@ -97,15 +251,15 @@ How it behaves:
 
 - **A session counts against the cap from the moment its create begins** — before the agent is up, and while its `post_worktree_commands` are still running. This is the window an external monitor cannot see, and why one that lists sessions and matches titles overshoots its own cap.
 - **Events over the cap are queued, never dropped on the admission path.** They land in the same durable per-task queue as a failed delivery (above), replay **in emission order**, and survive daemon restarts. They share that queue's retention bounds: a task that stays at its cap past the 72h age limit, or accumulates more than the 500-event / 256KB backlog, expires or drops its *oldest* parked events exactly as the delivery-failure path does — the bound exists so a permanently-saturated cap cannot grow the queue without limit. In normal use sessions finish and the backlog drains long before that.
-- **A slot frees when the session goes idle** — the agent finished the work the event asked for — or when it is archived or killed. It does *not* wait for you to archive the session: a cap that only freed on archive would stall the task until a human intervened, and the backlog would age out. It also does not wait for `post_worktree_commands` to finish, so a hung hook cannot wedge the task permanently.
-- **The cap counts runs, not sessions.** A run starts when an event creates its session and ends when the agent goes idle. Nothing that happens to the session afterwards — an outage, a failed archive, work you start in it yourself — puts it back under the task's cap.
-- **A run interrupted mid-flight keeps its slot** while the daemon is still trying to restore it. Freeing it sooner would let the task admit replacements and then exceed its cap once the originals came back. The restore loop retries with exponential backoff and gives up after a bounded number of failures, releasing the slot at that terminal give-up; `af sessions kill` is the manual off-ramp to free it sooner.
+- **A slot frees when the run ends**, or when the session is archived or killed. A run does not end on the first idle: a fresh-spawned session is held until the agent has demonstrably taken its turn, so a still-booting pane is not reaped (or filed for `on_complete`) before the turn — with a bounded fallback that releases only after sustained, successfully observed quiet (a still pane falls to the longer silent grace), so a pane that keeps churning without recognized in-turn chrome holds its slot until it finally goes quiet, since neither arm rewards unobserved time. It does *not* wait for you to archive the session: a cap that only freed on archive would stall the task until a human intervened, and the backlog would age out. It also does not wait for `post_worktree_commands` to finish, so a hung hook cannot wedge the task permanently.
+- **The cap counts runs, not sessions.** A run starts when an event creates its session and ends when the agent goes idle after taking its turn. One exception is a delivery the daemon can prove it never made — a definitively `PromptNotDelivered` event never arms the turn gate, so that run ends on its first idle without waiting for a turn the agent never received, and its session releases its slot at that idle edge. It is not the only one: the quiet and silent fallbacks above can end a run without observed in-turn chrome, and the runtime-replacement path below can too, so a completed run has not always proven turn evidence. Nothing that happens to the session afterwards — an outage, a failed archive, work you start in it yourself — puts it back under the task's cap.
+- **A run interrupted mid-flight keeps its slot** while the daemon is still trying to restore it. Freeing it sooner would let the task admit replacements and then exceed its cap once the originals came back. The restore loop retries with exponential backoff and gives up at a bounded terminal verdict — either the structural-failure budget (a consecutive-failure count) or the confirmed-flap bound (four restored-then-lost-again cycles inside a rolling 30-minute window) — releasing the slot at that terminal give-up; a failure in the environmental errno class — resource exhaustion such as a full disk (ENOSPC) or the kernel resource limits, plus socket timeouts (`ETIMEDOUT` from a dead or unresponsive network mount) — waits on the environment instead of reaching give-up, so the slot stays held until the condition clears, while a deadline-class non-answer (a bounded probe that did not respond) only gets a bounded share of the restore budget before it charges the structural budget, so it still reaches give-up and releases the slot. `af sessions kill` is the manual off-ramp to free it sooner. The one wrinkle is a runtime *replacement*: if recovery swaps the pane before turn evidence is observed, the replacement owns neither the send it did not make nor the chrome it did not show, so `ClearIdleEvidence` retires the run's `taskRunPromptAttemptAt` and the turn gate does not survive the swap — the replacement's first idle edge ends the run and frees its slot, just as it did before the gate existed (`TestTaskRunGateDoesNotSurviveRuntimeReplacement`). The interrupted-run hold therefore only persists while the *same* runtime is being restored.
 - **Archiving a session releases its slot**, even mid-run: you parked it deliberately, and holding the slot until someone restored it would wedge the task.
-- **A session that fails to load still counts.** If the daemon restarts and cannot rebuild a session (its worktree vanished, say), the agent may still be running — so its run keeps its slot rather than quietly freeing one. `af sessions kill` on the broken session releases it. The log names the task and session when this happens.
+- **A session that fails to load keeps its slot while it can come back.** If the daemon restarts and cannot rebuild a session, the agent may still be running — so its run keeps its slot rather than quietly freeing one, and `af sessions kill` on the broken session releases it. A restart-lost off-box session (docker/ssh/sandbox/hook) is a partial exception: a non-archived off-box row is reloaded inert on every daemon restart, so when its reconstructed activity is terminal its slot frees on its own rather than wedging the cap (a still-existing host does not change this — the row is inert either way). One with a pending handoff or account-swap obligation is still in flight, so it keeps the slot until that settles — `af sessions kill` on it releases it sooner. The log names the task and session when this happens.
 - **The cap is scoped to the task and its repo**, keyed on the task id recorded on each session it spawns — not on a session-title prefix.
 - **A parked task is healthy**, not failing: it logs quietly and never raises the delivery-failure alarm.
 
-Pick the cap from what a run actually costs. If each event triggers an expensive post-worktree build, a low cap keeps the machine usable; if runs are cheap, leave it unlimited and let the 10/min rate limit be the only bound.
+Pick the cap from what a run actually costs. If each event triggers an expensive post-worktree build, a low cap keeps the machine usable; if runs are cheap, leave it unlimited and let `watcher_events_per_minute` be the only bound.
 
 ## What happens to a run's session
 
@@ -129,6 +283,13 @@ af tasks add --name "Docs drift audit" --prompt "Audit the docs" \
 | `archive` | The session is archived — inert and restorable, and it keeps its full worktree |
 | `kill` | The session is permanently deleted, reclaiming its worktree and pruning the branch it owned |
 
+In the TUI Tasks pane the same three verbs are the **On done** row of the task form,
+between Target and Path. It shows what an existing task already declares, so a task set
+to `kill` is legible before you edit it rather than only from `af tasks get`. On a task
+with a `target_session` the row states why there is nothing to choose instead of
+offering a picker: that pair is refused (see [Task fields](#task-fields)), so a form that let
+you assemble it would turn a save into an error about a combination it offered.
+
 **Choosing between `archive` and `kill` is the real decision, and af does not make it
 for you.** Archiving is restorable, but an archived worktree is retained whole —
 gitignored build output included — until someone prunes it by hand, so a daily task set
@@ -146,8 +307,9 @@ How it behaves:
   releases a slot: the agent has gone idle and the session is sitting healthy. It is not
   a background sweep over old sessions, which matters because "a task session whose run
   has finished" stays true forever — including for a session you have since adopted and
-  are working in yourself. Once a run's completion has passed, that session is never
-  revisited.
+  are working in yourself. The completion edge fires once; if a restart drops a
+  teardown mid-flight, the next daemon generation re-drives only the obligation the
+  edge already filed — never a sweep that reconsiders completed sessions.
 - **A session you took over is yours.** If you prompt a finished run's session, the work
   is not the task's, and no policy applies to it.
 - **A session created outside a task is never touched**, whatever the tasks in that
@@ -173,7 +335,83 @@ The TUI Tasks pane shows each watch task's supervision state, derived from the p
 
 - **watching** — enabled, script supervised by the daemon
 - **stopped** — script exited 0 (or the task is disabled)
-- **errored** — crash-loop breaker tripped, or arming refused the task because its target relationship is unsafe (e.g. the target session is archived). The full `last_run_status`, shown on the row's detail line, says which; for a crash loop, check `~/.agent-factory/logs/task-<id>.log`
+- **errored** — crash-loop breaker tripped (`last_run_status` reads `errored: gave up after N failures in W (last: <exit>): <newest output line>`), or arming refused the task because its target relationship is unsafe (e.g. the target session is archived). The full `last_run_status`, shown on the row's detail line, says which; for a crash loop, check `~/.agent-factory/logs/task-<id>.log`. A stale `errored`/`stopped` clears to `started` once a re-armed run stays alive for a full crash window — up to 10 minutes after a healthy re-arm, by design
+
+## Debugging a task
+
+Start with the id returned by add (replace `<id>` below):
+
+```bash
+af tasks show <id>
+af tasks list --all
+```
+
+`show` gives the trigger, project, last run, live arming state, next cron run,
+and audit trail. `list --all` locates a task bound to another project; use
+`af tasks show <id> --repo /path/to/repo` to inspect it locally. An enabled task
+with `not-armed` cannot fire; unknown arming means no daemon reported a verdict.
+Check the audit trail for a disable or retime before interpreting overdue runs.
+
+For a cron task, `af tasks trigger <id>` exercises delivery immediately without
+waiting for the next scheduled occurrence. Watch tasks need an actual stdout
+line; manual trigger is refused. Check their stderr in
+`~/.agent-factory/logs/task-<id>.log` (or `logs/task-<id>.log` under your custom
+AF home), especially after a stopped or errored watcher. After fixing a script,
+`af tasks restart <id>` re-arms that enabled watcher.
+
+Search the daemon's `agent-factory.log` for the task id. With
+`AGENT_FACTORY_HOME` set, the log is in that directory; otherwise it is under
+the OS user config directory's `agent-factory` folder (`~/.config/agent-factory`
+on Linux, subject to `XDG_CONFIG_HOME`). The message bodies include:
+
+```text
+task <id> started successfully as instance "<title>"
+task <id> delivered prompt to target session "captain" (sent)
+task <id> parked at a usage limit as instance "<title>"; waiting for the limit window to reset
+scheduled task <id> failed to run: <reason>
+```
+
+The last line reports a cron delivery failure; watch stderr and the daemon log
+explain watch failures and queued deliveries. A successful startup or delivery
+proves the task fired, not that the agent completed its work. A parked run needs
+the [usage-limit recovery path](usage-limits.md#task-runs-park-dont-fail).
+The following section explains the health fields in more detail.
+
+## Is it actually firing?
+
+`enabled: true` is a claim about this instant, not about whether the task is running. Two enabled hourly tasks once went dark for 18 days on a healthy daemon and every surface still reported them healthy: their `last_run_status` said `started`, because the last run really did start — 18 days earlier — and the one place that showed a next-fire time recomputed it from `cron_expr`, so the rail cheerfully rendered `next 04:20 · last Aug 14 14:20` and left the subtraction to the reader (#3623).
+
+Three things answer it now, and none of them adds a field to `tasks.json`.
+
+**Overdue is derived.** Every read compares a cron task's `last_run_at` against its own schedule. The task is overdue when its most recent scheduled occurrence is more than one **slack window** later than that last run, where the slack is one full period of its own schedule (or five minutes, whichever is larger). One period is the only lateness indistinguishable from ordinary operation — an hourly task whose last run was 59 minutes ago simply has not reached its next occurrence — so a daily task is owed a day and a per-minute watchdog is owed five minutes. A task that has never run measures from `created_at`, which is what catches one created and then never armed.
+
+Lateness is measured from the **latest** of the last run, the last time the schedule the task is on *began*, and (for a task that has never run) its creation. The schedule begins when the task is enabled or when its `cron_expr` changes — both are a fresh start, exactly as a first run is. Without that rule a task deliberately paused and switched back on would report every occurrence it missed while intentionally off (#3623's own tasks, disabled 2026-08-14 and re-enabled 2026-09-01, would have read `overdue · missed 432` from the moment they came back until their next fire), and a daily task retimed to run every minute would immediately claim a day of per-minute misses that happened before that schedule existed. An ordinary edit — the prompt, the target session, the program — restarts nothing.
+
+Those times come from the audit trail below, so they are bounded too: a restart old enough to have fallen out of the window leaves the reference at the last run, which can only make the verdict more eager, never hide a task that has genuinely stopped.
+
+A record with **none** of those — no last run, no creation time, no trail — is reported as `unassessable` rather than healthy. Every create is stamped, so only a hand-edited row can get there, but "on schedule" would be a clean bill for a task that may never have fired. The same verdict covers a reference the schedule cannot be evaluated against, which a long-gap expression reaches (see below). `af doctor` treats both as unknowns: named in the row, never an alarm, and the rail marks the row `[?]`.
+
+A task **the scheduler cannot fire** is reported in its own right, as `unschedulable`. That covers three shapes, classified once in `task.UnschedulableReason` so every surface words the same verdict: a record enabled with **no trigger at all**, an expression that **does not parse**, and one that parses but **matches no date** within the scheduler's five-year search horizon — `0 0 31 2 *` is February 31st, which it happily arms with a next-fire time of never. Nothing is ever late because nothing was ever due, so the rail marks the row `[!]` (its detail reads `No upcoming run`, or `Invalid cron expression` when it does not parse, where the verdict fits the column), and `af tasks show` and the `af doctor` row say so instead of reporting health. It is derived from the record, so a box whose daemon is down gets the verdict too.
+
+The verdict is deliberately a claim about the **scheduler**, not about the calendar: the scheduler is what will or will not run the task, and it consults the same horizon. `0 0 29 2 *` asked in 2096 finds no match before 2104 — 2100 is not a leap year — so the daemon will not fire it during that window even though the calendar eventually would. "Cannot be scheduled" is true and actionable in both cases; "can never fire" would be false in the second.
+
+Watch tasks are never overdue: they fire when their command emits a line, which may legitimately be never. Neither is a disabled task — whether disabling it was *intended* is what the audit trail answers.
+
+**`next_run_at` comes from the live scheduler entry.** Present when the daemon has the task armed, absent when it does not. An enabled task with `arming: "not-armed"` is **enabled but not armed**: it will not fire at all until that is fixed (check the daemon log for an arming refusal, then `af daemon restart`). When no daemon answers, `arming` is absent — nothing observed it — and no surface reports that as "not armed".
+
+**A next run more than 60 days out is flagged.** Cron has no year field, so a dated expression such as `0 7 21 9 *` re-arms for the same date next year after it fires; the TUI and web task lists show such a run as `next 2027-09-21 (in 11 months)`, `af tasks show` appends `· in 11 months` to its next-run row, and `af tasks list`/`get` set `next_run_far: true` — disable the task if the re-arm was not intended.
+
+**Every mutation leaves a line.** `audit` records who created, updated, enabled, or disabled the task, when, and which fields moved, bounded to the last 20 entries. The store writes it inside the same locked operation that commits the change, diffed against the record actually replaced, so it cannot describe a change that did not happen.
+
+```bash
+af tasks show <id-or-name>      # trigger, arming, next run, overdue verdict, audit trail
+af tasks list | jq '.[] | select(.overdue)'   # --json wraps this in {data,error}: use .data[]
+af doctor                       # WARN row naming overdue and unarmed tasks
+```
+
+`af doctor` raises one row under **Automations**: `N enabled tasks have not fired on schedule; oldest missed <time> — <id> "<name>" (missed N)`, plus any task that is enabled but not armed, plus any whose expression the scheduler cannot fire. It exits non-zero on those, so a health probe on a box nobody watches catches a task that quietly stopped. Tasks whose health could not be established are named in the row but never raise an alarm, and only cron tasks are counted as "firing on schedule" — a watch task has no schedule, so an armed watcher proves its process is supervised and nothing more.
+
+In the TUI, an automation that has stopped firing — or whose expression the scheduler cannot fire — carries a static `[!]` in place of its enabled tick, and its expanded row leads with the reason (`overdue · missed N`, or `Invalid cron expression`) where the reason fits the column. One whose health could not be established carries `[?]` and reads `Health unknown`: an unknown is not a failure, so it is marked but never counted as one.
 
 ## Daemon lifecycle
 
@@ -201,16 +439,21 @@ Versions before #791 installed one systemd timer / launchd plist **per task** (`
 
 ```bash
 af tasks list [--all]
-af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--on-complete keep|archive|kill] [--program <agent>]
-af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill]
-af tasks get <id>
-af tasks update <id> [--cron …|--watch-cmd …] [--prompt …] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--project-path <repo>] [--program <agent>] [--enabled true|false]
-af tasks restart <id>          # enabled watch tasks only; reloads an edited script
-af tasks trigger <id>          # cron tasks only
-af tasks remove <id>
+af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--on-complete keep|archive|kill] [--host <name>] [--program <agent>]
+af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--host <name>]
+af tasks get <id-or-name>
+af tasks show <id-or-name>     # human-readable: schedule health and audit trail
+af tasks update <id-or-name> [--cron …|--watch-cmd …] [--prompt …|--prompt-file <path>] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--host <name>|--host ""] [--project-path <repo>] [--program <agent>] [--enabled true|false]
+af tasks restart <id-or-name>  # enabled watch tasks only; reloads an edited script
+af tasks trigger <id-or-name>  # cron tasks only
+af tasks remove <id-or-name>
 ```
 
-Every subcommand is scoped to one project — the current directory's, or the one `--repo` names — so `tasks list` shows this project's tasks (`--all` spans every project) and an id belonging to another project is refused rather than acted on. `tasks add` binds the task to the resolved project and reports it as `project_path`. On `tasks update`, `--repo` authorizes the task in its current project while `--project-path` moves it to a new project and working directory. See [Project scoping](cli.md#project-scoping) for the full contract.
+`--host <name>` places every session the task creates (including a missing `--target-session`) on a host from your global `hosts` list, over ssh. A name that is not in the list is refused when you add or update the task, with the same message `af sessions create --host` gives; `--host ""` on `update` clears it. The same flag exists on `af sessions send-prompt --create`, where it applies only to a session that call creates.
+
+`<id-or-name>` accepts a task's id or its exact name. An id match always wins — a name that collides with another task's id still resolves to the id — while a name resolves only when exactly one task in scope carries it: several in-scope matches are refused with their ids listed, so a shared name can never act on a task at random.
+
+Every subcommand is scoped to one project — the current directory's, or the one `--repo` names — so `tasks list` shows this project's tasks (`--all` spans every project) and an id or name belonging to another project is refused rather than acted on. `tasks add` binds the task to the resolved project and reports it as `project_path`. On `tasks update`, `--repo` authorizes the task in its current project while `--project-path` moves it to a new project and working directory. See [Project scoping](cli.md#project-scoping) for the full contract.
 
 On `update`, setting one trigger clears the other (switching watch→cron requires a prompt when the resulting cron task is enabled). `--target-session ""` explicitly reverts to create-per-run; omitting the flag leaves it untouched. `--max-concurrent-runs 0` explicitly reverts to unlimited; omitting the flag leaves the current cap untouched. `--on-complete keep` explicitly reverts to leaving sessions in place; omitting the flag leaves the current policy untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
 

@@ -95,11 +95,14 @@ func TestDerivationSeesLazyCobraSurface(t *testing.T) {
 // It reads what the web SENDS, which is not the same as what a user can DO. #1968
 // could not prove end-to-end that a working remote session is creatable from the
 // browser — provisioning was observed but the program-start timed out, cause
-// unresolved — so the inventory records session.create.opt.backend's web cell as
-// `partial`, not `yes`. `yes` needs someone to have created a working remote
-// session from a browser and said so. This is the package's oldest blind spot,
-// "reachable != user-settable" under Known blind spots: the derivation reads call
-// sites, not outcomes. #1936 is the same trap mirrored.
+// unresolved — so the inventory held session.create.opt.backend's web cell at
+// `partial`, not `yes`, until TestWebCreateSessionOnHookBackend
+// (integration/web_remote_hook_test.go) drove the browser's exact endpoints
+// through a working hook-backend create and the web-driver selftest submitted
+// the + New modal itself with hook selected (the modal-to-wire seam this
+// static derivation cannot see). This remains the package's oldest
+// blind spot class — "reachable != user-settable" under Known blind spots: the
+// derivation reads call sites, not outcomes. #1936 is the same trap mirrored.
 func TestDerivationSeesWebCreateOptions(t *testing.T) {
 	sent, unanalyzable := webCallBodyChecked(t, "CreateSession")
 	if len(unanalyzable) > 0 {
@@ -167,7 +170,7 @@ func TestWebPromptParityNamesTheLiveTerminalTransport(t *testing.T) {
 // strictly better fixture because one request type now exercises BOTH failure
 // directions at once.
 //
-//   - under-reporting: the TUI sets title/program/prompt/backend/force_remote, so a
+//   - under-reporting: the TUI sets title/program/prompt/backend, so a
 //     walk that missed real usage would report them unreached and manufacture a
 //     false gap — including reporting #1933 as still open after it was fixed.
 //   - over-reporting: the TUI sets no in_place (session.create.opt.inplace, still
@@ -183,8 +186,8 @@ func TestDerivationTracksTUICreateFieldUse(t *testing.T) {
 			"(expected app/session_control.go, startSessionThroughDaemon)")
 	}
 	unreached := unreachedFields(auditedRequests["CreateSessionRequest"], u, typeUse)
-	// The remaining gap: --here has no TUI analogue (session.create.opt.inplace).
-	for _, f := range []string{"in_place"} {
+	// --here has no TUI analogue; force_remote is compatibility-only (#4017).
+	for _, f := range []string{"in_place", "force_remote"} {
 		if !contains(unreached, f) {
 			t.Errorf("derivation says the TUI reaches CreateSession.%s, but sessionStartRequest "+
 				"has no such field. Either the gap was fixed (retire the fixture) or the AST "+
@@ -192,7 +195,7 @@ func TestDerivationTracksTUICreateFieldUse(t *testing.T) {
 		}
 	}
 	// Not blind: the TUI provably does set these.
-	for _, f := range []string{"program", "prompt", "force_remote", "backend"} {
+	for _, f := range []string{"program", "prompt", "backend"} {
 		if contains(unreached, f) {
 			t.Errorf("derivation says the TUI never sets CreateSession.%s, but it does "+
 				"(app/session_control.go startSessionThroughDaemon) — the AST walk is "+
@@ -436,6 +439,33 @@ func TestBothSurfaceScannersRecurse(t *testing.T) {
 				"the audit reports false parity over it. Restore the WalkDir in webSourceFiles.")
 		}
 	})
+}
+
+// TestWebRPCDerivationResolvesModuleStringConst keeps named transport methods
+// visible to the inventory. A module-level const is useful when a method name is
+// shared by compatibility handling and the call itself; treating only inline
+// string literals as RPCs would make that entire call disappear from parity.
+func TestWebRPCDerivationResolvesModuleStringConst(t *testing.T) {
+	root := repoRoot(t)
+	dir, err := os.MkdirTemp(filepath.Join(root, "web", "src"), "parityconstprobe-")
+	if err != nil {
+		t.Fatalf("mkdir const RPC probe: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, "probe.ts")
+	const method = "ParityConstProbe"
+	src := `const PARITY_RPC_METHOD = "` + method + `";
+export function parityConstProbe(token: string) {
+  return af(PARITY_RPC_METHOD, {}, token);
+}
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("write const RPC probe: %v", err)
+	}
+
+	if !deriveWebRPCs(t)[method] {
+		t.Fatalf("module-level const RPC %q was not derived — named method calls are invisible to parity", method)
+	}
 }
 
 // TestDerivationCoversEveryRequestConstructionSite is the backstop the fixtures

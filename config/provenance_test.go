@@ -213,17 +213,20 @@ default_program = "claude"
 codex = "/global/codex"
 aider = "/global/aider"
 `)
+	// In-repo program_overrides entries may not spell absolute executables
+	// (#5265 review: a checked-in file is not trusted provenance for a file
+	// outside it), so the shared-file leaves use relative spellings here.
 	writeInRepoTomlConfig(t, repoRoot, `
 [program_overrides]
-codex = "/repo/codex"
-gemini = "/repo/gemini"
+codex = "repo/codex"
+gemini = "repo/gemini"
 `)
 
 	resolved, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)
-	assert.Equal(t, "/repo/codex", resolved.ProgramOverrides["codex"])
+	assert.Equal(t, "repo/codex", resolved.ProgramOverrides["codex"])
 	assert.Equal(t, "/global/aider", resolved.ProgramOverrides["aider"])
-	assert.Equal(t, "/repo/gemini", resolved.ProgramOverrides["gemini"])
+	assert.Equal(t, "repo/gemini", resolved.ProgramOverrides["gemini"])
 
 	value := requireResolvedValue(t, resolved, "program_overrides")
 	assert.Nil(t, value.Winner, "a merged map must not claim one source won the whole value")
@@ -235,7 +238,7 @@ gemini = "/repo/gemini"
 
 	leaf, ok := resolved.ResolvedValuePath("program_overrides.codex")
 	require.True(t, ok)
-	assert.Equal(t, "/repo/codex", leaf.Value)
+	assert.Equal(t, "repo/codex", leaf.Value)
 	require.NotNil(t, leaf.Winner)
 	assert.Equal(t, SourceRepoShared.String(), leaf.Winner.Layer)
 	assert.Equal(t, "shadowed", candidateForLayer(t, leaf, SourceGlobal).Result)
@@ -308,76 +311,6 @@ func TestResolveConfigShowsDisallowedExistingLayers(t *testing.T) {
 	globalCandidate := candidateForLayer(t, repoOnly, SourceGlobal)
 	assert.False(t, globalCandidate.Allowed)
 	assert.Equal(t, "disallowed", globalCandidate.Result)
-}
-
-func TestResolveConfigReportsTableOriginsAndNormalizedEffectiveValue(t *testing.T) {
-	setupProvenanceTest(t, `
-schema_version = 1
-
-[theme]
-accent = "#8cd0d3"
-`)
-
-	resolved, err := ResolveGlobalConfig()
-	require.NoError(t, err)
-	value := requireResolvedValue(t, resolved, "theme")
-	require.IsType(t, ThemeConfig{}, value.Value)
-	theme := value.Value.(ThemeConfig)
-	assert.Equal(t, "#8CD0D3", theme.Accent)
-	assert.Equal(t, SourceGlobal.String(), value.Origins["accent"].Layer)
-	assert.Equal(t, SourceBuiltIn.String(), value.Origins["foreground"].Layer)
-	assert.Equal(t, "partially-shadowed", candidateForLayer(t, value, SourceBuiltIn).Result)
-	assert.Contains(t, candidateForLayer(t, value, SourceGlobal).Reason, "load-time normalization changed 1 configured entry")
-
-	accent, ok := resolved.ResolvedValuePath("theme.accent")
-	require.True(t, ok)
-	assert.Equal(t, "#8CD0D3", accent.Value)
-	require.NotNil(t, accent.Winner)
-	assert.Equal(t, SourceGlobal.String(), accent.Winner.Layer)
-	assert.Contains(t, candidateForLayer(t, accent, SourceGlobal).Reason, "load-time normalization changed")
-}
-
-func TestResolveConfigTreatsNamedThemePresetAsConfiguredPalette(t *testing.T) {
-	repoRoot := setupProvenanceTest(t, "schema_version = 1\ntheme = \"zenburn\"\n")
-
-	for _, resolve := range []struct {
-		name string
-		fn   func() (*ResolvedConfig, error)
-	}{
-		{name: "global", fn: ResolveGlobalConfig},
-		{name: "project", fn: func() (*ResolvedConfig, error) { return ResolveConfig(repoRoot) }},
-	} {
-		t.Run(resolve.name, func(t *testing.T) {
-			resolved, err := resolve.fn()
-			require.NoError(t, err)
-			assert.Equal(t, "zenburn", resolved.Theme.Preset())
-			assert.Equal(t, "#3F3F3F", resolved.Theme.Background)
-			assert.Equal(t, "#8CD0D3", resolved.Theme.Accent)
-			written, err := marshalConfigTOML(&resolved.Config)
-			require.NoError(t, err)
-			assert.Contains(t, string(written), "theme = 'zenburn'")
-			assert.NotContains(t, string(written), "[theme]")
-
-			value := requireResolvedValue(t, resolved, "theme")
-			for _, leaf := range []string{"background", "accent", "selection_background"} {
-				origin, present := value.Origins[leaf]
-				require.True(t, present, "missing origin for preset-derived theme.%s", leaf)
-				assert.Equal(t, SourceGlobal.String(), origin.Layer)
-			}
-			global := candidateForLayer(t, value, SourceGlobal)
-			assert.Equal(t, "zenburn", global.Value)
-			assert.Equal(t, "contributed", global.Result)
-		})
-	}
-}
-
-func TestResolveGlobalConfigPreservesBuiltInThemePresetIdentity(t *testing.T) {
-	setupProvenanceTest(t, "schema_version = 1\n")
-
-	resolved, err := ResolveGlobalConfig()
-	require.NoError(t, err)
-	assert.Equal(t, DefaultThemePreset, resolved.Theme.Preset())
-	assert.Equal(t, DefaultThemeConfig(), resolved.Theme)
 }
 
 func TestResolveGlobalConfigExplainsNormalizedKeyBindingLeaves(t *testing.T) {
@@ -506,7 +439,9 @@ default_program = "claude"
 [program_overrides]
 codex = "/global/codex"
 `)
-	writeInRepoTomlConfig(t, repoRoot, "[program_overrides]\ncodex = \"/repo/codex\"\n")
+	// Relative spelling: in-repo program_overrides may not name absolute
+	// executables (#5265 review).
+	writeInRepoTomlConfig(t, repoRoot, "[program_overrides]\ncodex = \"repo/codex\"\n")
 
 	resolved, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)

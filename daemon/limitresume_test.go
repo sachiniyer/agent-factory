@@ -1,25 +1,22 @@
 package daemon
 
 import (
-	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // captureInfoLog routes log.InfoLog into a buffer for the test's lifetime, so a
 // test can assert what the daemon claims in its own success log (#3240).
-func captureInfoLog(t *testing.T) *bytes.Buffer {
+func captureInfoLog(t *testing.T) *logCapture {
 	t.Helper()
-	var buf bytes.Buffer
-	prev := aflog.InfoLog.Writer()
-	aflog.InfoLog.SetOutput(&buf)
-	t.Cleanup(func() { aflog.InfoLog.SetOutput(prev) })
-	return &buf
+	return captureInfo(t)
 }
 
 // The usage-limit auto-resume scheduler tests (#1146 PR3). Every test drives the
@@ -35,11 +32,21 @@ func captureInfoLog(t *testing.T) *bytes.Buffer {
 // the parked instance, and its backend.
 func newAutoResumeManager(t *testing.T, retryInterval string, alive bool, prompt string, resetAt time.Time) (*Manager, string, *session.Instance, *limitResumeBackend) {
 	t.Helper()
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, tmux.ProgramClaude)
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	manager, repoID, repoPath := newStatusTestManager(t)
 	manager.cfg.LimitAutoResume = true
 	manager.cfg.LimitRetryInterval = retryInterval
 	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: alive}
 	inst := registerStarted(t, manager, repoID, repoPath, "limited", backend, true, session.Running)
+	// A started production session always has its Agent tab. Recovery metadata
+	// (notably a pending injected Claude id) is promoted into that durable tab,
+	// so a fixture without one exercises an impossible record and masks delivery.
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramClaude))
 	inst.Prompt = prompt
 	inst.SetLimitReached(resetAt)
 	return manager, repoID, inst, backend

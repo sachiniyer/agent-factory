@@ -57,8 +57,7 @@ func (r *CleanupRetry) Due(now time.Time) bool {
 }
 
 // Retired reports that this cleanup can never succeed by retrying and has been
-// given up on. It stays true until the entry is dropped (daemon restart) or a
-// caller records a success.
+// given up on. It stays true until the entry is dropped (daemon restart).
 func (r *CleanupRetry) Retired() bool { return r.retired }
 
 // Failures is the consecutive-failure count, for reporting.
@@ -91,10 +90,6 @@ func (r *CleanupRetry) RecordFailure(now time.Time, err error) bool {
 	r.escalated = true
 	return true
 }
-
-// RecordSuccess clears the streak, so a cause that healed leaves no backoff
-// behind for the next unrelated failure.
-func (r *CleanupRetry) RecordSuccess() { *r = CleanupRetry{} }
 
 // cleanupRetryBackoff doubles the base per consecutive failure and settles at the
 // max, so a cause that never heals costs one attempt per max interval rather

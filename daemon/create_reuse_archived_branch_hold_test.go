@@ -77,8 +77,7 @@ func TestReserveCreate_HeldArchivedBranchIsReclaimed(t *testing.T) {
 		"the archived session's recorded branch must move with it, or its record and git disagree")
 	held, herr = sessiongit.BranchesHeldByWorktrees(repoPath)
 	require.NoError(t, herr)
-	holder, stillHeld := held[archivedBranch]
-	assert.True(t, stillHeld, "the archived worktree must still be on its (renamed) branch")
+	holder := onlyHeldWorktree(t, held, archivedBranch)
 	assert.Contains(t, holder, "(archived)", "and that worktree is the relocated archive")
 
 	rec := recordFor(t, repoID, "foo (archived)")
@@ -121,7 +120,10 @@ func TestReserveCreate_PublishedArchivedBranchStillRefuses(t *testing.T) {
 	msg := err.Error()
 	assert.Contains(t, msg, branch, "the error must name the branch that blocks the create")
 	assert.Contains(t, msg, "published", "the error must say WHY the branch could not be moved aside")
-	assert.Contains(t, msg, "af sessions kill", "the error must offer a way to release the branch")
+	// The terminator is part of the contract, not decoration: an archived title may
+	// begin with "-", and without it the advertised release exits "unknown flag"
+	// (#3432).
+	assert.Contains(t, msg, "af sessions kill -- ", "the error must offer a PASTEABLE way to release the branch")
 
 	// And nothing moved: the refusal is still side-effect-free.
 	assert.Equal(t, "foo", archived.Title, "the archived session must keep its name after a refusal")
@@ -211,7 +213,7 @@ func TestReserveCreate_UnprobableBranchHoldsStillReuse(t *testing.T) {
 
 	probed := false
 	prev := branchesHeldByWorktrees
-	branchesHeldByWorktrees = func(string) (map[string]string, error) {
+	branchesHeldByWorktrees = func(string) (map[string][]string, error) {
 		probed = true
 		return nil, fmt.Errorf("forced branch-hold probe failure (#2127)")
 	}
@@ -281,8 +283,7 @@ func TestReserveCreate_ArchivedBranchMovesWithTheRename(t *testing.T) {
 		"renaming an archived session must now free its BRANCH as well as its title (#2127)")
 
 	archivedBranch := manager.branchForTitle("foo (archived)")
-	holder, stillHeld := held[archivedBranch]
-	assert.True(t, stillHeld, "the archived worktree must be on the renamed branch, not detached")
+	holder := onlyHeldWorktree(t, held, archivedBranch)
 	assert.Contains(t, holder, "(archived)",
 		"the branch follows the relocated archived worktree to its new path")
 	assert.Equal(t, archivedBranch, renamed.Branch,

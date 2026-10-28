@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -122,13 +123,32 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=ssh: cannot resolve repo config for %q: %w", spec.RepoRoot, err)
 	}
-	// Shared with the ListBackends RPC (#1933) — see BackendConfigError.
-	if err := BackendConfigError(BackendSSH, cfg); err != nil {
+	// A listed host (W6.3) replaces the repo's [ssh] section as the source of the
+	// connection settings; resolved BEFORE any remote state exists.
+	hostName, listed, err := chooseListedHost(spec.Host, cfg)
+	if err != nil {
 		return ProvisionResult{}, err
 	}
-	// Safe to dereference: BackendConfigError rejects a missing SSH section, so it
-	// is set here (locked by TestBackendConfigError_ReportsRepoConfigRequirements).
-	sshCfg := *cfg.SSH
+	// The licence to send an account's credentials (W7.3): a host-list entry and
+	// nothing else. A repository-chosen [ssh] target never earns it.
+	if listed != nil {
+		spec.AccountSyncHost = hostName
+	}
+	var sshCfg config.SSHConfig
+	posture := cfg.SSHHostKeyVerification
+	if listed != nil {
+		sshCfg = sshConfigForHost(*listed)
+		posture = hostPosture(*listed, cfg.SSHHostKeyVerification)
+		spec.WorkspaceRoot = listed.WorkspaceRoot
+	} else {
+		// Shared with the ListBackends RPC (#1933) — see BackendConfigError.
+		if err := BackendConfigError(BackendSSH, cfg); err != nil {
+			return ProvisionResult{}, err
+		}
+		// Safe to dereference: BackendConfigError rejects a missing SSH section, so it
+		// is set here (locked by TestBackendConfigError_ReportsRepoConfigRequirements).
+		sshCfg = *cfg.SSH
+	}
 	if spec.CloneURL == "" {
 		// Shared with BackendUnusableReason (#1933) — one wording, choose time and
 		// create time.
@@ -174,15 +194,15 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if pinPort == 0 {
 		pinPort = sshDefaultPort
 	}
-	dialAddr := pinForProvision(sshCfg, pinHost, pinPort, cfg.SSHHostKeyVerification)
+	dialAddr := pinForProvision(sshCfg, pinHost, pinPort, posture)
 	dialPort := 0
-	sshCmd, err := sshCommandPinnedTo(sshCfg, cfg.SSHHostKeyVerification, dialAddr, dialPort)
+	sshCmd, err := sshCommandPinnedTo(sshCfg, posture, dialAddr, dialPort)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
 	// Composition is pure; the accept-new store is created HERE, immediately
 	// before the command that appends to it runs. See prepareSSHHostKeyStore.
-	if err := prepareSSHHostKeyStore(sshCfg, cfg.SSHHostKeyVerification); err != nil {
+	if err := prepareSSHHostKeyStore(sshCfg, posture); err != nil {
 		return ProvisionResult{}, err
 	}
 	// AND ONE ADDRESS IS NOT ONE MACHINE. Behind an L4 load balancer the pin above
@@ -196,14 +216,26 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if dialAddr != "" {
 		if machineAddr, machinePort := learnPinnedMachine(sshCmd, dialAddr, pinPort); machineAddr != "" {
 			dialAddr, dialPort = machineAddr, machinePort
-			sshCmd, err = sshCommandPinnedTo(sshCfg, cfg.SSHHostKeyVerification, dialAddr, dialPort)
+			sshCmd, err = sshCommandPinnedTo(sshCfg, posture, dialAddr, dialPort)
 			if err != nil {
 				return ProvisionResult{}, err
 			}
 		}
 	}
-	program := config.ResolveProgram(&cfg.Config, spec.Program)
+	// The wire program is the configured name and flags — never af's
+	// auto-detected daemon path, which this host's filesystem does not have.
+	// The agent-server resolves it on the host's login PATH (#5571).
+	program := remoteProgramForHost(cfg, spec.Program)
 	p := newSSHSandboxProvisioner(spec, sshCmd, afBin, program)
+	// sandbox.binary is the operator's daemon-local override for air-gapped or
+	// unbuilt hosts (#5571 W2.2) — global-only config, so it can never be
+	// repo-supplied.
+	p.sandboxBinary = strings.TrimSpace(cfg.Config.SandboxBinary)
+	// A listed host's verdict lives under host:<name> — the key the catalog and
+	// `af doctor` read — not under the composed (per-create pinned) ssh command.
+	if listed != nil {
+		p.readinessKey = HostReadinessKey(hostName)
+	}
 	res, err := p.provision()
 	if err != nil {
 		// Best-effort reap whatever the failed provision left behind. Preserve any
@@ -212,16 +244,26 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
 	res.Backend = &sshBackend{
-		provisioner: p,
+		// The command the sandbox's agent-server was bound to launch (#5108) —
+		// the host-resolved value reported back in the banner (#5571 W2.1),
+		// recorded as runtime evidence when the launch RPC returns.
+		remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.hostProgram},
+		provisioner:        p,
 		cleanup: &SSHRuntimeCleanupData{
 			Config:     sshCfg,
+			HostName:   hostName,
 			SessionDir: p.sessionDir,
 			RemotePID:  p.remotePID,
 			// The one fact no re-resolution can recover: which machine this
 			// session's workspace is actually on. A reap after a daemon restart
 			// composes its command from this, in a fresh process, which is the
 			// constraint that ruled out a ControlMaster multiplex (#3086).
-			HostKeyVerification: cfg.SSHHostKeyVerification,
+			HostKeyVerification: posture,
+			// And the reattach identity the shared provisioner recorded (#5571
+			// W1.1) — see SandboxRuntimeCleanupData for the contract.
+			RemoteAddr:         p.remoteAddr,
+			AgentServerVersion: p.agentServerVersion,
+			TokenRef:           p.tokenRef,
 		},
 	}
 	// The pin fields are written together, because which of them is safe to write
@@ -255,7 +297,11 @@ func ensureKnownHostsFile(path string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	// Through the home guard: with no ssh.known_hosts override this path is
+	// <af-home>/<sshKnownHostsFileName>, so its parent IS the home, and the
+	// store is prepared on every ssh-backend launch and teardown (#3850). An
+	// exact os.MkdirAll for a configured path outside the home, e.g. ~/.ssh.
+	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)

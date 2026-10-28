@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -13,12 +13,13 @@ import (
 // elapsed. It is the automated sibling of the PR2 manual `c` retry and the
 // Lost-session restore loop (lostrestore.go) — same poll-goroutine discipline
 // (TryLock the per-session op lock, re-verify under it, back off on repeat) —
-// and it reuses the exact resumeFromLimit action the manual retry uses, so the
+// and it reuses the exact resumeFromLimitOutcome action the manual retry uses, so the
 // resume mechanics (re-spawn if the agent exited, re-deliver the stored prompt,
 // clear the limit) live in one place.
 //
-// Gated by config.LimitAutoResume (default OFF): when off, ResumeLimitedSessions
-// returns immediately and a limit stays surface-only (badge + manual retry).
+// Gated by config.LimitAutoResume (default OFF): when off, ordinary limits stay
+// surface-only (badge + manual retry). A previously committed account move is a
+// delivery obligation, not a new choice, and is completed even after opt-out.
 // When on, a LiveLimitReached row is resumed at limitResumeAt = its parsed reset
 // time + limitResumeGrace; a row whose banner carried NO parseable reset time is
 // retried on the fixed config.LimitRetryInterval fallback, or left surface-only
@@ -34,7 +35,7 @@ import (
 const limitResumeGrace = 2 * time.Minute
 
 // Backoff between repeat auto-resume attempts for one session — a resume that
-// re-hits the wall, or a resumeFromLimit that errors. Package vars so tests can
+// re-hits the wall, or a resumeFromLimitOutcome that errors. Package vars so tests can
 // shorten them (same pattern as lostRestoreBackoff*). Mirrors the lostrestore
 // discipline: exponential from base, settling at max, never a permanent
 // give-up. The no-parseable-reset-time fallback uses the fixed configured
@@ -61,18 +62,22 @@ var (
 // parkedAt anchors the
 // no-parseable-reset-time fallback interval (the first tick the session was seen
 // parked); nextAttempt is the backoff gate that ALSO survives the brief non-limit
-// window between resumeFromLimit clearing the limit and the next poll re-detecting
+// window between resumeFromLimitOutcome clearing the limit and the next poll re-detecting
 // the banner, so an immediate re-limit continues the backoff instead of hammering.
+// ordinaryAttemptedFor records which independently computed ordinary deadline
+// has actually fired; a candidate-only retry gate may be capped by an unfired
+// deadline, while a failed ordinary attempt must keep its own backoff.
 type limitResumeState struct {
-	attempts    int
-	nextAttempt time.Time
-	parkedAt    time.Time
+	attempts             int
+	nextAttempt          time.Time
+	ordinaryAttemptedFor time.Time
+	parkedAt             time.Time
 }
 
 // ResumeLimitedSessions runs one auto-resume pass over every LiveLimitReached
-// session the manager owns (#1146 PR3). A no-op when limit_auto_resume is off or
-// the manager is still warming up — the whole feature is opt-in and does zero
-// scheduling otherwise. Called from the daemon poll loop after
+// session the manager owns (#1146 PR3). A no-op while the manager is warming up;
+// with limit_auto_resume off it schedules only a durable account swap already
+// committed under an earlier opt-in. Called from the daemon poll loop after
 // RestoreLostSessions. Mirrors RestoreLostSessions: snapshot under m.mu, prune
 // dead/resolved retry state, then attempt each session in a stable order so the
 // logs read coherently.
@@ -81,7 +86,7 @@ func (m *Manager) ResumeLimitedSessions() {
 	// interval read the same generation, so a save mid-pass cannot toggle the
 	// feature between the guard and the interval read.
 	cfg := m.Config()
-	if !cfg.LimitAutoResume || !m.Ready() {
+	if !m.Ready() {
 		return
 	}
 	retryInterval := cfg.LimitRetryIntervalDuration()
@@ -110,11 +115,12 @@ func (m *Manager) ResumeLimitedSessions() {
 			live[stableSessionKey(repoID, inst)] = struct{}{}
 		}
 	}
-	// Drop retry state for sessions that are gone, or that have stayed OUT of
-	// LimitReached past their backoff window (a resume that stuck — the episode
-	// is over). State is deliberately KEPT for a row that is momentarily
+	// Drop retry state for sessions that are gone, or that have stayed outside
+	// resume eligibility past their backoff window (the episode is over). A
+	// healthy pending manual swap still owns an unfinished recovery episode.
+	// State is deliberately KEPT for a row that is momentarily
 	// non-limit within its backoff window: that window is the gap between
-	// resumeFromLimit clearing the limit and the next poll re-detecting the
+	// resumeFromLimitOutcome clearing the limit and the next poll re-detecting the
 	// banner, and keeping the state there is what throttles an immediate
 	// re-limit instead of restarting it at attempt zero.
 	//
@@ -130,7 +136,7 @@ func (m *Manager) ResumeLimitedSessions() {
 		if st == nil {
 			continue
 		}
-		if inst.GetLiveness() != session.LiveLimitReached && !now.Before(st.nextAttempt) {
+		if !accountSwapScheduledResumeEligible(inst) && !now.Before(st.nextAttempt) {
 			delete(m.limitResumeStates, stateKey)
 		}
 	}
@@ -142,22 +148,35 @@ func (m *Manager) ResumeLimitedSessions() {
 	m.mu.Unlock()
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+	evidence := &accountLimitEvidencePass{}
 	for _, e := range entries {
-		m.resumeLimitedSession(e.key, e.repoID, e.instance, retryInterval)
+		m.resumeLimitedSession(e.key, e.repoID, e.instance, cfg, retryInterval, evidence.load)
 	}
 }
 
-// resumeLimitedSession auto-resumes one session when it is eligible and its
-// limit window has elapsed. Eligibility mirrors restoreLostSession: started,
-// LiveLimitReached, not tombstoned, not the reserved root (the manual retry and
-// the poll own those), and no kill in flight. It takes the per-target lock and
-// then the per-session op lock in that canonical order (#2006) before invoking the
-// shared resumeFromLimitLocked body; the op lock is only TryLock'd so the poll
-// goroutine never stalls behind a kill teardown, and everything is re-verified
-// under the locks because the checks above are point-in-time.
-func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instance, retryInterval time.Duration) {
-	if inst == nil || !inst.Started() || inst.GetLiveness() != session.LiveLimitReached {
+// resumeLimitedSession auto-resumes one eligible session when its ordinary retry
+// is due or an account swap permits an earlier attempt. Eligibility mirrors
+// restoreLostSession: started, LiveLimitReached, not tombstoned, not the reserved
+// root (the manual retry and the poll own those), and no kill in flight. It takes
+// the per-target lock and then the per-session op lock in that canonical order
+// (#2006) before invoking resumeFromLimitLockedWithAccount; the op lock is only
+// TryLock'd so the poll goroutine never stalls behind a kill teardown, and
+// everything is re-verified under the locks because the checks above are
+// point-in-time.
+func (m *Manager) resumeLimitedSession(
+	key, repoID string,
+	inst *session.Instance,
+	cfg *config.Config,
+	retryInterval time.Duration,
+	loadEvidence accountLimitEvidenceLoader,
+) {
+	if inst == nil || !inst.Started() || !accountSwapScheduledResumeEligible(inst) {
 		return
+	}
+	if !cfg.LimitAutoResume {
+		if _, _, pending := inst.PendingAccountSwap(); !pending {
+			return
+		}
 	}
 	if inst.UserKilled() || session.IsReservedTitle(inst.Title) {
 		return
@@ -169,13 +188,18 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	// which is what a resume episode is about (#2876).
 	now := nowFunc()
 	stateKey := stableSessionKey(repoID, inst)
+	accountSwap, swapErr := m.accountSwapOpportunityFromFactsWithEvidence(inst, cfg, loadEvidence)
+	if swapErr != nil {
+		m.warn().Printf("account-swap check for limit-blocked session %q failed; retaining the existing wait: %v", inst.Title, swapErr)
+	}
 	m.mu.Lock()
 	if _, killing := m.killsInFlight[key]; killing {
 		m.mu.Unlock()
 		return
 	}
 	resetAt, hasReset := inst.LimitResetAt()
-	if !hasReset && retryInterval <= 0 {
+	ordinarySchedulable := hasReset || retryInterval > 0
+	if !ordinarySchedulable && accountSwap == nil {
 		// No parseable reset time and no fallback interval: the session is
 		// surface-only. Return WITHOUT creating retry state so unschedulable
 		// parks never accumulate a map entry.
@@ -191,14 +215,36 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	// is reset + grace (a reset already in the past yields a due in the past →
 	// resume promptly); with no reset time it is the fixed fallback interval
 	// measured from when the session was first seen parked. All in UTC.
-	due := st.parkedAt.Add(retryInterval)
+	ordinaryDue := st.parkedAt.Add(retryInterval)
 	if hasReset {
-		due = resetAt.Add(limitResumeGrace)
+		ordinaryDue = resetAt.Add(limitResumeGrace)
+	}
+	incomingManualReset := false
+	if accountSwap != nil && accountSwap.manual && hasReset {
+		limitedAgent, limitedAccount, limited := inst.LimitIdentity()
+		incomingManualReset = limited && limitedAgent == accountSwap.accountNamespace() && limitedAccount == accountSwap.to
+	}
+	due := ordinaryDue
+	if accountSwap != nil && !incomingManualReset {
+		// Account labels are agent-scoped. The ordinary reset belongs to the
+		// outgoing agent/account, so it cannot delay candidate preflight for a
+		// different identity. A parked manual transaction is different: only when
+		// both its agent and label name the incoming identity is ordinaryDue exactly
+		// when that same identity may be contacted again.
+		due = now
 	}
 	// The per-attempt backoff/interval gate sits on top of the due time, so the
 	// first fire lands at due and repeats are throttled.
 	if st.nextAttempt.After(due) {
 		due = st.nextAttempt
+	}
+	// Candidate preflight retries are independent of the original account's
+	// reset. Throttle those retries, but never let their gate move an ordinary
+	// deadline that has not fired yet. Once that deadline has fired, its own
+	// failure/re-limit backoff remains authoritative and prevents a hot loop.
+	if accountSwap != nil && ordinarySchedulable &&
+		!st.ordinaryAttemptedFor.Equal(ordinaryDue) && ordinaryDue.Before(due) {
+		due = ordinaryDue
 	}
 	skip := now.Before(due)
 	m.mu.Unlock()
@@ -206,7 +252,7 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 		return
 	}
 
-	// Canonical lock order is target-before-op (#2006); see resumeFromLimit. This
+	// Canonical lock order is target-before-op (#2006); see resumeFromLimitOutcome. This
 	// runs on the poll goroutine, so it can briefly block here on a DeliverPrompt
 	// in flight to the same session — bounded and correct, exactly where taking the
 	// op lock first used to deadlock the whole daemon. The op lock is still only
@@ -220,6 +266,17 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 		return
 	}
 	defer opLock.Unlock()
+	// Limit/account recovery reaches the same LocalBackend respawn choke point as
+	// Lost recovery and can rebuild a missing worktree. The poll must never wait
+	// for create's potentially unbounded worktree operation: skip while admission
+	// is held, before recording an attempt, and retry on a later tick.
+	worktreeAdmission, acquired := m.tryLocalWorktreeAdmission(repoID, inst)
+	if !acquired {
+		return
+	}
+	if worktreeAdmission != nil {
+		defer worktreeAdmission.Unlock()
+	}
 
 	// Re-verify under the lock: a kill may have torn the session down, a
 	// self-recovery or the manual retry may have cleared the limit, or the map
@@ -229,33 +286,80 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
-	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || inst.GetLiveness() != session.LiveLimitReached {
+	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapScheduledResumeEligible(inst) {
 		return
+	}
+	// A TUI attached to this session holds the attach pause lease, and the resume
+	// pastes a prompt and presses Enter (or tears the pane down for a swap) — into
+	// a pane the user may be typing in. Every DeliverPrompt path defers on the
+	// same lease (#1586, #1638); the scheduler must too (#5412). Return BEFORE
+	// limitResumeAttempted records an attempt, so a deferral burns no backoff
+	// step and the resume fires on the first tick after detach. The explicit
+	// ResumeFromLimit RPC is an operator action and stays exempt.
+	if m.isPollPaused(repoID, inst.Title, inst.ID) {
+		return
+	}
+	if accountSwap != nil {
+		// This value only schedules the attempt. admitAccountSwap rebuilds all facts
+		// after the limit-resume fence is raised and is the only result allowed to
+		// reach teardown.
+		accountSwap.fallbackDue = ordinarySchedulable && !now.Before(ordinaryDue)
 	}
 
 	// Whether this episode carried a parseable reset time, captured BEFORE the
-	// resume: resumeFromLimit clears the limit (and the reset time) on success,
+	// resume: resumeFromLimitOutcome clears the limit (and the reset time) on success,
 	// so it cannot be read back afterwards. It selects the re-schedule cadence.
 	_, hadReset := inst.LimitResetAt()
 
 	// Record the attempt and set the backoff/interval gate BEFORE firing, so a
 	// resume that re-hits the wall on the very next tick is already throttled —
 	// never a hot re-limit loop.
-	attempts, wait := m.limitResumeAttempted(st, now, hadReset, retryInterval)
+	ordinaryAttempt := ordinarySchedulable && !now.Before(ordinaryDue)
+	attempts, wait := m.limitResumeAttempted(
+		st, now, hadReset || accountSwap != nil, retryInterval, ordinaryDue, ordinaryAttempt)
 
-	if err := m.resumeFromLimitLocked(repoID, key, inst, inst.Title); err != nil {
-		log.WarningLog.Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, err)
+	outcome, resumeErr := m.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, accountSwap)
+	if accountSwap != nil && accountSwap.fellBack && !hadReset && retryInterval > 0 {
+		wait = m.limitResumeFixedFallbackScheduled(st, now, retryInterval)
+	}
+	if resumeErr != nil {
+		m.warn().Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, resumeErr)
 		return
 	}
-	// State the trigger that was actually observed (#3240): with a parsed reset
-	// time the daemon scheduled against it and that time passing is known; with
-	// none, only the fallback interval fired — a success there says nothing about
-	// when or why any provider usage window changed.
-	trigger := "after the limit_retry_interval fallback elapsed (no reset time was parsed)"
-	if hadReset {
-		trigger = "after its parsed usage-limit reset time passed"
+	// resumeFromLimitLockedOutcome returns (resumeNotPerformed, nil) for several
+	// mid-pass aborts — above all a LimitAutoResume opt-out observed at the
+	// final-fence config recheck after the pass-start snapshot saw it enabled.
+	// Such a no-op performed no resume and committed no swap, so it must not log
+	// success. Gate the success log on the actual outcome, not on resumeErr ==
+	// nil (which is true for both resumePerformed and resumeNotPerformed).
+	if outcome != resumePerformed {
+		return
 	}
-	log.InfoLog.Printf("auto-resumed limit-blocked session %q (repo %s) %s (attempt %d)", inst.Title, repoID, trigger, attempts)
+	if accountSwap != nil && !accountSwap.fellBack {
+		m.info().Printf("auto-resumed limit-blocked session %q (repo %s) on %s account %q (attempt %d)", inst.Title, repoID, accountSwap.accountNamespace(), accountSwap.to, attempts)
+	} else {
+		// State the trigger that was actually observed (#3240): with a parsed
+		// reset time the daemon scheduled against it; otherwise only the fallback
+		// interval firing is known.
+		trigger := "after the limit_retry_interval fallback elapsed (no reset time was parsed)"
+		if hadReset {
+			trigger = "after its parsed usage-limit reset time passed"
+		}
+		m.info().Printf("auto-resumed limit-blocked session %q (repo %s) %s (attempt %d)", inst.Title, repoID, trigger, attempts)
+	}
+}
+
+// limitResumeFixedFallbackScheduled corrects the provisional candidate backoff
+// after replacement admission yields to an already-due ordinary retry. A limit
+// with no parsed reset time repeats on the configured fixed interval regardless
+// of whether the same scheduler fire first explored an account replacement.
+func (m *Manager) limitResumeFixedFallbackScheduled(
+	st *limitResumeState, now time.Time, retryInterval time.Duration,
+) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st.nextAttempt = now.Add(retryInterval)
+	return retryInterval
 }
 
 // limitResumeAttempted records one auto-resume attempt and sets the gate for the
@@ -266,10 +370,15 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 // interval, repeats use that fixed interval (§4: "retry on that fixed
 // interval"). Must be called with attempts reflecting THIS fire, so it increments
 // first. Guarded by m.mu.
-func (m *Manager) limitResumeAttempted(st *limitResumeState, now time.Time, hadReset bool, retryInterval time.Duration) (int, time.Duration) {
+func (m *Manager) limitResumeAttempted(st *limitResumeState, now time.Time, hadReset bool,
+	retryInterval time.Duration, ordinaryDue time.Time, ordinaryAttempt bool,
+) (int, time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st.attempts++
+	if ordinaryAttempt {
+		st.ordinaryAttemptedFor = ordinaryDue
+	}
 	wait := retryInterval
 	if hadReset || retryInterval <= 0 {
 		wait = limitResumeBackoffFor(st.attempts)

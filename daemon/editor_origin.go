@@ -80,7 +80,7 @@ func ensureEditorOriginSecret() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("create editor-origin secret directory: %w", err)
 	}
 	var resolved string
@@ -95,7 +95,10 @@ func ensureEditorOriginSecret() (string, error) {
 		if gerr != nil {
 			return gerr
 		}
-		if werr := config.AtomicWriteFile(path, []byte(secret+"\n"), 0o600); werr != nil {
+		// Refuses a symlinked path for the same reason writeToken does
+		// (#3672): af mints this secret and owns it at a path af chose, so a
+		// link there is neither af's to write through nor af's to replace.
+		if werr := config.AtomicWriteFileRefusingLink(path, []byte(secret+"\n"), 0o600); werr != nil {
 			return fmt.Errorf("write editor-origin secret: %w", werr)
 		}
 		resolved = secret

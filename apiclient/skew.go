@@ -1,9 +1,14 @@
 package apiclient
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 )
@@ -46,23 +51,86 @@ type VersionSkewError struct {
 }
 
 func (e *VersionSkewError) Error() string {
+	if IsRemoteTarget() {
+		// `af daemon restart` acts on THIS machine, so recommending it for a
+		// remote daemon sends the operator to restart the wrong host (W9.4).
+		return fmt.Sprintf(
+			"the daemon at %s is out of date and rejected the %q field this client sent — upgrade and restart af on that host (%s), or use an af client that matches it (daemon said: %s)",
+			skewTargetName(), e.Field, remoteRestartRemedy(), e.Detail)
+	}
 	return fmt.Sprintf(
 		"daemon is out of date and rejected the %q field this client sent — restart it with `af daemon restart` (daemon said: %s)",
 		e.Field, e.Detail)
 }
 
-// interpretEnvelopeError converts a daemon envelope message into an error,
+// skewTargetName is the remote target as the operator typed it, falling back to
+// a generic noun when the target is configured but unresolvable.
+func skewTargetName() string {
+	if url := RemoteTargetURL(); url != "" {
+		return url
+	}
+	return "the configured remote target"
+}
+
+// remoteRestartRemedy is a remedy runnable FROM THIS CLIENT: it names the
+// daemon's host (taken from the target URL) so the operator runs the restart
+// there, not here.
+func remoteRestartRemedy() string {
+	if host := remoteTargetHost(); host != "" {
+		return fmt.Sprintf("for example `ssh %s 'af upgrade && af daemon restart'`", host)
+	}
+	return "run `af upgrade && af daemon restart` on the daemon host"
+}
+
+func remoteTargetHost() string {
+	u, err := url.Parse(RemoteTargetURL())
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// interpretEnvelopeError converts a daemon envelope error into a Go error,
 // upgrading a provable version skew into an actionable VersionSkewError and
 // passing everything else through verbatim so existing callers that match on
 // daemon message text are unaffected.
-func interpretEnvelopeError(msg, code string) error {
-	if code == apiproto.ErrorCodeMutationCommitted {
-		return &mutationCommittedError{detail: msg}
+//
+// The two machine-readable outcome codes classify definitively only on a
+// verified daemon answer — the web client's provenance rule (web/src/api.ts
+// isDaemonRejection / isMutationCommittedError): a 502 or 504 is always an
+// intermediary's answer no matter what the body carries, and a refusal code
+// must also bear the daemon_rejected marker. Without those checks a proxy that
+// forwarded the mutation could substitute or replay a project_rebound envelope
+// and this client would report "nothing was written" for a request the daemon
+// may have applied. An unverified outcome code is therefore an
+// UnconfirmedHTTPResponseError — outcome unknown — never a definitive refusal
+// or commit. On the local unix socket the checks are free: the daemon always
+// sets the marker and never emits a gateway status, so a real daemon's answer
+// always verifies.
+func interpretEnvelopeError(route string, status int, envErr *apiproto.EnvelopeError) error {
+	gatewayStatus := status == http.StatusBadGateway || status == http.StatusGatewayTimeout
+	switch envErr.Code {
+	case apiproto.ErrorCodeMutationCommitted:
+		// A committed envelope omits daemon_rejected (daemon/httpserver.go), so
+		// the gateway-status check is the whole provenance rule.
+		if !gatewayStatus {
+			return &mutationCommittedError{detail: envErr.Message}
+		}
+	case apiproto.ErrorCodeProjectRebound:
+		if envErr.DaemonRejected && !gatewayStatus {
+			return &ProjectReboundError{Detail: envErr.Message}
+		}
+	default:
+		if m := unknownFieldPattern.FindStringSubmatch(envErr.Message); m != nil {
+			return &VersionSkewError{Field: m[1], Detail: envErr.Message}
+		}
+		return fmt.Errorf("%s", envErr.Message)
 	}
-	if m := unknownFieldPattern.FindStringSubmatch(msg); m != nil {
-		return &VersionSkewError{Field: m[1], Detail: msg}
+	detail := envErr.Message
+	if detail == "" {
+		detail = fmt.Sprintf("envelope carried code %q without daemon provenance", envErr.Code)
 	}
-	return fmt.Errorf("%s", msg)
+	return &UnconfirmedHTTPResponseError{Route: route, Status: status, Detail: detail}
 }
 
 // mutationCommittedError tells mutation callers that the daemon durably wrote
@@ -72,16 +140,135 @@ type mutationCommittedError struct {
 	detail string
 }
 
+var _ apiproto.MutationCommittedError = (*mutationCommittedError)(nil)
+
 func (e *mutationCommittedError) Error() string           { return e.detail }
 func (e *mutationCommittedError) MutationCommitted() bool { return true }
 
-// IsMutationCommitted distinguishes a rejected mutation from a durable one
-// whose post-commit work failed. The latter still surfaces as an error, but a
-// caller must advance its persistence baseline instead of retrying the write.
+// IsMutationCommitted is apiproto.IsMutationCommitted under this package's name,
+// so client callers classify an outcome without importing the wire package. The
+// rule itself has one home; see apiproto/committed.go.
 func IsMutationCommitted(err error) bool {
-	type committed interface {
-		MutationCommitted() bool
+	return apiproto.IsMutationCommitted(err)
+}
+
+// RouteNotServedError reports that the daemon's marked 404 catch-all answered a
+// /v1 route this client called. The marker proves the route is absent from THAT
+// daemon's table, so the daemon is older than this client.
+//
+// The inference is sound rather than a guess, and it is the reason this is a
+// separate type from VersionSkewError. The daemon's rpcHandler answers only 200,
+// 400, 405, 409, 413, 500 and 503; a 404 comes from exactly one place, the mux
+// catch-all (daemon/httpserver.go), which is reached only by a path no route
+// registers. So a 404 on /v1/<Method> means the method is not served, never that
+// a handler ran and refused.
+//
+// It exists because the two are opposite instructions to a caller. An envelope
+// error is the daemon's considered answer and is final. A route that is not
+// served means NOTHING happened server-side — which is exactly what `af config
+// set --daemon-url` must be able to distinguish, because its only other option
+// would be writing THIS machine's config file for a change the operator asked to
+// make on another one (#3679). Collapsing both into a bare error is what would
+// make that fallback look reasonable.
+type RouteNotServedError struct {
+	// Route is the request path that 404ed, e.g. "/v1/UnsetConfigValue".
+	Route string
+	// Detail is the daemon's verbatim `unknown route "…"` message.
+	Detail string
+}
+
+func (e *RouteNotServedError) Error() string {
+	if IsRemoteTarget() {
+		return fmt.Sprintf("the daemon at %s does not serve %s (it answered 404: %s) — it is older than this client; upgrade and restart af on that host (%s)",
+			skewTargetName(), e.Route, e.Detail, remoteRestartRemedy())
 	}
-	var outcome committed
-	return errors.As(err, &outcome) && outcome.MutationCommitted()
+	return fmt.Sprintf("daemon does not serve %s (it answered 404: %s)", e.Route, e.Detail)
+}
+
+// IsRouteNotServed reports whether err (or anything it wraps) is a
+// RouteNotServedError — the route is missing from the daemon that answered, as
+// opposed to present and refusing.
+func IsRouteNotServed(err error) bool {
+	var missing *RouteNotServedError
+	return errors.As(err, &missing)
+}
+
+// UnconfirmedHTTPResponseError reports an unmarked intermediary response after
+// a request was sent. It deliberately carries no "daemon rejected" or "route
+// absent" classification: the intermediary cannot prove whether the handler ran.
+type UnconfirmedHTTPResponseError struct {
+	Route  string
+	Status int
+	Detail string
+}
+
+func (e *UnconfirmedHTTPResponseError) Error() string {
+	return fmt.Sprintf("request to %s received an unverified HTTP %d response (%s); the request outcome could not be confirmed", e.Route, e.Status, e.Detail)
+}
+
+func routeNotServed404(raw []byte, route string, trustedLocalSocket bool) bool {
+	// A Unix-socket client has no HTTP intermediary: the peer bound at the
+	// selected AF home's 0600 socket is the daemon, including older daemons whose
+	// catch-all predates DaemonRejected.
+	if trustedLocalSocket {
+		return true
+	}
+	var env struct {
+		Error *apiproto.EnvelopeError `json:"error"`
+	}
+	if json.Unmarshal(raw, &env) != nil || env.Error == nil {
+		return false
+	}
+	if env.Error.DaemonRejected {
+		return true
+	}
+	// DaemonRejected is additive. A remote daemon from before that field can
+	// still prove route absence with its exact catch-all envelope. Bind the legacy
+	// sentence to the requested path; a generic, mismatched, or non-envelope proxy
+	// 404 remains UnconfirmedHTTPResponseError.
+	return env.Error.Code == "" && env.Error.Message == fmt.Sprintf("unknown route %q", route)
+}
+
+// notServedDetail renders a 404 body for the refusal message: the daemon's own
+// envelope message when it sent one (`unknown route "/v1/…"`), else a snippet of
+// whatever an intermediary answered with. It is best-effort by construction:
+// the daemon provenance marker decides the classification; this text describes it.
+func notServedDetail(raw []byte) string {
+	var env struct {
+		Error *apiproto.EnvelopeError `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err == nil && env.Error != nil && env.Error.Message != "" {
+		return env.Error.Message
+	}
+	return bodySnippet(raw)
+}
+
+// bodySnippetLimit caps how much of a non-envelope response body is quoted back.
+// A proxy's 404 page is HTML and can be kilobytes; the first line is the part
+// that identifies who answered.
+const bodySnippetLimit = 200
+
+// bodySnippet renders an unparseable response body for a human-readable error:
+// whitespace-collapsed and truncated, so an nginx error page becomes a
+// recognizable fragment rather than a wall of markup.
+//
+// The limit is a BYTE count (it is a cap on message size), but the cut is made
+// on a rune boundary. A localized proxy error page is not ASCII, and slicing a
+// Go string at an arbitrary byte index happily splits a multi-byte rune, so the
+// naive form ends the message in an invalid fragment that renders as U+FFFD.
+func bodySnippet(raw []byte) string {
+	s := strings.Join(strings.Fields(string(raw)), " ")
+	if s == "" {
+		return "empty response body"
+	}
+	if len(s) <= bodySnippetLimit {
+		return s
+	}
+	// Walk back to the start of the rune the limit lands inside. A rune is at
+	// most 4 bytes, so this steps back 3 times at worst.
+	cut := bodySnippetLimit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

@@ -136,8 +136,46 @@ func TestRestoreSession_ReachableSandboxIsNotReplacedWhenThePushFails(t *testing
 		t.Fatalf("recover calls = %d, want 0: nothing may be replaced when the push did not land", got)
 	}
 	requireSandboxSurvived(t, reap, "its push failed, so it holds the only copy of this session's work")
+	// #2917 says the refusal must name the command that RELEASES it. This
+	// instance has no branch (registerStartedRemote records none, and the push
+	// that would have is the one that just failed), and --force-reap refuses an
+	// empty persisted branch via requireDurableSandboxBranch — see
+	// TestRestoreSession_ForcedAnsweredDeadBranchRefusalLowersTheFence. So the
+	// command that actually ends this state is kill/recreate, and naming
+	// --force-reap here sent the operator to a flag that refuses immediately
+	// (#4164). The branch-present case still names --force-reap; see below.
+	if strings.Contains(err.Error(), "--force-reap") {
+		t.Fatalf("the refusal named --force-reap for a session with no recorded branch, which that flag "+
+			"refuses outright: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sessions kill") {
+		t.Fatalf("the refusal must name a command that can actually end the state (#2917/#4164), got: %v", err)
+	}
+}
+
+// TestRestoreSession_PushFailureWithADurableBranchStillNamesForceReap is the
+// other half of #4164's off-ramp selection: when the branch IS recorded,
+// --force-reap can execute, so it remains the right thing to advertise. Without
+// this the change above could be "fixed" by naming kill unconditionally, which
+// would send operators to the destructive path when a recoverable one exists.
+func TestRestoreSession_PushFailureWithADurableBranchStillNamesForceReap(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "af/session-branch")
+	srv.archiveFails.Store(true)
+	inst, _, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "push-fails-branched", srv.url, session.Lost)
+	inst.SetSandboxBranch("af/already-durable")
+	if err := manager.persistInstanceErr(repoID, inst); err != nil {
+		t.Fatalf("persist durable branch: %v", err)
+	}
+
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "push-fails-branched", RepoID: repoID})
+
+	if err == nil {
+		t.Fatal("a restore whose pre-reap push failed reported success")
+	}
+	requireSandboxSurvived(t, reap, "its push failed, so it holds the only copy of this session's work")
 	if !strings.Contains(err.Error(), "--force-reap") {
-		t.Fatalf("the refusal must name the command that releases it (#2917), got: %v", err)
+		t.Fatalf("with a recorded branch --force-reap can execute and must stay the advertised off-ramp, got: %v", err)
 	}
 }
 
@@ -152,7 +190,7 @@ func TestRestoreSession_IndeterminateSandboxIsNotReplaced(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	srv := newSandboxProbeServer(t, "af/session-branch")
 	srv.unreachable.Store(true)
-	_, backend, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "indeterminate", srv.url, session.Lost)
+	inst, backend, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "indeterminate", srv.url, session.Lost)
 
 	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "indeterminate", RepoID: repoID})
 
@@ -167,8 +205,11 @@ func TestRestoreSession_IndeterminateSandboxIsNotReplaced(t *testing.T) {
 		t.Fatalf("archive calls = %d, want 0: there is nothing to push to when the sandbox cannot be reached", got)
 	}
 	requireSandboxSurvived(t, reap, "unreachable is not gone — it may be live behind a broken network path, still holding work")
-	if !strings.Contains(err.Error(), "--force-reap") {
-		t.Fatalf("the refusal must name the command that releases it (#2917), got: %v", err)
+	if got, want := err.Error(), killSuggestionFor(inst); !strings.Contains(got, want) {
+		t.Fatalf("the refusal must name the command that can release it (#2917/#4181)\n got: %s\nwant suggestion: %s", got, want)
+	}
+	if strings.Contains(err.Error(), "--force-reap") {
+		t.Fatalf("the refusal named --force-reap even though this session has no branch and that retry refuses: %v", err)
 	}
 }
 
@@ -214,6 +255,17 @@ func TestRestoreSession_ForceReapReleasesTheIndeterminateRefusal(t *testing.T) {
 	inst := manager.instances[daemonInstanceKey(repoID, "forced-unknown")]
 	inst.SetSandboxBranch("af/known-branch")
 	manager.persistInstance(repoID, inst)
+
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "forced-unknown", RepoID: repoID})
+	if err == nil {
+		t.Fatal("an indeterminate sandbox was replaced without --force-reap")
+	}
+	if got, want := err.Error(), forceReapSuggestionFor(inst); !strings.Contains(got, want) {
+		t.Fatalf("a session with a durable branch must keep the executable --force-reap off-ramp\n got: %s\nwant suggestion: %s", got, want)
+	}
+	if got, destructive := err.Error(), killSuggestionFor(inst); strings.Contains(got, destructive) {
+		t.Fatalf("a session with a durable branch was sent to the unnecessarily destructive kill path: %s", got)
+	}
 
 	if _, _, err := manager.RestoreSession(RestoreSessionRequest{
 		Title: "forced-unknown", RepoID: repoID, ForceReap: true,

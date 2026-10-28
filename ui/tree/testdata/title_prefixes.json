@@ -1,0 +1,31 @@
+[
+  {
+    "name": "remote + lost",
+    "liveness": 3,
+    "in_flight_op": 0,
+    "backend_type": "remote",
+    "expected": "[lost] [remote] alpha"
+  },
+  {
+    "name": "lost + killing",
+    "liveness": 3,
+    "in_flight_op": 2,
+    "backend_type": "local",
+    "expected": "[deleting] [lost] alpha"
+  },
+  {
+    "name": "limit + archiving",
+    "liveness": 6,
+    "in_flight_op": 3,
+    "backend_type": "local",
+    "expected": "[limit] [deleting] alpha"
+  },
+  {
+    "name": "remote + lost + unreachable",
+    "liveness": 3,
+    "in_flight_op": 0,
+    "backend_type": "remote",
+    "unreachable": { "since": "2026-08-10T12:00:00Z", "error": "dial tcp: i/o timeout" },
+    "expected": "[unreachable] [lost] [remote] alpha"
+  }
+]

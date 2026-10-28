@@ -78,16 +78,18 @@ func TestBranchesHeldByWorktrees_ReportsHoldsAtNewlineBearingPaths(t *testing.T)
 	require.NoError(t, err, "the listing is readable; this must not error")
 
 	// THE fail-open assertion.
-	holder, ok := held["endbranch"]
+	holders, ok := held["endbranch"]
 	require.True(t, ok,
 		"endbranch IS checked out at a path ending in a newline, but was reported as NOT held (#3524). "+
 			"The resolver would hand that branch to a new session, and `git worktree add` then refuses "+
 			"with \"already used by worktree at …\" — the confusing failure #2091 exists to prevent.")
-	assertHolds(t, endPath, holder, "the hold must name the worktree that actually holds it")
+	require.Len(t, holders, 1)
+	assertHolds(t, endPath, holders[0], "the hold must name the worktree that actually holds it")
 
-	holder, ok = held["midbranch"]
+	holders, ok = held["midbranch"]
 	require.True(t, ok, "midbranch is checked out and must be reported as held")
-	assertHolds(t, midPath, holder,
+	require.Len(t, holders, 1)
+	assertHolds(t, midPath, holders[0],
 		"a newline INSIDE the path must not truncate the recorded holder — this value is "+
 			"reported back to the user")
 }
@@ -159,7 +161,7 @@ func TestParseWorktreeBranchHolds_UnreadableListingIsAnErrorNotAnEmptyMap(t *tes
 	}
 	for _, tc := range unreadable {
 		t.Run(tc.name, func(t *testing.T) {
-			holds, err := parseWorktreeBranchHolds(tc.porcelain)
+			holds, err := holdsFromPorcelain(tc.porcelain)
 			require.Error(t, err,
 				"an unreadable listing must be reported, not returned as a map: a partial map is "+
 					"indistinguishable from a complete one and silently answers \"not held\" (#3524)")
@@ -170,17 +172,17 @@ func TestParseWorktreeBranchHolds_UnreadableListingIsAnErrorNotAnEmptyMap(t *tes
 	// The readable cases must still answer, or every create would lose the #2091
 	// skip and fall back to failing at `worktree add`.
 	t.Run("well-formed", func(t *testing.T) {
-		holds, err := parseWorktreeBranchHolds(
+		holds, err := holdsFromPorcelain(
 			"worktree /repo/main\x00HEAD abc\x00branch refs/heads/master\x00\x00" +
 				"worktree /repo/wt\nbroken\x00HEAD abc\x00branch refs/heads/held\x00\x00")
 		require.NoError(t, err)
-		assert.Equal(t, map[string]string{
-			"master": "/repo/main",
-			"held":   "/repo/wt\nbroken",
+		assert.Equal(t, map[string][]string{
+			"master": {"/repo/main"},
+			"held":   {"/repo/wt\nbroken"},
 		}, holds, "-z carries a newline-bearing path through intact")
 	})
 	t.Run("well-formed: detached and bare worktrees hold nothing", func(t *testing.T) {
-		holds, err := parseWorktreeBranchHolds(
+		holds, err := holdsFromPorcelain(
 			"worktree /repo/b.git\x00bare\x00\x00worktree /repo/d\x00HEAD abc\x00detached\x00\x00")
 		require.NoError(t, err)
 		assert.Empty(t, holds, "a complete listing with no branch holds is a real answer")

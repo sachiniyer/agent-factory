@@ -194,9 +194,22 @@ func runAF(t *testing.T, stdin []byte, args ...string) (stdout, stderr []byte, e
 // afTestBinary builds af once per test binary run.
 var (
 	afBuildOnce sync.Once
+	afBuildDir  string
 	afBuildPath string
 	afBuildErr  error
 )
+
+// removeAFTestBinary deletes the once-per-package build directory. TestMain
+// calls it, NOT t.Cleanup: afBuildOnce caches the build across every test in the
+// package, so a per-test cleanup would delete the binary the next test still
+// resolves to. Without it each `go test ./commands/...` run left one more
+// /tmp/af-relay-cmd* directory on the box — 182 of them by the time #3842
+// counted.
+func removeAFTestBinary() {
+	if afBuildDir != "" {
+		_ = os.RemoveAll(afBuildDir)
+	}
+}
 
 func afTestBinary(t *testing.T) string {
 	t.Helper()
@@ -210,6 +223,7 @@ func afTestBinary(t *testing.T) string {
 			afBuildErr = err
 			return
 		}
+		afBuildDir = dir
 		out := filepath.Join(dir, "af")
 		build := exec.Command("go", "build", "-o", out, "github.com/sachiniyer/agent-factory")
 		build.Dir = ".."

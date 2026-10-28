@@ -3,21 +3,23 @@ package api
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/spf13/cobra"
 )
 
 var (
 	sendPromptCreateFlag  bool
 	sendPromptProgramFlag string
+	sendPromptHostFlag    string
 	// sendPromptPromptFlag is an ALIAS for the positional <prompt>, not a
 	// replacement: its sibling `sessions create` takes the prompt as --prompt,
 	// so a user who learned that verb hit "unknown flag: --prompt" here — same
@@ -113,7 +115,15 @@ For one target, the JSON acknowledgement includes status: delivered,
 not-delivered, sent-unverified, or could-not-confirm. sent-unverified means tmux
 accepted the paste and Enter while a readable pane did not render exact content
 proof; could-not-confirm means the pane observer itself was unavailable. Neither
-status claims delivery, and the command adds no second confirmation wait.
+status claims delivery. A draft still staged in the composer shortly after Enter
+gets one more Enter only when it is exactly the single paste chip bound to this
+delivery and nothing in the composer changed; every other staged shape is
+reported sent-unverified. It is never re-pasted.
+
+If --create made the session but could not confirm its start, the command still
+exits 0: the JSON carries a warning, the status stays could-not-confirm, and
+stderr says the session was created. Do not retry; inspect it with
+'af sessions list'.
 
 With --all, broadcast a single prompt to every live session in scope:
 
@@ -145,6 +155,14 @@ can inspect per-session results.`,
 		}
 
 		prompt, rest := resolveSendPrompt(cmd, args)
+		if apiclient.IsRemoteTarget() && (sendPromptAllFlag || sendPromptCreateFlag) {
+			// Broadcast enumerates targets from this machine's disk and --create
+			// resolves the repo, config and program locally; both would act on the
+			// wrong host. A plain <title> <prompt> send is routed (W9.1).
+			return jsonError(fmt.Errorf("--all and --create are not available against the daemon at %s yet: "+
+				"broadcast targets and create-time repo resolution are computed on this machine. "+
+				"Send to one session by <title>, or run the command on the daemon host", apiclient.RemoteTargetURL()))
+		}
 		if sendPromptAllFlag {
 			return runBroadcast(prompt)
 		}
@@ -155,7 +173,7 @@ can inspect per-session results.`,
 		// preserves the prior all-repo search; a non-empty one confines both
 		// the existence pre-check and the delivery to that repo so a
 		// same-titled session in a different repo never receives the prompt.
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -178,8 +196,8 @@ can inspect per-session results.`,
 			}
 			workspace := repo.WorkspacePath()
 
-			if !git.IsGitRepo(workspace) {
-				return jsonError(fmt.Errorf("path %s is not a git repository", workspace))
+			if err := requireGitRepoWorkspace(workspace); err != nil {
+				return jsonError(err)
 			}
 
 			cfg, err := config.ResolveConfigForRepo(repo)
@@ -198,7 +216,17 @@ can inspect per-session results.`,
 			// send-prompt has no --backend flag, so the repo's `backend` key is
 			// the whole selection; a docker/ssh/hook repo runs the agent in the
 			// sandbox and must not be refused for a missing local one.
-			local, err := session.LocalPrereqsRequired(session.InstanceOptions{}, workspace)
+			if sendPromptHostFlag != "" {
+				// The same refusal create and the task definition give: the host must
+				// be in the operator's global list. Checked before anything is sent.
+				if err := config.ValidateHostPick(cfg.Hosts, sendPromptHostFlag); err != nil {
+					return jsonError(err)
+				}
+				if err := requireHostPickOn(hostPickOnDeliver, sendPromptHostFlag); err != nil {
+					return jsonError(err)
+				}
+			}
+			local, err := session.LocalPrereqsRequired(session.InstanceOptions{Host: sendPromptHostFlag}, workspace)
 			if err != nil {
 				return jsonError(err)
 			}
@@ -212,17 +240,39 @@ can inspect per-session results.`,
 				Title:    title,
 				RepoPath: workspace,
 				Program:  program,
+				Host:     sendPromptHostFlag,
 				Prompt:   prompt,
 			})
+			// A committed auto-create (the sandbox provisioned but start or
+			// teardown is unconfirmed, #3357) durably made the session. Report
+			// it the way kill/archive/restore report a committed mutation —
+			// exit 0 with a warning — so a script does not retry and send the
+			// prompt twice into the retained session. The status stays the
+			// delivery observation; an unconfirmed one reads could-not-confirm,
+			// the same non-claim plain send-prompt makes for sent-unverified.
+			warning := ""
+			if err != nil && apiclient.IsMutationCommitted(err) {
+				warning = err.Error()
+				if !status.Valid() {
+					status = session.PromptCouldNotConfirm
+				}
+				fmt.Fprintf(os.Stderr, "warning: %v; session %q was created and must not be retried — inspect it with 'af sessions list' before sending again\n", err, title)
+			} else if err != nil {
+				return jsonError(err)
+			}
+			return jsonOut(sendPromptResult{OK: true, Status: status, Warning: warning})
+		}
+
+		// Against a remote target the existence check would read THIS machine's
+		// disk and refuse a session that lives only on the daemon; the daemon's
+		// SendPrompt resolves the title itself and reports not-found.
+		exists := true
+		if !apiclient.IsRemoteTarget() {
+			var err error
+			exists, err = instanceTitleExistsInScope(repoID, title)
 			if err != nil {
 				return jsonError(err)
 			}
-			return jsonOut(sendPromptResult{OK: true, Status: status})
-		}
-
-		exists, err := instanceTitleExistsInScope(repoID, title)
-		if err != nil {
-			return jsonError(err)
 		}
 		if !exists {
 			return jsonError(fmt.Errorf("session %q not found. Use --create to auto-create the session, or run: %s --prompt <prompt>", title, shellsuggest.Command("af", "sessions", "create", "--name", title)))
@@ -239,6 +289,9 @@ can inspect per-session results.`,
 type sendPromptResult struct {
 	OK     bool                         `json:"ok"`
 	Status session.PromptDeliveryStatus `json:"status"`
+	// Warning is set when the command committed (the session was created) but
+	// a follow-up could not be confirmed; the command still exits 0.
+	Warning string `json:"warning,omitempty"`
 }
 
 // broadcastResult is the JSON summary `send-prompt --all` prints: aggregate
@@ -275,6 +328,9 @@ type broadcastTarget struct {
 // and RunE through validateSendPromptInvocation, so unit tests that drive RunE
 // directly still get the same guard.
 func validateSendPromptFlags() error {
+	if sendPromptHostFlag != "" && !sendPromptCreateFlag {
+		return fmt.Errorf("--host picks where a NEW session is created, so it needs --create; to move work to a host, create the session there with --create --host %s", sendPromptHostFlag)
+	}
 	if !sendPromptAllFlag {
 		// The broadcast-only flags are meaningless without --all. Name whichever
 		// were passed and point the user at the flag that unlocks them.
@@ -394,7 +450,12 @@ func runBroadcast(prompt string) error {
 			})
 			continue
 		}
-		status, err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: t.Title, RepoID: t.RepoID, Prompt: prompt})
+		// Carry the enumerated row's stable ID: the target list was materialized
+		// before this loop, so a same-title replacement between enumeration and
+		// this dispatch must fail rather than inherit the prompt (#2358's class,
+		// inside one command). A pre-ID record sends "" and the daemon resolves
+		// by title as before.
+		status, err := sendPromptViaDaemon(daemon.SendPromptRequest{ID: t.ID, Title: t.Title, RepoID: t.RepoID, Prompt: prompt})
 		if err != nil {
 			result.Failed++
 			result.Results = append(result.Results, broadcastTarget{

@@ -9,10 +9,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -103,6 +105,63 @@ func TestHandleStateNewMultiLinePasteKeepsTitleSingleLine(t *testing.T) {
 		"a single pasted KeyRunes payload must not retain layout-breaking control characters")
 }
 
+// TestHandleStateNewChunkedPasteClampsTitle is #5481: a paste longer than the
+// 32-cell cap can arrive as SEVERAL KeyRunes messages (the terminal splits the
+// payload), so refusing each overflowing message still committed the chunks
+// that fit — the field ended at a silent prefix, the "cannot" notice claimed
+// refusal, and Enter created a session with a truncated name nobody saw
+// coming. The input path now clamps to the cap and says the rest was dropped,
+// so the field always holds exactly what a create will use.
+func TestHandleStateNewChunkedPasteClampsTitle(t *testing.T) {
+	h := &home{
+		ctx:       context.Background(),
+		state:     stateNew,
+		appConfig: config.DefaultConfig(),
+		errBox:    ui.NewErrBox(),
+	}
+	h.errBox.SetSize(120, 1)
+	instance, err := session.NewInstance(session.InstanceOptions{
+		Path: t.TempDir(), Program: "claude",
+	})
+	require.NoError(t, err)
+	h.namingInstance = instance
+
+	// The same 40-character paste, delivered in two KeyRunes messages.
+	paste := "a-very-long-session-title-that-is-too-long"
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyRunes, Paste: true, Runes: []rune(paste[:20])})
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyRunes, Paste: true, Runes: []rune(paste[20:])})
+
+	assert.Equal(t, 32, runewidth.StringWidth(instance.Title),
+		"the field must hold the clamped title, not a silently extended one")
+	assert.Equal(t, paste[:32], instance.Title)
+	require.Contains(t, h.errBox.String(), "extra input was dropped",
+		"the notice must say truncation happened, not claim a refusal")
+}
+
+// TestHandleStateNewEnterRefusesOverlongTitle is the submit-time half of
+// #5481: whatever way the field came to hold an overlong title — a restored
+// failed-create draft predating the clamp — Enter must refuse and create
+// nothing rather than shipping a name the cap forbids.
+func TestHandleStateNewEnterRefusesOverlongTitle(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+	h.errBox.SetSize(120, 1)
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:   "a-very-long-session-title-that-is-too-long",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, stateNew, h.state, "naming flow must stay open for an overlong title")
+	require.NotNil(t, h.namingInstance, "the overlong title must not be submitted")
+	assert.Contains(t, h.errBox.String(), "title cannot be longer than 32 characters")
+}
+
 func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
 	h := newTestHome(t)
 	h.state = stateNew
@@ -116,7 +175,7 @@ func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
 func TestNamingProgramPickerTitleUsesSentenceCase(t *testing.T) {
 	h := activeProjectHome(t)
 	resizeHome(h, 80, 24)
-	_, _ = h.startNewInstance(false)
+	_, _ = h.startNewInstance()
 	require.Equal(t, stateNew, h.state)
 
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyTab})
@@ -141,10 +200,9 @@ func TestHandleMenuHighlightingNewInstanceActions(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
 
-	// lipgloss folds the underline attribute (SGR 4) into a combined escape
-	// such as "\x1b[4;38;5;99;4m" rather than a bare "\x1b[4m", so match the
-	// underline parameter at the head of a sequence.
-	const underline = "\x1b[4;"
+	// Underline (SGR 4) can follow bold (SGR 1) in a combined escape.
+	// Match the attribute rather than assuming it starts the sequence.
+	const underline = `\x1b\[(?:1;)?4(?:;|m)`
 
 	cases := []struct {
 		name string
@@ -166,19 +224,19 @@ func TestHandleMenuHighlightingNewInstanceActions(t *testing.T) {
 			h.menu.SetSize(200, 3)
 
 			// Baseline: nothing highlighted before the keypress.
-			require.NotContains(t, h.menu.String(), underline,
+			require.NotRegexp(t, underline, h.menu.String(),
 				"menu should not be highlighted before the keypress")
 
 			cmd, returnEarly := h.handleMenuHighlighting(tc.key)
 
-			// The keypress is intercepted so the highlight + re-emit fire.
-			assert.True(t, returnEarly, "naming action keys should be intercepted during stateNew")
-			assert.NotNil(t, cmd)
-			assert.True(t, h.keySent, "keySent guards the re-emitted key from re-highlighting")
+			// The highlight fires and the key goes on to its action in the same
+			// Update: nothing is consumed or replayed.
+			assert.False(t, returnEarly, "naming action keys must reach their action")
+			assert.NotNil(t, cmd, "the highlight schedules its clearing tick")
 
 			// keydownCallback runs synchronously when the batch is built, so the
 			// menu now renders the matching option underlined.
-			assert.Contains(t, h.menu.String(), underline,
+			assert.Regexp(t, underline, h.menu.String(),
 				"menu highlight render path should run for %s during stateNew", tc.name)
 		})
 	}
@@ -197,9 +255,9 @@ func TestStartNewInstanceSelectsNamingInstanceAfterSortedInsert(t *testing.T) {
 	h.store.AddInstance(existing)
 	h.sidebar.SetSelectedInstance(0)
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance()
 	require.Same(t, h, model)
-	require.Nil(t, cmd)
+	requireNamingFormOpened(t, h)
 	require.NotNil(t, h.namingInstance)
 
 	require.Equal(t, []string{"", "existing"}, collectTitles(h.store.GetInstances()),
@@ -211,90 +269,6 @@ func TestStartNewInstanceSelectsNamingInstanceAfterSortedInsert(t *testing.T) {
 	assert.Equal(t, stateNew, h.state)
 	assert.Equal(t, session.OpCreating, h.namingInstance.GetInFlightOp(),
 		"the #1350 BeginCreate chokepoint still fires exactly once when naming starts")
-}
-
-// TestStartNewRemoteWithoutHooksExplains is the #2020 regression guard. The menu
-// advertises `N new remote` as a peer of `n new`, but for a repo with no
-// remote_hooks — nearly every repo — N used to be a silent no-op: byte-identical
-// screen, no overlay, no error, no hint that remote sessions need setup. This
-// asserts the visible outcome, naming remote_hooks so the user knows what to
-// configure. It inverts the earlier TestStartNewRemoteWithoutHooksNoops, which
-// pinned the swallow as intended behavior.
-func TestStartNewRemoteWithoutHooksExplains(t *testing.T) {
-	repoDir := setupRealRepo(t)
-	t.Chdir(repoDir)
-
-	h := newTestHome(t)
-	h.repoRoot = repoDir
-	h.errBox.SetSize(120, 1)
-
-	model, cmd := h.startNewInstance(true)
-
-	require.Same(t, h, model)
-	require.NotNil(t, cmd, "pressing an advertised key must produce a visible outcome, never a swallowed keypress")
-	// No session is created and no naming overlay opens — the refusal itself is
-	// unchanged; only its silence is.
-	assert.Equal(t, stateDefault, h.state)
-	assert.Nil(t, h.namingInstance)
-	assert.Equal(t, 0, h.store.NumInstances())
-
-	full := h.errBox.FullError()
-	assert.Contains(t, full, "remote_hooks", "the message must name the config the user has to add")
-	assert.Contains(t, full, "n for a local session", "the message must offer the action that does work here")
-}
-
-// TestStartNewRemoteWithoutHooksLeadsWithTheCause pins the ordering the #1973
-// clipping class forces: the transient notice is truncated to the terminal
-// width and the TAIL is what vanishes, so the cause has to arrive before the
-// guide URL rather than after it.
-func TestStartNewRemoteWithoutHooksLeadsWithTheCause(t *testing.T) {
-	repoDir := setupRealRepo(t)
-	t.Chdir(repoDir)
-
-	h := newTestHome(t)
-	h.repoRoot = repoDir
-	h.errBox.SetSize(120, 1)
-
-	h.startNewInstance(true)
-
-	full := h.errBox.FullError()
-	cause := strings.Index(full, "remote_hooks")
-	url := strings.Index(full, "https://")
-	require.NotEqual(t, -1, cause)
-	require.NotEqual(t, -1, url)
-	assert.Less(t, cause, url, "the cause must survive width-clipping; the URL is the part that may be cut")
-}
-
-func TestStartNewRemoteInvalidHooksStillErrors(t *testing.T) {
-	repoDir := setupRealRepo(t)
-	t.Chdir(repoDir)
-
-	h := newTestHome(t)
-	h.repoRoot = repoDir
-	h.errBox.SetSize(120, 1)
-	repo, err := config.CurrentRepo()
-	require.NoError(t, err)
-	writeLegacyRepoConfig(t, repo.ID, &config.RepoConfig{
-		RemoteHooks: &config.RemoteHooks{
-			DeleteCmd: "/bin/echo",
-		},
-	})
-
-	model, cmd := h.startNewInstance(true)
-
-	require.Same(t, h, model)
-	require.NotNil(t, cmd)
-	assert.Equal(t, stateDefault, h.state)
-	assert.Nil(t, h.namingInstance)
-	assert.Equal(t, 0, h.store.NumInstances())
-	// The fixture is still invalid under the #2847 contract — it sets neither
-	// provision_cmd nor launch_cmd — so the assertion that invalid hooks error
-	// stands unchanged. It is STRENGTHENED to require both keys be named: a repo
-	// on the ssh-host contract that is sent to fix launch_cmd would be edited in
-	// the wrong place, which is the failure an error message exists to prevent.
-	assert.Contains(t, h.errBox.FullError(), "remote_hooks.launch_cmd")
-	assert.Contains(t, h.errBox.FullError(), "remote_hooks.provision_cmd",
-		"an invalid hook config must name BOTH contracts, or a provision_cmd user is sent to the wrong key")
 }
 
 // TestCancelNamingRemovesZombieAfterSelectionDrift is the regression guard for
@@ -436,7 +410,7 @@ func TestHandleStateNewWhitespaceViaRealInput(t *testing.T) {
 	h := activeProjectHome(t)
 	h.errBox.SetSize(120, 1)
 
-	_, _ = h.startNewInstance(false)
+	_, _ = h.startNewInstance()
 	require.NotNil(t, h.namingInstance)
 	require.NotEmpty(t, h.namingPlaceholder, "startNewInstance always generates a placeholder")
 
@@ -528,10 +502,7 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 	require.NoError(t, err)
 	h.store.AddInstance(existing)
 
-	// The naming row does not. It provisions nothing (#2599), so `N` is carried on
-	// the model and the gate resolves the create's kind from that instead of from
-	// this instance's capabilities. A repo path with no `backend` key plus
-	// ForceRemote resolves to hook — the same answer the daemon will reach.
+	// The inert naming row stays local; the selected backend determines slug validation.
 	naming, err := session.NewInstance(session.InstanceOptions{
 		Title:   "my_app",
 		Path:    t.TempDir(),
@@ -540,7 +511,7 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 	})
 	require.NoError(t, err)
 	h.namingInstance = naming
-	h.pendingForceRemote = true
+	h.pendingBackend = "hook"
 
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -588,7 +559,7 @@ func TestHandleStateNewHookSlugIgnoresNonHookRemoteSessions(t *testing.T) {
 			})
 			require.NoError(t, err)
 			h.namingInstance = naming
-			h.pendingForceRemote = true
+			h.pendingBackend = "hook"
 
 			_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -612,7 +583,7 @@ func TestHandleStateNewRejectsRemoteHookTitleWithoutASCIIAlphanumeric(t *testing
 	})
 	require.NoError(t, err)
 	h.namingInstance = naming
-	h.pendingForceRemote = true
+	h.pendingBackend = "hook"
 
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -683,7 +654,7 @@ func TestHandleStateNewEmptySubmitAdoptsPlaceholder(t *testing.T) {
 	h := activeProjectHome(t)
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
-	_, _ = h.startNewInstance(false)
+	_, _ = h.startNewInstance()
 	inst := h.namingInstance
 	require.NotNil(t, inst)
 	require.Equal(t, "", inst.Title, "precondition: the name field starts empty")
@@ -712,7 +683,7 @@ func TestHandleStateNewEmptySubmitFailedGateKeepsPlaceholder(t *testing.T) {
 		return errors.New("Claude Code is not installed or not on PATH")
 	}))
 
-	_, _ = h.startNewInstance(false)
+	_, _ = h.startNewInstance()
 	inst := h.namingInstance
 	require.NotNil(t, inst)
 	require.Equal(t, "", inst.Title, "precondition: the field starts empty")
@@ -741,7 +712,7 @@ func TestCancelNamingClearsPlaceholder(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := activeProjectHome(t)
-			_, _ = h.startNewInstance(false)
+			_, _ = h.startNewInstance()
 			require.NotNil(t, h.namingInstance)
 			require.NotEmpty(t, h.namingPlaceholder, "precondition: a placeholder was generated")
 
@@ -761,7 +732,36 @@ func TestCancelNamingClearsPlaceholder(t *testing.T) {
 // already started. That is a broken invariant and must keep reaching ERROR, or
 // #2575's severity cleanup would silently mute a real state bug.
 func TestHandleStateNewTitleSeverity(t *testing.T) {
-	t.Run("validation refusal is a notice", func(t *testing.T) {
+	t.Run("default snapshot fetchers preserve existing rows", func(t *testing.T) {
+		h := newTestHome(t)
+		previousHTTP := withDaemonHTTP
+		withDaemonHTTP = func(func(*apiclient.Client) error) error {
+			t.Error("newTestHome snapshot poll reached the daemon launcher")
+			return errTestFetcherUnstubbed
+		}
+		t.Cleanup(func() { withDaemonHTTP = previousHTTP })
+
+		rows, err := allReposSnapshotFetcher(context.Background())
+		require.ErrorIs(t, err, errTestFetcherUnstubbed)
+		require.Nil(t, rows)
+		instance := newSnapshotTestInstance(t, "retained")
+		h.store.AddInstance(instance)
+		projects := []ui.SidebarProject{{Root: "/repos/retained", SessionCount: 2}}
+		h.projects.SetProjects(projects)
+
+		msg := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
+		require.ErrorIs(t, msg.allReposErr, errTestFetcherUnstubbed)
+		require.Error(t, msg.err)
+		require.False(t, h.handleSnapshot(msg), "a transient failure keeps the loaded layout")
+		require.Same(t, instance, findSidebarInstance(h, "retained"))
+		// Cross-repo errors are handled separately from handleSnapshot in
+		// Update; exercise that path too, without executing its next tick.
+		_, _ = h.Update(msg)
+		require.Equal(t, projects, h.projects.Projects())
+		require.Same(t, instance, findSidebarInstance(h, "retained"))
+	})
+
+	t.Run("validation notice is a notice", func(t *testing.T) {
 		h := newTestHome(t)
 		h.state = stateNew
 		h.errBox.SetSize(160, 1)
@@ -777,14 +777,19 @@ func TestHandleStateNewTitleSeverity(t *testing.T) {
 
 		_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 
-		require.Contains(t, info.String(), "title cannot be longer than 32 characters",
-			"the reason the keystroke was refused stays visible at INFO")
+		// The keystroke is dropped, not refused (#5481): the title already fills
+		// the cap, so the field keeps holding exactly what a create would use.
+		require.Equal(t, strings.Repeat("x", 32), naming.Title)
+		require.Contains(t, info.String(), "extra input was dropped",
+			"the reason the keystroke changed nothing stays visible at INFO")
 		require.Empty(t, errorLogs.String(),
-			"a designed input refusal must not be indistinguishable from an operation failure")
+			"a designed input clamp must not be indistinguishable from an operation failure")
 	})
 
 	t.Run("started placeholder is an error", func(t *testing.T) {
 		h := newTestHome(t)
+		// Only synchronous naming severity matters here. newTestHome stubs both
+		// snapshot fetchers; do not execute returned commands or start a Tea loop.
 		h.state = stateNew
 		h.errBox.SetSize(160, 1)
 		h.pendingProgram = "claude"

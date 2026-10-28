@@ -1,0 +1,935 @@
+const assert = require('node:assert/strict');
+const test = require('node:test');
+const { aggregate, render, readRecord, sweep, gateNotice, createGhApi } = require('./codex-outage.js');
+const gate = require('./auto-gate.js');
+const t = (hour) => `2026-09-05T${String(hour).padStart(2, '0')}:00:00.000Z`;
+const tomorrow = (hour) => `2026-09-06T${String(hour).padStart(2, '0')}:00:00.000Z`;
+const head = 'a'.repeat(40);
+const limits = [
+  'You have reached your Codex usage limits for code ' + 'reviews.',
+  'Codex usage limits have been reached for code reviews. Please check with the admins of this repo to increase the limits by adding credits.',
+  'You have reached your Codex usage limits.',
+];
+const environmentMissing = 'To use Codex here, [create an environment for this repo](https://chatgpt.com/codex/cloud/settings/environments).';
+const findingBody =
+  '**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ' +
+  'Keep incomplete summary rows out of outage evidence**';
+const comment = (hour, body, extra = {}) => ({ created_at: t(hour), body,
+  user: { login: 'chatgpt-codex-connector[bot]' }, html_url: `https://example.com/${hour}`, ...extra });
+const verdict = (hour, sha = head) => comment(hour, `Codex Review\nReviewed commit: \`${sha.slice(0, 10)}\``);
+function fixture() {
+  return [
+    { number: 1, head: { sha: head }, merged_at: t(4), artifacts: [verdict(1), comment(2, limits[0]), comment(3, limits[1])] },
+    { number: 2, head: { sha: head }, merged_at: t(4), artifacts: [comment(3, limits[2]), verdict(7)] },
+    { number: 3, head: { sha: head }, merged_at: t(6), artifacts: [comment(4, limits[1]), verdict(5)] },
+    { number: 4, head: { sha: head }, merged_at: t(10), artifacts: [comment(8, limits[2]), comment(9, limits[1])] },
+    { number: 5, head: { sha: head }, merged_at: null, artifacts: [comment(11, limits[0], { user: { login: 'someone' } })] },
+  ];
+}
+async function runRecordedSweep({ episodes, pulls, artifactsByRoute, now }) {
+  let record = { id: 42, user: { login: 'sachiniyer' }, body: render(episodes, now) };
+  const calls = [];
+  const api = async (route, options = {}) => {
+    calls.push(route);
+    if (options.method === 'PATCH') {
+      record = { ...record, body: options.body };
+      return record;
+    }
+    if (route.includes('/issues/3932/comments')) return [record];
+    if (route.includes('/pulls?')) return pulls;
+    const match = Object.entries(artifactsByRoute).find(([part]) => route.includes(part));
+    return match?.[1] || [];
+  };
+  await sweep(api, 'owner/repo', now);
+  return { calls, episodes: readRecord(record).episodes };
+}
+test('usage-limit predicate recognizes all three captured variants', () => {
+  for (const body of limits) assert.equal(gate.codexEvidence.codexReportsReviewUsageLimit(body), true);
+});
+test('mixed history closes at first verdict, counts merged heads once, keeps recurrence', () => {
+  const episodes = aggregate(fixture(), t(12));
+  assert.deepEqual(episodes.map(e => [e.start, e.end, e.merged]), [
+    [t(2), t(5), [2]], [t(8), null, [4]],
+  ]);
+  assert.equal(episodes[0].latest.time, t(4));
+  const body = render(episodes, t(12));
+  assert.match(body, /unavailable since 2026-09-05T08/);
+  assert.match(body, /4.0h/);
+  assert.match(body, /Recovered: 2026-09-05T05/);
+  assert.deepEqual(readRecord({ body, user: { login: 'sachiniyer' } }).episodes, episodes);
+  assert.equal(readRecord({ body, user: { login: 'someone' } }), null);
+  assert.deepEqual(aggregate(fixture().reverse(), t(12)), episodes);
+});
+test('late verdict cannot cover an earlier merge and quoted notices do not start outages', () => {
+  const pulls = [{ number: 1, head: { sha: head }, merged_at: t(4), artifacts: [
+    comment(2, limits[1]), verdict(5), comment(6, `Codex Review\nReviewed commit: \`${head}\`\n${limits[0]}`),
+  ] }];
+  assert.deepEqual(aggregate(pulls, t(8)).map(e => [e.start, e.end, e.merged]), [[t(2), t(5), [1]]]);
+});
+test('sweep paginates both comment endpoints unfiltered, updates existing record', async () => {
+  const calls = [];
+  const existing = { id: 42, user: { login: 'sachiniyer' }, body: render([], t(1)) };
+  const api = async (route, options = {}) => {
+    calls.push([route, options]);
+    if (options.method === 'PATCH') return { ...existing, body: options.body };
+    if (route.includes('/issues/3932/comments')) return [existing];
+    if (route.includes('/pulls?')) return [{ number: 2, updated_at: t(9), merged_at: t(8), head: { sha: head } }];
+    if (route.endsWith('/pulls/2/comments?per_page=100')) return [comment(2, limits[1], { line: null, in_reply_to_id: 5 })];
+    if (route.endsWith('/issues/2/comments?per_page=100')) return [comment(3, limits[2])];
+    if (route.endsWith('/pulls/2/reviews?per_page=100')) return [];
+    throw new Error(route);
+  };
+  await sweep(api, 'owner/repo', t(10));
+  const write = calls.find(([, o]) => o.method === 'PATCH');
+  assert.equal(write[0], 'repos/owner/repo/issues/comments/42');
+  assert.match(write[1].body, /Degraded merges: 1/);
+  assert.equal(calls.filter(([, o]) => o.method === 'POST').length, 0);
+});
+test('sweep recomputes a recent completed episode with the current classifier', async () => {
+  const opener = comment(2, limits[1]);
+  const usage = comment(3, limits[0], { html_url: 'https://example.com/real-usage-limit' });
+  const finding = comment(4, findingBody, {
+    html_url: 'https://example.com/stale-finding',
+    pull_request_review_id: 5128730196,
+    commit_id: head,
+  });
+  const recovery = verdict(5);
+  const stale = {
+    start: t(2),
+    end: t(5),
+    latest: { time: t(4), url: finding.html_url, body: finding.body, kind: 'unrecognised' },
+    merged: [3984],
+    causes: ['usage-limit', 'unrecognised'],
+    recovery: recovery.html_url,
+  };
+  let record = {
+    id: 42,
+    user: { login: 'sachiniyer' },
+    body: render([stale], t(6)),
+  };
+  const api = async (route, options = {}) => {
+    if (options.method === 'PATCH') {
+      record = { ...record, body: options.body };
+      return record;
+    }
+    if (route.includes('/issues/3932/comments')) return [record];
+    if (route.includes('/pulls?')) return [{
+      number: 3984, updated_at: t(9), merged_at: t(4), head: { sha: head },
+    }];
+    if (route.includes('/pulls/3984/comments')) return [finding];
+    if (route.includes('/issues/3984/comments')) return [opener, usage];
+    if (route.includes('/pulls/3984/reviews')) return [recovery];
+    throw new Error(route);
+  };
+
+  await sweep(api, 'owner/repo', t(10));
+  const [actual] = readRecord(record).episodes;
+  assert.deepEqual(
+    { start: actual.start, end: actual.end, merged: actual.merged, recovery: actual.recovery },
+    { start: stale.start, end: stale.end, merged: stale.merged, recovery: stale.recovery },
+  );
+  assert.deepEqual(actual.causes, ['usage-limit']);
+  assert.deepEqual(actual.latest, {
+    time: t(3), url: usage.html_url, body: usage.body, kind: 'usage-limit',
+  });
+  assert.deepEqual(
+    readRecord({ body: render([actual], t(10)), user: { login: 'sachiniyer' } }).episodes,
+    [actual],
+  );
+});
+test('recompute scan includes newly recognised evidence before the stored start', async () => {
+  const now = '2026-09-06T00:30:00.001Z';
+  const newlyRecognised = comment(1,
+    'Codex Review: Something went wrong. Try again later by commenting "@codex review". Unknown error');
+  const recentNotice = comment(3, limits[0]);
+  const recentRecovery = verdict(5);
+  const recent = {
+    start: t(3), end: t(5),
+    latest: { time: t(3), url: recentNotice.html_url, body: recentNotice.body, kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: recentRecovery.html_url,
+  };
+  const result = await runRecordedSweep({
+    episodes: [recent],
+    pulls: [
+      { number: 2, updated_at: t(6), merged_at: null, head: { sha: head } },
+      { number: 1, updated_at: t(1), merged_at: null, head: { sha: head } },
+    ],
+    artifactsByRoute: {
+      '/issues/1/comments': [newlyRecognised],
+      '/issues/2/comments': [recentNotice],
+      '/pulls/2/reviews': [recentRecovery],
+    },
+    now,
+  });
+
+  assert.equal(result.episodes[0].start, t(1));
+  assert.deepEqual(result.episodes[0].causes, ['failure', 'usage-limit']);
+  assert.ok(result.calls.some(route => route.includes('/issues/1/comments')));
+});
+test('recompute scan recovers a missed episode after frozen history', async () => {
+  const now = '2026-09-06T00:30:00.001Z';
+  const frozenEnd = '2026-09-05T00:30:00.000Z';
+  const frozen = {
+    start: '2026-09-05T00:10:00.000Z', end: frozenEnd,
+    latest: { time: '2026-09-05T00:20:00.000Z', url: 'frozen-notice', body: limits[0], kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: 'frozen-recovery',
+  };
+  const missedNotice = comment(1, limits[1]);
+  const missedRecovery = verdict(2);
+  const recentNotice = comment(3, limits[0]);
+  const recentRecovery = verdict(5);
+  const recent = {
+    start: t(3), end: t(5),
+    latest: { time: t(3), url: recentNotice.html_url, body: recentNotice.body, kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: recentRecovery.html_url,
+  };
+  const result = await runRecordedSweep({
+    episodes: [frozen, recent],
+    pulls: [
+      { number: 3, updated_at: t(6), merged_at: null, head: { sha: head } },
+      { number: 2, updated_at: t(2), merged_at: null, head: { sha: head } },
+    ],
+    artifactsByRoute: {
+      '/issues/2/comments': [missedNotice],
+      '/pulls/2/reviews': [missedRecovery],
+      '/issues/3/comments': [recentNotice],
+      '/pulls/3/reviews': [recentRecovery],
+    },
+    now,
+  });
+
+  assert.deepEqual(result.episodes.map(episode => [episode.start, episode.end]), [
+    [frozen.start, frozen.end], [t(1), t(2)], [t(3), t(5)],
+  ]);
+});
+test('recompute scan never re-aggregates frozen history', async () => {
+  const now = '2026-09-06T00:30:00.001Z';
+  const frozenNotice = comment(0, limits[0], {
+    created_at: '2026-09-05T00:10:00.000Z', html_url: 'frozen-notice',
+  });
+  const frozenRecovery = verdict(0);
+  frozenRecovery.created_at = '2026-09-05T00:30:00.000Z';
+  frozenRecovery.html_url = 'frozen-recovery';
+  const frozen = {
+    start: frozenNotice.created_at, end: frozenRecovery.created_at,
+    latest: {
+      time: frozenNotice.created_at, url: frozenNotice.html_url,
+      body: frozenNotice.body, kind: 'usage-limit',
+    },
+    merged: [], causes: ['usage-limit'], recovery: frozenRecovery.html_url,
+  };
+  const recentNotice = comment(3, limits[0]);
+  const recentRecovery = verdict(5);
+  const recent = {
+    start: t(3), end: t(5),
+    latest: { time: t(3), url: recentNotice.html_url, body: recentNotice.body, kind: 'usage-limit' },
+    merged: [], causes: ['usage-limit'], recovery: recentRecovery.html_url,
+  };
+  const result = await runRecordedSweep({
+    episodes: [frozen, recent],
+    pulls: [
+      { number: 2, updated_at: t(6), merged_at: null, head: { sha: head } },
+      { number: 1, updated_at: t(6), merged_at: null, head: { sha: head } },
+    ],
+    artifactsByRoute: {
+      '/issues/1/comments': [frozenNotice],
+      '/pulls/1/reviews': [frozenRecovery],
+      '/issues/2/comments': [recentNotice],
+      '/pulls/2/reviews': [recentRecovery],
+    },
+    now,
+  });
+
+  assert.ok(result.calls.some(route => route.includes('/issues/1/comments')));
+  assert.equal(result.episodes.filter(episode => episode.start === frozen.start).length, 1);
+  assert.deepEqual(result.episodes[0], frozen);
+});
+test('gate duration uses shared record and falls back without changing policy', async () => {
+  const episodes = aggregate(fixture(), t(12));
+  const github = { rest: { issues: { listComments() {} } }, paginate: async () => [
+    { body: render(episodes, t(12)), user: { login: 'sachiniyer' }, html_url: 'https://example.com/record' },
+  ] };
+  assert.match(await gateNotice({ github, context: { repo: {} }, since: t(9), now: t(12) }), /since .*08:00.*4.0h ago/);
+  github.paginate = async () => { throw Error('offline'); };
+  assert.match(await gateNotice({ github, context: { repo: {} }, since: t(9), now: t(12) }), /3.0h ago.*record unavailable/);
+});
+test('a failed sweep preserves the previous record; a first sweep creates only one', async () => {
+  const writes = [];
+  let record;
+  let fail = false;
+  const api = async (route, options = {}) => {
+    if (options.method) {
+      writes.push(options.method);
+      record = { id: 42, user: { login: 'sachiniyer' }, body: options.body };
+      return record;
+    }
+    if (route.includes('/issues/3932/comments')) return record ? [record] : [];
+    if (route.includes('/pulls?')) return [{ number: 2, updated_at: t(9), merged_at: t(8), head: { sha: head } }];
+    if (route.includes('/issues/2/comments')) {
+      if (fail) throw Error('API read failed');
+      return [comment(2, limits[1])];
+    }
+    return [];
+  };
+  await sweep(api, 'owner/repo', t(10));
+  await sweep(api, 'owner/repo', t(11));
+  assert.deepEqual(writes, ['POST', 'PATCH']);
+  const previous = record.body;
+  fail = true;
+  // A failed scan still writes (#4629): the record marks itself incomplete and
+  // carries the previous episodes verbatim rather than posing as a clean read.
+  await sweep(api, 'owner/repo', t(12));
+  assert.deepEqual(writes, ['POST', 'PATCH', 'PATCH']);
+  assert.match(record.body, /incomplete/i);
+  assert.deepEqual(readRecord(record).episodes, readRecord({ body: previous, user: { login: 'sachiniyer' } }).episodes);
+});
+test('an expired completed episode is preserved after its artifacts leave scan history', async () => {
+  let artifacts = [comment(2, limits[1])];
+  let record;
+  let pulls = [{ number: 2, updated_at: t(9), merged_at: t(4), head: { sha: head } }];
+  const methods = [];
+  const api = async (route, options = {}) => {
+    if (options.method) {
+      methods.push(options.method);
+      record = { id: 42, user: { login: 'sachiniyer' }, body: options.body };
+      return record;
+    }
+    if (route.includes('/issues/3932/comments')) return record ? [record] : [];
+    if (route.includes('/pulls?')) return pulls;
+    return route.includes('/issues/2/comments') ? artifacts : [];
+  };
+  await sweep(api, 'owner/repo', t(5));
+  assert.equal(readRecord(record).episodes[0].end, null);
+  artifacts = [...artifacts, verdict(6), verdict(7)];
+  await sweep(api, 'owner/repo', t(8));
+  const closed = readRecord(record).episodes;
+  assert.equal(closed[0].end, t(6));
+  assert.deepEqual(closed[0].merged, [2]);
+  pulls = [];
+  await sweep(api, 'owner/repo', tomorrow(7));
+  assert.deepEqual(readRecord(record).episodes, closed);
+  assert.deepEqual(methods, ['POST', 'PATCH', 'PATCH']);
+});
+
+test('transient failure starts an outage through the shared artifact predicate', () => {
+  const failure = comment(2, 'Codex Review: Something went wrong. Try again later by commenting "@codex review". Unknown error');
+  const pulls = [{ number: 3951, head: { sha: head }, merged_at: t(3), artifacts: [failure, verdict(4)] }];
+  assert.deepEqual(aggregate(pulls, t(5)).map(e => [e.start, e.end, e.merged]), [[t(2), t(4), [3951]]]);
+});
+
+test('outage history records failure and quota causes without a false diagnosis', () => {
+  const failure = comment(2, 'Codex Review: Something went wrong. Unknown error');
+  const episodes = aggregate([{ number: 3953, head: { sha: head }, artifacts: [failure] }], t(5));
+  assert.deepEqual(episodes[0].causes, ['failure']);
+  assert.match(render(episodes, t(5)), /transient failure/);
+  assert.doesNotMatch(render(episodes, t(5)), /limit notice|usage.limit/);
+  const mixed = aggregate([{ number: 3953, head: { sha: head }, artifacts: [failure, comment(3, limits[0])] }], t(5));
+  assert.deepEqual(mixed[0].causes, ['failure', 'usage-limit']);
+  assert.equal(mixed[0].latest.kind, 'usage-limit');
+  assert.match(render(mixed, t(5)), /transient failure, usage limit/);
+});
+
+test('an unrecognised response extends an outage but never opens an episode alone', () => {
+  const unknown = comment(3, environmentMissing);
+  const alone = [{ number: 3985, head: { sha: head }, merged_at: t(4), artifacts: [unknown] }];
+  assert.deepEqual(aggregate(alone, t(5)), [], 'weak evidence must not open an outage or count a merge');
+
+  const active = aggregate([{
+    number: 3985,
+    head: { sha: head },
+    merged_at: t(4),
+    artifacts: [comment(2, limits[0]), unknown],
+  }], t(5));
+  assert.equal(active.length, 1);
+  assert.equal(active[0].start, t(2));
+  assert.deepEqual(active[0].causes, ['usage-limit', 'unrecognised']);
+  assert.deepEqual(active[0].merged, [3985]);
+  assert.deepEqual(active[0].latest, {
+    time: t(3), url: unknown.html_url, body: environmentMissing, kind: 'unrecognised',
+  });
+  assert.match(render(active, t(5)), /usage limit, unrecognised response/);
+
+  const afterRecovery = aggregate([{
+    number: 3985,
+    head: { sha: head },
+    merged_at: t(5),
+    artifacts: [comment(2, limits[0]), verdict(3), comment(4, environmentMissing)],
+  }], t(6));
+  assert.deepEqual(afterRecovery.map(e => [e.start, e.end, e.merged]), [[t(2), t(3), []]]);
+});
+
+test('top-level inline findings never add outage evidence or degrade a merge', () => {
+  const finding = comment(3, findingBody, {
+    id: 3947119505,
+    pull_request_review_id: 5128730196,
+    commit_id: head,
+  });
+  const opener = comment(2, limits[0]);
+  const episodes = aggregate([
+    { number: 3985, head: { sha: head }, merged_at: null, artifacts: [opener] },
+    { number: 3987, head: { sha: head }, merged_at: t(4), artifacts: [finding] },
+  ], t(5));
+
+  assert.deepEqual(episodes[0].causes, ['usage-limit']);
+  assert.deepEqual(episodes[0].latest, {
+    time: t(2), url: opener.html_url, body: limits[0], kind: 'usage-limit',
+  });
+  assert.deepEqual(episodes[0].merged, []);
+  assert.equal(gate.codexEvidence.classifyCodexUnavailableArtifact(finding), null);
+});
+
+test('finding-shaped pull-review replies keep their body guard', () => {
+  const reply = comment(3, findingBody, {
+    pull_request_review_id: 5128730196,
+    in_reply_to_id: 3947119505,
+    commit_id: head,
+  });
+
+  assert.equal(gate.codexEvidence.classifyCodexUnavailableArtifact(reply), null);
+  assert.deepEqual(
+    gate.codexEvidence.classifyCodexUnavailableArtifact({ ...reply, body: limits[0] }),
+    { kind: 'usage-limit' },
+  );
+});
+
+test('summary status rows never add outage evidence or replace the latest notice', () => {
+  const running = summaryArtifact([summaryRow(3, { status: 'Running' })]);
+  const episodes = aggregate([{ number: 1, head: { sha: head }, artifacts: [comment(2, limits[0]), running] }], t(5));
+  assert.deepEqual(episodes[0].causes, ['usage-limit']);
+  assert.equal(episodes[0].latest.body, limits[0]);
+});
+
+test('outage records escape comment delimiters and round-trip their state', () => {
+  const body = 'first --> second\n<!-- summary -->';
+  const episodes = [{ start: t(2), end: null, merged: [], causes: ['unrecognised'],
+    latest: { time: t(3), url: 'https://example.com/3', body, kind: 'unrecognised' } }];
+  const rendered = render(episodes, t(4));
+  assert.equal(rendered.slice(0, rendered.lastIndexOf(' -->')).includes('-->'), false);
+  assert.deepEqual(readRecord({ body: rendered, user: { login: 'sachiniyer' } }).episodes, episodes);
+});
+
+test('pre-episode unrecognised evidence does not degrade a merge, but in-episode evidence does', () => {
+  const before = comment(1, environmentMissing);
+  const opener = comment(2, limits[0]);
+  const inEpisode = comment(2, environmentMissing, { created_at: '2026-09-05T02:30:00.000Z' });
+  const base = [
+    { number: 1, head: { sha: head }, merged_at: t(3), artifacts: [before] },
+    { number: 2, head: { sha: head }, merged_at: null, artifacts: [opener] },
+  ];
+  assert.deepEqual(aggregate(base, t(4))[0].merged, []);
+  assert.deepEqual(aggregate([
+    { ...base[0], artifacts: [before, inEpisode] }, base[1],
+  ], t(4))[0].merged, [1]);
+});
+
+function summaryRow(hour, { status = 'Completed', commit = 'bbbbbbb' } = {}) {
+  const timestamp = hour == null ? '' : `<relative-time datetime="${t(hour)}"></relative-time>`;
+  return `| Code Review | ${status} ${timestamp} | \`${commit}\` | New commits |`;
+}
+function summaryArtifact(rows, extra = {}) {
+  return comment(9, `<!-- codex-pull-request-review-summary -->\n## Codex Review Summary\n${rows.join('\n')}`, extra);
+}
+test('older-head completed summary rows recover outages at every row time', () => {
+  const failure = comment(2, 'Codex Review: Something went wrong. Unknown error');
+  const collect = artifacts => aggregate([{ number: 3953, head: { sha: head }, artifacts }], t(8));
+  const summary = summaryArtifact([summaryRow(4)]);
+  const proof = comment(3, "### 💡 Codex Review\n\nDidn't find any major issues.", { commit_id: "b".repeat(40), submitted_at: t(3), id: 3606 });
+  const episodes = collect([failure, summary, proof]);
+  assert.equal(episodes[0].end, t(4));
+  assert.equal(episodes[0].recovery, summary.html_url);
+  // Every row is an event: neither the first row nor the current head is special.
+  const freshProof = { ...proof, id: 3607, created_at: t(6), submitted_at: t(6) };
+  const multiple = collect([failure, proof, comment(5, limits[0]), freshProof, summaryArtifact([summaryRow(7), summaryRow(4)])]);
+  assert.deepEqual(multiple.map(e => [e.start, e.end]), [[t(2), t(4)], [t(5), t(7)]]);
+  for (const invalid of [
+    summaryArtifact([summaryRow(4, { status: 'Running' })]),
+    summaryArtifact([summaryRow(null)]),
+    summaryArtifact([summaryRow(4, { commit: '' })]),
+    summaryArtifact([summaryRow(4)], { user: { login: 'someone' } }),
+    comment(9, `Quoted summary:\n${summary.body}`),
+  ]) assert.equal(collect([failure, invalid])[0].end, null);
+});
+
+test('record-backed notices use the episode causes for the entire adopted span', async () => {
+  for (const [causes, kind, expected] of [
+    [['failure', 'usage-limit'], 'usage-limit', 'unavailable since'],
+    [['usage-limit', 'failure'], 'failure', 'unavailable since'],
+    [['failure'], 'usage-limit', 'unavailable since'],
+    [['usage-limit'], 'failure', 'unavailable since'],
+    [['failure'], 'failure', 'unavailable after a transient failure since'],
+    [['usage-limit'], 'usage-limit', 'usage-limited since'],
+    [['usage-limit', 'unrecognised'], 'unrecognised', 'unavailable since'],
+    [undefined, 'usage-limit', 'unavailable since'],
+  ]) {
+    const episodes = [{ start: t(2), end: null, causes, merged: [], latest: { time: t(3), body: '', url: 'notice' } }];
+    const github = { rest: { issues: { listComments() {} } }, paginate: async () => [
+      { user: { login: 'sachiniyer' }, body: render(episodes, t(4)), html_url: 'record' },
+    ] };
+    const notice = await gateNotice({ github, context: { repo: {} }, since: t(3), now: t(4), kind });
+    assert.ok(notice.startsWith(`Codex ${expected} ${t(2)}, 2.0h ago`), notice);
+    if (expected === 'unavailable since' && causes) {
+      const labels = causes.map(c => ({
+        failure: 'transient failure', 'usage-limit': 'usage limit', unrecognised: 'unrecognised response',
+      })[c]).join(', then ');
+      assert.ok(notice.includes(`(${labels})`), notice);
+    }
+  }
+});
+
+test('missing and unreadable records retain local cause and local duration', async () => {
+  for (const kind of ['failure', 'usage-limit', 'unrecognised']) {
+    for (const paginate of [async () => [], async () => { throw Error('offline'); }]) {
+      const github = { rest: { issues: { listComments() {} } }, paginate };
+      const notice = await gateNotice({ github, context: { repo: {} }, since: t(3), now: t(4), kind });
+      const label = ({
+        failure: 'unavailable after a transient failure',
+        'usage-limit': 'usage-limited',
+        unrecognised: 'unavailable after an unrecognised response',
+      })[kind];
+      assert.ok(notice.startsWith(`Codex ${label} since ${t(3)}, 1.0h ago`), notice);
+    }
+  }
+});
+
+test('#4052: a Completed row without a review artifact cannot close an episode', () => {
+  for (const sha of [head, 'b'.repeat(40)]) {
+    const summary = summaryArtifact([summaryRow(3, { commit: sha.slice(0, 7) })]);
+    const episodes = aggregate([{ number: 4051, head: { sha: head }, merged_at: t(4),
+      artifacts: [comment(2, limits[0]), summary] }], t(5));
+    assert.equal(episodes[0].end, null);
+    assert.deepEqual(episodes[0].merged, [4051]);
+  }
+});
+
+test('#4052: superseded rows need matching fresh corroboration and cannot backdate a merge', () => {
+  const old = 'b'.repeat(40);
+  const summary = summaryArtifact([summaryRow(3, { commit: old.slice(0, 7) })]);
+  const review = comment(5, "### 💡 Codex Review\n\nDidn't find any major issues.", { id: 3606, commit_id: old, submitted_at: t(5) });
+  const pull = { number: 4051, head: { sha: head }, created_at: t(0), merged_at: t(4),
+    commitDates: { [old]: t(1) }, artifacts: [comment(2, limits[0]), summary, review] };
+  assert.deepEqual(aggregate([pull], t(6)).map(e => [e.end, e.merged]), [[t(5), [4051]]]);
+  for (const invalid of [
+    { ...review, commit_id: head },
+    { ...review, user: { login: 'someone' } },
+    { ...review, created_at: t(1), submitted_at: t(1) },
+  ]) assert.equal(aggregate([{ ...pull, artifacts: [pull.artifacts[0], summary, invalid] }], t(6))[0].end, null);
+});
+
+test('#4052: live sweep reads commit and paginated push anchors before accepting a row', async () => {
+  const summary = summaryArtifact([summaryRow(4, { commit: head.slice(0, 7) })]);
+  const review = comment(2, "### 💡 Codex Review\n\nDidn't find any major issues.", { id: 3606, commit_id: head, submitted_at: t(2) });
+  let unreadable = false;
+  const calls = [];
+  const writes = [];
+  const api = async (route, options = {}) => {
+    calls.push([route, options]);
+    if (options.method) { writes.push(options.body); return { body: options.body }; }
+    if (route.includes('/issues/3932/comments')) return [];
+    if (route.includes('/pulls?')) return [{ number: 4051, head: { sha: head }, created_at: t(0), updated_at: t(5), merged_at: t(5) }];
+    if (route.includes('/issues/4051/comments')) return [comment(3, limits[0]), summary];
+    if (route.includes('/pulls/4051/reviews')) return [review];
+    if (route.includes('/pulls/4051/comments')) return [];
+    if (route.includes('/commits/')) return { sha: head, commit: { committer: { date: t(1) } } };
+    if (route === 'graphql') {
+      if (unreadable) throw Error('push history unavailable');
+      const first = !options.variables.cursor;
+      return { data: { repository: { pullRequest: { timelineItems: {
+        pageInfo: { hasNextPage: first, endCursor: first ? 'next' : null },
+        nodes: first ? [] : [{ createdAt: t(3), afterCommit: { oid: head } }],
+      } } } } };
+    }
+    throw Error(route);
+  };
+  await sweep(api, 'owner/repo', t(6));
+  const record = readRecord({ body: writes[0], user: { login: 'sachiniyer' } });
+  assert.equal(record.episodes[0].end, null, 'the review predates the force-push');
+  assert.deepEqual(record.episodes[0].merged, [4051]);
+  assert.equal(calls.filter(([route]) => route === 'graphql').length, 2);
+  unreadable = true;
+  // The unreadable push history degrades to an incomplete record (#4629):
+  // the write still happens, says the scan was partial, and — the fake never
+  // serves the record back — carries an empty episode list rather than the
+  // partial scan's.
+  await sweep(api, 'owner/repo', t(6));
+  assert.equal(writes.length, 2);
+  assert.match(writes[1], /incomplete/i);
+});
+
+test('3954286650: an unrecognised submitted review cannot turn a row into recovery', () => {
+  const response = comment(3, environmentMissing, { id: 3606, commit_id: head, submitted_at: t(3) });
+  const summary = summaryArtifact([summaryRow(4, { commit: head.slice(0, 7) })]);
+  const [episode] = aggregate([{ number: 4053, head: { sha: head }, merged_at: t(5),
+    artifacts: [comment(2, limits[0]), response, summary] }], t(6));
+  assert.equal(episode.end, null);
+  assert.equal(episode.latest.kind, 'unrecognised');
+  assert.equal(episode.latest.body, environmentMissing);
+  assert.deepEqual(episode.merged, [4053]);
+});
+
+test('3954623225: a bare repeat row cannot close an outage using an earlier review', () => {
+  for (const sha of [head, 'b'.repeat(40)]) {
+    const review = comment(1, "### 💡 Codex Review\n\nDidn't find any major issues.", {
+      id: 3606, commit_id: sha, submitted_at: t(1) });
+    const summary = summaryArtifact([summaryRow(3, { commit: sha.slice(0, 7) })]);
+    const collect = artifacts => aggregate([{ number: 4053, head: { sha: head },
+      created_at: t(0), artifacts }], t(5));
+    const limit = comment(2, limits[0], { commit_id: sha });
+    assert.equal(collect([review, limit, summary])[0].end, null);
+    const fresh = { ...review, id: 3954623225, created_at: t(3), submitted_at: t(3) };
+    assert.equal(collect([review, limit, summary, fresh])[0].end, t(3));
+    assert.deepEqual(collect([review, summary]), []);
+  }
+});
+
+test('#4078: merges after recovery belong to the latest qualifying notice episode', () => {
+  const recovery = { number: 90, head: { sha: head }, artifacts: [verdict(3), verdict(6), verdict(9)] };
+  const late = { number: 4051, head: { sha: head }, merged_at: t(10), artifacts: [comment(2, limits[0])] };
+  const repeated = { number: 4031, head: { sha: head }, merged_at: t(10),
+    artifacts: [comment(8, limits[0]), comment(2, limits[0]), comment(5, limits[0]), comment(11, limits[0])] };
+  const inside = { number: 3, head: { sha: head }, merged_at: t(5), artifacts: [comment(5, limits[0])] };
+  const covered = { number: 4, head: { sha: head }, merged_at: t(10), artifacts: [comment(2, limits[0]), verdict(1)] };
+  const pulls = [recovery, late, repeated, inside, covered];
+  const episodes = aggregate(pulls, t(12));
+  assert.deepEqual(episodes.map(e => [e.start, e.end, e.merged]), [
+    [t(2), t(3), [4051]], [t(5), t(6), [3]], [t(8), t(9), [4031]], [t(11), null, []],
+  ]);
+  assert.deepEqual(episodes.flatMap(e => e.merged).sort((a, b) => a - b), [3, 4031, 4051]);
+  assert.deepEqual(aggregate(pulls.reverse(), t(12)), episodes);
+});
+
+test('#4078: a merge after the freeze boundary is attributed once to its retained episode', async () => {
+  const frozen = aggregate([{ number: 1, head: { sha: head },
+    artifacts: [comment(2, limits[0]), verdict(3, 'b'.repeat(40))] }], t(4))[0];
+  const now = tomorrow(8);
+  const pulls = [{ number: 1, updated_at: tomorrow(7), merged_at: tomorrow(6), head: { sha: head } }];
+  const artifactsByRoute = { '/issues/1/comments': [comment(2, limits[0]), verdict(3, 'b'.repeat(40))] };
+  const first = await runRecordedSweep({ episodes: [frozen], pulls, artifactsByRoute, now });
+  assert.deepEqual(first.episodes, [{ ...frozen, merged: [1] }]);
+  const repeat = await runRecordedSweep({ episodes: first.episodes, pulls, artifactsByRoute, now });
+  assert.deepEqual(repeat.episodes, first.episodes);
+  const newer = await runRecordedSweep({ episodes: first.episodes, pulls,
+    artifactsByRoute: { '/issues/1/comments': [...artifactsByRoute['/issues/1/comments'],
+      comment(4, limits[0], { created_at: tomorrow(4) })] }, now });
+  assert.deepEqual(newer.episodes.map(e => [e.start, e.merged]), [[t(2), []], [tomorrow(4), [1]]]);
+});
+
+// #4241: the count must accept the same head names the gate accepted at merge
+// time. #4233's shape — Codex reviewed the only content commit hours before the
+// outage, and the merged head was a clean update-branch merge of it with
+// master. Recorded as degraded before this fix; a real review, not an escape.
+test('a verdict bound to a proven content head covers the merged head', () => {
+  const CONTENT = '8d6fa799576f23afdc5ca227c91834000a2729c0';
+  const LAP = '9e27c60100000000000000000000000000000000';
+  const MERGE = '506829439dcdd89713b7544f7a7bb453f7c78ac9';
+  const contentHead = { oid: CONTENT, committedDate: t(1), evidenceHeadOids: [LAP, CONTENT] };
+  const pull = (extra = {}, artifacts = [comment(3, limits[0]), verdict(1, CONTENT)]) =>
+    ({ number: 4233, head: { sha: MERGE }, merged_at: t(5), artifacts, ...extra });
+
+  // Without the proof nothing changed: the head-only rule still counts it.
+  assert.deepEqual(aggregate([pull()], t(6))[0].merged, [4233]);
+  // With it, the verdict on the terminal content head covers the merge.
+  assert.deepEqual(aggregate([pull({ contentHead })], t(6))[0].merged, []);
+  // A verdict on a tree-proven intermediate head covers it too (#4239's set).
+  assert.deepEqual(aggregate([pull({ contentHead }, [comment(3, limits[0]), verdict(1, LAP)])], t(6))[0].merged, []);
+  // A verdict naming an unrelated commit still leaves the merge degraded.
+  assert.deepEqual(aggregate([pull({ contentHead }, [comment(3, limits[0]), verdict(1, 'b'.repeat(40))])], t(6))[0].merged, [4233]);
+});
+
+// The same pin through the live sweep: the api fake serves the commit, compare
+// and tree reads updateBranchContentHead makes, so the counted set is the one
+// the gate's proof produced — not a restated copy.
+test('the sweep proves the content head before counting a merge degraded', async () => {
+  const CONTENT = '8d6fa799576f23afdc5ca227c91834000a2729c0';
+  const MERGE = '506829439dcdd89713b7544f7a7bb453f7c78ac9';
+  const BASE = '9ac0ffee00000000000000000000000000000000';
+  const MERGE_BASE = 'ba5eba5e00000000000000000000000000000000';
+  const PARENT = 'aaaa000000000000000000000000000000000000';
+  const commits = {
+    [MERGE]: { date: t(5), parents: [CONTENT, BASE] },
+    [CONTENT]: { date: t(1), parents: [PARENT] },
+    [BASE]: { date: t(4), parents: [MERGE_BASE] },
+    [MERGE_BASE]: { date: t(0), parents: [] },
+    [PARENT]: { date: t(0), parents: [] },
+  };
+  const byRef = (ref) => {
+    const sha = Object.keys(commits).find(candidate => candidate.startsWith(ref));
+    const entry = sha && commits[sha];
+    return entry && { sha, commit: { committer: { date: entry.date }, tree: { sha } },
+      parents: entry.parents.map(parent => ({ sha: parent })) };
+  };
+  for (const contained of [true, false]) {
+    const writes = [];
+    const calls = [];
+    const api = async (route, options = {}) => {
+      calls.push(route);
+      if (options.method) { writes.push(options.body); return { body: options.body }; }
+      if (route.includes('/issues/3932/comments')) return [];
+      if (route.includes('/pulls?')) return [{ number: 4233, created_at: t(0), updated_at: t(5),
+        merged_at: t(5), head: { sha: MERGE }, base: { ref: 'master' } }];
+      if (route.includes('/issues/4233/comments')) return [verdict(2, CONTENT), comment(3, limits[0])];
+      if (route.includes('/pulls/4233/comments') || route.includes('/pulls/4233/reviews')) return [];
+      if (route.includes('/compare/')) return {
+        status: contained ? 'behind' : 'diverged', merge_base_commit: { sha: MERGE_BASE } };
+      if (route.includes('/git/trees/')) return {
+        sha: route.split('/git/trees/')[1].split('?')[0], truncated: false, tree: [] };
+      if (route.includes('/commits/')) {
+        const commit = byRef(route.split('/commits/')[1].split('?')[0]);
+        if (!commit) throw new Error(`unknown commit ${route}`);
+        return commit;
+      }
+      throw new Error(route);
+    };
+    await sweep(api, 'owner/repo', t(6));
+    const record = readRecord({ body: writes[0], user: { login: 'sachiniyer' } });
+    if (contained) {
+      assert.deepEqual(record.episodes[0].merged, [],
+        'a verdict bound to the proven content head covers the merged head');
+      assert.match(writes[0], /Degraded merges: 0/);
+      assert.ok(calls.some(route => route.includes('/compare/master...')),
+        'the update-branch proof ran rather than being bypassed');
+    } else {
+      assert.deepEqual(record.episodes[0].merged, [4233],
+        'a merge the proof does not accept keeps the head-only count');
+    }
+  }
+});
+
+// #4629: the live sweep drives `gh api` through an execFileSync helper, and
+// one transient failure inside the multi-hundred-call scan must not kill the
+// run. These stub the exec layer itself — a dropped body, a transport
+// timeout, a 5xx, a secondary-rate-limit 403, and a sustained outage.
+function ghFailure(stderr, { status = 1 } = {}) {
+  const error = new Error(`Command failed: gh api\n${stderr}`);
+  error.status = status;
+  error.stderr = stderr;
+  return error;
+}
+
+// Replays gh's wire format: paginated endpoints emit each page as one JSON
+// array line (`--jq '@json'`), single reads and writes a single document.
+// `handler` answers by route (and sees argv, so it can fail a write) and may
+// throw a process error or return a raw body string.
+function fakeGh(handler) {
+  const calls = [];
+  const writes = [];
+  const execFileSync = (command, args, { input } = {}) => {
+    calls.push(args);
+    assert.equal(command, 'gh');
+    const answer = handler(args[1], args);
+    if (typeof answer === 'string') return answer;
+    if (args.includes('--method')) {
+      writes.push(JSON.parse(input).body);
+      return JSON.stringify({ id: 42, html_url: 'https://example.com/record' });
+    }
+    return JSON.stringify(answer);
+  };
+  return { calls, writes, execFileSync };
+}
+const callCount = (calls, part) => calls.filter(args => String(args[1]).includes(part)).length;
+const writeCount = (calls) => calls.filter(args => args.includes('--method')).length;
+const outageScanFixture = (route, args = []) => {
+  if (args.includes('--method')) return { id: 42, html_url: 'https://example.com/record' };
+  if (route.includes('/issues/3932/comments')) return [];
+  if (route.includes('/pulls?')) return [{ number: 2, created_at: t(0), updated_at: t(9), merged_at: t(8), head: { sha: head } }];
+  if (route.includes('/issues/2/comments')) return [comment(2, limits[1])];
+  if (route.includes('/pulls/2/comments') || route.includes('/pulls/2/reviews')) return [];
+  throw new Error(`unstubbed route ${route}`);
+};
+
+test('#4629: transient gh api failures retry and the sweep completes', async () => {
+  for (const [name, part, fail] of [
+    ['an empty body', '/pulls?', () => ''],
+    ['a truncated page line', '/pulls/2/comments', () => '[{"number":2,"updated_at"'],
+    ['an empty page envelope', '/pulls/2/comments', () => ''],
+    ['a non-collection page', '/pulls/2/comments', () => '{"message":"Server Error"}'],
+    ['a transport timeout', '/pulls/2/reviews', () => {
+      throw ghFailure('Get "https://api.github.com/x": dial tcp 140.82.113.6:443: i/o timeout');
+    }],
+    ['a 5xx', '/pulls?', () => { throw ghFailure('gh: Server Error (HTTP 502)'); }],
+    ['a secondary rate limit', '/issues/2/comments', () => {
+      throw ghFailure('gh: You have exceeded a secondary rate limit. (HTTP 403)');
+    }],
+  ]) {
+    let failing = true;
+    const { calls, writes, execFileSync } = fakeGh((route, args) => {
+      if (failing && route.includes(part)) { failing = false; return fail(); }
+      return outageScanFixture(route, args);
+    });
+    const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
+    await sweep(api, 'owner/repo', t(10));
+    assert.equal(callCount(calls, part), 2, `${name}: the failed call must be retried`);
+    assert.equal(writes.length, 1, name);
+    assert.match(writes[0], /unavailable since 2026-09-05T02/, name);
+    assert.doesNotMatch(writes[0], /incomplete/i, name);
+  }
+});
+
+test('#4629: a gh failure that outlives its retries writes an incomplete record', async () => {
+  const previous = { start: t(2), end: null, merged: [2], causes: ['usage-limit'],
+    latest: { time: t(2), url: 'https://example.com/2', body: limits[1], kind: 'usage-limit' } };
+  const existing = { id: 42, user: { login: 'sachiniyer' }, body: render([previous], t(5)) };
+  const { calls, writes, execFileSync } = fakeGh((route, args) => {
+    if (route.includes('/issues/3932/comments')) return [existing];
+    if (route.includes('/pulls?')) throw ghFailure('Get "https://api.github.com/x": dial tcp: i/o timeout');
+    return outageScanFixture(route, args);
+  });
+  const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
+  await sweep(api, 'owner/repo', t(10));
+  assert.equal(callCount(calls, '/pulls?'), 4, 'the read is retried on a bounded schedule then stops');
+  assert.equal(writes.length, 1, 'a scan that cannot finish still writes — the record marks itself incomplete');
+  assert.match(writes[0], /incomplete/i);
+  assert.match(writes[0], /Status: unavailable as of 2026-09-05T05:00:00\.000Z \(last complete observation\)/);
+  assert.doesNotMatch(writes[0], /Status: unavailable\./);
+  const record = readRecord({ body: writes[0], user: { login: 'sachiniyer' } });
+  assert.deepEqual(record.episodes, [previous],
+    'an incomplete scan keeps the last complete episodes rather than restating them from partial data');
+  assert.equal(record.observedAt, t(5), 'observedAt stays at the last complete sweep');
+  assert.ok(record.incomplete?.at, 'the record marks the scan incomplete');
+});
+
+test('#4629: a real 4xx answer is not retried, and still degrades to a marked record', async () => {
+  for (const stderr of [
+    'gh: Not Found (HTTP 404)',
+    'gh: Validation Failed (HTTP 422)',
+    'gh: Forbidden. This integration is not allowed to read that. (HTTP 403)',
+  ]) {
+    const { calls, writes, execFileSync } = fakeGh((route, args) => {
+      if (route.includes('/pulls/2/comments')) throw ghFailure(stderr);
+      return outageScanFixture(route, args);
+    });
+    const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
+    await sweep(api, 'owner/repo', t(10));
+    assert.equal(callCount(calls, '/pulls/2/comments'), 1, `a 4xx verdict is not retried: ${stderr}`);
+    assert.equal(writes.length, 1);
+    assert.match(writes[0], /incomplete/i);
+  }
+});
+
+test('#4629: a record-create POST replays only a rate-limit refusal, never an ambiguous failure', async () => {
+  for (const [name, failPost, attempts, matches] of [
+    ['a 5xx answer', () => { throw ghFailure('gh: Server Error (HTTP 502)'); }, 1, /502/],
+    ['a transport failure', () => { throw ghFailure('Post "https://api.github.com/x": EOF'); }, 1, /EOF/],
+    // The POST may have committed; an unreadable response cannot tell us.
+    ['an unreadable response body', () => '{"id":42', 1, /JSON|end of JSON/],
+    // A rate-limit refusal is a definitive "nothing was created" — replayable.
+    ['a rate-limit refusal', () => {
+      throw ghFailure('gh: You have exceeded a secondary rate limit. (HTTP 403)');
+    }, 2, /unavailable since/],
+  ]) {
+    let failing = true;
+    const { calls, writes, execFileSync } = fakeGh((route, args) => {
+      if (failing && args.includes('--method')) { failing = false; return failPost(); }
+      return outageScanFixture(route, args);
+    });
+    const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
+    if (attempts === 1) {
+      await assert.rejects(sweep(api, 'owner/repo', t(10)), matches, name);
+    } else {
+      await sweep(api, 'owner/repo', t(10));
+      assert.match(writes[0], matches, name);
+    }
+    assert.equal(writeCount(calls), attempts,
+      `${name}: an ambiguous create is never replayed — a duplicate record breaks every later sweep`);
+  }
+});
+
+test('#4629: an unreadable policy-record read retries, then fails without a blind duplicate POST', async () => {
+  const { calls, writes, execFileSync } = fakeGh((route, args) => {
+    if (route.includes('/issues/3932/comments') && !args.includes('--method')) return '';
+    return outageScanFixture(route, args);
+  });
+  const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
+  await assert.rejects(sweep(api, 'owner/repo', t(10)), /no output/);
+  assert.equal(callCount(calls, '/issues/3932/comments'), 4, 'the bootstrap read still exhausts its retries');
+  assert.equal(writes.length, 0, 'no record may be created while the existing one is unreadable');
+});
+
+test('#4629: an incomplete record never claims a still-running outage across the unobserved gap', async () => {
+  const episodes = [{ start: t(2), end: null, merged: [2], causes: ['usage-limit'],
+    latest: { time: t(2), url: 'https://example.com/2', body: limits[1], kind: 'usage-limit' } }];
+  const body = render(episodes, t(9), { at: t(9), reason: 'dial tcp: i/o timeout', observedAt: t(5) });
+  assert.match(body, /availability — unknown \(sweep incomplete\)/);
+  assert.match(body, /3\.0h elapsed/, 'elapsed time stops at the last complete observation');
+  assert.match(body, /Status: unavailable as of 2026-09-05T05/, 'the open episode is labelled a last observation, not current');
+  assert.doesNotMatch(body, /7\.0h/, 'must not stretch a stale outage across the unobserved gap');
+  const github = { rest: { issues: { listComments() {} } }, paginate: async () => [
+    { user: { login: 'sachiniyer' }, body, html_url: 'https://example.com/record' },
+  ] };
+  // The gate falls back to the duration this PR observed itself rather than
+  // adopting the stale active episode's start.
+  const notice = await gateNotice({ github, context: { repo: {} }, since: t(8), now: t(12), kind: 'usage-limit' });
+  assert.ok(notice.startsWith(`Codex usage-limited since ${t(8)}, 4.0h ago`), notice);
+  assert.match(notice, /sweep incomplete/);
+});
+
+test('#4629: a rate-limit refusal waits at least GitHub\'s documented minimum between retries', async () => {
+  for (const stderr of [
+    'gh: You have exceeded a secondary rate limit. (HTTP 403)',
+    // GraphQL secondary limits can return HTTP 200 — gh exits nonzero on the
+    // errors payload with no `HTTP nnn` for ghHttpStatus to read.
+    'gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+  ]) {
+    let failures = 2;
+    const sleeps = [];
+    const { execFileSync } = fakeGh((route, args) => {
+      if (failures && route.includes('/pulls/2/reviews')) {
+        failures -= 1;
+        throw ghFailure(stderr);
+      }
+      return outageScanFixture(route, args);
+    });
+    const api = createGhApi({ execFileSync, sleep: async ms => { sleeps.push(ms); }, delays: [0, 0, 0], log: () => {} });
+    await sweep(api, 'owner/repo', t(10));
+    assert.deepEqual(sleeps, [60000, 60000],
+      `secondary-limit retries take the documented ≥60s floor, not the transport schedule: ${stderr}`);
+  }
+});
+
+// #5776: a stacked PR's recorded base branch is deleted when the stack
+// collapses, so the gate's compare 404s. That one PR is unprovable; the sweep
+// completes. A 5xx (or a 404 with the base ref still present) still aborts.
+test('#5776: a deleted stacked base branch does not abort the sweep', async () => {
+  const MERGE = '0bc834a39427bd57adc64e4c3c6d0bc8bea55c11';
+  const BASE = '9ac0ffee00000000000000000000000000000000';
+  const PARENT = 'aaaa000000000000000000000000000000000000';
+  const run = async ({ compare, ref }) => {
+    const writes = [];
+    const api = async (route, options = {}) => {
+      if (options.method) { writes.push(options.body); return { body: options.body }; }
+      if (route.includes('/issues/3932/comments')) return [];
+      if (route.includes('/pulls?')) return [{ number: 5454, created_at: t(0), updated_at: t(5),
+        merged_at: t(5), head: { sha: MERGE }, base: { ref: 'matt/project-colors' } }];
+      if (route.includes('/issues/5454/comments')) return [comment(3, limits[0])];
+      if (route.includes('/pulls/5454/comments') || route.includes('/pulls/5454/reviews')) return [];
+      if (route.includes('/compare/')) return compare();
+      if (route.includes('/git/ref/heads/')) return ref();
+      if (route.includes(`/commits/${MERGE}`)) return { sha: MERGE, parents: [{ sha: PARENT }, { sha: BASE }],
+        commit: { committer: { date: t(5) } } };
+      throw new Error(route);
+    };
+    const logs = [];
+    const orig = console.error;
+    console.error = (m) => logs.push(m);
+    try { await sweep(api, 'owner/repo', t(6)); } finally { console.error = orig; }
+    return { body: writes[0], logs };
+  };
+  const notFound = () => { throw ghFailure('gh: Not Found (HTTP 404)'); };
+
+  // Base ref gone: complete record, the PR counted on its merged head only.
+  const done = await run({ compare: notFound, ref: notFound });
+  assert.doesNotMatch(done.body, /sweep incomplete/);
+  assert.match(done.body, /Degraded merges: 1 \(#5454\)/);
+  assert.ok(done.logs.some(l => /#5454 content head unprovable.*project-colors/.test(l)));
+
+  // 5xx on the compare: still fails the sweep closed.
+  const flake = await run({ compare: () => { throw ghFailure('gh: Server Error (HTTP 502)'); }, ref: notFound });
+  assert.match(flake.body, /sweep incomplete/);
+
+  // A 404 while the base ref still exists is not "deleted base": fail closed.
+  const present = await run({ compare: notFound, ref: () => ({ ref: 'refs/heads/matt/project-colors' }) });
+  assert.match(present.body, /sweep incomplete/);
+
+  // The confirming ref read failing for any reason but 404 also fails closed.
+  const authFail = await run({ compare: notFound, ref: () => { throw ghFailure('gh: Bad credentials (HTTP 401)'); } });
+  assert.match(authFail.body, /sweep incomplete/);
+});

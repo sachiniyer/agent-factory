@@ -37,7 +37,7 @@ func TestArchiveReportJSONPreservesInvalidUTF8PathBytes(t *testing.T) {
 	require.Len(t, restored.RetainedTrees, 1)
 	require.Len(t, restored.RetainedTrees[0].Skipped, 1)
 	assert.Equal(t, rawRoot, restored.RetainedTrees[0].filesystemPath())
-	assert.Equal(t, rawRelative, restored.RetainedTrees[0].Skipped[0].filesystemPath())
+	assert.Equal(t, rawRelative, restored.RetainedTrees[0].Skipped[0].FilesystemPath())
 	assert.NotEmpty(t, restored.RetainedTrees[0].Skipped[0].PathBytes,
 		"invalid filename bytes need a lossless field beside the JSON display string")
 }
@@ -59,6 +59,40 @@ func TestArchiveReportWarningBoundsSkippedPaths(t *testing.T) {
 	assert.Contains(t, warning, "private-019")
 	assert.NotContains(t, warning, "private-020")
 	assert.Less(t, len(warning), 5000, "wire warnings must stay bounded; the session JSON owns the full report")
+}
+
+// TestArchiveReportWarningKeepsUnknownReasonOnOneField pins the one field in
+// this warning that is NOT a number and NOT %q-quoted. A stored reason is
+// rendered with %s, and it is a decoded string rather than a compile-time
+// constant: an unknown value from a newer or corrupt record reaches the format
+// verbatim. The warning is a single-line diagnostic — one log line, one TUI row,
+// one error string — so a newline in that value splits it, and a paren or a
+// quote closes its field early.
+//
+// The bug-report redactor reads this format to take the user file names back out
+// of a bundled log (#3553), and each of those characters breaks that read in a
+// way that leaves a name behind: a newline puts the entries after it on a line
+// with no anchor, and a quote desynchronizes the walk over %q tokens. Both are
+// the emitter's to prevent — a single-line row cannot be reassembled downstream.
+func TestArchiveReportWarningKeepsUnknownReasonOnOneField(t *testing.T) {
+	report := ArchiveReport{RetainedTrees: []ArchiveRetainedTree{testRetainedTree(
+		"/worktrees/.af-source-0", 2,
+		ArchiveSkippedEntry{Path: "first.txt", Reason: ArchiveSkipReason("read failed\n  (detail) \"quoted\"")},
+		ArchiveSkippedEntry{Path: "private/second.txt", Reason: ArchiveSkipPermissionDenied},
+	)}}
+
+	warning := report.Warning("restore")
+
+	assert.NotContains(t, warning, "\n", "an embedded newline splits this single-line diagnostic across log lines and TUI rows")
+	assert.NotContains(t, warning, `"read`, "a quote in a reason opens a field that is not a path")
+	// The reason still says something: an unknown value is passed through so a
+	// report written by another binary is not rendered as a blank.
+	assert.Contains(t, warning, "read failed")
+	// Both entries stay on the one line, each still its own "<path>" (<reason>).
+	assert.Contains(t, warning, `"first.txt" (read failed`)
+	assert.Contains(t, warning, `"private/second.txt" (permission denied)`)
+	// The known reason is a constant and is untouched by the sanitizing.
+	assert.Equal(t, "permission denied", skipReasonText(ArchiveSkipPermissionDenied))
 }
 
 func TestArchiveWorktreePreservesPriorOmissions(t *testing.T) {

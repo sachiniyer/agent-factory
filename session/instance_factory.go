@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // Options for creating a new instance
@@ -44,10 +45,28 @@ type InstanceOptions struct {
 	SandboxCredentials SandboxCredentials
 	// Path is the path to the workspace.
 	Path string
+	// RepoIdentityPath is the owning repo's canonical identity path
+	// (RepoContext.IdentityPath). The daemon supplies it at create so worktree-
+	// less sandbox backends can keep projecting Worktree.RepoPath with the same
+	// value the pending row announced — under a bare repository's linked-worktree
+	// registration it differs from Path, which is the operational checkout.
+	// Empty leaves the projection to its Path fallback.
+	RepoIdentityPath string
 	// Program is the program to run in the instance (e.g. "claude", "aider --model ollama_chat/gemma3:1b")
 	Program string
 	// Account scopes the session to a registered credential account (#3051).
 	Account string
+	// AccountSource says where a NON-REQUESTED Account came from, as a sentence
+	// naming the config key, its file, and how to clear it (#3386). Empty when the
+	// caller asked for the account.
+	//
+	// It exists only for the refusals below. `--account work` on a hook-backed repo
+	// is answered by "omit --account", which is exactly right for someone who typed
+	// it — and useless for someone whose account arrived from a project's
+	// `default_accounts`, because there is no flag on their command to omit. The
+	// refusal is the same refusal; only the remedy differs, so only the remedy is
+	// carried.
+	AccountSource string
 	// ProgramResolved marks Program as the final command selected by an outer
 	// runtime. It is internal to the sandbox agent-server handoff; ordinary
 	// callers pass an agent enum and leave this false.
@@ -55,14 +74,19 @@ type InstanceOptions struct {
 	// ForceRemote forces the instance to use the remote hook backend,
 	// even if the repo config would default to local. It is the pre-Phase-4
 	// hook selector, equivalent to Backend == BackendHook, and takes precedence
-	// over a config-declared backend (it is set by the TUI's "new remote
-	// session" action, which means "hook now" regardless of config).
+	// over a config-declared backend. Retained for older wire clients; new
+	// clients and the TUI use Backend, which takes precedence over this flag.
 	ForceRemote bool
 	// Backend, when set, selects the session's runtime explicitly (the
 	// `--backend` create flag, #1592 Phase 4 PR3), overriding the repo's
 	// `backend` config key. Empty means "resolve from config" — which defaults
 	// to local, so an unset Backend keeps the local default byte-identical.
 	Backend BackendKind
+	// Host names the listed host (global `hosts`, #5571 W6.3) the session runs on.
+	// It selects the ssh runtime: with Backend empty the kind resolves to ssh, and
+	// with any other explicit Backend the create is refused. Empty means "no pick"
+	// — the default_host applies only where the resolved backend is ssh.
+	Host string
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
 	// git worktree+branch. The worktree is marked external so kill/cleanup
@@ -74,6 +98,10 @@ type InstanceOptions struct {
 	// behavior of resolving the current on-disk value when provisioning begins.
 	// A pointer distinguishes an explicitly configured empty prefix from nil.
 	BranchPrefix *string
+	// BranchName, when set, is the exact branch a fresh local worktree is
+	// created on, instead of one derived from BranchPrefix and the title. The
+	// in-sandbox agent-server sets it to the name the DAEMON chose (#5571 W2.4).
+	BranchName string
 	// ResumeConversation asks the first launch to come up on a provider
 	// conversation a previous record held, rather than starting a new one
 	// (#2616). Set only by the daemon's root-agent heal, which replaces the
@@ -111,6 +139,19 @@ type InstanceOptions struct {
 	// on the Instance: a removed global grant must disappear from later respawns,
 	// handoffs, archive restores, and config-agent launches without a restart.
 	ProvisionSessionEnvPassthrough []string
+	// CallbackUnavailable declares that no daemon callback was delivered to the
+	// process building this instance. It is set by the in-sandbox agent-server
+	// (daemon/agentserver_headless.go), which learns the fact from the absence
+	// of AF_DAEMON_URL/AF_DAEMON_TOKEN in its environment — its Instance has no
+	// mint error to quote, so it records the generic undelivered reason. The
+	// daemon-side create path instead learns the reason from the mint itself
+	// and arrives through ProvisionResult.CallbackUnavailable.
+	CallbackUnavailable bool
+	// HostedRemotely declares this instance runs inside a sandbox the daemon
+	// treats as a remote workspace (set by the in-sandbox agent-server), so its
+	// guidance reflects the remote runtime's tab admission rather than the local
+	// capabilities it happens to execute on (#5571 W3.3).
+	HostedRemotely bool
 }
 
 // backendFactory provisions the already-resolved runtime for a new Instance,
@@ -121,25 +162,6 @@ type InstanceOptions struct {
 // passes the same resolved kind its pre-provision gates inspected, so config
 // cannot produce a different answer between the guard and provisioning.
 var backendFactory = defaultBackendFactoryForKind
-
-// defaultBackendFactory resolves the session's runtime from the requested
-// backend kind (the `--backend` flag / repo `backend` config, or ForceRemote for
-// the legacy hook path) and provisions it, returning the whole ProvisionResult.
-// It is the production path behind the backendFactory test seam; a test that
-// replaces backendFactory injects a FakeBackend directly and never reaches here.
-//
-// The full ProvisionResult flows to NewInstance (#1592 Phase 4): the local
-// runtime provisions in-process (nil Endpoint, nil Teardown — the local path is
-// unchanged), while the off-box runtimes (docker/ssh/hook) return the
-// agent-server's authed endpoint + a sandbox-reap teardown, which NewInstance
-// threads into the instance's remote agent-server client and Kill path.
-func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResult, error) {
-	kind, err := resolveBackendKind(opts, absPath)
-	if err != nil {
-		return ProvisionResult{}, err
-	}
-	return defaultBackendFactoryForKind(opts, absPath, kind)
-}
 
 func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind BackendKind) (ProvisionResult, error) {
 	rt, err := ResolveRuntime(kind)
@@ -157,6 +179,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		RepoRoot:              absPath,
 		Title:                 opts.Title,
 		Program:               opts.Program,
+		Host:                  opts.Host,
 		SessionEnvPassthrough: provisionSessionEnv,
 	}
 	// An off-box runtime clones the workspace from the repo's origin (epic
@@ -167,6 +190,13 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// launch_cmd, which does the clone on the user's infra).
 	if kind.ProvisionsOffBox() {
 		spec.CloneURL = originRemoteURL(absPath)
+		spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(absPath)
+		spec.Branch = daemonBranchForTitle(opts)
+		policy, perr := agentPolicyFor(absPath, opts.BranchPrefix)
+		if perr != nil {
+			return ProvisionResult{}, perr
+		}
+		spec.AgentPolicy = policy
 	}
 	// Mint through the SHARED helper, which the replacement path uses too, so the
 	// two cannot diverge on which kinds get a credential or on what a refusal
@@ -191,34 +221,60 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		}
 		spec.Account = account
 	}
-	cred, err := mintForProvision(&spec, kind, opts.SandboxCredentials)
-	if err != nil {
-		return ProvisionResult{}, err
-	}
+	cred := mintForProvision(&spec, kind, opts.SandboxCredentials)
 	res, err := rt.Provision(spec)
 	if err != nil {
+		// A minted credential must not outlive a sandbox that never came up —
+		// the same fail-closed rule the replacement path's replacementLive defer
+		// enforces for the identical exit (#5571 W3.1).
+		if cred.Granted() && opts.SandboxCredentials != nil {
+			opts.SandboxCredentials.Revoke()
+		}
 		return res, err
+	}
+	res.Branch = spec.Branch
+
+	// A refused or absent credential did not stop provisioning — it must stop
+	// being silent instead. The reason rides the result onto the instance's
+	// durable record so every surface can say "af callback unavailable: …"
+	// instead of leaving the agent to discover af commands all fail (#5571 W3.1).
+	// A runtime may already have set the reason — the mid-provision loss the
+	// provisioner detects just before committing the env is more precise than
+	// the mint's, so it wins.
+	if res.CallbackUnavailable == "" {
+		res.CallbackUnavailable = cred.UnavailableReason
 	}
 	// Revalidate now that the sandbox exists: provisioning is the long window, and
 	// a listener move or an auth change inside it leaves the sandbox holding a
 	// credential that was revoked while it was being written in.
 	//
-	// A failure here must REAP what was just provisioned. NewInstance discards the
-	// ProvisionResult of a failed factory call, so nothing downstream retains
-	// res.Teardown — returning the error alone leaks the sandbox with no handle
-	// left to reap it (#3065 review). This is the same discipline every other
-	// failure exit on a provisioned runtime already follows; a new exit does not
-	// get to skip it.
-	//
-	// And when that reap cannot CONFIRM the sandbox is gone, the identity travels
-	// out with the error so the daemon can tombstone it and keep retrying (#3480).
-	// Reaping was never the gap here; the gap was that an unconfirmed reap left
-	// nothing behind but a sentence.
+	// A failure here DEGRADES the same way a refused mint does — the sandbox is
+	// provisioned, runnable and owned, just callback-less, so reaping it would
+	// destroy a session that is merely missing one capability (#5571 W3.1). The
+	// dead grant is revoked for tidiness (the invalidation sweep already voided
+	// it), and the reason replaces the earlier one: "the credential died
+	// mid-provision" is more specific than a bare absence.
 	if rerr := revalidateAfterProvision(cred); rerr != nil {
-		who := sandboxIdentity{id: opts.ID, title: opts.Title, path: absPath, createdAt: opts.CreatedAt}
-		return ProvisionResult{}, discardUnusableSandbox(who, res, opts.SandboxCredentials, rerr)
+		if opts.SandboxCredentials != nil {
+			opts.SandboxCredentials.Revoke()
+		}
+		res.CallbackUnavailable = rerr.Error()
 	}
 	return res, nil
+}
+
+// daemonBranchForTitle names the branch an off-box session works on, from the
+// daemon's frozen branch_prefix snapshot — the same derivation the local runtime
+// uses — so the sandbox's worktree does not re-derive it from the host's own
+// config (#5571 W2.4).
+func daemonBranchForTitle(opts InstanceOptions) string {
+	prefix := ""
+	if opts.BranchPrefix != nil {
+		prefix = *opts.BranchPrefix
+	} else if cfg, err := config.LoadConfig(); err == nil {
+		prefix = cfg.BranchPrefix
+	}
+	return git.BranchForTitle(prefix, opts.Title)
 }
 
 // reapUnusableSandbox tears down a sandbox that was provisioned but must not be
@@ -232,10 +288,10 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 //
 // Where the handle GOES is the caller's business, and the only thing that
 // differs between the create and the replacement paths: retain installs it, and
-// nil means the caller has nowhere to put one (see discardUnusableSandbox). The
-// classification is NOT the caller's business, because a branch that re-derives
-// it drifts — #3475 is exactly that drift, two adjacent exits in
-// reprovisionRemote answering this condition differently.
+// nil means the caller has nowhere to put one. The classification is NOT the
+// caller's business, because a branch that re-derives it drifts — #3475 is
+// exactly that drift, two adjacent exits in reprovisionRemote answering this
+// condition differently.
 //
 // A KNOWN teardown error still means the runtime is gone, per the runtimes'
 // best-effort contract, so it is logged and the cause is returned alone.
@@ -257,62 +313,43 @@ func reapUnusableSandbox(title string, res ProvisionResult, cause error, retain 
 	return cause
 }
 
-// discardUnusableSandbox is the CREATE path's exit for a sandbox that was
-// provisioned but must not be used: reap it, and revoke the credential minted
-// for it.
-//
-// Both halves matter and both were missing. The runtime leaks without the reap,
-// because the caller drops the ProvisionResult on error and with it the only
-// cleanup handle. The credential leaks without the revoke, because it is
-// registered against a session whose sandbox no longer exists — a token minted
-// for a runtime that is gone, which is the state this feature exists to prevent.
-//
-// Its retainer CAPTURES rather than installs, because create fails before an
-// Instance exists: there is nothing to hang a handle on, so the identity leaves
-// through the returned error as a cleanup-only record instead (#3480). The
-// replacement path has an instance and installs directly — see
-// Instance.discardUnusableReplacement.
-//
-// Going through the hook rather than inspecting the returned error is the
-// load-bearing part. The hook fires ONLY from reapUnusableSandbox's
-// unknown-teardown branch, so the orphan is classified by what the TEARDOWN
-// answered. Testing TeardownStateUnknown on the combined error instead asks a
-// different question — cause can carry a teardown sentinel of its own — and
-// produced an orphan record, a durable tombstone and a held title for a sandbox
-// the reap had already confirmed gone.
-func discardUnusableSandbox(who sandboxIdentity, res ProvisionResult, creds SandboxCredentials, cause error) error {
-	if creds != nil {
-		creds.Revoke()
-	}
-	unconfirmed := false
-	err := reapUnusableSandbox(who.title, res, cause, func(ProvisionResult) { unconfirmed = true })
-	if !unconfirmed {
-		return err
-	}
-	return newSandboxOrphanError(who, res, err)
-}
-
 // resolveBackendKind decides which runtime a new session uses, in precedence
 // order: an explicit --backend flag (opts.Backend) wins; then the legacy
 // ForceRemote hook selector; otherwise the repo's `backend` config key, which
 // defaults to local.
 //
-// The config read is best-effort for the DEFAULT (no explicit selection) path:
-// a path that is not a git repo, or a repo with no readable config, falls back
-// to local so a local session is never blocked by config resolution here (the
-// same posture as before Phase 4, where this factory read no config for a local
-// session). A config that loads but declares an invalid backend value surfaces
-// that error — misconfiguration should fail the create, not silently run local.
+// On the DEFAULT (no explicit selection) path a path that is not a git repo, or
+// a repo with no in-repo config or no `backend` key, resolves to local. A repo
+// whose config exists but cannot be resolved FAILS the create with that error
+// (#5801): the backend is undeterminable, and guessing local would run the agent
+// somewhere other than the isolation the repo chose.
 func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, error) {
+	if opts.Host != "" {
+		// A host pick is an ssh placement. An explicit backend that is not ssh
+		// contradicts it; refuse rather than guess which was meant.
+		if opts.Backend != "" && opts.Backend != BackendSSH {
+			return "", fmt.Errorf("--host %q places a session on a listed host over ssh, which contradicts --backend %s; drop one of them", opts.Host, opts.Backend)
+		}
+		return BackendSSH, nil
+	}
 	if opts.Backend != "" {
 		return ParseBackendKind(string(opts.Backend))
 	}
 	if opts.ForceRemote {
 		return BackendHook, nil
 	}
-	cfg, err := resolveRepoConfig(absPath)
+	// Not a git repo: there is no in-repo config to read, so local as ever.
+	repo, err := config.RepoFromPath(absPath)
 	if err != nil {
 		return BackendLocal, nil
+	}
+	// A repo whose config EXISTS but cannot be resolved (a TOML syntax error
+	// anywhere in it, an invalid value) has an undeterminable backend. Falling
+	// back to local would run an agent the repo isolated (docker/ssh) on the
+	// daemon host with no error, so refuse with the config error (#5801).
+	cfg, err := config.ResolveConfigForRepo(repo)
+	if err != nil {
+		return "", fmt.Errorf("cannot determine the backend for %s: its configuration could not be resolved, and creating the session on the local machine instead could bypass the isolation the repo asks for — fix the config and retry: %w", absPath, err)
 	}
 	return ParseBackendKind(cfg.Backend)
 }
@@ -569,7 +606,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 						// constructor already decided — never re-derived from the combined
 						// error, which can carry a sentinel from the client-build cause.
 						return nil, newSandboxOrphanError(
-							sandboxIdentity{id: id, title: opts.Title, path: absPath, createdAt: t}, res,
+							sandboxIdentity{id: id, title: opts.Title, path: absPath, createdAt: t, repoIdentityPath: opts.RepoIdentityPath}, res,
 							fmt.Errorf("failed to build remote agent-server client and sandbox cleanup state is unknown; a sandbox may still be running: %w",
 								errors.Join(err, cleanupErr)))
 					}
@@ -585,19 +622,33 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		branchPrefix = *opts.BranchPrefix
 	}
 
+	accountAgent := ""
+	if strings.TrimSpace(opts.Account) != "" {
+		// refuseUnsupportedAccountAgent already refused a program whose
+		// resolution drifts to another agent, so the requested enum IS the
+		// namespace the account was selected in (#4430 review round 4).
+		accountAgent = sessionenv.AgentForCommand(opts.Program)
+	}
+
 	return &Instance{
 		ID:           id,
 		sandboxCreds: opts.SandboxCredentials,
 		TaskID:       opts.TaskID,
 		Title:        opts.Title,
+		// The daemon-named branch of an off-box session, known from the first
+		// frame rather than after the first push (#5571 W2.4). Empty for local.
+		Branch: res.Branch,
 		// A task delivery's run begins here and ends when the agent goes idle
 		// (#1892). Only a task-spawned session has a run to bound; a user's session
 		// is never counted against a cap.
 		taskRunActive:         opts.TaskID != "",
 		liveness:              LiveReady,
 		Path:                  absPath,
+		repoIdentityPath:      opts.RepoIdentityPath,
 		Program:               opts.Program,
 		Account:               opts.Account,
+		Host:                  opts.Host,
+		accountAgent:          accountAgent,
 		Height:                0,
 		Width:                 0,
 		CreatedAt:             t,
@@ -607,13 +658,31 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		inPlace:               opts.InPlace,
 		branchPrefix:          branchPrefix,
 		branchPrefixResolved:  opts.BranchPrefix != nil,
+		branchName:            strings.TrimSpace(opts.BranchName),
 		carriedConversation:   opts.ResumeConversation,
 		carriedTabs:           append([]TabData(nil), opts.RestoreTabs...),
 		carriedRecreateNotice: opts.PendingRecreateNotice,
 		backend:               backend,
 		remoteClient:          remoteClient,
 		runtimeTeardown:       res.Teardown,
+		callbackUnavailable:   callbackUnavailableReasonFor(opts, res),
+		hostedRemotely:        opts.HostedRemotely,
 	}, nil
+}
+
+// callbackUnavailableReasonFor picks the callback-absence reason a new instance
+// records. The provisioning path's reason wins — it names what the mint or the
+// post-provision revalidation actually refused; the caller's bare declaration
+// (the in-sandbox agent-server noticing no callback env) is the generic
+// fallback, recorded so the instance's own guidance can stop teaching af verbs.
+func callbackUnavailableReasonFor(opts InstanceOptions, res ProvisionResult) string {
+	if res.CallbackUnavailable != "" {
+		return res.CallbackUnavailable
+	}
+	if opts.CallbackUnavailable {
+		return callbackUndeliveredReason
+	}
+	return ""
 }
 
 func resolvedProgramMarker(opts InstanceOptions) string {
@@ -650,7 +719,8 @@ func refuseOffBoxAccountForKind(opts InstanceOptions, kind BackendKind) error {
 	if kind == BackendLocal || kind.CarriesAccount() {
 		return nil
 	}
-	return fmt.Errorf("account %q cannot be used with the %s backend: %s", opts.Account, kind, offBoxAccountRefusal(kind))
+	return accountRefusalWithSource(opts,
+		fmt.Errorf("account %q cannot be used with the %s backend: %s", opts.Account, kind, offBoxAccountRefusal(kind)))
 }
 
 // offBoxAccountRefusal appends only backend-specific facts to the shared
@@ -755,57 +825,115 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	requested := sessionenv.AgentForCommand(opts.Program)
 	agent := sessionenv.AgentForCommand(config.ResolveProgram(cfg, opts.Program))
 	if agent != requested {
-		return fmt.Errorf(
+		return accountRefusalWithSource(opts, fmt.Errorf(
 			"account %q was validated as a %s account, but this session's program_overrides resolves %s to "+
 				"a %s command — the account namespaces are separate, so a same-named %s account would be "+
 				"used instead of the %s one you selected. Remove the override, or create the session on the "+
 				"agent whose account you mean",
-			opts.Account, requested, requested, agent, agent, requested)
+			opts.Account, requested, requested, agent, agent, requested))
 	}
-	// An EXPLICIT list, still, and claude is on it now because af's launch rewrite
-	// carries provenance the boundary verifies (#3083): the launcher declares
-	// `--session-id`/`--plugin-dir`, so the rewritten command is provable rather
-	// than refused. codex needs no declaration — af leaves its command unmodified.
+	// Still an EXPLICIT list, and still deliberately NOT sessionenv.SupportsAccounts:
+	// that answers "does this agent have a credential-root variable", which is a
+	// different question from "can af prove its launch to the boundary". Keeping them
+	// separate is what makes an agent added to the roster unsupported HERE until
+	// someone checks the second question, which fails in the safe direction (#3051,
+	// #3083). claude is on the list because af's launch rewrite carries provenance the
+	// boundary verifies — the launcher declares `--session-id`/`--plugin-dir`, so the
+	// rewritten command is provable rather than refused; codex needs no declaration,
+	// because af leaves its command unmodified.
 	//
-	// Deliberately NOT keyed on sessionenv.SupportsAccounts: that answers "does this
-	// agent have a credential-root variable", which is a different question from "can
-	// af prove its launch to the boundary". Keeping them separate is what makes an
-	// agent added to the first list unsupported here until someone checks the second,
-	// which fails in the safe direction (#3051, #3083).
-	if agent == "codex" || agent == "claude" {
+	// What changed in #3609 is only WHERE the list lives. This function kept its own
+	// copy, so once gemini joined the roster `af accounts add gemini work` succeeded
+	// and `--account work` answered "supported: claude, codex" — a sentence the roster
+	// had just made false, and the user had no way to tell which surface was wrong.
+	// sessionenv owns the one list now, and every surface says the same thing about a
+	// rostered-but-unproven agent.
+	//
+	// gemini joined the list in #3639, by running the check rather than waiving it:
+	// af hands its pane the resolved command unchanged, so ValidateAccountCommand
+	// proves it without a declaration, and a scoped session was observed using the
+	// account directory while an unscoped control kept the ambient identity. The two
+	// lists agree again, which is the normal state — the registration-only surfaces
+	// exist for the gap between them, not as a permanent fixture.
+	if sessionenv.AccountLaunchProven(agent) {
 		return nil
 	}
-	return fmt.Errorf(
+	// A ROSTERED agent gets the registration-only sentence, because "unsupported" is
+	// false for it: the account exists, the login works, and only the launch is
+	// unproven. Naming the follow-up is what makes that a state rather than a dead end.
+	if reason, ok := sessionenv.AccountRegistrationOnlyReason(agent); ok {
+		return accountRefusalWithSource(opts,
+			fmt.Errorf("account %q is registered for %s, but %s", opts.Account, agent, reason))
+	}
+	return accountRefusalWithSource(opts, fmt.Errorf(
 		"account %q cannot be used with %s yet: af has not established that the account boundary can "+
 			"verify how it launches that agent, so the session could start on the ambient identity or exit "+
-			"immediately; account scoping currently supports claude and codex",
-		opts.Account, agent)
+			"immediately; account scoping supports %s",
+		opts.Account, agent, sessionenv.AccountAgentsSummary()))
 }
 
-// resolveAccountForProvision resolves opts.Account to the registered account's
-// directory on this host.
+// accountRefusalWithSource appends where a non-requested account came from, so a
+// refusal whose remedy is "omit --account" is not handed to someone with no
+// --account to omit (#3386).
 //
-// The agent is derived from the session's program, matching how every other
-// account surface names one: an account belongs to an agent, and "codex" and
-// "claude" keep separate registries.
-func resolveAccountForProvision(repoRoot, program, accountName string) (sessionenv.Account, error) {
-	home, err := config.GetConfigDir()
-	if err != nil {
-		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q: %w", accountName, err)
+// The clause goes LAST, after the refusal's own reason, because that reason is
+// what the user has to understand first. The separator is " · " and not a bare
+// concatenation for a reason the registration-only arm makes concrete: that
+// sentence can END IN A URL, and only whitespace terminates one for a terminal's
+// link detector — a period or a letter fused to it becomes part of the address.
+// AccountSource is itself a complete sentence, so this only joins the two.
+func accountRefusalWithSource(opts InstanceOptions, err error) error {
+	source := strings.TrimSpace(opts.AccountSource)
+	if source == "" || err == nil {
+		return err
 	}
-	requestedAgent := sessionenv.AgentForCommand(program)
+	return fmt.Errorf("%w · %s", err, source)
+}
+
+// resolveAccountForProvision resolves a create's --account to the registered
+// account's directory on this host, in the REQUESTED program's namespace.
+//
+// A create names the account in the enum's registry — the API validated it
+// there — so a program_overrides redirect that moves the enum to another
+// agent's command must refuse rather than silently spend the resolved agent's
+// same-named account (#4430 review, D2). The swap path deliberately differs:
+// it selects under the command the session is RUNNING (the resolved one),
+// because the session's live identity, not its recorded enum, is what the
+// account will pin.
+func resolveAccountForProvision(repoRoot, program, accountName string) (sessionenv.Account, error) {
 	resolved, err := resolveRepoConfig(repoRoot)
 	if err != nil {
 		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q against the session program: %w", accountName, err)
 	}
 	resolvedProgram := config.ResolveProgram(&resolved.Config, program)
+	// A create requests an account in the requested enum's namespace; when
+	// program_overrides resolves the enum to another agent's command, silently
+	// spending the RESOLVED agent's same-named account is the name-collision
+	// hazard the local path refuses via refuseAccountAgentDrift — both backends
+	// must give the same answer to the same command (#4430 review).
+	requestedAgent := sessionenv.AgentForCommand(program)
 	resolvedAgent := sessionenv.AgentForCommand(resolvedProgram)
 	if resolvedAgent != requestedAgent {
 		return sessionenv.Account{}, fmt.Errorf(
-			"account %q is a %s account, but this session resolves %s to a %s command; account namespaces are separate, so the Docker session would not use the identity you selected",
+			"account %q is a %s account, but this session resolves %s to a %s command; account namespaces are separate, so the session would not use the identity you selected",
 			accountName, requestedAgent, requestedAgent, resolvedAgent)
 	}
-	account, err := agentaccount.Selected(home, requestedAgent, accountName, "")
+	return selectAccountInNamespace(requestedAgent, accountName)
+}
+
+// selectAccountInNamespace resolves accountName inside agent's account
+// registry. It is the shared tail of account selection: fresh provisions reach
+// it through resolveAccountForProvision's refused-or-matched requested
+// namespace, a swap reaches it with the resolved launch command's agent, and a
+// committed manual swap's retry reaches it with the namespace the transaction
+// recorded at commit — the one answer a later config flip cannot move (#4430
+// review).
+func selectAccountInNamespace(agent, accountName string) (sessionenv.Account, error) {
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q: %w", accountName, err)
+	}
+	account, err := agentaccount.Selected(home, agent, accountName)
 	if err != nil {
 		return sessionenv.Account{}, err
 	}

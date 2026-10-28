@@ -1,3 +1,4 @@
+import { renderMutationOutcome, recoveryScreen, scopeRecovery, type MutationOutcomeNotice } from "./recovery.js";
 // The view layer of the web client (#1592 Phase 5). It renders two views into
 // #app: the paste-token login (design §1.2) and the authed app — a left rail of
 // live sessions (PR3) beside a main pane that now hosts the live attach terminal
@@ -21,8 +22,9 @@
 import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
-import { VIEWS } from "./nav.js";
-import { type DragPayload, resolveDragTab, TAB_DND_MIME } from "./layout.js";
+import { h } from "./dom.js";
+import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure, placeMenu } from "./components.js";
+import { type DragPayload, type TabDropResult, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
   filterLabel,
@@ -33,38 +35,96 @@ import {
   type StatusFilter,
 } from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
+import type { RegisteredProject } from "./api.js";
+import { replaceProjectMenuChildren } from "./project-menu-focus.js";
+import { applyProjectFavicon, applyProjectFrame, projectColor, projectColorRow } from "./project_color.js";
 import {
   archiveWarningText,
+  callbackUnavailableText,
   canHandoff,
   compareSessionsForRail,
   isArchived,
   isCreating,
   idleReasonDetail,
+  unreachableDetail,
   isLimitReached,
-  isRootSession,
+  isPendingAgentHandoffDeliveryUnconfirmed,
+  isPendingAgentHandoffDeliveryConfirmable,
+  isPendingManualHandoffDeliveryUnconfirmed,
+  isPendingManualSwapDeliveryConfirmable,
   OPERATOR_KIND_LABELS,
   type OperatorKind,
   operatorKind,
-  prBadgeContent,
   rowStatus,
   rowTitle,
+  isOffBoxWorkspace,
+  sessionWarningText,
 } from "./status.js";
-import { ConfigPane, type ConfigStatus } from "./config.js";
+import type { AccountsState } from "./accounts.js";
+import type { QuotaState } from "./quota.js";
+import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
-import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
+import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
+import { KeyedRows, orderChildren } from "./keyed-rows.js";
+import { sessionKey } from "./sessions.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 import { TasksPane } from "./tasks.js";
-import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
+import { type ThemeChoice, currentMode } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   type ConfigEntry,
   type LifecycleAction,
   type SessionData,
+  type SkippedRepo,
   type TabKindAllowance,
   type TaskData,
   TabKind,
 } from "./types.js";
+
+/** The daemon's stable reason codes for a skipped repo (daemon/snapshot.go). Mirror
+ *  the exact strings the Go side stamps so the web never reclassifies a reason the
+ *  daemon owns — an unknown value renders as corrupted, which is all an older daemon
+ *  ever sent. */
+export const SKIPPED_REPO_REASON = {
+  corrupted: "corrupted-instances-json",
+  unreadable: "unreadable-instances-json",
+  newerSchema: "newer-schema-instances-json",
+  rowsFailed: "rows-failed-to-load",
+} as const;
+
+/** A short, human-readable label for a skipped repo's reason. Mirrors the
+ *  classification in api/skipped_repos.go (splitSkippedRepos) so the web and the CLI
+ *  name the same failure. Unknown/empty → corrupted (the older-daemon default). */
+export function skippedRepoReasonLabel(reason: string | undefined): string {
+  switch (reason) {
+    case SKIPPED_REPO_REASON.unreadable:
+      return "instances.json could not be read";
+    case SKIPPED_REPO_REASON.newerSchema:
+      return "instances.json written by a newer af";
+    case SKIPPED_REPO_REASON.rowsFailed:
+      return "some sessions could not be loaded (worktree or tmux gone)";
+    default:
+      return "instances.json is corrupted";
+  }
+}
+
+/** The one-line repair hint for a skipped repo's reason. Mirrors the constant hints
+ *  in api/skipped_repos.go verbatim so the web sends the operator to the SAME remedy
+ *  the CLI does — the daemon is the contract, and a different remedy here would drift
+ *  the moment the CLI's hint is refined. Unknown/empty → corrupted. */
+export function skippedRepoRepairHint(reason: string | undefined): string {
+  switch (reason) {
+    case SKIPPED_REPO_REASON.unreadable:
+      return "Make the file(s) readable by the user the af daemon runs as (check ownership, permissions and the disk), then restart the daemon so it re-reads them; do not delete them, they hold the hidden sessions.";
+    case SKIPPED_REPO_REASON.newerSchema:
+      return "Upgrade af to a version that understands the newer state file, then restart the daemon; do not edit or delete these files, they hold sessions this binary cannot read.";
+    case SKIPPED_REPO_REASON.rowsFailed:
+      return "Restore or delete the sessions the daemon could not load (their worktree or tmux is gone), then the daemon re-reads the complete list on the next poll; e.g. `af sessions restore <title>` or `af sessions delete <title>`; the instances.json itself is not the problem.";
+    default:
+      return "Stop the af daemon, copy the corrupt file(s) aside, fix the JSON or restore it from a backup, then start the daemon; af keeps no backup of these files.";
+  }
+}
 
 /** The tab kinds the web UI can create with no further input from the user. A
  *  web tab is deliberately absent: its target comes from whatever an agent is
@@ -94,6 +154,58 @@ export function isActionableSession(s: SessionData): s is ActionableSession {
   );
 }
 
+export type RetryActionPresentation = {
+  kind: "limit" | "handoff";
+  label: string;
+  title: string;
+};
+
+/** The selected row's explicit recovery action. A delivery-unconfirmed handoff
+ * keeps a distinct label so Retry never looks like an unrelated quota control. */
+export function retryActionForSession(s: SessionData): RetryActionPresentation | null {
+  if (
+    isPendingManualHandoffDeliveryUnconfirmed(s) ||
+    isPendingAgentHandoffDeliveryUnconfirmed(s)
+  ) {
+    return {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane",
+    };
+  }
+  if (isLimitReached(s)) {
+    return { kind: "limit", label: "Retry limit", title: "Retry after the usage limit" };
+  }
+  return null;
+}
+
+function patchRetryButton(button: HTMLElement, action: RetryActionPresentation | null): void {
+  button.hidden = action === null;
+  if (action) {
+    button.textContent = action.label;
+    button.title = action.title;
+  }
+}
+
+/** The selected row's no-resend delivery exit (#4429). Distinct from
+ *  retryActionForSession: a confirmable row may ALSO be retryable, in which case
+ *  the head offers both verbs side by side and the operator's pane inspection
+ *  decides between them. Kept off Retry itself so a resend never silently wears
+ *  a "delivered" meaning. */
+export function markDeliveredActionForSession(s: SessionData): RetryActionPresentation | null {
+  if (
+    isPendingAgentHandoffDeliveryConfirmable(s) ||
+    isPendingManualSwapDeliveryConfirmable(s)
+  ) {
+    return {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed — retire it without resending",
+    };
+  }
+  return null;
+}
+
 /** Fail-closed narrowing for the daemon's independent teardown capability. */
 export function isKillableSession(s: SessionData): s is KillableSession {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
@@ -103,6 +215,7 @@ export function isKillableSession(s: SessionData): s is KillableSession {
  *  authed — the live session projection plus the current selection. */
 export interface AppState {
   phase: "login" | "app";
+  pendingRestores?: ReadonlySet<string>;
   /** the top-level view: the live sessions rail+terminal, or the tasks (scheduled
    *  automations) pane — both SCOPED to the selected project (redesign PR2). The
    *  appbar view tabs and the [ / ] keys switch it; it selects which body shows. */
@@ -122,8 +235,18 @@ export interface AppState {
   connecting: boolean;
   /** an actionable message shown under the login form after a failed probe. */
   loginError: string | null;
+  loginCondition?: "unavailable" | "expired";
+  tasksError?: string;
+  projectsError?: string;
   /** the live session projection (Snapshot + /v1/events), the rail's data. */
   sessions: SessionData[];
+  /** Repos the daemon dropped at startup (SnapshotResponse.skipped_repos, #4742),
+   *  so the rail can surface their missing sessions as a persistent incompleteness
+   *  notice instead of presenting the truncated projection as a complete list.
+   *  Empty in the healthy steady state. Replaced wholesale on every snapshot
+   *  commit (applySessions carries it on the snapshot evidence); event deltas do
+   *  not touch it, since the skip set changes only when a snapshot refresh runs. */
+  skippedRepos: SkippedRepo[];
   /** the selected row's STABLE id (session.id), or null when nothing is selected.
    *  Selection keys off the id, not the title: the attach terminal dials
    *  /v1/sessions/{id}/stream and titles can collide across repos (design §4). */
@@ -153,13 +276,18 @@ export interface AppState {
    *  ops have no modal to surface an error in (unlike create/kill/archive), so the
    *  failure is shown here instead of being silently swallowed (#1592 Phase 5 PR7/PR8). */
   tabError: string | null;
+  tabNotice?: boolean;
+  /** An optimistic mutation outcome remains explained until explicitly dismissed. */
+  mutationError?: MutationOutcomeNotice;
   /** the live task projection (ListTasks + task.* events), the tasks view's data. */
   tasks: TaskData[];
-  /** the daemon's registered-project roots (listProjects, #2456 union) — the extra
-   *  input, beside sessions + tasks, that projectSummaries / pickerProjects union so a
-   *  registered-but-sessionless repo shows in the switcher and is creatable-into.
+  /** the daemon's registered-project records (listProjects, #2456 union) — the
+   *  extra input, beside sessions + tasks, whose ROOTS projectSummaries /
+   *  pickerProjects union so a registered-but-sessionless repo shows in the
+   *  switcher and is creatable-into. The whole record is kept (not just roots)
+   *  because id + path_exists are what the rebind affordance acts on.
    *  Refetched on connect and on every projects.changed event. */
-  registeredProjects: string[];
+  registeredProjects: RegisteredProject[];
   /** the config manifest zipped with the user's live values (GetConfig), the config
    *  view's data. There is no local key list: this IS the description of config, so
    *  a key added to config_types.go arrives here with no change to the bundle. */
@@ -170,8 +298,22 @@ export interface AppState {
   /** the outcome of the last config write — the daemon's echo and restart notice,
    *  or the validator's message when it refused — or null when there is none. */
   configStatus: ConfigStatus | null;
-  /** the persisted theme preference (redesign PR1): Auto follows the OS, Light/Dark
-   *  force a mode. The appbar toggle sets it; theme.ts stamps data-theme on <html>
+  /** the registered agent accounts with their logged-in state, the agents one can
+   *  be registered for, and the outcome of the last account action (#3385).
+   *
+   *  It rides in the config view's state because that is where the section is
+   *  rendered, and NOT in `config`: an account is a credential directory on the
+   *  daemon host, not a manifest key, and merging the two would be the category
+   *  error #3385 asks this surface to avoid. */
+  accounts: AccountsState;
+  /** the daemon's usage/quota report (QuotaReport, #2983), the Usage section's
+   *  data. It rides in the config view's state for the same reason `accounts`
+   *  does — it renders there — and is not config: it is computed from the
+   *  daemon host's session records, so merging it into `config` would be the
+   *  same category error. */
+  quota: QuotaState;
+  /** the persisted theme preference (redesign PR1): System follows the OS, Light/Dark
+   *  force a mode. The config view's Theme picker sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
   themeChoice: ThemeChoice;
   /** which session states the rail shows (feat: hide archived by default). A pure
@@ -187,7 +329,7 @@ export interface AppState {
  *  be a drop target (the browser then shows a no-drop cursor); a finger has no cursor
  *  to read, so the same refusal has to be said out loud. Sentence case, `·` as the
  *  fragment separator, per the repo's copy conventions. */
-export const TAB_PINNED_NOTICE = "The agent tab stays first · drag it onto a pane to split instead";
+export const TAB_PINNED_NOTICE = "Agent tab stays first · drag to a pane to split";
 
 export interface Actions {
   connect(token: string): void;
@@ -197,7 +339,11 @@ export interface Actions {
    *  attaches exactly like Enter on the selected row (#1693). */
   open(id: string): void;
   /** Opens the new-session modal (#1592 Phase 5 PR5). */
+  dismissNotice?(): void;
+  retryConnection?(): void;
+  retryTasks?(): void;
   newSession(): void;
+  copyLink(): void;
   /** Opens the kill-confirm modal for this stably-addressed rail row. */
   kill(session: KillableSession): void;
   /** Opens the archive-confirm modal for this rail row. */
@@ -210,6 +356,11 @@ export interface Actions {
    *  TUI: it is not destructive (it re-delivers the prompt the session was already
    *  going to run) and it is the obvious next step for a session that is stuck. */
   retryLimit(): void;
+  /** Retires the selection's pending handoff mission WITHOUT resending it
+   *  (#4429) — the web half of the TUI resolve picker's "Mark delivered" row.
+   *  Opens a confirm modal: the attestation is the operator's, so the click must
+   *  be deliberate, unlike the no-confirm Retry. */
+  markDelivered(): void;
   /** Hands the current selection off to a different agent (#2013) — the web's
    *  analogue of the TUI's `F`. Opens the agent picker; on confirm it swaps the
    *  agent in place, keeping the worktree and branch. Offered only for a
@@ -220,10 +371,16 @@ export interface Actions {
    *  stays in rail nav mode (the 1-9 keys, mirroring the TUI). */
   switchTab(index: number): void;
   /** Re-measures every live terminal after shell chrome changes usable geometry.
-   *  The app shell owns drawer/view/condensed-header state, while SplitView owns
+   *  The app shell owns drawer/view state, while SplitView owns
    *  xterm; this explicit boundary keeps those two owners synchronized without a
    *  resize-event shim or a polling timer. */
   layoutChanged(): void;
+  /** Close the focused split pane; the session itself remains open. */
+  closePane?(): void;
+  /** Steps the shared terminal font size for this viewport's device class
+   *  (#5500): ±1 selects the direction; the step size, clamp, and the debounced
+   *  config write all live in terminal-font.ts. */
+  stepTerminalFontSize(delta: number): void;
   /** Switches to a tab AND attaches its terminal (a tab-bar click, mirroring how a
    *  session-row click attaches). */
   openTab(index: number): void;
@@ -247,8 +404,10 @@ export interface Actions {
   clearPaneDropHint(): void;
   /** Lands a touch-dragged tab on whichever pane is under the point, splitting or
    *  replacing exactly as a mouse drop does — the same body, not a copy of it
-   *  (split.ts applyTabDrop). False means no pane was under the release. */
-  dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): boolean;
+   *  (split.ts applyTabDrop). `landed` false means no pane was under the release;
+   *  `changed` false means the pane rejected the drop and the layout is untouched
+   *  (#4434 — one boolean cannot answer both questions). */
+  dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): TabDropResult;
   /** Sets one global config key. index.ts POSTs SetConfigValue (the same validated,
    *  locked, atomic writer `af config set` uses), then re-reads the manifest so the
    *  form shows what the file actually holds. Validation is deliberately NOT done
@@ -260,6 +419,18 @@ export interface Actions {
    *  close. The config pane only reports the intent; the shell owns the token and the
    *  modal host. */
   openConfigAssistant(): void;
+  /** Resolves one config key's provenance through POST /v1/ExplainConfig (#4803)
+   *  — the same config.ResolvedValue `af config get --explain` renders, computed
+   *  daemon-side so the view formats a trace it could not diverge from. Always
+   *  settles: a refusal arrives as `{ok:false}` text. */
+  explainConfig(key: string): Promise<ExplainOutcome>;
+  /** Creates an agent account's credential directory on the daemon host (#3385).
+   *  Idempotent; the daemon holds the name rule and its refusal is shown verbatim. */
+  registerAccount(agent: string, name: string): void;
+  /** Runs the agent's OWN login flow for an account in a tmux session on the
+   *  daemon host and opens its pane here (#3384/#3385). af never reads, stores or
+   *  forwards the credential — it points one variable at a directory. */
+  openAccountLogin(agent: string, name: string): void;
   /** Renames the tab with the stable IDENTITY `id` (tabIdentity) to `name` (#1813):
    *  the commit of the bar's inline edit. Only offered for a RENAMEABLE tab (web /
    *  process — see isRenameableTab); index.ts resolves the identity to the tab's
@@ -317,27 +488,29 @@ export interface Actions {
   /** Opens the delete-project confirm for a project row (#1735); on confirm
    *  index.ts calls DeleteProject, which removes the project registration and
    *  archives each restorable live session. */
-  deleteProject(root: string, label: string, sessionCount: number): void;
+  deleteProject(root: string, label: string): void;
   /** Opens the add-project modal (#2456): register a git checkout by path via
    *  RegisterProject so it appears as an empty project you can create into. */
   addProject(): void;
+  /** Opens the rebind-project modal (`af projects rebind`): repoint a registered
+   *  project's stable identity at the checkout it should track now — the repair
+   *  after that checkout was moved or recloned. */
+  rebindProject(id: string, label: string): void;
+  /** Sets (or, with "", clears) the display color of the project at root,
+   *  registering it first when it has no registry record yet. */
+  setProjectColor(root: string, color: string): void;
   /** Sets the theme preference (redesign PR1): persists it, stamps data-theme on
    *  <html>, and re-themes the live terminals. */
   setTheme(choice: ThemeChoice): void;
 }
 
-/** The backend types whose workspace lives off-box (session/archive_sandbox.go
- *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
- *  them can service tab management: every Add*Tab path needs a daemon-side git
- *  worktree they do not have, so the daemon's Capabilities().TabManagement is
- *  false for all three (#1874).
- *
- *  This list is the ONE place the web names backend types. It exists only because
- *  the session envelope carries `backend_type` but not the daemon's capability
- *  bits — the honest fix is to serialize the capability so no client re-derives
- *  it (see #1874). Until then, a NEW off-box runtime must be added here, which is
- *  what ui.test.ts pins. */
-const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
+/** Only known local restores can skip consent. Empty is the legacy local encoding
+ *  (session.InstanceData.UsesLocalTmux); unknown future backends keep consent. */
+export function restoreRequiresConfirmation(session: SessionData): boolean {
+  return session.backend_type !== undefined && session.backend_type !== "" && session.backend_type !== "local";
+}
+
+export { isOffBoxWorkspace };
 
 /** The kinds this session may gain a tab of, as the DAEMON decided them.
  *
@@ -354,7 +527,7 @@ export function allowedTabKinds(s: SessionData): TabKindAllowance[] {
   if (s.tab_kinds && s.tab_kinds.length > 0) {
     return s.tab_kinds;
   }
-  const legacyAllowed = !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  const legacyAllowed = !isOffBoxWorkspace(s);
   return LEGACY_TAB_KINDS.map((kind) => ({
     kind,
     allowed: legacyAllowed,
@@ -499,7 +672,7 @@ function tabRuntimeLabel(s: SessionData): string {
 /** The selected session's tabs, always non-empty: a pre-#930 record with no tabs
  *  is shown as a single implicit agent tab so the bar (and index math) never sees
  *  an empty list. */
-export function sessionTabs(s: SessionData): { id?: string; name: string; kind: number; url?: string }[] {
+export function sessionTabs(s: SessionData): NonNullable<SessionData["tabs"]> {
   if (s.tabs && s.tabs.length > 0) {
     return s.tabs;
   }
@@ -536,52 +709,6 @@ export function tabRealId(tab: { id?: string }): string {
   return tab.id && tab.id !== "" ? tab.id : "";
 }
 
-/** The appbar label for a top-level view. */
-function viewLabel(view: View): string {
-  switch (view) {
-    case "sessions":
-      return "Sessions";
-    case "tasks":
-      return "Tasks";
-    case "config":
-      return "Config";
-  }
-}
-
-/** The appbar label for a theme choice (redesign PR1). */
-function themeLabel(choice: ThemeChoice): string {
-  switch (choice) {
-    case "auto":
-      return "Auto";
-    case "light":
-      return "Light";
-    case "dark":
-      return "Dark";
-  }
-}
-
-/** Minimal hyperscript: create an element, apply props, append children. Keeps the
- *  views declarative without a framework and without innerHTML. */
-function h<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  props: Partial<HTMLElementTagNameMap[K]> & { class?: string } = {},
-  ...children: (Node | string)[]
-): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (key === "class") {
-      el.className = value as string;
-    } else {
-      // Assign DOM properties (className, textContent, type, value, disabled…).
-      (el as unknown as Record<string, unknown>)[key] = value;
-    }
-  }
-  for (const child of children) {
-    el.append(child);
-  }
-  return el;
-}
-
 /**
  * The rail's session order, mirroring the TUI sidebar (ui/sidebar_model.go): live
  * sessions first ordered oldest-created first, the archived group last ordered
@@ -602,11 +729,34 @@ function visibleRailSessions(state: AppState): SessionData[] {
 }
 
 /** Renders the paste-token login view, replacing the root's contents. */
+const loginDrafts = new WeakMap<HTMLElement, string>();
 export function renderLogin(root: HTMLElement, state: AppState, actions: Actions): void {
+  const draft = state.loginError || state.connecting || state.loginCondition
+    ? root.querySelector<HTMLInputElement>("#af-token")?.value ?? loginDrafts.get(root) ?? "" : "";
+  loginDrafts.set(root, draft);
   root.replaceChildren(loginView(state, actions));
+  const input = root.querySelector<HTMLInputElement>("#af-token");
+  if (input) input.value = draft;
 }
 
-function loginView(state: AppState, actions: Actions): HTMLElement {
+/** Forgets the in-memory login draft for `root` so an auth-driven return to the
+ *  login view (a resync 401, a token rejection) does not pre-fill the paste form
+ *  with a credential the daemon just rejected. The draft WeakMap is module-private
+ *  and never cleared by renderLogin itself, so disconnect() must call this on an
+ *  auth rejection; the manual-Disconnect path leaves the draft alone because its
+ *  falsy renderLogin guard already resolves `draft` to "". */
+export function clearLoginDraft(root: HTMLElement): void {
+  loginDrafts.set(root, "");
+}
+
+export function loginView(state: AppState, actions: Actions): HTMLElement {
+  if (state.loginCondition === "unavailable") {
+    const screen = recoveryScreen({ condition: "Cannot reach the daemon", failed: true,
+      detail: state.loginError ?? "Check the daemon address, then retry.", action: state.connecting ? "Connecting…" : "Retry",
+      run: () => actions.retryConnection?.(), });
+    screen.classList.add("af-recovery-login");
+    return screen;
+  }
   // While the initial auth probe (or a silent token resume) is in flight, show a
   // neutral placeholder rather than flashing a paste-token field a tokenless daemon
   // may not need (#1696). An error always wins over the placeholder so a failed
@@ -651,48 +801,51 @@ function loginView(state: AppState, actions: Actions): HTMLElement {
   });
 
   const children: (Node | string)[] = [
-    h("h1", { class: "af-title" }, "Agent Factory"),
+    h("h1", { class: state.loginCondition === "expired" ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.loginCondition === "expired" ? "Login expired" : "Sign in"),
     h(
       "p",
       { class: "af-subtitle" },
-      "Paste the daemon bearer token to connect. Get it from ",
+      "Paste the daemon token from ",
       h("code", {}, "af token show"),
       " on the host.",
     ),
     // Say that the token is kept, and where the off switch is. Persisting a
     // full-access credential in the browser is the user's call to make knowingly —
     // silently writing it to disk is the thing not to do.
-    h("p", { class: "af-subtitle af-login-note" }, "It stays saved in this browser until you disconnect."),
+    h("p", { class: "af-subtitle af-login-note" }, "Saved here until you log out."),
     form,
   ];
   if (state.loginError) {
     children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
   }
 
-  return h("main", { class: "af-login" }, h("div", { class: "af-card" }, ...children));
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
 }
 
 /** The neutral "connecting" placeholder shown while the initial auth probe or a
  *  token resume is in flight (#1696), so no paste-token field flashes before we know
  *  whether this client even needs one. */
 function connectingView(): HTMLElement {
-  return h(
-    "main",
-    { class: "af-login" },
-    h(
-      "div",
-      { class: "af-card" },
-      h("h1", { class: "af-title" }, "Agent Factory"),
-      h("p", { class: "af-subtitle" }, "Connecting…"),
-    ),
-  );
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" },
+    h("h1", { class: "af-recovery-title" }, "Connecting…")));
 }
 
 /** The tokenless login view (#1696): the daemon exempts this client, so there is no
  *  token to paste — just a Connect button that dials in with the empty-token
  *  sentinel. Normally auto-connected on load; this view is what a user sees only if
- *  they explicitly Disconnect on such a daemon. */
-function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
+ *  they explicitly Disconnect on such a daemon.
+ *
+ *  Defense in depth against a stale `authRequired: false`: if a 401 reaches this
+ *  view (`loginCondition === "expired"` — the daemon started requiring a token after
+ *  the tokenless probe), degrade into a paste-token form instead of the
+ *  self-contradictory "No token needed." screen that re-issues the just-rejected
+ *  empty-token request. The primary fix flips `authRequired` in connect()'s catch so
+ *  the paste form is reached directly, but this keeps the screen coherent regardless
+ *  of how the staleness arose. */
+export function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
+  if (state.loginCondition === "expired") {
+    return expiredTokenlessView(state, actions);
+  }
   const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
@@ -709,7 +862,7 @@ function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
     h(
       "p",
       { class: "af-subtitle" },
-      "This daemon does not require a token for your connection.",
+      "No token needed.",
     ),
     form,
   ];
@@ -717,7 +870,58 @@ function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
     children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
   }
 
-  return h("main", { class: "af-login" }, h("div", { class: "af-card" }, ...children));
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
+}
+
+/** The degraded form `noAuthLoginView` falls back to when a 401 reached the tokenless
+ *  branch (`loginCondition === "expired"`): the daemon now requires a token this
+ *  client has none of, so surface a paste field instead of the empty-token Connect.
+ *  Mirrors loginView's paste-form branch (title degrades to "Login expired"). */
+function expiredTokenlessView(state: AppState, actions: Actions): HTMLElement {
+  const input = h("input", {
+    type: "password",
+    id: "af-token",
+    placeholder: "Paste your daemon token",
+    autocomplete: "off",
+    disabled: state.connecting,
+  });
+  input.setAttribute("aria-label", "Daemon bearer token");
+  const button = h(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting…" : "Connect",
+  );
+  const form = h(
+    "form",
+    { class: "af-login-form" },
+    h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
+    input,
+    button,
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const token = input.value.trim();
+    if (token !== "") {
+      actions.connect(token);
+    }
+  });
+
+  const children: (Node | string)[] = [
+    h("h1", { class: "af-recovery-title af-recovery-failed" }, "Login expired"),
+    h(
+      "p",
+      { class: "af-subtitle" },
+      "Paste the daemon token from ",
+      h("code", {}, "af token show"),
+      " on the host.",
+    ),
+    form,
+  ];
+  if (state.loginError) {
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
 }
 
 /**
@@ -739,20 +943,96 @@ export class AppShell {
   // the three body surfaces they toggle between. The sessions body (rail+terminal)
   // stays mounted while another view shows — hidden, not destroyed — so switching
   // views never tears down the focused terminal or its scrollback.
-  private readonly viewTabs = new Map<View, HTMLElement>();
-  // The appbar theme toggle (redesign PR1): one button per Auto/Light/Dark choice,
-  // the active one highlighted in update().
-  private readonly themeOpts = new Map<ThemeChoice, HTMLElement>();
-  private lastThemeChoice: ThemeChoice | null = null;
+  private readonly viewTabs: Map<View, HTMLElement>;
+  private readonly phone = window.matchMedia("(max-width: 768px)");
+  private readonly header: HTMLElement;
+  private readonly viewNav: HTMLElement;
+  private sessionFirst: ReturnType<typeof sessionFirstComposition> | null = null;
+  private terminalSelected = false;
+  // The disclosure context from the previous state update. Derived composition
+  // and focused kind are both too coarse: switching between same-kind panes must
+  // still invalidate carried actions, while viewport-only recomposition must not.
+  private sessionComposition: {
+    view: View;
+    selectedId: string | null;
+    focusedTab: string | null;
+    focusedTabSynth: string | null;
+    focusedKind: number | null;
+  } | null = null;
+  private newTabPickerPosition: (() => void) | null = null;
+  private phoneSyncQueued = false;
+  private readonly schedulePhoneSync = (): void => {
+    if (this.phoneSyncQueued) return;
+    this.phoneSyncQueued = true;
+    queueMicrotask(() => {
+      this.phoneSyncQueued = false;
+      this.syncPhone();
+    });
+  };
+  private syncPhone(): void {
+    const active = this.phone.matches && this.terminalSelected === true;
+    const compositionChanged = this.el.classList.contains("af-session-first") !== active;
+    const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
+    // appbarControls captures this before its media listener closes the phone
+    // disclosure. The composition pass is deliberately deferred until every
+    // owner-specific listener has run, so neither picker state nor its shortcut
+    // return may be sampled from the already-mutated DOM here.
+    const responsiveState = this.responsiveNewTabState;
+    this.responsiveNewTabState = null;
+    const pickerOpen = responsiveState?.trigger === pickerTrigger
+      ? responsiveState.open
+      : pickerTrigger?.getAttribute("aria-expanded") === "true";
+    const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ??
+      (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : undefined) : undefined;
+    const reopenPicker = (): void => {
+      this.openNewTabPicker();
+      // Closing the old owner can synchronously close the picker and clear its
+      // return. Preserve a shortcut transaction across this intentional reparent.
+      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
+        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
+      }
+    };
+    if (!compositionChanged) {
+      // A store update can observe the new media-query value and recompose before
+      // the query's change listeners run. The owner listener then closes the picker,
+      // leaving this deferred pass with no composition work but a real open capture.
+      if (responsiveState?.trigger === pickerTrigger && responsiveState.open &&
+          pickerTrigger?.getAttribute("aria-expanded") !== "true") reopenPicker();
+      return;
+    }
+    const focus = document.activeElement as HTMLElement | null;
+    // Escape can finish the shortcut before this deferred composition pass. Its
+    // return has already closed an incidental Session actions disclosure, while
+    // leaving a user-opened one expanded. Carry that settled state through the
+    // move even when there is no longer an open picker to restore it for us.
+    const sessionActionsOpen = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
+    this.appControls.close();
+    this.terminalChrome?.menu.close();
+    this.closeProjectMenu();
+    this.sessionFirst?.setActive(active);
+    this.el.classList.toggle("af-session-first", active);
+    if (sessionActionsOpen) this.terminalChrome?.menu.open();
+    // Reparenting closes the old enclosing disclosure. Reopen through the new
+    // owner and capture its return state before restoring the focused item.
+    if (pickerOpen) {
+      reopenPicker();
+    }
+    // openNewTabPicker has restored focus to its first item. Do not overwrite it
+    // with the app-controls trigger focused by the preceding media listener: that
+    // focusout would immediately close the picker we just reopened.
+    if (!pickerOpen && focus && focus !== document.activeElement) {
+      if (focus.getClientRects().length) focus.focus();
+      else this.appControls.trigger.focus();
+    }
+    this.actions.layoutChanged();
+  }
+  private readonly appControls: ReturnType<typeof appbarControls>;
   private readonly sessionsBody: HTMLElement;
   private readonly tasksPane: TasksPane;
   private readonly configPane: ConfigPane;
   private lastView: View | null = null;
-  // Whether the selected sessions surface is using the phone's condensed shell.
-  // Kept separately from lastView/lastSelectedId because either can flip this one
-  // presentation decision. The root class is media-query inert on desktop.
-  private lastCondensedSessionChrome: boolean | null = null;
   private lastTasks: TaskData[] | null = null;
+  private lastTasksError: string | undefined;
   private lastTasksProject: string | null = null;
 
   // The top-right project switcher (redesign PR2): a button showing the current
@@ -769,7 +1049,7 @@ export class AppShell {
   // highlight; the task set can add/drop a task-only project).
   private lastProjectSessions: SessionData[] | null = null;
   private lastProjectTasks: TaskData[] | null = null;
-  private lastRegisteredProjects: string[] | null = null;
+  private lastRegisteredProjects: RegisteredProject[] | null = null;
   private lastSelectedProject: string | null = null;
 
   // The rail's status filter control (feat: hide archived by default): a rail-head
@@ -788,6 +1068,7 @@ export class AppShell {
 
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
+  private terminalChrome: ReturnType<typeof terminalChrome> | null = null;
   // The full bounded archive-loss notice for the selected session. It stays
   // mounted above the terminal and is patched on every same-selection snapshot,
   // so automatic Lost recovery cannot turn it into a one-shot toast.
@@ -810,23 +1091,39 @@ export class AppShell {
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   private retryBtn: HTMLElement | null = null;
-  private retryVisible = false;
+  private retryKind: RetryActionPresentation["kind"] | null = null;
+  // The "Mark delivered" button and whether it is currently shown (#4429). Same
+  // in-place treatment as retryBtn: a verdict becomes confirmable — or settles —
+  // on a session.updated event with no selection change to rebuild the header.
+  private deliverBtn: HTMLElement | null = null;
+  private deliverVisible = false;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
   // change, so patchMainHead toggles it rather than deciding once at build time.
   private handoffBtn: HTMLElement | null = null;
   private handoffVisible = false;
-  // The PR badge link and the signature of what it currently draws (#3285). Same
-  // in-place treatment as retryBtn/handoffBtn: the daemon's sweep discovers a
-  // session's PR — or its state flips open → merged — WITHOUT a selection change,
-  // so patchMainHead fills it rather than deciding once at build time.
-  private prBadge: HTMLAnchorElement | null = null;
-  private prBadgeSig = "";
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   private tabBar: HTMLElement | null = null;
+  // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
+  // Escape restores every enclosing disclosure a keyboard open changed before
+  // returning to navigation. Pointer opens have no entry and return to the button.
+  private readonly newTabCancelReturn = new WeakMap<HTMLElement, () => void>();
+  private responsiveNewTabState: {
+    trigger: HTMLElement;
+    cancel?: () => void;
+    open: boolean;
+  } | null = null;
+  private readonly captureNewTabCancelReturn = (): void => {
+    const trigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
+    this.responsiveNewTabState = trigger ? {
+      trigger,
+      cancel: this.newTabCancelReturn.get(trigger),
+      open: trigger.getAttribute("aria-expanded") === "true",
+    } : null;
+  };
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -852,6 +1149,7 @@ export class AppShell {
   private dragFromIndex: number | null = null;
 
   // Last-applied state, for cheap change detection between updates.
+  private pendingRestores?: ReadonlySet<string>;
   private lastSessions: SessionData[] | null = null;
   private lastSelectedId: string | null = null;
   private lastLive: EventStreamStatus | null = null;
@@ -865,17 +1163,11 @@ export class AppShell {
   // selected (selectedId is null before AND after that first update, so the
   // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
+  private lastEmptyKey = "";
   private mainRendered = false;
   private readonly idleAgeTimer: number;
 
-  // The narrow-viewport session rail (web mobile pass): below ~768px the rail is an
-  // off-canvas drawer that the .af-nav-toggle hamburger slides over the terminal, so a
-  // phone gives the terminal the full width. This is the ONLY piece of the responsive
-  // work that needs JS — everything else is @media CSS. `navOpen` is pure UI ephemera
-  // (never store state): the drawer is closed on load, opens on the toggle, and
-  // auto-closes when an action leaves the rail (create/select/lifecycle) or the view
-  // changes. Filtering stays in the rail and deliberately keeps it open (#2226).
-  // On desktop the CSS ignores the class, so setNav is an inert no-op there.
+  // Drawer state is local UI ephemera; closing it restores session-first chrome.
   private readonly navToggle: HTMLButtonElement;
   private readonly navScrim: HTMLElement;
   private navOpen = false;
@@ -890,41 +1182,12 @@ export class AppShell {
      *  install (a harness) can leave it out. */
     private readonly installEl?: HTMLElement,
   ) {
-    // Disconnect doubles as "forget the saved token": the credential persists across
-    // visits now, so this button is the only way back to the login prompt on a shared
-    // machine or after a rotation. The title says so — the label alone reads as a
-    // transport action, not a logout.
-    const disconnect = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
-    disconnect.setAttribute("title", "Disconnect and forget the saved token");
-
-    // The theme toggle: a compact Auto/Light/Dark segmented control. A click routes
-    // through actions.setTheme, which persists the choice and re-themes the terminals.
-    const themeToggle = h("div", { class: "af-theme-toggle" });
-    themeToggle.setAttribute("role", "group");
-    themeToggle.setAttribute("aria-label", "Theme");
-    for (const choice of THEME_CHOICES) {
-      const opt = h("button", { type: "button", class: "af-theme-opt" }, themeLabel(choice));
-      opt.setAttribute("data-theme-opt", choice);
-      opt.setAttribute("title", `${themeLabel(choice)} theme`);
-      opt.addEventListener("click", () => this.actions.setTheme(choice));
-      this.themeOpts.set(choice, opt);
-      themeToggle.append(opt);
-    }
-
     // The view switcher: one tab per top-level view, left-to-right in the [ / ] cycle
     // order (nav.ts VIEWS), the active one highlighted in update(). A click routes
     // through actions.switchView, exactly like the keyboard path.
-    const viewNav = h("div", { class: "af-viewnav" });
-    viewNav.setAttribute("role", "tablist");
-    viewNav.setAttribute("aria-label", "Views");
-    for (const v of VIEWS) {
-      const tab = h("button", { type: "button", class: "af-viewtab" }, viewLabel(v));
-      tab.setAttribute("role", "tab");
-      tab.setAttribute("data-view", v);
-      tab.addEventListener("click", () => this.actions.switchView(v));
-      this.viewTabs.set(v, tab);
-      viewNav.append(tab);
-    }
+    const { el: viewNav, tabs } = viewNavigation((view) => this.switchView(view));
+    this.viewTabs = tabs;
+    this.viewNav = viewNav;
 
     // The project switcher (redesign PR2): a button showing the current project and a
     // dropdown listing every project with counts. `margin-left:auto` (the wrap) pushes
@@ -944,7 +1207,10 @@ export class AppShell {
     this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
     this.projectSwitchBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      setAppbarToolsOpen(false);
+      // Switch project stops propagation, so the panel's delegated dismissal
+      // never sees the activation; dismiss (not close) retires a carried
+      // Session actions disclosure like every other panel action.
+      this.appControls.dismiss();
       this.toggleProjectMenu();
     });
     this.projectMenu = h("div", { class: "af-project-menu" });
@@ -960,82 +1226,25 @@ export class AppShell {
       }
     });
 
-    // The narrow-viewport rail toggle (web mobile pass): a hamburger that slides the
-    // session drawer over the terminal. CSS keeps it display:none on desktop and shows
-    // it only in the sessions view on a phone (the tasks/config views have no rail), so
-    // it never competes with the appbar controls on a comfortable width.
+    // The drawer toggle shares the compact session row at phone widths.
     this.navToggle = h("button", { type: "button", class: "af-nav-toggle" }, icon("menu"));
     this.navToggle.setAttribute("aria-label", "Toggle sessions");
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
 
-    // Secondary appbar chrome stays inline on desktop, but a phone cannot give all
-    // four controls scarce primary-row width without clipping the project context
-    // (#2227). Group them behind one More trigger at the narrow breakpoint instead
-    // of deleting functionality or shrinking touch targets. The listeners exist only
-    // while the popover is open, so logout/login cannot accumulate document handlers.
-    const appbarTools = h(
-      "div",
-      { class: "af-appbar-tools", id: "af-appbar-tools" },
+    // Share one MediaQueryList so app-controls closes its old layout before
+    // syncPhone reparents and reopens the picker. Separate lists can dispatch
+    // in creation order and close the disclosure after syncPhone reopened it.
+    this.appControls = appbarControls([
       ...(this.installEl ? [this.installEl] : []),
-      themeToggle,
-      disconnect,
-    );
-    appbarTools.setAttribute("role", "group");
-    appbarTools.setAttribute("aria-label", "App controls");
-    const appbarMore = h("button", { type: "button", class: "af-appbar-more" }, icon("ellipsis"));
-    appbarMore.setAttribute("aria-label", "More app controls");
-    appbarMore.setAttribute("title", "More app controls");
-    appbarMore.setAttribute("aria-controls", "af-appbar-tools");
-    appbarMore.setAttribute("aria-expanded", "false");
-    const appbarToolsWrap = h("div", { class: "af-appbar-tools-wrap" }, appbarMore, appbarTools);
-    let appbarToolsOpen = false;
-    function setAppbarToolsOpen(open: boolean): void {
-      if (appbarToolsOpen === open) {
-        return;
-      }
-      appbarToolsOpen = open;
-      appbarToolsWrap.classList.toggle("af-appbar-tools-open", open);
-      appbarMore.setAttribute("aria-expanded", open ? "true" : "false");
-      if (open) {
-        document.addEventListener("mousedown", onAppbarToolsMouseDown);
-        document.addEventListener("keydown", onAppbarToolsKeyDown, true);
-        window.addEventListener("resize", onAppbarToolsResize);
-      } else {
-        document.removeEventListener("mousedown", onAppbarToolsMouseDown);
-        document.removeEventListener("keydown", onAppbarToolsKeyDown, true);
-        window.removeEventListener("resize", onAppbarToolsResize);
-      }
-    }
-    const onAppbarToolsMouseDown = (e: MouseEvent): void => {
-      if (!appbarToolsWrap.isConnected || !appbarToolsWrap.contains(e.target as Node)) {
-        setAppbarToolsOpen(false);
-      }
-    };
-    const onAppbarToolsKeyDown = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape") {
-        return;
-      }
-      e.stopPropagation();
-      setAppbarToolsOpen(false);
-      appbarMore.focus();
-    };
-    const onAppbarToolsResize = (): void => setAppbarToolsOpen(false);
-    appbarMore.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const opening = !appbarToolsOpen;
-      if (opening) {
-        this.closeProjectMenu();
-      }
-      setAppbarToolsOpen(opening);
-    });
-    // Disconnect replaces the shell synchronously. Close first so the temporary
-    // document/window listeners cannot outlive the DOM subtree they describe.
-    disconnect.addEventListener("click", () => {
-      setAppbarToolsOpen(false);
-      this.actions.disconnect();
-    });
+    ], this.phone, this.captureNewTabCancelReturn, () => {
+      // The phone disclosure owns the carried desktop actions. A user dismissal
+      // retires that state, unlike layout and picker-return programmatic closes.
+      const slot = this.terminalChrome?.newTabSlot;
+      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
+    }, () => this.projectSwitchBtn);
+    this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
 
     const header = h(
       "header",
@@ -1044,8 +1253,20 @@ export class AppShell {
       h("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       this.projectSwitchWrap,
-      appbarToolsWrap,
+      this.appControls.el,
     );
+
+    this.header = header;
+    // Run after every owner-specific media listener. That guarantees the app-controls
+    // disclosure has finished its own close/reflow before an open picker is restored.
+    this.phone.addEventListener("change", this.schedulePhoneSync);
+    // Nested controls stop propagation so opening them does not dismiss their owner.
+    // Other panel actions that reach this boundary are user dismissals.
+    this.appControls.panel.addEventListener("click", event => {
+      const target = (event.target as HTMLElement).closest("button, a");
+      if (this.el.classList.contains("af-session-first") && target &&
+        !target.closest(".af-viewnav")) this.appControls.dismiss();
+    });
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h(
@@ -1111,6 +1332,8 @@ export class AppShell {
     // shows exactly one and hides the other by `state.view`. It owns its own subtree
     // (scoped to the selected project) so a task.* event patches only that pane.
     this.tasksPane = new TasksPane({
+      retry: () => this.actions.retryTasks?.(),
+      addProject: () => this.actions.addProject(),
       add: () => this.actions.addTask(),
       edit: (task: TaskData) => this.actions.editTask(task),
       toggle: (task: TaskData) => this.actions.toggleTask(task),
@@ -1120,6 +1343,13 @@ export class AppShell {
     this.configPane = new ConfigPane({
       save: (key: string, value: string) => this.actions.setConfigValue(key, value),
       openAssistant: () => this.actions.openConfigAssistant(),
+      explain: (key: string) => this.actions.explainConfig(key),
+      accounts: {
+        register: (agent: string, name: string) => this.actions.registerAccount(agent, name),
+        login: (agent: string, name: string) => this.actions.openAccountLogin(agent, name),
+      },
+      setTheme: (choice: ThemeChoice) => this.actions.setTheme(choice),
+      disconnect: () => this.actions.disconnect(),
     });
     const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
 
@@ -1130,12 +1360,24 @@ export class AppShell {
     // The modal host is a persistent overlay layer index.ts mounts modals into; it
     // sits above the app body and is empty except while a modal is open.
     this.el = h("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
+    // Local scopes keep daemon inline overrides out of migrated chrome until C.
+    header.dataset.afTheme = currentMode();
+    rail.dataset.afTheme = currentMode();
+    this.navScrim.dataset.afTheme = currentMode();
     this.idleAgeTimer = window.setInterval(() => refreshIdleReasonAges(this.railList), 15_000);
   }
 
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose(): void {
     window.clearInterval(this.idleAgeTimer);
+    if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
+    this.pendingInitialRail = null;
+    this.terminalChrome?.dispose();
+    this.phone.removeEventListener("change", this.schedulePhoneSync);
+    this.sessionFirst?.setActive(false);
+    this.appControls.dispose();
+    for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectFavicon(null);
   }
 
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
@@ -1181,14 +1423,27 @@ export class AppShell {
   }
 
   /** Applies the latest state, touching only what changed. */
-  update(state: AppState): void {
+  update(state: AppState, prioritizeTerminal = false): void {
+    const restoresChanged = this.pendingRestores !== state.pendingRestores;
+    this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
-    const condensedSessionChrome = usesCondensedSessionChrome(state);
-    if (this.lastCondensedSessionChrome !== condensedSessionChrome) {
-      this.lastCondensedSessionChrome = condensedSessionChrome;
-      this.el.classList.toggle("af-session-selected", condensedSessionChrome);
-      this.actions.layoutChanged();
-    }
+    const color = projectColor(state.registeredProjects, state.selectedProject);
+    applyProjectFrame(this.main, color);
+    applyProjectFavicon(color);
+    const selectedForPhone = selectedSession(state);
+    const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
+    const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
+    const focusedTab = focusedForPhone ? tabIdentity(focusedForPhone) : null;
+    // The synthesized kind:name fallback, tracked separately from the resolved
+    // identity: a snapshot that backfills a real id onto the same tab changes
+    // tabIdentity but no pixel (#1779), and must not read as a context change.
+    const focusedTabSynth = focusedForPhone ? `${focusedForPhone.kind}:${focusedForPhone.name}` : null;
+    const focusedKind = focusedForPhone?.kind ?? null;
+    // Observe the semantic owner before this update can replace or reparent its DOM.
+    // Viewport-only recomposition leaves this context alone and therefore preserves
+    // a user-opened disclosure; changing its view, session, or focused tab invalidates
+    // carried state no matter which present or future action produced the store update.
+    this.observeSessionComposition(state.view, state.selectedId, focusedTab, focusedKind, focusedTabSynth);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -1200,10 +1455,22 @@ export class AppShell {
       this.el.classList.toggle("af-kb-rail", kb === "rail");
     }
 
-    if (this.lastError !== state.tabError) {
-      this.lastError = state.tabError;
-      this.toast.textContent = state.tabError ?? "";
-      this.toast.classList.toggle("af-toast-show", state.tabError !== null);
+    const errorSignature = JSON.stringify([state.mutationError, state.tabError, state.tabNotice]);
+    if (this.lastError !== errorSignature) {
+      this.lastError = errorSignature;
+      if (state.mutationError) {
+        const notice = renderMutationOutcome(state.mutationError);
+        const dismiss = h("button", { type: "button", class: "af-recovery-action" }, "Dismiss");
+        dismiss.addEventListener("click", () => this.actions.dismissNotice?.());
+        notice.append(dismiss);
+        this.toast.replaceChildren(notice);
+      } else {
+        this.toast.replaceChildren(...(state.tabError ? [recoveryScreen({
+          condition: state.tabNotice ? "Notice" : "Operation failed", detail: state.tabError,
+          failed: !state.tabNotice, action: "Dismiss", run: () => this.actions.dismissNotice?.(),
+        })] : []));
+      }
+      this.toast.classList.toggle("af-toast-show", Boolean(state.mutationError) || state.tabError !== null);
     }
 
     // The event-stream state is tracked and published, but no longer DRAWN: the
@@ -1242,33 +1509,31 @@ export class AppShell {
       this.setNav(false);
     }
 
-    // Highlight the active theme option (redesign PR1) when the choice changes.
-    if (this.lastThemeChoice !== state.themeChoice) {
-      this.lastThemeChoice = state.themeChoice;
-      for (const [choice, opt] of this.themeOpts) {
-        const active = choice === state.themeChoice;
-        opt.classList.toggle("af-theme-opt-active", active);
-        opt.setAttribute("aria-pressed", active ? "true" : "false");
-      }
-    }
-
     // The tasks pane mirrors the task projection, SCOPED to the selected project
     // (redesign PR2). It re-renders when either the task list or the project scope
     // changes, so switching projects re-scopes the tasks view too.
-    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject) {
+    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject || this.lastTasksError !== state.tasksError) {
+      this.lastTasksError = state.tasksError;
       this.lastTasks = state.tasks;
       this.lastTasksProject = state.selectedProject;
-      this.tasksPane.update(state.tasks, state.selectedProject);
+      this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
 
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
     // config.toml applies to every repo — so unlike the tasks pane it re-renders on
     // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
+    // A registry-only change (registeredProjects updated without touching
+    // sessions/selection/filter) still moves the skipped-repos notice — its labels
+    // map repo_id -> root via the registry, so a freshly learned root (a rebind, or a
+    // ListProjects recovery on projects.changed) must re-render the rail even though
+    // the row set is unchanged. Captured before the project-switcher block below
+    // overwrites lastRegisteredProjects.
+    const registryChanged = this.lastRegisteredProjects !== state.registeredProjects;
 
     // Selecting a session on a phone should reveal its terminal, so fold the drawer
     // shut whenever the selection lands on a real session — the keyboard/programmatic
@@ -1306,29 +1571,35 @@ export class AppShell {
     // the terminal host (it lives in the main pane), so events never blur it.
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged) {
-      // The rail rebuilds on session STATUS CHURN, not only on something the user did,
-      // so a reader scrolled down it was being returned to the top by other people's
-      // sessions (#2933). Keep the place while it is the same list; a project or filter
-      // change is a different list and correctly starts at the top.
-      const railToken = listToken([
-        state.selectedProject,
-        Object.entries(state.statusFilter)
-          .filter(([, on]) => on)
-          .map(([kind]) => kind)
-          .sort()
-          .join(","),
-      ]);
-      const previousRailToken = this.lastRailToken;
-      this.lastRailToken = railToken;
-      rebuildKeepingScroll(this.railList, previousRailToken, railToken, () => this.renderRail(state));
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
+      // Mount/bind a routed terminal before spending the first frame on the rail.
+      // Further updates coalesce into that first paint; later gestures stay immediate.
+      if (!this.railPainted && prioritizeTerminal) {
+        this.pendingInitialRail = state;
+        if (this.initialRailFrame === null) {
+          this.initialRailFrame = window.requestAnimationFrame(() => {
+            this.initialRailFrame = null;
+            this.railPainted = true;
+            if (this.pendingInitialRail) this.updateRail(this.pendingInitialRail);
+            this.pendingInitialRail = null;
+          });
+        }
+      } else {
+        if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
+        this.initialRailFrame = null;
+        this.pendingInitialRail = null;
+        this.railPainted = true;
+        this.updateRail(state);
+      }
     }
 
     // The main pane's STRUCTURE only changes when the selected session changes (or on
     // the very first update, which lays down the initial empty-state placeholder);
     // otherwise we just patch its header (title, actions, published status), leaving
     // the terminal host — and its focus and scrollback — in place.
-    if (selectionChanged || !this.mainRendered) {
+    const emptyKey = `${state.selectedProject}:${state.sessions.length}:${state.projectsError ?? ""}`;
+    if (selectionChanged || !this.mainRendered || (!selectedSession(state) && emptyKey !== this.lastEmptyKey)) {
+      this.lastEmptyKey = emptyKey;
       this.mainRendered = true;
       this.renderMain(state);
     } else {
@@ -1356,7 +1627,22 @@ export class AppShell {
     // instead of using the now-known stable id. Adding ids to the signature would fix
     // the cache by reintroducing exactly the #1737 rebuild — so the cache is synced
     // independently of the render instead.
+    this.syncPhone();
     this.syncTabIdentityCaches(state);
+  }
+
+  private railPainted = false;
+  private initialRailFrame: number | null = null;
+  private pendingInitialRail: AppState | null = null;
+
+  private updateRail(state: AppState): void {
+    const railToken = listToken([
+      state.selectedProject,
+      Object.entries(state.statusFilter).filter(([, on]) => on).map(([kind]) => kind).sort().join(","),
+    ]);
+    const previous = this.lastRailToken;
+    this.lastRailToken = railToken;
+    rebuildKeepingScroll(this.railList, previous, railToken, () => this.renderRail(state));
   }
 
   /** Refreshes the ordered tab identity + REAL-id caches the delegated dragstart
@@ -1403,52 +1689,129 @@ export class AppShell {
   private renderRail(state: AppState): void {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
     const visible = visibleRailSessions(state);
-    // Every rebuild replaces the row controls. Drop the old reference first so a
-    // selected row hidden by the project/status filter cannot leave patchMainHead
-    // mutating a detached button.
-    this.lifecycleBtn = null;
-    this.lifecycleAction = null;
-    // The count is what the rail SHOWS, not what the project holds — a count that
-    // disagrees with the rows under it is just a bug the user has to reconcile. The
-    // filter menu carries the per-state totals for what's hidden.
-    this.railCount.textContent = String(visible.length);
-    this.renderFilterMenu(state, scoped);
-    const list = this.railList;
-    // No project selected ⇒ there are no projects at all (nothing has been created):
-    // the global empty rail. Post-#2456 the coherent first step is registering a repo
-    // from the switcher's "+ Add project", not the TUI — the union then surfaces it
-    // and a session can be created into it here.
-    if (!state.selectedProject) {
-      list.replaceChildren(
-        h("li", { class: "af-rail-empty" }, "No projects yet — add one from the project switcher to get started."),
-      );
-      return;
+    const count = String(visible.length);
+    if (this.railCount.textContent !== count) this.railCount.textContent = count;
+    const filterSignature = JSON.stringify([kindCounts(scoped), state.statusFilter]);
+    if (filterSignature !== this.lastFilterSignature) {
+      this.lastFilterSignature = filterSignature;
+      this.renderFilterMenu(state, scoped);
     }
-    const rows = visible.map((s) => {
-      const selected = s.id === state.selectedId;
-      return sessionRow(
-        s,
-        selected,
-        (id) => this.runRailExit(() => this.actions.open(id)),
-        (target) => this.rowActions(target, selected),
-      );
-    });
-    // A subtle hairline under the pinned root agent (#2513), matching the TUI. Only
-    // when root actually leads the visible list AND a non-root row follows it, so
-    // there's never a dangling rule on an empty or root-only list. Root sorts first
-    // (compareSessionsForRail) and is unique, so it is visible[0] whenever present.
-    if (visible.length > 1 && isRootSession(visible[0])) {
-      rows.splice(1, 0, h("li", { class: "af-rail-sep", ariaHidden: "true" }));
+    const activeBefore = document.activeElement as HTMLElement | null;
+    let restoreChangedFocus: (() => void) | undefined;
+    const reopened: Array<ReturnType<typeof actionsDisclosure>> = [];
+    const rows = this.railRows.reconcile(
+      state.selectedProject ? visible : [], sessionKey,
+      s => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
+      (s, previous) => {
+        const key = sessionKey(s);
+        const oldMenu = this.railMenus.get(key);
+        const wasOpen = oldMenu && !oldMenu.panel.hidden;
+        const active = document.activeElement as HTMLElement | null;
+        const focusedName = previous?.contains(active) ? active?.getAttribute("aria-label") : null;
+        oldMenu?.dispose();
+        this.railMenus.delete(key);
+        const row = sessionRow(s, s.id === state.selectedId,
+          id => this.runRailExit(() => this.actions.open(id)),
+          target => this.rowActions(target, s.id === state.selectedId), previous);
+        const menu = wasOpen ? this.railMenus.get(key) : undefined;
+        if (menu) { menu.open(); reopened.push(menu); }
+        if (focusedName) restoreChangedFocus = () =>
+          row.querySelector<HTMLElement>(`[aria-label="${CSS.escape(focusedName)}"]`)?.focus({ preventScroll: true });
+        return row;
+      },
+      key => { this.railMenus.get(key)?.dispose(); this.railMenus.delete(key); },
+    );
+    // Preserve the notice too: its controls may own focus during a snapshot.
+    const noticeSignature = JSON.stringify([state.selectedProject, scoped.length,
+      scoped.some(s => !isArchived(s)), scoped.filter(isArchived).length,
+      visible.length, state.statusFilter]);
+    if (noticeSignature !== this.lastRailNoticeSignature) {
+      this.lastRailNoticeSignature = noticeSignature;
+      this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
-    const notice = this.railNotice(state, scoped, visible);
-    list.replaceChildren(...(notice ? [notice, ...rows] : rows));
+    // The skipped-repos notice is independent of the project scope and the status
+    // filter: it reports snapshot incompleteness the daemon carried alongside the
+    // rows, not a per-project empty/filter state, so it is rebuilt only when the
+    // skip set itself changes. Its labels map repo_id -> root via the registry, so
+    // the signature also carries the id/root pairs for the skipped repos — a
+    // ListProjects recovery or a rebind that leaves the skip set untouched still
+    // replaces a bare repo_id (or an obsolete root) with the now-known path.
+    // Prepended before the rail notice so a project that IS the skipped one still
+    // sees WHY its sessions vanished.
+    const skipped = state.skippedRepos ?? [];
+    // Key on RegisteredProject.repo_id (the RepoIDFromRoot hash the snapshot's
+    // skipped_repos[].repo_id carries), not RegisteredProject.id (the `prj_...`
+    // registry identity, which never matches a repo hash). Without this the
+    // notice can never resolve a skipped repo to its root and falls back to the
+    // bare hash even on the initial render.
+    const skippedRoots = state.registeredProjects
+      .filter(p => p.repo_id && skipped.some(s => s.repo_id === p.repo_id))
+      .map(p => [p.repo_id, p.root] as [string, string]);
+    const skippedSig = JSON.stringify([skipped, skippedRoots]);
+    if (skippedSig !== this.lastSkippedNoticeSignature) {
+      this.lastSkippedNoticeSignature = skippedSig;
+      this.cachedSkippedNotice = this.skippedReposNotice(state);
+    }
+    const head: HTMLElement[] = [];
+    if (this.cachedRailNotice) head.push(this.cachedRailNotice);
+    orderChildren(this.railList, [...head, ...rows]);
+    // The skipped-repos notice is a role="alert": it must be a SIBLING of the
+    // role="listbox", not one of its owned children (which the ARIA listbox contract
+    // expects to be role="option" session rows). Mounting it inside the listbox made
+    // assistive tech either drop the alert or miscount the listbox's options. Render
+    // it just above the list, between the rail head and the listbox, so it is still
+    // announced and visually precedes the rows without joining the listbox's owned
+    // item set. Tracked separately from cachedSkippedNotice so a null notice (the
+    // healthy steady state) removes the previously mounted element.
+    const railNav = this.railList.parentElement;
+    if (this.cachedSkippedNotice !== this.mountedSkippedNotice) {
+      this.mountedSkippedNotice?.remove();
+      if (this.cachedSkippedNotice && railNav) {
+        railNav.insertBefore(this.cachedSkippedNotice, this.railList);
+      }
+      this.mountedSkippedNotice = this.cachedSkippedNotice;
+    }
+    for (const menu of reopened) if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
+    restoreChangedFocus?.();
+    if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
+      activeBefore.focus({ preventScroll: true });
+    }
+    const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : undefined;
+    this.lifecycleBtn = selectedMenu?.panel.querySelector<HTMLElement>(".af-rail-lifecycle") ?? null;
+    this.lifecycleAction = selectedSession(state)?.lifecycle_action ?? null;
   }
+
+  private railRows = new KeyedRows<SessionData, HTMLElement>();
+  private lastFilterSignature = "";
+  private lastRailNoticeSignature = "";
+  private cachedRailNotice: HTMLElement | null = null;
+  private lastSkippedNoticeSignature = "";
+  private cachedSkippedNotice: HTMLElement | null = null;
+  // The element currently mounted as a sibling of the rail listbox; null when the
+  // skip set is empty. Distinct from cachedSkippedNotice (the latest value) so a
+  // transition to empty removes the previously mounted alert.
+  private mountedSkippedNotice: HTMLElement | null = null;
 
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
    *  the browser never reconstructs either policy from status pixels. */
+  private railMenus = new Map<string, ReturnType<typeof actionsDisclosure>>();
   private rowActions(session: ManagedSession, selected: boolean): HTMLElement {
-    return h("div", { class: "af-row-actions" }, ...this.sessionActionButtons(session, "rail", selected));
+    const host = h("div", { class: "af-row-actions" });
+    const buttons = this.sessionActionButtons(session, "rail", selected);
+    if (!buttons.length) return host;
+    const menu = actionsDisclosure(`Actions for ${session.title}`);
+    menu.el.dataset.sessionId = session.id;
+    this.railMenus.set(sessionKey(session), menu);
+    menu.trigger.replaceChildren("…");
+    menu.trigger.addEventListener("click", () => {
+      if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
+    });
+    menu.panel.append(...buttons);
+    menu.el.addEventListener("click", (event) => event.stopPropagation());
+    menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });
+    host.append(menu.el);
+    return host;
   }
 
   /** Builds both rail and fallback-header controls from the same daemon capabilities.
@@ -1473,10 +1836,12 @@ export class AppShell {
         if (surface === "rail") {
           this.runRailExit(run);
         } else {
+          this.appControls.dismiss();
           run();
         }
       });
       this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title, surface);
+      lifecycleBtn.disabled = lifecycleSession.lifecycle_action === "restore" && this.pendingRestores?.has(session.id) === true;
       if (surface === "rail" && selected) {
         this.lifecycleBtn = lifecycleBtn;
         this.lifecycleAction = lifecycleSession.lifecycle_action;
@@ -1492,9 +1857,9 @@ export class AppShell {
       const killBtn = h(
         "button",
         { type: "button", class: killClass },
-        ...(surface === "rail" ? [icon("octagon-x")] : ["Kill"]),
+        "Delete session",
       );
-      const killLabel = `Kill session “${killSession.title}”`;
+      const killLabel = `Delete session “${killSession.title}”`;
       killBtn.setAttribute("aria-label", killLabel);
       killBtn.setAttribute("title", killLabel);
       killBtn.addEventListener("click", (e) => {
@@ -1502,6 +1867,7 @@ export class AppShell {
         if (surface === "rail") {
           this.runRailExit(() => this.actions.kill(killSession));
         } else {
+          this.appControls.dismiss();
           this.actions.kill(killSession);
         }
       });
@@ -1522,7 +1888,7 @@ export class AppShell {
     const label = `${verb} “${sessionTitle}”`;
     btn.dataset.action = action;
     if (surface === "rail") {
-      btn.replaceChildren(icon(action === "restore" ? "archive-restore" : "archive"));
+      btn.textContent = verb.replace(" session", "");
     } else {
       btn.textContent = verb.replace(" session", "");
     }
@@ -1544,6 +1910,8 @@ export class AppShell {
    *  - otherwise nothing: rows are showing.
    */
   private railNotice(state: AppState, scoped: SessionData[], visible: SessionData[]): HTMLElement | null {
+    // The pane owns zero-data guidance; keep only the rail count for that state.
+    if (scoped.length === 0) return null;
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
@@ -1569,11 +1937,60 @@ export class AppShell {
       return h(
         "li",
         { class: "af-rail-empty-project" },
-        `No sessions match the filter — ${hiddenCount(scoped, state.statusFilter)} hidden `,
+        `No matches · ${hiddenCount(scoped, state.statusFilter)} hidden `,
         reset,
       );
     }
     return null;
+  }
+
+  /** A persistent incompleteness notice for the rail, naming the repos the daemon
+   *  dropped at startup and the daemon's reason for each (#4742). This is the web's
+   *  half of the contract the CLI's list/get/whoami honor by refusing or caveating:
+   *  rather than presenting the truncated `instances` as a complete roster, the rail
+   *  shows WHAT is missing and WHY so a user can tell "repo has no sessions" from
+   *  "the daemon dropped this repo's sessions at startup". Returns null when no repo
+   *  was skipped — the healthy steady state — so the rail renders nothing extra.
+   *
+   *  Each skipped repo is named by its project root when the registry knows it (the
+   *  repo_id is a short hash, not a path), falling back to the bare id; the reason
+   *  renders the daemon's stable code plus a one-line repair hint mirroring
+   *  api/skipped_repos.go verbatim so the web and the CLI send the operator to the
+   *  same remedy. An unknown/empty reason is treated as corrupted, which is all an
+   *  older daemon ever sent. */
+  private skippedReposNotice(state: AppState): HTMLElement | null {
+    const skipped = state.skippedRepos ?? [];
+    if (skipped.length === 0) return null;
+    // Map the snapshot's skipped_repos[].repo_id (a RepoIDFromRoot hash) to the
+    // registered project root through RegisteredProject.repo_id — the SAME identity
+    // space — not the project's `id` (a `prj_...` registry key, which never matches
+    // a repo hash). An unresolved registered project (no repo_id) cannot resolve a
+    // skipped repo this way and falls back to the bare hash, which is correct: the
+    // registry has no known root for it either.
+    const knownRoot = new Map<string, string>();
+    for (const p of state.registeredProjects) {
+      if (p.repo_id && !knownRoot.has(p.repo_id)) knownRoot.set(p.repo_id, p.root);
+    }
+    const body = h("div", { class: "af-rail-skipped-body" });
+    for (const s of skipped) {
+      const label = knownRoot.get(s.repo_id) ?? s.repo_id;
+      const reason = skippedRepoReasonLabel(s.reason);
+      const hint = skippedRepoRepairHint(s.reason);
+      const line = h("p", { class: "af-rail-skipped-row" },
+        h("strong", {}, label),
+        ` — ${reason}. `,
+        hint,
+      );
+      if (s.failed_rows && s.failed_rows > 0) {
+        line.append(` (${s.failed_rows} session(s) hidden)`);
+      }
+      body.append(line);
+    }
+    return h("div", { class: "af-rail-skipped", role: "alert" },
+      h("div", { class: "af-rail-skipped-head" },
+        "Some sessions are hidden — a daemon repo could not be loaded."),
+      body,
+    );
   }
 
   /** (Re)builds the filter menu: one checkbox per session state with its scoped
@@ -1628,7 +2045,7 @@ export class AppShell {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   private renderProjectSwitch(state: AppState): void {
-    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects);
+    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects.map((p) => p.root));
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
     // The switcher is ALWAYS openable, even with no projects (#2456): its menu now
@@ -1642,7 +2059,8 @@ export class AppShell {
       children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet — add one below."));
     }
     for (const p of summaries) {
-      children.push(this.projectItem(p, p.root === current));
+      const record = state.registeredProjects.find((r) => r.root === p.root);
+      children.push(this.projectItem(p, p.root === current, record));
     }
 
     // Footer actions. Add-project is ALWAYS present (#2456): it is the empty
@@ -1652,18 +2070,46 @@ export class AppShell {
     const footChildren: HTMLElement[] = [];
 
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
+    add.dataset.projectFocus = "add";
     add.setAttribute("title", "Register a git checkout by path as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
+      this.appControls.dismiss();
       this.actions.addProject();
     });
     footChildren.push(add);
 
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      children.push(
+        projectColorRow(projectColor(state.registeredProjects, currentSummary.root), currentSummary.name, (color) => {
+          this.actions.setProjectColor(currentSummary.root, color);
+        }),
+      );
+      const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
+      if (currentRecord) {
+        // Rebind (`af projects rebind`): repoint the registration at the checkout
+        // it should track now — the repair when the recorded root was moved or
+        // recloned. Only a REGISTERED project can rebind — the verb moves a
+        // registry identity, and a session-derived project has none.
+        const rebind = h("button", { type: "button", class: "af-ghost af-project-rebind" }, "Rebind…");
+        rebind.dataset.projectFocus = "rebind";
+        rebind.setAttribute(
+          "title",
+          `Point ${currentSummary.name} at a different checkout — the repair after it was moved or recloned`,
+        );
+        rebind.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.closeProjectMenu();
+          this.appControls.dismiss();
+          this.actions.rebindProject(currentRecord.id, currentSummary.name);
+        });
+        footChildren.push(rebind);
+      }
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
-      const isRegistered = state.registeredProjects.includes(currentSummary.root);
+      del.dataset.projectFocus = "delete";
+      const isRegistered = currentRecord !== undefined;
       // Delete-project ARCHIVES the project's regular live sessions (#1735) AND, for
       // a registered project, removes its durable registry record (#2456) so it leaves
       // the switcher. It is a silent no-op ONLY for a project with neither: a task-only,
@@ -1680,46 +2126,190 @@ export class AppShell {
       } else {
         del.setAttribute(
           "title",
-          currentSummary.liveCount > 0
-            ? `Delete project ${currentSummary.name} (archives its sessions, restorable)`
-            : `Delete project ${currentSummary.name} (removes the empty project)`,
+          `Delete project ${currentSummary.name} (review session consequences)`,
         );
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
-          this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
+          this.appControls.dismiss();
+          this.actions.deleteProject(currentSummary.root, currentSummary.name);
         });
       }
       footChildren.push(del);
     }
 
     children.push(h("div", { class: "af-project-menu-foot" }, ...footChildren));
-    this.projectMenu.replaceChildren(...children);
+    const focusFallback = this.projectSwitchBtn.getClientRects().length ? this.projectSwitchBtn : this.appControls.trigger;
+    replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
 
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
-   *  switches the active project and closes the menu. */
-  private projectItem(p: ProjectSummary, current: boolean): HTMLElement {
+   *  switches the active project and closes the menu. `record` is the registry
+   *  registration behind the row, when there is one — a registration whose
+   *  recorded root is gone (path_exists=false) is marked missing, the state the
+   *  footer Rebind action repairs. */
+  private projectItem(p: ProjectSummary, current: boolean, record?: RegisteredProject): HTMLElement {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...(current ? [icon("check")] : []));
     check.setAttribute("aria-hidden", "true");
+    const name = h("span", { class: "af-project-item-name" }, p.name);
+    const dotColor = record ? projectColor([record], record.root) : null;
+    if (dotColor !== null) {
+      const dot = h("span", { class: "af-project-dot" });
+      dot.style.setProperty("--af-swatch", dotColor);
+      dot.setAttribute("aria-hidden", "true");
+      name.prepend(dot, " ");
+    }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      h("span", { class: "af-project-item-name" }, p.name),
+      name,
       h("span", { class: "af-project-item-path" }, p.path),
     );
-    const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
+    // The missing marker leads the glance: a dead checkout is the consequential
+    // half, the counts the reassuring one (same order delete results use).
+    const meta = h(
+      "span",
+      { class: "af-project-item-meta" },
+      ...(record && !record.path_exists
+        ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` · ${projectMeta(p)}`]
+        : [projectMeta(p)]),
+    );
     const item = h("button", { type: "button", class: cls }, check, label, meta);
+    item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
+      this.appControls.dismiss();
       this.actions.switchProject(p.root);
     });
     return item;
+  }
+
+  /** Invalidates carried disclosure state when its owning context changes. */
+  private observeSessionComposition(
+    view: View,
+    selectedId: string | null,
+    focusedTab: string | null,
+    focusedKind: number | null,
+    focusedTabSynth: string | null,
+  ): void {
+    const previous = this.sessionComposition;
+    // An id-less tab tracked by its synthesized kind:name keeps the same context
+    // when a later snapshot backfills its real id — the adoption is the same tab,
+    // so only a genuine focused-tab change retires a carried disclosure.
+    const sameFocusedTab = previous !== null && (
+      previous.focusedTab === focusedTab
+      || (previous.focusedTab === previous.focusedTabSynth
+        && focusedTabSynth !== null && previous.focusedTabSynth === focusedTabSynth)
+    );
+    if (previous && (
+      previous.view !== view
+      || previous.selectedId !== selectedId
+      || !sameFocusedTab
+      || previous.focusedKind !== focusedKind
+    )) {
+      this.dismissCarriedActions();
+    }
+    this.sessionComposition = { view, selectedId, focusedTab, focusedTabSynth, focusedKind };
+    this.terminalSelected = isSessionFirst(true, view, focusedKind);
+  }
+
+  /** Retires carried actions before a user-owned transition can recompose them. */
+  private dismissCarriedActions(): void {
+    // Dismiss through the owner in the CURRENT composition. A Web/VS Code tab is
+    // not session-first, but its desktop Session actions disclosure can still be
+    // carried open when a phone user selects a terminal tab.
+    if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+    else this.terminalChrome?.menu.dismiss();
+  }
+
+  /** One user-owned view transition for both appbar tabs and document shortcuts. */
+  switchView(view: View): void {
+    // The store update can synchronously reparent the phone panel. Notify its
+    // disclosure first, while it still owns the carried Session actions state.
+    this.dismissCarriedActions();
+    this.actions.switchView(view);
+  }
+
+  /** Tab buttons and 1-9 shortcuts share the same pre-recomposition dismissal. */
+  openTab(index: number): void {
+    this.dismissCarriedActions();
+    this.actions.openTab(index);
+  }
+
+  switchTab(index: number): void {
+    this.dismissCarriedActions();
+    this.actions.switchTab(index);
+  }
+
+  closeTab(index: number): void {
+    this.dismissCarriedActions();
+    this.actions.closeTab(index);
+  }
+
+  /** A touch pane drop is a user-owned tab transition, but only if a pane accepts it. */
+  private dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): boolean {
+    // Hit-test before dismissal so a release outside both the bar and every pane
+    // remains a cancel. The drop itself can synchronously recompose the active kind.
+    if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
+    const drop = this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    // Dismiss only when the drop committed: a landed-but-rejected drop (stale
+    // payload, sole tab on its own edge) changed nothing, so retiring a
+    // user-opened disclosure would imply a transition that did not happen
+    // (#4434). The gesture is still consumed either way — landed means landed.
+    if (drop.changed) {
+      this.dismissCarriedActions();
+    }
+    return drop.landed;
+  }
+
+  /** Keyboard twin of the New tab button, including its per-kind availability. */
+  openNewTabPicker(shortcutReturn?: () => void): void {
+    const slot = this.terminalChrome?.newTabSlot;
+    const trigger = slot?.querySelector<HTMLButtonElement>(".af-tab-new");
+    if (!trigger || !slot) return;
+    // Capture the whole pre-shortcut state before exposing either nested control.
+    // Responsive recomposition calls this method again without a return callback;
+    // keep the original record until the picker itself closes.
+    if (shortcutReturn) {
+      const preserveAppControls = this.appControls.panel.contains(slot) &&
+        this.appControls.trigger.getAttribute("aria-expanded") === "true";
+      const preserveSessionActions = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
+      this.newTabCancelReturn.set(trigger, () => {
+        // Close inside-out before restoring focus outside either disclosure.
+        if (!preserveSessionActions) this.terminalChrome?.menu.close();
+        // Recomposition may have opened app controls after the shortcut began.
+        // Preserve it only when the user had already opened the phone disclosure.
+        if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
+        shortcutReturn();
+      });
+    }
+    // Phone composition moves these controls into the app-controls disclosure.
+    // Ask the DOM owner, rather than guessing from viewport width.
+    if (this.appControls.panel.contains(slot)) {
+      if (!this.newTabCancelReturn.has(trigger)) {
+        const wasHidden = this.appControls.panel.hidden;
+        this.newTabCancelReturn.set(trigger, () => {
+          // Recomposition can move the slot home and close its desktop disclosure.
+          if (!this.appControls.panel.contains(slot)) {
+            this.terminalChrome?.menu.open();
+            trigger.focus();
+            return;
+          }
+          if (wasHidden) this.appControls.close(true);
+          else this.appControls.trigger.focus(); // the phone's New tab button is hidden
+        });
+      }
+      this.appControls.open();
+    }
+    this.terminalChrome?.menu.open();
+    if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
+    else trigger.click();
+    slot?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
   }
 
   /** The visible New tab button and its kind menu.
@@ -1727,7 +2317,7 @@ export class AppShell {
    *  The old split control created a terminal from a plus and hid VS Code behind a
    *  separate, unlabeled caret. Even the project's maintainer could not find that
    *  path (#2077), so the labelled button now makes the choice explicit where the
-   *  editor will appear. The `t` shortcut remains the direct shell fast path.
+   *  editor will appear. The `t` shortcut opens this same picker.
    *
    *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
    *  are bound to THIS instance and torn down with it — see the isConnected check
@@ -1736,7 +2326,7 @@ export class AppShell {
     const wrap = h("div", { class: "af-tab-new-wrap" });
     const trigger = h(
       "button",
-      { type: "button", class: "af-tab-new", title: "Create a terminal or VS Code tab" },
+      { type: "button", class: "af-tab-new", title: "New terminal or VS Code tab" },
       icon("plus", "af-tab-new-plus"),
       h("span", {}, "New tab"),
       icon("chevron-down", "af-tab-new-caret"),
@@ -1757,20 +2347,31 @@ export class AppShell {
       const menuBox = menu.getBoundingClientRect();
       const maxLeft = Math.max(0, window.innerWidth - menuBox.width);
       const left = Math.min(Math.max(0, anchor.right - menuBox.width), maxLeft);
-      const below = anchor.bottom + 6;
-      const above = anchor.top - menuBox.height - 6;
+      const gap = parseFloat(getComputedStyle(trigger).getPropertyValue("--af-space-2"));
+      const below = anchor.bottom + gap;
+      const above = anchor.top - menuBox.height - gap;
       const top = below + menuBox.height <= window.innerHeight ? below : Math.max(0, above);
       menu.style.left = `${left}px`;
       menu.style.top = `${top}px`;
     };
     const close = (): void => {
       menu.hidden = true;
+      this.newTabCancelReturn.delete(trigger);
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keydown", onKeyDown, true);
       scrollParent?.removeEventListener("scroll", positionMenu);
       scrollParent = null;
       window.removeEventListener("resize", positionMenu);
+      wrap.removeEventListener("focusout", onFocusOut);
+      if (this.newTabPickerPosition === positionMenu) this.newTabPickerPosition = null;
+    };
+    const onFocusOut = (e: FocusEvent): void => {
+      // Keyboard focus can leave the menu without a pointer event. Close before
+      // a sibling action receives Enter/Space so the capture listener cannot eat
+      // the modal's next Escape or navigate hidden menu items.
+      const next = e.relatedTarget as Node | null;
+      if (!next || !wrap.contains(next)) close();
     };
     const onDocMouseDown = (e: MouseEvent): void => {
       // A rerender can detach this control while the menu is open; closing on a
@@ -1781,17 +2382,38 @@ export class AppShell {
       }
     };
     const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape") {
+      if (!wrap.isConnected) {
+        close();
         return;
       }
-      // Swallow it: an open menu owns Escape, so closing it must NOT also let the ESC
-      // reach the agent (a bare Escape now forwards to the PTY as the agent's
-      // interrupt, #2517 — an open menu is the exception).
+      if (!["Escape", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(e.key)) return;
+      const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      // Tab can leave the picker open. Preserve the focused control's native
+      // activation rather than claiming Enter/Space for a nonexistent item.
+      if ((e.key === "Enter" || e.key === " ") && current < 0) return;
+      // Own these keys before document's rail handler or xterm can act on them.
+      e.preventDefault();
       e.stopPropagation();
-      close();
-      trigger.focus();
+      if (e.key === "Escape") {
+        const returnAfterCancel = this.newTabCancelReturn.get(trigger);
+        close();
+        if (returnAfterCancel) returnAfterCancel();
+        else trigger.focus();
+        return;
+      }
+      if (!items.length) return;
+      if (e.key === "Enter" || e.key === " ") {
+        items[current]?.click();
+        return;
+      }
+      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1
+        : e.key === "ArrowDown" ? (current + 1) % items.length
+        : current <= 0 ? items.length - 1 : current - 1;
+      items[next].focus();
     };
     const open = (): void => {
+      this.newTabPickerPosition = positionMenu;
       menu.hidden = false;
       positionMenu();
       trigger.setAttribute("aria-expanded", "true");
@@ -1799,15 +2421,10 @@ export class AppShell {
       scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
       window.addEventListener("resize", positionMenu);
       document.addEventListener("mousedown", onDocMouseDown);
-      // CAPTURE phase, deliberately, so this runs BEFORE xterm's textarea handler:
-      // when the menu is open, Escape must close it here and this listener's own
-      // stopPropagation must keep the ESC from also reaching the agent (#2517: a bare
-      // Escape now forwards to the PTY as the agent's interrupt — an open menu is the
-      // exception that still owns it). It sits beside the app's own capture-phase
-      // document handler (index.ts onKeydown), which no longer stopPropagations
-      // Escape; same-node capture listeners both fire, so this one does the closing
-      // and the stopping.
-      document.addEventListener("keydown", onKeyDown, true);
+      wrap.addEventListener("focusout", onFocusOut);
+      // Window capture precedes the app's document capture listener, so menu
+      // navigation cannot also navigate sessions or send input to the agent.
+      window.addEventListener("keydown", onKeyDown, true);
     };
 
     const item = (label: string, kind: NewTabKind): HTMLElement => {
@@ -1816,6 +2433,8 @@ export class AppShell {
       b.addEventListener("click", (e) => {
         e.stopPropagation();
         close();
+        this.terminalChrome?.menu.close();
+        this.appControls.close();
         this.actions.newTab(kind);
       });
       return b;
@@ -1885,6 +2504,11 @@ export class AppShell {
   }
 
   private renderMain(state: AppState): void {
+    this.sessionFirst?.setActive(false);
+    this.sessionFirst = null;
+    this.el.classList.remove("af-session-first");
+    this.terminalChrome?.dispose();
+    this.terminalChrome = null;
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
@@ -1892,88 +2516,56 @@ export class AppShell {
       this.headActions = null;
       this.headActionSig = "";
       this.retryBtn = null;
-      this.retryVisible = false;
+      this.retryKind = null;
+      this.deliverBtn = null;
+      this.deliverVisible = false;
       this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
+      delete this.main.dataset.afTheme;
       // Dropped rather than left at its last value: with no session attached there is
       // no terminal for a status to describe, and a stale "open" here would let a
       // selftest wait on the PREVIOUS attach and call it the new one.
       delete this.main.dataset.termStatus;
       this.main.replaceChildren(
-        h("p", { class: "af-empty-title" }, "Select a session"),
-        h("p", { class: "af-empty-hint" }, "Pick a session in the rail to attach its terminal."),
+        recoveryScreen(state.projectsError && state.selectedProject === null ? {
+          condition: "Projects unavailable", detail: state.projectsError, failed: true,
+          action: "Retry", run: () => this.actions.retryConnection?.(),
+        } : state.selectedProject === null ? {
+          condition: "No project registered", action: "Add project", run: () => this.actions.addProject(),
+        } : scopeToProject(state.sessions, state.selectedProject).length === 0 ? {
+          condition: "No sessions", action: "New session", run: () => this.actions.newSession(),
+        } : {
+          condition: "Select a session", action: "Choose a session", run: () => this.railList.querySelector<HTMLElement>(".af-row")?.focus(),
+        }),
       );
       return;
     }
-    this.headTitle = h("span", { class: "af-term-title" }, selected.title);
-    // The PR badge is the web's session.pr.open (#3285): the daemon-discovered
-    // number + state (#3232/#3287) as a plain link — the browser's native
-    // analogue of the TUI's p/y keys. Built hidden and filled by patchMainHead,
-    // NOT decided here: discovery normally lands while the session is already
-    // selected (the daemon sweep refreshes pr_info with no selection change),
-    // the same render-time trap Retry hit (#1932).
-    const prBadge = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
-    prBadge.hidden = true;
-    this.prBadge = prBadge;
-    this.prBadgeSig = "";
-    // The title wrapper remains title-only: the mobile shell hides that repeated
-    // chrome to reclaim its sole control row (#2354), while the PR link must stay
-    // reachable there. The "Live · master" meta that used to sit beside the title
-    // was removed as chrome nobody wanted to look at (#2458); the badge is not
-    // that — it carries an action (follow the PR), not ambient state.
-    const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle);
-
-    // Retry, for a session parked at a usage-limit wall (#1934). The web rendered
-    // that state — ◆ glyph, "Limit reached" label, "[limit] resets …" title prefix
-    // — and offered nothing to do about it, so the session sat until someone found
-    // a terminal and opened the TUI.
-    //
-    // Shown only while the selection is limit-blocked, mirroring the TUI, which
-    // advertises `c` only for a limit-blocked row (ui/menu.go) rather than showing
-    // a dead control on every session.
-    //
-    // Hidden via `hidden`, and patched by patchMainHead — NOT decided once here.
-    // renderMain runs only on a SELECTION change, and the common path is a session
-    // hitting the wall while it is already selected, which is no selection change
-    // at all (#1932, the same trap the archive/restore verb hit). A render-time
-    // decision would mean the button appears only if you look away and back.
-    const retryBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
-    retryBtn.title = "Resume this session from its usage-limit wall";
-    retryBtn.addEventListener("click", () => this.actions.retryLimit());
-    this.retryBtn = retryBtn;
-    this.retryVisible = isLimitReached(selected);
-    retryBtn.hidden = !this.retryVisible;
-
-    // Handoff, for continuing a session under a different agent (#2013) — the web
-    // half of the TUI's `F`. A limit-blocked session now shows BOTH exits the ledger
-    // called for: Retry (wait for the window) and Handoff (switch agents); a normal
-    // local session shows Handoff alone. Same build-once / patch-in-place treatment
-    // as Retry — gated by the daemon-projected can_handoff, toggled in patchMainHead.
-    const handoffBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Handoff");
-    handoffBtn.title = "Continue this session under a different agent";
-    handoffBtn.addEventListener("click", () => this.actions.handoff());
-    this.handoffBtn = handoffBtn;
+    const chrome = terminalChrome({
+      title: selected.title,
+      copyLink: () => this.actions.copyLink(),
+      handoff: () => this.actions.handoff(),
+      retry: () => this.actions.retryLimit(),
+      markDelivered: () => this.actions.markDelivered(),
+      closePane: () => this.actions.closePane?.(),
+      fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta),
+    });
+    this.terminalChrome = chrome;
+    this.headTitle = chrome.title;
+    this.retryBtn = chrome.retry;
+    const retryAction = retryActionForSession(selected);
+    this.retryKind = retryAction?.kind ?? null;
+    patchRetryButton(chrome.retry, retryAction);
+    this.deliverBtn = chrome.deliver;
+    this.deliverVisible = markDeliveredActionForSession(selected) !== null;
+    chrome.deliver.hidden = !this.deliverVisible;
+    this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
-    handoffBtn.hidden = !this.handoffVisible;
-
-    // Empty while the selected row is visible; patchMainHead fills it only when the
-    // shared rail derivation says filtering/scoping removed that row. Keeping the
-    // container stable avoids touching the terminal host as that condition flips.
-    const headActions = h("div", { class: "af-term-actions" });
-    headActions.hidden = true;
-    this.headActions = headActions;
+    chrome.handoff.hidden = !this.handoffVisible;
+    this.headActions = chrome.actions;
     this.headActionSig = "";
-
-    // The tab bar is the flexible middle of the single pane-header row (#2224):
-    // title first, the same horizontally scrolling bar, then the fixed Retry escape
-    // when a limit wall makes it visible. Keeping the real bar node here (rather
-    // than projecting a second mobile/desktop copy) preserves one drag/drop and
-    // popover-anchoring path at every width.
-    const tabBar = h("div", { class: "af-tabbar" });
+    const tabBar = chrome.tabs;
     this.tabBar = tabBar;
-    tabBar.setAttribute("role", "tablist");
-    tabBar.setAttribute("aria-label", "Session tabs");
     // The drag source is wired ONCE here on the (stable) bar container via delegation,
     // not per button — so EVERY tab, including one created after load, is a drag source
     // by construction, with no per-button binding to forget on a re-render (#1737).
@@ -1993,16 +2585,14 @@ export class AppShell {
     // delegation again, giving a finger the same two capabilities (#2899).
     this.attachTabTouchDrag(tabBar);
 
-    // Retry and the filtered-selection fallback are fixed pane-level actions. Their
-    // hidden containers create no flex items on the common path, while visible
-    // controls cannot shrink behind the tabs.
-    const head = h("div", { class: "af-term-head" }, titleBox, prBadge, tabBar, headActions, handoffBtn, retryBtn);
-    const warningText = archiveWarningText(selected);
+    const head = chrome.head;
+    const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
 
     this.main.className = "af-main af-main-term";
+    this.main.dataset.afTheme = currentMode();
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
     // selection change, so this reparent is rare and never happens mid-type.
     if (warningText === "") {
@@ -2010,6 +2600,13 @@ export class AppShell {
     } else {
       this.main.replaceChildren(head, archiveWarning, this.termHost);
     }
+    this.sessionFirst = sessionFirstComposition([
+      [chrome.title, this.header], [chrome.keyboard, this.header],
+      [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
+      ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
+      [chrome.tabs, this.appControls.panel],
+      [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
+    ]);
     this.renderTabBar(state);
     this.patchMainHead(state);
   }
@@ -2071,15 +2668,16 @@ export class AppShell {
     // them on every snapshot instead — see syncTabIdentityCaches (#1779).
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
-      tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions, () => this.liveTabIdentity(i), selected.id ?? ""),
+      tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions,
+        () => this.openTab(i), () => this.closeTab(i), () => this.liveTabIdentity(i), selected.id ?? ""),
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
-      children.push(this.newTabControl(selected));
+      this.terminalChrome?.newTabSlot.replaceChildren(this.newTabControl(selected));
     } else {
       const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
       reason.setAttribute("aria-label", `New tab unavailable · ${unavailable}`);
-      children.push(reason);
+      this.terminalChrome?.newTabSlot.replaceChildren(reason);
     }
     // Replacing every child resets a horizontally scrolled bar to its left edge.
     // Preserve the stable container's viewport so activating an off-screen tab does
@@ -2276,11 +2874,20 @@ export class AppShell {
       }
       // Picked up: this gesture is ours, so stop the page reacting to it as a scroll.
       e.preventDefault();
-      // Over a pane → that pane's split zone; otherwise the bar's insertion gap.
-      if (this.actions.paneDropHintAt(e.clientX, e.clientY)) {
-        this.hideTabInsert();
-      } else {
+      // Three regions, mirroring the pointerup drop decision below: a pane shows its
+      // split zone, the bar shows its insertion gap, and anywhere else (the header,
+      // appbar controls, or empty space) shows nothing — a release there is a cancel,
+      // so the indicator must not track a finger that is no longer over the bar. The
+      // verdict lives in tabtouch.ts for the same reason `tabPressVerdict` does. The
+      // pane hit-test shows its hint as a side effect, so it runs only when the pointer
+      // is off the bar (short-circuit), exactly as before.
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const overBar = bar.contains(hit);
+      const overPane = !overBar && this.actions.paneDropHintAt(e.clientX, e.clientY);
+      if (tabDragFeedbackRegion(overBar, overPane) === "bar") {
         this.showTabInsert(bar, e.clientX);
+      } else {
+        this.hideTabInsert();
       }
     });
 
@@ -2296,7 +2903,7 @@ export class AppShell {
       if (!held) {
         return; // a tap: the button's own click handler owns it
       }
-      if (this.actions.dropTabOnPaneAt(x, y, drag)) {
+      if (!bar.contains(document.elementFromPoint(x, y)) && this.dropTabOnPaneAt(x, y, drag)) {
         return; // landed in a pane: split or replaced
       }
       // Outside the bar is a CANCEL. The mouse path only reorders when the drop lands
@@ -2521,7 +3128,13 @@ export class AppShell {
       return;
     }
     this.headTitle.textContent = selected.title;
-    const warningText = archiveWarningText(selected);
+    this.headTitle.title = selected.title;
+    this.headTitle.setAttribute("aria-label", selected.title);
+    if (this.terminalChrome) {
+      this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
+      this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
+    }
+    const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
         this.archiveWarning.textContent = warningText;
@@ -2551,16 +3164,23 @@ export class AppShell {
       this.lifecycleAction = nowAction;
     }
 
-    // Show/hide Retry as the selected session enters or leaves the usage-limit wall
-    // (#1934). This is the load-bearing half of the button: a session almost always
-    // hits the limit while it is the one you are watching, and that is not a
-    // selection change, so renderMain never runs. Deciding visibility only at build
-    // time would leave a limit-blocked session with no way out until the user
-    // clicked away and back.
-    const nowLimited = isLimitReached(selected);
-    if (this.retryBtn && nowLimited !== this.retryVisible) {
-      this.retryVisible = nowLimited;
-      this.retryBtn.hidden = !nowLimited;
+    // Patch Retry as the selected session enters/leaves a limit wall or retains an
+    // ambiguous handoff mission. Either transition can happen without a selection
+    // change, so deciding once in renderMain would strand the recovery action.
+    const retryAction = retryActionForSession(selected);
+    const retryKind = retryAction?.kind ?? null;
+    if (this.retryBtn && retryKind !== this.retryKind) {
+      this.retryKind = retryKind;
+      patchRetryButton(this.retryBtn, retryAction);
+    }
+
+    // Show/hide Mark delivered as the selected session's pending mission becomes
+    // (or stops being) confirmable without a selection change (#4429) — the same
+    // in-place path Retry above uses, for the same reason.
+    const nowDeliver = markDeliveredActionForSession(selected) !== null;
+    if (this.deliverBtn && nowDeliver !== this.deliverVisible) {
+      this.deliverVisible = nowDeliver;
+      this.deliverBtn.hidden = !nowDeliver;
     }
 
     // Show/hide Handoff as the selected session becomes (or stops being)
@@ -2571,25 +3191,6 @@ export class AppShell {
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
-    }
-
-    // Fill/patch the PR badge (#3285) in place, like Retry/Handoff above and for
-    // the same reason: the daemon's sweep discovers a PR while the session is
-    // already selected, which is no selection change, so renderMain never runs.
-    // The sig covers everything the badge draws, so an unrelated snapshot never
-    // touches the DOM and a state flip (open → merged) patches exactly once.
-    if (this.prBadge) {
-      const badge = prBadgeContent(selected);
-      const sig = badge ? `${badge.url}\0${badge.label}\0${badge.tooltip}` : "";
-      if (sig !== this.prBadgeSig) {
-        this.prBadgeSig = sig;
-        if (badge) {
-          this.prBadge.textContent = badge.label;
-          this.prBadge.href = badge.url;
-          this.prBadge.title = badge.tooltip;
-        }
-        this.prBadge.hidden = badge === null;
-      }
     }
   }
 
@@ -2618,6 +3219,8 @@ export class AppShell {
       managed.title,
       managed.lifecycle_action ?? null,
       managed.can_kill === true,
+      managed.is_root === true,
+      this.pendingRestores?.has(managed.id) === true,
     ]);
     if (sig !== this.headActionSig) {
       host.replaceChildren(...this.sessionActionButtons(managed, "head"));
@@ -2657,21 +3260,6 @@ export function documentTitle(state: AppState): string {
 /** The currently selected session row, or null. */
 function selectedSession(state: AppState): SessionData | null {
   return state.selectedId ? (state.sessions.find((s) => s.id === state.selectedId) ?? null) : null;
-}
-
-/** Whether mobile CSS should collapse the persistent appbar/title chrome into the
- *  selected session's hamburger + tab row. A stale selected id is deliberately false:
- *  renderMain shows the empty state in that case, so hiding its app navigation would
- *  strand the user on a blank shell. Desktop consumes the same class but ignores it
- *  outside the narrow media query. */
-export function usesCondensedSessionChrome(
-  state: Pick<AppState, "view" | "selectedId" | "sessions">,
-): boolean {
-  return (
-    state.view === "sessions" &&
-    !!state.selectedId &&
-    state.sessions.some((session) => session.id === state.selectedId)
-  );
 }
 
 /** A signature of everything the tab BAR draws for the selected session: which session
@@ -2775,6 +3363,8 @@ function tabButton(
   canRename: boolean,
   canClose: boolean,
   actions: Actions,
+  openTab: () => void,
+  closeTab: () => void,
   /** This tab's identity as of the LATEST snapshot — see AppShell.liveTabIdentity.
    *  A getter rather than a value because this button outlives the render that built
    *  it: it is called when a GESTURE fires, so the identity is the one the roster the
@@ -2801,7 +3391,7 @@ function tabButton(
   // read. tabDisplayLabel() supplies the plain-text title without leaking an icon
   // name into the accessible surface.
   btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h("span", { class: "af-tab-label" }, tabLabel(tab)));
-  btn.addEventListener("click", () => actions.openTab(index));
+  btn.addEventListener("click", openTab);
   // Rename-in-place (#1813), offered ONLY where a name is actually rendered: an
   // agent/shell tab draws a fixed label and ignores its name, so an edit there could
   // only appear to work (see isRenameableTab). A tab-managed session is required for
@@ -2825,11 +3415,11 @@ function tabButton(
   }
   // The agent tab (index 0) is unclosable — killing the session tears it down.
   if (index > 0 && canClose) {
-    const close = h("span", { class: "af-tab-close", title: "Close tab" }, icon("x"));
+    const close = h("span", { class: "af-tab-close", title: `Delete tab “${tabDisplayLabel(tab)}”` }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
-      actions.closeTab(index);
+      closeTab();
     });
     btn.append(close);
   }
@@ -2938,15 +3528,37 @@ function beginTabRename(
   input.select();
 }
 
+/** Why a managed-but-inert row cannot be opened, appended to its title (#4394).
+ *  Killable without lifecycle_action means lifecycleActionFor withheld the verb
+ *  for a durable cause the projection still names: a kill tombstone awaiting
+ *  teardown or retry, a startup whose runtime was never confirmed, or a
+ *  committed account swap still in flight. user_killed proves the intent, not
+ *  an active operation — a failed kill leaves the tombstone as a retry handle,
+ *  so the wording says pending rather than in progress. An unrecognized cause
+ *  still gets the bare refusal rather than going silent again. */
+function inertRowReason(s: SessionData): string {
+  let cause = "";
+  if (s.user_killed === true) {
+    cause = "kill pending";
+  } else if (s.startup_state_unknown === true) {
+    cause = "startup could not be confirmed";
+  } else if (s.pending_account_swap !== undefined) {
+    cause = "account swap in progress";
+  }
+  return cause === "" ? "cannot be opened" : `cannot be opened · ${cause}`;
+}
+
 /** One session row: a status dot, the (prefixed) title, the branch line, and a reserved
  *  slot for its daemon-projected management actions (#2186, #2223). Clicking opens
  *  only a lifecycle-actionable session by stable id; a kill-only startup-unknown row
- *  retains its button without becoming attachable. */
-function sessionRow(
+ *  retains its button without becoming attachable. Every inert row carries
+ *  aria-disabled, and a managed-but-inert one's title says why (#4394). */
+export function sessionRow(
   s: SessionData,
   selected: boolean,
   openSession: (id: string) => void,
   buildActions: (session: ManagedSession) => HTMLElement,
+  previous?: HTMLElement,
 ): HTMLElement {
   const status = rowStatus(s);
   const operator = operatorKind(s);
@@ -2956,34 +3568,45 @@ function sessionRow(
   const managed = actionable || killable;
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
-  const idleDetail = idleReasonDetail(s);
+  // The outage detail outranks the idle reason: it explains why every other
+  // fact on the row may be stale, so it renders even on unselected rows — the
+  // TUI keeps it for the same reason (#5571 W1.3).
+  const outageDetail = unreachableDetail(s);
+  const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
   const branchParts: Array<Node | string> = [
     h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
-    " · ",
   ];
-  if (idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, `${idleDetail} · `);
+  if ((selected || outageDetail !== "") && idleDetail) {
+    const idle = h("span", { class: "af-idle-reason" }, ` · ${idleDetail}`);
     idle.dataset.idleReason = s.idle_reason ?? "";
-    if (s.last_pane_churn_at) {
+    if (outageDetail !== "" && s.unreachable) {
+      // Repaint hook: refreshIdleReasonAges re-ages the outage without a
+      // session event, exactly like the pane-churn arm below.
+      idle.dataset.unreachableSince = s.unreachable.since ?? "";
+      idle.dataset.unreachableError = s.unreachable.error ?? "";
+    } else if (s.last_pane_churn_at) {
       idle.dataset.paneChurnAt = s.last_pane_churn_at;
     }
     branchParts.push(idle);
   }
-  branchParts.push(
-    h(
-      "span",
-      { class: "af-row-branch-name" },
-      icon("git-branch", "af-branch-icon"),
-      s.branch || "—",
-    ),
-  );
+  if (s.branch) {
+    branchParts.push(
+      " · ",
+      h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch),
+    );
+  }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);
 
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
     actionable ? "" : " af-row-inert"
   }${creating ? " af-row-creating" : ""}`;
-  const row = h("li", { class: cls });
+  const row = previous ?? h("li", { class: cls });
+  row.className = cls;
+  row.replaceChildren();
+  row.onclick = null;
+  row.removeAttribute("aria-disabled");
+  row.dataset.state = status.kind ?? "working";
   // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
   // one. The empty fixed-width slot matches the TUI's blank status cell and keeps
   // every title aligned without inventing a working indicator.
@@ -2996,7 +3619,15 @@ function sessionRow(
   row.append(statusSlot);
   row.append(main);
   if (managed) {
-    row.append(buildActions(s));
+    const actions = buildActions(s);
+    // The row's aria-disabled below says it cannot be opened — it must not
+    // read onto the still-working controls inside it. A managed-but-inert
+    // row's Delete button stays live, so the actions host opts back out of
+    // the disabled state the row carries (#4394 review).
+    if (!actionable) {
+      actions.setAttribute("aria-disabled", "false");
+    }
+    row.append(actions);
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
@@ -3005,19 +3636,28 @@ function sessionRow(
     : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  const callbackWarning = callbackUnavailableText(s);
+  // A managed-but-inert row keeps its Kill button but cannot be opened; its
+  // title says why. The reason rides a dataset fragment like the other title
+  // parts so refreshIdleReasonAges preserves it on an idle-age repaint.
+  const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
   row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
+  row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
+  row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}`,
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${inertReason}`,
   );
-  if (!actionable && !managed) {
-    // The server withheld both capabilities: a creating row has no session yet,
-    // while an id-less row has no unambiguous mutation target.
+  if (actionable) {
+    row.onclick = () => openSession(s.id);
+  } else {
+    // Every inert row says so (#4394). An unmanaged row is a creating row with
+    // no session yet or an id-less row with no unambiguous mutation target; a
+    // managed-but-inert one still draws its Kill button, so without this it
+    // looked live while swallowing every click.
     row.setAttribute("aria-disabled", "true");
-  } else if (actionable) {
-    row.addEventListener("click", () => openSession(s.id));
   }
   return row;
 }
@@ -3025,6 +3665,23 @@ function sessionRow(
 /** Patch relative pane ages without waiting for a session event or rebuilding
  * the rail. The row's branch, controls, selection, and scroll position survive. */
 export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()): void {
+  for (const idle of root.querySelectorAll<HTMLElement>(".af-idle-reason[data-unreachable-since]")) {
+    const detail = unreachableDetail(
+      {
+        unreachable: { since: idle.dataset.unreachableSince, error: idle.dataset.unreachableError },
+      } as SessionData,
+      now,
+    );
+    idle.textContent = detail ? ` · ${detail}` : "";
+    const row = idle.closest(".af-row") as HTMLElement | null;
+    if (row) {
+      const reason = detail ? `; ${detail}` : "";
+      row.setAttribute(
+        "title",
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`,
+      );
+    }
+  }
   for (const idle of root.querySelectorAll<HTMLElement>(".af-idle-reason[data-pane-churn-at]")) {
     const detail = idleReasonDetail(
       {
@@ -3033,13 +3690,13 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       } as SessionData,
       now,
     );
-    idle.textContent = detail ? `${detail} · ` : "";
+    idle.textContent = detail ? ` · ${detail}` : "";
     const row = idle.closest(".af-row") as HTMLElement | null;
     if (row) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}`,
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleInert ?? ""}`,
       );
     }
   }

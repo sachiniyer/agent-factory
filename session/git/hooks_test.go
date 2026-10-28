@@ -1,9 +1,11 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -13,6 +15,9 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/hooklog"
+	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 func TestPostWorktreeHookEnvironmentRequiresExplicitCredentialNames(t *testing.T) {
@@ -49,6 +54,112 @@ func TestPostWorktreeHookEnvironmentRequiresExplicitCredentialNames(t *testing.T
 	}
 	if slices.Contains(names, deniedName) {
 		t.Fatalf("post-worktree hook inherited disallowed variable %s", deniedName)
+	}
+}
+
+// A failed hook is ONE log entry (#4853): the command, the full-output path and
+// the exit status, then at most hooklog.ExcerptLines of the output's end, each
+// behind hooklog.ExcerptPrefix so none of them — least of all a build tool's own
+// "ERROR" line — can be read as an entry of its own. The whole output still
+// lands in the per-hook file the entry names.
+func TestPostWorktreeHookFailureLogsOneEntryWithBoundedPrefixedTail(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	payloadPath := filepath.Join(t.TempDir(), "hook-output")
+	var payload strings.Builder
+	payload.WriteString("discarded beginning\n")
+	payload.WriteString(strings.Repeat("x", hooklog.TailLimit) + "\n")
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&payload, "build progress line %d\n", i)
+	}
+	payload.WriteString(" ERROR  @scope/backend#build: command exited (1)\n\n")
+	payload.WriteString("kept ending\n")
+	if err := os.WriteFile(payloadPath, []byte(payload.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	writeLegacyRepoConfig(t, config.RepoIDFromRoot(repoPath), &config.RepoConfig{
+		PostWorktreeCommands: []string{fmt.Sprintf("cat %q; exit 23", payloadPath)},
+	})
+
+	var errors logtest.Buffer
+	previous := aflog.ErrorLog.Writer()
+	aflog.ErrorLog.SetOutput(&errors)
+	t.Cleanup(func() { aflog.ErrorLog.SetOutput(previous) })
+	<-RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), nil)
+
+	logs, err := filepath.Glob(filepath.Join(home, "logs", "hooks", "post-worktree-*.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("found %d post-worktree logs, want 1", len(logs))
+	}
+	// Other ERROR entries (a defaulted config, say) may precede the hook's, so
+	// find its single entry and read what the logger wrote after it.
+	lines := strings.Split(strings.TrimSuffix(errors.String(), "\n"), "\n")
+	at := -1
+	for i, line := range lines {
+		if strings.Contains(line, "post-worktree hook") {
+			if at >= 0 {
+				t.Fatalf("post-worktree failure logged more than one entry:\n%s", errors.String())
+			}
+			at = i
+		}
+	}
+	if at < 0 {
+		t.Fatalf("post-worktree failure was not logged:\n%s", errors.String())
+	}
+	entry := lines[at]
+	for _, want := range []string{"exit status 23", "(full output: " + logs[0] + ")"} {
+		if !strings.Contains(entry, want) {
+			t.Fatalf("post-worktree failure entry omitted %q:\n%s", want, entry)
+		}
+	}
+	tail := lines[at+1:]
+	if len(tail) == 0 || len(tail) > hooklog.ExcerptLines {
+		t.Fatalf("post-worktree failure quoted %d output lines, want 1..%d:\n%s", len(tail), hooklog.ExcerptLines, errors.String())
+	}
+	for _, line := range tail {
+		if !strings.HasPrefix(line, hooklog.ExcerptPrefix) {
+			t.Fatalf("quoted output line %q lacks the %q prefix, so it reads as a log entry of its own:\n%s", line, hooklog.ExcerptPrefix, errors.String())
+		}
+	}
+	for _, want := range []string{hooklog.ExcerptPrefix + "kept ending", hooklog.ExcerptPrefix + "ERROR  @scope/backend#build"} {
+		if !strings.Contains(errors.String(), want) {
+			t.Fatalf("post-worktree failure omitted the output's end %q:\n%s", want, errors.String())
+		}
+	}
+	for _, unwanted := range []string{"discarded beginning", "build progress line 0", "[output truncated"} {
+		if strings.Contains(errors.String(), unwanted) {
+			t.Fatalf("post-worktree failure quoted %q, more than the bounded tail:\n%s", unwanted, errors.String())
+		}
+	}
+	full, err := os.ReadFile(logs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(full) != payload.String() {
+		t.Fatalf("full hook log holds %d bytes, want the hook's complete %d-byte output", len(full), payload.Len())
+	}
+}
+
+func TestPostWorktreeHookSuccessRemovesOutputLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	writeLegacyRepoConfig(t, config.RepoIDFromRoot(repoPath), &config.RepoConfig{
+		PostWorktreeCommands: []string{"printf success"},
+	})
+
+	<-RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), nil)
+
+	logs, err := filepath.Glob(filepath.Join(home, "logs", "hooks", "post-worktree-*.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("successful post-worktree hook retained output logs: %v", logs)
 	}
 }
 
@@ -144,8 +255,8 @@ func TestHookCompletion_BackgroundedGrandchildKilled(t *testing.T) {
 	pid := waitForPidFile(t, pidFile, 5*time.Second)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 
-	// cmd.Wait unblocks ~hookWaitDelay after the shell exits, then the group
-	// kill fires; allow margin over that bound for the grandchild to be reaped.
+	// The hook's direct output file lets cmd.Wait return as soon as the shell
+	// exits; allow margin for the group kill and reaping that follow.
 	if !waitForProcessExit(pid, 6*time.Second) {
 		t.Fatalf("backgrounded grandchild pid %d survived hook completion — process group not killed on the success path", pid)
 	}
@@ -185,16 +296,66 @@ func waitForPidFile(t *testing.T, pidFile string, timeout time.Duration) int {
 	return 0
 }
 
-// waitForProcessExit polls until syscall.Kill(pid, 0) reports ESRCH. Signal 0
-// is a permission/existence probe that delivers nothing; ESRCH means the
-// process has been reaped (init reaps the orphaned grandchild after SIGKILL).
+// waitForProcessExit polls until the process is terminated. Signal 0 is a
+// permission/existence probe that delivers nothing; ESRCH means the process has
+// been reaped.
+//
+// A ZOMBIE counts as terminated, and that is the load-bearing part. These tests
+// kill an orphaned grandchild, so whether it is reaped promptly is up to
+// whatever inherited it — init on a normal box, but in a container PID 1 is
+// often the test harness or a shell that never reaps. There, kill(pid, 0) keeps
+// succeeding on a process that cannot run, and an ESRCH-only oracle reports the
+// process-group kill as having failed when it did exactly what it should. Read
+// the state field of /proc/<pid>/stat instead, which is unambiguous.
 func waitForProcessExit(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
 			return true
 		}
+		if processIsZombie(pid) {
+			return true
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+// processIsZombie reads /proc/<pid>/stat, whose third space-separated field
+// after the comm is the state character. comm is parenthesized and may itself
+// contain spaces and parentheses, so the scan starts after the LAST ')'.
+func processIsZombie(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		// ANY read failure means "cannot tell", never "exited". On a host without
+		// procfs — macOS, or a container that does not mount it — every pid returns
+		// ENOENT, and treating that as exit would make waitForProcessExit accept a
+		// live process instantly and pass these tests without testing anything.
+		// "Gone" is the ESRCH probe's answer to give, and it already gives it.
+		return false
+	}
+	closing := bytes.LastIndexByte(data, ')')
+	if closing < 0 || closing+2 >= len(data) {
+		return false
+	}
+	return data[closing+2] == 'Z'
+}
+
+// waitForProcessExit must never accept a LIVE process. It reads /proc to tell a
+// zombie from a runnable process, and a host without procfs — macOS, or a
+// container that does not mount it — fails that read for every pid; treating
+// that as exit would make every caller of this helper pass instantly without
+// testing anything (#3650 review). CI runs this on macOS, where the read fails.
+func TestWaitForProcessExitDoesNotAcceptALiveProcess(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	if waitForProcessExit(cmd.Process.Pid, 300*time.Millisecond) {
+		t.Fatalf("a live process (pid %d) was reported as exited", cmd.Process.Pid)
+	}
 }

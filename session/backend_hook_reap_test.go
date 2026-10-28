@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +64,19 @@ func (h hookState) deleteRunCount(t *testing.T) int {
 	return strings.Count(string(data), "\n")
 }
 
+// requireLaunchProvisioned is the precondition of every test whose launch_cmd
+// must provision and then fail ON ITS OWN. A launch killed by its bound takes the
+// same "launch_cmd failed" path as one that exited, so without this a bound that
+// fires mid-provision either fails a later assertion that reads as a reap bug or,
+// where the sandbox is reaped anyway, passes having tested nothing (#4642). The
+// log sits outside the sandbox, so the reap cannot erase it.
+func (h hookState) requireLaunchProvisioned(t *testing.T) {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(h.dir, "launch-provisioned.log"))
+	require.NoError(t, err,
+		"launch_cmd was killed by hookLaunchTimeout before it finished provisioning: the clock, not the reap logic — this test's launch bound is too tight")
+}
+
 // writeHookScript writes an executable bash script and returns its path. Paths
 // are interpolated single-quoted, so the script never depends on cwd or $HOME.
 func writeHookScript(t *testing.T, path, body string) string {
@@ -80,8 +95,9 @@ done
 }
 
 // newHookState builds the script pair. launchBody runs after the sandbox dir is
-// created, so a test only has to say how launch_cmd FAILS; deleteBody defaults
-// to a working, idempotent reap in the shape docs/remote-hooks.md recommends.
+// created and launch-provisioned.log records that it was, so a test only has to
+// say how launch_cmd FAILS; deleteBody defaults to a working, idempotent reap in
+// the shape docs/remote-hooks.md recommends.
 func newHookState(t *testing.T, launchBody, deleteBody string) hookState {
 	t.Helper()
 	dir := t.TempDir()
@@ -98,8 +114,9 @@ func newHookState(t *testing.T, launchBody, deleteBody string) hookState {
 	writeHookScript(t, h.launch, fmt.Sprintf(`
 mkdir -p '%s'/sandboxes/"$name"
 echo "a VM that bills by the hour" > '%s'/sandboxes/"$name"/resource.txt
+echo "$name" >> '%s'/launch-provisioned.log
 %s
-`, dir, dir, launchBody))
+`, dir, dir, dir, launchBody))
 	// No mkdir before the log line: dir is t.TempDir(), which already exists, and
 	// on the wedged-reap paths that mkdir was a whole fork+exec standing between
 	// the spawn and the only evidence the script ever writes (#2821).
@@ -119,6 +136,13 @@ func shrinkHookTimeouts(t *testing.T, launch, del time.Duration) {
 	t.Cleanup(func() { hookLaunchTimeout, hookDeleteTimeout = ol, od })
 }
 
+// completingLaunchBound is hookLaunchTimeout for a test whose launch_cmd must
+// provision and then fail ON ITS OWN. The bound only stops a hang, and these
+// scripts exit by themselves, so a generous one costs no wall-clock — while a
+// tight one is a race against fork+exec and the fixture's mkdir that a loaded
+// runner loses (#4642). Tests that need the bound to FIRE keep short values.
+const completingLaunchBound = 30 * time.Second
+
 func newHookProvisioner(h hookState, title string) *hookProvisioner {
 	return &hookProvisioner{
 		hooks: config.RemoteHooks{LaunchCmd: h.launch, DeleteCmd: h.delete},
@@ -135,6 +159,10 @@ func TestHookProvisionReapsPartiallyProvisionedLaunch(t *testing.T) {
 		name string
 		// launchBody runs after the sandbox has been "provisioned".
 		launchBody string
+		// boundFires marks the case that needs hookLaunchTimeout to FIRE; every
+		// other case must reach its own exit, so it gets completingLaunchBound
+		// rather than a bound it would have to race (#4642).
+		boundFires bool
 	}{
 		{
 			// (a) provisions, then hangs until the launch timeout kills it. The
@@ -142,6 +170,7 @@ func TestHookProvisionReapsPartiallyProvisionedLaunch(t *testing.T) {
 			// output pipe — the shape that made the timeout unbounded.
 			name:       "provisions then hangs until timeout",
 			launchBody: "sleep 3\n",
+			boundFires: true,
 		},
 		{
 			// (b) provisions, then exits non-zero.
@@ -158,12 +187,22 @@ func TestHookProvisionReapsPartiallyProvisionedLaunch(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second)
+			launchBound := completingLaunchBound
+			if tc.boundFires {
+				launchBound = 300 * time.Millisecond
+			}
+			shrinkHookTimeouts(t, launchBound, 5*time.Second)
 			h := newHookState(t, tc.launchBody, "")
 			p := newHookProvisioner(h, "bills by the hour")
 
 			_, err := p.provisionOrReap()
 			require.Error(t, err, "provisioning must fail")
+			if tc.boundFires {
+				require.ErrorIs(t, err, context.DeadlineExceeded,
+					"this case is the launch bound firing mid-launch; a launch_cmd that reached its own exit tests nothing here")
+			} else {
+				h.requireLaunchProvisioned(t)
+			}
 
 			assert.True(t, h.deleteRan(t), "delete_cmd must run: launch_cmd started, so it may have provisioned")
 			assert.NoDirExists(t, h.sandbox(p.slug),
@@ -223,7 +262,7 @@ func TestHookProvisionDoesNotReapWhenLaunchNeverStarted(t *testing.T) {
 // so the failure has to reach the person creating the session, name the orphan,
 // and say how to reap it by hand.
 func TestHookProvisionReportsOrphanWhenDeleteFails(t *testing.T) {
-	shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second)
+	shrinkHookTimeouts(t, completingLaunchBound, 5*time.Second)
 	h := newHookState(t,
 		"echo 'provisioned, then died' >&2\nexit 4\n",
 		"echo 'the VM is still in CREATING state' >&2\nexit 9\n")
@@ -231,6 +270,7 @@ func TestHookProvisionReportsOrphanWhenDeleteFails(t *testing.T) {
 
 	_, err := p.provisionOrReap()
 	require.Error(t, err)
+	h.requireLaunchProvisioned(t)
 	msg := err.Error()
 
 	// The original failure survives...
@@ -477,12 +517,14 @@ func TestHookReapAnsweredErrorIsKnownStateAndLatches(t *testing.T) {
 // (errors.Join, not flattened into %s text) — the hook/docker/ssh unknown-state
 // parity this fix is about, matching ssh's reapProvisionFailure.
 func TestHookProvisionFailureWithReapTimeoutPreservesUnknownSentinel(t *testing.T) {
-	shrinkHookTimeouts(t, 300*time.Millisecond, 300*time.Millisecond)
+	// Only the delete bound is under test: launch_cmd must exit 4 on its own.
+	shrinkHookTimeouts(t, completingLaunchBound, 300*time.Millisecond)
 	h := newHookState(t, "echo 'provisioned then died' >&2\nexit 4\n", "sleep 5\n")
 	p := newHookProvisioner(h, "create then wedged reap")
 
 	_, err := p.provisionOrReap()
 	require.Error(t, err)
+	h.requireLaunchProvisioned(t)
 	assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
 		"the provision error must keep the reap's unknown-state sentinel classifiable (#2529 review P3-a)")
 	// The original launch failure and the human-actionable orphan warning survive too.
@@ -555,6 +597,201 @@ echo "a VM that bills by the hour" > '%s'/sandboxes/"$name"/resource.txt
 	}
 }
 
+// TestHookProvisionCmdQuiescesOrphanedChildOnParseFailure pins the #2440/#1955
+// quiesce on the provision_cmd exit-0 + stdout-contract-violation path — the
+// branch the premature p.launchPgid = 0 in runProvisionCmd silently disarmed.
+//
+// runProvisionCmd spends the script's process-group id so a later, minutes-stale
+// failure during the transport phase can never SIGKILL a group the kernel has
+// reissued to an unrelated process. The bug spent it BEFORE the stdout parse, so
+// every stdout-contract-violation branch returned with the id already gone and
+// the quiesceLaunchGroup() call in provisionHostOrReap was a no-op — a
+// backgrounded child the script left mid-provision survived the whole reap path
+// (including delete_cmd), the exact silent-orphan harm quiesceLaunchGroup's own
+// comment says it exists to prevent. The launch path keeps the id set through
+// its own stdout parse for the same reason (TestHookReapKillsAnOrphanedLaunchChildBeforeDeleting
+// is its regression); this is the parity test for provision_cmd.
+//
+// Each subtest is one parse-failure branch, plus a control (non-zero exit) that
+// already quiesced before the fix and must keep quiescing after it — isolating
+// the fix to the exit-0 parse branches rather than a uniform policy change. The
+// child outlives the script by sleeping, so it is alive at the parse boundary
+// iff the bug is present; the assertion proves provisionHostOrReap leaves it
+// dead by outcome — the orphan's side effect (the marker) never appears, and a
+// child that was merely reaped to a zombie still never runs the sleep that
+// writes it, so the outcome is a non-signaling proof that does not probe a PID
+// the kernel may have recycled.
+func TestHookProvisionCmdQuiescesOrphanedChildOnParseFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		// provisionBody runs after the script has backgrounded the orphan child
+		// and recorded its pid. It is what provision_cmd prints on stdout and
+		// how it exits — the determinant of which branch of runProvisionCmd's
+		// parse discipline fails (or, for the control, the early-exit branch).
+		provisionBody string
+	}{
+		{
+			// The violation branch: stdout carries content that is not the
+			// record. parseHookProvisionRecord returns (nil, false, violation).
+			name:          "garbage on stdout",
+			provisionBody: "echo 'not a host record'\nexit 0\n",
+		},
+		{
+			// The no-JSON branch: stdout is empty. parseHookProvisionRecord
+			// returns (nil, false, nil) — the "printed no host record" error.
+			name:          "empty stdout",
+			provisionBody: "exit 0\n",
+		},
+		{
+			// The wrong-shape branch: stdout is JSON but not a usable record
+			// (no host_key). parseHookProvisionRecord returns (nil, true, nil)
+			// — the "is not a host record" error.
+			name:          "json without host_key",
+			provisionBody: "echo '{\"host\":\"10.0.0.7\"}'\nexit 0\n",
+		},
+		{
+			// Control A: the non-zero-exit branch in runProvisionCmd returns
+			// before the spend (the early `if err != nil` is above it), so it
+			// quiesced before the fix and must keep quiescing after it. This is
+			// the asymmetry the bug was — the function's own non-zero-exit
+			// branch was never subject to it.
+			name:          "non-zero exit control",
+			provisionBody: "echo 'provisioned, then died' >&2\nexit 7\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shrinkHookTimeouts(t, completingLaunchBound, 5*time.Second)
+			requireProvisionCmdQuiescesChild(t, tc.provisionBody)
+		})
+	}
+}
+
+// requireProvisionCmdQuiescesChild wires provision_cmd to a script that
+// backgrounds a long-running child (in the script's own process group, so the
+// quiesce can reach it), prints the given body on stdout, and exits. It then
+// drives provisionHostOrReap and asserts the child is dead by the time it
+// returns — by the child's side effect never appearing (the outcome). The
+// assertion is non-signaling: it never sends a signal to the child's numeric
+// PID, which on a reaping host may have been recycled to an unrelated process
+// after the quiesce, so a probe that signaled it could terminate that process.
+func requireProvisionCmdQuiescesChild(t *testing.T, provisionBody string) {
+	t.Helper()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	markerFile := filepath.Join(dir, "orphan-finished-here")
+	deleteRanLog := filepath.Join(dir, "delete-ran.log")
+
+	// The orphan child: sleeps long enough to outlive the failing provision,
+	// then writes a marker — the stand-in for "the orphan finished provisioning
+	// a VM after delete_cmd reported success". The marker is the only thing the
+	// test watches for: a child the quiesce killed never writes it, and a child
+	// the quiesce missed does, so its absence is a non-signaling proof of death
+	// that never touches the (possibly recycled) numeric PID.
+	child := writeHookScript(t, filepath.Join(dir, "provision-child.sh"), fmt.Sprintf(`
+sleep 0.25
+echo "a VM that bills by the hour" > %s
+`, shellsuggest.Arg(markerFile)))
+
+	// provision_cmd: backgrounds the orphan child, records its pid for the
+	// assertion, then runs the body under test (print-and-exit) on stdout.
+	provisionCmd := writeHookScript(t, filepath.Join(dir, "provision.sh"), fmt.Sprintf(`
+%s &
+echo $! > %s
+%s
+`, shellsuggest.Arg(child), shellsuggest.Arg(pidFile), provisionBody))
+
+	// delete_cmd: logs that it ran (so the test can confirm the reap path was
+	// taken) and tolerates a slug it cannot find — the contract the bug
+	// exploits, since a successful reap latches nil while the orphan is still
+	// alive and no orphanWarning ever fires.
+	deleteCmd := writeHookScript(t, filepath.Join(dir, "delete.sh"), fmt.Sprintf(`
+echo "$name" >> %s
+true
+`, shellsuggest.Arg(deleteRanLog)))
+
+	p := &hookProvisioner{
+		hooks: config.RemoteHooks{ProvisionCmd: provisionCmd, DeleteCmd: deleteCmd},
+		spec:  ProvisionSpec{Title: "orphaned provision child", CloneURL: "https://example.invalid/repo.git"},
+		slug:  Slugify("orphaned provision child"),
+	}
+
+	_, err := p.provisionHostOrReap()
+	require.Error(t, err, "provision_cmd must fail so the reap path runs")
+
+	// The reap path ran: delete_cmd was invoked, so the quiesce-then-reap gate
+	// in provisionHostOrReap was reached — the branch the bug disarmed.
+	_, logErr := os.Stat(deleteRanLog)
+	require.NoError(t, logErr, "delete_cmd must run: provision_cmd started, so it may have provisioned")
+
+	// The child's PID was recorded before the script exited.
+	pidData, readErr := os.ReadFile(pidFile)
+	require.NoError(t, readErr, "provision_cmd must record the background child's pid")
+	var childPID int
+	_, scanErr := fmt.Sscan(strings.TrimSpace(string(pidData)), &childPID)
+	require.NoError(t, scanErr, "provision_cmd wrote an invalid child pid %q", pidData)
+	require.Positive(t, childPID, "the recorded child pid must be a live process id")
+
+	// Capture the child's process group NOW, at the earliest point after
+	// provisionHostOrReap returns, while the child is freshly dead (the fix
+	// path) or still alive (the bug path). Re-deriving it at cleanup time — after
+	// the 1.2s of assertion window below — would hand cleanup a numeric PID the
+	// kernel may have recycled. The individual PID is never signalled in cleanup
+	// or in the assertion: a bare kill(childPID) on a recycled PID hits an
+	// unrelated single process, and the group kill subsumes it anyway (the child
+	// is in the script's process group, the same group quiesceLaunchGroup
+	// targets in production). This matches the established cleanup pattern in
+	// TestHookLaunchDoesNotKillBackgroundedChildren, which signals the captured
+	// group only.
+	childPgid, childPgidErr := syscall.Getpgid(childPID)
+	// childConfirmedDead is set after the assertion below proves the child is
+	// dead. On the fix path the child is dead, so cleanup has nothing to signal;
+	// on the bug path t.Fatalf fires before it is set, so cleanup still runs
+	// and tears the (still-live) group down. This avoids signalling a PID whose
+	// group the kernel has already recycled — the fix-path child is gone, and
+	// the bug-path child is alive so its group is still ours.
+	childConfirmedDead := false
+	t.Cleanup(func() {
+		if childConfirmedDead {
+			return
+		}
+		if childPgidErr == nil {
+			_ = syscall.Kill(-childPgid, syscall.SIGKILL)
+		}
+	})
+
+	// THE OUTCOME CLAIM: the child is dead by the time provisionHostOrReap
+	// returns. The marker is what the orphan would write if it finished
+	// provisioning after the reap reported success — a resource that bills
+	// forever with nothing pointing at it. Watch across the whole window in
+	// which it would land: the child sleeps 0.25s before writing it, so a child
+	// the quiesce killed never writes it and a child the quiesce missed does
+	// within that 0.25s — well inside the 1.2s window. A resource that appears
+	// at ANY point after the reap is the leak, because delete_cmd already
+	// reported success and will never run again. This is a non-signaling proof:
+	// it never sends a signal to the numeric PID, so a host that has already
+	// reaped the child and recycled its PID to an unrelated process is not
+	// disturbed by the assertion.
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, statErr := os.Stat(markerFile); statErr == nil {
+			t.Fatalf("a provision_cmd child outlived provisionHostOrReap and created %s: "+
+				"delete_cmd reported success, so this sandbox now bills with nothing pointing at it",
+				markerFile)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The outcome claim passed: the child never wrote the marker across the full
+	// 1.2s window, so it was killed before it could — quiesce did its work. A
+	// zombie (a reaping init leaves one briefly) does not run the sleep or write
+	// the file either, so the absence of the marker is enough and no probe signal
+	// is needed. Cleanup has nothing to signal — skip it rather than risk
+	// kill(-childPgid, SIGKILL) on a PID the kernel may have recycled by now.
+	childConfirmedDead = true
+}
+
 // TestHookQuiesceNeverSignalsAStalePgid pins the other half of the process-group
 // kill: it may only ever target a group THIS attempt established.
 //
@@ -574,13 +811,10 @@ func TestHookQuiesceNeverSignalsAStalePgid(t *testing.T) {
 	shrinkHookTimeouts(t, 50*time.Millisecond, 5*time.Second)
 
 	// Stands in for whatever now owns a recycled pgid.
-	sentinel := exec.Command("sleep", "30")
-	sentinel.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	require.NoError(t, sentinel.Start())
+	sentinel := testguard.StartGroupProcess(t, exec.Command("sleep", "30"))
 	stalePgid := sentinel.Process.Pid
 	exited := make(chan error, 1)
 	go func() { exited <- sentinel.Wait() }()
-	t.Cleanup(func() { _ = sentinel.Process.Kill() })
 
 	h := newHookState(t, "", "")
 	p := newHookProvisioner(h, "stale pgid")
@@ -754,35 +988,6 @@ func TestHookOutputSuffixRedactsSerializedEndpointVariants(t *testing.T) {
 	}
 }
 
-// TestExtractJSONAtHandlesMalformedDelimiterFlood keeps endpoint selection
-// linear after a valid JSON log. No unmatched opener can produce a complete
-// value, so retrying a suffix scan from each one is pure quadratic work.
-func TestExtractJSONAtHandlesMalformedDelimiterFlood(t *testing.T) {
-	const logRecord = `{"level":"info"}`
-	output := logRecord + strings.Repeat("{", 50_000)
-
-	first, next := extractJSONAt(output, 0)
-	require.Equal(t, logRecord, first)
-	started := time.Now()
-	value, end := extractJSONAt(output, next)
-	assert.Less(t, time.Since(started), time.Second, "unmatched delimiters must be scanned in linear time")
-	assert.Empty(t, value)
-	assert.Equal(t, len(output), end)
-
-	balanced := strings.Repeat("[", 50_000) + "not-json" + strings.Repeat("]", 50_000)
-	started = time.Now()
-	value, end = extractJSONAt(balanced, 0)
-	assert.Less(t, time.Since(started), time.Second, "balanced malformed nesting must be scanned in linear time")
-	assert.Empty(t, value)
-	assert.Equal(t, len(balanced), end)
-
-	recoverable := strings.Repeat("[bad", 20_000) + logRecord + strings.Repeat("]", 20_000)
-	started = time.Now()
-	value, _ = extractJSONAt(recoverable, 0)
-	assert.Less(t, time.Since(started), time.Second, "nested recovery must walk each candidate once")
-	assert.Equal(t, logRecord, value)
-}
-
 // TestHookProvisionRedactsTokenFromIncompleteEndpointOutput covers a launch
 // killed or interrupted while writing its endpoint JSON. The unmatched tail is
 // still diagnostic output, but a complete quoted token value inside it is just
@@ -934,14 +1139,17 @@ func TestHookLaunchDoesNotKillBackgroundedChildren(t *testing.T) {
 (
   trap 'echo alive > %s' USR1
   : > %s
-  while true; do echo "still here" >&2; sleep 0.05; done
+  %s
 ) &
 child_pid=$!
 echo "$child_pid" > %s
-while [[ ! -e %s ]]; do sleep 0.01; done
+%s
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
-`, shellsuggest.Arg(ackFile), shellsuggest.Arg(readyFile), shellsuggest.Arg(pidFile), shellsuggest.Arg(readyFile)))
+`, shellsuggest.Arg(ackFile), shellsuggest.Arg(readyFile),
+		testguard.BoundedLoop(50*time.Millisecond, 5*time.Minute, `echo "still here" >&2; sleep 0.05`),
+		shellsuggest.Arg(pidFile),
+		testguard.BoundedGateWait(readyFile, 10*time.Millisecond, 5*time.Minute)))
 	writeHookScript(t, h.delete, "true")
 
 	p := newHookProvisioner(h, "background child")

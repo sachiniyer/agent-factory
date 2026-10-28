@@ -1,3 +1,6 @@
+import { formatTime } from "./time.js";
+import { actionsDisclosure } from "./components.js";
+import { recoveryScreen } from "./recovery.js";
 // The TASKS view of the web client (#1592 Phase 5 PR8): the browser analogue of the
 // TUI's automations / task pane (ui/task_pane.go, ui/automations.go). It lists the
 // scheduled tasks the daemon owns — name, cron/watch trigger, enabled, target
@@ -22,10 +25,10 @@
 
 import { h } from "./dom.js";
 import { asForm, field, modalChrome, type ModalHandle, projectLabel } from "./modals.js";
-import { icon } from "./icon.js";
+import { icon, type IconName } from "./icon.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
 import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron, previewIsRedundant } from "./schedule.js";
-import type { TaskData } from "./types.js";
+import type { OnCompleteOption, TaskData } from "./types.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 
 /** The add-task form's inputs (a subset of task.Task the browser fills; the daemon
@@ -38,6 +41,7 @@ export interface AddTaskInput {
   watchCmd: string;
   prompt: string;
   targetSession: string;
+  onComplete?: string;
   program: string;
 }
 
@@ -46,6 +50,8 @@ export interface AddTaskInput {
  *  handler has its stable id and current state; the toggle turns that into a
  *  field-level `{ enabled }` patch (UpdateTask), never a full-struct write (#1700). */
 export interface TaskActions {
+  retry?: () => void;
+  addProject?: () => void;
   /** Opens the add-task modal. */
   add(): void;
   /** Opens the edit modal seeded from this task; submits the changed fields via
@@ -81,11 +87,17 @@ export function buildTask(input: AddTaskInput): TaskData {
     cron_expr: input.trigger === "cron" ? input.cron : "",
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
+    on_complete: input.targetSession.trim() ? "" : input.onComplete ?? "",
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
     created_at: new Date().toISOString(),
   };
+}
+
+/** Targeted tasks reuse a session, so a spawned-session policy cannot apply. */
+export function onCompleteUnavailableReason(targetSession: string): string | null {
+  return targetSession.trim() ? "Target session will be reused." : null;
 }
 
 /** The task's trigger as a one-line summary, mirroring the TUI's row detail
@@ -117,12 +129,183 @@ function lastRunSummary(t: TaskData): string {
 }
 
 /**
+ * Schedule health (#3623), rendered here for the first time (#3626).
+ *
+ * The daemon derives every one of these and puts them on the records ListTasks
+ * returns, so this file renders and never re-derives — which is the whole point:
+ * the CLI, the TUI and this list must not each reach a different verdict about
+ * the same task, and the way that happened before was three surfaces each
+ * computing it from the cron expression themselves.
+ *
+ * The copy and the ordering mirror ui/automations.go deliberately, so a person
+ * moving between the rail and the browser reads the same words in the same
+ * order about the same task.
+ */
+
+/** Whether the row carries a WARNING: it has stopped firing, the scheduler
+ *  cannot fire it at all, or the daemon reports it is not holding it. An unknown
+ *  is deliberately not one — see taskHealthMark. */
+export function taskNeedsAttention(t: TaskData): boolean {
+  return !!t.overdue || !!t.unschedulable || notArmed(t);
+}
+
+/** An ENABLED task the running daemon reports it is not holding. It will not
+ *  fire, which is #2929 exactly, and `af doctor` raises it as actionable.
+ *
+ *  Gated on `enabled` because the daemon reports arming for every task, and
+ *  "disabled and therefore not armed" is a true, unsurprising reading of the same
+ *  field — deciding that an unarmed ENABLED task is the interesting one is the
+ *  consuming surface's job. And on `not-armed` specifically, never on the absence
+ *  of an answer: nothing having reported is not an observation that it is
+ *  unarmed. */
+function notArmed(t: TaskData): boolean {
+  return !!t.enabled && t.arming === "not-armed";
+}
+
+/** The row's health mark: which static glyph it carries, and the modifier class
+ *  that colours it. No animation — state reads from a glyph here as in the TUI
+ *  (#1766). */
+export function taskHealthMark(t: TaskData): { icon: IconName; cls: string } | null {
+  if (taskNeedsAttention(t)) {
+    return { icon: "triangle-alert", cls: "af-task-warn" };
+  }
+  if (t.unassessable) {
+    // Its own mark rather than either neighbour's: a tick is the claim this
+    // whole feature exists to stop making, and the warning glyph would call an
+    // unestablished thing a failure.
+    return { icon: "circle-question", cls: "af-task-unknown" };
+  }
+  return null;
+}
+
+const NOT_ARMED = "enabled but not armed";
+
+/** The leading health fragment, or "" when the row is healthy. It LEADS the meta
+ *  line for the reason the TUI's leads its detail line: these lines ellipsize
+ *  from the right, so a reason placed behind the configuration is the half that
+ *  gets cut, leaving a marked row with nothing explaining it. */
+export function taskHealthSummary(t: TaskData): string {
+  // ONE precedence chain, and it is taskHealthMark's: everything taskNeedsAttention
+  // covers first, then the unknown, then nothing. The two must agree about which
+  // fact a row is showing, or a row gets a warning glyph explained by text about
+  // something else — "Health unknown" beside a warning mark, which is the round-1
+  // finding reintroduced through a different door. Reachable because arming is
+  // layered on separately from the derivation: unschedulable/overdue/unassessable
+  // are mutually exclusive, but a task with nothing to measure from can also be
+  // one the daemon refused to arm (#3626 review).
+  if (t.unschedulable) {
+    // The daemon's own classification, read rather than re-derived — the three
+    // shapes and the three strings are ui/automations.go's attentionFragment,
+    // exactly. Inspecting cron_expr here is what had other surfaces calling an
+    // ABSENT expression invalid (#3648), and an older daemon that sends the
+    // verdict without the reason falls back to the verdict's own words rather
+    // than to a local guess at which one it is.
+    switch (t.unschedulable_reason) {
+      case "no-trigger":
+        return "No trigger";
+      case "invalid-expression":
+        return "Invalid cron expression";
+      case "no-occurrence":
+        return "No upcoming run";
+      default:
+        return "Cannot be scheduled";
+    }
+  }
+  if (t.overdue) {
+    if (!t.missed_occurrences || t.missed_occurrences <= 0) {
+      // A count nobody took is not a count of zero: the daemon's walk budget can
+      // be spent before it reaches a task, and it says so by capping a zero.
+      return "overdue";
+    }
+    const capped = t.missed_occurrences_capped ? "+" : "";
+    return `overdue · missed ${t.missed_occurrences}${capped}`;
+  }
+  if (notArmed(t)) {
+    // After the three above, because each is a stronger statement about the same
+    // task and af doctor orders them the same way — a row it has already named is
+    // not named again. An overdue task is usually also unarmed; "it has missed 432
+    // fires" is the sentence worth the width.
+    return NOT_ARMED;
+  }
+  // Only now: an unknown is the weakest thing a row can say, and anything above
+  // is both truer and more actionable.
+  return t.unassessable ? "Health unknown" : "";
+}
+
+/** The far-out wording, "2027-09-21 (in 11 months)" — the same words as
+ *  task.FarOutNote in the TUI. Only formatting lives here: whether a run is far
+ *  out is the daemon's `next_run_far`, never a threshold re-derived client-side.
+ *  Whole calendar months, rounded down, in the viewer's local time. */
+export function farOutNote(nextRunAt: string, now: Date = new Date()): string {
+  const next = new Date(nextRunAt);
+  if (Number.isNaN(next.getTime())) return "";
+  let months = (next.getFullYear() - now.getFullYear()) * 12 + next.getMonth() - now.getMonth();
+  const nextClock = next.getHours() * 3_600_000 + next.getMinutes() * 60_000 + next.getSeconds() * 1000 + next.getMilliseconds();
+  const nowClock = now.getHours() * 3_600_000 + now.getMinutes() * 60_000 + now.getSeconds() * 1000 + now.getMilliseconds();
+  if (next.getDate() < now.getDate() || (next.getDate() === now.getDate() && nextClock < nowClock)) months--;
+  const date = `${next.getFullYear()}-${pad2(next.getMonth() + 1)}-${pad2(next.getDate())}`;
+  return `${date} (in ${months} ${months === 1 ? "month" : "months"})`;
+}
+
+/** The next-run fragment: what the LIVE scheduler entry will fire, or the fact
+ *  that nothing is holding this task. Absent arming says nothing at all — no
+ *  daemon has reported on it, which is not the same as "not armed". */
+export function taskArmingSummary(t: TaskData, now: Date = new Date()): string {
+  if (t.next_run_at) {
+    const far = t.next_run_far ? farOutNote(t.next_run_at, now) : "";
+    if (far) return `Next run ${far}`;
+    return `Next run ${formatTime(t.next_run_at, now)}`;
+  }
+  // The not-armed fact belongs to the HEALTH fragment now, which leads the line
+  // and carries the mark with it — a fact that will stop the task firing has no
+  // business in the dim tail that ellipsizes first. Repeating it here would say
+  // it twice on the one row narrow enough to lose the second copy.
+  return "";
+}
+
+type FocusLike = Pick<HTMLElement, "getAttribute" | "textContent"> & { parentElement: { className: string } | null };
+
+/** Identifies a row control across a rebuild. The desktop icons and the phone menu
+ *  repeat the same labels, so the surface (parent group) is part of the key. */
+export function controlKey(el: FocusLike): { name: string; surface: string } {
+  return { name: el.getAttribute("aria-label") || el.textContent || "", surface: el.parentElement?.className ?? "" };
+}
+
+export function sameControlKey(a: { name: string; surface: string }, b: { name: string; surface: string }): boolean {
+  return a.name === b.name && a.surface === b.surface;
+}
+
+export interface TaskVerb {
+  label: string;
+  glyph: IconName;
+  run: () => void;
+  /** Why the verb is unavailable; set means render it disabled. */
+  blocked?: string;
+}
+
+/** The row verbs both the desktop icons and the phone menu render, in order. */
+export function taskVerbs(t: TaskData, actions: Pick<TaskActions, "edit" | "trigger" | "remove">): TaskVerb[] {
+  const triggerBlocked = canTrigger(t)
+    ? undefined
+    : !t.enabled
+      ? "Enable the task to trigger it"
+      : "Only scheduled tasks can be triggered";
+  return [
+    { label: "Edit", glyph: "pencil", run: () => actions.edit(t) },
+    { label: "Trigger", glyph: "play", run: () => actions.trigger(t), blocked: triggerBlocked },
+    { label: "Remove", glyph: "trash", run: () => actions.remove(t) },
+  ];
+}
+
+/**
  * The tasks pane: build once (its `el` mounts into the app body), then
  * update(tasks) re-renders on a change. A small stateful class like the projects
  * pane so a task.* event patches only this subtree.
  */
 export class TasksPane {
   readonly el: HTMLElement;
+  private menus: ReturnType<typeof actionsDisclosure>[] = [];
+  private lastError: string | undefined;
   private lastTasks: TaskData[] | null = null;
   private lastProject: string | null = null;
   // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
@@ -137,20 +320,47 @@ export class TasksPane {
   /** Re-renders the tasks list SCOPED to the selected project (redesign PR2): only
    *  tasks whose project_path matches, so the tasks view operates within the same
    *  project the rail is scoped to. A null project (none exist) shows no tasks. */
-  update(tasks: TaskData[], selectedProject: string | null): void {
-    if (this.lastTasks === tasks && this.lastProject === selectedProject) {
+  update(tasks: TaskData[], selectedProject: string | null, error?: string): void {
+    if (this.lastTasks === tasks && this.lastProject === selectedProject && this.lastError === error) {
       return;
     }
+    this.lastError = error;
     const token = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token;
     this.lastTasks = tasks;
     this.lastProject = selectedProject;
+    const openIds = new Set(this.menus.filter((menu) => !menu.panel.hidden)
+      .map((menu) => menu.el.closest<HTMLElement>("[data-task-id]")?.dataset.taskId));
+    const active = document.activeElement as HTMLElement | null;
+    const focusedId = active?.closest<HTMLElement>("[data-task-id]")?.dataset.taskId;
+    const focused = active ? controlKey(active) : null;
+    for (const menu of this.menus) menu.dispose();
+    this.menus = [];
     const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
     rebuildKeepingScroll(this.el, previous, token, () => this.render(scoped));
+    for (const menu of this.menus) {
+      if (openIds.has(menu.el.closest<HTMLElement>("[data-task-id]")?.dataset.taskId)) menu.open();
+    }
+    if (focusedId && focused?.name) {
+      const row = this.el.querySelector(`[data-task-id="${CSS.escape(focusedId)}"]`);
+      const control = [...(row?.querySelectorAll<HTMLButtonElement>("button") ?? [])]
+        .find((button) => sameControlKey(controlKey(button), focused));
+      control?.focus({ preventScroll: true });
+    }
   }
 
   private render(tasks: TaskData[]): void {
+    if (this.lastError) {
+      this.el.replaceChildren(recoveryScreen({ condition: "Tasks unavailable", detail: this.lastError,
+        failed: true, action: "Retry", run: () => this.actions.retry?.() }));
+      return;
+    }
+    if (this.lastProject === null) {
+      this.el.replaceChildren(recoveryScreen({ condition: "No project registered",
+        action: "Add project", run: () => this.actions.addProject?.() }));
+      return;
+    }
     const addBtn = h(
       "button",
       { type: "button", class: "af-tasks-add", title: "Add task" },
@@ -167,12 +377,7 @@ export class TasksPane {
     );
     if (tasks.length === 0) {
       this.el.replaceChildren(
-        head,
-        h(
-          "p",
-          { class: "af-tasks-empty" },
-          "No scheduled tasks yet. Add one to deliver a prompt on a cron schedule.",
-        ),
+        recoveryScreen({ condition: "No tasks", action: "Add task", run: () => this.actions.add() }),
       );
       return;
     }
@@ -183,16 +388,38 @@ export class TasksPane {
   }
 
   private taskRow(t: TaskData): HTMLElement {
+    // The health mark REPLACES the enabled tick rather than adding a column, as
+    // the rail's does: only an enabled task can carry one, so the two can never
+    // collide, and a marked row stays exactly as wide as an unmarked one.
+    const mark = taskHealthMark(t);
     const enabledDot = h(
       "span",
-      { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` },
-      icon(t.enabled ? "square-check" : "square"),
+      { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}${mark ? ` ${mark.cls}` : ""}` },
+      ...(mark ? [icon(mark.icon)] : []),
     );
+    // Hidden from assistive tech even when it is a MARK. The glyph exists to
+    // survive visual CLIPPING, and clipping is a sighted-reader problem: CSS
+    // ellipsis does not remove the health text from the accessibility tree, so
+    // labelling the glyph with the same summary announced the verdict twice. The
+    // words carry it, and taskHealthMark returns a mark on exactly the states
+    // taskHealthSummary has words for — pinned below, because a mark with no
+    // words would be a row that says nothing at all to a screen reader (#3626
+    // review).
     enabledDot.setAttribute("aria-hidden", "true");
 
     const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
     const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));
     const metaParts: (Node | string)[] = [];
+    // Health LEADS the line — see taskHealthSummary.
+    const health = taskHealthSummary(t);
+    if (health !== "") {
+      // The text takes the MARK's class, so the glyph and the words it explains
+      // cannot end up in different colours: an unknown is muted in both places.
+      // Painting "Health unknown" in the warning colour would present something
+      // unestablished as a failure, which is how people learn to ignore the rows
+      // that are one.
+      metaParts.push(h("span", { class: `af-task-health${mark ? ` ${mark.cls}` : ""}` }, health), " · ");
+    }
     if (t.target_session && t.target_session.trim() !== "") {
       metaParts.push(
         h("span", { class: "af-task-target" }, icon("arrow-right"), t.target_session),
@@ -201,30 +428,61 @@ export class TasksPane {
     }
     metaParts.push(lastRunSummary(t));
     const meta = h("div", { class: "af-task-meta" }, ...metaParts);
-    const main = h("div", { class: "af-task-main" }, name, trigger, meta);
-
-    const toggleBtn = h(
-      "button",
-      { type: "button", class: "af-ghost af-task-action" },
-      t.enabled ? "Disable" : "Enable",
-    );
-    toggleBtn.addEventListener("click", () => this.actions.toggle(t));
-
-    const editBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Edit");
-    editBtn.addEventListener("click", () => this.actions.edit(t));
-
-    const actionEls: HTMLElement[] = [toggleBtn, editBtn];
-    if (canTrigger(t)) {
-      const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
-      triggerBtn.addEventListener("click", () => this.actions.trigger(t));
-      actionEls.push(triggerBtn);
+    const next = h("div", { class: "af-task-next" }, taskArmingSummary(t));
+    const detail = h("div", { class: "af-task-detail" }, next, trigger, meta);
+    const main = h("div", { class: "af-task-main" }, name, detail);
+    if (t.last_run_status?.startsWith("errored:")) {
+      main.insertBefore(h("div", { class: "af-task-failure" }, t.last_run_status), detail);
     }
-    const removeBtn = h("button", { type: "button", class: "af-danger af-task-action" }, "Remove");
-    removeBtn.addEventListener("click", () => this.actions.remove(t));
-    actionEls.push(removeBtn);
 
-    const actions = h("div", { class: "af-task-actions" }, ...actionEls);
-    return h("li", { class: "af-task-row" }, enabledDot, main, actions);
+    const toggle = h(
+      "button",
+      { type: "button", class: `af-task-switch${t.enabled ? " af-task-switch-on" : ""}`, role: "switch" },
+      h("span", { class: "af-task-switch-track" }, h("span", { class: "af-task-switch-thumb" })),
+    );
+    toggle.setAttribute("aria-checked", t.enabled ? "true" : "false");
+    toggle.setAttribute("aria-label", `Enabled: ${t.name}`);
+    toggle.title = t.enabled ? "Enabled · click to disable" : "Disabled · click to enable";
+    toggle.addEventListener("click", () => this.actions.toggle(t));
+
+    const verbs = taskVerbs(t, this.actions);
+
+    const iconBtns = verbs.map(({ label, glyph, run, blocked }) => {
+      const btn = h("button", { type: "button", class: "af-task-icon-btn", title: blocked ?? label }, icon(glyph));
+      btn.setAttribute("aria-label", label);
+      if (blocked) {
+        btn.disabled = true;
+      } else {
+        btn.addEventListener("click", run);
+      }
+      return btn;
+    });
+
+    // Phones show the same verbs as a menu; CSS picks one of the two sets.
+    const menu = actionsDisclosure(`Actions for ${t.name}`);
+    this.menus.push(menu);
+    menu.panel.append(...verbs.map(({ label, glyph, run, blocked }) => {
+      const btn = h("button", { type: "button", class: "af-ghost af-task-action" }, icon(glyph), label);
+      if (blocked) {
+        btn.disabled = true;
+        btn.title = blocked;
+      } else {
+        btn.addEventListener("click", run);
+      }
+      return btn;
+    }));
+    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+
+    const actions = h(
+      "div",
+      { class: "af-task-actions" },
+      h("div", { class: "af-task-icons" }, ...iconBtns),
+      menu.el,
+      toggle,
+    );
+    const row = h("li", { class: "af-task-row" }, enabledDot, main, actions);
+    row.dataset.taskId = t.id;
+    return row;
   }
 }
 
@@ -547,10 +805,10 @@ class SchedulePicker {
    *  the picker-level constraints that would otherwise generate a nonsense cron. */
   validate(): string | null {
     if (this.type === "custom" && this.rawInput.value.trim() === "") {
-      return "A cron expression is required for a cron task.";
+      return "Enter a cron expression.";
     }
     if (this.type === "weekly" && this.weekdaysOn.size === 0) {
-      return "Select at least one day of the week.";
+      return "Select at least one day.";
     }
     return null;
   }
@@ -615,6 +873,7 @@ function taskFormModal(opts: {
    *  imported so this module stays free of the API/token layer, and re-run on every
    *  project change: the program a repo defaults to is a per-repo fact. */
   loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+  loadOnComplete: () => Promise<OnCompleteOption[]>;
   onSubmit: (input: AddTaskInput) => void;
   onCancel: () => void;
 }): ModalHandle {
@@ -634,7 +893,7 @@ function taskFormModal(opts: {
     // Post-#2456 a registered repo is a valid task target (opts.projects ∪ the
     // registry), so the coherent action is the switcher's "+ Add project", not a
     // session — matching the New session modal's empty state.
-    const opt = h("option", { value: "" }, "No projects yet — add one from the project switcher first");
+    const opt = h("option", { value: "" }, "Add a project first.");
     opt.disabled = true;
     opt.selected = true;
     projectSelect.append(opt);
@@ -687,6 +946,48 @@ function taskFormModal(opts: {
 
   const targetInput = h("input", { type: "text", class: "af-input", placeholder: "Target session (optional)", autocomplete: "off" });
   targetInput.setAttribute("aria-label", "Target session");
+
+  const onCompleteSelect = h("select", { class: "af-input", disabled: true });
+  onCompleteSelect.setAttribute("aria-label", "On done");
+  // Preserve the seed while loading or if the catalog is unavailable. Do not
+  // invent selectable choices from a local enum copy.
+  const seedOnComplete = opts.seed?.on_complete ?? "";
+  onCompleteSelect.append(h("option", { value: seedOnComplete }, seedOnComplete ? seedOnComplete[0].toUpperCase() + seedOnComplete.slice(1) : "Default"));
+  const onCompleteHint = h("span", { class: "af-modal-hint af-on-complete-hint", id: "af-task-on-complete-hint" });
+  onCompleteSelect.setAttribute("aria-describedby", onCompleteHint.id);
+  const onCompleteField = field("On done", onCompleteSelect);
+  onCompleteField.append(onCompleteHint);
+  const onCompleteReason = h("p", { class: "af-muted" });
+  const onCompleteReasonField = fieldGroup("On done", onCompleteReason);
+  const syncOnComplete = (): void => {
+    const reason = onCompleteUnavailableReason(targetInput.value);
+    onCompleteField.hidden = reason !== null;
+    onCompleteReasonField.hidden = reason === null;
+    onCompleteReason.textContent = reason ?? "";
+  };
+  targetInput.addEventListener("input", syncOnComplete);
+  let onCompleteOptions: OnCompleteOption[] = [];
+  const renderOnCompleteHint = (): void => {
+    onCompleteHint.textContent = onCompleteOptions.find(option => option.value === onCompleteSelect.value)?.hint ?? "";
+  };
+  onCompleteSelect.addEventListener("change", renderOnCompleteHint);
+  void opts.loadOnComplete().then((options) => {
+    onCompleteOptions = options;
+    const choices = [...options];
+    if (seedOnComplete && !choices.some(option => option.value === seedOnComplete)) {
+      choices.push({ value: seedOnComplete, hint: "" });
+    }
+    onCompleteSelect.replaceChildren();
+    for (const { value } of choices) {
+      onCompleteSelect.append(h("option", { value }, value[0].toUpperCase() + value.slice(1)));
+    }
+    // The daemon serves the default first, in least-destructive-first order.
+    onCompleteSelect.value = seedOnComplete || choices[0]?.value || "";
+    onCompleteSelect.disabled = false;
+    renderOnCompleteHint();
+  }).catch(() => {
+    onCompleteHint.textContent = "Choices unavailable · current value kept.";
+  });
 
   // The program field (#1970). Its options come from the daemon, never from a list
   // here, so an agent added server-side shows up with no change to the web.
@@ -756,6 +1057,7 @@ function taskFormModal(opts: {
   // Kicked off after the seed so the catalog's re-render preserves the seeded
   // program as the current selection rather than clobbering it with the default.
   loadProgramsFor(projectSelect.value);
+  syncOnComplete();
 
   body.append(
     field("Name", nameInput),
@@ -765,6 +1067,8 @@ function taskFormModal(opts: {
     watchField,
     field("Prompt", promptArea),
     field("Target session", targetInput),
+    onCompleteField,
+    onCompleteReasonField,
     field("Program", programSelect),
   );
 
@@ -775,7 +1079,7 @@ function taskFormModal(opts: {
     const watchCmd = watchInput.value.trim();
     const prompt = promptArea.value.trim();
     if (name === "" || projectSelect.value === "") {
-      handle.setError("A name and a project are required.");
+      handle.setError("Enter a name and choose a project.");
       return;
     }
     // The picker always yields a well-formed expression for a preset; validate()
@@ -788,11 +1092,11 @@ function taskFormModal(opts: {
     }
     const cron = trigger === "cron" ? picker.cron() : "";
     if (trigger === "cron" && prompt === "") {
-      handle.setError("A prompt is required for a cron task.");
+      handle.setError("Enter a prompt.");
       return;
     }
     if (trigger === "watch" && watchCmd === "") {
-      handle.setError("A watch command is required for a watch task.");
+      handle.setError("Enter a watch command.");
       return;
     }
     handle.setError(null);
@@ -804,6 +1108,7 @@ function taskFormModal(opts: {
       watchCmd,
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
+      onComplete: onCompleteSelect.value,
       program: programSelect.value,
     });
   });
@@ -821,6 +1126,7 @@ export function addTaskModal(
     onSubmit: (input: AddTaskInput) => void;
     onCancel: () => void;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+    loadOnComplete: () => Promise<OnCompleteOption[]>;
   },
 ): ModalHandle {
   return taskFormModal({
@@ -829,6 +1135,7 @@ export function addTaskModal(
     projects,
     defaultProject,
     loadPrograms: callbacks.loadPrograms,
+    loadOnComplete: callbacks.loadOnComplete,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });
@@ -844,6 +1151,7 @@ export function editTaskModal(
     onSubmit: (input: AddTaskInput) => void;
     onCancel: () => void;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+    loadOnComplete: () => Promise<OnCompleteOption[]>;
   },
 ): ModalHandle {
   return taskFormModal({
@@ -853,6 +1161,7 @@ export function editTaskModal(
     defaultProject: task.project_path,
     seed: task,
     loadPrograms: callbacks.loadPrograms,
+    loadOnComplete: callbacks.loadOnComplete,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });

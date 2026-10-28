@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -40,17 +41,103 @@ type helpSection struct {
 	rows  []helpRow
 }
 
-// renderHelpSections lays the sections out with a single key column whose width
-// fits the widest effective key across ALL sections. When contentWidth is
-// known, the description is a separate block: lipgloss wraps it beneath its
-// first word, never beneath the key (#2577).
+// helpKeyColumnFraction caps the key column as a share of the overlay's content
+// width. The column is otherwise sized to the widest key across ALL sections, so
+// a single unusually wide entry sets it for every row — and the help has exactly
+// one: "tab / shift+tab / ctrl+r" at 24 cells, against ~30 rows of 1-6 cells.
+//
+// At 80x24 the overlay's content is 44 columns, so that one key took 26 of them
+// (59%) and left 16 for every description. The screen a new user opens to learn
+// the app became a column of 3-5-line ribbons with ~25 blank columns beside each
+// of them: 8 page-downs to read, versus 1 at 200x50 (#3629).
+//
+// A key wider than the cap wraps inside its own column rather than widening
+// everyone else's — it pays for its own length. The cap is inert at wide sizes:
+// at 200x50 (contentWidth 116) 40% is 46 and the natural 26 is far below it, so
+// the layout that already reads correctly there is untouched.
+const helpKeyColumnFraction = 0.4
+
+// helpKeyColumnWidth is the key column's width for a given content width: the
+// widest key plus its 2-cell gutter, capped by helpKeyColumnFraction.
+//
+// When the cap bites, the column shrinks to the widest key that still FITS
+// under it rather than to the cap itself. That is what keeps the cap from
+// creating a second victim: at 80x24 the cap is 17, and snapping to the widest
+// fitting key gives 15 — enough for "ctrl+u/ctrl+d", the widest ordinary key —
+// so exactly one row wraps and it is the outlier that caused the problem.
+func helpKeyColumnWidth(keyWidths []int, contentWidth int) int {
+	widest := 0
+	for _, w := range keyWidths {
+		if w > widest {
+			widest = w
+		}
+	}
+	width := widest + 2
+	if capped := int(float64(contentWidth) * helpKeyColumnFraction); width > capped {
+		width = capped
+		widestFitting := 0
+		for _, w := range keyWidths {
+			if fits := w + 2; fits <= capped && fits > widestFitting {
+				widestFitting = fits
+			}
+		}
+		// Zero means every key is over the cap; then the cap itself is the
+		// column and they all wrap, which is the only fair answer.
+		if widestFitting > 0 {
+			width = widestFitting
+		}
+	}
+	// Leave room for the "- " separator and at least one description cell.
+	if room := contentWidth - 3; width > room {
+		width = room
+	}
+	if width < 1 {
+		width = 1
+	}
+	return width
+}
+
+// helpKeyColumnGutter is the blank space reserved on the right of the key
+// column, so no key — wrapped or not — can touch the "- " that follows it. It
+// collapses to zero only on a column too narrow to hold both.
+func helpKeyColumnGutter(keyColumnWidth int) int {
+	const gutter = 2
+	if keyColumnWidth-gutter < 1 {
+		return 0
+	}
+	return gutter
+}
+
+// renderHelpSections lays the sections out with a single key column sized to the
+// widest effective key across ALL sections, capped at helpKeyColumnFraction of
+// the content width. When contentWidth is known, the description is a separate
+// block: lipgloss wraps it beneath its first word, never beneath the key (#2577).
+//
+// Keys are measured with layout.Cells, the ONE width answer (#3585/#3610). They
+// are ASCII today, so nothing here renders differently — the point is that the
+// invariant is literal rather than nearly true, and that a rebind to a glyph key
+// cannot make this column disagree with the pane the overlay is drawn into
+// (#3635).
 func renderHelpSections(header string, sections []helpSection, contentWidth int) string {
 	keyWidth := 0
+	var keyWidths []int
 	for _, s := range sections {
 		for _, r := range s.rows {
-			if w := lipgloss.Width(r.key); w > keyWidth {
+			w := layout.Cells(r.key)
+			keyWidths = append(keyWidths, w)
+			if w > keyWidth {
 				keyWidth = w
 			}
+		}
+	}
+	// One layout for the whole screen, computed once: every row shares the
+	// column so the descriptions line up.
+	keyColumnWidth, descWidth := 0, 0
+	if contentWidth > 0 {
+		keyColumnWidth = helpKeyColumnWidth(keyWidths, contentWidth)
+		descWidth = contentWidth - keyColumnWidth - 2
+		if descWidth < 1 {
+			descWidth = 1
 		}
 	}
 
@@ -60,23 +147,20 @@ func renderHelpSections(header string, sections []helpSection, contentWidth int)
 		lines = append(lines, headerStyle.Render(s.title))
 		for _, r := range s.rows {
 			if contentWidth <= 0 {
-				pad := strings.Repeat(" ", keyWidth-lipgloss.Width(r.key)+2)
+				pad := strings.Repeat(" ", keyWidth-layout.Cells(r.key)+2)
 				lines = append(lines, keyStyle.Render(r.key)+pad+descStyle.Render("- "+r.desc))
 				continue
 			}
 
-			keyColumnWidth := keyWidth + 2
-			if keyColumnWidth+3 > contentWidth {
-				keyColumnWidth = contentWidth / 2
-				if keyColumnWidth < 1 {
-					keyColumnWidth = 1
-				}
-			}
-			descWidth := contentWidth - keyColumnWidth - 2
-			if descWidth < 1 {
-				descWidth = 1
-			}
-			keyBlock := lipgloss.NewStyle().Width(keyColumnWidth).Render(keyStyle.Render(r.key))
+			// PaddingRight, not bare Width: the 2 cells are a GUTTER, and an
+			// over-cap key must wrap inside its own text width rather than
+			// spend the gutter on a wrapped line. Without it the row rendered
+			// "tab / shift+tab- While naming…", the key colliding with its own
+			// separator (#3629, same class as #3630's "Automation…·").
+			keyBlock := lipgloss.NewStyle().
+				Width(keyColumnWidth).
+				PaddingRight(helpKeyColumnGutter(keyColumnWidth)).
+				Render(keyStyle.Render(r.key))
 			dashBlock := descStyle.Render("- ")
 			descBlock := lipgloss.NewStyle().Width(descWidth).Render(descStyle.Render(r.desc))
 			lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, keyBlock, dashBlock, descBlock))
@@ -149,7 +233,7 @@ func attachedScrollControls(agent string) (string, string) {
 }
 
 func firstRunActionLine(actions string) string {
-	return descStyle.Render(actions)
+	return ui.ActionHint(actions)
 }
 
 type helpAlias struct {
@@ -157,14 +241,25 @@ type helpAlias struct {
 	msg   tea.KeyMsg
 }
 
+// helpDismissBindings are the rebindable bindings that close a text overlay.
+// isHelpDismissKey dispatches on this list and visibleHelpAliases hides any
+// advertised paging/jump alias a rebind has turned into one of them, so the
+// copy and the dispatch cannot disagree: with `[keys] quit = "pgdown"` the
+// help must not print "pgdn" beside "Page:" when pgdn now closes the screen.
+var helpDismissBindings = []keys.KeyName{
+	keys.KeyHelp,
+	keys.KeyEnter,
+	keys.KeyQuit,
+}
+
 func visibleHelpAliases(aliases []helpAlias) string {
-	bindings := []keys.KeyName{
-		keys.KeyHelp,
+	// The dismiss keys, plus the scroll bindings an alias can be shadowed by.
+	bindings := append([]keys.KeyName{
 		keys.KeyUp,
 		keys.KeyDown,
 		keys.KeyShiftUp,
 		keys.KeyShiftDown,
-	}
+	}, helpDismissBindings...)
 
 	var visible []string
 	for _, alias := range aliases {
@@ -217,9 +312,9 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 		lineControls += descStyle.Render(" · " + aliases + " jump")
 	}
 	header := lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render(fmt.Sprintf("Agent Factory v%s", Version)),
+		titleStyle.Render(helpProductTitle()),
 		"",
-		"A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces.",
+		"Manage agents in separate workspaces.",
 		"",
 		pageLine,
 		lineControls,
@@ -227,58 +322,69 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 	)
 	return renderHelpSections(header, []helpSection{
 		{title: "Managing:", rows: []helpRow{
-			{helpKey(keys.KeyNew), "Create a new session"},
-			{helpKey(keys.KeyNewRemote), "Create a new remote session (requires remote_hooks config)"},
-			// The naming form's three optional fields, named here because its own
+			{helpKey(keys.KeyNew), "Create a session"},
+			// The naming form's four optional fields, named here because its own
 			// status-bar hints shed by terminal width (ui/menu.go hintDropOrder): on a
 			// narrow bar this is the only surface that still advertises them.
-			{helpKey(keys.KeyChangeProgram) + " / " + helpKey(keys.KeySetPrompt) + " / " + helpKey(keys.KeySetBackend),
-				"While naming a new session: pick its agent / initial prompt / backend"},
-			{helpKey(keys.KeySwitchProject), "Switch to another project (repo) in place"},
-			{helpKey(keys.KeyTaskList), "Manage tasks (n inside the manager creates one, r runs one)"},
-			{helpKey(keys.KeyKill), "Kill (delete) the selected session"},
-			{helpKey(keys.KeyArchive), "Archive the selected live session"},
-			{helpKey(keys.KeyRestore), "Restore the selected archived / lost / dead session"},
-			{helpKey(keys.KeyLimitRetry), "Retry a session blocked at a usage limit (re-spawn + resume)"},
-			{navKeys, "Navigate between sessions"},
-			{helpKey(keys.KeyEnter), "Interact with the session in its pane (all keys go to it)"},
-			{helpKey(keys.KeyExitInteractive), "Leave interactive mode (back to navigation)"},
-			{helpKey(keys.KeyAttach), "Attach to the selected session full-screen"},
-			{tmux.DetachKeyDisplay, "Detach from a full-screen session"},
+			//
+			// Slash-joined in PAIRS with a space between them, which is not decoration:
+			// the key column is sized to the widest key across every section and capped
+			// (#3629), so at 80x24 it is 13 usable cells — exactly what "tab/shift+tab"
+			// and "ctrl+r/ctrl+o" each occupy. Written " / " throughout, the account
+			// field's arrival would add a fourth wrapped line to this row, and the
+			// general help is at its 5-page budget at that size with nothing to spare
+			// (TestGeneralHelpReadsInFarFewerPagesAt80x24). Two clean lines instead of
+			// three, and one line at any width that fits the row.
+			{helpKey(keys.KeyChangeProgram) + "/" + helpKey(keys.KeySetPrompt) + " " +
+				helpKey(keys.KeySetBackend) + "/" + helpKey(keys.KeySetAccount),
+				"New session: agent · prompt · backend · account"},
+			{helpKey(keys.KeySwitchProject), "Switch projects"},
+			{helpKey(keys.KeyTaskList), "Manage tasks · n create · r run"},
+			{helpKey(keys.KeyKill), "Delete session · its af-owned worktree and branch are removed"},
+			{helpKey(keys.KeyHandoff), "Hand off to another agent"},
+			{helpKey(keys.KeySearch), "Search sessions"},
+			{helpKey(keys.KeyArchive), "Archive locally · sandboxes publish work first"},
+			{helpKey(keys.KeyRestore), "Restore · reconnect or recover; absent sandboxes use last push"},
+			{helpKey(keys.KeyLimitRetry), "Retry a usage limit or inspected handoff"},
+			{navKeys, "Select a session"},
+			{helpKey(keys.KeyEnter), "Type in the pane · all keys go to that pane"},
+			{helpKey(keys.KeyExitInteractive), "Return to navigation"},
+			{helpKey(keys.KeyAttach), "Attach full-screen"},
+			{tmux.DetachKeyDisplay, "Leave full-screen"},
 		}},
 		{title: "Workspace:", rows: []helpRow{
-			{helpKey(keys.KeyTab), "Cycle focus: tree → open panes → automations"},
-			{helpKey(keys.KeyShiftTab), "Cycle focus backwards"},
-			{helpKey(keys.KeyOpenPane), "Open the selected tab as a pane (or focus its pane)"},
-			{helpKey(keys.KeySplitPane), "Commit the current preview as another pane"},
-			{helpKey(keys.KeyHidePane), "Hide the focused pane (the tab keeps running)"},
-			{helpKey(keys.KeyPanePrev) + "/" + helpKey(keys.KeyPaneNext), "Move focus between open panes"},
-			{navKeys, "Navigate the tree (sessions and their tabs)"},
-			{helpKey(keys.KeyLeft), "Collapse the selected session's tabs"},
-			{helpKey(keys.KeyRight), "Expand the selected session's tabs"},
+			{helpKey(keys.KeyTab), "Focus tree → panes → tasks"},
+			{helpKey(keys.KeyShiftTab), "Focus previous area"},
+			{helpKey(keys.KeyOpenPane), "Open or focus the tab’s pane"},
+			{helpKey(keys.KeySplitPane), "Keep the preview as a pane"},
+			{helpKey(keys.KeyHidePane), "Hide pane · tab keeps running"},
+			{helpKey(keys.KeyPanePrev) + "/" + helpKey(keys.KeyPaneNext), "Focus another pane"},
+			{navKeys, "Select a session or tab"},
+			{helpKey(keys.KeyLeft), "Collapse tabs"},
+			{helpKey(keys.KeyRight), "Expand tabs"},
 		}},
 		{title: "Configuration:", rows: []helpRow{
-			{helpKey(keys.KeyConfigAgent), "Open the config agent to change your settings"},
-			{helpKey(keys.KeyHooks), "Open the worktree hooks editor"},
-			{helpKey(keys.KeyConfigEditor), "Open the global config editor"},
-		}},
-		{title: "GitHub PR:", rows: []helpRow{
-			{helpKey(keys.KeyOpenPR), "Open PR in browser"},
-			{helpKey(keys.KeyCopyPR), "Copy PR URL to clipboard"},
+			{helpKey(keys.KeyConfigAgent), "Configure with assistant"},
+			{helpKey(keys.KeyHooks), "Edit worktree hooks"},
+			{helpKey(keys.KeyConfigEditor), "Edit settings"},
 		}},
 		{title: "Tabs:", rows: []helpRow{
-			{helpKey(keys.KeyJumpTab), "Select one of the first nine tabs by number (s opens it, enter attaches)"},
-			{helpKey(keys.KeyJumpTabPrompt), "Jump to ANY tab by number or name — there is no tab limit (#3021)"},
+			{helpKey(keys.KeyJumpTab), "Select tab 1–9 · " + helpKey(keys.KeyOpenPane) + " open · enter attach"},
+			// The unbounded jump-to-tab prompt comes from #3021; keep the issue
+			// reference in source rather than exposing it in the help overlay.
+			{helpKey(keys.KeyJumpTabPrompt), "Jump to any tab by number or name"},
 			{helpKey(keys.KeyNewTab), "Choose a terminal or VS Code tab"},
-			{helpKey(keys.KeyCloseTab), "Close the current tab (the agent tab can't be closed)"},
-			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll the current tab preview (navigation mode only)"},
+			{helpKey(keys.KeyCloseTab), "Delete tab · asks first; agent stays"},
+			{helpKey(keys.KeyRenameTab), "Rename a web, process or VS Code tab"},
+			{helpKey(keys.KeyMoveTabLeft) + "/" + helpKey(keys.KeyMoveTabRight), "Move tab left or right"},
+			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll preview in navigation mode"},
 		}},
 		{title: "Full-screen scrolling:", rows: []helpRow{
 			{"Claude", claudeAttachedScrollControls},
 			{"Codex", codexAttachedScrollControls},
 		}},
 		{title: "Other:", rows: []helpRow{
-			{helpKey(keys.KeyQuit), "Quit the application"},
+			{helpKey(keys.KeyQuit), "Quit"},
 		}},
 	}, contentWidth)
 }
@@ -299,25 +405,39 @@ func (h helpTypeInstanceStart) toContent() string {
 	if !h.instance.Capabilities().TabManagement {
 		tabHelp = keyStyle.Render("1-9/"+jumpAny) + descStyle.Render(fmt.Sprintf(" - Select a tab: digits reach the first nine, %s reaches any by number or name (%s opens it; tabs live in the tree)", jumpAny, openPane))
 	}
-	content := lipgloss.JoinVertical(lipgloss.Left,
+	// An off-box session has no local worktree and no daemon-side tmux session, so
+	// the local wording ("isolated worktree", "background tmux session", in-pane
+	// Enter, full-screen attach) would promise surfaces it does not have.
+	branchLine := "• Git branch: %s (isolated worktree)"
+	runLine := "• Agent process running in background tmux session"
+	managing := []string{
+		keyStyle.Render(helpKey(keys.KeyEnter)) + descStyle.Render(fmt.Sprintf("     - Interact with the session in its pane (%s returns to nav)", helpKey(keys.KeyExitInteractive))),
+		keyStyle.Render(helpKey(keys.KeyAttach)) + descStyle.Render("     - Attach to the session full-screen"),
+		keyStyle.Render(tmux.DetachKeyDisplay) + descStyle.Render("     - Leave full-screen"),
+	}
+	if h.instance.Capabilities().Workspace == session.WorkspaceRemote {
+		branchLine = "• Git branch: %s (in the sandbox's workspace)"
+		runLine = "• Agent process running in the sandbox"
+		managing = nil
+	}
+	lines := []string{
 		titleStyle.Render("Session created"),
 		"",
 		descStyle.Render("New session created:"),
-		descStyle.Render(fmt.Sprintf("• Git branch: %s (isolated worktree)",
+		descStyle.Render(fmt.Sprintf(branchLine,
 			lipgloss.NewStyle().Bold(true).Render(h.instance.GetBranch()))),
-		descStyle.Render("• Agent process running in background tmux session"),
+		descStyle.Render(runLine),
 		"",
 		headerStyle.Render("Managing:"),
-		keyStyle.Render(helpKey(keys.KeyEnter))+descStyle.Render(fmt.Sprintf("     - Interact with the session in its pane (%s returns to nav)", helpKey(keys.KeyExitInteractive))),
-		keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render("     - Attach to the session full-screen"),
-		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("     - Detach from a full-screen session"),
-		tabHelp,
-		keyStyle.Render(helpKey(keys.KeyKill))+descStyle.Render("     - Kill (delete) the selected session"),
+	}
+	lines = append(lines, managing...)
+	lines = append(lines, tabHelp,
+		keyStyle.Render(helpKey(keys.KeyKill))+descStyle.Render("     - Permanently delete the session"),
 		"",
 		headerStyle.Render("Actions:"),
 		firstRunActionLine("enter continue · esc close"),
 	)
-	return content
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
 func (h helpTypeInstanceAttach) toContent() string {
@@ -342,12 +462,12 @@ func (h helpTypeInteractive) toContent() string {
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Interactive pane"),
 		"",
-		descStyle.Render("You are typing into this pane's terminal: every key — including tab —"),
-		descStyle.Render("goes to the agent/shell. The pane's frame turns green while it has the"),
-		descStyle.Render("keyboard, and the sessions rail stays visible."),
+		descStyle.Render("All keys, including tab, go to the pane."),
+		descStyle.Render("The pane’s keyboard label shows where you type."),
+		descStyle.Render("The sessions rail stays visible."),
 		"",
-		descStyle.Render("Press ")+keyStyle.Render(helpKey(keys.KeyExitInteractive))+descStyle.Render(" to return to navigation."),
-		descStyle.Render("Full-screen attach is still available on ")+keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render(" (from nav mode)."),
+		descStyle.Render("Press ")+keyStyle.Render(helpKey(keys.KeyExitInteractive))+descStyle.Render(" to navigate."),
+		descStyle.Render("Attach full-screen with ")+keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render(" in navigation mode."),
 	)
 	return content
 }
@@ -384,10 +504,10 @@ func (m *home) layoutTextOverlay() {
 }
 
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(ui.CurrentTheme().Accent)
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Info)
-	keyStyle    = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Warning)
-	descStyle   = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Foreground)
+	titleStyle  = ui.DialogTitleStyle()
+	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Ink)
+	keyStyle    = lipgloss.NewStyle().Bold(true).Foreground(ui.CurrentTheme().Ink)
+	descStyle   = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Ink)
 )
 
 // showHelpScreen displays the help screen overlay if it hasn't been shown
@@ -420,29 +540,44 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 	// in the seen bitmask.
 	m.replayHelpDismissKey = false
 	m.textOverlayDismissPolicy = nil
-	m.textOverlayScrollable = false
+	m.textOverlayPendingSeenMask = 0
 	if alwaysShow || (m.appState.GetHelpScreensSeen()&flag) == 0 {
-		// Mark this help screen as seen and save state
-		if err := m.appState.SetHelpScreensSeen(m.appState.GetHelpScreensSeen() | flag); err != nil {
-			log.WarningLog.Printf("failed to save help screen state: %v", err)
-		}
+		// Record "seen" when the user DISMISSES the screen, not when it is
+		// painted (#3628). A once-per-home screen that overflows 80x24 was
+		// being burned on display, so a user who closed it before reaching the
+		// bottom — which the old any-key dismiss made the default outcome —
+		// could never get the rest back.
+		m.textOverlayPendingSeenMask = flag
 
 		if responsive, ok := helpType.(responsiveHelpText); ok {
-			m.textOverlay = overlay.NewResponsiveTextOverlay(responsive.toContentWidth)
+			m.textOverlay = overlay.NewResponsiveTextOverlay(func(width int) string {
+				content := responsive.toContentWidth(width)
+				if window, _ := m.focusedContentPane(); window != nil && window.PreviewOrigin() != "" {
+					content = "Preview returns to " + window.PreviewOrigin() + "\n\n" + content
+				}
+				return content
+			})
 		} else {
 			m.textOverlay = overlay.NewTextOverlay(helpType.toContent())
 		}
 		m.textOverlay.OnDismiss = onDismiss
 		m.textOverlayDismissAnyKey = true
-		if _, ok := helpType.(helpTypeGeneral); ok {
+		switch helpType.(type) {
+		case helpTypeGeneral:
 			m.textOverlayDismissAnyKey = false
-			m.textOverlayScrollable = true
-		}
-		if _, ok := helpType.(helpTypeInstanceAttach); ok {
+		case helpTypeInstanceStart:
+			// This screen advertises its own close keys ("enter continue · esc
+			// close"), so it is not a press-any-key gate — and it must behave the
+			// same way whether or not it happens to overflow the terminal (#3628).
+			m.textOverlayDismissAnyKey = false
+		case helpTypeInstanceAttach:
 			m.textOverlayDismissAnyKey = false
 			m.textOverlayDismissPolicy = attachHelpDismissPolicy
-		}
-		if _, ok := helpType.(helpTypeInteractive); ok {
+		case helpTypeInteractive:
+			// The one screen that stays a press-any-key gate: its dismiss
+			// keystroke is deliberately the user's first pane input and gets
+			// replayed into the pane (#1576/#2413). An overflowing overlay still
+			// narrows that to the dismiss keys — see handleHelpState.
 			m.replayHelpDismissKey = true
 		}
 		m.layoutTextOverlay()
@@ -459,7 +594,16 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 
 // handleHelpState handles key events when in help state
 func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.textOverlayScrollable && !isHelpDismissKey(msg) {
+	// Scrolling is a property of the CONTENT, not of the caller: any overlay
+	// that overflows paints "↓ more", so any overlay that overflows must honour
+	// the keys that marker advertises (#3628).
+	//
+	// A key this overlay would treat as DISMISSAL never scrolls — and "would
+	// treat as dismissal" has to be asked of the overlay's own policy, not of
+	// the generic set. The attach overlay's policy accepts only enter/esc, so
+	// gating on the generic set could swallow a key the policy then refuses,
+	// leaving it dead in both branches (#3634 review).
+	if m.textOverlay != nil && m.textOverlay.Scrollable() && !m.dismissesTextOverlay(msg) {
 		// Effective bindings precede hardcoded aliases so an advertised rebind
 		// such as up=pgdown keeps its configured meaning inside help.
 		if isHelpLineUpKey(msg) {
@@ -526,16 +670,22 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		shouldClose = true
 	}
 	if shouldClose {
+		m.recordHelpScreenSeen()
 		replayDismissKey := m.replayHelpDismissKey
 		m.replayHelpDismissKey = false
 		m.textOverlayDismissAnyKey = false
-		m.textOverlayScrollable = false
 		m.textOverlayDismissPolicy = nil
-		m.state = stateDefault
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
-		m.menu.SetState(ui.StateDefault)
+		if m.returnToNamingFormAfterDetails() {
+			m.state = stateNew
+			m.menu.SetState(ui.StateNewInstance)
+			dismissCmd = tea.Batch(dismissCmd, m.replayDeferredNamingReplies())
+		} else {
+			m.state = stateDefault
+			m.menu.SetState(ui.StateDefault)
+		}
 		if replayDismissKey {
 			dismissCmd = replayKeyAfterInteractiveHelpDismiss(dismissCmd, msg)
 		}
@@ -546,6 +696,37 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// dismissesTextOverlay reports whether the open overlay would close on msg. It
+// asks the overlay's own policy where it has one, so the scroll branch and the
+// dismiss branch agree about every key and none can fall between them (#3634
+// review). A press-any-key overlay is deliberately NOT treated as "dismisses
+// everything" here: while its content overflows the scroll keys must scroll,
+// and every other key still dismisses through the branch below — which is what
+// keeps the first-run interactive help's ctrl+] alive at sizes where it
+// overflows (#1576/#2413).
+func (m *home) dismissesTextOverlay(msg tea.KeyMsg) bool {
+	if m.textOverlayDismissPolicy != nil {
+		dismiss, _ := m.textOverlayDismissPolicy(msg)
+		return dismiss
+	}
+	return isHelpDismissKey(msg)
+}
+
+// recordHelpScreenSeen persists the one-shot mask of the overlay the user just
+// dismissed. It is deliberately the LAST step of the screen's life rather than
+// the first (#3628): a screen the user never finished reading has not been
+// seen, and quitting with one open leaves it to be shown again.
+func (m *home) recordHelpScreenSeen() {
+	flag := m.textOverlayPendingSeenMask
+	m.textOverlayPendingSeenMask = 0
+	if flag == 0 {
+		return
+	}
+	if err := m.appState.SetHelpScreensSeen(m.appState.GetHelpScreensSeen() | flag); err != nil {
+		log.WarningLog.Printf("failed to save help screen state: %v", err)
+	}
 }
 
 func attachHelpDismissPolicy(msg tea.KeyMsg) (bool, bool) {
@@ -596,10 +777,22 @@ func isHelpLineDownKey(msg tea.KeyMsg) bool {
 	return key.Matches(msg, keys.GlobalKeyBindings[keys.KeyDown])
 }
 
+// isHelpDismissKey is the explicit close set for every text overlay that is not
+// a press-any-key gate. enter and q join esc here because a scrolling overlay
+// no longer closes on just anything (#3628), and the first-run screens advertise
+// "enter continue · esc close" in their own copy. The rebindable half is read
+// from helpDismissBindings — the same list visibleHelpAliases hides shadowed
+// aliases from — off the generated table, so a [keys] rebind moves them (#1026).
 func isHelpDismissKey(msg tea.KeyMsg) bool {
-	return msg.Type == tea.KeyEsc ||
-		msg.Type == tea.KeyCtrlC ||
-		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyHelp])
+	if msg.Type == tea.KeyEsc || msg.Type == tea.KeyCtrlC {
+		return true
+	}
+	for _, name := range helpDismissBindings {
+		if key.Matches(msg, keys.GlobalKeyBindings[name]) {
+			return true
+		}
+	}
+	return false
 }
 
 func replayKeyAfterInteractiveHelpDismiss(dismissCmd tea.Cmd, keyMsg tea.KeyMsg) tea.Cmd {

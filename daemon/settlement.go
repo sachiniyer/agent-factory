@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -15,6 +14,22 @@ type settleOwedEntry struct {
 	repoID   string
 	key      string
 	instance *session.Instance
+}
+
+// dischargeRetryEntry holds a stand-down discharge whose durable marker-CLEAR did
+// not land, so the poll can re-run it. Keyed by stable instance identity like
+// settleOwed but carried in its OWN map (m.dischargeOwed): a generic settlement's
+// recordSettlementWrite must not retire it, since the whole-row write that ret the
+// generic retry re-writes the restored marker along with the row and would lose
+// the clear while disk still carries it. marker is the obligation's identity —
+// the flush re-runs the discharge only while THIS marker is still the one the
+// stand-down failed to clear, so a marker filed after the stand-down is not
+// clobbered.
+type dischargeRetryEntry struct {
+	repoID   string
+	key      string
+	instance *session.Instance
+	marker   *session.PendingOnCompleteData
 }
 
 // A SETTLEMENT is the write that records the outcome of an irreversible step —
@@ -31,7 +46,8 @@ type settleOwedEntry struct {
 // What that costs depends on the fact:
 //
 //   - a handoff's PendingHandoffMission is a standing instruction, so losing its
-//     clear makes the next daemon deliver a mission the agent already ran (#2781);
+//     clear leaves a stale replacement fence. Mission-scoped ambiguity now blocks
+//     automatic replay, but an operator could still retry work the agent ran;
 //   - a recovery's branchCreatedByUs says af created this branch and may delete
 //     it, so losing the flip leaves an af-* branch nothing will ever clean up
 //     (#2883, and the outcome #1841 named).
@@ -72,6 +88,17 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 // those in-memory observations, while this settlement makes the fence safe.
 func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
 	m.noteRuntimeReplaced(repoID, instance)
+	// A restore landing on a replacement runtime ends a still-in-flight task
+	// run as interrupted (#4222). The end belongs in THIS settlement: the
+	// transition's own interrupt lands only in memory, and a daemon exit
+	// between this boundary write and the post-recovery persist would
+	// otherwise reload TaskRunActive=true on the replacement's own verified
+	// identity — verified, because this write is exactly what published it —
+	// and let its first idle edge complete the run for on_complete. Scoped to
+	// OpRestoring by the callee; a limit-resume boundary replays the prompt.
+	// The stamp stays one-shot so the post-recovery noteRuntimeReplaced
+	// reports the outcome exactly once.
+	instance.InterruptTaskRunForRestoreBoundary()
 	if err := m.persistSettlement(repoID, key, instance); err != nil {
 		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", err)
 	}
@@ -80,7 +107,7 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 
 func (m *Manager) persistRuntimeReplacement(repoID, title string, instance *session.Instance) {
 	if err := m.persistSettlement(repoID, daemonInstanceKey(repoID, title), instance); err != nil {
-		log.WarningLog.Printf("restored remote session %q with predecessor evidence cleared in memory but not yet on disk: %v", title, err)
+		m.warn().Printf("restored remote session %q with predecessor evidence cleared in memory but not yet on disk: %v", title, err)
 	}
 }
 
@@ -112,6 +139,10 @@ func (m *Manager) FlushOwedSettlements() {
 	for _, entry := range m.settleOwed {
 		owed = append(owed, entry)
 	}
+	discharges := make([]dischargeRetryEntry, 0, len(m.dischargeOwed))
+	for _, entry := range m.dischargeOwed {
+		discharges = append(discharges, entry)
+	}
 	m.mu.Unlock()
 
 	for _, entry := range owed {
@@ -130,7 +161,21 @@ func (m *Manager) FlushOwedSettlements() {
 			continue
 		}
 		if err := m.flushOneOwedSettlement(entry); err != nil {
-			log.WarningLog.Printf("settlement retry for %q: %v", entry.instance.Title, err)
+			m.warn().Printf("settlement retry for %q: %v", entry.instance.Title, err)
+		}
+	}
+	for _, entry := range discharges {
+		m.mu.Lock()
+		registered := m.instances[entry.key] == entry.instance
+		if !registered {
+			delete(m.dischargeOwed, stableSessionKey(entry.repoID, entry.instance))
+		}
+		m.mu.Unlock()
+		if !registered {
+			continue
+		}
+		if err := m.flushDischargeRetry(entry); err != nil {
+			m.warn().Printf("discharge retry for %q: %v", entry.instance.Title, err)
 		}
 	}
 }

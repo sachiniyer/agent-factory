@@ -1,0 +1,573 @@
+package task
+
+// The field-level task patch (#1700) and the update path that applies it.
+//
+// Split out of task.go so the store's read/create side and its patch/merge side
+// are separately readable: this file owns TaskUpdate, the merge rules that
+// decide what a patch actually stores, and UpdateTask/UpdateTaskChecked.
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/config"
+)
+
+// TaskUpdate is a field-level patch for UpdateTask (#1700). Each non-nil field
+// replaces that field on the freshly-loaded record under the file lock; a nil
+// field is left exactly as stored. Because the write carries ONLY the fields the
+// caller changed — never a full, possibly-stale copy — a single-field edit (the
+// enable/disable toggle sends just Enabled) is structurally incapable of
+// clobbering a concurrent edit another client made to a different field.
+//
+// Only the user-editable fields are patchable. The daemon-owned LastRunAt,
+// LastRunStatus, and DroppedEvents fields and the immutable CreatedAt never
+// appear here — their dedicated writers remain canonical, and preserving them
+// is now inherent to the merge (the record starts from the on-disk copy).
+//
+// The json tags define the HTTP JSON body shape for the daemon's /v1/UpdateTask
+// route; a nil pointer serializes as an absent key (omitempty), so the wire form
+// carries exactly the changed fields. The net/rpc gob control socket the CLI
+// uses goes through the same JSON encoding via GobEncode/GobDecode below — see
+// there for why plain gob would be lossy for this type.
+type TaskUpdate struct {
+	Name          *string `json:"name,omitempty"`
+	Prompt        *string `json:"prompt,omitempty"`
+	CronExpr      *string `json:"cron_expr,omitempty"`
+	WatchCmd      *string `json:"watch_cmd,omitempty"`
+	TargetSession *string `json:"target_session,omitempty"`
+	// MaxConcurrentRuns patches the watch-task concurrency cap (#1892). A pointer
+	// because 0 is a meaningful value ("unlimited"), not "unchanged" — the same
+	// nil-vs-zero distinction Enabled and TargetSession rely on, and the reason
+	// this type needs the JSON gob codec below.
+	MaxConcurrentRuns *int `json:"max_concurrent_runs,omitempty"`
+	// OnComplete patches the spawned-session lifecycle verb (#2595). A pointer for
+	// the same reason as MaxConcurrentRuns: "keep" is a meaningful value to patch
+	// BACK to, and a plain string could not tell "revert to keep" from "leave it
+	// alone".
+	OnComplete *string `json:"on_complete,omitempty"`
+	// Host patches the listed host sessions are placed on (#5571 W6.3). A pointer
+	// so "" (clear the pick) is distinguishable from "leave it alone".
+	Host        *string `json:"host,omitempty"`
+	ProjectPath *string `json:"project_path,omitempty"`
+	Program     *string `json:"program,omitempty"`
+	Enabled     *bool   `json:"enabled,omitempty"`
+}
+
+// GobEncode/GobDecode route TaskUpdate through JSON on the net/rpc gob control
+// socket the CLI uses (daemon.UpdateTask → callDaemon). This is REQUIRED for
+// correctness, not an optimization: gob elides a struct field holding its zero
+// value, and — fatally here — a *bool pointing at false (or a *string at "", or
+// an *int at 0) is followed to that zero and dropped, so the pointer decodes back
+// as nil. That would silently turn `af tasks update --enabled false`, the
+// trigger-clearing WatchCmd:"" / CronExpr:"" patches, and `--max-concurrent-runs
+// 0` (revert to unlimited, #1892) into no-ops. JSON preserves the exact
+// nil-vs-non-nil-zero-pointer distinction (omitempty omits ONLY a nil pointer, so
+// a non-nil &false serializes as `false`), so this round-trip is lossless.
+func (u TaskUpdate) GobEncode() ([]byte, error) {
+	return json.Marshal(u)
+}
+
+func (u *TaskUpdate) GobDecode(data []byte) error {
+	return json.Unmarshal(data, u)
+}
+
+// IsEmpty reports whether the patch changes no field. An empty patch is a
+// well-formed no-op: UpdateTask still validates and returns the record but
+// writes nothing new.
+func (u TaskUpdate) IsEmpty() bool {
+	return u.Name == nil && u.Prompt == nil && u.CronExpr == nil &&
+		u.WatchCmd == nil && u.TargetSession == nil && u.MaxConcurrentRuns == nil &&
+		u.OnComplete == nil && u.Host == nil &&
+		u.ProjectPath == nil && u.Program == nil && u.Enabled == nil
+}
+
+// apply merges the non-nil fields of u onto t and returns the result. It never
+// touches CreatedAt, LastRunAt, LastRunStatus, or DroppedEvents, so a merge onto
+// the freshly-loaded record preserves those daemon-owned values automatically.
+func (u TaskUpdate) apply(t Task) Task {
+	if u.Name != nil {
+		t.Name = *u.Name
+	}
+	if u.Prompt != nil {
+		t.Prompt = *u.Prompt
+	}
+	if u.CronExpr != nil {
+		t.CronExpr = *u.CronExpr
+	}
+	if u.WatchCmd != nil {
+		t.WatchCmd = *u.WatchCmd
+	}
+	if u.TargetSession != nil {
+		t.TargetSession = *u.TargetSession
+	}
+	if u.MaxConcurrentRuns != nil {
+		t.MaxConcurrentRuns = *u.MaxConcurrentRuns
+	}
+	if u.OnComplete != nil {
+		t.OnComplete = *u.OnComplete
+	}
+	if u.Host != nil {
+		t.Host = strings.TrimSpace(*u.Host)
+	}
+	if u.ProjectPath != nil {
+		t.ProjectPath = *u.ProjectPath
+	}
+	if u.Program != nil {
+		t.Program = *u.Program
+	}
+	if u.Enabled != nil {
+		t.Enabled = *u.Enabled
+	}
+	// Canonicalize the MERGED target, unconditionally — never gated on
+	// u.TargetSession != nil (#1892). Gating it there left the original defect live
+	// on the legacy path: a task written before this rule can hold a whitespace-only
+	// target on disk, and a patch that touches only the cap never enters the branch
+	// that would fix it. ValidateTrigger would then read the target as empty and
+	// accept the cap, while delivery read the raw value, took the target-session
+	// path, and never passed the cap to CreateSession — the silently-ignored cap
+	// this PR exists to close, reachable by simply not mentioning the field. Every
+	// write now canonicalizes what it is about to store, so the record cannot
+	// persist a value the two sides would read differently.
+	t.canonicalizeTargetSession()
+	t.canonicalizeOnComplete()
+	// Drop a cap the merged record can no longer carry, unless this patch set it
+	// explicitly (#1892). A partial patch that only moves the trigger or the
+	// delivery mode — which is every non-CLI writer, since DiffTask sends just the
+	// changed fields and the TUI pane has no cap control — would otherwise leave a
+	// positive cap on a cron/target-session task and have ValidateTrigger reject
+	// the whole save. The rule lives here, in the shared merge, so the daemon,
+	// TUI, API, and CLI all get it; an explicitly-patched cap is left alone so a
+	// contradictory request still surfaces as an error instead of being silently
+	// dropped. It runs AFTER the canonicalization above, which decides what
+	// capApplies sees.
+	if u.MaxConcurrentRuns == nil {
+		t.clearInapplicableCap()
+	}
+	// Same rule, same reason, for the spawned-session lifecycle (#2595): adding a
+	// target_session to a per-run task that declares on_complete would otherwise
+	// merge into a record ValidateTrigger rejects, so ordinary retargeting would
+	// fail from every surface that does not expose the field — and force a CLI user
+	// to know to pass --on-complete keep alongside. An explicitly-patched verb is
+	// left alone so a contradictory request still surfaces as an error.
+	if u.OnComplete == nil {
+		t.clearInapplicableOnComplete()
+	}
+	return t
+}
+
+// TaskEdit pairs a task ID with the field-level patch to apply to it. The TUI's
+// task pane emits one per edited task (see DiffTask) so a save sends only the
+// fields the user actually changed.
+//
+// Expect pins the project binding of the record the pane LOADED (not the
+// edited copy — an edit may itself move the task), so the daemon refuses the
+// patch if another client rebound the task while the pane was open (#3230).
+type TaskEdit struct {
+	ID     string
+	Update TaskUpdate
+	Expect ProjectExpectation
+}
+
+// DiffTask returns a TaskUpdate holding exactly the user-editable fields that
+// differ between old and cur. The TUI uses it to turn an in-place edit of a
+// cached task into a minimal patch, so saving one field never rewrites another
+// that changed out-of-band while the editor was open (#1700/#1213).
+func DiffTask(old, cur Task) TaskUpdate {
+	var u TaskUpdate
+	if cur.Name != old.Name {
+		u.Name = &cur.Name
+	}
+	if cur.Prompt != old.Prompt {
+		u.Prompt = &cur.Prompt
+	}
+	if cur.CronExpr != old.CronExpr {
+		u.CronExpr = &cur.CronExpr
+	}
+	if cur.WatchCmd != old.WatchCmd {
+		u.WatchCmd = &cur.WatchCmd
+	}
+	if cur.TargetSession != old.TargetSession {
+		u.TargetSession = &cur.TargetSession
+	}
+	if cur.MaxConcurrentRuns != old.MaxConcurrentRuns {
+		u.MaxConcurrentRuns = &cur.MaxConcurrentRuns
+	}
+	// Included before any editor offers it (#2595). An unchanged field patches
+	// nothing either way, so this is inert today — but a differ that silently
+	// omits a user-editable field is the #1700 clobber waiting to be reintroduced
+	// the moment a surface starts editing it.
+	if cur.OnComplete != old.OnComplete {
+		u.OnComplete = &cur.OnComplete
+	}
+	if cur.Host != old.Host {
+		u.Host = &cur.Host
+	}
+	if cur.ProjectPath != old.ProjectPath {
+		u.ProjectPath = &cur.ProjectPath
+	}
+	if cur.Program != old.Program {
+		u.Program = &cur.Program
+	}
+	if cur.Enabled != old.Enabled {
+		u.Enabled = &cur.Enabled
+	}
+	return u
+}
+
+// UpdateTask applies a field-level patch to the task with the given id under the
+// file lock and returns the merged record. Only the patch's non-nil fields are
+// written; every other field — including a value a concurrent writer committed
+// after the caller read its copy — is preserved from the freshly-loaded record.
+// This closes the full-struct read-modify-write clobber (#1700): an enable/
+// disable toggle patches only Enabled and cannot revert another client's edit to
+// the prompt, trigger, target session, or program.
+//
+// The merged task is validated (ValidateTrigger, plus the program enum when the
+// patch sets Program) before it is written, so a patch that would leave the task
+// in an invalid state is rejected. Daemon-owned fields (LastRunAt/LastRunStatus/
+// DroppedEvents) and CreatedAt are never patchable — their dedicated store
+// operations remain canonical (#731/#1215). Returns the not-found error when no
+// task with the given id exists.
+// UpdateTask applies a field-level patch. expect optionally asserts, inside the
+// same locked operation, that the task is still bound to the project the caller
+// authorized it against — see ProjectExpectation.
+// UpdateTask applies a patch with no declared actor, auditing it as
+// ActorUnknown — see AddTask for why the undeclared form exists.
+func UpdateTask(id string, update TaskUpdate, expect ProjectExpectation) (Task, error) {
+	return UpdateTaskChecked(id, update, expect, ActorUnknown, nil)
+}
+
+// UpdateTaskChecked is UpdateTask with a validator applied to the authoritative
+// merged record immediately before commit. Alongside an error, the validator
+// may return a nonempty resolved RepoID to persist on a legacy row; no other
+// field can be changed after ordinary task validation. A validator error leaves
+// the stored task unchanged. See AddTaskChecked for the callback constraints.
+//
+// actor names the surface the patch came from. The audit entry is derived from
+// the difference between the stored record and the merged one, so it describes
+// what was actually written rather than what the caller asked for (#3623).
+func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, actor Actor, validate func(Task) (string, error)) (Task, error) {
+	if err := ValidateTaskID(id); err != nil {
+		return Task{}, err
+	}
+	// Validate a host the patch sets BEFORE the lock, like the repo re-resolve
+	// below: it reads the global config. Only a patch that sets it is checked, so
+	// an unrelated edit never fails on a host removed from the list since.
+	if update.Host != nil {
+		if err := validateTaskHost(strings.TrimSpace(*update.Host)); err != nil {
+			return Task{}, err
+		}
+	}
+	path, err := getTasksPathFn()
+	if err != nil {
+		return Task{}, err
+	}
+	if err := ensureTasksSchemaMigrated(path); err != nil {
+		return Task{}, err
+	}
+	// Re-resolve the retained RepoID when the patch rebinds the task, and do it
+	// BEFORE taking the lock: this shells out to git, and holding the tasks.json
+	// lock across a subprocess is the hazard ProjectExpectation's doc calls out.
+	rebindRepoID := ""
+	if update.ProjectPath != nil {
+		rebindRepoID = repoIDForPath(*update.ProjectPath)
+	}
+	var merged Task
+	lockErr := config.WithFileLock(path, func() error {
+		tasks, err := loadTasksLocked(path)
+		if err != nil {
+			return err
+		}
+
+		found := false
+		row := -1
+		for i, existing := range tasks {
+			if existing.ID == id {
+				// Verify against the freshly loaded record, before the patch is
+				// applied — the pre-patch ProjectPath is what the caller
+				// authorized against.
+				if err := expect.Verify(existing); err != nil {
+					return err
+				}
+				merged = update.apply(existing)
+				if update.ProjectPath != nil {
+					// A patch that rebinds the task overwrites RepoID with the freshly
+					// re-resolved id (rebindRepoID). The exception is a same-path
+					// reassertion whose re-resolution is empty: the path stopped
+					// resolving (its .git died, or the recorded leaf was a sibling
+					// worktree or subdirectory whose owning repo is no longer reachable
+					// by an ancestor walk), so overwriting with "" would erase the binding
+					// apply already preserved from existing and strand the task from its
+					// own project's scope the moment that path was reasserted — the exact
+					// harm RepoID exists to prevent (see Task.RepoID's PURPOSE). The
+					// recompute itself stays: a legacy row whose retained RepoID is "" is
+					// still filled in by a same-path patch that DOES resolve.
+					//
+					// sameProjectPathReassertion recognizes the same path across the
+					// equivalent spellings a remote caller can reassert without the
+					// daemon normalizing project_path (a trailing separator or a "."
+					// leaf). It compares filesystem-resolved paths when both sides
+					// still resolve — by filesystem identity (os.SameFile), not the
+					// resolved spelling, so a case-variant reassertion on a
+					// case-insensitive volume (/Users/me/Repo vs /Users/me/repo) is
+					// recognized as the same path rather than read as a rebind — so
+					// a symlink-divergent spelling that cleans lexically equal — e.g.
+					// base/link/../task, where base/link points elsewhere, cleans to
+					// base/task but resolves to a different directory — is read as a
+					// real rebind rather than a same-path reassertion. It falls back
+					// to lexical Clean only for a path the filesystem can no longer
+					// resolve (the dead-path case this protection exists for), where
+					// EvalSymlinks fails and a genuine rebind cannot be proven either
+					// — and only when neither spelling has a ".." segment, since ".."
+					// can cross a symlink Clean cannot see against a dead path on
+					// either side, so it is treated as a rebind (the conservative
+					// outcome) rather than risk retaining a stale RepoID.
+					if rebindRepoID != "" || !sameProjectPathReassertion(existing.ProjectPath, *update.ProjectPath) {
+						merged.RepoID = rebindRepoID
+					}
+				}
+				if err := merged.ValidateTrigger(); err != nil {
+					return err
+				}
+				// Validate the program ONLY when the patch sets it: a toggle or
+				// an unrelated field edit must not fail on a pre-existing Program
+				// value that would no longer pass current enum validation (the
+				// same tolerance UpdateTaskStatus applies to legacy records).
+				if update.Program != nil && merged.Program != "" {
+					if err := config.ValidateProgramEnum("task program", "task program", merged.Program, ""); err != nil {
+						return err
+					}
+				}
+				if validate != nil {
+					validatedRepoID, err := validate(merged)
+					if err != nil {
+						return err
+					}
+					if validatedRepoID != "" {
+						merged.RepoID = validatedRepoID
+					}
+				}
+				// The daemon resolved a legacy row's binding, and that write is
+				// durable. Recorded here or nowhere: changedFields covers only
+				// patchable fields, and once RepoID is set the stable-binding loader —
+				// which writes this same daemon-upgrade entry on the path it owns —
+				// skips the row forever, so a patch that backfills would leave no trace
+				// at all.
+				//
+				// Keyed on the RESULT rather than on which branch produced it (#3623
+				// review). Two of them can: the validator, and the pre-lock resolution
+				// above, which `af tasks update --project-path <the path it already
+				// has>` reaches — an explicit same-value path resolves and persists the
+				// ID before the validator ever sees a difference to report.
+				//
+				// A real REBIND is excluded: there the user moved the task, project_path
+				// is in changedFields, and auditUpdate already records it as their
+				// change. This entry is only for a binding that resolved while the path
+				// stood still, which nobody asked for.
+				if merged.ProjectPath == existing.ProjectPath && merged.RepoID != existing.RepoID {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"repo_id"}, nowFn())
+				}
+				// Store canonicalizations of on_complete and target_session, recorded
+				// here for the same reason repo_id is. apply canonicalizes both
+				// unconditionally on every write — to repair a legacy or hand-edited row
+				// the caller never asked to repair — so a write that changes nothing the
+				// caller requested can still land bytes ("Archive"→"archive", a
+				// whitespace-only target→""). That byte-change must not be invisible
+				// (audit.go: "cannot miss one that did") and must not be attributed to
+				// the caller (the caller did not move the field). It is keyed on canonical
+				// equality AND raw inequality: a genuine policy change (keep→kill)
+				// canonical-differs, so auditUpdate already records it as the caller's
+				// change, and this block stays out — exactly as a real rebind stays out
+				// of the repo_id block above. This fires at most once per non-canonical
+				// row, since the triggering write canonicalizes the on-disk value.
+				if CanonicalOnComplete(existing.OnComplete) == CanonicalOnComplete(merged.OnComplete) && existing.OnComplete != merged.OnComplete {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"on_complete"}, nowFn())
+				}
+				if CanonicalTargetSession(existing.TargetSession) == CanonicalTargetSession(merged.TargetSession) && existing.TargetSession != merged.TargetSession {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"target_session"}, nowFn())
+				}
+				// Store clear-repairs of fields the freshly-loaded row was ALREADY too
+				// misshapen to carry — a stale max_concurrent_runs on a non-watch task,
+				// or a non-keep on_complete alongside a target_session. Every in-process
+				// writer runs ValidateTrigger, so these rows reach disk only via a
+				// hand-edit of tasks.json; apply's clearInapplicableCap /
+				// clearInapplicableOnComplete silently repair them on the next write,
+				// and that repair fires even when the caller's patch never touched the
+				// field (update.MaxConcurrentRuns / update.OnComplete == nil). Attributing the
+				// cleared field to the caller's actor — the default, via changedFields'
+				// raw/canonical diff — would claim a surface moved a field it never did.
+				//
+				// The decisive test is whether the field was ALREADY inapplicable on
+				// the freshly-loaded record. A valid row the caller retargets still has
+				// capApplies()/onCompleteApplies() == true, so the clear there is a
+				// consequence of the caller's trigger change and stays attributed to
+				// the caller (see TestUpdateTaskClearsStaleCapForNonCLIWriters and
+				// TestRepro_GenuineRetargetCapClearAttributedToCaller). A hand-edited row
+				// already has it false, so the clear is purely the store's repair and
+				// is recorded under the store's own actor — the same class of
+				// store-initiated change as the repo_id backfill and the byte
+				// canonicalizations above. Those carves cover only canonical-equivalent
+				// changes ("Archive"→"archive"); a clear-repair like kill→keep changes
+				// the canonical value, so it falls through them and is handled here.
+				//
+				// The update.MaxConcurrentRuns / update.OnComplete == nil gate is what separates
+				// a store repair from a caller who explicitly cleared the field: an
+				// explicit clear patches the field, skips these blocks, and stays the
+				// caller's change in auditUpdate — so the trail never misses a write
+				// that actually happened.
+				//
+				// callerBefore is the existing record with a store-repaired field
+				// aligned to its post-repair value, so changedFields (called by
+				// auditUpdate below) does NOT also list that field under the caller's
+				// actor. This is the same exclusion the canonical-to-canonical diff in
+				// changedFields achieves for the byte-canonicalization carves above:
+				// there canonical-equality makes the diff see no change, and here the
+				// alignment does. The caller's entry then names only the fields the
+				// caller actually moved.
+				callerBefore := existing
+				if update.MaxConcurrentRuns == nil && existing.MaxConcurrentRuns > 0 && !existing.capApplies() &&
+					merged.MaxConcurrentRuns != existing.MaxConcurrentRuns {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"max_concurrent_runs"}, nowFn())
+					callerBefore.MaxConcurrentRuns = merged.MaxConcurrentRuns
+				}
+				if update.OnComplete == nil && existing.SessionLifecycle() != OnCompleteKeep && !existing.onCompleteApplies() &&
+					merged.OnComplete != existing.OnComplete {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"on_complete"}, nowFn())
+					callerBefore.OnComplete = merged.OnComplete
+				}
+				// Diffed against the record just loaded under this lock, and
+				// stamped before the write — so the trail records the change that
+				// actually landed, at the instant it landed.
+				auditUpdate(&callerBefore, &merged, actor, nowFn())
+				tasks[i] = merged
+				row = i
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			return &NotFoundError{ID: id}
+		}
+
+		generation, err := writeTasks(tasks)
+		if err != nil {
+			return err
+		}
+		// The record this returns is published as EventTaskUpdated and handed back
+		// as the update response, and loadTasksLocked identified it against the
+		// PRE-write bytes. Left alone it would name a version of the store that no
+		// longer exists — unpairable with every later read, so a consumer merging
+		// it into its list would quietly lose that row's arming (#3684 review).
+		// Re-derived over the slice that was actually written; see stampRowIdentity.
+		merged = stampRowIdentity(tasks, generation)[row]
+		return nil
+	})
+	if lockErr != nil {
+		return Task{}, lockErr
+	}
+	return merged, nil
+}
+
+// sameProjectPathReassertion reports whether patched is the same recorded path
+// the task is already bound to, so an otherwise-empty re-resolution does not
+// erase the retained RepoID. See UpdateTaskChecked for the stranding this
+// prevents.
+//
+// The comparison respects filesystem semantics where it can: lexical Clean
+// alone misreads a symlink-divergent spelling as the same path — base/link/../task
+// cleans to base/task while base/link resolves elsewhere, so the two are
+// physically distinct. Evaluate symlinks on both sides when the filesystem can
+// answer, and compare the two by filesystem identity (os.SameFile) rather than
+// by the resolved spelling: on a case-insensitive, case-preserving volume (the
+// common macOS and Windows layout) EvalSymlinks preserves the input spelling,
+// so /Users/me/Repo and /Users/me/repo both resolve yet spell differently, and
+// a string compare would read the reassertion as a rebind and clear the
+// retained RepoID over a path that never moved. Fall back to lexical Clean only
+// for a form the filesystem cannot resolve (a path that has since been
+// removed, the dead-path case this comparison protects), where EvalSymlinks
+// fails and a genuine rebind cannot be proven either. The fallback is
+// restricted to cases where neither spelling has a ".." segment: ".." can
+// cross a symlink to a directory Clean cannot reach, so against a dead path on
+// either side the cleaned compare would read a real rebind as same-path and
+// retain a stale RepoID; a ".." in either spelling is treated as a rebind
+// instead (the conservative outcome).
+func sameProjectPathReassertion(recorded, patched string) bool {
+	if recorded == patched {
+		return true
+	}
+	// EvalSymlinks is the physical, kernel-traversal resolver here, not a
+	// lexical one — Go's walk resolves each symlink component before applying
+	// the next "..", so base/link/../task with base/link -> other/child resolves
+	// to other/task, NOT to the lexically cleaned base/task. A symlink-divergent
+	// ".." rebind is therefore detected and re-resolved (RepoID cleared) rather
+	// than retained — pinned by TestAudit_SymlinkDivergentRebindIsDetectedNotRetained.
+	// The lexical ".." guard belongs only in the dead-path fallback below, where
+	// EvalSymlinks cannot answer and a ".." could cross a symlink Clean cannot
+	// see; rejecting ".." HERE would instead strand the up-and-back equivalent
+	// spelling <dir>/../<leaf>, which a directory that still lives resolves back
+	// to itself — pinned by TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling.
+	resolvedPatched, errPatched := filepath.EvalSymlinks(patched)
+	resolvedRecorded, errRecorded := filepath.EvalSymlinks(recorded)
+	if errPatched == nil && errRecorded == nil {
+		// Compare by filesystem identity, not resolved spelling. On a
+		// case-insensitive, case-preserving volume (the common macOS and
+		// Windows layout) EvalSymlinks preserves the input spelling, so a
+		// reassertion of the SAME directory with only a change in casing —
+		// recorded /Users/me/Repo versus patched /Users/me/repo — succeeds on
+		// both calls yet compares unequal as a string, reading as a rebind
+		// and clearing the retained RepoID over a path that never moved.
+		// os.SameFile compares the underlying file (device + inode), so the
+		// case-variant spellings of one directory are recognized as a
+		// same-path reassertion. It is a strict superset of the resolved
+		// string compare: the only pairs that share an inode but resolve to
+		// different spellings are the same directory reached another way (a
+		// bind mount of the same inode), which is also not a rebind. A Stat
+		// failure here is a TOCTOU removal between EvalSymlinks and Stat;
+		// fall back to the resolved-string compare rather than guess.
+		statPatched, errP := os.Stat(patched)
+		if errP == nil {
+			if statRecorded, errR := os.Stat(recorded); errR == nil {
+				return os.SameFile(statPatched, statRecorded)
+			}
+		}
+		return resolvedPatched == resolvedRecorded
+	}
+	// Lexical Clean is only a safe fallback for spellings that cannot cross a
+	// symlink. A ".." segment resolves physically somewhere Clean cannot see —
+	// base/link/../task cleans to base/task but, with base/link pointing at
+	// other/child, resolves to other/task — so when either spelling has a ".."
+	// and the other side is a path the filesystem can no longer answer
+	// (EvalSymlinks failed, the dead-recorded or dead-patched case) the cleaned
+	// compare would read a real rebind as a same-path reassertion and retain a
+	// now-stale RepoID. Fall back only when neither spelling has a ".." segment
+	// (a trailing "/" or "." leaf is safe to clean); otherwise treat the patch
+	// as a rebind and let the caller re-resolve, the conservative outcome.
+	if hasDotDotSegment(patched) || hasDotDotSegment(recorded) {
+		return false
+	}
+	return filepath.Clean(patched) == filepath.Clean(recorded)
+}
+
+// hasDotDotSegment reports whether path contains a ".." path segment after
+// trimming a trailing separator. Such a segment can resolve through a symlink
+// to a directory filepath.Clean does not reach, so the lexical compare is
+// unsafe as a same-path test against a path the filesystem can no longer answer
+// for; a trailing "/" or "." leaf never crosses a symlink and is left to the
+// Clean compare. Both the recorded and patched spellings are checked, since a
+// ".." in either can cross a symlink the cleaned compare would misread.
+func hasDotDotSegment(path string) bool {
+	trimmed := strings.TrimRight(path, string(filepath.Separator))
+	if trimmed == "" {
+		return false
+	}
+	for _, seg := range strings.Split(trimmed, string(filepath.Separator)) {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}

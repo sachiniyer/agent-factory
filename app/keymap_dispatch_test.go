@@ -19,13 +19,9 @@ func reachesQuit(cmd tea.Cmd) bool {
 
 func runeKey(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
 
-// dispatchKey drives one key through the real handler as the DISPATCH pass. A
-// mapped key press is first intercepted by handleMenuHighlighting (which sets
-// keySent and re-emits the same key); the action fires on the re-emitted pass,
-// when keySent is already true. Setting keySent here reproduces that second
-// pass so the test exercises the dispatch wiring, not the highlight animation.
+// dispatchKey drives one key through the real handler: the menu highlight and
+// the key's action both run in this one call.
 func dispatchKey(h *home, msg tea.KeyMsg) tea.Cmd {
-	h.keySent = true
 	_, cmd := h.handleKeyPress(msg)
 	return cmd
 }
@@ -114,26 +110,6 @@ func TestErgonomicDefaultKeysDispatchThroughKeymap(t *testing.T) {
 		assert.Equal(t, stateDefault, h.state, "old archive key must be unbound by default")
 	})
 
-	t.Run("copy PR URL uses y and not P", func(t *testing.T) {
-		h := newTestHome(t)
-		h.errBox.SetSize(200, 1)
-		inst, err := session.NewInstance(session.InstanceOptions{Title: "no-pr", Path: t.TempDir(), Program: "claude"})
-		require.NoError(t, err)
-		inst.SetStatusForTest(session.Running)
-		selectInstance(h, inst)
-
-		_ = dispatchKey(h, runeKey('y'))
-		assert.Contains(t, h.errBox.String(), "no PR for this session yet")
-
-		h = newTestHome(t)
-		h.errBox.SetSize(200, 1)
-		inst, err = session.NewInstance(session.InstanceOptions{Title: "no-pr", Path: t.TempDir(), Program: "claude"})
-		require.NoError(t, err)
-		inst.SetStatusForTest(session.Running)
-		selectInstance(h, inst)
-		_ = dispatchKey(h, runeKey('P'))
-		assert.NotContains(t, h.errBox.String(), "no PR for this session yet", "old copy key must be unbound by default")
-	})
 }
 
 func TestPinnedOldDefaultDispatchesThroughKeymap(t *testing.T) {

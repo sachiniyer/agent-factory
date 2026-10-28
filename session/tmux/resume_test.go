@@ -72,8 +72,44 @@ func TestResumeProgram(t *testing.T) {
 		// Codex headless: "exec" is a subcommand; resume comes after it.
 		{"codex exec", "codex exec", "codex exec resume --last"},
 		{"codex exec with flag", "codex exec --foo bar", "codex exec resume --last --foo bar"},
+		// Codex global -c/--config options — the position af's
+		// check_for_update_on_startup suppression lands in (#5238) — sit
+		// before the subcommand, so the splice goes BEHIND them and the flag
+		// stays global. That is also what keeps `exec` reachable through an
+		// injected -c: the exec/resume check must not read the -c operand as
+		// the subcommand slot.
+		{
+			"codex injected -c keeps the flag global",
+			"codex -c check_for_update_on_startup=false",
+			"codex -c check_for_update_on_startup=false resume --last",
+		},
+		{
+			"codex --config= keeps the flag global",
+			"codex --config=check_for_update_on_startup=false",
+			"codex --config=check_for_update_on_startup=false resume --last",
+		},
+		{
+			"exec codex wrapper keeps the flag global",
+			"exec codex -c check_for_update_on_startup=false",
+			"exec codex -c check_for_update_on_startup=false resume --last",
+		},
+		{
+			"env codex wrapper keeps the flag global",
+			"env codex -c check_for_update_on_startup=false",
+			"env codex -c check_for_update_on_startup=false resume --last",
+		},
+		{
+			"codex exec reachable through a global -c",
+			"codex -c check_for_update_on_startup=false exec --json",
+			"codex -c check_for_update_on_startup=false exec resume --last --json",
+		},
 		// Codex: already-has-resume cases — no-op.
 		{"codex already resume", "codex resume --last", "codex resume --last"},
+		{
+			"codex already resume behind a global -c",
+			"codex -c check_for_update_on_startup=false resume --last",
+			"codex -c check_for_update_on_startup=false resume --last",
+		},
 		{"codex exec already resume", "codex exec resume --last", "codex exec resume --last"},
 		// Codex: "resume" appearing in flag-value position must NOT trip
 		// the already-has-resume check (#632). The subcommand can only
@@ -490,6 +526,20 @@ func TestResumeProgram_QuotedCodexPath(t *testing.T) {
 	require.Equal(t, "'/path with space/codex' resume --last --model gpt-5", got)
 }
 
+// TestResumeProgram_DashTerminatedEnvDoesNotInjectResume verifies that a bare
+// `env -` (or `env --`) that ends option parsing leaves the later agent-shaped
+// word as an argument to env's option-looking command, not the running agent,
+// so Restore does not append a resume flag to a non-agent command (#5036/#5052).
+func TestResumeProgram_DashTerminatedEnvDoesNotInjectResume(t *testing.T) {
+	for _, in := range []string{
+		"env - -u claude",
+		"env -- -u claude",
+		"env - -C /evilpath codex",
+	} {
+		require.Equal(t, in, resumeProgram(in))
+	}
+}
+
 func TestClaudeProgramWithSessionID(t *testing.T) {
 	const id = "019f386f-7206-7fc2-803b-f7045e07a242"
 	cases := []struct {
@@ -541,6 +591,15 @@ func TestResumeProgramWithConversationID(t *testing.T) {
 		{"codex exec", ProgramCodex, "codex exec --foo bar", "codex exec resume " + id + " --foo bar", true},
 		{"codex quoted path", ProgramCodex, "'/path with spaces/codex' --model gpt-5", "'/path with spaces/codex' resume " + id + " --model gpt-5", true},
 		{"codex already resume", ProgramCodex, "codex resume --last", "codex resume --last", false},
+		// Global -c/--config options sit before the subcommand in codex's
+		// grammar, so the id splice must land after them rather than ahead of
+		// them — `codex resume <id> -c k=v` reorders the option after the
+		// subcommand, which codex rejects. Mirrors resumeProgram's --last
+		// splice, which already skips these options.
+		{"codex config option", ProgramCodex, "codex -c check_for_update_on_startup=false", "codex -c check_for_update_on_startup=false resume " + id, true},
+		{"codex config option already resume", ProgramCodex, "codex -c check_for_update_on_startup=false resume", "codex -c check_for_update_on_startup=false resume", false},
+		{"codex config option exec", ProgramCodex, "codex -c check_for_update_on_startup=false exec foo", "codex -c check_for_update_on_startup=false exec resume " + id + " foo", true},
+		{"codex attached config option", ProgramCodex, "codex --config=k=v", "codex --config=k=v resume " + id, true},
 		{"amp bare", ProgramAmp, "amp", "amp threads continue " + id, true},
 		{"amp with global flag", ProgramAmp, "amp --no-ide", "amp --no-ide threads continue " + id, true},
 		{"amp quoted path", ProgramAmp, "'/path with spaces/amp' --no-ide", "'/path with spaces/amp' --no-ide threads continue " + id, true},
@@ -607,6 +666,47 @@ func TestResumeProgram_CodexProfileResumeFalsePositive(t *testing.T) {
 	want := "codex resume --last --profile resume"
 	got := resumeProgram(in)
 	require.Equal(t, want, got, "BUG: 'resume' in flag value position should not be detected as subcommand")
+}
+
+func TestConversationSelectorArgs_CodexGlobalOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		program string
+		want    []string
+	}{
+		{"long value option", "codex --model gpt-5 resume old-chat", []string{"resume", "old-chat"}},
+		{"short value option", "codex -m gpt-5 resume --last", []string{"resume", "--last"}},
+		{"attached value option", "codex -mgpt-5 resume old-chat", []string{"resume", "old-chat"}},
+		{"boolean option", "codex --search resume old-chat", []string{"resume", "old-chat"}},
+		{"equals value named resume", "codex --model=resume resume old-chat", []string{"resume", "old-chat"}},
+		{"separate model value named resume", "codex --model resume", nil},
+		{"separate profile value named resume", "codex --profile resume", nil},
+		{"config value containing resume", "codex --config model=resume", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, ConversationSelectorArgs(tc.program))
+		})
+	}
+}
+
+func TestConversationSelectorArgs_CodexExecOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		program string
+		want    []string
+	}{
+		{"long value option", "codex exec --model gpt-5 resume old-chat", []string{"resume", "old-chat"}},
+		{"short value option", "codex exec -m gpt-5 resume --last", []string{"resume", "--last"}},
+		{"attached value option", "codex exec -mgpt-5 resume old-chat", []string{"resume", "old-chat"}},
+		{"boolean option", "codex exec --json resume old-chat", []string{"resume", "old-chat"}},
+		{"equals value named resume", "codex exec --model=resume resume old-chat", []string{"resume", "old-chat"}},
+		{"separate value named resume", "codex exec --model resume", nil},
+		{"exec alias", "codex e resume old-chat", []string{"resume", "old-chat"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, ConversationSelectorArgs(tc.program))
+		})
+	}
 }
 
 // TestResumeProgram_Idempotent verifies that running the rewrite twice
@@ -689,5 +789,96 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		once := resumeProgram(in)
 		twice := resumeProgram(once)
 		require.Equal(t, once, twice, "resumeProgram should be idempotent for %q", in)
+	}
+}
+
+// CodexResumeTarget reads the resume selector the way Codex's own parser
+// does: an explicit SESSION_ID positional pins a conversation, --last/--all
+// mark the unpinned selectors, and an option af cannot model is unprovable
+// rather than guessed (#5471 review). Under --last the positional slot is the
+// initial PROMPT (cli/src/main.rs) — never an id — so even a uuid-shaped
+// prompt must not pin a rollout (#5486 review).
+func TestCodexResumeTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		selector []string
+		wantID   string
+		wantLast bool
+		wantAll  bool
+		wantOK   bool
+	}{
+		{"explicit id", []string{"resume", "019f386f-7206-7fc2-803b-f7045e07a242"}, "019f386f-7206-7fc2-803b-f7045e07a242", false, false, true},
+		{"bare picker", []string{"resume"}, "", false, false, true},
+		{"last alone", []string{"resume", "--last"}, "", true, false, true},
+		{
+			"the --last positional is a prompt, never an id",
+			[]string{"resume", "--last", "fix the flaky test"}, "", true, false, true,
+		},
+		{
+			"a uuid-shaped --last prompt still is not an id",
+			[]string{"resume", "--last", "019f386f-7206-7fc2-803b-f7045e07a242"}, "", true, false, true,
+		},
+		{
+			"positional before --last is still the prompt",
+			[]string{"resume", "019f386f-7206-7fc2-803b-f7045e07a242", "--last"}, "", true, false, true,
+		},
+		{"all widens the pool", []string{"resume", "--last", "--all"}, "", true, true, true},
+		{"all before last", []string{"resume", "--all", "--last"}, "", true, true, true},
+		{
+			"an option value is not the id",
+			[]string{"resume", "-m", "gpt-5", "019f386f-7206-7fc2-803b-f7045e07a242"},
+			"019f386f-7206-7fc2-803b-f7045e07a242", false, false, true,
+		},
+		{
+			"an option value is not the prompt under --last",
+			[]string{"resume", "--last", "-m", "gpt-5"}, "", true, false, true,
+		},
+		{"attached option value", []string{"resume", "--model=gpt-5", "--last"}, "", true, false, true},
+		{
+			"an unmodelled flag is unprovable",
+			[]string{"resume", "--include-non-interactive", "--last"}, "", false, false, false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, last, all, ok := CodexResumeTarget(tc.selector)
+			require.Equal(t, tc.wantOK, ok)
+			require.Equal(t, tc.wantID, id)
+			require.Equal(t, tc.wantLast, last)
+			require.Equal(t, tc.wantAll, all)
+		})
+	}
+}
+
+// CodexResumeRunsRemote must catch `--remote` anywhere global options parse —
+// before the subcommand and inside the selector — because a remote resume's
+// rollout never lands in the local CODEX_HOME (#5486 review).
+func TestCodexResumeRunsRemote(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"not codex", "claude --remote x resume --last", false},
+		{"local resume", "codex resume --last", false},
+		{"remote before resume", "codex --remote ws://host resume --last", true},
+		{"remote attached", "codex --remote=ws://host resume --last", true},
+		{"remote inside the selector", "codex resume --last --remote ws://host", true},
+		{"remote inside the selector attached", "codex resume --remote=ws://host --last", true},
+		{"remote on a bare launch", "codex --remote ws://host", true},
+		{
+			"a remote-looking -c value is not the flag",
+			"codex -c --remote resume --last", false,
+		},
+		{"the flag is caught before its value is walked", "codex --remote --last resume", true},
+		{"exec remote resume", "codex exec --remote ws://host resume --last", true},
+		{
+			"-- terminator makes --remote a prompt, not the flag",
+			"codex resume --last -- --remote", false,
+		},
+		{"remote-looking word after -- is positional", "codex -- --remote resume --last", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, CodexResumeRunsRemote(tc.command))
+		})
 	}
 }

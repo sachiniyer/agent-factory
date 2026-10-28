@@ -248,7 +248,7 @@ func TestVSCodeSocket_StartOneEvictsSquatter(t *testing.T) {
 	go func() { _ = foreignSrv.Serve(foreign) }()
 	t.Cleanup(func() { _ = foreignSrv.Close() })
 
-	server, err := v.startOne("repo/session", "instance-id", binary, flavorCodeServer, path, t.TempDir())
+	server, err := v.startOne("repo/session", "instance-id", binary, flavorCodeServer, path, t.TempDir(), "", vscodeChildEnv())
 	if err != nil {
 		t.Fatalf("startOne over a squatted socket: %v", err)
 	}
@@ -387,6 +387,11 @@ func TestVSCodeSocket_RespawnSurvivesOutgoingTeardown(t *testing.T) {
 		fakeVSCodeIgnoreTermEnv: "1",
 	})
 	v := newTestVSCodeSupervisor(t, binary)
+	// The property only needs the outgoing editor to hold its socket through a
+	// teardown grace the fake's TERM-ignoring forces to expire — a shortened
+	// grace keeps the same ordering (unlink lands at end-of-grace, after the
+	// incoming bind) without burning the production five seconds (#4464).
+	v.stopGrace = 400 * time.Millisecond
 
 	const key = "repo/session"
 	first, err := v.ensureServer(key, t.TempDir())
@@ -406,8 +411,9 @@ func TestVSCodeSocket_RespawnSurvivesOutgoingTeardown(t *testing.T) {
 	}
 
 	// Outlast the old editor's stop grace, then prove the live editor is still
-	// serving on a socket that still exists.
-	deadline := time.Now().Add(vscodeStopGrace + 3*time.Second)
+	// serving on a socket that still exists. The margin has to cover the grace
+	// plus the group kill and reap that precede the unlink.
+	deadline := time.Now().Add(v.stopGrace + 2*time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Lstat(second.SocketPath); os.IsNotExist(err) {
 			t.Fatalf("the outgoing editor's teardown unlinked the LIVE editor's socket %s: "+

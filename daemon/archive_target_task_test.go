@@ -489,7 +489,7 @@ func TestDeleteProject_FencesCreateAfterTaskPreflight(t *testing.T) {
 	mutationReached := make(chan struct{})
 	resumeDelete := make(chan struct{})
 	orig := deregisterRootAgents
-	deregisterRootAgents = func(string) ([]string, error) {
+	deregisterRootAgents = func(...string) ([]string, error) {
 		close(mutationReached)
 		<-resumeDelete
 		return nil, errors.New("forced stop before mutation")
@@ -585,7 +585,7 @@ func TestProjectDeleteAndRestoreAdmissionAreMutuallyExclusive(t *testing.T) {
 			mutationReached := make(chan struct{})
 			resumeDelete := make(chan struct{})
 			orig := deregisterRootAgents
-			deregisterRootAgents = func(string) ([]string, error) {
+			deregisterRootAgents = func(...string) ([]string, error) {
 				close(mutationReached)
 				<-resumeDelete
 				return nil, errors.New("forced stop before mutation")
@@ -621,7 +621,7 @@ func TestDeleteProject_RefusesClaimedArchivedRestore(t *testing.T) {
 	require.NoError(t, err)
 
 	key := daemonInstanceKey(repoID, "worker")
-	require.NoError(t, manager.claimRestoreOperation(repoID, key, "worker"))
+	require.NoError(t, manager.claimRestoreOperation(repoID, key, "worker", 0, manager.projectDeleteSeqNow()))
 	t.Cleanup(func() { manager.releaseRestoreOperation(key) })
 
 	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
@@ -646,7 +646,7 @@ func TestDeleteProject_TargetedExternalSessionsArePreflightBlockers(t *testing.T
 			manager.mu.Lock()
 			manager.instances[daemonInstanceKey(repoID, title)] = inst
 			manager.mu.Unlock()
-			require.NoError(t, manager.SaveInstances())
+			require.NoError(t, manager.storage.SaveInstances(manager.InstancesSnapshot()))
 			require.NoError(t, task.AddTask(archiveTargetTask("external1", "External Target", repoPath, title, true)))
 
 			seed := config.DefaultConfig()

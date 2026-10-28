@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -473,6 +474,82 @@ func TestReparkUnderTheFenceWhereThePlainSetterSilentlyNoOps(t *testing.T) {
 	require.Error(t, i.ReparkLimitUnderResumeFence(reset), "no fence, no privileged re-park")
 }
 
+// TestReparkLimitUnderResumeFence_LeavesAttributionAndObservationsUnchanged guards
+// the caller distinction the caller-scoped fix rests on. The
+// restorePendingLiveness closure at daemon/limit.go:510 re-parks the OUTGOING's
+// wall: by the time it runs, commitNewAccountSwapIdentity has already installed
+// the incoming account (i.Account == incoming), but resetAt was captured before
+// the respawn as the OUTGOING's window. ReparkLimitUnderResumeFence must remain
+// UN-attributing here — it must not call attributeLimitIdentityLocked (which
+// would publish i.Account = incoming as the wall's identity) nor
+// recordAccountLimitObservationLocked (which would append a spurious observation
+// for the incoming pair keyed to the outgoing's window, and ClearLimitReached
+// does not clear accountLimitObservations so the bogus row would survive the
+// wall lift). An unconditional mirror that folds attribution into
+// ReparkLimitUnderResumeFence regresses this caller; this test pins the
+// outgoing-to-outgoing attribution the un-attributing re-park preserves.
+func TestReparkLimitUnderResumeFence_LeavesAttributionAndObservationsUnchanged(t *testing.T) {
+	outgoingReset := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC)
+	// A started production-style instance whose outgoing identity is
+	// claude/work; SetLimitReached attributes the wall to that pair and
+	// records the durable observation, the way setLimitReachedLocked does for
+	// the original outgoing wall.
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work", started: true}
+	i.SetLimitReached(outgoingReset)
+
+	agent, account, ok := i.LimitIdentity()
+	require.True(t, ok)
+	require.Equal(t, tmux.ProgramClaude, agent)
+	require.Equal(t, "work", account)
+	require.Len(t, i.AccountLimitObservations(), 1, "the outgoing wall is recorded once")
+
+	// Raise the resume fence and ConfirmLive: liveness moves to LiveRunning,
+	// but ConfirmLive's limitResetKeep edge leaves limitAgent/limitAccount
+	// holding the OUTGOING identity (the transition touches limitResetAt only
+	// via the edge's limitReset effect, never the identity stamps).
+	require.NoError(t, i.BeginLimitResume())
+	require.NoError(t, i.Transition(ConfirmLive()))
+	require.Equal(t, LiveRunning, i.GetLiveness())
+
+	// commitNewAccountSwapIdentity has now installed the incoming account onto
+	// the instance, but the re-park below must NOT re-attribute to it.
+	i.Account = "personal"
+
+	// The re-park restores the OUTGOING wall with the OUTGOING's window (resetAt
+	// was captured before the respawn at daemon/limit.go:738). It must not
+	// attribute or record.
+	require.NoError(t, i.ReparkLimitUnderResumeFence(outgoingReset))
+	require.Equal(t, LiveLimitReached, i.GetLiveness())
+
+	// The live LimitIdentity stays the OUTGOING identity. An unconditional
+	// mirror that called attributeLimitIdentityLocked here would instead
+	// report (claude, "personal"), the incoming account.
+	agent, account, ok = i.LimitIdentity()
+	require.True(t, ok)
+	require.Equal(t, tmux.ProgramClaude, agent, "the outgoing agent stays attributed")
+	require.Equal(t, "work", account, "the outgoing account stays attributed, not the incoming personal")
+
+	// The observations ledger gains NO incoming entry. An unconditional mirror
+	// that called recordAccountLimitObservationLocked(claude, personal,
+	// outgoingReset) here would append a spurious {claude, personal} row that
+	// ClearLimitReached never clears, blocking future auto-swaps from
+	// re-selecting the incoming account for the duration of the unrelated
+	// outgoing window — an opposite-direction hetero-bind.
+	observations := i.AccountLimitObservations()
+	require.Len(t, observations, 1, "no incoming observation is appended")
+	require.Equal(t, tmux.ProgramClaude, observations[0].Agent)
+	require.Equal(t, "work", observations[0].Account)
+	require.True(t, observations[0].ResetAt.Equal(outgoingReset))
+
+	// The durable row mirrors the live attribution: the outgoing identity is
+	// the wall's identity, with the outgoing window.
+	data := i.ToInstanceData()
+	require.Equal(t, tmux.ProgramClaude, data.LimitAgent)
+	require.Equal(t, "work", data.LimitAccount)
+	require.True(t, data.LimitResetAt.Equal(outgoingReset))
+	require.Len(t, data.AccountLimitObservations, 1)
+}
+
 // #3004 review finding 15 (P2): the release has to be distinguishable from a no-op,
 // because the caller publishes a settled projection only when it actually released —
 // otherwise the success path, which already published one, emits a duplicate.
@@ -482,4 +559,23 @@ func TestEndLimitResumeReportsWhetherItReleased(t *testing.T) {
 
 	require.True(t, i.EndLimitResume(), "the first call lowered it")
 	require.False(t, i.EndLimitResume(), "the deferred second call must not re-announce")
+}
+
+// While a rebuild teardown is owed, the fence release is an operation-only edge:
+// it must leave the liveness the transaction owner restored under the fence, not
+// re-run it through the coerce-to-Lost guard that exists for lying observations
+// (#5371 review).
+func TestEndLimitResumeKeepsTheOwnersRestoredLivenessWhileATeardownIsPending(t *testing.T) {
+	reset := time.Now().Add(42 * time.Minute).UTC()
+	i := limitBlockedInstance(t, newRespawnProbe())
+	i.SetRebuildTeardownNotify(func(*Instance) error { return nil })
+	require.NoError(t, i.BeginLimitResume())
+	require.NoError(t, i.SetRebuildTeardownPending(true))
+
+	require.NoError(t, i.ReparkLimitUnderResumeFence(reset))
+	require.Equal(t, LiveLimitReached, i.GetLiveness())
+
+	require.True(t, i.EndLimitResume())
+	require.Equal(t, LiveLimitReached, i.GetLiveness(), "releasing the fence must not coerce the restored disposition to Lost")
+	require.Equal(t, OpNone, i.GetInFlightOp())
 }

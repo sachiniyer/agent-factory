@@ -128,5 +128,8 @@ func (cache *CheckCache) Record(channel, lastSeenTag, currentVersion string, now
 		return err
 	}
 	data = append(data, '\n')
-	return config.AtomicWriteFile(cache.path, data, 0644)
+	// Refuses a symlinked path (#3672): the check cache is af's own throttle
+	// bookkeeping at a path af chose, never a file a user authors, so a link
+	// there is neither af's to write through nor af's to replace.
+	return config.AtomicWriteFileRefusingLink(cache.path, data, 0644)
 }

@@ -26,9 +26,27 @@
 // Patched in place like the rest of the shell and CSP-safe (createElement +
 // addEventListener via the shared h() helper, no innerHTML with markup).
 
+import {
+  ACCOUNT_INPUT_ATTR,
+  type AccountActions,
+  type AccountsState,
+  emptyAccountsState,
+  renderAccountsSection,
+} from "./accounts.js";
+import {
+  type QuotaState,
+  emptyQuotaState,
+  renderQuotaSection,
+} from "./quota.js";
 import { h } from "./dom.js";
-import type { ConfigEntry } from "./types.js";
+import type {
+  ConfigEntry,
+  ConfigSetResponse,
+  ExplainConfigResponse,
+  ResolvedValue,
+} from "./types.js";
 import { rebuildKeepingScroll } from "./scrollkeep.js";
+import { THEME_CHOICES, type ThemeChoice } from "./theme.js";
 
 /** The config list is ONE global manifest, so every rebuild shows the same list and
  *  the reader's place is always worth keeping — there is no project or filter here to
@@ -38,12 +56,43 @@ const CONFIG_LIST_TOKEN = "config";
 /** What the config view can ask the shell to do. Saving is the shell's job (it
  *  owns the token and the refresh), so the pane reports intent and renders the
  *  outcome it is handed back. */
+/** The settled result of one ExplainConfig call (#4803): the daemon's
+ *  ResolvedValue, or its refusal already rendered to text by the shell (which
+ *  owns errorText — this view renders strings, it does not interpret errors). */
+export type ExplainOutcome =
+  | { ok: true; resp: ExplainConfigResponse }
+  | { ok: false; error: string };
+
 export interface ConfigActions {
   save: (key: string, value: string) => void;
   /** Opens the conversational config assistant (#2467) — the web analogue of the
    *  TUI's config-agent takeover. The shell owns the token and the modal host, so
    *  the pane only reports the intent. */
   openAssistant: () => void;
+  /** Resolves one key's provenance through the daemon's ExplainConfig — the
+   *  SAME config.ResolvedValue `af config get --explain` renders (#4803), so
+   *  this view formats a trace it did not compute and could not diverge from.
+   *  Always settles: a refusal (unknown key, a daemon too old for the route)
+   *  arrives as `{ok:false}` text rather than a rejection. */
+  explain: (key: string) => Promise<ExplainOutcome>;
+  /** The Accounts section's two verbs (#3385). They are NOT config writes and do
+   *  not go through `save`: an account is a credential directory on the daemon
+   *  host, not a settable key, and routing them through the config writer would
+   *  be the category error #3385 asks this surface to avoid. */
+  accounts: AccountActions;
+  setTheme: (choice: ThemeChoice) => void;
+  disconnect: () => void;
+}
+
+export function themeLabel(choice: ThemeChoice): string {
+  switch (choice) {
+    case "system":
+      return "System";
+    case "light":
+      return "Light";
+    case "dark":
+      return "Dark";
+  }
 }
 
 /** The outcome of the last save, as the shell learned it from the daemon. */
@@ -52,7 +101,7 @@ export interface ConfigStatus {
   /** The echo — the canonical value the daemon actually wrote, which may differ
    *  from what was typed. Empty when `error` is set. */
   value: string;
-  /** The daemon's own restart notice, shown verbatim. */
+  /** The daemon's save outcome and warnings, shown verbatim. */
   notice: string;
   /** The validator's message, verbatim, when the value was refused. */
   error: string;
@@ -123,6 +172,103 @@ export function canCommit(shown: string, current: string): boolean {
 }
 
 /**
+ * Whether a freshly delivered status should CLOSE the field that is open.
+ *
+ * A save closes the field it came from: the value is committed, and leaving it open
+ * would invite a second write of the same thing. The subtlety is `statusIsNew`. A
+ * success status is a LEVEL that stays on the store, not an EDGE that fires once —
+ * `applyConfigValueNow` sets `configStatus` and then calls `refreshConfig()`, whose
+ * commit writes only `config`/`configPath`. The refetch therefore re-enters update()
+ * with fresh entries and the SAME status object, and a predicate that ignores the
+ * transition closes whatever edit is open when it lands.
+ *
+ * That window is not hypothetical: it is precisely the window this view's focus
+ * restoration exists to make usable, so the edit sitting in it is the user typing
+ * again in the field they just saved. Closing it clears `editing` and `draft`, and
+ * the rebuild then paints the re-read value over text that was on screen a frame
+ * earlier — a silent loss, with no error and nothing to undo.
+ *
+ * The failure direction is deliberate. Requiring the edge can only ever leave an
+ * edit OPEN that a re-delivery would have closed, and an edit that outlived its own
+ * save is by definition typing the user did afterwards — the thing to keep. A field
+ * left open costs a redundant Save at worst; a field closed early costs the user
+ * their input. Exported so config.test.ts locks the rule rather than a copy of it.
+ */
+export function shouldCloseSavedField(
+  status: ConfigStatus | null,
+  editing: string | null,
+  statusIsNew: boolean,
+): boolean {
+  return statusIsNew && status !== null && !status.error && status.key === editing;
+}
+
+/**
+ * The one line the form shows under a saved field: the daemon's own account of
+ * when the edit takes effect, plus — when the edit moved a listener — where the
+ * daemon is accepting now (#3722).
+ *
+ * Both halves come from the daemon and neither is computed here. The address in
+ * particular MUST NOT be inferred from the value that was sent: a rebind can
+ * fail, in which case the daemon is still serving on the previous address and
+ * says so, and a form that echoed what it typed would name an address nothing
+ * answers precisely when the user most needs the real one.
+ *
+ * The restart notice is normally shown only for a key that requires a restart,
+ * since "Applied" under every field is noise. A warning overrides that gate:
+ * it is actionable for an ordinarily-live key, and both the warning and the
+ * outcome sentence must reach the operator. The address is also independent of
+ * the gate: a listener that moved is worth saying whether or not a restart is
+ * owed, and for this form it is the address the browser must be re-pointed at.
+ * Exported so config.test.ts locks the real rule rather than a copy.
+ */
+export function saveNotice(resp: ConfigSetResponse): string {
+  const parts: string[] = [];
+  // resp.warnings is the apply-time channel; resp.result.warnings is the
+  // per-write channel the daemon fills even when the apply produced none
+  // (e.g. default_accounts.<agent> is EffectAppliedLive). Fall back the way
+  // the TUI does (ui/config_target.go) so every surface shows exactly one
+  // notice — never the two differently-worded ones a daemon-running edit can
+  // carry on both channels (#5266).
+  let warnings = resp.warnings ?? [];
+  if (warnings.length === 0) {
+    warnings = resp.result.warnings ?? [];
+  }
+  // A warning makes the apply outcome actionable even for an ordinarily-live
+  // key. In that case the restart notice must not be hidden by the key's static
+  // requires-restart classification: it describes what happened to this save.
+  if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
+    parts.push(resp.restart_notice);
+  }
+  parts.push(...warnings);
+  const addr = resp.listener_addr ?? "";
+  if (addr !== "") {
+    parts.push(`Daemon now listening at ${addr}`);
+  }
+  return parts.join(" · ");
+}
+
+/** The web spelling of config.FormatExplainValue (#4803): an explicitly
+ *  configured empty string stays visible as `""` — a bare blank would read as
+ *  absent — scalars print bare, and composites print as compact JSON. Exported
+ *  so config.test.ts locks the REAL renderer rather than a copy. */
+export function explainValueText(value: unknown): string {
+  if (typeof value === "string") {
+    return value === "" ? '""' : value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (value === null || value === undefined) {
+    return "null";
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
  * Serializes async work per key: a second save for the same key waits for the
  * first to settle, so the LAST value the user chose is the last one written.
  *
@@ -172,8 +318,16 @@ export class ConfigPane {
   readonly el: HTMLElement;
 
   private entries: ConfigEntry[] = [];
+  private registration = { open: false, agent: "" };
   private path = "";
   private status: ConfigStatus | null = null;
+  /** The Accounts section's data (#3385). It is rendered by this view but is not
+   *  config: see accounts.ts. */
+  private accounts: AccountsState = emptyAccountsState();
+  /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
+   *  Accounts. Same "not config" rule: see quota.ts. */
+  private quota: QuotaState = emptyQuotaState();
+  private theme: ThemeChoice = "system";
   private showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
    *  write is per-key (like `af config set`), so a multi-row "save all" would
@@ -183,10 +337,28 @@ export class ConfigPane {
   // The live controls a rebuild replaces, so focus can be handed back to whichever of
   // them had it (#2933). Null whenever that control is not currently rendered.
   private editingInput: HTMLInputElement | null = null;
+  /** The config key whose input held DOM focus when the in-progress rebuild started,
+   *  so render() can re-point `editingInput` at that row's replacement even when the
+   *  row is no longer the open edit. Live only for the duration of one render (set
+   *  and cleared around the single `this.render()` call). */
+  private restoreKey: string | null = null;
   private advancedToggle: HTMLElement | null = null;
+
+  // The open provenance trace (#4803): at most one row explains at a time, the
+  // same way at most one edits — two open traces would read as though the keys
+  // resolved together. `explainGeneration` drops a stale fetch that lands after
+  // the user opened a different row or closed this one.
+  private explainKey: string | null = null;
+  private explainResp: ExplainConfigResponse | null = null;
+  private explainError = "";
+  private explainBusy = false;
+  private explainGeneration = 0;
 
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
+  private lastAccounts: AccountsState | null = null;
+  private lastQuota: QuotaState | null = null;
+  private lastTheme: ThemeChoice | null = null;
 
   constructor(private readonly actions: ConfigActions) {
     this.el = h("section", { class: "af-config" });
@@ -195,20 +367,56 @@ export class ConfigPane {
 
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries: ConfigEntry[], path: string, status: ConfigStatus | null): void {
-    if (this.lastEntries === entries && this.lastStatus === status) {
+  update(
+    entries: ConfigEntry[],
+    path: string,
+    status: ConfigStatus | null,
+    accounts: AccountsState,
+    quota: QuotaState,
+    theme: ThemeChoice = this.theme,
+  ): void {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts
+      && this.lastQuota === quota && this.lastTheme === theme) {
       return;
+    }
+    // Captured before `lastStatus`/`lastEntries` are overwritten below: the
+    // status edge is what `shouldCloseSavedField` gates on (by then the level
+    // would look unchanged), and the entries edge is what decides whether an
+    // open explanation must re-resolve (see below).
+    const statusIsNew = status !== this.lastStatus;
+    const entriesAreNew = this.lastEntries !== entries;
+    const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status
+      && accounts.status.name === "" && !accounts.status.error;
+    if (registrationSucceeded) {
+      const submitted = this.accountInput(accounts.status!.agent);
+      if (submitted) submitted.value = "";
     }
     this.lastEntries = entries;
     this.lastStatus = status;
-    this.entries = entries;
+    this.lastAccounts = accounts;
+    this.lastQuota = quota;
+    this.lastTheme = theme;
+    this.theme = theme;
+    // Retired web appearance keys from older daemons are never editable here.
+    this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
-    // A save closes the field it came from: the value is committed, and leaving
-    // it open would invite a second write of the same thing.
-    if (status && !status.error && status.key === this.editing) {
+    this.accounts = accounts;
+    this.quota = quota;
+    if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
+    }
+    // An open trace describes the manifest it was fetched from. A refresh that
+    // carries NEW entries — a save landing, a hand-edit, an `af config set`
+    // elsewhere — has already moved the row's effective value; leaving the old
+    // ResolvedValue painted under it would show provenance for a value the row
+    // no longer reports. Re-resolve in place rather than close the disclosure:
+    // the generation guard drops the answer if the user has since opened
+    // another row or closed this one, so the refetch is free of the race it
+    // could otherwise lose.
+    if (entriesAreNew && this.explainKey !== null) {
+      this.requestExplain(this.explainKey);
     }
     this.rerenderKeepingUserState();
   }
@@ -231,21 +439,93 @@ export class ConfigPane {
    */
   private rerenderKeepingUserState(): void {
     const active = document.activeElement;
+    // The account register fields (#3385) are rebuilt like everything else, and
+    // they hold a name the user is part-way through typing. Capturing every
+    // field's text — not only the focused one — is what keeps a refresh landing
+    // from another action (a register elsewhere, a login closing) from eating a
+    // draft the user never submitted.
+    const accountDrafts = this.readAccountDrafts();
+    const accountAgentFocused = active?.getAttribute("aria-label") === "Account agent";
+    const accountSummaryFocused = active === this.el.querySelector(".af-account-disclosure summary");
+    const focusedAccount =
+      active instanceof HTMLInputElement ? active.getAttribute(ACCOUNT_INPUT_ATTR) : null;
+    const accountCaret = focusedAccount !== null && active instanceof HTMLInputElement
+      ? { start: active.selectionStart, end: active.selectionEnd }
+      : null;
     const wasEditing = this.editingInput !== null && active === this.editingInput;
     // Both ends, not just the start: a rebuild landing while text is SELECTED would
     // otherwise silently collapse the selection the user was about to overwrite.
     const caretStart = wasEditing ? (this.editingInput?.selectionStart ?? null) : null;
     const caretEnd = wasEditing ? (this.editingInput?.selectionEnd ?? null) : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    // The explain trigger is rendered on every row, so the one that held focus
+    // is named by its data-key — restored below whether the disclosure it drove
+    // ended the rebuild open or closed.
+    const explainFocusedKey =
+      active instanceof HTMLElement && active.classList.contains("af-config-explain-trigger")
+        ? active.getAttribute("data-key")
+        : null;
+    // The pane's own checkbox/select rows commit on `change`, and a text row the
+    // user has only CLICKED into — before the first keystroke — commits nothing of
+    // its own, but an UNRELATED rebuild can still land on it (a sibling's save, the
+    // config view's own entry refetches, an accounts refresh). None of these is
+    // tracked as `editingInput`: the text path assigns that only on the `input`
+    // event, i.e. once the user has actually typed, and `editingInput` never names a
+    // checkbox or select at all. So the rebuild dropped focus to <body> and the
+    // user's next `[`/`]` became a view-cycle shortcut (other keystrokes silently
+    // swallowed) — the exact body-focus hazard the rest of this method exists to
+    // prevent. The controls already carry `aria-label = e.key`, so capture the
+    // focused control's key here and re-locate its replacement after the rebuild.
+    // Scoped to `.af-config-list` so the account-agent select (which lives in the
+    // accounts section and has its own branch below) is never matched. The
+    // `wasEditing` check above is first in the ladder, so a TYPED text row keeps the
+    // caret-preserving branch; this branch only catches the untyped, click-focused
+    // text case (plus checkbox/select, which `editingInput` never names) and is the
+    // sole restorer for it. A checkbox/select has no caret; a click-focused text
+    // input, however, may sit at a non-default position or selection, and that is
+    // captured just below (`focusedConfigTextCaret`) and restored after the rebuild.
+    const focusedConfigControlKey =
+      active instanceof HTMLElement
+        && active.closest(".af-config-list") !== null
+        && (active instanceof HTMLSelectElement
+          || (active instanceof HTMLInputElement
+            && (active.type === "checkbox" || active.type === "text")))
+        ? active.getAttribute("aria-label")
+        : null;
+    // A click-focused TEXT row may sit at a non-default caret (the user clicked a
+    // position, or selected a substring) before the first keystroke assigns
+    // `editingInput`; the `wasEditing` branch above does not cover it. Capture both
+    // ends here so the rebuilt input resumes at the same place — the user's first
+    // keystroke then inserts at, or replaces, exactly what they aimed at. A checkbox
+    // has no selection; a select's value is its own state, so only the text case
+    // carries a caret worth restoring.
+    const focusedConfigTextCaret =
+      focusedConfigControlKey !== null
+        && active instanceof HTMLInputElement
+        && active.type === "text"
+        ? { start: active.selectionStart, end: active.selectionEnd }
+        : null;
     // The config list is always the same list — one global manifest — so a rebuild
     // never legitimately starts at the top. Keeping the place matters most right after
     // a save, which is exactly when this fires.
+    // Which ROW to hand focus back to is decided here, from the element that
+    // actually holds it, and never from `status.key`. Saves are serialized per key
+    // (`createKeyedQueue` in index.ts), so two keys in flight together can land out
+    // of order: save A, move to B, save B, B answers first. A's later status would
+    // name row A while the user is sitting in row B — and re-pointing by status key
+    // would then move focus and the captured caret into A, so the next keystroke
+    // edits the wrong setting. The key that held focus is the only thing that
+    // answers "where was the user", which is the question restoration is asking.
+    // aria-label carries it because render() sets it to `e.key` on every row input.
+    this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    this.restoreKey = null;
     // preventScroll on BOTH: focus() scrolls its target into view by default, which
     // would undo the offset rebuildKeepingScroll just restored. That is not a corner
     // case — a user who wheels the pane while a field still holds focus is exactly the
     // reader this change exists for, and a plain focus() would yank them back to the
     // field the moment a save or an external refresh landed.
+    this.restoreAccountDrafts(accountDrafts);
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {
@@ -253,7 +533,74 @@ export class ConfigPane {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (explainFocusedKey !== null) {
+      this.el
+        .querySelector<HTMLElement>(`.af-config-explain-trigger[data-key="${CSS.escape(explainFocusedKey)}"]`)
+        ?.focus({ preventScroll: true });
+    } else if (focusedConfigControlKey !== null) {
+      // Hand focus back to the rebuilt checkbox/select/text control for the key
+      // that genuinely held it. preventScroll for the same reason as above: focus()
+      // would otherwise undo the offset rebuildKeepingScroll just restored.
+      const restored = this.el.querySelector<HTMLElement>(
+        `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`,
+      );
+      restored?.focus({ preventScroll: true });
+      // A click-focused text field may have a non-default caret or selection; put
+      // it back where the user left it so the first keystroke lands correctly. A
+      // checkbox/select has nothing to restore, so the gate narrows to text inputs.
+      if (
+        restored instanceof HTMLInputElement
+        && restored.type === "text"
+        && focusedConfigTextCaret?.start != null
+      ) {
+        restored.setSelectionRange(
+          focusedConfigTextCaret.start,
+          focusedConfigTextCaret.end ?? focusedConfigTextCaret.start,
+        );
+      }
+    } else if (accountAgentFocused) {
+      this.el.querySelector<HTMLElement>('[aria-label="Account agent"]')?.focus({ preventScroll: true });
+    } else if (accountSummaryFocused) {
+      this.el.querySelector<HTMLElement>(".af-account-disclosure summary")?.focus({ preventScroll: true });
+    } else if (focusedAccount !== null) {
+      const field = this.accountInput(focusedAccount);
+      // preventScroll for the same reason as above: focus() would otherwise undo
+      // the offset rebuildKeepingScroll just restored.
+      field?.focus({ preventScroll: true });
+      if (field && accountCaret?.start != null) {
+        field.setSelectionRange(accountCaret.start, accountCaret.end ?? accountCaret.start);
+      }
     }
+  }
+
+  /** Every register field's current text, keyed by agent. */
+  private readAccountDrafts(): Map<string, string> {
+    const drafts = new Map<string, string>();
+    for (const field of this.el.querySelectorAll<HTMLInputElement>(`input[${ACCOUNT_INPUT_ATTR}]`)) {
+      const agent = field.getAttribute(ACCOUNT_INPUT_ATTR);
+      if (agent !== null && field.value !== "") {
+        drafts.set(agent, field.value);
+      }
+    }
+    return drafts;
+  }
+
+  /** Puts them back on the freshly rendered fields. An agent whose row is gone —
+   *  a roster that shrank between renders — simply drops its draft; there is no
+   *  field left to hold it. */
+  private restoreAccountDrafts(drafts: Map<string, string>): void {
+    for (const [agent, value] of drafts) {
+      const field = this.accountInput(agent);
+      if (field) {
+        field.value = value;
+      }
+    }
+  }
+
+  private accountInput(agent: string): HTMLInputElement | null {
+    return this.el.querySelector<HTMLInputElement>(
+      `input[${ACCOUNT_INPUT_ATTR}="${CSS.escape(agent)}"]`,
+    );
   }
 
   private render(): void {
@@ -270,7 +617,7 @@ export class ConfigPane {
     if (this.path !== "") {
       // Name the file being edited: a user with AF_HOME set is otherwise left
       // guessing which config.toml this is.
-      head.append(h("span", { class: "af-config-path" }, this.path));
+      head.append(h("span", { class: "af-config-path" }, `Daemon ${location.host} · ${this.path}`));
     }
     // The conversational assistant (#2467): a chat that helps configure the service,
     // the web counterpart of the TUI's config-agent takeover. Opening it is the
@@ -290,7 +637,7 @@ export class ConfigPane {
         continue;
       }
       const folded = tier === TIER_ADVANCED && !this.showAdvanced;
-      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name));
+      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name.charAt(0).toUpperCase() + name.slice(1)));
 
       if (tier === TIER_ADVANCED) {
         const toggle = h(
@@ -321,10 +668,56 @@ export class ConfigPane {
             h(
               "p",
               { class: "af-config-empty" },
-              "No settings are available — use Configure with assistant or check the daemon connection.",
+              "No settings available. Try Configure with assistant.",
             ),
           ];
-    this.el.replaceChildren(head, h("div", { class: "af-config-list" }, ...content));
+    // Accounts LAST, then Usage (#2983): the config keys are what this view is
+    // for, and daemon-reported sections above them would push them below the fold.
+    this.el.replaceChildren(
+      head,
+      h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
+      renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
+      renderQuotaSection(this.quota),
+    );
+  }
+
+  /** Theme and the saved token live in this browser's localStorage, not in
+   *  config.toml, so neither goes through `save`. */
+  private renderBrowser(): HTMLElement[] {
+    const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, "This browser"));
+    const select = h("select", { class: "af-input af-config-input af-theme-select" });
+    select.setAttribute("aria-label", "Theme");
+    for (const choice of THEME_CHOICES) {
+      const opt = h("option", { value: choice }, themeLabel(choice));
+      opt.selected = choice === this.theme;
+      select.append(opt);
+    }
+    select.addEventListener("change", () => this.actions.setTheme(select.value as ThemeChoice));
+    const row = h(
+      "div",
+      { class: "af-config-row af-theme-row" },
+      h(
+        "div",
+        { class: "af-config-label" },
+        h("span", { class: "af-config-key" }, "Theme"),
+        h("span", { class: "af-config-purpose" }, "Color scheme for this browser. System follows your device setting."),
+      ),
+      h("div", { class: "af-config-control" }, select),
+    );
+    const disconnect = h("button", { type: "button", class: "af-ghost af-config-disconnect" }, "Log out");
+    disconnect.addEventListener("click", () => this.actions.disconnect());
+    const tokenRow = h(
+      "div",
+      { class: "af-config-row af-disconnect-row" },
+      h(
+        "div",
+        { class: "af-config-label" },
+        h("span", { class: "af-config-key" }, "Saved token"),
+        h("span", { class: "af-config-purpose" }, "Forget the token saved in this browser and go back to the login screen."),
+      ),
+      h("div", { class: "af-config-control" }, disconnect),
+    );
+    return [heading, row, tokenRow];
   }
 
   /** One key: its name, purpose, control, and — when it is the row just written
@@ -333,17 +726,43 @@ export class ConfigPane {
     const row = h("div", { class: "af-config-row" });
     row.setAttribute("data-key", e.key);
 
+    const open = this.explainKey === e.key;
+    // The key itself is the explain trigger (#4803): the caret marks it as a
+    // disclosure, and the trace it opens is about exactly this name. Keeping the
+    // affordance on the key's own line means a closed trace adds no row height —
+    // the most repeated control on the page stays the quietest.
+    const caret = h("span", { class: "af-config-explain-caret" }, open ? "▾" : "▸");
+    caret.setAttribute("aria-hidden", "true");
+    const trigger = h(
+      "button",
+      {
+        type: "button",
+        class: "af-config-key af-config-explain-trigger",
+        title: "Which config layer supplied this value",
+      },
+      caret,
+      e.key,
+    );
+    trigger.setAttribute("aria-expanded", String(open));
+    trigger.setAttribute("aria-controls", `af-config-explain-${e.key}`);
+    trigger.setAttribute("data-key", e.key);
+    trigger.addEventListener("click", () => this.toggleExplain(e.key));
+
     const label = h(
       "div",
       { class: "af-config-label" },
-      h("span", { class: "af-config-key" }, e.key),
+      trigger,
       h("span", { class: "af-config-purpose" }, e.purpose),
     );
     row.append(label);
     row.append(this.renderControl(e));
 
     const status = this.status;
-    if (status && status.key === e.key) {
+    // A status for a dotted LEAF (web.terminal_font_size_desktop, written by the
+    // A−/A+ controls rather than this form) renders under its table's row — the
+    // only row the manifest offers for it. Without the prefix match the leaf's
+    // save outcome is invisible in this view entirely.
+    if (status && (status.key === e.key || status.key.startsWith(`${e.key}.`))) {
       if (status.error !== "") {
         // The validator's message, verbatim — never reworded here.
         row.append(h("div", { class: "af-config-error", role: "alert" }, status.error));
@@ -355,7 +774,129 @@ export class ConfigPane {
         }
       }
     }
+    if (open) {
+      row.append(this.renderExplainSection(e));
+    }
     return row;
+  }
+
+  /** The open provenance panel (#4803): the SAME candidate trace
+   *  `af config get --explain` prints — which on-disk layer won, and which were
+   *  shadowed, absent, or disallowed. The daemon computes the ResolvedValue;
+   *  this view only formats it, so the two surfaces cannot disagree about what
+   *  a layer did. Rendered only while the row's key trigger is open, so a closed
+   *  row carries no trace chrome. */
+  private renderExplainSection(e: ConfigEntry): HTMLElement {
+    const section = h("div", { class: "af-config-explain", id: `af-config-explain-${e.key}` });
+    section.append(this.renderExplainBody());
+    return section;
+  }
+
+  private toggleExplain(key: string): void {
+    if (this.explainKey === key) {
+      this.explainKey = null;
+      this.explainResp = null;
+      this.explainError = "";
+      this.explainBusy = false;
+      this.rerenderKeepingUserState();
+      return;
+    }
+    this.explainKey = key;
+    this.explainResp = null;
+    this.explainError = "";
+    this.explainBusy = true;
+    const generation = ++this.explainGeneration;
+    this.rerenderKeepingUserState();
+    this.requestExplain(key, generation);
+  }
+
+  /** Fetches one key's trace into the open disclosure. update() calls this
+   *  without a generation when fresh manifest rows arrive (the trace re-resolves
+   *  in place); toggleExplain passes its own so a second open supersedes the
+   *  first. The settle check is the same either way: the answer paints only if
+   *  it is still the newest request for the row still open. */
+  private requestExplain(key: string, generation?: number): void {
+    const gen = generation ?? ++this.explainGeneration;
+    void this.actions.explain(key).then((outcome) => {
+      // A stale answer must not paint over a newer open: the user may have
+      // explained another key — or closed this one — while the fetch flew.
+      if (gen !== this.explainGeneration || this.explainKey !== key) {
+        return;
+      }
+      this.explainBusy = false;
+      // Exclusive: the body renders the error first, so a stale one would mask
+      // a fresh trace — and a stale trace would do the same to a fresh error.
+      // Whichever this newest answer is, it is the only one still standing.
+      if (outcome.ok) {
+        this.explainResp = outcome.resp;
+        this.explainError = "";
+      } else {
+        this.explainResp = null;
+        this.explainError = outcome.error;
+      }
+      this.rerenderKeepingUserState();
+    });
+  }
+
+  /** The trace body for the open row: busy, refusal, or the ResolvedValue the
+   *  daemon answered — effective value, default, merge policy, then each
+   *  candidate's value, location, and verdict, plus per-leaf origins for
+   *  composite keys. */
+  private renderExplainBody(): HTMLElement {
+    const body = h("div", { class: "af-config-explain-body", role: "status" });
+    if (this.explainBusy) {
+      body.append(h("div", { class: "af-config-explain-line" }, "Resolving provenance…"));
+      return body;
+    }
+    if (this.explainError !== "") {
+      body.append(h("div", { class: "af-config-error", role: "alert" }, this.explainError));
+      return body;
+    }
+    const v: ResolvedValue | undefined = this.explainResp?.explanation;
+    if (!v) {
+      body.append(h("div", { class: "af-config-error", role: "alert" }, "The daemon returned no explanation."));
+      return body;
+    }
+
+    body.append(
+      h("div", { class: "af-config-explain-effective" }, `${v.key} = ${explainValueText(v.value)}`),
+      h(
+        "div",
+        { class: "af-config-explain-line" },
+        v.default ? `default: ${v.default} · ` : "",
+        `policy: ${v.merge} · ${v.precedence.join(" < ")}`,
+      ),
+    );
+    for (const cand of v.candidates) {
+      const result = cand.reason !== "" ? `${cand.result} · ${cand.reason}` : cand.result;
+      const value = cand.present ? explainValueText(cand.value) : "—";
+      const location = cand.path ? `${cand.path}:${cand.key_path}` : "compiled default";
+      body.append(
+        h("div", { class: `af-config-explain-cand af-config-explain-${cand.result}` },
+          h("div", { class: "af-config-explain-layer" }, `${cand.layer}: ${result}`),
+          h("div", { class: "af-config-explain-src" }, `${value} · ${location}`),
+        ),
+      );
+    }
+    const origins = v.origins ?? {};
+    const leaves = Object.keys(origins).sort();
+    if (leaves.length > 0) {
+      body.append(h("div", { class: "af-config-explain-line" }, "origins:"));
+      for (const leaf of leaves) {
+        const origin = origins[leaf];
+        const location = origin.path ? `${origin.path}:${origin.key_path}` : "compiled default";
+        body.append(
+          h("div", { class: "af-config-explain-src" }, `${leaf}: ${origin.layer} · ${location}`),
+        );
+      }
+    }
+    // The route is explicit about this (running_value_checked): the trace says
+    // what the FILES resolve to, which is also what the next start reads — a
+    // running daemon's snapshot is a different question.
+    body.append(
+      h("div", { class: "af-config-explain-note" }, "On-disk sources · the running daemon's value was not checked."),
+    );
+    return body;
   }
 
   /** The control for one key, chosen from the manifest's own description of it:
@@ -399,9 +940,32 @@ export class ConfigPane {
     if (this.editing === e.key) {
       this.editingInput = input;
     }
+    // A same-key Enter-save closes this field (update() clears `editing` before the
+    // rerender), so the gate above does not re-point `editingInput` at the rebuilt
+    // input — and `rerenderKeepingUserState`'s `if (wasEditing && this.editingInput)`
+    // restoration then no-ops, dropping focus to <body>. The user's next keystrokes
+    // become document shortcuts (`[`/`]` cycle the view) or, for any other printable
+    // key, are silently swallowed (`decideKey` returns `{kind:"none"}` without
+    // preventDefault for a body-focused key in config view). #2955's gate covered
+    // only the unrelated-rebuild case; the same-key variation was never analyzed.
+    //
+    // Keep the handle live for the row that HELD FOCUS so the existing restoration
+    // branch hands focus (and the caret) back to its replacement. `restoreKey` is
+    // read rather than `status.key` because the two diverge exactly when it matters
+    // — see rerenderKeepingUserState. The `=== null` guard means an actively-edited
+    // row's capture above always wins. This re-points the handle on every rebuild
+    // that finds the row still focused, including the one the post-save refetch
+    // triggers, so focus survives both renders. It does not re-open the edit:
+    // `editing` stays null and the Save button stays disabled via `canCommit`
+    // against the refreshed `e.value`.
+    if (this.restoreKey === e.key && this.editingInput === null) {
+      this.editingInput = input;
+    }
     input.setAttribute("aria-label", e.key);
 
     const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
+
+    const dirty = h("span", { class: "af-config-dirty", role: "status" }, "Unsaved");
 
     // ONE gate, both gestures. There are two ways to commit this field — the
     // button and Enter — and they must agree. Enter used to call save()
@@ -418,11 +982,13 @@ export class ConfigPane {
 
     const syncSave = () => {
       save.disabled = !canCommit(input.value, e.value);
+      dirty.hidden = save.disabled;
     };
 
     input.addEventListener("input", () => {
       this.editing = e.key;
       this.draft = input.value;
+      this.editingInput = input;
       syncSave();
     });
     input.addEventListener("keydown", (ev: KeyboardEvent) => {
@@ -434,6 +1000,6 @@ export class ConfigPane {
     save.addEventListener("click", commit);
     syncSave();
 
-    return h("div", { class: "af-config-control" }, input, save);
+    return h("div", { class: "af-config-control" }, input, dirty, save);
   }
 }

@@ -1,6 +1,8 @@
 package apiclient
 
 import (
+	"context"
+
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -10,12 +12,34 @@ import (
 // to /v1/Snapshot and unwraps resp.Instances from the shared envelope, so its
 // result is byte-identical to daemon.SnapshotNoSpawn's on a running daemon. Like
 // the RPC read it is scoped by req.RepoID (empty = all repos).
-func (c *Client) Snapshot(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
+func (c *Client) Snapshot(req daemon.SnapshotRequest) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+	return c.SnapshotCtx(context.Background(), req)
+}
+
+// SnapshotCtx is Snapshot bounded by ctx.
+//
+// The LOCAL unix socket deliberately carries no overall request timeout (see
+// Client.requestTimeout), because most local RPCs return from an in-memory read
+// and a create legitimately runs long. That leaves one gap: a daemon that
+// ACCEPTS the connection and then never answers blocks the caller forever — the
+// 250ms dial timeout has already been satisfied by then.
+//
+// A read-only diagnostic must not hang on that. `af doctor`'s orphaned-pin
+// collector (#3560) bounds this read and treats the deadline as "the session
+// inventory could not be read", which reports UNKNOWN and refuses every removal
+// — the same answer an unreachable daemon produces.
+//
+// The second return carries repos the daemon dropped at startup due to a
+// corrupted instances.json, so the caller can refuse or caveat instead of
+// silently serving a partial list (#603 closed over the wire). Empty when no
+// repo was skipped; absent (also empty) on an older daemon that predates the
+// field.
+func (c *Client) SnapshotCtx(ctx context.Context, req daemon.SnapshotRequest) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	var resp daemon.SnapshotResponse
-	if err := c.call("Snapshot", req, &resp); err != nil {
-		return nil, err
+	if err := c.callCtx(ctx, "Snapshot", req, &resp); err != nil {
+		return nil, nil, err
 	}
-	return resp.Instances, nil
+	return resp.Instances, resp.SkippedRepos, nil
 }
 
 // SnapshotNoSpawn is a drop-in for daemon.SnapshotNoSpawn over the HTTP API: it
@@ -32,20 +56,48 @@ func (c *Client) Snapshot(req daemon.SnapshotRequest) ([]session.InstanceData, e
 // missing token MUST surface as an auth error rather than be masked by a
 // same-machine disk read. So a remote failure returns the real error verbatim;
 // the caller (api/sessions.go) suppresses its disk fallback when IsRemoteTarget().
-func SnapshotNoSpawn(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
+//
+// The second return carries the daemon's startup-time skipped repos (#603
+// closed over the wire); see SnapshotCtx.
+func SnapshotNoSpawn(req daemon.SnapshotRequest) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	c, err := NewTargeted()
 	if err != nil {
 		if IsRemoteTarget() {
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, daemon.ErrDaemonUnavailable
+		return nil, nil, daemon.ErrDaemonUnavailable
 	}
-	instances, err := c.Snapshot(req)
+	instances, skipped, err := c.Snapshot(req)
 	if err != nil {
 		if IsRemoteTarget() {
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, daemon.ErrDaemonUnavailable
+		return nil, nil, daemon.ErrDaemonUnavailable
 	}
-	return instances, nil
+	return instances, skipped, nil
+}
+
+// CallerNoSpawn returns the session a sandbox credential is bound to together
+// with that session's (narrowed) row (#5571 W3.2). ok is false when the daemon
+// reports no bound caller — an operator credential, an older daemon, or no
+// daemon at all — so the caller falls back to resolving by tmux name. It never
+// starts a daemon.
+func CallerNoSpawn() (row session.InstanceData, ok bool, err error) {
+	c, err := NewTargeted()
+	if err != nil {
+		return session.InstanceData{}, false, err
+	}
+	var resp daemon.SnapshotResponse
+	if err := c.callCtx(context.Background(), "Snapshot", daemon.SnapshotRequest{}, &resp); err != nil {
+		return session.InstanceData{}, false, err
+	}
+	if resp.Caller == "" {
+		return session.InstanceData{}, false, nil
+	}
+	for _, d := range resp.Instances {
+		if d.ID == resp.Caller {
+			return d, true, nil
+		}
+	}
+	return session.InstanceData{}, false, nil
 }

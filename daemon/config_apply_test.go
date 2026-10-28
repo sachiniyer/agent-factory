@@ -1,15 +1,12 @@
 package daemon
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
@@ -28,33 +25,6 @@ func applyConfigTestManager(t *testing.T) *Manager {
 // A plain `af` launch is the apply boundary for a hand-edited global theme. It
 // must not apply an unrelated listener/auth/program edit as a side effect, and an
 // already-open web client needs an events-plane signal to fetch the new palette.
-func TestApplyThemeChangesOnlyThemeAndPublishes(t *testing.T) {
-	m := applyConfigTestManager(t)
-	_, events := m.events.subscribe()
-	home := os.Getenv("AGENT_FACTORY_HOME")
-	require.NotEmpty(t, home)
-	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName), []byte(`schema_version = 1
-default_program = "codex"
-listen_addr = "127.0.0.1:9999"
-theme = "zenburn"
-`), 0o600))
-
-	changed, err := m.ApplyTheme()
-	require.NoError(t, err)
-	require.True(t, changed)
-	assert.Equal(t, "zenburn", m.Config().Theme.Preset())
-	assert.Equal(t, config.DefaultConfig().DefaultProgram, m.Config().DefaultProgram,
-		"theme-only launch apply must not advance unrelated config")
-	assert.Equal(t, config.DefaultConfig().ListenAddr, m.Config().ListenAddr,
-		"theme-only launch apply must never attempt a listener rebind")
-
-	select {
-	case event := <-events:
-		assert.Equal(t, agentproto.EventThemeChanged, event.Type)
-	default:
-		t.Fatal("theme apply did not notify connected event subscribers")
-	}
-}
 
 // TestApplyConfigSwapsLiveConfig: a hot-reloadable key written to disk is live via
 // Config() after ApplyConfig, with no restart, and is reported Applied.
@@ -170,6 +140,14 @@ func TestApplyConfigReportsBranchPrefixPending(t *testing.T) {
 // the daemon diffs is classified applied-live or next-daemon-start — never
 // client-side, never unclassified — so ApplyConfig can never file a key into a
 // bucket the notice would describe a different way.
+//
+// It also pins the REVERSE direction: every daemon-applied effect key
+// (EffectAppliedLive or EffectNextDaemonStart) must have a keyDiff entry, or a
+// change to it falls through the bucketing loop in ApplyConfig and is silently
+// dropped from ApplyConfigResult.Applied/Pending — the wire-contract gap that
+// dropped watcher_events_per_minute and upgrade_clear_unverifiable_artifacts.
+// Client-only (EffectNextAfLaunch) keys are intentionally absent from keyDiff:
+// the daemon never reads them, so there is nothing for ApplyConfig to diff.
 func TestApplyBucketsAgreeWithEffectClasses(t *testing.T) {
 	for key := range keyDiff {
 		switch config.KeyEffectClass(key) {
@@ -180,12 +158,21 @@ func TestApplyBucketsAgreeWithEffectClasses(t *testing.T) {
 				key, config.KeyEffectClass(key))
 		}
 	}
+	for _, key := range config.AllEffectClassifiedKeys() {
+		switch config.KeyEffectClass(key) {
+		case config.EffectAppliedLive, config.EffectNextDaemonStart:
+			if _, ok := keyDiff[key]; !ok {
+				t.Errorf("daemon-applied key %q is missing from keyDiff, so ApplyConfig silently drops changes to it from Applied/Pending",
+					key)
+			}
+		}
+	}
 }
 
 // Turning require_token OFF must not leave sandbox callback credentials behind
 // (#2999, #3012 review).
 //
-// mintSandboxCallback refuses to ISSUE one while require_token is false, because a
+// mintSandboxCallbackFenced refuses to ISSUE one while require_token is false, because a
 // scoped credential against a listener that authenticates nobody enforces nothing.
 // That check runs once, at provision time, and auth keys apply live with no rebind
 // — so without this, relaxing the key silently converts every already-issued
@@ -212,11 +199,16 @@ func TestApplyConfig_DisablingRequireTokenRevokesSandboxCredentials(t *testing.T
 	_, ok = m.sandboxTokens.sessionFor(secret)
 	assert.False(t, ok, "a credential issued under require_token=true must not outlive it: the gate short-circuits on the tokenless posture before consulting the registry, so its scope stops being enforced")
 
-	// And the operator must be TOLD, including that this does not re-isolate the
-	// sandboxes — revoking without saying so would read as a security action.
+	// And the operator must be TOLD. This test manager binds no TCP listener,
+	// so the warning takes the no-endpoint variant (#5137 review): it must not
+	// claim the control plane "answers unauthenticated callers" when nothing
+	// is serving on the network.
 	joined := strings.Join(result.Warnings, "\n")
 	assert.Contains(t, joined, "network.require_token is now false")
-	assert.Contains(t, joined, "does not re-isolate")
+	assert.Contains(t, joined, "no TCP control listener is serving")
+	assert.NotContains(t, joined, "answers unauthenticated callers",
+		"no TCP endpoint is serving — the warning must not claim a live unauthenticated exposure")
+	assert.NotContains(t, joined, "NOTE:", "warning prose must not use a shouted emphasis prefix")
 }
 
 // The converse: an unrelated config change must leave credentials alone, or every
@@ -239,4 +231,51 @@ func TestApplyConfig_UnrelatedChangeKeepsSandboxCredentials(t *testing.T) {
 	owner, ok := m.sandboxTokens.sessionFor(secret)
 	assert.True(t, ok, "an unrelated save must not revoke callback credentials")
 	assert.Equal(t, "sess-a", owner)
+}
+
+// TestApplyConfig_UnrelatedChangeWhileExposedDoesNotResurfaceExposureNotice is the
+// regression for the warning-fatigue bug at the apply-time exposure-notice emitter:
+// config.ListenerExposureNotice is a stateless predicate of the CURRENT posture, so
+// calling it unconditionally on every ApplyConfig re-surfaces the notice on every
+// unrelated save (default_program, etc.) while the daemon already holds a
+// tokenless non-loopback bind — training an operator to ignore the one notice that
+// says their control API is reachable with no auth. The other two emitters
+// (exposureWarning per-write, the bind-time caller in listener_reload.go) both gate
+// the notice to the transition that creates the exposure; the apply-time caller must
+// match them and emit only on the transition INTO the exposed posture.
+func TestApplyConfig_UnrelatedChangeWhileExposedDoesNotResurfaceExposureNotice(t *testing.T) {
+	m := applyConfigTestManager(t)
+
+	// Enter the exposed posture: non-loopback listen_addr + require_token=false,
+	// opted in — since #5137 the same pair without allow_unauthenticated_network
+	// is a refused write, not an exposure, so the warn-and-serve surface this
+	// test pins only exists under the explicit opt-in.
+	_, err := config.SetGlobalConfigValue("network.allow_unauthenticated_network", "true")
+	require.NoError(t, err)
+	_, err = config.SetGlobalConfigValue("network.listen_addr", "0.0.0.0:8443")
+	require.NoError(t, err)
+	_, err = config.SetGlobalConfigValue("network.require_token", "false")
+	require.NoError(t, err)
+	first, applyErr := m.ApplyConfig()
+	require.NoError(t, applyErr)
+	// Anti-vacuous: the transition into exposure MUST surface the notice here, or
+	// the gate below could pass by never emitting at all.
+	joinedFirst := strings.Join(first.Warnings, "\n")
+	require.True(t, strings.Contains(joinedFirst, "reachable from the network"),
+		"the transition into the exposed posture must surface the exposure notice, got: %s", joinedFirst)
+
+	// Now make an UNRELATED change: default_program.
+	_, err = config.SetGlobalConfigValue("default_program", "codex")
+	require.NoError(t, err)
+	result, applyErr := m.ApplyConfig()
+	require.NoError(t, applyErr)
+
+	require.Contains(t, result.Applied, "default_program")
+	require.NotContains(t, result.Applied, "network.listen_addr")
+	require.NotContains(t, result.Applied, "network.require_token")
+
+	joined := strings.Join(result.Warnings, "\n")
+	if strings.Contains(joined, "reachable from the network") {
+		t.Fatalf("BUG: exposure notice resurfaced on an unrelated change while exposed. Warnings:\n%s", joined)
+	}
 }

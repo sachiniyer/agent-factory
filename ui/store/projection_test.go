@@ -1,16 +1,16 @@
 package store
 
 import (
-	"bytes"
 	"testing"
 
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-func captureProjectionErrorLog(t *testing.T) *bytes.Buffer {
+func captureProjectionErrorLog(t *testing.T) *logtest.Buffer {
 	t.Helper()
-	var buf bytes.Buffer
+	var buf logtest.Buffer
 	prev := aflog.ErrorLog.Writer()
 	aflog.ErrorLog.SetOutput(&buf)
 	t.Cleanup(func() { aflog.ErrorLog.SetOutput(prev) })

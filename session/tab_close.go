@@ -10,28 +10,6 @@ import "fmt"
 // until its 15s keepalive gave up, with nothing on the wire to say the tab went
 // away).
 
-// CloseTab kills the tab at idx, ends its PTY stream, and removes it from Tabs.
-// The agent tab (idx 0) is unclosable; CloseTab errors on idx 0 or any
-// out-of-range index. The tab is removed from Tabs regardless of whether the tmux
-// teardown succeeds (best-effort, matching LocalBackend.Kill) so a broken session
-// can't wedge the tab list. Unlike Kill this does not wait for the pane to exit:
-// the worktree is not being removed, so there is no #802 delete race to guard
-// against.
-func (i *Instance) CloseTab(idx int) error {
-	i.mu.Lock()
-	if idx < 0 || idx >= len(i.Tabs) {
-		i.mu.Unlock()
-		return fmt.Errorf("session %q has no tab at index %d", i.Title, idx)
-	}
-	if idx == 0 {
-		i.mu.Unlock()
-		return fmt.Errorf("the agent tab of session %q can't be closed: it is the session's own agent, pinned to the first slot — archive or kill the session instead", i.Title)
-	}
-	tab := i.removeTabLocked(idx)
-	i.mu.Unlock()
-	return i.closeRemovedTabRetainingCleanup(tab)
-}
-
 // CloseTabByID removes the tab with stable id, selecting and removing it in the
 // same critical section. An ordinal resolved from an earlier snapshot is never
 // applied to the live roster (#2200).
@@ -70,6 +48,7 @@ func (i *Instance) closeRemovedTabRetainingCleanup(tab *Tab) error {
 	if handle, _ := stageTabCleanup(nil, tab); handle != nil {
 		i.mu.Lock()
 		i.pendingTabCleanup = append(i.pendingTabCleanup, *handle)
+		i.touchLocked()
 		i.mu.Unlock()
 	}
 	return err
@@ -130,6 +109,7 @@ func (i *Instance) CloseTabByIDWithCommit(
 		return CommittedTabClose{}, fmt.Errorf("tab cannot be closed")
 	}
 
+	updatedAt := i.UpdatedAt
 	tab := i.removeTabLocked(idx)
 	handle, staged := stageTabCleanup(i.pendingTabCleanup, tab)
 	i.pendingTabCleanup = staged
@@ -144,6 +124,7 @@ func (i *Instance) CloseTabByIDWithCommit(
 		copy(i.Tabs[idx+1:], i.Tabs[idx:])
 		i.Tabs[idx] = tab
 		i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, handle)
+		i.UpdatedAt = updatedAt
 		i.mu.Unlock()
 		return CommittedTabClose{}, err
 	}
@@ -158,7 +139,11 @@ func (i *Instance) CloseTabByIDWithCommit(
 	// Confirmed dead. Retire the handle and hand the caller the projection that
 	// records the retirement.
 	i.mu.Lock()
+	before := len(i.pendingTabCleanup)
 	i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, handle)
+	if len(i.pendingTabCleanup) != before {
+		i.touchLocked()
+	}
 	settled := i.toInstanceDataLocked()
 	i.mu.Unlock()
 	return CommittedTabClose{Settled: &settled}, nil
@@ -228,6 +213,7 @@ func restoredTabCleanup(data []TabCleanupData) []TabCleanupData {
 func (i *Instance) removeTabLocked(idx int) *Tab {
 	tab := i.Tabs[idx]
 	i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
+	i.touchLocked()
 	return tab
 }
 
@@ -243,7 +229,7 @@ func (i *Instance) closeRemovedTab(tab *Tab) error {
 	i.endTabPTYStream(tab.ID)
 
 	if tab.tmux == nil {
-		return nil
+		return i.closeOffBoxTab(tab)
 	}
 	// Pane state deliberately ignored: closing ONE tab touches no worktree, so
 	// nothing destructive follows an unknown here. (A Close that fails after the

@@ -108,12 +108,12 @@ func TestBriefingStatesTheScopeFence(t *testing.T) {
 // the network must never leave the token off. If this text drifts, the walkthrough
 // can talk a user into an unauthenticated control plane on their LAN.
 //
-// #2168 Phase 0 made this rule MORE load-bearing, not less. af no longer refuses
-// the pairing, so a walkthrough that writes it gets no correction from the daemon
-// — the briefing is the last thing standing between a user who asked for "access
-// from my phone" and an open control plane. Hence the pinned phrase is now about
-// the agent's own initiative: it may write the pairing if the user insists, and
-// must never reach for it unprompted.
+// #5137 made the pairing fail closed: af config set rejects a non-loopback
+// listen_addr while require_token is off, so the briefing must order the token
+// write first and name the explicit opt-in — network.allow_unauthenticated_network
+// — for the user who insists. The pinned phrase still covers the agent's own
+// initiative: it may write the pairing if the user insists, and must never reach
+// for it unprompted.
 func TestBriefingCouplesListenAddrToRequireToken(t *testing.T) {
 	for _, mode := range []Mode{ModeOnboard, ModeChange} {
 		out := BuildBriefing(mode, briefingConfig(), "/tmp/af/config.toml")
@@ -122,6 +122,7 @@ func TestBriefingCouplesListenAddrToRequireToken(t *testing.T) {
 			"af config set network.require_token true",
 			"Never write a non-loopback network.listen_addr with network.require_token = false on your own",
 			"network.require_token = false",
+			"network.allow_unauthenticated_network",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("mode %s: briefing is missing the listen_addr/require_token coupling text %q", mode, want)
@@ -165,7 +166,7 @@ func TestBriefingSetsStructuredKeysThroughConfigSet(t *testing.T) {
 	out := BuildBriefing(ModeOnboard, briefingConfig(), "/tmp/af/config.toml")
 
 	for _, key := range []string{
-		"theme", "keys", "root_agents", "root_agent", "program_overrides",
+		"keys", "root_agents", "root_agent", "program_overrides",
 		"limit_patterns", "session_env_passthrough",
 	} {
 		if !strings.Contains(out, "`"+key+"`") {
@@ -188,8 +189,8 @@ func TestBriefingSetsStructuredKeysThroughConfigSet(t *testing.T) {
 			t.Errorf("briefing still directs a raw structured edit: %q", retired)
 		}
 	}
-	if !strings.Contains(out, "do not offer to pick hex values") {
-		t.Error("briefing should still tell the agent not to pick hex values slot by slot in conversation")
+	if !strings.Contains(out, "custom color editing is retired") {
+		t.Error("briefing must restrict appearance to fixed modes")
 	}
 	if !strings.Contains(out, "`af config set network.cors_allowed_origins <value>`") {
 		t.Error("the assistant must use the canonical settable network key for the CORS list")
@@ -203,16 +204,6 @@ func TestBriefingUsesPerKeyEffectNoticeForStructuredSettings(t *testing.T) {
 	}
 	if strings.Contains(out, "same validated, immediate-apply") {
 		t.Error("briefing still claims every structured setting applies immediately")
-	}
-}
-
-func TestBriefingAllowsPartialCustomThemeObjects(t *testing.T) {
-	out := BuildBriefing(ModeOnboard, briefingConfig(), "/tmp/af/config.toml")
-	if !strings.Contains(out, "only the requested color slots") {
-		t.Error("briefing must explain that a custom theme object may contain only requested slots")
-	}
-	if strings.Contains(out, "containing all") {
-		t.Error("briefing still requires every color slot in a custom theme object")
 	}
 }
 

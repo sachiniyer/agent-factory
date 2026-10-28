@@ -21,6 +21,10 @@ const (
 	TomlConfigFileName        = "config.toml"
 	defaultProgram            = tmux.ProgramClaude
 	defaultDaemonPollInterval = 1000
+	// DefaultWatcherEventsPerMinute preserves the original hard-coded watch-task
+	// delivery cap while making it available to the daemon and the config
+	// manifest from one source of truth.
+	DefaultWatcherEventsPerMinute = 10
 	// defaultListenAddr is the daemon's default web/API/WS bind address: the
 	// loopback interface on 8443. The web UI is bundled with the daemon and
 	// served here by default (plain HTTP, no TLS) — a same-machine browser at
@@ -114,6 +118,26 @@ func ResolveUserPath(path string) (string, error) {
 	return filepath.Abs(ExpandTilde(path))
 }
 
+// ResolveDaemonHostPath is the RPC-boundary counterpart of ResolveUserPath: it
+// normalizes a path a remote caller sent the daemon — surrounding whitespace
+// trimmed, a leading "~" expanded against the daemon host's home — and refuses
+// anything that is still not absolute. The daemon has no access to the caller's
+// working directory, so resolving a relative path would silently land on the
+// daemon's own cwd: an unrelated checkout for an ad-hoc daemon, / under systemd
+// (#4821).
+//
+// The returned string is the value that was checked, and callers must pass THAT
+// on rather than the raw input. Checking a trimmed copy while storing the raw
+// one re-opens the hole this closes: " /repo" passes the check and then
+// resolves against the cwd as the relative name " /repo" (#4789 round 7).
+func ResolveDaemonHostPath(path string) (string, error) {
+	normalized := ExpandTilde(strings.TrimSpace(path))
+	if !filepath.IsAbs(normalized) {
+		return "", fmt.Errorf("path %q must be absolute (or start with ~/): the daemon resolves it on its own filesystem and has no access to your working directory", path)
+	}
+	return normalized, nil
+}
+
 // GetConfigDir returns the path to the application's configuration directory.
 // If AGENT_FACTORY_HOME is set, it is used as the config directory.
 // Otherwise, defaults to ~/.agent-factory.
@@ -175,6 +199,32 @@ type Config struct {
 	// (typically a full path with flags). When unset for an agent, the
 	// bare agent name is used and resolved via $PATH.
 	ProgramOverrides map[string]string `json:"program_overrides,omitempty" toml:"program_overrides,omitempty"`
+	// DefaultAccounts maps an agent name (key) to the credential account (value)
+	// a session for that agent runs as when the create names none (#3386).
+	//
+	// KEYED BY AGENT, and that is the whole design rather than a convenience. An
+	// account is a directory in ONE agent's registry: claude's "work" and codex's
+	// "work" are different identities that merely share a spelling. A single
+	// scalar default would therefore have to be re-interpreted against whichever
+	// agent the session resolved to, and the two ways of doing that are both
+	// wrong — refuse the create (a project default that breaks every session on a
+	// second agent), or look the name up in the other agent's registry (a session
+	// silently running as an identity nobody chose, the #2983 outcome). A map has
+	// neither failure: an agent with no entry gets the ambient identity, exactly
+	// as before this key existed.
+	//
+	// Keys are the agents sessionenv.AccountAgents() reports, which is narrower
+	// than tmux.SupportedPrograms: an agent with no credential-root variable
+	// cannot be scoped to an account at all, so an entry for one would be
+	// silently inert. Values are account NAMES, validated for shape here and for
+	// EXISTENCE at create time — the create is where a missing account matters,
+	// and it refuses rather than falling back to the ambient identity.
+	//
+	// Admitted globally and in the machine-local personal per-project layer, and
+	// deliberately NOT in a checked-in repo file: identity policy is never
+	// checked in, and a committed account name is meaningless for everyone else
+	// who clones the repository (the #3174 precedent for limit_account_candidates).
+	DefaultAccounts map[string]string `json:"default_accounts,omitempty" toml:"default_accounts,omitempty"`
 	// SessionEnvPassthrough extends the built-in, default-deny environment for
 	// agent sessions with exact variable names. It is deliberately global-only:
 	// a cloned repository must never be able to request a credential from the
@@ -203,6 +253,13 @@ type Config struct {
 	// Default strict, so an existing backend=ssh user sees no change; accept-new
 	// writes learned keys to an af-owned store, never the user's ~/.ssh/known_hosts.
 	SSHHostKeyVerification string `json:"ssh_host_key_verification" toml:"ssh_host_key_verification"`
+	// Hosts is the operator-owned named host list (#5571 W6.1): name → ssh
+	// destination. Global-only — af executes against these and sends credentials
+	// to them, so no repo layer can set or extend it. See HostConfig.
+	Hosts map[string]HostConfig `json:"hosts,omitempty" toml:"hosts,omitempty"`
+	// DefaultHost names the Hosts entry used when a session does not pick one.
+	// Empty means no default. Global-only, like Hosts.
+	DefaultHost string `json:"default_host,omitempty" toml:"default_host,omitempty"`
 	// SandboxSSH is the free-form `ssh …` command the `sandbox` backend runs to
 	// reach the sandbox host — any invocation that already works for the operator
 	// (jump hosts, ProxyCommand, custom ports/flags/keys; #2476). It is
@@ -216,6 +273,24 @@ type Config struct {
 	// operator's ssh_config / known_hosts / ProxyCommand are the authority (unlike
 	// the x/crypto `ssh` backend, which af enforces via ssh_host_key_verification).
 	SandboxSSH string `json:"sandbox_ssh,omitempty" toml:"sandbox_ssh,omitempty"`
+	// SandboxBinary is a daemon-local path to an `af` binary the sandbox/ssh
+	// backends stream to the remote host instead of the daemon's own binary or
+	// a release download — the override for air-gapped hosts and hosts whose
+	// platform has no published artifact (#5571 W2.2). The file must be a
+	// static build for the host's platform; af still runs it on the host and
+	// requires its `version` to equal the daemon's before launch. Global-only,
+	// like sandbox.ssh: the daemon reads the path and streams the file, so a
+	// repo-settable value would let a cloned repository exfiltrate an arbitrary
+	// local path or install an arbitrary binary on every sandbox host.
+	SandboxBinary string `json:"sandbox_binary,omitempty" toml:"sandbox_binary,omitempty"`
+	// MoveCmd is the operator-written script af runs on the daemon box when it
+	// moves a live local session to a sandbox (`af sessions move`, W7.9): JSON spec
+	// on stdin, AF_SSH / AF_SSH_DEST / AF_SSH_FULL in the environment. It is
+	// deliberately global-only: af EXECUTES it with the session's environment and
+	// the operator's credentials in reach, so a repository must never choose it —
+	// a checked-in value is a load error, not a warning. The user writes the
+	// script; the repo only ever has a session worth moving.
+	MoveCmd string `json:"move_cmd,omitempty" toml:"move_cmd,omitempty"`
 	// AutoUpdate controls the startup self-update check. It defaults to true:
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.
@@ -224,6 +299,10 @@ type Config struct {
 	// stored internally in milliseconds. Config accepts a Go duration string such
 	// as "1500ms" or "30m"; the legacy integer-millisecond form remains valid.
 	DaemonPollInterval int `json:"daemon_poll_interval" toml:"daemon_poll_interval"`
+	// WatcherEventsPerMinute caps how many events each watch task may deliver in
+	// one rolling minute. Excess source events are discarded deliberately; the
+	// task's DroppedEvents counter makes that loss visible. Must be positive.
+	WatcherEventsPerMinute int `json:"watcher_events_per_minute" toml:"watcher_events_per_minute"`
 	// LogMaxSizeMB is the size cap (MB) for agent-factory.log. When the log
 	// exceeds it, the file is rotated (renamed to .1, older backups shifted
 	// up). Must be positive; non-positive values fall back to the default.
@@ -255,11 +334,26 @@ type Config struct {
 	// additionally tracks the automatic 1.x.y-preview-z prereleases.
 	// Any other value falls back to stable with a warning.
 	UpdateChannel string `json:"update_channel" toml:"update_channel"`
-	// Theme is the global-only TOML palette (#1389): either a named preset or a
-	// custom [theme] table, shared by the TUI and web. It is intentionally
-	// TOML-only because legacy config.json is frozen and a cloned repo must never
-	// be able to recolor a user's interfaces.
-	Theme ThemeConfig `json:"-" toml:"theme"`
+	// UpgradeClearUnverifiableArtifacts lets an upgrade set aside binaries staged
+	// beside the af executable whose owning agent-factory home af cannot read
+	// (#3864), instead of refusing to upgrade while they are there.
+	//
+	// Off by default, and the default is the whole point: an unreadable claim is
+	// still a claim, and an unmounted home reports exactly what a finished
+	// transaction does, so af refuses and names the file rather than guessing. A
+	// leftover af CAN attribute — one whose home says it is finished, or one
+	// nothing records at all and nothing has touched in an hour — is already set
+	// aside without this. Turn it on for a box where an upgrade keeps refusing on
+	// a staged artifact you have looked at and know is dead.
+	UpgradeClearUnverifiableArtifacts bool `json:"upgrade_clear_unverifiable_artifacts" toml:"upgrade_clear_unverifiable_artifacts"`
+	// Appearance is global-only; a cloned repository cannot choose TUI colours.
+	Appearance string `json:"-" toml:"appearance"`
+	// Web holds the browser client's display preferences (#5500): today the
+	// xterm font size per device class, so the web terminal's +/- controls can
+	// persist a different size for the phone breakpoint and for desktop. Global-
+	// only for the same reason as Appearance — a cloned repository must not
+	// choose the operator's display settings.
+	Web WebConfig `json:"web,omitempty" toml:"web,omitempty"`
 	// RootAgents opts specific repositories into an always-ensured "root"
 	// session (#1106): for each entry the daemon creates a reserved session
 	// titled "root" in-place at the repo root (the `af sessions create
@@ -292,16 +386,25 @@ type Config struct {
 	// retry from PR2) and the scheduler does zero work. Deliberately GLOBAL-ONLY
 	// (it configures daemon behavior), like daemon_poll_interval.
 	LimitAutoResume bool `json:"limit_auto_resume" toml:"limit_auto_resume"`
+	// LimitAccountCandidates is the ordered, explicit set of registered account
+	// names the usage-limit scheduler may select when a session is blocked. An
+	// empty list (the default) disables account switching. The same names are
+	// resolved in the limited session's agent namespace, so a nonexistent account
+	// is skipped rather than reinterpreted. Admitted globally and from the
+	// machine-local personal-project layer, never checked-in repo config: a clone
+	// cannot opt the operator into changing identity or billing account.
+	LimitAccountCandidates []string `json:"limit_account_candidates,omitempty" toml:"limit_account_candidates,omitempty"`
 	// GlobalAgentSkills opts af into writing its "agent-factory" skill file
 	// into the USER'S GLOBAL per-agent config directories — codex's
 	// $CODEX_HOME/skills, gemini's ~/.gemini/skills, amp's
-	// ~/.config/amp/skills — so those agents discover af's CLI guidance
-	// (#1977). DEFAULT FALSE: creating a session is not consent to edit the
-	// user's global tool configuration, and a file written there outlives the
-	// session, survives uninstalling af, and still loads when the user runs
-	// that agent by hand somewhere af has nothing to do with.
+	// ~/.config/amp/skills, devin's ~/.config/devin/skills — so those agents
+	// discover af's CLI guidance (#1977). DEFAULT FALSE: creating a session is
+	// not consent to edit the user's global tool configuration, and a file
+	// written there outlives the session, survives uninstalling af, and still
+	// loads when the user runs that agent by hand somewhere af has nothing to
+	// do with.
 	//
-	// It governs ONLY the three agents with no per-launch pointer. claude
+	// It governs ONLY the four agents with no per-launch pointer. claude
 	// (--plugin-dir), aider (--read) and opencode (OPENCODE_CONFIG) get the
 	// same guidance from af-OWNED files under af's own config dir, are
 	// unaffected by this key, and stay on unconditionally — nothing of af's
@@ -347,10 +450,13 @@ type Config struct {
 	// DISABLES the web server entirely (no TCP listener, pure-unix daemon). A
 	// routable value like "0.0.0.0:8443" or a LAN/Tailscale IP exposes it to the
 	// network (opt-in). Pair it with require_token=true unless you trust the
-	// network: a non-loopback bind with the token off serves the control plane
-	// unauthenticated, which the daemon ALLOWS and warns about once at startup
-	// (ListenerExposureNotice). #2090 made that combination a startup refusal;
-	// #2168 Phase 0 reversed it — the choice is the operator's, not af's.
+	// network: a non-loopback bind with the token off is REFUSED — the daemon
+	// starts anyway and keeps serving its unix sockets, but the TCP listener
+	// stays unbound (#5137, ListenerBindRefusal) — unless the operator also sets
+	// allow_unauthenticated_network = true to accept the risk explicitly.
+	// #2090 made that combination a fatal startup refusal and crash-looped the
+	// autostart unit; #2168 Phase 0 made it warn-and-serve; #5137 lands between
+	// them: the LISTENER is refused, never the daemon.
 	// The listener is plain HTTP — af terminates no TLS of
 	// its own; put a routable listener behind a reverse proxy (nginx/caddy) or a
 	// private network (Tailscale/VPN) if you need transport encryption. See
@@ -375,11 +481,10 @@ type Config struct {
 	//
 	// The default is safe only because listen_addr is loopback-only
 	// (127.0.0.1:8443): nothing off-box can reach a listener the tokenless posture
-	// applies to. Pairing this default with a NON-loopback listen_addr serves an
-	// unauthenticated control plane to everyone who can route to it. That is
-	// ALLOWED and warned about once at daemon start (ListenerExposureNotice) —
-	// #2090 made it a refusal, #2168 Phase 0 reversed that by owner decision — so
-	// a network bind SHOULD set require_token = true, and af will not do it for you.
+	// applies to. Pairing this default with a NON-loopback listen_addr is
+	// REFUSED: the TCP listener stays unbound while the daemon and its unix
+	// sockets keep working (#5137, ListenerBindRefusal), unless the operator sets
+	// allow_unauthenticated_network = true to accept the exposure explicitly.
 	// Note that require_loopback_token cannot substitute: it is inert while this
 	// key is false, because tokenDisabled short-circuits the gate. The listener is
 	// plain HTTP (no TLS) regardless — this key is only about the token, and the
@@ -412,6 +517,27 @@ type Config struct {
 	// Global-only (daemon network surface), like require_token — a cloned repo must
 	// never be able to flip it. See docs/remote-http-auth.md.
 	RequireLoopbackToken bool `json:"require_loopback_token" toml:"require_loopback_token"`
+	// AllowUnauthenticatedNetwork is the explicit opt-in that releases the
+	// #5137 listener refusal: set it true to let a NON-loopback listen_addr
+	// bind while require_token is false — serving the full control API,
+	// DeliverPrompt included, to anyone who can route to the address with no
+	// authentication and no TLS. It defaults to FALSE, so a non-loopback
+	// tokenless bind is refused out of the box: the daemon starts and the unix
+	// control socket still works, but the TCP listener stays unbound until one
+	// of the three named fixes lands — require_token = true, a loopback
+	// listen_addr, or this key.
+	//
+	// It is deliberately a posture key, not a bind address: it changes nothing
+	// on a loopback or tokened listener, and it is read LIVE like the other
+	// auth-posture keys, so a saved flip takes effect on the running daemon's
+	// next reconcile without a restart. A hand-edit that withdraws it under a
+	// serving tokenless network listener retires that listener at the next
+	// ApplyConfig — the refusal is posture, not a startup check.
+	//
+	// Global-only, like the rest of the network surface: a cloned repo must
+	// never be able to open an unauthenticated network port. See
+	// docs/remote-http-auth.md.
+	AllowUnauthenticatedNetwork bool `json:"allow_unauthenticated_network" toml:"allow_unauthenticated_network"`
 	// PreviewListenAddr binds a SECOND plain-HTTP TCP listener — the dedicated
 	// web-tab PREVIEW origin (#1856). It exists so previews can eventually be
 	// served CROSS-ORIGIN to the SPA (listen_addr): a framed dev server on a
@@ -443,6 +569,35 @@ type Config struct {
 	// Global-only (daemon network surface), like listen_addr: a cloned repo must
 	// never be able to open a network port. See docs/configuration.md.
 	PreviewListenAddr string `json:"preview_listen_addr,omitempty" toml:"preview_listen_addr,omitempty"`
+	// DebugPprof serves the daemon's opt-in runtime profiling endpoint (#3651) at
+	// GET /v1/debug/pprof/{profile} — the stdlib net/http/pprof surface (heap,
+	// goroutine, allocs, profile, block, mutex, trace). It exists to answer the
+	// questions VmHWM and cgroup memory.stat cannot: which allocation site retains
+	// the heap, where goroutines are leaking, what a lock is contending on.
+	//
+	// It DEFAULTS to false and is served ONLY on the daemon's unix control socket,
+	// whose 0600 permissions are the authentication. It is never mounted on the
+	// listen_addr or preview_listen_addr listeners — not behind the bearer token,
+	// not on loopback, not on any interface (daemon/debug_pprof.go registers the
+	// handlers on the unix listener's chain alone, so there is no route to reach
+	// there). With the key false the endpoint returns the ordinary 404
+	// unknown-route envelope, so a daemon that did not opt in looks exactly like
+	// one built before the endpoint existed.
+	//
+	// The reason for both properties is that a heap or goroutine profile is a dump
+	// of live process memory, which on this daemon holds session titles, worktree
+	// paths, and prompt text. Turn it on to investigate, and turn it back off.
+	// AF_DEBUG_PPROF in the daemon's environment overrides this key for one
+	// process (1/true/yes/on, 0/false/no/off), which is the way to profile without
+	// editing config. The block and mutex sampling rates stay at Go's default of 0
+	// — those two profiles read empty until a rate is set separately — so enabling
+	// the endpoint costs nothing while nothing is being collected.
+	//
+	// Read at daemon start (the route table is built once, at bind), so a change
+	// waits for the next daemon start. Global-only, like the listener keys: a
+	// cloned repo must never be able to open a memory-dumping endpoint on the
+	// machine that runs it. See docs/dev/daemon-memory.md.
+	DebugPprof bool `json:"debug_pprof" toml:"debug_pprof"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding
 	// entirely (unlisted actions keep their defaults). TOML-ONLY by design —
@@ -542,13 +697,37 @@ func ResolveProgram(cfg *Config, agent string) string {
 // trusting any additional arguments that came from an operator's shell alias.
 const DetectedClaudePermissionsFlag = "--dangerously-skip-permissions"
 
-// DefaultConfig returns the default configuration. The auto-detected claude
-// command (e.g. "/home/user/.local/bin/claude") is stored in
+// DefaultConfig returns the default configuration. The environment-cached,
+// auto-detected claude command (e.g. "/home/user/.local/bin/claude") is stored in
 // ProgramOverrides["claude"] together with --dangerously-skip-permissions
 // rather than being concatenated into DefaultProgram, which is restricted to
 // a bare agent enum name.
 func DefaultConfig() *Config {
-	cfg := &Config{
+	cfg := staticDefaultConfig()
+	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
+		// An alias can resolve to a full command with flags (e.g. "claude
+		// --model opus"), which is already shell syntax and must not be quoted
+		// wholesale. Quote only a provable executable-path prefix and preserve
+		// the alias-provided argument suffix (#569, #2323).
+		command := shellQuoteDetectedCommand(claudePath)
+		cfg.ProgramOverrides = map[string]string{
+			tmux.ProgramClaude: command + " " + DetectedClaudePermissionsFlag,
+		}
+	}
+
+	return cfg
+}
+
+// staticDefaultConfig returns the compiled-in default configuration without the
+// machine-dependent claude probe. DefaultConfig layers that probe's
+// auto-detected ProgramOverrides on top of this baseline. Callers that only
+// need a provenance baseline for an already-loaded snapshot — notably the
+// daemon-handoff inspection path — must not rerun the probe or reintroduce
+// overrides the operator cleared, so they take this static baseline instead
+// (#5113). The auto-detected claude override is a runtime augmentation of the
+// global layer, not a compiled-in default, so it has no place in this baseline.
+func staticDefaultConfig() *Config {
+	return &Config{
 		SchemaVersion:          GlobalConfigSchemaVersion,
 		DefaultProgram:         defaultProgram,
 		AutoUpdate:             true,
@@ -556,6 +735,7 @@ func DefaultConfig() *Config {
 		RequireLoopbackToken:   false,
 		ListenAddr:             defaultListenAddr,
 		DaemonPollInterval:     defaultDaemonPollInterval,
+		WatcherEventsPerMinute: DefaultWatcherEventsPerMinute,
 		LimitAutoResume:        false,
 		GlobalAgentSkills:      false,
 		LimitRetryInterval:     defaultLimitRetryInterval,
@@ -563,7 +743,7 @@ func DefaultConfig() *Config {
 		LogMaxBackups:          log.DefaultMaxBackups,
 		UpdateChannel:          UpdateChannelStable,
 		SSHHostKeyVerification: SSHHostKeyStrict,
-		Theme:                  DefaultThemeConfig(),
+		Appearance:             "system",
 		WorktreeRoot:           WorktreeRootSibling,
 		BranchPrefix: func() string {
 			user, err := user.Current()
@@ -574,20 +754,9 @@ func DefaultConfig() *Config {
 			return fmt.Sprintf("%s/", strings.ToLower(user.Username))
 		}(),
 		DetachKeys: defaultDetachKeys,
+		Web: WebConfig{
+			TerminalFontSizePhone:   defaultWebTerminalFontSizePhone,
+			TerminalFontSizeDesktop: defaultWebTerminalFontSizeDesktop,
+		},
 	}
-
-	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
-		// An alias can resolve to a full command with flags (e.g. "claude
-		// --model opus"), which is already shell syntax and must not be quoted
-		// wholesale. Quote only a provable executable-path prefix and preserve
-		// the alias-provided argument suffix (#569, #2323).
-		command := shellQuoteDetectedCommand(claudePath)
-		cfg.ProgramOverrides = map[string]string{
-			tmux.ProgramClaude: command + " " + DetectedClaudePermissionsFlag,
-		}
-	} else if err != nil {
-		log.ErrorLog.Printf("failed to get claude command: %v", err)
-	}
-
-	return cfg
 }

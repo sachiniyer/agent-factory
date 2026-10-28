@@ -1,10 +1,8 @@
 package daemon
 
 import (
-	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/task"
 )
 
 // CreateSessionRequest is the daemon-owned session creation contract used by
@@ -22,7 +20,17 @@ type CreateSessionRequest struct {
 	// Account scopes the session to one of the agent's registered credential
 	// accounts (#3051). Empty leaves it on the ambient identity.
 	Account string `json:"account,omitempty"`
-	Prompt  string `json:"prompt"`
+	// AccountSource explains where a NON-REQUESTED account came from — the
+	// `default_accounts` key, the layer, the file, and how to clear it (#3386).
+	// Empty when the client named the account itself.
+	//
+	// `json:"-"` for the reason the provenance fields below are: it is an
+	// assertion the daemon makes about its OWN resolution, never a claim a client
+	// gets to make. It exists so a refusal raised later in the create — an off-box
+	// backend, a cross-agent program_overrides — can tell a user who never typed
+	// --account which config key put an account on their session.
+	AccountSource string `json:"-"`
+	Prompt        string `json:"prompt"`
 	// TaskID records which task's delivery spawned this session, and
 	// MaxConcurrentRuns carries that task's cap so the manager can decide
 	// admission under its own lock — the only place a burst cannot race the check
@@ -63,10 +71,19 @@ type CreateSessionRequest struct {
 	// intact. Incompatible with ForceRemote.
 	InPlace     bool `json:"in_place"`
 	ForceRemote bool `json:"force_remote"`
+	// ValidateFirst asks the daemon to run the create's host-owned checks —
+	// the explicit account against ITS registry and the backend-aware local
+	// prerequisites — before the title is reserved. A remote client cannot run
+	// them (they are answers about the daemon's host), and reserving first can
+	// rename an existing archive for a create that is then refused (#5744).
+	ValidateFirst bool `json:"validate_first,omitempty"`
 	// Backend explicitly selects the session's runtime (the `--backend` create
 	// flag): one of local|docker|ssh|hook. Empty resolves from the repo's
 	// `backend` config key, defaulting to local.
 	Backend string `json:"backend,omitempty"`
+	// Host picks a listed host (the global `hosts` table) for the session — the
+	// `--host` create flag. It selects the ssh runtime; empty means no pick.
+	Host string `json:"host,omitempty"`
 
 	// allowReserved lets the daemon's own root-agent ensure loop (#1106)
 	// create the reserved "root" title that reserveCreate rejects for
@@ -168,12 +185,22 @@ type ArchiveSessionRequest struct {
 	// follow-up). Retained TUI actions send it; one-shot CLI callers resolve by
 	// {Title, RepoID}.
 	ID string `json:"id"`
+	// Push publishes an off-box session's branch to origin before its sandbox is
+	// reaped. The default (false) publishes nothing: the agent stops and the
+	// workspace stays on its host, owned by the archived row (#5571 W8.5).
+	// docker and hook sessions keep no host directory to leave in place, so they
+	// push whatever this says.
+	Push bool `json:"push,omitempty"`
 }
 
 type ArchiveSessionResponse struct {
 	OK bool `json:"ok"`
 	// ArchivedPath is the new on-disk location of the relocated worktree.
 	ArchivedPath string `json:"archived_path"`
+	// ArchivedWorkspace says where an off-box session's work lives after the
+	// archive: the preserved directory on its host, or the pushed branch (#5571
+	// W8.5). Absent for a local archive.
+	ArchivedWorkspace *session.ArchivedWorkspaceData `json:"archived_workspace,omitempty"`
 	// Warning is the FLAT, pre-#3036 wire field, retained for the one direction
 	// the envelope structurally cannot serve: gob encodes the embedded
 	// MutationOutcome as a NESTED field, so a NEWER daemon answering an OLDER
@@ -218,6 +245,11 @@ type RestoreSessionRequest struct {
 	// actions send it so a restore queued for one row cannot resurrect a
 	// different session that reuses the title before dispatch.
 	ID string `json:"id"`
+	// ExpectedDaemonBootID pins a browser request to the daemon incarnation in
+	// the Snapshot that enabled it. A different process refuses before mutation,
+	// so its first Snapshot can safely retire the previous process's client fence.
+	// Empty preserves compatibility for the CLI and older browser clients.
+	ExpectedDaemonBootID string `json:"expected_daemon_boot_id,omitempty"`
 	// ForceReap replaces a REACHABLE sandbox without first pushing its work
 	// (#2923). Recovery refuses that by default, because a sandbox that still
 	// answers may hold commits nothing else has a copy of; this is the operator
@@ -237,98 +269,6 @@ type RestoreSessionResponse struct {
 	MutationOutcome
 }
 
-// DeleteProjectRequest asks the daemon to delete a project — a repo grouping of
-// sessions (#1735). Every regular live session is archived (worktree relocated,
-// branch/state preserved, restorable via RestoreArchived); in-place/external
-// sessions are torn down. The repo's root_agents opt-in is removed, as is any
-// durable registration whose root matches RepoPath, and the always-on root agent
-// (if any) is stopped. The user's real git repo is never touched. Restoring an
-// archived session makes the repo active again, but does not restore its
-// registration or root opt-in.
-//
-// RepoPath is the repo root (the stable project id clients group by:
-// worktree.repo_path). RepoID is the precomputed id; when either is omitted the
-// daemon derives it from RepoPath or its durable registry record, respectively.
-// When both are set they must identify the same project. At least one must be
-// set. Deleting an unknown project is a clean no-op; a registered project with no
-// live sessions is deregistered.
-type DeleteProjectRequest struct {
-	RepoPath string `json:"repo_path"`
-	RepoID   string `json:"repo_id"`
-}
-
-type DeleteProjectResponse struct {
-	OK bool `json:"ok"`
-	// ArchivedCount is how many live sessions were archived (restorable).
-	ArchivedCount int `json:"archived_count"`
-	// KilledCount is how many live sessions could not be archived and were torn
-	// down instead — only in-place/external worktrees (the root agent, `--here`
-	// sessions), whose kill never touches the user's tree or branch.
-	KilledCount int `json:"killed_count"`
-	// Deregistered reports whether the durable project record was removed.
-	Deregistered bool `json:"deregistered"`
-	// Warning is the FLAT, pre-#3036 wire field. See ArchiveSessionResponse: it
-	// is what keeps a committed hook failure visible to an OLDER gob client,
-	// which has no slot for the nested envelope.
-	Warning string `json:"warning,omitempty"`
-	// MutationOutcome carries nonfatal on-archive hook failures from sessions
-	// whose archive and project deletion both committed.
-	MutationOutcome
-}
-
-// RegisterProjectRequest asks the daemon to register a git checkout as a durable,
-// sessionless project in the #2355 registry (#2456). Path names a directory on
-// the DAEMON's filesystem; the daemon expands ~, resolves symlinks, and walks to
-// the git checkout's canonical main-repo root, then validates it.
-//
-// Path must already be absolute (or ~-prefixed) — the daemon has no access to the
-// caller's working directory, so a relative path would resolve against the
-// daemon's own cwd, which is not the caller's. Callers whose input can be
-// relative resolve it against the user's cwd BEFORE sending: the CLI's
-// `af projects add` does this (see api/projects.go), and the web only ever
-// supplies daemon-host paths. Registration is idempotent: a known checkout is a
-// no-op success that returns the existing identity.
-type RegisterProjectRequest struct {
-	Path string `json:"path"`
-}
-
-// RegisterProjectResponse carries the durable identity the registration
-// resolved to. The project is now in the registry ON THE DAEMON HOST, and once
-// #2456's UI slices land it shows as an empty row in that daemon's project
-// switcher until a session is created into it.
-//
-// Scope caveat for a REMOTE daemon: `af projects list` and `af projects rebind`
-// still run in-process against the CLIENT's local registry, so they will not see
-// a project that `add` just wrote to the daemon's registry. For the common
-// local daemon the two registries are the same store, so it round-trips as
-// expected. Routing list/rebind through the daemon too is the follow-up needed
-// for full remote parity (#2491).
-//
-// OK is always true on a nil error (a redundant flag kept for wire symmetry with
-// the other project RPCs).
-type RegisterProjectResponse struct {
-	OK      bool           `json:"ok"`
-	Project config.Project `json:"project"`
-}
-
-// ListProjectsRequest asks the daemon for every durable project in ITS registry
-// (#2456). It carries no fields: the registry is machine-local and unscoped, so
-// there is one answer per daemon. This is the READ that makes the local project
-// list a union of derived-from-sessions projects and explicitly-registered ones
-// — a web/TUI client cannot call config.ListProjects in-process the way the CLI
-// does, so the union needs this RPC. It is the read half of #2491 (closed as not
-// worth it for remote parity alone; it turns out load-bearing for the LOCAL
-// union, a different rationale).
-type ListProjectsRequest struct{}
-
-// ListProjectsResponse carries every registered project, each a durable identity
-// plus its last-known root and whether that path still exists. Clients union
-// these roots with the projects they derive from live sessions/tasks so a
-// registered-but-sessionless project is still shown and creatable-into.
-type ListProjectsResponse struct {
-	Projects []config.Project `json:"projects"`
-}
-
 type SendPromptRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
@@ -338,6 +278,11 @@ type SendPromptRequest struct {
 	// can't land on the wrong session under a cross-repo title collision (#1592
 	// Phase 5 follow-up). TUI/CLI/delivery callers omit it and resolve by title.
 	ID string `json:"id"`
+	// TaskOrigin is daemon-internal provenance. Automated task delivery sets it
+	// so the final, op-lock-protected liveness check can park at a usage limit;
+	// manual send-prompt leaves it false because an operator may need to answer a
+	// limit or credits picker in that pane.
+	TaskOrigin bool `json:"-"`
 }
 
 type SendPromptResponse struct {
@@ -356,6 +301,10 @@ type DeliverPromptRequest struct {
 	RepoPath string `json:"repo_path"`
 	Program  string `json:"program"`
 	Prompt   string `json:"prompt"`
+	// Host picks a listed host for the session this call CREATES when the target
+	// does not exist (#5571 W6.3); ignored when the prompt lands in an existing
+	// session. Same semantics and validation as CreateSessionRequest.Host.
+	Host string `json:"host,omitempty"`
 	// TaskRepoID is the task's retained project binding. Like CreateSession's
 	// TaskID, it is daemon-internal provenance carried over GOB and excluded from
 	// HTTP/JSON so a client cannot forge task authority. DeliverPrompt compares it
@@ -364,6 +313,11 @@ type DeliverPromptRequest struct {
 	// retain a provable not-attempted outcome without claiming TaskID ownership.
 	TaskRepoID string `json:"-"`
 	TaskOrigin bool   `json:"-"`
+	// SandboxOwner is the sandbox session that created the task being delivered
+	// (task.Task.SandboxOwner, #5571 W3.5). Daemon-internal like TaskRepoID: it
+	// rides the gob loopback only. When set the delivery is re-authorized against
+	// the owner's project and NEVER auto-creates its target.
+	SandboxOwner string `json:"-"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a
@@ -374,13 +328,28 @@ type DeliverPromptRequest struct {
 	DeferWhileAttached bool `json:"defer_while_attached,omitempty"`
 }
 
-// DeliverPromptResponse reports how the prompt was delivered. Status is
-// "started" when this call created the target session (the prompt was its
-// initial prompt) and "sent" when it was sent into a session that already
-// existed — the same status vocabulary deliverTaskPrompt records on a task.
+// DeliverPromptResponse reports how the prompt was handled. Status is "started"
+// when this call created the target session, "sent" when it sent into an
+// existing session, and "parked: usage limit" when task provenance made it skip
+// a limit-reached target — the same vocabulary deliverTaskPrompt records.
+//
+// DeliverPrompt auto-creates its target through the same Manager.CreateSession
+// the createSession handler reaches, so it inherits the same committed-outcome
+// contract: a create that provisioned a sandbox but could not confirm its
+// teardown/startup is a durable mutation, not a clean failure a caller may
+// freely retry. The response stays successful on that committed path so the
+// marker rides the envelope and callDaemon's CommittedOutcome() carrier check
+// reconstructs it — mirroring CreateSession/KillSession/ArchiveSession and the
+// other mutating handlers (#3357). VALUE embed, never a pointer: gob elides
+// zero values (see control_expect_gob_test.go and #1700).
 type DeliverPromptResponse struct {
 	Status         string                       `json:"status"`
 	DeliveryStatus session.PromptDeliveryStatus `json:"delivery_status"`
+	// PromptRetained distinguishes a newly created limit-parked target, whose
+	// initial prompt is already owned by resume, from an existing limited target
+	// whose watch event still needs queue replay.
+	PromptRetained bool `json:"prompt_retained,omitempty"`
+	MutationOutcome
 }
 
 // CreateTabRequest asks the daemon to spawn a tab in the target session's
@@ -430,6 +399,9 @@ type CreateTabRequest struct {
 	// Port is a convenience for a web tab: when set (and URL is empty) the target
 	// becomes http://localhost:<port>.
 	Port int `json:"port,omitempty"`
+	// Proposal is the slug a docs tab (Kind=="docs") edits. It must exist in the
+	// session's project, and it is refused for every other kind.
+	Proposal string `json:"proposal,omitempty"`
 	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
 	// the daemon resolves the target session by id first, so web and retained TUI
 	// tab-create actions cannot hit a same-title replacement (#1592 Phase 5 PR7,
@@ -598,40 +570,6 @@ type ReorderTabResponse struct {
 	Index int    `json:"index"`
 }
 
-// SetPRInfoRequest records (or clears) the GitHub PR info for a session and
-// persists it (#960). ID is authoritative when present; legacy callers resolve
-// by {Title, RepoID}. A zero-value PRInfo (Number 0) clears the recorded info,
-// matching how pr_info round-trips through storage (FromInstanceData treats
-// Number 0 as "no PR").
-type SetPRInfoRequest struct {
-	Title  string `json:"title"`
-	RepoID string `json:"repo_id"`
-	// ID is the session's stable id; see KillSessionRequest.ID. The TUI's PR
-	// lookup is asynchronous, so a completed fetch must not persist onto a
-	// different same-title row that appeared while gh was running.
-	ID string `json:"id"`
-	// PRInfo is the fetched projection to persist.
-	PRInfo session.PRInfoData `json:"pr_info"`
-}
-
-type SetPRInfoResponse struct {
-	OK bool `json:"ok"`
-}
-
-// RefreshPRInfoRequest asks the daemon to refresh its GitHub PR projection for
-// one session. The client supplies identity only: discovery, eligibility, and
-// the projected fields are daemon-owned (#3296). ID is authoritative when
-// present; legacy callers may address the row by {Title, RepoID}.
-type RefreshPRInfoRequest struct {
-	Title  string `json:"title"`
-	RepoID string `json:"repo_id"`
-	ID     string `json:"id"`
-}
-
-type RefreshPRInfoResponse struct {
-	OK bool `json:"ok"`
-}
-
 // PauseStatusPollRequest asks the daemon to pause its per-instance capture-pane
 // liveness poll for ONE session while a TUI is attached full-screen to it
 // (#1160, Fix A follow-up to #1157). ID identifies the lease owner when
@@ -684,6 +622,9 @@ type PingRequest struct{}
 // reports through Ping. It is deliberately narrower than config.Config: status
 // only needs the listener/auth values that can differ after a supported
 // hand-edit, and Ping must never become a general config or secret export.
+// One overlay is not boot state: RequireToken also reads true while the #5183
+// upgrade-probation token floor is armed, because that is what the control
+// listener enforces.
 type DaemonBootConfig struct {
 	ListenAddr           string `json:"listen_addr"`
 	RequireToken         bool   `json:"require_token"`
@@ -692,6 +633,30 @@ type DaemonBootConfig struct {
 
 type PingResponse struct {
 	OK bool `json:"ok"`
+	// AccountHandoff is an affirmative protocol capability, not a version
+	// guess. A new client must see true before it sends HandoffSession: only a
+	// capable daemon can inspect the live session's account pin and apply the
+	// safe account-aware admission rules. Older daemons omit the field, decode
+	// as false, and therefore never receive the destructive mutation.
+	AccountHandoff bool `json:"account_handoff,omitempty"`
+	// HostPick is an affirmative capability: this daemon honors
+	// CreateSessionRequest.Host (#5571 W6.3). A daemon that predates the field
+	// decodes the request without it and silently creates the session on the repo's
+	// default backend, so a client sending a host pick must see true here first.
+	// Older daemons omit the field and decode as false.
+	HostPick bool `json:"host_pick,omitempty"`
+	// DeliverHostPick and TaskHost are the same capability for the other two wire
+	// fields a pick rides on: DeliverPromptRequest.Host (send-prompt --create) and
+	// Task.Host / TaskUpdate.Host. Separate bits because a daemon from between the
+	// two releases honors one and silently drops the other.
+	DeliverHostPick bool `json:"deliver_host_pick,omitempty"`
+	TaskHost        bool `json:"task_host,omitempty"`
+	// (The guarded-rebind capability is its wire method instead of a Ping bit —
+	// #4888 review: RebindProjectGuarded exists only on daemons that enforce
+	// the expected_root/expected_checkout_id pair, so a guarded send is refused
+	// by a pre-guard daemon rather than applied unconditionally, and no probe
+	// is consulted since a Ping answered by one daemon can never vouch for
+	// the one a proxy might route the mutation to.)
 	// Version is the af build version the responding daemon is running, so a
 	// client can compare it against its own and detect skew (#1044). It rides
 	// Ping because Ping is the one RPC that answers throughout the daemon's
@@ -724,106 +689,16 @@ type PingResponse struct {
 	BootConfig *DaemonBootConfig `json:"boot_config,omitempty"`
 }
 
-type ReloadTasksRequest struct{}
-type ReloadTasksResponse struct {
-	OK bool `json:"ok"`
-}
-
-// Task CRUD RPCs (#1029 PR 3). They promote task writes to the daemon so it is
-// the sole task writer among clients — exactly the model sessions already
-// follow — and the write and the scheduler/watcher refresh happen atomically
-// in-process (no separate ReloadTasks poke). The on-disk tasks.json format is
-// unchanged; the daemon reuses the same task.AddTask/UpdateTask/RemoveTask
-// (config.WithFileLock + saveTasks) that clients used to call directly.
-
-// ListTasksRequest asks the daemon for the full task list. There is
-// deliberately no repo filter: the daemon returns every repo's tasks and the
-// CLI applies its --repo filter, matching the disk-read fallback
-// (task.LoadTasks). It is the read side of the task single-writer model, mirror
-// of Snapshot for sessions.
-type ListTasksRequest struct{}
-type ListTasksResponse struct {
-	Tasks []task.Task `json:"tasks"`
-}
-
-// AddTaskRequest carries a fully-populated task.Task to append. The CLI/TUI
-// still build and validate the struct (flag parsing, ID generation, program
-// resolution); the daemon re-validates via task.AddTask and owns the write.
-type AddTaskRequest struct {
-	Task task.Task `json:"task"`
-}
-type AddTaskResponse struct {
-	OK bool `json:"ok"`
-	MutationOutcome
-}
-
-// UpdateTaskRequest carries a FIELD-LEVEL patch (#1700): the ID of the task to
-// edit and a task.TaskUpdate holding only the field(s) the caller intends to
-// change. The daemon merges the patch onto the freshly-loaded record under the
-// file lock, leaving every unspecified field as-stored — so a single-field edit
-// (the enable/disable toggle sends just Enabled) cannot clobber a concurrent
-// edit another client made to a different field. This replaces the prior
-// full-struct read-modify-write, which re-applied every user field from the
-// caller's possibly-stale copy. Scheduler-owned fields (LastRunAt/LastRunStatus/
-// CreatedAt) are never patchable — UpdateTaskStatus stays their writer.
-//
-// Expect optionally carries the project the caller authorized the id against,
-// re-verified under the same lock — see task.ProjectExpectation.
-type UpdateTaskRequest struct {
-	ID     string                  `json:"id"`
-	Update task.TaskUpdate         `json:"update"`
-	Expect task.ProjectExpectation `json:"expect,omitempty"`
-}
-
-// UpdateTaskResponse returns the merged record the write produced, so the CLI
-// can print the authoritative post-edit task and the daemon publishes the full
-// task (not the partial patch) on its EventTaskUpdated.
-type UpdateTaskResponse struct {
-	OK   bool      `json:"ok"`
-	Task task.Task `json:"task"`
-	MutationOutcome
-}
-
-// Expect optionally carries the project the caller authorized the id against,
-// re-verified under the same lock — see task.ProjectExpectation.
-type RemoveTaskRequest struct {
-	ID     string                  `json:"id"`
-	Expect task.ProjectExpectation `json:"expect,omitempty"`
-}
-type RemoveTaskResponse struct {
-	OK bool `json:"ok"`
-	MutationOutcome
-}
-
-// RestartTaskRequest asks the daemon to stop and replace one enabled watch
-// task from its current on-disk definition. Expect carries the same project
-// compare-and-swap as the other id-addressed task mutations.
-type RestartTaskRequest struct {
-	ID     string                  `json:"id"`
-	Expect task.ProjectExpectation `json:"expect,omitempty"`
-}
-type RestartTaskResponse struct {
-	OK bool `json:"ok"`
-}
-
-// TriggerTaskRequest asks the daemon to fire a task NOW through the same
-// RunTask firing path the in-daemon scheduler uses (#1029 PR 3 / #1169-class
-// fix). The handler preserves RunTask's guards: watch tasks and disabled tasks
-// are refused.
-// Expect optionally carries the project the caller authorized the id against,
-// re-verified against the same load that produces the fired record — see
-// task.ProjectExpectation.
-type TriggerTaskRequest struct {
-	ID     string                  `json:"id"`
-	Expect task.ProjectExpectation `json:"expect,omitempty"`
-}
-type TriggerTaskResponse struct {
-	OK bool `json:"ok"`
-}
-
 type ShutdownRequest struct{}
 type ShutdownResponse struct {
 	OK bool `json:"ok"`
+	// PID is the acknowledging daemon's process id (#5007). RequestShutdown
+	// cross-checks it against the PID the pre-shutdown Ping reported on the
+	// same connection and drops the target on a mismatch; it never uses it
+	// alone, because a PID learned only from the ack cannot be pinned before
+	// the daemon may exit. Additive: a daemon built before this field decodes
+	// as 0, which skips the cross-check.
+	PID int `json:"pid,omitempty"`
 }
 
 // ReleaseUpgradeProbationRequest asks a probationary upgrade candidate to leave
@@ -908,12 +783,31 @@ type GetConfigResponse struct {
 	Path string `json:"path"`
 }
 
-// GetTheme is the palette read used by renderer clients. Config remains the
-// source of truth; the response carries only its resolved semantic slots, never
-// browser mode or renderer-specific derivatives.
-type GetThemeRequest struct{}
-type GetThemeResponse struct {
-	Theme apiproto.Theme `json:"theme"`
+// ExplainConfigRequest asks for one global config key's layer-by-layer
+// provenance — the explain half of the config read surface (#4803, the UI half
+// of #2216). The TUI and web editors render the effective value; this is how
+// they answer which layer supplied it, through the identical resolver
+// `af config get <key> --explain` prints rather than a second precedence
+// implementation.
+type ExplainConfigRequest struct {
+	// Key is the manifest key to explain — a top-level key or a dotted leaf
+	// (root_agent resolves through its specialized four-layer trace).
+	Key string `json:"key"`
+}
+type ExplainConfigResponse struct {
+	// Explanation is config.ResolvedValue verbatim: effective value, default,
+	// merge policy, precedence, every source candidate with its result and
+	// reason, and per-leaf origins for composite values.
+	Explanation config.ResolvedValue `json:"explanation"`
+	// Scope names the scope the explanation describes. "global" is the only
+	// scope served: project-scoped provenance follows the project-config read
+	// surface, the same staging as config.read-project's UI half.
+	Scope string `json:"scope"`
+	// RunningValueChecked is always false: the trace resolves on-disk sources
+	// fresh per call, never the running daemon's in-memory config — the same
+	// contract `af config get --explain` prints. Carried so a client surfaces
+	// the distinction rather than leaving a reader to assume it.
+	RunningValueChecked bool `json:"running_value_checked"`
 }
 
 // SetConfigValueRequest sets one key, exactly as `af config set key value` does.
@@ -942,10 +836,24 @@ type SetConfigValueResponse struct {
 	// on the next daemon start.
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
-	// Warnings surfaces the tokenless-network exposure notice and any listener
-	// rebind failure at save time (#2480 PR2). The web form shows them after the
-	// echo so a user learns when a socket key did not apply or a posture is exposed.
+	// Warnings carries apply-time notices: tokenless-network exposure, listener
+	// rebind failures, and failed/unconfirmed live-apply details. On a failed or
+	// unconfirmed apply it also retains Result.Warnings, since ApplyConfig did not
+	// return its normal warning set. The web form renders this complete set.
 	Warnings []string `json:"warnings,omitempty"`
+	// ListenerAddr is where the daemon is ACCEPTING right now for a listener key
+	// (network.listen_addr / network.preview_listen_addr) — "" for every other key,
+	// and for a listener that is not bound. It exists because moving a listener is
+	// the one config write that can cost the caller the connection it is talking
+	// over (#3722): the reply has to name the address the operator must re-target
+	// to, or they are left rediscovering it by hand — and, after a rebind that
+	// FAILED, it names the address still serving rather than the one config now
+	// asks for, which is what the deferred notice beside it is about.
+	ListenerAddr string `json:"listener_addr,omitempty"`
+	// ApplyOutcome is appended to preserve every established response member's
+	// wire order. It lets automation distinguish applied, deferred, no-daemon,
+	// failed, and unconfirmed saves without parsing RestartNotice or Warnings.
+	ApplyOutcome config.ApplyStatus `json:"apply_outcome,omitempty"`
 }
 
 // UnsetConfigValueRequest clears one globally unsettable migrated setting.
@@ -961,6 +869,13 @@ type UnsetConfigValueResponse struct {
 	Applied       []string            `json:"applied"`
 	Pending       []string            `json:"pending"`
 	Warnings      []string            `json:"warnings,omitempty"`
+	// ListenerAddr as in SetConfigValueResponse. Unsetting a listener key restores
+	// its DEFAULT address, which rebinds the socket exactly as a set does — so the
+	// two verbs report it identically or one of them is the surface that quietly
+	// does not (#3397 is that lesson, on this same pair of handlers).
+	ListenerAddr string `json:"listener_addr,omitempty"`
+	// Keep this additive field last for the same wire-order contract as set.
+	ApplyOutcome config.ApplyStatus `json:"apply_outcome,omitempty"`
 }
 
 // ApplyConfigRequest asks the running daemon to apply the on-disk global config
@@ -975,20 +890,11 @@ type ApplyConfigResponse struct {
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
 	// Warnings carries the tokenless-network exposure notice and any listener rebind
-	// failure so a pre-#3231 `af config set` (which applies via RequestApplyConfig)
+	// failure so a pre-#3231 `af config set` (which applies via the ApplyConfig poke)
 	// can print them.
 	Warnings []string `json:"warnings,omitempty"`
 	// FailedListenerKeys names the socket keys (listen_addr / preview_listen_addr)
 	// whose live rebind failed, so the CLI can report THAT key's change as deferred
 	// rather than falsely applied.
 	FailedListenerKeys []string `json:"failed_listener_keys,omitempty"`
-}
-
-// ApplyThemeRequest asks a running daemon to reload only the global palette.
-// Unlike ApplyConfig, it cannot change auth, listeners, or any other live key.
-type ApplyThemeRequest struct{}
-
-// ApplyThemeResponse reports whether the live palette generation advanced.
-type ApplyThemeResponse struct {
-	Changed bool `json:"changed"`
 }

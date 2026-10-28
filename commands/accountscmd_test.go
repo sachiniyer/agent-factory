@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -43,6 +46,21 @@ func TestAccountsHelpDoesNotAssertRefusingBackendLocation(t *testing.T) {
 	}
 }
 
+// accountsTestDaemonURL is the remote-daemon target runAccountsHere pins for the
+// duration of one case. Empty — the default — means "this host", which is what
+// every case except the remote-refusal ones wants. Set it with
+// withAccountsRemoteDaemon.
+var accountsTestDaemonURL string
+
+// withAccountsRemoteDaemon makes the accounts commands see a remote daemon
+// target for one case, and puts it back afterwards.
+func withAccountsRemoteDaemon(t *testing.T, url string) {
+	t.Helper()
+	prev := accountsTestDaemonURL
+	accountsTestDaemonURL = url
+	t.Cleanup(func() { accountsTestDaemonURL = prev })
+}
+
 // runAccounts drives `af accounts …` through the real root command and returns
 // what the caller would see on each stream.
 //
@@ -54,12 +72,31 @@ func TestAccountsHelpDoesNotAssertRefusingBackendLocation(t *testing.T) {
 func runAccounts(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	tempAFHome(t)
-	// --daemon-url / AF_DAEMON_URL makes both subcommands refuse (they write the
+	return runAccountsHere(t, args...)
+}
+
+// runAccountsInHome runs against a home the CALLER owns, so one case can register
+// an account and then list it. runAccounts makes a fresh home per invocation,
+// which is right for the failure-envelope cases and useless for a round trip.
+func runAccountsInHome(t *testing.T, home string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	leaveAmbientRepo(t)
+	return runAccountsHere(t, args...)
+}
+
+func runAccountsHere(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	// --daemon-url / AF_DAEMON_URL makes every subcommand refuse (they act on the
 	// LOCAL home), so an ambient value on the developer's box would turn every
-	// case below into the remote-target refusal.
-	t.Setenv("AF_DAEMON_URL", "")
+	// case below into the remote-target refusal. It is PINNED rather than merely
+	// left alone, in both spellings, because either one is enough to trip it.
+	//
+	// accountsTestDaemonURL is how a case that wants the refusal asks for it:
+	// setting the environment before calling in cannot work, since this pins it.
+	t.Setenv("AF_DAEMON_URL", accountsTestDaemonURL)
 	prevFlagURL := apiclient.FlagDaemonURL
-	apiclient.FlagDaemonURL = ""
+	apiclient.FlagDaemonURL = accountsTestDaemonURL
 
 	prevJSON := accountsJSONFlag
 	accountsJSONFlag = false
@@ -98,9 +135,14 @@ func runAccounts(t *testing.T, args ...string) (stdout, stderr string, err error
 // without this a case that passes --json would leak into the next one.
 func resetAccountsJSONFlags() {
 	for _, cmd := range accountsCmd.Commands() {
-		if flag := cmd.Flags().Lookup("json"); flag != nil {
-			_ = flag.Value.Set("false")
-			flag.Changed = false
+		// Every bound boolean, not just --json: `login` also binds --no-attach, and
+		// cobra keeps flag values and Changed across Execute calls, so a leaked
+		// --no-attach would silently decide a later case's branch.
+		for _, name := range []string{"json", "no-attach"} {
+			if flag := cmd.Flags().Lookup(name); flag != nil {
+				_ = flag.Value.Set("false")
+				flag.Changed = false
+			}
 		}
 	}
 }
@@ -254,5 +296,173 @@ func TestAccountsAddJSONSuccessEnvelope(t *testing.T) {
 	}
 	if entry.Agent != "codex" || entry.Name != "work" || entry.Dir == "" {
 		t.Fatalf("unexpected entry: %+v", entry)
+	}
+}
+
+// #3639 verified gemini's launch proof, so `af accounts add gemini work` is a
+// plain registration again: the account can be logged in AND a session can be
+// scoped to it, so there is nothing to warn about.
+//
+// This is the NEGATIVE half of the registration-only contract. The positive half —
+// that the notice appears, names the agent, and names its follow-up — is pinned in
+// internal/sessionenv, which can put an agent into that state; this package can
+// only observe the roster it is given (#3639).
+func TestAccountsAddGeminiIsAPlainRegistration(t *testing.T) {
+	_, stderr, err := runAccounts(t, "add", "gemini", "work")
+	if err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+	if !strings.Contains(stderr, "GEMINI_CLI_HOME") {
+		t.Fatalf("add must print the login guidance with gemini's own variable:\n%s", stderr)
+	}
+	if strings.Contains(strings.ToLower(stderr), sessionenv.AccountRegistrationOnlyMarker) {
+		t.Fatalf("gemini is launch-proven now, so registration must carry no caveat:\n%s", stderr)
+	}
+}
+
+// `af accounts list` marks only the rows a session cannot be scoped to. With the
+// roster and the launch proof agreeing, that is none of them — every row keeps the
+// four columns a script reads (agent, name, dir, and the login state #3384 added),
+// and the JSON says so explicitly rather than by omission.
+func TestAccountsListMarksNothingWhileTheRosterAgrees(t *testing.T) {
+	home := t.TempDir()
+	for _, agent := range []string{"gemini", "codex"} {
+		if _, _, err := runAccountsInHome(t, home, "add", agent, "work"); err != nil {
+			t.Fatalf("add %s failed: %v", agent, err)
+		}
+	}
+
+	stdout, stderr, err := runAccountsInHome(t, home, "list")
+	if err != nil {
+		t.Fatalf("list failed: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 {
+			t.Fatalf("every row must keep exactly four columns while nothing is registration-only: %q", line)
+		}
+		// The three a script already read stay in their positions; the state is the
+		// appended one, and it must SAY something rather than be blank.
+		if fields[3] != "not logged in" {
+			t.Fatalf("a registered-but-empty account must report its state, not a blank column: %q", line)
+		}
+	}
+	if strings.Contains(strings.ToLower(stderr), sessionenv.AccountRegistrationOnlyMarker) {
+		t.Fatalf("nothing is registration-only, so the listing must annotate nothing:\n%s", stderr)
+	}
+
+	jsonOut, _, err := runAccountsInHome(t, home, "list", "--json")
+	if err != nil {
+		t.Fatalf("list --json failed: %v", err)
+	}
+	env := requireEnvelope(t, jsonOut, "stdout")
+	var entries []accountEntry
+	if err := json.Unmarshal(env.Data, &entries); err != nil {
+		t.Fatalf("envelope data is not a list of accountEntry: %v (%q)", err, jsonOut)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("both accounts must be listed: %q", jsonOut)
+	}
+	for _, entry := range entries {
+		if entry.RegistrationOnly {
+			t.Fatalf("%s/%s must be registration_only:false: %q", entry.Agent, entry.Name, jsonOut)
+		}
+	}
+	// Both booleans are EMITTED, not omitted — an automation caller needs the
+	// difference between "false" and "this af is too old to say", and an omitted
+	// false is the same bytes as a missing field.
+	for _, field := range []string{"\"registration_only\"", "\"logged_in\""} {
+		if !strings.Contains(jsonOut, field) {
+			t.Fatalf("%s must be present even when false: %q", field, jsonOut)
+		}
+	}
+	for _, entry := range entries {
+		if entry.LoggedIn {
+			t.Fatalf("%s/%s was registered and never logged in: %q", entry.Agent, entry.Name, jsonOut)
+		}
+	}
+}
+
+// The logged-in column is read from the AGENT's own credential file, so an
+// account that holds one reports it and an account beside it that does not still
+// reports the truth about itself.
+func TestAccountsListReportsLoginStatePerAccount(t *testing.T) {
+	home := t.TempDir()
+	for _, name := range []string{"empty", "signed-in"} {
+		if _, _, err := runAccountsInHome(t, home, "add", "codex", name); err != nil {
+			t.Fatalf("add codex %s failed: %v", name, err)
+		}
+	}
+	dir, err := agentaccount.Dir(home, "codex", "signed-in")
+	if err != nil {
+		t.Fatalf("resolve account dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write the agent's credential artifact: %v", err)
+	}
+
+	stdout, _, err := runAccountsInHome(t, home, "list")
+	if err != nil {
+		t.Fatalf("list failed: %v", err)
+	}
+	for _, want := range []string{"empty\t", "not logged in", "signed-in\t"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("listing is missing %q:\n%s", want, stdout)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		fields := strings.Split(line, "\t")
+		wantState := "not logged in"
+		if fields[1] == "signed-in" {
+			wantState = "logged in"
+		}
+		if fields[3] != wantState {
+			t.Fatalf("account %q reports state %q, want %q", fields[1], fields[3], wantState)
+		}
+	}
+}
+
+// The group help must show the gemini form, with the shape that makes it
+// different: GEMINI_CLI_HOME is a HOME-like root and the CLI appends .gemini/
+// itself, so an operator who copies the CODEX_HOME line and swaps names points
+// the variable one level too deep and logs in somewhere af will not look.
+func TestAccountsHelpShowsTheGeminiHomeRootShape(t *testing.T) {
+	for _, want := range []string{
+		"GEMINI_CLI_HOME=$(af accounts add gemini work) NO_BROWSER=true gemini",
+		"GEMINI_CLI_HOME is a HOME-like root: gemini appends .gemini/ to it",
+	} {
+		if !strings.Contains(accountsCmd.Long, want) {
+			t.Fatalf("account help is missing %q:\n%s", want, accountsCmd.Long)
+		}
+	}
+	for _, artifact := range agentaccount.AccountCredentialArtifacts("gemini") {
+		want := "<dir>/" + filepath.ToSlash(artifact)
+		if !strings.Contains(accountsCmd.Long, want) {
+			t.Errorf("account help is missing recognized Gemini credential artifact %q", want)
+		}
+	}
+	// And it carries no registration-only paragraph while the roster and the launch
+	// proof agree — the paragraph is composed from the roster, so it removes itself
+	// rather than needing an edit (#3639).
+	if strings.Contains(strings.ToLower(accountsCmd.Long), sessionenv.AccountRegistrationOnlyMarker) {
+		t.Fatalf("no agent is registration-only, so the help must say nothing about it:\n%s", accountsCmd.Long)
+	}
+}
+
+// The group help walks the operator through a login, so it must not promise a
+// browser step either (#3854) — and the pasteable by-hand invocations underneath
+// it are what af actually runs, so codex's has to carry --device-auth.
+func TestAccountsHelpDescribesTheDeviceCodeFlow(t *testing.T) {
+	help := accountsCmd.Long
+	for _, want := range []string{
+		"device code",
+		"codex login --device-auth",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("af accounts --help is missing %q:\n%s", want, help)
+		}
+	}
+	if strings.Contains(help, "browser or device-code") {
+		t.Fatalf("af accounts --help still offers a browser step as an alternative:\n%s", help)
 	}
 }

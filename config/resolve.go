@@ -1,12 +1,16 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -24,10 +28,17 @@ var legacyDeprecationLogged sync.Map
 // pre-#3358 parent-keyed config to once per corrected repository identity.
 var retainedLegacyBareRepoConfigLogged sync.Map
 
+// resetRetainedLegacyBareRepoConfigWarnings clears that memo. captureLog calls
+// it so a test asserting the warning is not silenced by an earlier test in the
+// same process that happened to use the same repo and legacy identity.
+func resetRetainedLegacyBareRepoConfigWarnings() {
+	retainedLegacyBareRepoConfigLogged.Clear()
+}
+
 // ResolvedConfig is effective configuration plus the provenance produced by
 // the same manifest-driven pass. Every consumer of per-repo configuration
 // (programs, remote hooks, post-worktree commands) must go through this file's
-// ResolveConfig or ResolveConfigForInspection entry point rather than reading
+// ResolveConfig or ResolveConfigForRepoInspection entry point rather than reading
 // source files directly, so precedence and scoping stay uniform.
 type ResolvedConfig struct {
 	// Config carries the effective app-level fields. DefaultProgram and
@@ -35,7 +46,8 @@ type ResolvedConfig struct {
 	// file; the global-only fields (e.g. AutoUpdate, DaemonPollInterval,
 	// BranchPrefix, DetachKeys — the manifest's full sourceGlobalOnly set)
 	// always come from the global config because LoadInRepoConfig rejects them
-	// per-repo.
+	// per-repo. BranchPrefix additionally ignores the personal-project layer
+	// until #4539: a stored per-project value is kept but never wins.
 	Config
 
 	// PostWorktreeCommands are the effective post-worktree hooks: the
@@ -64,6 +76,10 @@ type ResolvedConfig struct {
 	// equivalent lexical spelling through RebaseProjectPathsForDisplay.
 	ProjectRoot string `json:"-" toml:"-"`
 
+	// InRepoConfigFile is the repo-relative filename selected by the loader.
+	// It stays empty when no in-repo file was loaded.
+	InRepoConfigFile string `json:"-" toml:"-"`
+
 	// Resolution is produced by the same manifest-driven pass that populated
 	// the effective fields above. Renderers consume it directly; they never
 	// reconstruct precedence from the finished Config.
@@ -74,6 +90,9 @@ type ResolvedConfig struct {
 // the historical global `af config get/list` contract while still returning
 // presence-aware provenance for --explain.
 func ResolveGlobalConfig() (*ResolvedConfig, error) {
+	if policy := activeAgentPolicy(); policy != nil {
+		return &ResolvedConfig{Config: *policy.globalConfig()}, nil
+	}
 	global, err := LoadConfig()
 	if err != nil {
 		return nil, err
@@ -88,8 +107,8 @@ func ResolveGlobalConfig() (*ResolvedConfig, error) {
 // ResolveConfig returns effective configuration and provenance for repoRoot
 // (normally the main worktree root from RepoFromPath or CurrentRepo). It also
 // records the existing per-repo load observation for command-bearing checked-in
-// config. Inspection-only callers must use ResolveConfigForInspection so a read
-// cannot create that durable state.
+// config. Inspection-only callers must use ResolveConfigForRepoInspection so a
+// read cannot create that durable state.
 func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 	return resolveConfig(repoRoot, recordInRepoLoadObservation)
 }
@@ -102,19 +121,253 @@ func ResolveConfigForRepo(repo *RepoContext) (*ResolvedConfig, error) {
 	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
 }
 
-// ResolveConfigForInspection returns the same effective values and provenance
-// as ResolveConfig without logging or persisting the per-repo load observation.
-// It is the resolver for read surfaces such as `af config --project`. This is
-// deliberately not called a generally write-free load: LoadConfig retains its
-// documented first-run and legacy-format migration behavior.
-func ResolveConfigForInspection(repoRoot string) (*ResolvedConfig, error) {
-	return resolveConfig(repoRoot, suppressInRepoLoadObservation)
+// boundedRepoResolve serializes in-flight bounded resolutions per repository.
+// A read wedged on a dead mount cannot be killed mid-syscall, so without
+// serialization every form open after a timeout would stack another abandoned
+// worker on the same files; retries instead wait on the one in-flight resolve
+// and bound only their own wait (#4889 review).
+//
+// It is deliberately NOT singleflight's result sharing: a caller that joins an
+// in-flight flight predating its own call would accept a snapshot that can
+// precede the config change this read exists to observe (#4889 review). A
+// joiner waits for the flight to FINISH — the pileup cap is the point — then
+// loops: every flight it can join on a later pass began after the call, so the
+// result is as live as its own read would have been. A completed flight is
+// removed before its result is published, so a caller can never attach to a
+// resolved flight's stale channel.
+// A flight BROADCASTS its outcome: done is closed (not sent on) after out is
+// set, so every waiter observing the close reads the same result — a channel
+// send would wake exactly one waiter and strand the rest until ctx expiry
+// (#4889 review). The close synchronizes-before every observing read, so out
+// needs no other guard.
+type repoResolveFlight struct {
+	done chan struct{}
+	out  repoResolveOutcome
+	// Callers parked on done — tests read it to prove a join attached before
+	// releasing the flight, so the re-read path runs under a real pileup.
+	waiters atomic.Int32
+}
+
+type repoResolveOutcome struct {
+	val *ResolvedConfig
+	err error
+}
+
+var (
+	repoResolveFlightsMu sync.Mutex
+	repoResolveFlights   = map[string]*repoResolveFlight{}
+)
+
+// resolveRepoForBound is the resolve a bounded flight performs, taken out to a
+// var so tests can watch how many workers a wedge accumulates.
+var resolveRepoForBound = func(repo *RepoContext) (*ResolvedConfig, error) {
+	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
+}
+
+// ResolveConfigForRepoContext is ResolveConfigForRepo bounded by ctx: the git
+// subprocesses inside a RepoContext already carry their own deadlines, but the
+// resolution itself is ordinary file I/O — global/legacy/checked-in/personal
+// TOML — that an unavailable mount can stall indefinitely. A caller that must
+// answer (the TUI's off-loop refresh) bounds the read here (#4889 review).
+// Same pattern as resolveConfigForRepoInspectionWithGlobalAndPersonalContext,
+// plus the per-repo flight above so a wedged read never multiplies workers; the
+// observation record is kept because this is the runtime, not inspection,
+// resolve — a worker that finishes after its callers timed out recorded a
+// load that genuinely happened.
+func ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*ResolvedConfig, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required for bounded repo resolution")
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("resolve repository config: %w", err)
+	}
+	key := repo.IdentityPath() + "\x00" + repo.WorkspacePath()
+	firstJoin := true
+	for {
+		// A joiner that wakes to a dead ctx must not spawn a fresh worker for
+		// the required re-read — the worker ignores ctx and would run for a
+		// result nobody waits on (#4889 review).
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("resolve repository config: %w", err)
+		}
+		repoResolveFlightsMu.Lock()
+		flight, joined := repoResolveFlights[key]
+		if !joined {
+			flight = &repoResolveFlight{done: make(chan struct{})}
+			repoResolveFlights[key] = flight
+			go func() {
+				val, err := resolveRepoForBound(repo)
+				repoResolveFlightsMu.Lock()
+				delete(repoResolveFlights, key)
+				repoResolveFlightsMu.Unlock()
+				flight.out = repoResolveOutcome{val, err}
+				close(flight.done)
+			}()
+		}
+		repoResolveFlightsMu.Unlock()
+
+		flight.waiters.Add(1)
+		select {
+		case <-flight.done:
+			if joined && firstJoin {
+				// The flight predates this call — its snapshot can precede a
+				// change this read exists to observe. Wait done; read again.
+				firstJoin = false
+				continue
+			}
+			return flight.out.val, flight.out.err
+		case <-ctx.Done():
+			// A completed read is an answer even if its caller's deadline
+			// became ready at the same instant — unless the flight predates
+			// this call, whose stale snapshot the loop still owes a
+			// replacement for and the expired ctx will not wait through.
+			select {
+			case <-flight.done:
+				if !(joined && firstJoin) {
+					return flight.out.val, flight.out.err
+				}
+			default:
+			}
+			return nil, fmt.Errorf("resolve repository config: %w", ctx.Err())
+		}
+	}
 }
 
 // ResolveConfigForRepoInspection is ResolveConfigForRepo without the durable
 // in-repo load observation.
 func ResolveConfigForRepoInspection(repo *RepoContext) (*ResolvedConfig, error) {
 	return resolveConfigForRepo(repo, suppressInRepoLoadObservation)
+}
+
+// ResolveConfigForRepoInspectionWithGlobal is the fully read-only, complete
+// inspection path for callers that already loaded the global layer without
+// migrations or materialization. Passing that snapshot prevents a nested
+// resolve from re-entering LoadConfig while preserving the same repo/personal
+// precedence. An unreadable personal lookup is unknown, never an empty layer.
+func ResolveConfigForRepoInspectionWithGlobal(repo *RepoContext, global *Config) (*ResolvedConfig, error) {
+	return resolveConfigForRepoInspectionWithGlobalAndPersonal(repo, global, nil)
+}
+
+func resolveConfigForRepoInspectionWithGlobalAndPersonal(repo *RepoContext, global *Config, personal *sourceDocument) (*ResolvedConfig, error) {
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	if global == nil {
+		return nil, fmt.Errorf("global config snapshot is required for read-only repo inspection")
+	}
+	prepared, err := prepareGlobalConfigSnapshot(global)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := resolveConfigRootsWithOptions(
+		repo.IdentityPath(), repo.WorkspacePath(), suppressInRepoLoadObservation,
+		resolveOptions{global: prepared, requirePersonalPolicy: true, personalDocument: personal},
+	)
+	if err != nil {
+		return nil, err
+	}
+	warnRetainedLegacyBareRepoConfig(repo)
+	return resolved, nil
+}
+
+// resolveConfigForRepoInspectionWithGlobalAndPersonalContext bounds the
+// complete read-only resolution, including filesystem-backed legacy,
+// checked-in, and personal config loads. Repository subprocesses already
+// receive their own deadlines, but an unavailable mount can stall an ordinary
+// file read too; inspection callers must be able to return an unknown result
+// when that happens.
+func resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx context.Context, repo *RepoContext, global *Config, personal *sourceDocument) (*ResolvedConfig, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required for bounded repo inspection")
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	if global == nil {
+		return nil, fmt.Errorf("global config snapshot is required for read-only repo inspection")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("inspect repository config: %w", err)
+	}
+	type result struct {
+		resolved *ResolvedConfig
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resolved, err := resolveConfigForRepoInspectionWithGlobalAndPersonal(repo, global, personal)
+		done <- result{resolved: resolved, err: err}
+	}()
+	select {
+	case outcome := <-done:
+		return outcome.resolved, outcome.err
+	case <-ctx.Done():
+		// A completed read is an answer even if its caller's deadline became ready
+		// at the same instant. Prefer it before classifying the observation unknown.
+		select {
+		case outcome := <-done:
+			return outcome.resolved, outcome.err
+		default:
+			return nil, fmt.Errorf("inspect repository config: %w", ctx.Err())
+		}
+	}
+}
+
+// ResolveConfigForIdentityDecisionFromGlobal resolves the same effective config
+// as ResolveConfigForRepoInspection over an already-loaded global snapshot, but
+// refuses to ignore an unreadable personal-project layer.
+//
+// Automatic credential selection needs the COMPLETE candidate policy. Every
+// other caller degrades an unreadable project registry to "no personal layer"
+// (see projectPersonalDocumentFromLookup) because one bad record must not break
+// session creation everywhere. Here that degradation is the wrong trade: a
+// project whose personal layer narrows or clears the global candidate list would
+// silently inherit the global list instead, and af would move work onto an
+// identity the user did not authorize for this project. An incomplete read is a
+// refusal.
+//
+// The global snapshot is passed rather than loaded so one decision cannot be
+// split across two config generations: the caller has already gated on
+// limit_auto_resume from its own frozen snapshot.
+func ResolveConfigForIdentityDecisionFromGlobal(repoRoot string, global *Config) (*ResolvedConfig, error) {
+	global, err := prepareGlobalConfigSnapshot(global)
+	if err != nil {
+		return nil, err
+	}
+	return resolveConfigRootsWithOptions(repoRoot, repoRoot, suppressInRepoLoadObservation, resolveOptions{
+		global:                global,
+		requirePersonalPolicy: true,
+	})
+}
+
+// prepareGlobalConfigSnapshot makes an in-memory global config usable as a
+// resolution layer. A Config handed over by a running daemon carries no source
+// metadata, and the manifest resolver needs one to attribute provenance, so this
+// re-encodes the snapshot and attaches its own. A snapshot that already has a
+// built-in baseline came from a loader and is passed through untouched.
+func prepareGlobalConfigSnapshot(global *Config) (*Config, error) {
+	if global == nil || global.source.builtIn != nil {
+		return global, nil
+	}
+	data, err := toml.Marshal(global)
+	if err != nil {
+		return nil, fmt.Errorf("encode global config snapshot: %w", err)
+	}
+	snapshot := snapshotConfig(global)
+	// Use the compiled-in defaults, not DefaultConfig(), as the built-in
+	// provenance baseline: DefaultConfig() reruns the machine-dependent claude
+	// probe and would reintroduce the auto-detected ProgramOverrides the
+	// operator may have cleared, changing the effective snapshot. The
+	// auto-detected override lives in the handed-off global layer, not the
+	// built-in baseline (#5113).
+	snapshot.source.builtIn = snapshotConfig(staticDefaultConfig())
+	if err := attachConfigSource(snapshot, data, "", FormatTOML); err != nil {
+		return nil, fmt.Errorf("describe global config snapshot: %w", err)
+	}
+	return snapshot, nil
 }
 
 func resolveConfigForRepo(repo *RepoContext, observation inRepoLoadObservation) (*ResolvedConfig, error) {
@@ -142,13 +395,43 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 	return resolveConfigRoots(repoRoot, repoRoot, observation)
 }
 
+// resolveOptions carry the non-default behaviour an entry point can ask for.
+// The zero value is the ordinary runtime resolve every existing caller gets.
+type resolveOptions struct {
+	// global, when non-nil, is an already-prepared snapshot of the global layer
+	// to resolve over instead of reading it from disk.
+	global *Config
+	// requirePersonalPolicy fails the resolve when the personal project layer
+	// cannot be read, instead of degrading to "no personal layer".
+	requirePersonalPolicy bool
+	// personalDocument, when non-nil, is a personal-project layer already read
+	// by a larger inspection. Reusing it keeps related decisions on one file
+	// generation instead of reopening the source between them.
+	personalDocument *sourceDocument
+}
+
 func resolveConfigRoots(identityRoot, workspaceRoot string, observation inRepoLoadObservation) (*ResolvedConfig, error) {
+	return resolveConfigRootsWithOptions(identityRoot, workspaceRoot, observation, resolveOptions{})
+}
+
+func resolveConfigRootsWithOptions(
+	identityRoot, workspaceRoot string,
+	observation inRepoLoadObservation,
+	opts resolveOptions,
+) (*ResolvedConfig, error) {
+	if policy := activeAgentPolicy(); policy != nil {
+		return policy.resolvedRepo(identityRoot), nil
+	}
 	if observation != suppressInRepoLoadObservation && observation != recordInRepoLoadObservation {
 		return nil, fmt.Errorf("invalid in-repo load observation mode %d", observation)
 	}
-	global, err := LoadConfig()
-	if err != nil {
-		return nil, err
+	global := opts.global
+	var err error
+	if global == nil {
+		global, err = LoadConfig()
+		if err != nil {
+			return nil, err
+		}
 	}
 	documents, err := globalResolutionDocuments(global)
 	if err != nil {
@@ -174,6 +457,10 @@ func resolveConfigRoots(identityRoot, workspaceRoot string, observation inRepoLo
 		metadata: legacy.source,
 		schemas:  []any{legacy},
 	})
+	inRepoConfigFile := ""
+	if inRepo != nil {
+		inRepoConfigFile = filepath.Join(InRepoConfigDirName, filepath.Base(inRepo.source.path))
+	}
 	if inRepo == nil {
 		inRepo = &InRepoConfig{source: sourceMetadata{
 			path:   InRepoTomlConfigPath(workspaceRoot),
@@ -192,9 +479,14 @@ func resolveConfigRoots(identityRoot, workspaceRoot string, observation inRepoLo
 	// resolveManifest's requireAllSources check always finds the candidate a
 	// personal-admitting key names in its precedence, exactly like the empty
 	// in-repo document above.
-	personalDoc, err := projectPersonalDocumentForRoots(identityRoot, workspaceRoot)
-	if err != nil {
-		return nil, err
+	var personalDoc sourceDocument
+	if opts.personalDocument != nil {
+		personalDoc = *opts.personalDocument
+	} else {
+		personalDoc, err = projectPersonalDocumentForRoots(identityRoot, workspaceRoot, opts.requirePersonalPolicy)
+		if err != nil {
+			return nil, err
+		}
 	}
 	documents = append(documents, personalDoc)
 
@@ -202,6 +494,8 @@ func resolveConfigRoots(identityRoot, workspaceRoot string, observation inRepoLo
 	if err != nil {
 		return nil, err
 	}
+
+	res.InRepoConfigFile = inRepoConfigFile
 
 	// Rewrite relative hook command paths to absolute against workspaceRoot
 	// (#834). This is the single chokepoint for the rewrite: every exec of a
@@ -238,40 +532,47 @@ func emptyProjectPersonalDocument() sourceDocument {
 	return sourceDocument{layer: SourceProjectPersonal, metadata: sourceMetadata{format: FormatTOML}}
 }
 
-// projectPersonalDocumentForRoots preserves the registered project's personal
-// layer when a bare repository is addressed through a different linked
-// worktree. Registry records name a checkout, while repo-keyed configuration
-// belongs to the bare identity shared by all of its checkouts.
-func projectPersonalDocumentForRoots(identityRoot, workspaceRoot string) (sourceDocument, error) {
+// projectPersonalDocumentForRoots builds the SourceProjectPersonal document for
+// a repo. It resolves the repo to a registered project read-only (a bounded
+// Git/checkout-marker probe, but no writes) and loads that project's
+// machine-local config; a repo that is not a registered project, or one with no
+// personal file yet, yields an empty presence-only document so the layer is
+// always present for the resolver.
+//
+// The two roots differ only when a bare repository is addressed through one of
+// its linked worktrees. Registry records name a checkout, while repo-keyed
+// configuration belongs to the bare identity shared by all of them, so that case
+// looks the project up by repo rather than by root — which preserves the
+// registered project's personal layer either way.
+//
+// strict refuses an unreadable registry instead of degrading to "no personal
+// layer"; see ResolveConfigForIdentityDecisionFromGlobal for why one caller
+// needs that.
+func projectPersonalDocumentForRoots(identityRoot, workspaceRoot string, strict bool) (sourceDocument, error) {
 	if identityRoot == workspaceRoot {
-		return projectPersonalDocument(workspaceRoot)
+		project, found, err := projectForRoot(workspaceRoot)
+		return projectPersonalDocumentFromLookup(project, found, err, strict)
 	}
 	project, found, err := projectForRepo(&RepoContext{
 		Root: workspaceRoot, IdentityRoot: identityRoot, ID: RepoIDFromRoot(identityRoot),
 	})
-	return projectPersonalDocumentFromLookup(project, found, err)
+	return projectPersonalDocumentFromLookup(project, found, err, strict)
 }
 
-// projectPersonalDocument builds the SourceProjectPersonal document for
-// repoRoot. It resolves the repo to a registered project read-only (a bounded
-// Git/checkout-marker probe, but no writes) and loads that project's
-// machine-local config; a repo that is not a
-// registered project, or one with no personal file yet, yields an empty
-// presence-only document so the layer is always present for the resolver.
+// projectPersonalDocumentFromLookup turns a project-registry lookup into the
+// SourceProjectPersonal document.
 //
-// A registry that cannot be listed (a corrupt or newer-schema record) degrades
-// to "no personal layer" with a one-time warning rather than failing config
-// resolution for every repo — including repos that have no personal config at
-// all. Before this layer existed, ResolveConfig never touched the registry, and
-// one bad project record must not now break session creation everywhere. The
-// explicit `af config --project` / `af projects` paths still surface the real
-// error, because they call the registry directly.
-func projectPersonalDocument(repoRoot string) (sourceDocument, error) {
-	project, found, err := projectForRoot(repoRoot)
-	return projectPersonalDocumentFromLookup(project, found, err)
-}
-
-func projectPersonalDocumentFromLookup(project Project, found bool, err error) (sourceDocument, error) {
+// Unless strict, a registry that cannot be listed (a corrupt or newer-schema
+// record) degrades to "no personal layer" with a one-time warning rather than
+// failing config resolution for every repo — including repos that have no
+// personal config at all. Before this layer existed, ResolveConfig never
+// touched the registry, and one bad project record must not now break session
+// creation everywhere. The explicit `af config --project` / `af projects` paths
+// still surface the real error, because they call the registry directly.
+func projectPersonalDocumentFromLookup(project Project, found bool, err error, strict bool) (sourceDocument, error) {
+	if err != nil && strict {
+		return sourceDocument{}, err
+	}
 	if err != nil {
 		projectRegistryWarnOnce.Do(func() {
 			log.WarningLog.Printf("personal project config disabled: the project registry could not be read (%v); run `af projects list` to inspect it", err)
@@ -281,11 +582,15 @@ func projectPersonalDocumentFromLookup(project Project, found bool, err error) (
 	if !found {
 		return emptyProjectPersonalDocument(), nil
 	}
-	path, err := ProjectConfigTomlPath(project.ID)
+	personal, err := LoadProjectConfig(project.ID)
 	if err != nil {
 		return sourceDocument{}, err
 	}
-	personal, err := LoadProjectConfig(project.ID)
+	return projectPersonalDocumentFromLoaded(project, personal)
+}
+
+func projectPersonalDocumentFromLoaded(project Project, personal *ProjectConfig) (sourceDocument, error) {
+	path, err := ProjectConfigTomlPath(project.ID)
 	if err != nil {
 		return sourceDocument{}, err
 	}
@@ -343,6 +648,11 @@ func materializeResolution(global *Config, projectRoot string, entries []Manifes
 		value.resolved.Value = clonedInterface(value.value)
 		res.Resolution = append(res.Resolution, value.resolved)
 	}
+	// A stored personal branch_prefix resolves as precedence-disallowed; relabel
+	// it as the accepted-but-unapplied state it actually is (#4539) so explain
+	// output and the get/list marker describe it honestly. No-op on the
+	// global-only resolve, which carries no personal document.
+	annotateProjectBranchPrefix(res)
 	refreshResolutionValues(res)
 	return res, nil
 }
@@ -467,7 +777,7 @@ func logInRepoConfigLoaded(repoID, repoRoot string, inRepo *InRepoConfig, raw []
 		return
 	}
 	log.InfoLog.Printf("loaded in-repo config for %s: %s (sha256 %s)", repoRoot, strings.Join(fields, ", "), hash[:8])
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := MkdirAllUnderAFHome(dir, 0755); err != nil {
 		log.WarningLog.Printf("failed to create repo state dir %s: %v", dir, err)
 		return
 	}
@@ -526,7 +836,7 @@ func warnRetainedLegacyBareRepoConfig(repo *RepoContext) {
 		if os.IsNotExist(err) {
 			return
 		}
-		key := repo.ID + "|" + legacyID
+		key := repo.ID + "|" + legacyID + "|inspect-error"
 		if _, loaded := retainedLegacyBareRepoConfigLogged.LoadOrStore(key, true); loaded {
 			return
 		}

@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +52,9 @@ func TestSandboxRunPassesTheScriptAsOneArgument(t *testing.T) {
 	require.NoError(t, err)
 	got := string(out)
 	assert.Contains(t, got, "argc=1", "the remote script must arrive as exactly one argv element, not split on spaces")
-	assert.Contains(t, got, `last=echo 'a b' && ls "/tmp/x y"`, "and must arrive byte-for-byte")
+	// Wrapped as an explicit `sh -c '<script>'` so the remote login shell (fish,
+	// csh) never parses the script itself (#5571 W2.9).
+	assert.Contains(t, got, "last="+remoteShScript(`echo 'a b' && ls "/tmp/x y"`), "and must arrive byte-for-byte inside the explicit sh -c")
 }
 
 // TestSandboxRunKeepsOperatorQuoting pins the other half: the operator's own
@@ -72,8 +76,9 @@ func TestSandboxRunKeepsOperatorQuoting(t *testing.T) {
 //
 // The handoff's rule was "WaitDelay on the tunnel child, NEVER on the copy",
 // because force-closing the pipe mid-copy truncates the stream while ssh still
-// exits 0. That holds only while nothing else catches a short copy — and
-// verifyCopiedBinary now does. Meanwhile a ZERO WaitDelay is not neutral:
+// exits 0. That holds only while nothing else catches a short copy — and the
+// installRemoteBinary sha256 check now does (#5571 W2.2). Meanwhile a ZERO
+// WaitDelay is not neutral:
 // os/exec makes Wait block until every orphaned descriptor-holder closes, which
 // for this backend is exactly the ProxyCommand/wrapper it exists to serve, so
 // the copy's timeout would not bound provisioning at all.
@@ -87,7 +92,7 @@ func TestSandboxRunBoundsEveryChildAfterCancellation(t *testing.T) {
 	streaming := p.buildRunCommand(ctx, "cat > af", strings.NewReader("payload"))
 	assert.Equal(t, sandboxTunnelWaitDelay, streaming.WaitDelay,
 		"a zero WaitDelay lets Wait block on an orphaned ProxyCommand holding the pipe, so the copy "+
-			"timeout would not bound provisioning; truncation is caught by verifyCopiedBinary instead")
+			"timeout would not bound provisioning; truncation is caught by installRemoteBinary's sha256 check instead")
 
 	payloadFree := p.buildRunCommand(ctx, "true", nil)
 	assert.Equal(t, sandboxTunnelWaitDelay, payloadFree.WaitDelay)
@@ -110,34 +115,10 @@ func TestSandboxRunStreamsStdinWhole(t *testing.T) {
 	assert.Equal(t, len(payload), len(got), "the streamed payload must arrive whole — a short write is the truncated-af trap")
 }
 
-// verifyCopiedBinary is the independent check behind TRAP 1: even if a copy is
-// silently short, the byte count on the sandbox must not match and the error
-// must name the copy rather than surfacing later as an exec failure.
-func TestSandboxVerifyCopiedBinaryCatchesATruncatedCopy(t *testing.T) {
-	local := filepath.Join(t.TempDir(), "af")
-	require.NoError(t, os.WriteFile(local, []byte("0123456789"), 0o755)) // 10 bytes
-
-	p := &sandboxProvisioner{afBin: local, sessionDir: "/remote/dir"}
-	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
-		return []byte("4\n"), nil // the sandbox only has 4 of the 10 bytes
-	}
-
-	err := p.verifyCopiedBinary()
-	require.Error(t, err, "a short copy must fail the provision at the copy, not later")
-	assert.Contains(t, err.Error(), "truncated")
-	assert.Contains(t, err.Error(), "/remote/dir/af")
-}
-
-func TestSandboxVerifyCopiedBinaryAcceptsAWholeCopy(t *testing.T) {
-	local := filepath.Join(t.TempDir(), "af")
-	require.NoError(t, os.WriteFile(local, []byte("0123456789"), 0o755))
-
-	p := &sandboxProvisioner{afBin: local, sessionDir: "/remote/dir"}
-	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
-		return []byte("10\n"), nil
-	}
-	assert.NoError(t, p.verifyCopiedBinary())
-}
+// The copy-verification half of TRAP 1 moved with the W2.2 staged-binary work:
+// installRemoteBinary proves the published cache file by sha256 against the
+// daemon's known hash — remote_binary_test.go pins the corrupted-copy,
+// whole-copy, and cache-hit cases end to end.
 
 // TRAP 2. ssh(1) exits 255 for its OWN failures, and a remote command exiting
 // 255 is indistinguishable from it. A reap that saw 255 must report UNDETERMINED
@@ -283,11 +264,13 @@ func TestSandboxTunnelRefusesToOutliveAFailedForward(t *testing.T) {
 	// Reach the composed command without starting it: the flag must be present
 	// in what startTunnel builds.
 	assert.Contains(t, p.sshCmd+` -o ExitOnForwardFailure=yes -N -L "$1"`, "ExitOnForwardFailure=yes")
-	// And the production path must actually carry it.
-	src, err := os.ReadFile("backend_sandbox.go")
+	// And the production path must actually carry it. Since #5564 the tunnel
+	// child is built by spawnTunnel in sandbox_tunnel.go (one command text for
+	// the lifeline and direct spawn shapes alike), so that is the file pinned.
+	src, err := os.ReadFile("sandbox_tunnel.go")
 	require.NoError(t, err)
 	assert.Contains(t, string(src), `-o ExitOnForwardFailure=yes -N -L`,
-		"startTunnel must pass ExitOnForwardFailure so a lost bind kills the child instead of "+
+		"spawnTunnel must pass ExitOnForwardFailure so a lost bind kills the child instead of "+
 			"leaving the probe to succeed against whoever won the port")
 }
 
@@ -458,4 +441,502 @@ func TestSandboxReapRecoversAfterANonceFailure(t *testing.T) {
 	failNonce = false
 	require.NoError(t, p.reap(), "the retry the non-latch preserves must be able to succeed")
 	assert.True(t, p.reaped, "a confirmed reap latches, so the record may finally be retired")
+}
+
+// ErrWaitDelay fusion. exec.CommandContext can return exec.ErrWaitDelay when the
+// child exited CLEANLY (exit code 0 — a non-zero exit surfaces as an
+// *exec.ExitError, never as ErrWaitDelay) and only a descendant held the capture
+// pipe open past cmd.WaitDelay, so the captured output is already complete.
+//
+// The rest of the tree treats a bare ErrWaitDelay as success (12 normalize-to-nil
+// sites: backend_docker.go:161, doctor/remote.go:132, tmux/bounded.go, the git
+// bounded helpers, etc.). runCommand was the sole exception: its check was
+// `if ctx.Err() != nil` AFTER Output/CombinedOutput, with no ErrWaitDelay
+// carve-out, so when an orphan pushed the return past the deadline it rewrote
+// the bare ErrWaitDelay as context.DeadlineExceeded — flattening "the command
+// completed; only pipe cleanup overran" into "the deadline killed the command."
+// In reap that routed a sentinel-present reap (positive proof the far side ran)
+// into the ErrWorkspaceStateUnknown branch instead of latching.
+//
+// The fix normalizes a bare ErrWaitDelay to nil BEFORE the deadline check,
+// matching backend_docker.go and doctor/remote.go, and gates the deadline wrap
+// on `err != nil` so it never fires for a completed command. These tests pin
+// both the fix and the genuine-timeout path it must not touch.
+
+// sandboxOrphanGuard bounds the real-exec tests below. A completed command with
+// an orphaned pipe-holder returns at ~sandboxTunnelWaitDelay (2s); a missing
+// WaitDelay regression would block on the straggler's full sleep (30s) and trip
+// the guard. Ample slack over 2s keeps a loaded box from flaking the fixed path.
+const sandboxOrphanGuard = 8 * time.Second
+
+// stubSSHStraggler writes an executable `ssh` stub that runs printCmd (writing
+// the wanted output to stdout), then backgrounds a `sleep` that inherits the
+// capture pipe (the orphaned descriptor-holder of #1967), records its pid, and
+// exits 0 — so CombinedOutput() returns exec.ErrWaitDelay after
+// sandboxTunnelWaitDelay while the buffer already holds printCmd's output. The
+// straggler is killed on cleanup so a regression cannot leak it past the test.
+func stubSSHStraggler(t *testing.T, printCmd string) string {
+	t.Helper()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "straggler.pid")
+	body := "#!/usr/bin/env bash\n" +
+		printCmd + "\n" +
+		"sleep 30 &\n" +
+		"echo $! > " + shellQuote(pidFile) + "\n" +
+		"exit 0\n"
+	path := filepath.Join(dir, "ssh")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o755))
+	t.Cleanup(func() {
+		data, rerr := os.ReadFile(pidFile)
+		if rerr != nil {
+			return
+		}
+		pid, perr := strconv.Atoi(strings.TrimSpace(string(data)))
+		if perr != nil || pid <= 0 {
+			return
+		}
+		if proc, ferr := os.FindProcess(pid); ferr == nil {
+			_ = proc.Kill()
+		}
+	})
+	return path
+}
+
+// TestSandboxRunNormalizesErrWaitDelayToNilWhenOrphanHoldsPipe drives the REAL
+// runCommand (real buildRunCommand + CombinedOutput) against a stub ssh that
+// prints a marker, orphans a sleep holding the capture pipe, and exits 0. With a
+// 1s timeout and a 2s WaitDelay the orphaned pipe-holder pushes the return past
+// the deadline, so os/exec returns exec.ErrWaitDelay with ctx.Err() = Deadline-
+// Exceeded simultaneously. A bare ErrWaitDelay means the child exited 0 and the
+// output is complete, so runCommand must normalize it to nil — NOT rewrite it as
+// a timeout. Before the fix this returned "...timed out...: context deadline
+// exceeded"; after, it returns the complete output and no error.
+func TestSandboxRunNormalizesErrWaitDelayToNilWhenOrphanHoldsPipe(t *testing.T) {
+	ssh := stubSSHStraggler(t, "printf 'AF-SANDBOX-ANSWER\\n'")
+	p := &sandboxProvisioner{sshCmd: ssh}
+
+	var (
+		out   []byte
+		err   error
+		start = time.Now()
+	)
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		out, err = p.Run(1*time.Second, "true", nil, true)
+	}), "runCommand must return within the guard — a missing WaitDelay would block on the straggler (#1967)")
+
+	elapsed := time.Since(start)
+	assert.NoError(t, err,
+		"a bare exec.ErrWaitDelay (child exited 0, output complete) must NOT be wrapped as a timeout")
+	assert.False(t, errors.Is(err, context.DeadlineExceeded),
+		"a completed command must not be reported as a deadline kill")
+	assert.Contains(t, string(out), "AF-SANDBOX-ANSWER",
+		"the orphaned pipe-holder must not lose already-written output")
+	// ~sandboxTunnelWaitDelay, not the command's runtime: the stub exits ~instantly,
+	// so the elapsed time is the WaitDelay overrun, proving the err came from the
+	// orphaned-pipe path rather than a slow command (and self-checking that the
+	// straggler did hold the pipe, else elapsed would be ~0).
+	assert.GreaterOrEqual(t, elapsed, sandboxTunnelWaitDelay-500*time.Millisecond,
+		"the return must wait at least sandboxTunnelWaitDelay for the orphan's pipe")
+	assert.Less(t, elapsed, sandboxOrphanGuard, "and must not block on the straggler's full sleep")
+}
+
+// TestSandboxRunGenuineTimeoutWrapsAsDeadlineExceeded pins the path the fix must
+// NOT change: a command still running at the deadline is killed (group SIGKILL),
+// producing an *exec.ExitError — never a bare exec.ErrWaitDelay — so the
+// normalize-to-nil does not fire and runCommand still wraps it as a timeout.
+// Non-reap callers (installRemoteBinary, etc.) that do not branch on error identity
+// continue to see a correct timeout for a genuine deadline kill.
+func TestSandboxRunGenuineTimeoutWrapsAsDeadlineExceeded(t *testing.T) {
+	ssh := stubSSH(t, "sleep 10")
+	p := &sandboxProvisioner{sshCmd: ssh}
+
+	var err error
+	start := time.Now()
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		_, err = p.Run(1*time.Second, "true", nil, true)
+	}), "a genuinely timed-out command must be killed at the deadline, not block forever")
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"a genuine deadline kill must still surface as context.DeadlineExceeded")
+	assert.Contains(t, err.Error(), "timed out")
+	assert.GreaterOrEqual(t, elapsed, 1*time.Second-300*time.Millisecond,
+		"the process must be killed near the 1s deadline")
+	assert.Less(t, elapsed, sandboxOrphanGuard, "and must not wait for the 10s sleep to end naturally")
+}
+
+// TestSandboxReapSentinelRoutingDependsOnRunCommandErrorIdentity pins that reap's
+// switch is the site that decides a sentinel-present reap, so a regression that
+// re-introduces the wrap is caught at the decision boundary rather than only
+// end-to-end. Through the runCommandFn seam three error identities meet the same
+// answered=true reap:
+//
+//   - context.DeadlineExceeded → the first case → ErrWorkspaceStateUnknown, NOT
+//     latched (the bug shape, retained so a genuine timeout reap stays unknown).
+//   - nil (the fix: runCommand normalized a bare ErrWaitDelay) → the
+//     `err == nil && answered` early return → latched.
+//   - a raw exec.ErrWaitDelay (the narrower carve-out) → falls to `default` →
+//     latched; the sentinel is positive proof the far side ran.
+func TestSandboxReapSentinelRoutingDependsOnRunCommandErrorIdentity(t *testing.T) {
+	_, expect := sandboxReapChallenge("0123456789abcdef")
+	stubSandboxReapNonce(t, func() (string, error) { return "0123456789abcdef", nil })
+
+	cases := []struct {
+		name        string
+		err         error
+		wantLatched bool
+		wantUnknown bool
+	}{
+		{
+			name:        "DeadlineExceeded misroutes a sentinel-present reap to unknown",
+			err:         context.DeadlineExceeded,
+			wantLatched: false,
+			wantUnknown: true,
+		},
+		{
+			name:        "nil latches via the answered early return",
+			err:         nil,
+			wantLatched: true,
+			wantUnknown: false,
+		},
+		{
+			name:        "raw ErrWaitDelay latches via the default branch",
+			err:         exec.ErrWaitDelay,
+			wantLatched: true,
+			wantUnknown: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &sandboxProvisioner{sshCmd: "ssh host", sessionDir: "/remote/dir", remotePID: "1"}
+			p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
+				return []byte(expect), tc.err
+			}
+			err := p.reap()
+			if tc.wantUnknown {
+				require.Error(t, err)
+				assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
+					"a deadline-expired reap must retain the record as unknown-state")
+			} else {
+				assert.False(t, errors.Is(err, ErrWorkspaceStateUnknown),
+					"a sentinel-present reap that completed must not be reported unknown")
+			}
+			assert.Equal(t, tc.wantLatched, p.reaped)
+		})
+	}
+}
+
+// TestSandboxReapLatchesRealErrWaitDelayOrphanEndToEnd closes the composition gap:
+// runCommandFn is wired to the REAL runCommand (real buildRunCommand +
+// CombinedOutput) with a 1s timeout, so sandboxTunnelWaitDelay (2s) overruns the
+// deadline within test time. The stub ssh prints the uppercase sentinel (as only
+// real remote execution can — it transforms the lowercase challenge via tr),
+// orphans a sleep holding the capture pipe, and exits 0. After the fix runCommand
+// normalizes the resulting exec.ErrWaitDelay to nil, so reap's
+// `err == nil && answered` early return latches and retires the record — instead
+// of misrouting a completed reap into ErrWorkspaceStateUnknown (the bug, end to
+// end through the real transport).
+func TestSandboxReapLatchesRealErrWaitDelayOrphanEndToEnd(t *testing.T) {
+	ssh := stubSSHStraggler(t, `printf '%s' "${!#}" | grep -o 'af-sandbox-reaped-[0-9a-f]*' | tr 'a-z' 'A-Z'`)
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir", remotePID: "77"}
+	p.runCommandFn = func(_ time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error) {
+		return p.runCommand(1*time.Second, script, stdin, combined)
+	}
+
+	var err error
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		err = p.reap()
+	}), "reap must return within the guard — a missing WaitDelay would block on the straggler")
+
+	assert.False(t, errors.Is(err, ErrWorkspaceStateUnknown),
+		"a sentinel-present reap that completed with an orphaned pipe-holder must latch, not misroute to unknown-state")
+	assert.True(t, p.reaped, "the completed reap must latch so the record may be retired")
+}
+
+// A captured-but-non-numeric remote PID must NOT be conflated with "nothing to
+// signal". The free-form `sandbox.ssh` transport exists to run operator
+// wrappers, and a wrapper that emits stdout noise while the nohup'd `af
+// agent-server` did start makes the launch script's `echo $!` return a polluted
+// string; provisioning fails on the validity check, but the server may still be
+// running detached on the remote. The reap must refuse with
+// ErrWorkspaceStateUnknown and NOT latch, NOT remove the session dir, NOT
+// invoke the transport: the record is the operator's only handle on the
+// orphaned server and the next poll has to retry rather than read a cached
+// verdict. This is the guard 42aa81f3 added in backend_ssh_reap.go, the
+// convergence deleted at 3820431a, and the refactor's success-only PID
+// mirroring at 6d83aaf3 made unreachable on exactly this path. Both ends are
+// restored: provision mirrors w.RemotePID before checking the validity error
+// (see TestSandboxProvisionFailureMirrorsTheRawPIDForTheReap), and reap
+// refuses here.
+func TestSandboxReapRefusesAnUnverifiableRemotePID(t *testing.T) {
+	// A stub ssh that RUNS the reap script in a real shell, so a missing guard
+	// would actually `rm -rf` the session dir and answer the challenge (latching
+	// a clean reap of a possibly-running server).
+	ssh := stubSSH(t, `sh -c "${!#}"`)
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "session-dir")
+	require.NoError(t, os.MkdirAll(marker, 0o755))
+	sentinel := filepath.Join(marker, "still-here")
+	require.NoError(t, os.WriteFile(sentinel, []byte("present"), 0o644))
+
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: marker, remotePID: "af-wrapper noise 4242"}
+
+	err := p.reap()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
+		"an unverifiable PID means the agent-server may still be running; the record must be retained as unknown-state")
+	assert.False(t, p.reaped,
+		"the reap must NOT latch — the next poll must retry, not return a cached verdict")
+	assert.Contains(t, err.Error(), "refusing to reap",
+		"the error must say it refused, not that the reap completed")
+	assert.Contains(t, err.Error(), "af-wrapper noise 4242",
+		"the error must name the invalid PID so the operator can diagnose it")
+	assert.Contains(t, err.Error(), marker,
+		"the error must name the session dir so the operator can inspect it by hand")
+
+	_, statErr := os.Stat(sentinel)
+	assert.NoError(t, statErr,
+		"the session dir must NOT be removed while the agent-server may still be running")
+}
+
+// The refusal must not latch, so the next poll re-runs the reap. A latched
+// refusal would silently drop the record on the next attempt — exactly the
+// retain-forever-until-the-operator-clears-it state the pre-refactor
+// guard deliberately left the row in.
+func TestSandboxReapRefusesAnUnverifiableRemotePIDAndRetries(t *testing.T) {
+	ssh := stubSSH(t, `sh -c "${!#}"`)
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "session-dir")
+	require.NoError(t, os.MkdirAll(marker, 0o755))
+
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: marker, remotePID: "af-wrapper noise 4242"}
+
+	first := p.reap()
+	require.Error(t, first)
+	require.True(t, errors.Is(first, ErrWorkspaceStateUnknown))
+	require.False(t, p.reaped, "the first refusal must not latch")
+
+	second := p.reap()
+	require.Error(t, second)
+	assert.True(t, errors.Is(second, ErrWorkspaceStateUnknown),
+		"a second reap with the same invalid PID must refuse again, not read a cached verdict")
+	assert.False(t, p.reaped, "and still must not latch")
+
+	_, statErr := os.Stat(marker)
+	assert.False(t, os.IsNotExist(statErr),
+		"the session dir must survive a repeated refusal")
+}
+
+// The legitimate empty-PID path ("nothing ever started") is unchanged: an
+// empty `remotePID` continues to mean there is nothing to signal, the reap
+// removes the partial session dir, and a clean challenge-response latches.
+// This is the pre-`startAgentServer` failure path (e.g. a clone or
+// binary-copy failure), where no nohup'd server exists, and the refuse guard
+// must not regress it.
+func TestSandboxReapWithEmptyRemotePIDStillReapsPartialSession(t *testing.T) {
+	ssh := stubSSH(t, `sh -c "${!#}"`)
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "session-dir")
+	require.NoError(t, os.MkdirAll(marker, 0o755))
+
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: marker, remotePID: ""}
+
+	require.NoError(t, p.reap(),
+		"a pre-launch failure with no captured PID removes the partial session dir and latches")
+	assert.True(t, p.reaped, "an answered clean reap latches so retries do not re-run it")
+
+	_, statErr := os.Stat(marker)
+	assert.True(t, os.IsNotExist(statErr),
+		"the session dir was only ever a partial workspace and must be removed")
+}
+
+// End-to-end through provision() + reapProvisionFailure: a polluted `echo $!`
+// output (wrapper stdout noise while the nohup'd server did start) fails
+// provisioning with "invalid background PID"; the mirroring carries the raw
+// PID onto the provisioner, so the failure reap refuses rather than
+// `rm -rf`-ing the session dir of a possibly-running server. The surfaced
+// error joins both diagnostics and wraps ErrWorkspaceStateUnknown so the
+// daemon retains the record for retry — instead of latching a clean reap and
+// retiring the row over an orphan.
+func TestSandboxProvisionFailureMirrorsTheRawPIDForTheReap(t *testing.T) {
+	localBin := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(localBin, []byte("0123456789"), 0o755))
+
+	var reapTransportCalls []string
+	stageBinaryReply := binaryStageReplies(t, localBin)
+	p := &sandboxProvisioner{
+		spec:    ProvisionSpec{Title: "test-session"},
+		afBin:   localBin,
+		program: "",
+	}
+	p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		if out, ok := stageBinaryReply(script); ok {
+			return out, nil
+		}
+		switch {
+		case strings.Contains(script, "mktemp -d"):
+			return []byte("/remote/af-sessions/test.XXXXXX\n"), nil
+		case strings.Contains(script, "git config --global"):
+			return nil, nil
+		case strings.Contains(script, "git clone"):
+			return nil, nil
+		case strings.Contains(script, "cat >") && strings.Contains(script, "chmod +x"):
+			return nil, nil
+		case strings.Contains(script, "wc -c"):
+			return []byte("10\n"), nil
+		case strings.Contains(script, "nohup"):
+			return []byte("af-wrapper noise 4242\n"), nil
+		case strings.Contains(script, "rm -rf") ||
+			strings.Contains(script, "af-sandbox-reaped-") ||
+			strings.Contains(script, "kill -0"):
+			reapTransportCalls = append(reapTransportCalls, script)
+			return nil, nil
+		default:
+			return nil, nil
+		}
+	}
+
+	_, err := p.provision()
+	require.Error(t, err, "an invalid captured PID must fail provisioning")
+	assert.Contains(t, err.Error(), "invalid background PID",
+		"the provision error must name what failed")
+	assert.Contains(t, err.Error(), "af-wrapper noise 4242")
+
+	// The mirroring fix: even on the failure path, the raw PID is on the
+	// provisioner for the reaper to see — "" would mean "nothing started" and
+	// the rm would proceed; the garbage PID is what makes the refuse guard
+	// reachable. The success-only mirroring at 6d83aaf3 regressed this to "".
+	assert.Equal(t, "af-wrapper noise 4242", p.remotePID,
+		"the raw captured PID must be mirrored onto the provisioner even on the invalid-PID failure path")
+	assert.Equal(t, "/remote/af-sessions/test.XXXXXX", p.sessionDir)
+
+	joinedErr := p.reapProvisionFailure(err)
+	require.Error(t, joinedErr)
+	assert.True(t, errors.Is(joinedErr, ErrWorkspaceStateUnknown),
+		"the joined error must preserve the reap refusal's unknown-state classification, so the daemon retains the record")
+	assert.False(t, p.reaped,
+		"the reap must not latch — the record must be retried, not retired")
+	assert.Contains(t, joinedErr.Error(), "provisioning failed and cleanup of its partial workspace",
+		"the surfaced error must say cleanup did not complete, so the operator inspects before retrying")
+	assert.Contains(t, joinedErr.Error(), "refusing to reap",
+		"the surfaced error must say the reap refused, so the operator knows the server may still be running")
+	assert.Contains(t, joinedErr.Error(), "af-wrapper noise 4242",
+		"the surfaced error must name the invalid PID for diagnosis")
+
+	assert.Empty(t, reapTransportCalls,
+		"the refuse guard must short-circuit before the reap invokes the transport")
+}
+
+// A launch that suppressed `echo $!` (a wrapper swallowing stdout while the
+// nohup'd `af agent-server` did start) leaves RemotePID empty, but the nohup
+// still ran — so this is NOT the pre-launch empty-PID path that may `rm -rf`
+// the partial workspace. The refuse guard must fail closed: an empty PID after
+// a launch attempts the reap with launchAttempted set, so the reap refuses,
+// does not latch, does not remove the session dir, and never invokes the
+// transport — the record is the operator's only handle on the orphan.
+func TestSandboxReapRefusesAnEmptyRemotePIDAfterLaunch(t *testing.T) {
+	ssh := stubSSH(t, `sh -c "${!#}"`)
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "session-dir")
+	require.NoError(t, os.MkdirAll(marker, 0o755))
+	sentinel := filepath.Join(marker, "still-here")
+	require.NoError(t, os.WriteFile(sentinel, []byte("present"), 0o644))
+
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: marker, launchAttempted: true}
+
+	err := p.reap()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
+		"an empty PID after a launch means the agent-server may still be running; the record must be retained as unknown-state")
+	assert.False(t, p.reaped,
+		"the reap must NOT latch — the next poll must retry, not return a cached verdict")
+	assert.Contains(t, err.Error(), "refusing to reap",
+		"the error must say it refused, not that the reap completed")
+	assert.Contains(t, err.Error(), "no remote PID",
+		"the error must name the empty PID so the operator can diagnose it")
+	assert.Contains(t, err.Error(), marker,
+		"the error must name the session dir so the operator can inspect it by hand")
+
+	_, statErr := os.Stat(sentinel)
+	assert.NoError(t, statErr,
+		"the session dir must NOT be removed while the agent-server may still be running")
+}
+
+// End-to-end through provision() + reapProvisionFailure: when the launch
+// transport exits cleanly but returns no PID (a wrapper that swallowed `echo
+// $!`), startAgentServer fails with "invalid background PID" and an empty
+// RemotePID. The launchAttempted flag is set before the call, so the failure
+// reap refuses rather than `rm -rf`-ing the session dir of a possibly-running
+// server. The surfaced error joins the provision error with the reap refusal
+// and wraps ErrWorkspaceStateUnknown so the daemon retains the record.
+func TestSandboxProvisionFailureRefusesAnEmptyRemotePIDAfterLaunch(t *testing.T) {
+	localBin := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(localBin, []byte("0123456789"), 0o755))
+
+	var reapTransportCalls []string
+	stageBinaryReply := binaryStageReplies(t, localBin)
+	p := &sandboxProvisioner{
+		spec:    ProvisionSpec{Title: "test-session"},
+		afBin:   localBin,
+		program: "",
+	}
+	p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		if out, ok := stageBinaryReply(script); ok {
+			return out, nil
+		}
+		switch {
+		case strings.Contains(script, "mktemp -d"):
+			return []byte("/remote/af-sessions/test.XXXXXX\n"), nil
+		case strings.Contains(script, "git config --global"):
+			return nil, nil
+		case strings.Contains(script, "git clone"):
+			return nil, nil
+		case strings.Contains(script, "cat >") && strings.Contains(script, "chmod +x"):
+			return nil, nil
+		case strings.Contains(script, "wc -c"):
+			return []byte("10\n"), nil
+		case strings.Contains(script, "nohup"):
+			// The transport exits cleanly but suppresses `echo $!`: the nohup
+			// ran, the agent-server may be detached, and the captured PID is
+			// empty rather than the non-numeric noise the garbage-PID test uses.
+			return []byte("\n"), nil
+		case strings.Contains(script, "rm -rf") ||
+			strings.Contains(script, "af-sandbox-reaped-") ||
+			strings.Contains(script, "kill -0"):
+			reapTransportCalls = append(reapTransportCalls, script)
+			return nil, nil
+		default:
+			return nil, nil
+		}
+	}
+
+	_, err := p.provision()
+	require.Error(t, err, "an empty captured PID must fail provisioning")
+	assert.Contains(t, err.Error(), "invalid background PID",
+		"the provision error must name what failed")
+	assert.Contains(t, err.Error(), `""`,
+		"the provision error must name the empty PID that failed the validity check")
+
+	assert.True(t, p.launchAttempted,
+		"the launch was attempted, so the reap must treat an empty PID as a possibly-running server")
+	assert.Equal(t, "", p.remotePID,
+		"the empty captured PID is mirrored onto the provisioner unchanged")
+	assert.Equal(t, "/remote/af-sessions/test.XXXXXX", p.sessionDir)
+
+	joinedErr := p.reapProvisionFailure(err)
+	require.Error(t, joinedErr)
+	assert.True(t, errors.Is(joinedErr, ErrWorkspaceStateUnknown),
+		"the joined error must preserve the reap refusal's unknown-state classification, so the daemon retains the record")
+	assert.False(t, p.reaped,
+		"the reap must not latch — the record must be retried, not retired")
+	assert.Contains(t, joinedErr.Error(), "provisioning failed and cleanup of its partial workspace",
+		"the surfaced error must say cleanup did not complete, so the operator inspects before retrying")
+	assert.Contains(t, joinedErr.Error(), "refusing to reap",
+		"the surfaced error must say the reap refused, so the operator knows the server may still be running")
+	assert.Contains(t, joinedErr.Error(), "no remote PID",
+		"the surfaced error must name the empty PID for diagnosis")
+
+	assert.Empty(t, reapTransportCalls,
+		"the refuse guard must short-circuit before the reap invokes the transport")
 }

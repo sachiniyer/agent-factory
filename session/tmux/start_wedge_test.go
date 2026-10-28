@@ -128,3 +128,100 @@ func wedgeHasSessionAfterFirstOnPath(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+// wedgeOnlyReadyPollHasSession installs a fake `tmux` on PATH that lets Start
+// reach its readiness poll and then WEDGES only that poll's has-session,
+// leaving every other tmux command fast. It reproduces the production
+// preconditions for the readiness-poll budget overshoot: the up-front
+// existence gate (start.go's first ProbeSession) must answer "not found" so
+// the create proceeds, and then the poll's has-session wedges.
+//
+// The first has-session answers exit 1 (so the start.go:24 gate passes); every
+// later has-session sleeps in a child that a context deadline can SIGKILL — the
+// only faithful stand-in for a wedged tmux server (a blocking mock is
+// unreachable by any deadline; see kill_wedge_test.go). Every other command
+// (new-session, set-option, kill-session, list-panes, display-message) exits 0
+// fast, so the post-timeout cleanup path does not also stall and confound the
+// timing measurement. show-options reports "no server running" the way
+// EnsureDaemonServer expects.
+//
+// Unlike wedgeHasSessionAfterFirstOnPath this does NOT wedge the teardown
+// commands: the point is to isolate the readiness poll's budget, not to
+// reproduce #1962's false-success path.
+func wedgeOnlyReadyPollHasSession(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	state := filepath.Join(dir, "has_session_calls")
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"has-session)\n" +
+		"  n=$(cat " + state + " 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > " + state + "\n" +
+		"  if [ \"$n\" -eq 1 ]; then exit 1; fi\n" +
+		"  sleep 300 & wait\n" +
+		"  ;;\n" +
+		"show-options)\n" +
+		"  echo 'no server running' >&2\n" +
+		"  exit 1\n" +
+		"  ;;\n" +
+		"*)\n" +
+		"  exit 0\n" +
+		"  ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestStartReadinessPollHonors2sDeadlineAgainstProductionTimeout is the
+// budget-overshoot regression: with the production tmuxCommandTimeout (10s) kept
+// INTACT (no shortTmuxTimeout), a has-session that wedges DURING the readiness
+// poll must NOT hold Start past the poll's own 2s deadline.
+//
+// Before the fix each poll probe went through ProbeSession -> probeSession ->
+// tmuxTimeoutContext(), i.e. the flat 10s tmuxCommandTimeout, while the only
+// give-up path (the loop's `case <-timeout`) ran AFTER the synchronous probe
+// returned. One wedged has-session then blocked Start for the whole 10s, so the
+// 2s deadline the loop documents (and ErrTmuxTimeout names) was unreachable for
+// those 10s. shortTmuxTimeout-based wedge tests shrink tmuxCommandTimeout below
+// the 2s budget and so cannot observe this overshoot; this test keeps the
+// production value and asserts the fixed bound. Mirrors the paste-delivery
+// poll's use of tmuxTimeoutContextWithin (#2099).
+func TestStartReadinessPollHonors2sDeadlineAgainstProductionTimeout(t *testing.T) {
+	wedgeOnlyReadyPollHasSession(t)
+	forceNewSessionEnvMarkers(t, false)
+	// Deliberately NOT calling shortTmuxTimeout: keep the production 10s so the
+	// overshoot (flat-10s probe vs the 2s poll budget) is what is under test.
+	ts := NewTmuxSessionWithDeps("wedge-poll-overshoot", "sh", NewMockPtyFactory(t), cmd.MakeExecutor())
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- ts.Start(t.TempDir()) }()
+
+	select {
+	case err := <-done:
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatal("Start reported success against a server that wedged during the readiness poll " +
+				"— the poll exited on the lie that the session came up (#1962)")
+		}
+		// This harness deliberately keeps the telescoping teardown FAST (only
+		// has-session wedges), so Start's post-timeout cleanup confirms absence
+		// and the returned error wraps ErrSessionNotStarted, not ErrTmuxTimeout.
+		// The ErrTmuxTimeout classification is the existing full-wedge test's
+		// concern; THIS test's property is the readiness poll's 2s budget.
+		//
+		// The poll's own deadline is 2s and the post-timeout cleanup is fast under
+		// this harness. The buggy code returned in ~10s because the flat-10s probe
+		// outran the loop's 2s give-up case (the select that hosts case <-timeout
+		// only ran after the synchronous probe returned); the fixed code bounds
+		// each probe by the remaining budget and returns at ~2s. A generous ceiling
+		// rejects the 10s overshoot while tolerating CI jitter.
+		if elapsed > 6*time.Second {
+			t.Fatalf("readiness poll overshot its 2s deadline: took %v; a wedged has-session must be "+
+				"bounded by the remaining 2s budget, not the flat 10s tmuxCommandTimeout", elapsed)
+		}
+	case <-time.After(40 * time.Second):
+		t.Fatal("Start hung past 40s; the readiness poll must be bounded")
+	}
+}

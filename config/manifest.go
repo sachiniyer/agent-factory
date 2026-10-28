@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -64,11 +65,6 @@ type ManifestEntry struct {
 	// "table", or "list". It describes what a user writes, which can be more
 	// specific than the Go field used for the normalized in-memory value.
 	Type string
-	// AcceptedTypes lists every config shape the decoder accepts when Type alone
-	// is incomplete. It includes Type itself and is nil for ordinary one-shape
-	// keys. Theme uses this to describe its named string presets and custom table
-	// without weakening Type's lock to the normalized Go struct.
-	AcceptedTypes []string
 	// Default is the default value rendered for a human. For a key whose default
 	// is deterministic, TestManifestDefaultsMatchDefaultConfig pins this against
 	// DefaultConfig(); the rest (a username-derived prefix, a detected binary
@@ -81,8 +77,9 @@ type ManifestEntry struct {
 	// Tier ranks the key for ordering and for what an agent surfaces first.
 	Tier ConfigTier
 	// Settable reports whether the current global `af config set` accepts this
-	// whole key. Dynamic families (program_overrides, limit_patterns) additionally
-	// retain their leaf form, e.g. `af config set program_overrides.claude …`.
+	// whole key. Dynamic families (program_overrides, limit_patterns) and selected
+	// structured tables additionally retain leaf forms, e.g. `af config set
+	// program_overrides.claude …` and `af config set root_agent.enabled …`.
 	// It is pinned against the real allowlist by TestManifestAgreesWithSettableKeys,
 	// so it can never become a claim the CLI does not honor. Global entries are
 	// uniformly true; false is reserved for repo-only keys outside these panes.
@@ -205,23 +202,14 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 
-	// ---- Tier 2 ----
 	{
-		Key:  "theme",
-		Type: "table",
-		AcceptedTypes: []string{
-			"string",
-			"table",
-		},
-		Default:    "nord",
-		Purpose:    "Colors the terminal and browser interfaces use · choose the nord or zenburn preset, or provide one #RRGGBB value per custom slot.",
-		Tier:       TierCommon,
-		Settable:   true,
-		Sources:    sourceGlobalOnly,
-		Precedence: precedenceGlobal,
-		Merge:      MergeTableByField,
-		Formats:    formatTOMLOnly,
+		Key: "appearance", Type: "string", Default: "system",
+		Purpose: "TUI appearance · Light, Dark or System (terminal background); applies on next TUI launch.",
+		Tier:    TierCore, Settable: true, Enum: []string{"light", "dark", "system"},
+		Sources: sourceGlobalOnly, Precedence: precedenceGlobal, Merge: MergeReplace, Formats: formatTOMLOnly,
 	},
+
+	// ---- Tier 2 ----
 	{
 		Key:        "vscode_server_binary",
 		Type:       "string",
@@ -249,10 +237,46 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "network.allow_unauthenticated_network",
+		Type:       "bool",
+		Default:    "false",
+		Purpose:    "Explicitly permit a non-loopback network.listen_addr to serve the full control API with no token · off by default, so that combination is refused rather than bound.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "daemon_poll_interval",
 		Type:       "duration",
 		Default:    "1000",
 		Purpose:    "How often the background service checks sessions for new output · use a duration such as 1500ms or 30m; legacy integer milliseconds remain accepted.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "watcher_events_per_minute",
+		Type:       "int",
+		Default:    "10",
+		Purpose:    "Maximum events each watch task may deliver per rolling minute · excess source events are discarded and counted on the task record.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "debug_pprof",
+		Type:       "bool",
+		Default:    "false",
+		Purpose:    "Serve Go runtime profiles from the background service, for diagnosing a memory or goroutine problem · off by default, reachable only over the local control socket, and never on the web address · a profile contains live process memory, so turn it off again afterwards.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalOnly,
@@ -285,14 +309,20 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "branch_prefix",
-		Type:       "string",
-		Default:    "your username, followed by a slash",
-		Purpose:    "Prefix for the git branch each new session creates.",
-		Tier:       TierAdvanced,
-		Settable:   true,
+		Key:      "branch_prefix",
+		Type:     "string",
+		Default:  "your username, followed by a slash",
+		Purpose:  "Prefix for the git branch each new session creates · global-only for now — a per-project value is accepted and stored but ignored.",
+		Tier:     TierAdvanced,
+		Settable: true,
+		// Sources still admits the personal layer so a project-scoped value
+		// remains writable and existing personal files keep loading, but
+		// Precedence is global-only: the daemon names branches from its frozen
+		// startup prefix, so a personal value can never win until #4539 lands
+		// the real feature. annotateProjectBranchPrefix relabels the stored
+		// candidate in the trace, and the set/load warnings say the same.
 		Sources:    sourceGlobalPersonal,
-		Precedence: precedenceGlobalPersonal,
+		Precedence: precedenceGlobal,
 		Merge:      MergeReplace,
 		Formats:    formatTOMLJSON,
 	},
@@ -305,6 +335,18 @@ var configManifest = []ManifestEntry{
 		Settable:   true,
 		Sources:    sourceGlobalPersonal,
 		Precedence: precedenceGlobalPersonal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "move_cmd",
+		Type:       "string",
+		Default:    `""`,
+		Purpose:    "Script af runs on the daemon host when moving a live local session to a sandbox (`af sessions move`): spec as JSON on stdin, AF_SSH / AF_SSH_DEST / AF_SSH_FULL in the environment · empty means no script · global-only: af executes it with the session's environment in reach, so a repository must never choose it — a checked-in value is rejected at load.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
 		Merge:      MergeReplace,
 		Formats:    formatTOMLJSON,
 	},
@@ -347,6 +389,29 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:  "default_accounts",
+		Type: "table",
+		// Deliberately no Default value to quote: the built-in state is "no entry
+		// for any agent", which is the ambient identity every session had before
+		// this key existed.
+		Default:  "none · sessions run on the agent's own ambient login",
+		Purpose:  "Which of an agent's logged-in accounts a new session runs as · one entry per agent, most useful set per project so one project runs as your work identity and another as your personal one.",
+		Tier:     TierAdvanced,
+		Settable: true,
+		// The KEYS are enumerated, not the values: only an agent whose credential
+		// root af can relocate may be scoped to an account at all, and that set is
+		// narrower than tmux.SupportedPrograms. An account NAME is free-form.
+		Enum: sessionenv.AccountAgents(),
+		// Global and personal-per-project, never in-repo. Identity policy is never
+		// checked in: a committed account name is meaningless for everyone else who
+		// clones the repository, and af must not let a repo choose whose quota its
+		// sessions spend (the #3174 precedent for limit_account_candidates).
+		Sources:    sourceGlobalPersonal,
+		Precedence: precedenceGlobalPersonal,
+		Merge:      MergeMapByKey,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "session_env_passthrough",
 		Type:       "list",
 		Default:    "none",
@@ -384,10 +449,22 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "limit_account_candidates",
+		Type:       "list",
+		Default:    "none",
+		Purpose:    "Registered account names a usage-limited session may switch to, in order · empty keeps waiting on the current identity; set globally or as a personal per-project override.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalPersonal,
+		Precedence: precedenceGlobalPersonal,
+		Merge:      MergeListReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "global_agent_skills",
 		Type:       "bool",
 		Default:    "false",
-		Purpose:    "Let af add its af-usage skill to your own codex/gemini/amp config folders · off means those agents are not told about af.",
+		Purpose:    "Let af add its af-usage skill to your own codex/gemini/amp/devin config folders · off means those agents are not told about af.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalOnly,
@@ -425,6 +502,42 @@ var configManifest = []ManifestEntry{
 		Type:       "string",
 		Default:    `""`,
 		Purpose:    "The free-form ssh command the `sandbox` backend runs to reach the sandbox host (jump hosts, ProxyCommand, custom flags) · global-only: af executes it on the daemon host, so a repo selecting backend=sandbox cannot dictate what command runs — only the operator can.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "sandbox.binary",
+		Type:       "string",
+		Default:    `""`,
+		Purpose:    "A daemon-local path to an `af` binary the sandbox/ssh backends stream to remote hosts instead of the daemon's own binary or a release download — the override for air-gapped hosts · global-only: the daemon reads and streams the path, so a repo-settable value could install an arbitrary binary on every host.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "hosts",
+		Type:       "table",
+		Default:    "none",
+		Purpose:    "Named hosts sessions can run on · one entry per name with host (the ssh destination), and optional user, port, identity_file, workspace_root, host_key_verification and use_ssh_config (opt that host into your ssh_config) · set the whole table with compact JSON · global-only: af executes against these hosts and sends credentials to them, so no repo can set or extend the list.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "default_host",
+		Type:       "string",
+		Default:    `""`,
+		Purpose:    "The listed host a session runs on when it does not pick one · must name an entry of hosts · empty means no default · global-only, like hosts.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalOnly,
@@ -472,12 +585,24 @@ var configManifest = []ManifestEntry{
 		Key:        "root_agent",
 		Type:       "table",
 		Default:    "not enabled",
-		Purpose:    "Current project profile: whether a registered project keeps a session named root running, and the command it runs · the singleton successor to the legacy root_agents path map, settable per project.",
+		Purpose:    "Current project profile: whether a registered project keeps a session named root running, and the command it runs · set the whole table with compact JSON, or set enabled and program directly.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalPersonal,
 		Precedence: precedenceGlobalPersonal,
 		Merge:      MergeTableByField,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "web",
+		Type:       "table",
+		Default:    `{"terminal_font_size_desktop":13,"terminal_font_size_phone":6.5}`,
+		Purpose:    "Terminal text size in the browser client · one size for the phone-width breakpoint and one for desktop · the terminal's A−/A+ controls step and save the class in use.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
 		Formats:    formatTOMLJSON,
 	},
 	{
@@ -553,6 +678,18 @@ var configManifest = []ManifestEntry{
 		Merge:      MergeTableByField,
 		Formats:    formatTOMLJSON,
 	},
+	{
+		Key:        "upgrade_clear_unverifiable_artifacts",
+		Type:       "bool",
+		Default:    "false",
+		Purpose:    "Let an upgrade set aside a binary staged beside af whose owning agent-factory home af cannot read · only for a leftover you have checked yourself; af already clears the ones it can attribute.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
 }
 
 // Manifest returns every user-facing GLOBAL config key in tier order. It keeps
@@ -586,11 +723,6 @@ func cloneManifest(entries []ManifestEntry) []ManifestEntry {
 	out := make([]ManifestEntry, len(entries))
 	copy(out, entries)
 	for i := range out {
-		if out[i].AcceptedTypes != nil {
-			acceptedTypes := make([]string, len(out[i].AcceptedTypes))
-			copy(acceptedTypes, out[i].AcceptedTypes)
-			out[i].AcceptedTypes = acceptedTypes
-		}
 		if out[i].Enum != nil {
 			enum := make([]string, len(out[i].Enum))
 			copy(enum, out[i].Enum)
@@ -606,10 +738,7 @@ func cloneManifest(entries []ManifestEntry) []ManifestEntry {
 }
 
 func (e ManifestEntry) acceptedTypes() []string {
-	if len(e.AcceptedTypes) == 0 {
-		return []string{e.Type}
-	}
-	return e.AcceptedTypes
+	return []string{e.Type}
 }
 
 func (e ManifestEntry) typeLabel() string {
@@ -637,23 +766,6 @@ func manifestGlobalOnlyKeySet() map[string]bool {
 			keys[entry.Key] = true
 			if alias, ok := configAliasForCanonical(entry.Key); ok {
 				keys[alias.legacy] = true
-			}
-		}
-	}
-	return keys
-}
-
-func manifestTOMLOnlyGlobalKeySet() map[string]bool {
-	keys := make(map[string]bool)
-	for _, entry := range configManifest {
-		if entry.Sources.Has(SourceGlobal) && !entry.Formats.Has(FormatJSON) {
-			keys[entry.Key] = true
-		}
-		if entry.Sources.Has(SourceGlobal) {
-			if _, ok := configAliasForCanonical(entry.Key); ok {
-				// The setting remains available to JSON under its flat alias, but
-				// its canonical dotted spelling is a TOML table leaf.
-				keys[entry.Key] = true
 			}
 		}
 	}

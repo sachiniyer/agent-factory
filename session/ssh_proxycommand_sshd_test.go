@@ -112,7 +112,7 @@ func TestPinnedSessionStreamsStdinAndSeesEOF(t *testing.T) {
 	payload := strings.Repeat("af-binary-stand-in-0123456789\n", 40000)
 	dst := filepath.Join(t.TempDir(), "streamed")
 	p := newSSHSandboxProvisioner(ProvisionSpec{Title: "stream"}, pinnedCmd, "", "")
-	out, err := p.Run(60*time.Second, "cat > "+shellQuoteSandbox(dst)+" && wc -c < "+shellQuoteSandbox(dst),
+	out, err := p.Run(60*time.Second, "cat > "+shellQuote(dst)+" && wc -c < "+shellQuote(dst),
 		strings.NewReader(payload), false)
 	require.NoError(t, err, "ssh said:\n%s", out)
 	assert.Equal(t, strconv.Itoa(len(payload)), strings.TrimSpace(string(out)),
@@ -135,11 +135,11 @@ func hostKeyAliasPinnedCommand(t *testing.T, cfg config.SSHConfig, posture, dial
 	if port == 0 {
 		port = sshDefaultPort
 	}
-	suffix := " " + shellQuoteSandbox(host)
+	suffix := " " + shellQuote(host)
 	require.True(t, strings.HasSuffix(base, suffix))
 	return strings.TrimSuffix(base, suffix) +
-		" -o HostKeyAlias=" + shellQuoteSandbox(knownHostsLookupName(host, port)) +
-		" " + shellQuoteSandbox(dialAddr)
+		" -o HostKeyAlias=" + shellQuote(knownHostsLookupName(host, port)) +
+		" " + shellQuote(dialAddr)
 }
 
 // runOverTransport runs one command through the production transport — the same
@@ -318,9 +318,22 @@ func waitForListener(t *testing.T, port int) {
 // isolation. A shell stand-in would test the composition and none of that.
 var (
 	afRelayOnce sync.Once
+	afRelayDir  string
 	afRelayPath string
 	afRelayErr  error
 )
+
+// removeAFRelayBinary deletes the once-per-package build directory. TestMain
+// calls it, NOT t.Cleanup: afRelayOnce caches the build across every test in the
+// package, so a per-test cleanup would delete the binary the next test still
+// resolves to. Without it each `go test ./session/...` run left one more
+// /tmp/af-relay-bin* directory on the box — 284 of them by the time #3842
+// counted.
+func removeAFRelayBinary() {
+	if afRelayDir != "" {
+		_ = os.RemoveAll(afRelayDir)
+	}
+}
 
 func afRelayBinary(t *testing.T) string {
 	t.Helper()
@@ -334,6 +347,7 @@ func afRelayBinary(t *testing.T) string {
 			afRelayErr = err
 			return
 		}
+		afRelayDir = dir
 		out := filepath.Join(dir, "af")
 		build := exec.Command("go", "build", "-o", out, "github.com/sachiniyer/agent-factory")
 		build.Dir = ".."

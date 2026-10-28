@@ -1,29 +1,37 @@
 // Package apiclient is a typed Go client for the daemon-hosted HTTP/JSON API
 // (#1029) that the daemon serves on its `daemon-http.sock` Unix socket. It is
-// the read-side twin of the gob `net/rpc` control client in daemon/: it dials
-// the SAME daemon core over a DIFFERENT transport and, by decoding the shared
+// the HTTP twin of the gob `net/rpc` control client in daemon/: it dials the
+// SAME daemon core over a DIFFERENT transport and, by decoding the shared
 // `{data,error}` envelope back into the SAME request/response structs the RPC
-// client uses, it returns byte-identical results. This is the seam #1592 Phase 2
-// grows the client API on — HTTP today, WebSocket streaming later — without the
-// TUI or CLI ever touching the wire shape.
+// client uses, it returns byte-identical results — without the TUI or CLI ever
+// touching the HTTP envelope shape. The streaming path is the exception: the
+// TUI drives the WebSocket protocol itself (app/live_stream.go, over
+// agentproto) through the raw connection DialStream exposes.
 //
-// Phase 2 PR2 scope: this client exposes only the READ-ONLY Snapshot path and
-// its first consumer is the non-spawning `af sessions list`/`get` read
-// (api/sessions.go). Every write/control call stays on net/rpc; the disk
-// fallback is unchanged. The envelope is NOT redefined here — the client decodes
-// the exact bytes daemon/httpserver.go writes via apiproto.WriteEnvelope, which
-// is what guarantees parity.
+// The client covers the operations the TUI and CLI drive today — snapshot
+// reads, session/tab/task lifecycle writes, config get/set, and streaming
+// attach — a subset of the HTTP route catalog, not all of it (SendPrompt and
+// the tab rename/reorder routes have no wrapper yet, for example). The TUI's
+// session control calls ride it (app/session_control.go's withDaemonHTTP),
+// though a few flows — local account registration and login, for one — still
+// use the gob client directly; the CLI's `af sessions` and `af tasks` trees
+// in api/ call it too. The
+// envelope is NOT redefined here — the client decodes the exact bytes
+// daemon/httpserver.go writes via apiproto.WriteEnvelope, which is what
+// guarantees parity.
 package apiclient
 
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"sync/atomic"
 	"time"
 
@@ -42,9 +50,28 @@ import (
 // daemon boot order), so a call fired in that window sees connection-refused.
 // Callers distinguish the two with IsTransportError so they can retry a bind
 // race without ever masking a real daemon error by retrying it.
-type TransportError struct{ Err error }
+//
+// A transport error is not proof that nothing happened. A read that fails
+// mid-response comes after the daemon ran the handler, so a MUTATION may have
+// committed (#4820). NotSent separates the two: it is true only when the client
+// never obtained a connection, so no request byte left this process. The zero
+// value is false — "may have been received" — so a TransportError built anywhere
+// without that proof fails safe. Mutation callers retry only NotSent failures;
+// see IsMutationOutcomeUncertain.
+type TransportError struct {
+	Err error
+	// NotSent reports that the request provably never reached the daemon: the
+	// round-trip failed before any connection was obtained (a refused dial, a
+	// missing socket during the daemon-HTTP bind race).
+	NotSent bool
+}
 
-func (e *TransportError) Error() string { return e.Err.Error() }
+func (e *TransportError) Error() string {
+	if hint := tlsVerifyHint(e.Err); hint != "" {
+		return e.Err.Error() + " — " + hint
+	}
+	return e.Err.Error()
+}
 func (e *TransportError) Unwrap() error { return e.Err }
 
 // IsTransportError reports whether err (or anything it wraps) is a TransportError
@@ -176,6 +203,24 @@ func NewWithSocket(socketPath string) *Client {
 	}
 }
 
+// CloseIdleConnections drains the transport's idle connection pool.
+//
+// A Client built for ONE round-trip and then dropped does not release its
+// connection: the completed keep-alive socket stays in the pool with its
+// read-loop goroutine, and that goroutine keeps the transport reachable, so
+// nothing is ever collected. Measured against a real unix-socket server, 200
+// such clients leak 400 descriptors — both ends — and forcing GC reclaims none.
+//
+// Callers that make one call and discard the Client must defer this. The WS path
+// already does it for its cloned transport (see stream.go); this is the REST
+// twin (#3626 review).
+func (c *Client) CloseIdleConnections() {
+	c.httpClient.CloseIdleConnections()
+	if c.remoteTransport != nil {
+		c.remoteTransport.CloseIdleConnections()
+	}
+}
+
 // call POSTs req as JSON to /v1/<method>, decodes the shared {data,error}
 // envelope, and unmarshals the envelope's data member into resp. It is the
 // single client-side twin of daemon/httpserver.go's rpcHandler: request struct
@@ -226,6 +271,15 @@ func (c *Client) callCtx(ctx context.Context, method string, req any, resp any) 
 		return fmt.Errorf("apiclient: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	return c.roundTrip(httpReq, resp)
+}
+
+// roundTrip sends an already-built request, decodes the shared {data,error}
+// envelope, and unmarshals the data member into resp. It is split out of
+// callCtx so the one non-POST route this client speaks — GET /v1/health, see
+// health.go — shares the identical headers, auth, transport classification and
+// envelope semantics instead of growing a second, driftable copy of them.
+func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 	// Identify this request as machine-generated by an af client so the daemon
 	// tolerates request fields it has never heard of. The daemon is upgraded
 	// independently of its clients (#960), so a newer client legitimately sends
@@ -238,17 +292,44 @@ func (c *Client) callCtx(ctx context.Context, method string, req any, resp any) 
 	// local unix socket carries no token (trusted transport) and this is a no-op.
 	c.setAuth(httpReq.Header)
 
+	// Record whether the transport ever handed this request a connection. Until
+	// it does, not one byte of the request can have been written, so a failure
+	// in that window is a request the daemon never saw — the only transport
+	// failure a mutation may safely re-send (#4820). Once a connection exists the
+	// request may be on the wire, and the daemon may run the handler even if the
+	// reply is lost. GotConn fires before the write begins, so the classification
+	// errs toward "may have been received".
+	var gotConn atomic.Bool
+	httpReq = httpReq.WithContext(httptrace.WithClientTrace(httpReq.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { gotConn.Store(true) },
+	}))
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		// The round-trip never reached a daemon handler — refused dial, missing
-		// socket, etc. Tag it so a caller can tell a bind race from a real error.
-		return &TransportError{Err: err}
+		// The round-trip failed without a daemon answer. Tag it so a caller can
+		// tell a bind race from a real error, and say whether the request can
+		// have reached the daemon at all.
+		return &TransportError{Err: err, NotSent: !gotConn.Load()}
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
 	raw, err := io.ReadAll(httpResp.Body)
 	if err != nil {
+		// The daemon has already answered with a status line, so the handler ran.
 		return &TransportError{Err: fmt.Errorf("apiclient: read response body: %w", err)}
+	}
+
+	// Only the daemon's marked catch-all proves that a 404 means an absent route.
+	// A reverse proxy can forward a mutation and substitute its own 404 after the
+	// upstream response is lost; that unmarked answer leaves the outcome unknown.
+	// Status still wins over body decoding so malformed or zero-shaped proxy
+	// responses can never become a successful call.
+	if httpResp.StatusCode == http.StatusNotFound {
+		if routeNotServed404(raw, httpReq.URL.Path, c.remoteTransport == nil) {
+			return &RouteNotServedError{Route: httpReq.URL.Path, Detail: notServedDetail(raw)}
+		}
+		return &UnconfirmedHTTPResponseError{
+			Route: httpReq.URL.Path, Status: httpResp.StatusCode, Detail: notServedDetail(raw),
+		}
 	}
 
 	// Decode into a RawMessage-backed envelope so the typed response is decoded
@@ -260,18 +341,33 @@ func (c *Client) callCtx(ctx context.Context, method string, req any, resp any) 
 		Error *apiproto.EnvelopeError `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("apiclient: malformed response envelope: %w", err)
+		return &malformedResponseError{err: fmt.Errorf("apiclient: malformed response envelope: %w", err)}
 	}
 	if env.Error != nil {
 		// Surface the daemon's message verbatim — byte-identical to what the
 		// net/rpc client would carry, since both transports wrap the same
 		// controlServer error — except where the message is provably a version
-		// skew, which is unactionable in its raw form.
-		return interpretEnvelopeError(env.Error.Message, env.Error.Code)
+		// skew, which is unactionable in its raw form. The definitive outcome
+		// codes first verify the answer is the daemon's own: status and the
+		// daemon_rejected marker both go in, so an intermediary's substituted or
+		// replayed envelope cannot classify a mutation it may have forwarded.
+		return interpretEnvelopeError(httpReq.URL.Path, httpResp.StatusCode, env.Error)
+	}
+	// The daemon pairs every non-200 status with a populated env.Error
+	// (daemon/httpserver.go writeHTTPError). A non-200 status carrying a benign
+	// envelope — env.Error == nil — can only have come from an intermediary in
+	// front of a remote daemon: the handler's outcome is unconfirmed, never a
+	// success. Without this guard, `{"data":null,"error":null}` on a 5xx
+	// unmarshals JSON null into resp (a no-op) and committedFromResponse
+	// returns nil, reporting a mutation that landed when its fate is unknown.
+	if httpResp.StatusCode != http.StatusOK && env.Error == nil {
+		return &UnconfirmedHTTPResponseError{
+			Route: httpReq.URL.Path, Status: httpResp.StatusCode, Detail: notServedDetail(raw),
+		}
 	}
 	if resp != nil {
 		if err := json.Unmarshal(env.Data, resp); err != nil {
-			return fmt.Errorf("apiclient: malformed response data: %w", err)
+			return &malformedResponseError{err: fmt.Errorf("apiclient: malformed response data: %w", err)}
 		}
 	}
 	return committedFromResponse(resp)
@@ -302,4 +398,19 @@ func (c *Client) setAuth(h http.Header) {
 	if c.token != "" {
 		h.Set(agentproto.AuthHeader, agentproto.BearerScheme+c.token)
 	}
+}
+
+// tlsVerifyHint names the remedy for a failed certificate check against an
+// https:// or wss:// target (W9.5). The client verifies against the system CAs
+// and offers no way to skip that, so the only fixes are on the certificate side.
+func tlsVerifyHint(err error) string {
+	var unknown x509.UnknownAuthorityError
+	var invalid x509.CertificateInvalidError
+	var host x509.HostnameError
+	if errors.As(err, &unknown) || errors.As(err, &invalid) || errors.As(err, &host) {
+		return "the daemon's TLS certificate is not trusted by this machine's system CAs; " +
+			"point --daemon-url at an endpoint with a certificate this machine trusts " +
+			"(for example the HTTPS name `tailscale serve` prints), or install the CA — af has no option to skip verification"
+	}
+	return ""
 }

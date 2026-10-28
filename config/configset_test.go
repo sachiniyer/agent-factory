@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -268,13 +267,6 @@ func TestSetGlobalConfigValuePreservesUnknownStructuredMembers(t *testing.T) {
 		name, input, key, value, preserved string
 	}{
 		{
-			name:      "theme direct member",
-			input:     "[theme]\nfuture_policy = 'keep'\n",
-			key:       "theme",
-			value:     `{"accent":"#112233"}`,
-			preserved: "future_policy = 'keep'",
-		},
-		{
 			name:      "root agent direct member",
 			input:     "[root_agent]\nprogram = 'claude'\nfuture_policy = 'keep'\n",
 			key:       "root_agent",
@@ -313,8 +305,8 @@ func TestSetGlobalConfigValueRefusesToDiscardUnknownMemberOnShapeChange(t *testi
 		t.Fatal(err)
 	}
 	_, err = SetGlobalConfigValue("theme", "zenburn")
-	if err == nil || !strings.Contains(err.Error(), "theme.future_policy") {
-		t.Fatalf("shape-changing set error = %v, want unknown member path", err)
+	if err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("shape-changing set error = %v, want retirement diagnostic", err)
 	}
 	after, readErr := os.ReadFile(path)
 	if readErr != nil {
@@ -331,6 +323,9 @@ func TestResolveSettable(t *testing.T) {
 	}
 	if s, leaf, _, ok := resolveSettable("program_overrides.claude"); !ok || s != "program_overrides" || leaf != "claude" {
 		t.Fatalf("dynamic resolve wrong: s=%q leaf=%q ok=%v", s, leaf, ok)
+	}
+	if s, leaf, spec, ok := resolveSettable("root_agent.enabled"); !ok || s != "root_agent" || leaf != "enabled" || spec.kind != cfgBool {
+		t.Fatalf("fixed leaf resolve wrong: s=%q leaf=%q kind=%v ok=%v", s, leaf, spec.kind, ok)
 	}
 	// A dotted leaf on a fixed key, an unknown key, and a nested dynamic leaf are rejected.
 	for _, bad := range []string{"default_program.x", "root_agents.foo", "nope", "program_overrides.a.b", "program_overrides."} {
@@ -524,6 +519,7 @@ func TestSettableKeysSorted(t *testing.T) {
 		if spec.dynamic && spec.structured {
 			wantLen++
 		}
+		wantLen += len(spec.subkeys)
 	}
 	if len(keys) != wantLen {
 		t.Fatalf("SettableKeys len %d != expected forms %d", len(keys), wantLen)
@@ -631,26 +627,36 @@ func TestSetGlobalConfigValueNewlySettableKeys(t *testing.T) {
 		key   string
 		value string
 		check func(*Config) any
+		// seed overrides the config body when a case's write would otherwise be
+		// refused by the #5137 posture gate (a routable listen_addr under the
+		// tokenless default needs the opt-in already on disk).
+		seed string
 	}{
-		{"listen_addr", "0.0.0.0:9443", func(c *Config) any { return c.ListenAddr }},
+		{"listen_addr", "0.0.0.0:9443", func(c *Config) any { return c.ListenAddr },
+			"default_program = 'claude'\nallow_unauthenticated_network = true\n"},
 		// The documented opt-out: "" disables the web server, so it must be
 		// settable, not treated as a missing argument.
-		{"listen_addr", "", func(c *Config) any { return c.ListenAddr }},
+		{"listen_addr", "", func(c *Config) any { return c.ListenAddr }, ""},
 		// preview_listen_addr (#1856) shares listen_addr's grammar and settability.
-		{"preview_listen_addr", "127.0.0.1:8444", func(c *Config) any { return c.PreviewListenAddr }},
+		{"preview_listen_addr", "127.0.0.1:8444", func(c *Config) any { return c.PreviewListenAddr }, ""},
 		// "" is the default and disables the preview listener — a real value.
-		{"preview_listen_addr", "", func(c *Config) any { return c.PreviewListenAddr }},
-		{"require_loopback_token", "true", func(c *Config) any { return c.RequireLoopbackToken }},
-		{"vscode_server_binary", "/opt/code-server/bin/code-server", func(c *Config) any { return c.VSCodeServerBinary }},
+		{"preview_listen_addr", "", func(c *Config) any { return c.PreviewListenAddr }, ""},
+		{"require_loopback_token", "true", func(c *Config) any { return c.RequireLoopbackToken }, ""},
+		{"vscode_server_binary", "/opt/code-server/bin/code-server", func(c *Config) any { return c.VSCodeServerBinary }, ""},
 		// Empty means PATH detection — also a real value.
-		{"vscode_server_binary", "", func(c *Config) any { return c.VSCodeServerBinary }},
-		{"limit_auto_resume", "true", func(c *Config) any { return c.LimitAutoResume }},
-		{"limit_retry_interval", "45m", func(c *Config) any { return c.LimitRetryInterval }},
+		{"vscode_server_binary", "", func(c *Config) any { return c.VSCodeServerBinary }, ""},
+		{"limit_auto_resume", "true", func(c *Config) any { return c.LimitAutoResume }, ""},
+		{"limit_account_candidates", "work,personal", func(c *Config) any { return strings.Join(c.LimitAccountCandidates, ",") }, ""},
+		{"limit_retry_interval", "45m", func(c *Config) any { return c.LimitRetryInterval }, ""},
 	}
 
 	for _, c := range cases {
 		t.Run(c.key+"="+c.value, func(t *testing.T) {
-			writeTempConfig(t, "default_program = 'claude'\n")
+			seed := c.seed
+			if seed == "" {
+				seed = "default_program = 'claude'\n"
+			}
+			writeTempConfig(t, seed)
 
 			if _, err := SetGlobalConfigValue(c.key, c.value); err != nil {
 				t.Fatalf("set %s=%q: %v", c.key, c.value, err)
@@ -727,7 +733,6 @@ func TestSetGlobalConfigValueStillRejectsMachineManagedSchemaVersion(t *testing.
 // value and return exactly what CurrentValue will render on refresh.
 func TestSetGlobalConfigValueFormerlyImmutableKeysRoundTrip(t *testing.T) {
 	want := DefaultConfig()
-	want.Theme.Accent = "#112233"
 	if want.ProgramOverrides == nil {
 		want.ProgramOverrides = map[string]string{}
 	}
@@ -739,7 +744,6 @@ func TestSetGlobalConfigValueFormerlyImmutableKeysRoundTrip(t *testing.T) {
 	want.Keys = map[string]any{"quit": "Q"}
 
 	for _, key := range []string{
-		"theme",
 		"program_overrides",
 		"session_env_passthrough",
 		"limit_patterns",
@@ -771,59 +775,6 @@ func TestSetGlobalConfigValueFormerlyImmutableKeysRoundTrip(t *testing.T) {
 				t.Fatalf("%s round-tripped as %q (ok=%v), want %q", key, roundTrip, ok, value)
 			}
 		})
-	}
-}
-
-func TestSetGlobalConfigValueThemePresetRoundTripsWithoutExpandingToATable(t *testing.T) {
-	path := writeTempConfig(t, "# custom theme\n[theme]\naccent = '#112233'\n")
-
-	res, err := SetGlobalConfigValue("theme", "zenburn")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Value != "zenburn" {
-		t.Fatalf("theme echo = %q, want zenburn", res.Value)
-	}
-	written, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(written), "theme = 'zenburn'") || strings.Contains(string(written), "[theme]") {
-		t.Fatalf("named preset did not replace the custom table as a scalar:\n%s", written)
-	}
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Theme.Preset() != "zenburn" {
-		t.Fatalf("loaded preset = %q, want zenburn", cfg.Theme.Preset())
-	}
-	if shown, ok := CurrentValue(cfg, "theme"); !ok || shown != "zenburn" {
-		t.Fatalf("theme editor value = %q (ok=%v), want zenburn", shown, ok)
-	}
-}
-
-func TestSetGlobalConfigValuePartialThemeMergesTheCurrentPalette(t *testing.T) {
-	writeTempConfig(t, "theme = 'zenburn'\n")
-	before, err := LoadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := before.Theme
-	want.Accent = "#123456"
-	want.preset = ""
-	want.explicitPreset = false
-
-	res, err := SetGlobalConfigValue("theme", `{"accent":"#123456"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, err := LoadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(after.Theme, want) {
-		t.Fatalf("partial theme edit reset omitted slots:\n got: %#v\nwant: %#v\necho: %s", after.Theme, want, res.Value)
 	}
 }
 
@@ -899,8 +850,8 @@ func TestSetGlobalConfigValueStructuredValidationRejectsBeforeWrite(t *testing.T
 	cases := []struct {
 		key, value, want string
 	}{
-		{"theme", `{"accent":"red"}`, "#RRGGBB"},
-		{"theme", `{"accent":null}`, "must not be null"},
+		{"theme", `{"accent":"red"}`, "retired"},
+		{"theme", `{"accent":null}`, "retired"},
 		{"program_overrides", `{"not-an-agent":"cmd"}`, "must be one of"},
 		{"session_env_passthrough", `["SECRET=value"]`, "exact POSIX name"},
 		{"limit_patterns", `{"claude":"("}`, "regular expression"},
@@ -1046,46 +997,98 @@ func TestLoaderAcceptsHandEditedMalformedCORSOrigin(t *testing.T) {
 	}
 }
 
-// TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener is the guardrail for
-// the exposure this PR made easy. Before listen_addr was settable, putting the
-// control plane on the network took a deliberate hand-edit; now it is one
-// command. `af config set listen_addr 0.0.0.0:8443` exits 0, and with
-// require_token defaulting to false the result is a full, unauthenticated,
-// plain-HTTP control plane for anyone who can route to it.
+// TestSetGlobalConfigValueTokenlessNetworkListener is the guardrail for the
+// exposure this PR made easy — and the #5137 hardening of it. Before listen_addr
+// was settable, putting the control plane on the network took a deliberate
+// hand-edit; then it was one command that succeeded with a warning (#2168).
+// Now a write whose RESULT is a tokenless non-loopback bind — from either
+// direction — is REFUSED with the same ListenerBindRefusal message the daemon
+// would emit, and the file is left untouched.
 //
-// The write still SUCCEEDS — this warns, it does not refuse (that would break
-// scripting) and does not auto-set require_token (silently changing a key the
-// user did not name is worse than the surprise it prevents).
-func TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener(t *testing.T) {
+// It refuses rather than silently repairing (auto-setting require_token on a
+// key the user did not name is still wrong), and it refuses ONLY the dangerous
+// result: writes that land a safe posture — loopback, token on, opt-in set —
+// still succeed.
+func TestSetGlobalConfigValueTokenlessNetworkListener(t *testing.T) {
 	cases := []struct {
 		name     string
 		seed     string
 		key, val string
-		wantWarn bool
+		// refused: the write errors and the file is untouched.
+		// warn:    the write succeeds and carries the opted-in exposure notice.
+		// neither: the write succeeds quietly — a safe posture, or a key that is
+		//          not part of the refusal's terms.
+		wantRefused, wantWarn bool
 	}{
-		// The dangerous move, from either direction.
-		{"network listener while token off", "default_program = 'claude'\n", "listen_addr", "0.0.0.0:8443", true},
-		{"token off while listener is network", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\nrequire_token = true\n", "require_token", "false", true},
-		{"routable ip while token off", "default_program = 'claude'\n", "listen_addr", "192.168.1.50:8443", true},
-		{"empty host binds every interface", "default_program = 'claude'\n", "listen_addr", ":8443", true},
+		// The dangerous write, from either direction.
+		{"network listener while token off", "default_program = 'claude'\n", "listen_addr", "0.0.0.0:8443", true, false},
+		{"token off while listener is network", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\nrequire_token = true\n", "require_token", "false", true, false},
+		{"routable ip while token off", "default_program = 'claude'\n", "listen_addr", "192.168.1.50:8443", true, false},
+		{"empty host binds every interface", "default_program = 'claude'\n", "listen_addr", ":8443", true, false},
+		{"tailscale address while token off", "default_program = 'claude'\n", "listen_addr", "100.83.69.90:8443", true, false},
+		// Dropping the opt-in under a tokenless network listener is ALLOWED even
+		// though the result is refused: it is the revocation that retires a
+		// serving exposure, and refusing it would trap the opt-in.
+		{"opt-in off while listener is exposed", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\nallow_unauthenticated_network = true\n", "allow_unauthenticated_network", "false", false, false},
 
 		// Safe: loopback stays loopback.
-		{"loopback default", "default_program = 'claude'\n", "listen_addr", "127.0.0.1:8443", false},
-		{"ipv6 loopback", "default_program = 'claude'\n", "listen_addr", "[::1]:8443", false},
-		{"localhost", "default_program = 'claude'\n", "listen_addr", "localhost:9000", false},
+		{"loopback default", "default_program = 'claude'\n", "listen_addr", "127.0.0.1:8443", false, false},
+		{"ipv6 loopback", "default_program = 'claude'\n", "listen_addr", "[::1]:8443", false, false},
+		{"localhost", "default_program = 'claude'\n", "listen_addr", "localhost:9000", false, false},
 		// Safe: the web server is off entirely.
-		{"empty disables the server", "default_program = 'claude'\n", "listen_addr", "", false},
+		{"empty disables the server", "default_program = 'claude'\n", "listen_addr", "", false, false},
 		// Safe: network bind but the token is already required.
-		{"network listener with token on", "default_program = 'claude'\nrequire_token = true\n", "listen_addr", "0.0.0.0:8443", false},
-		{"token on while listener is network", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "require_token", "true", false},
-		// Unrelated keys never warn.
-		{"unrelated key", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "auto_update", "true", false},
+		{"network listener with token on", "default_program = 'claude'\nrequire_token = true\n", "listen_addr", "0.0.0.0:8443", false, false},
+		{"token on while listener is network", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "require_token", "true", false, false},
+		// Safe: the write completes the valid combination itself — it sets the
+		// opt-in while the tokenless non-loopback half is already on disk.
+		{"opt-in while listener is tokenless network", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "allow_unauthenticated_network", "true", false, false},
+		// Opted-in and warned: the listen_addr write lands a SERVING exposure, so
+		// the accepted risk is still stated on the changed key.
+		{"network listener while opted in", "default_program = 'claude'\nallow_unauthenticated_network = true\n", "listen_addr", "0.0.0.0:8443", false, true},
+		// Opted-in exposure warns on the changed key: the listener WILL serve
+		// unauthenticated — the accepted risk is still stated plainly, once.
+		{"token off under opted-in listener warns", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\nrequire_token = true\nallow_unauthenticated_network = true\n", "require_token", "false", false, true},
+		// An unrelated key on an already-refused config (a hand-edit left one)
+		// stays quiet AND allowed: it did not create the posture, and refusing
+		// it would strand every other edit behind an unrelated fix.
+		{"unrelated key", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "auto_update", "true", false, false},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			writeTempConfig(t, c.seed)
+			path := writeTempConfig(t, c.seed)
 			res, err := SetGlobalConfigValue(c.key, c.val)
+			if c.wantRefused {
+				if err == nil {
+					t.Fatalf("set %s=%q: succeeded with warnings=%v; the refused posture must error",
+						c.key, c.val, res.Warnings)
+				}
+				if !strings.HasPrefix(err.Error(), "refusing to write: ") {
+					t.Errorf("set %s=%q: the refusal must name itself a refusal, got: %v", c.key, c.val, err)
+				}
+				// The message is ListenerBindRefusal's own: it names the address
+				// and the three fixes, so pin them rather than the phrasing.
+				for _, want := range []string{
+					"network.require_token true", "af token show",
+					"network.listen_addr 127.0.0.1:8443",
+					"network.allow_unauthenticated_network true",
+				} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("set %s=%q: refusal must mention %q, got: %v", c.key, c.val, want, err)
+					}
+				}
+				// And nothing was written: refusing the write is refusing to
+				// create the refused config.
+				after, readErr := os.ReadFile(path)
+				if readErr != nil {
+					t.Fatalf("reading the file after a refused write: %v", readErr)
+				}
+				if string(after) != c.seed {
+					t.Errorf("a refused write must leave the file untouched.\nseed: %q\nafter: %q", c.seed, after)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("set %s=%q: %v", c.key, c.val, err)
 			}
@@ -1098,6 +1101,9 @@ func TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener(t *testing.T) {
 				return
 			}
 			w := res.Warnings[0]
+			if !strings.HasPrefix(w, "network.listen_addr ") {
+				t.Errorf("warning must lead with its sentence instead of a shouted prefix, got: %s", w)
+			}
 			// The warning has to say what is wrong AND what to do about it.
 			for _, want := range []string{"network.require_token", "af config set network.require_token true"} {
 				if !strings.Contains(w, want) {
@@ -1113,6 +1119,12 @@ func TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener(t *testing.T) {
 // call the SAME function (config.IsLoopbackListenAddr, which the daemon's
 // webListenerPolicy also uses); two definitions drifting apart is exactly how a
 // security check rots, so this fails if a second one is ever introduced.
+//
+// The fixture opts in to the network exposure: since #5137 the warning only
+// ever describes an OPTED-IN posture — without allow_unauthenticated_network
+// the result is refused (listenerWriteRefusal) before the warning is ever
+// asked. The loopback split is identical either way, so opting in here is what
+// keeps both arms exercised.
 func TestExposureWarningUsesTheDaemonsLoopbackPredicate(t *testing.T) {
 	// cfg is the config the write RESULTS in, so the address under test is the
 	// one it already carries (#2412).
@@ -1120,6 +1132,7 @@ func TestExposureWarningUsesTheDaemonsLoopbackPredicate(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.RequireToken = false
 		cfg.ListenAddr = addr
+		cfg.AllowUnauthenticatedNetwork = true
 		return cfg
 	}
 	for _, addr := range []string{"127.0.0.1:8443", "[::1]:8443", "localhost:8443"} {
@@ -1137,5 +1150,216 @@ func TestExposureWarningUsesTheDaemonsLoopbackPredicate(t *testing.T) {
 		if w := exposureWarning(resulting(addr), "listen_addr"); w == "" {
 			t.Errorf("%q is network-reachable with require_token=false — expected a warning", addr)
 		}
+	}
+}
+
+// TestUnsetGlobalConfigValueRefusesTheRefusedPosture is the unset half of the
+// #5137 write gate: removing a key can create the refused combination just as
+// surely as writing one can, so an unset whose RESULT is a tokenless
+// non-loopback bind errors with the same shared message and writes nothing.
+// Unsetting listen_addr itself is the opposite — the listener falls back to the
+// loopback default, which is safe — and the unset goes through.
+func TestUnsetGlobalConfigValueRefusesTheRefusedPosture(t *testing.T) {
+	t.Run("unsetting require_token on a network bind", func(t *testing.T) {
+		path := writeTempConfig(t, "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\nrequire_token = true\n")
+		_, err := UnsetGlobalConfigValue("require_token")
+		if err == nil {
+			t.Fatal("unsetting require_token on a non-loopback bind must be refused")
+		}
+		for _, want := range []string{"refusing to write", "0.0.0.0:8443", "network.allow_unauthenticated_network true"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal must mention %q, got: %v", want, err)
+			}
+		}
+		after, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !strings.Contains(string(after), "require_token = true") {
+			t.Error("the refused unset must leave require_token in the file")
+		}
+	})
+	t.Run("unsetting the opt-in under a tokenless network bind", func(t *testing.T) {
+		writeTempConfig(t, "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\nallow_unauthenticated_network = true\n")
+		res, err := UnsetGlobalConfigValue("allow_unauthenticated_network")
+		if err != nil {
+			t.Fatalf("revoking the opt-in must be ALLOWED even though the result is "+
+				"refused — it is the tightening that retires a serving exposure; "+
+				"blocking it would trap the operator's opt-in: %v", err)
+		}
+		if !res.Removed {
+			t.Error("the allow_unauthenticated_network line must actually be removed")
+		}
+	})
+	t.Run("setting the opt-in false under a tokenless network bind", func(t *testing.T) {
+		path := writeTempConfig(t, "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\nrequire_token = false\nallow_unauthenticated_network = true\n")
+		if _, err := SetGlobalConfigValue("network.allow_unauthenticated_network", "false"); err != nil {
+			t.Fatalf("the explicit revocation must land so the daemon's apply can "+
+				"retire the exposed listener: %v", err)
+		}
+		after, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !strings.Contains(string(after), "allow_unauthenticated_network = false") {
+			t.Error("the revocation must be written to the file")
+		}
+	})
+	t.Run("unsetting listen_addr falls back to loopback", func(t *testing.T) {
+		writeTempConfig(t, "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n")
+		res, err := UnsetGlobalConfigValue("listen_addr")
+		if err != nil {
+			t.Fatalf("unsetting the address back to the loopback default is the fix, not the refusal: %v", err)
+		}
+		if !res.Removed {
+			t.Error("the listen_addr line must actually be removed")
+		}
+	})
+}
+
+// TestListenerWriteRefusalIsScopedToThePostureKeys pins the refusal's scope: it
+// fires only on a write of one of the keys that can create the refused posture
+// (listen_addr, require_token), judged on the RESULTING config. Every other key —
+// including require_loopback_token, which cannot create the posture while
+// require_token is false, preview_listen_addr, which is a different listener
+// that never serves the control plane, and allow_unauthenticated_network itself,
+// whose write is always a revocation or an explicit opt-in and never creates the
+// exposure silently — is allowed even when the file already carries the refused
+// combination (a hand-edit can leave one; the daemon refuses the bind, not the
+// config file).
+func TestListenerWriteRefusalIsScopedToThePostureKeys(t *testing.T) {
+	refused := func() *Config {
+		cfg := DefaultConfig()
+		cfg.ListenAddr = "0.0.0.0:8443"
+		cfg.RequireToken = false
+		return cfg
+	}
+	for _, key := range []string{"listen_addr", "network.listen_addr", "require_token", "network.require_token"} {
+		if refusal := listenerWriteRefusal(key, refused()); refusal == "" {
+			t.Errorf("%q on a refused resulting posture must refuse the write", key)
+		}
+	}
+	for _, key := range []string{"network.require_loopback_token", "network.preview_listen_addr",
+		"default_program", "auto_update", "program_overrides.claude"} {
+		if refusal := listenerWriteRefusal(key, refused()); refusal != "" {
+			t.Errorf("%q is not a posture term — an unrelated write on a refused file must not be refused: %s", key, refusal)
+		}
+	}
+	// The opt-in key is exempt even though the resulting posture is refused:
+	// revoking it is the one write that MUST land so the daemon retires the
+	// exposed listener, and setting it true is an explicit acceptance, not a
+	// silent exposure.
+	for _, key := range []string{"allow_unauthenticated_network", "network.allow_unauthenticated_network"} {
+		if refusal := listenerWriteRefusal(key, refused()); refusal != "" {
+			t.Errorf("%q is exempt — gating it would trap the operator's opt-in revocation: %s", key, refusal)
+		}
+	}
+	// And the refusal answers the RESULT, not the file: the same keys write
+	// freely when the resulting posture is safe.
+	safe := DefaultConfig()
+	for _, key := range []string{"network.listen_addr", "network.require_token", "network.allow_unauthenticated_network"} {
+		if refusal := listenerWriteRefusal(key, safe); refusal != "" {
+			t.Errorf("%q on a safe resulting posture must not refuse: %s", key, refusal)
+		}
+	}
+}
+
+// TestSetTOMLStructuredRemovesCommentIntroducingTargetTableNonLast pins the
+// fix for the headline bug: when a non-first target table has contiguous
+// introducing comments above its header, those comments belong to the target
+// (per leadingTableCommentStart's rule) and must be removed with the target.
+// The next table's own introducing comment must be preserved.
+func TestSetTOMLStructuredRemovesCommentIntroducingTargetTableNonLast(t *testing.T) {
+	in := "[pre]\nx = 1\n\n# leading for target\n[program_overrides]\nclaude = 'old'\n\n# next intro\n[unrelated]\nvalue = 'kept'\n"
+	got, err := setTOMLStructured(in, "program_overrides", "[program_overrides]\ncodex = 'new'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "# leading for target") {
+		t.Errorf("target's introducing comment was not removed:\n%s", got)
+	}
+	if !strings.Contains(got, "# next intro\n[unrelated]") {
+		t.Errorf("next table's introducing comment was not preserved:\n%s", got)
+	}
+	if !strings.Contains(got, "[pre]\n") || !strings.Contains(got, "x = 1") {
+		t.Errorf("previous table's content was disturbed:\n%s", got)
+	}
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("replacement is not valid TOML: %v\n%s", err, got)
+	}
+}
+
+// TestSetTOMLStructuredRemovesCommentIntroducingTargetTableEOF pins the EOF
+// (last-block) path: the target's introducing comment must be removed before
+// setTOMLStructured re-appends the table, so no orphan floats above the blank
+// line that precedes the re-appended table.
+func TestSetTOMLStructuredRemovesCommentIntroducingTargetTableEOF(t *testing.T) {
+	in := "[pre]\nx = 1\n\n# leading for target\n[program_overrides]\nclaude = 'old'\n"
+	got, err := setTOMLStructured(in, "program_overrides", "[program_overrides]\ncodex = 'new'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "# leading for target") {
+		t.Errorf("target's introducing comment was not removed:\n%s", got)
+	}
+	if !strings.Contains(got, "[pre]\n") || !strings.Contains(got, "x = 1") {
+		t.Errorf("previous table's content was disturbed:\n%s", got)
+	}
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("replacement is not valid TOML: %v\n%s", err, got)
+	}
+}
+
+// TestUnsetRemovesCommentIntroducingTargetTable pins the applyProjectUnset
+// path (removeTOMLTopLevelValue with no re-append): the target's introducing
+// comment is removed with the table; the next table's introducing comment is
+// preserved and not merged with the removed target's comment.
+func TestUnsetRemovesCommentIntroducingTargetTable(t *testing.T) {
+	in := "[pre]\nx = 1\n\n# leading for target\n[program_overrides]\nclaude = 'old'\n\n# next intro\n[unrelated]\nvalue = 'kept'\n"
+	got, err := removeTOMLTopLevelValue(in, "program_overrides")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "# leading for target") {
+		t.Errorf("target's introducing comment was not removed:\n%s", got)
+	}
+	if strings.Contains(got, "program_overrides") || strings.Contains(got, "claude = 'old'") {
+		t.Errorf("target table was not removed:\n%s", got)
+	}
+	if !strings.Contains(got, "# next intro\n[unrelated]") {
+		t.Errorf("next table's introducing comment was not preserved:\n%s", got)
+	}
+	if !strings.Contains(got, "[pre]\n") || !strings.Contains(got, "x = 1") {
+		t.Errorf("previous table's content was disturbed:\n%s", got)
+	}
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("result is not valid TOML: %v\n%s", err, got)
+	}
+}
+
+// TestRemoveTOMLTopLevelValuePreservesFileHeaderComment pins the file-header
+// edge case: the comment immediately above the first-table target is
+// syntactically indistinguishable from a file-level header comment, so the
+// conservative fix must leave it in place rather than delete it. Passes under
+// both the old and the new code; guards against a regression that starts
+// deleting file headers.
+func TestRemoveTOMLTopLevelValuePreservesFileHeaderComment(t *testing.T) {
+	in := "# project config\n[program_overrides]\nclaude = 'old'\n[unrelated]\nvalue = 'kept'\n"
+	got, err := removeTOMLTopLevelValue(in, "program_overrides")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "# project config") {
+		t.Errorf("file-level header comment was deleted:\n%s", got)
+	}
+	if strings.Contains(got, "program_overrides") || strings.Contains(got, "claude = 'old'") {
+		t.Errorf("target table was not removed:\n%s", got)
+	}
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("result is not valid TOML: %v\n%s", err, got)
 	}
 }

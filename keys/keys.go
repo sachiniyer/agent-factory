@@ -19,7 +19,7 @@ const (
 	KeyKill
 	KeyArchive    // Archive a live session (#1028, #1300)
 	KeyRestore    // Restore an archived, Lost, or Dead session (#1605)
-	KeyLimitRetry // Retry a session blocked at a usage-limit wall (#1146)
+	KeyLimitRetry // Retry a usage-limit resume or inspected account handoff (#1146/#4018)
 	KeyQuit
 	KeyErrorDetails // Show the full last error when the status line is truncated (#1423).
 
@@ -37,7 +37,7 @@ const (
 	// fifteen, where counting to the right digit is not the problem.
 	KeyJumpTabPrompt
 
-	KeyNewRemote // Key for creating a new remote instance
+	KeyNewRemote // Compatibility binding: open creation at the backend field
 	KeyHelp      // Key for showing help screen
 
 	// Diff keybindings
@@ -48,9 +48,7 @@ const (
 
 	KeySearch // Key for searching sessions
 
-	KeyOpenPR // Key for opening PR in browser
-	KeyCopyPR // Key for copying PR URL to clipboard
-	KeyHooks  // Key for editing post-worktree hooks
+	KeyHooks // Key for editing post-worktree hooks
 
 	// KeyConfigEditor opens the global config editor overlay: a form over the
 	// config manifest that writes config.toml through the same path
@@ -66,7 +64,7 @@ const (
 	// KeySwitchProject opens the searchable project-picker overlay to switch the
 	// TUI's active project/repo in place (#1461). ctrl+p rather than P: the
 	// capital keys are deliberately left free so a user can pin the old
-	// ergonomic bindings (copy_pr/archive/hooks) to them via [keys], and a new
+	// ergonomic bindings (archive/hooks) to them via [keys], and a new
 	// default on P would collide with such a pin at startup.
 	KeySwitchProject
 
@@ -164,6 +162,57 @@ const (
 	// the form's keys while it is open.
 	KeySetBackend
 	KeyEditBackend
+
+	// KeySetAccount and KeyEditAccount are the two faces of the naming form's
+	// account field (#3844): which of the agent's registered credential accounts
+	// the session runs as, listed from the daemon's own ListAccounts registry.
+	// Same display-only swap as KeySetBackend/KeyEditBackend — the picker is
+	// modal, so the status bar is the only place that can confirm a session is
+	// being created on a non-ambient identity before Enter.
+	//
+	// ctrl+o, not the mnemonic ctrl+a: ctrl+a is the most common tmux prefix
+	// REBIND (every screen refugee sets `set -g prefix C-a`), so for those users
+	// the multiplexer would swallow it and the field would be unreachable — the
+	// same argument that kept the backend field off tmux's default ctrl+b. ctrl+u
+	// is already af's own scroll_up. That leaves "o": unbound in af, claimed by no
+	// tmux binding outside the prefix, and none of the terminal's signal or
+	// flow-control keys (ctrl+c/d/z/s/q/\). Like ctrl+r it is deliberately NOT
+	// added to reservedKeys — a [keys] table may still bind ctrl+o everywhere
+	// outside this modal form.
+	KeySetAccount
+	KeyEditAccount
+
+	// KeyRenameTab opens the rename prompt for the tab the user is looking at
+	// (the focused pane's tab, or the tree's active tab — the same target `w`
+	// closes). The daemon's RenameTab RPC does the relabel (#1813); only kinds
+	// that display their name are renameable (session.TabKindRenameable), so the
+	// agent tab and shell tabs are refused before the prompt opens.
+	//
+	// "R", not "r": lower-case r is restore, and capital defaults are the
+	// established pattern for verbs that mutate (D kill, S split, F handoff).
+	// Appended at the end of this iota block for the same reason KeyConfigAgent
+	// was — inserting mid-block renumbers every KeyName after it.
+	KeyRenameTab
+
+	// KeyMoveTabLeft and KeyMoveTabRight move the current tab one slot in the
+	// roster (session.tab.reorder): the daemon's ReorderTab RPC the web reaches
+	// by dragging the tab bar and the CLI reaches via `af sessions tab-reorder`.
+	//
+	// "<" and ">", not shift+left/shift+right: a terminal that cannot encode a
+	// shifted arrow silently delivers plain left/right (pane focus), so the
+	// binding would exist and never arrive — a shipped capability nobody can
+	// press. The bare runes reach every terminal, the angle bracket names the
+	// direction the tab moves, and neither is claimed by tmux's prefix or af's
+	// reserved keys.
+	KeyMoveTabLeft
+	KeyMoveTabRight
+
+	// KeyRebindProject rebinds a registered project's stable identity to a
+	// replacement checkout inside the project picker (b): the repair when the
+	// checkout a registration names was moved or recloned elsewhere
+	// (`af projects rebind`, made reachable without leaving the TUI). Fixed:
+	// it is a picker-internal verb like D, not a global binding.
+	KeyRebindProject
 )
 
 // spec is one action's canonical binding definition: its default keys, help
@@ -207,10 +256,10 @@ var specs = []spec{
 	{name: KeyAttach, configKey: "attach", keys: []string{"o"}, desc: "attach", dispatch: true},
 	{name: KeyExitInteractive, keys: []string{"ctrl+]"}, desc: "nav mode"},
 	{name: KeyNew, configKey: "new", keys: []string{"n"}, desc: "new", dispatch: true},
-	{name: KeyKill, configKey: "kill", keys: []string{"D"}, desc: "kill", dispatch: true},
+	{name: KeyKill, configKey: "kill", keys: []string{"D"}, desc: "delete session", dispatch: true},
 	{name: KeyArchive, configKey: "archive", keys: []string{"a"}, desc: "archive", dispatch: true},
 	{name: KeyRestore, configKey: "restore", keys: []string{"r"}, desc: "restore", dispatch: true},
-	{name: KeyLimitRetry, configKey: "limit_retry", keys: []string{"c"}, desc: "retry limit", dispatch: true},
+	{name: KeyLimitRetry, configKey: "limit_retry", keys: []string{"c"}, desc: "retry", dispatch: true},
 	// "F" for hand-oFF. Capital like the other consequential verbs (D kill, S
 	// split, C config agent): lower-case h/l are navigation, and swapping the
 	// agent that edits your branch should not sit under an unshifted key next to
@@ -226,11 +275,12 @@ var specs = []spec{
 	{name: KeyHelp, configKey: "help", keys: []string{"?"}, desc: "help", dispatch: true},
 	{name: KeyQuit, configKey: "quit", keys: []string{"q"}, desc: "quit", dispatch: true},
 	{name: KeyErrorDetails, configKey: "error_details", keys: []string{"E"}, desc: "details", dispatch: true},
-	{name: KeyNewRemote, configKey: "new_remote", keys: []string{"N"}, desc: "new remote", dispatch: true},
+	{name: KeyNewRemote, configKey: "new_remote", desc: "creation form, backend field (compatibility)", dispatch: true},
 	{name: KeyTab, keys: []string{"tab"}, desc: "focus", dispatch: true},
 	{name: KeyShiftTab, keys: []string{"shift+tab"}, desc: "focus prev", dispatch: true},
 	{name: KeyNewTab, configKey: "new_tab", keys: []string{"t"}, desc: "new tab", dispatch: true},
-	{name: KeyCloseTab, configKey: "close_tab", keys: []string{"w"}, desc: "close tab", dispatch: true},
+	{name: KeyCloseTab, configKey: "close_tab", keys: []string{"w"}, desc: "del tab", dispatch: true},
+	{name: KeyRenameTab, configKey: "rename_tab", keys: []string{"R"}, desc: "rename tab", dispatch: true},
 	// The chip names BOTH gestures — "1-9/g go" — rather than gaining a second chip
 	// (#3021). The old "1-9" read as "there are nine tabs", and the footer is exactly
 	// where that impression was formed; naming g beside the digits says the digits are
@@ -245,24 +295,27 @@ var specs = []spec{
 	// hint its place.
 	{name: KeyJumpTab, keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}, helpLabel: "1-9/g", desc: "go"},
 	{name: KeyJumpTabPrompt, keys: []string{"g"}, helpLabel: "g", desc: "jump to tab (number or name)", dispatch: true},
+	// The move pair shares one description so hintPairs can collapse them into
+	// a single "</> move tab" chip, the same trick the scroll pair uses.
+	{name: KeyMoveTabLeft, configKey: "move_tab_left", keys: []string{"<"}, desc: "move tab", dispatch: true},
+	{name: KeyMoveTabRight, configKey: "move_tab_right", keys: []string{">"}, desc: "move tab", dispatch: true},
 	{name: KeyTaskList, configKey: "tasks", keys: []string{"m"}, desc: "tasks", dispatch: true},
 	{name: KeyManageAutomations, keys: []string{"enter"}, desc: "manage"},
 	{name: KeySwitchProjectRow, keys: []string{"enter"}, desc: "switch"},
 	{name: KeyDeleteProject, keys: []string{"D"}, desc: "delete project"},
+	{name: KeyRebindProject, keys: []string{"b"}, desc: "rebind project"},
 	{name: KeyOpenPane, configKey: "open_pane", keys: []string{"s"}, desc: "open pane", dispatch: true},
 	{name: KeySplitPane, configKey: "split_pane", keys: []string{"S"}, desc: "split pane", dispatch: true},
 	{name: KeyHidePane, configKey: "hide_pane", keys: []string{"x"}, desc: "hide pane", dispatch: true},
 	{name: KeyPanePrev, configKey: "pane_prev", keys: []string{"left"}, desc: "prev pane", contextual: true},
 	{name: KeyPaneNext, configKey: "pane_next", keys: []string{"right"}, desc: "next pane", contextual: true},
 	{name: KeySearch, configKey: "search", keys: []string{"/"}, desc: "search", dispatch: true},
-	{name: KeyOpenPR, configKey: "open_pr", keys: []string{"p"}, desc: "open PR", dispatch: true},
-	{name: KeyCopyPR, configKey: "copy_pr", keys: []string{"y"}, desc: "copy PR URL", dispatch: true},
 	{name: KeyHooks, configKey: "hooks", keys: []string{"e"}, desc: "worktree hooks", dispatch: true},
 	// "C" for configure. Capital because lower-case c is taken (limit_retry) and
 	// because this is a deliberate, infrequent action rather than a navigation
 	// key. Capital defaults are established practice here (D/E/N/S), and the
 	// "capitals left free" note on KeySwitchProject is specifically about P,
-	// where a legacy copy_pr pin was likely.
+	// where users may have pinned a different action.
 	{name: KeyConfigAgent, configKey: "config_agent", keys: []string{"C"}, desc: "config agent", dispatch: true},
 	{name: KeyConfigEditor, configKey: "config_editor", keys: []string{","}, desc: "config", dispatch: true},
 	{name: KeySwitchProject, configKey: "switch_project", keys: []string{"ctrl+p"}, desc: "switch project", dispatch: true},
@@ -278,6 +331,8 @@ var specs = []spec{
 	{name: KeyEditPrompt, keys: []string{"shift+tab"}, desc: "initial prompt ✓"},
 	{name: KeySetBackend, keys: []string{"ctrl+r"}, desc: "backend"},
 	{name: KeyEditBackend, keys: []string{"ctrl+r"}, desc: "backend ✓"},
+	{name: KeySetAccount, keys: []string{"ctrl+o"}, desc: "account"},
+	{name: KeyEditAccount, keys: []string{"ctrl+o"}, desc: "account ✓"},
 	{name: KeyCancelName, keys: []string{"esc"}, desc: "cancel"},
 }
 
@@ -304,18 +359,20 @@ var reservedKeys = map[string]string{
 	"9":         "1-9 jump to tabs",
 }
 
-// keyDisplayNames maps key strings to their compact help-column glyphs.
-// Anything absent renders as itself.
-var keyDisplayNames = map[string]string{
-	"up":         "↑",
-	"down":       "↓",
-	"left":       "←",
-	"right":      "→",
-	"enter":      "↵",
-	"shift+up":   "⇧↑",
-	"shift+down": "⇧↓",
-	" ":          "space",
-	"ctrl+@":     "ctrl+space",
+// keyDisplayNames is the single runtime-to-display vocabulary. CLI/JSON use
+// pasteable config spellings; help/menu can use compact glyphs for named keys.
+var keyDisplayNames = map[string]struct{ config, compact string }{
+	"up":         {"up", "↑"},
+	"down":       {"down", "↓"},
+	"left":       {"left", "←"},
+	"right":      {"right", "→"},
+	"enter":      {"enter", "↵"},
+	"shift+up":   {"shift+up", "⇧↑"},
+	"shift+down": {"shift+down", "⇧↓"},
+	" ":          {"space", "space"},
+	"ctrl+@":     {"ctrl+space", "ctrl+space"},
+	"alt+ ":      {"alt+space", "alt+space"},
+	"alt+ctrl+@": {"alt+ctrl+space", "alt+ctrl+space"},
 }
 
 // namedKeys are the non-rune key names bubbletea produces (tea.KeyMsg.String()
@@ -345,11 +402,11 @@ var GlobalKeyBindings map[KeyName]key.Binding
 func init() {
 	// Defaults must always build; a panic here means the specs table itself
 	// is inconsistent, which no config can cause.
-	strings, bindings, err := buildMaps(nil)
+	built, err := buildMaps(nil)
 	if err != nil {
 		panic(fmt.Sprintf("keys: default binding table is invalid: %v", err))
 	}
-	GlobalKeyStringsMap, GlobalKeyBindings = strings, bindings
+	GlobalKeyStringsMap, GlobalKeyBindings = built.strings, built.bindings
 }
 
 // ValidateOverrides checks a [keys] override table (action name → key list)
@@ -358,8 +415,8 @@ func init() {
 // bad keymap fails at config load with the file named — never as a dead key
 // at runtime.
 func ValidateOverrides(overrides map[string][]string) error {
-	_, _, err := buildMaps(overrides)
-	return err
+	_, err := buildMaps(overrides)
+	return decorateValidationError(overrides, err)
 }
 
 // ApplyOverrides rebuilds the global binding maps with the given [keys]
@@ -368,11 +425,11 @@ func ValidateOverrides(overrides map[string][]string) error {
 // and menu labels are regenerated from the effective keys, so rebinds are
 // reflected everywhere the binding is displayed.
 func ApplyOverrides(overrides map[string][]string) error {
-	stringsMap, bindings, err := buildMaps(overrides)
+	built, err := buildMaps(overrides)
 	if err != nil {
 		return err
 	}
-	GlobalKeyStringsMap, GlobalKeyBindings = stringsMap, bindings
+	GlobalKeyStringsMap, GlobalKeyBindings = built.strings, built.bindings
 	return nil
 }
 
@@ -381,15 +438,26 @@ func ApplyOverrides(overrides map[string][]string) error {
 type BindingInfo struct {
 	// Action is the [keys] table name; "" for fixed bindings config cannot
 	// touch.
-	Action string
+	Action string `json:"action"`
 	// Desc is the help-column description.
-	Desc string
-	// Keys are the effective key strings (defaults or the override).
-	Keys []string
-	// Default are the built-in key strings.
-	Default []string
+	Desc string `json:"description"`
+	// Keys are effective config spellings, not Bubble Tea runtime strings.
+	Keys []string `json:"keys"`
+	// Default are the built-in bindings in config spelling.
+	Default []string `json:"default"`
 	// Rebound reports whether an override replaced the default.
-	Rebound bool
+	Rebound bool `json:"rebound"`
+	// SuppressedBy has one entry for every inactive default key, whether or not
+	// other keys remain active, and attributes each to every user-rebound action
+	// that took it. The CLI appends it to JSON only when non-empty.
+	SuppressedBy []SuppressedKey `json:"-"`
+}
+
+// SuppressedKey is one default key removed from an action's active binding set,
+// together with the user-rebound actions that claim it.
+type SuppressedKey struct {
+	Key     string   `json:"key"`
+	TakenBy []string `json:"taken_by"`
 }
 
 // EffectiveBindings returns every action's effective binding with the given
@@ -398,29 +466,20 @@ type BindingInfo struct {
 // overrides are validated first, so a broken table reports the same error
 // the TUI would refuse to start with.
 func EffectiveBindings(overrides map[string][]string) ([]BindingInfo, error) {
-	if err := ValidateOverrides(overrides); err != nil {
-		return nil, err
-	}
-	byConfigKey := specsByConfigKey()
-	normalizedOverrides, err := normalizeOverrides(overrides, byConfigKey)
+	built, err := buildMaps(overrides)
 	if err != nil {
-		return nil, err
+		return nil, decorateValidationError(overrides, err)
 	}
-	var rebindable, fixed []BindingInfo
-	for _, sp := range specs {
-		info := BindingInfo{Action: sp.configKey, Desc: sp.desc, Keys: sp.keys, Default: sp.keys}
-		if sp.configKey != "" {
-			if o, ok := normalizedOverrides[sp.configKey]; ok {
-				info.Keys = o
-				info.Rebound = true
-			}
-			rebindable = append(rebindable, info)
-			continue
+	return built.infos, nil
+}
+
+func decorateValidationError(overrides map[string][]string, err error) error {
+	if err != nil {
+		if _, configured := overrides["new_remote"]; configured {
+			return fmt.Errorf("%w; new_remote is a compatibility binding: it opens the creation form with the backend field focused; it no longer forces remote creation", err)
 		}
-		fixed = append(fixed, info)
 	}
-	sort.Slice(rebindable, func(i, j int) bool { return rebindable[i].Action < rebindable[j].Action })
-	return append(rebindable, fixed...), nil
+	return err
 }
 
 // RebindableActions returns the sorted [keys] table names of every action
@@ -436,6 +495,31 @@ func RebindableActions() []string {
 	return names
 }
 
+// IsRebindableAction reports whether name is one of the [keys] table's
+// rebindable action names (the same set RebindableActions returns), as a
+// membership check for the config loader. discardDeadShiftRuneOverrides must
+// tell a real action from a typo before dropping the action's dead bindings:
+// an unknown action whose every binding is a dead shift+<rune> spec has to
+// stay visible so keys.ValidateOverrides can still reject it, instead of being
+// silently hidden behind the dead-key warning.
+func IsRebindableAction(name string) bool {
+	// The legal empty quoted action name ("" = "shift+a" under [keys]) is not a
+	// rebindable action — fixed specs carry configKey == "" — so without this
+	// guard the empty name would match the first fixed binding and read as
+	// "known", letting discardDeadShiftRuneOverrides delete its only binding and
+	// hide the malformed entry from keys.ValidateOverrides. RebindableActions
+	// skips empty configKeys for the same reason; mirror that filter here.
+	if name == "" {
+		return false
+	}
+	for _, sp := range specs {
+		if sp.configKey == name {
+			return true
+		}
+	}
+	return false
+}
+
 // keyClaim is one action's claim on a key string while buildMaps resolves the
 // effective binding table: the action, whether a [keys] override placed it
 // there, and whether it dispatches (contextual claims participate in conflict
@@ -447,8 +531,14 @@ type keyClaim struct {
 	dispatch   bool
 }
 
-// buildMaps generates the strings and bindings maps from specs with
-// overrides applied, validating as it goes.
+type builtMaps struct {
+	strings  map[string]KeyName
+	bindings map[KeyName]key.Binding
+	infos    []BindingInfo
+}
+
+// buildMaps resolves one effective table from specs and overrides, then derives
+// both the runtime maps and the introspection rows from that same active set.
 //
 // Conflict resolution distinguishes provenance so an UPGRADE never breaks boot
 // (#1461): a USER binding ([keys] override) of a key SUPPRESSES any DEFAULT
@@ -457,11 +547,11 @@ type keyClaim struct {
 // bindings on one key, or two DEFAULTS (a specs-table bug), are still a real
 // conflict, except for the sanctioned pane/tree contextual overlap. A suppressed
 // default simply loses that key (the user can rebind the action via [keys]).
-func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]key.Binding, error) {
+func buildMaps(overrides map[string][]string) (builtMaps, error) {
 	byConfigKey := specsByConfigKey()
 	normalizedOverrides, err := normalizeOverrides(overrides, byConfigKey)
 	if err != nil {
-		return nil, nil, err
+		return builtMaps{}, err
 	}
 
 	// Effective keys per spec, and whether an override replaced the default,
@@ -490,7 +580,7 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 	// suppressed[name][key] marks a default claim dropped because a user binding
 	// took the key. Iterate keys in sorted order so a table with multiple genuine
 	// conflicts reports the same one deterministically.
-	suppressed := map[KeyName]map[string]bool{}
+	suppressed := map[KeyName]map[string][]string{}
 	keyStrings := make([]string, 0, len(claims))
 	for k := range claims {
 		keyStrings = append(keyStrings, k)
@@ -507,31 +597,43 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 				if a.overridden != b.overridden {
 					continue // user-vs-default: the default yields (suppressed below)
 				}
-				return nil, nil, fmt.Errorf("keys: %q is bound to both %q and %q; each key can trigger only one action", k, a.action, b.action)
+				return builtMaps{}, fmt.Errorf("keys: %q is bound to both %q and %q; each key can trigger only one action", k, a.action, b.action)
 			}
 		}
 		for _, c := range cs {
-			if c.overridden || !overrideSuppressesDefault(k, c, cs) {
+			if c.overridden {
+				continue
+			}
+			takers := defaultSuppressors(c, cs)
+			if len(takers) == 0 {
 				continue
 			}
 			if suppressed[c.name] == nil {
-				suppressed[c.name] = map[string]bool{}
+				suppressed[c.name] = map[string][]string{}
 			}
-			suppressed[c.name][k] = true
+			suppressed[c.name][k] = takers
 		}
 	}
 
 	stringsMap := make(map[string]KeyName, 64)
 	bindings := make(map[KeyName]key.Binding, len(specs))
+	var rebindable, fixed []BindingInfo
 	for i, sp := range specs {
 		effective := effectiveKeys[i]
 		active := effective
+		var suppressedBy []SuppressedKey
 		if sup := suppressed[sp.name]; len(sup) > 0 {
 			active = make([]string, 0, len(effective))
 			for _, k := range effective {
-				if !sup[k] {
+				takers, dropped := sup[k]
+				if !dropped {
 					active = append(active, k)
+					continue
 				}
+				suppressedBy = append(suppressedBy, SuppressedKey{
+					Key:     displayKeys([]string{k}, false)[0],
+					TakenBy: append([]string(nil), takers...),
+				})
 			}
 		}
 
@@ -549,15 +651,35 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 			key.WithKeys(active...),
 			key.WithHelp(label, sp.desc),
 		)
+
+		info := BindingInfo{
+			Action:       sp.configKey,
+			Desc:         sp.desc,
+			Keys:         displayKeys(active, false),
+			Default:      displayKeys(sp.keys, false),
+			Rebound:      overridden[i],
+			SuppressedBy: suppressedBy,
+		}
+		if sp.configKey != "" {
+			rebindable = append(rebindable, info)
+		} else {
+			fixed = append(fixed, info)
+		}
 	}
-	return stringsMap, bindings, nil
+	sort.Slice(rebindable, func(i, j int) bool { return rebindable[i].Action < rebindable[j].Action })
+	return builtMaps{
+		strings:  stringsMap,
+		bindings: bindings,
+		infos:    append(rebindable, fixed...),
+	}, nil
 }
 
-// overrideSuppressesDefault reports whether the default claim c on key k must
-// yield: some OTHER action bound k via a [keys] override and is not a sanctioned
-// contextual overlap with c. When true, c loses k rather than the config being
+// defaultSuppressors reports the OTHER actions that make the default claim c
+// yield: each bound the same key via a [keys] override and is not a sanctioned
+// contextual overlap with c. The default loses the key rather than config being
 // rejected (#1461).
-func overrideSuppressesDefault(k string, c keyClaim, cs []keyClaim) bool {
+func defaultSuppressors(c keyClaim, cs []keyClaim) []string {
+	var takers []string
 	for _, o := range cs {
 		if !o.overridden || o.name == c.name {
 			continue
@@ -565,9 +687,9 @@ func overrideSuppressesDefault(k string, c keyClaim, cs []keyClaim) bool {
 		if contextualKeyOverlapAllowed(c.name, o.name) {
 			continue
 		}
-		return true
+		takers = append(takers, o.action)
 	}
-	return false
+	return takers
 }
 
 func ownerAction(sp spec) string {
@@ -609,9 +731,14 @@ func normalizeOverrides(overrides map[string][]string, byConfigKey map[string]sp
 		if _, ok := byConfigKey[action]; !ok {
 			return nil, fmt.Errorf("keys: unknown action %q (rebindable actions: %s)", action, strings.Join(RebindableActions(), ", "))
 		}
-		if len(keyList) == 0 {
-			return nil, fmt.Errorf("keys: action %q has no keys; give it a key string or a list of key strings", action)
-		}
+		// An empty key list for a KNOWN action is the explicit "disable this
+		// action" state: buildMaps treats it as overridden with no keys, so the
+		// action's defaults are suppressed and it dispatches on nothing. The
+		// loader's dead-shift-rune warn-and-skip uses it to preserve the
+		// disabled state of an action whose every binding was a dead
+		// shift+<rune> spec, instead of silently restoring its defaults on
+		// upgrade. An empty list for an UNKNOWN action never reaches this
+		// point — the byConfigKey check above rejects it first.
 		normalizedList := make([]string, 0, len(keyList))
 		for _, k := range keyList {
 			normalizedKey, ok := normalizeKeySpec(k)
@@ -628,19 +755,30 @@ func normalizeOverrides(overrides map[string][]string, byConfigKey map[string]sp
 	return normalized, nil
 }
 
-// helpLabelFor renders a key list for the help/menu column: each key mapped
-// through keyDisplayNames and joined with "/" (e.g. ["up","k"] → "↑/k").
-func helpLabelFor(keyList []string) string {
+// displayKeys renders runtime keys as config spellings, or compact help labels.
+// It always allocates a new list so introspection cannot mutate dispatch keys.
+func displayKeys(keyList []string, compact bool) []string {
 	parts := make([]string, len(keyList))
 	for i, k := range keyList {
+		parts[i] = k
 		if display, ok := keyDisplayNames[k]; ok {
-			parts[i] = display
-		} else {
-			parts[i] = k
+			parts[i] = display.config
+			if compact {
+				parts[i] = display.compact
+			}
 		}
 	}
-	return strings.Join(parts, "/")
+	return parts
 }
+
+// helpLabelFor supplies both the help overlay and menu hints.
+func helpLabelFor(keyList []string) string {
+	return strings.Join(displayKeys(keyList, true), "/")
+}
+
+// HelpLabel is the help and menu label for keyList, for a caller that narrows a
+// binding's keys and must relabel what is left.
+func HelpLabel(keyList []string) string { return helpLabelFor(keyList) }
 
 func normalizeKeySpec(s string) (string, bool) {
 	if s == "" || strings.ContainsAny(s, " \t\n") {
@@ -669,14 +807,29 @@ func normalizeKeySpec(s string) (string, bool) {
 			shift = true
 			rest = rest[len("shift+"):]
 		default:
+			// Bubble Tea represents Ctrl/Shift on named keys as distinct
+			// KeyTypes, not arbitrary modifier flags. Reject combinations it
+			// cannot emit; Alt can prefix every supported KeyType.
+			if namedKeys[rest] && !namedKeyModifiersSupported(rest, ctrl, shift) {
+				return "", false
+			}
 			if rest == "space" {
 				if ctrl {
 					rest = "@"
-				} else if !alt && !shift {
-					return " ", true
+				} else {
+					rest = " "
 				}
 			}
 			if !namedKeys[rest] && utf8.RuneCountInString(rest) != 1 {
+				return "", false
+			}
+			// Bubble Tea's Key has no Shift field: for rune input (KeyRunes) it
+			// writes the rune verbatim, so Shift+A is emitted as "A", never
+			// "shift+a". Only dedicated KeyShift*/KeyCtrlShift* named KeyTypes
+			// spell "shift+", and those are already gated by the named-key guard
+			// above. Reject shift on a plain rune so the binding is not installed
+			// under a spelling Bubble Tea cannot emit (#4040).
+			if shift && !namedKeys[rest] {
 				return "", false
 			}
 			var b strings.Builder
@@ -695,5 +848,84 @@ func normalizeKeySpec(s string) (string, bool) {
 		if rest == "" {
 			return "", false
 		}
+	}
+}
+
+// IsDeadShiftRuneSpec reports whether s is a shift+-bearing plain-rune key spec
+// that normalizeKeySpec rejects because Bubble Tea can never emit it: the Key
+// struct has no Shift field, so for rune input (KeyRunes) it writes the rune
+// verbatim — Shift+A is emitted as "A", never "shift+a" — and only the
+// dedicated KeyShift*/KeyCtrlShift* named KeyTypes spell "shift+". The load
+// path warns and skips these (#4599, "warn now, reject later") so a config
+// that already contains one upgrades without refusing to start over a binding
+// that was already inert; the write path (`af config set keys`, via
+// ValidateOverrides) still rejects a NEW one. The predicate mirrors
+// normalizeKeySpec's guard order so it returns true only for the exact case
+// the shift guard catches, not for the unrelated rejections around it (an
+// unsupported named-key combo like shift+space, a malformed spec like "qq", or
+// a reachable spec like "ctrl+a" or "shift+up").
+func IsDeadShiftRuneSpec(s string) bool {
+	if s == "" || strings.ContainsAny(s, " \t\n") {
+		return false
+	}
+	rest := s
+	var ctrl, alt, shift bool
+	for {
+		switch {
+		case strings.HasPrefix(rest, "ctrl+"):
+			if ctrl {
+				return false
+			}
+			ctrl = true
+			rest = rest[len("ctrl+"):]
+		case strings.HasPrefix(rest, "alt+"):
+			if alt {
+				return false
+			}
+			alt = true
+			rest = rest[len("alt+"):]
+		case strings.HasPrefix(rest, "shift+"):
+			if shift {
+				return false
+			}
+			shift = true
+			rest = rest[len("shift+"):]
+		default:
+			if namedKeys[rest] && !namedKeyModifiersSupported(rest, ctrl, shift) {
+				return false
+			}
+			if rest == "space" {
+				if ctrl {
+					rest = "@"
+				} else {
+					rest = " "
+				}
+			}
+			if !namedKeys[rest] && utf8.RuneCountInString(rest) != 1 {
+				return false
+			}
+			return shift && !namedKeys[rest]
+		}
+		if rest == "" {
+			return false
+		}
+	}
+}
+
+// Mirrors the modified KeyTypes in Bubble Tea v1's key.go. The table test
+// checks every namedKeys entry and modifier combination against Key.String.
+func namedKeyModifiersSupported(name string, ctrl, shift bool) bool {
+	if !ctrl && !shift {
+		return true
+	}
+	switch name {
+	case "up", "down", "left", "right", "home", "end":
+		return true
+	case "pgup", "pgdown", "space":
+		return !shift
+	case "tab":
+		return !ctrl
+	default:
+		return false
 	}
 }

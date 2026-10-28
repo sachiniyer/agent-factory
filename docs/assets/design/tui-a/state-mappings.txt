@@ -1,0 +1,201 @@
+P5 A state -> glyph/style audit, fifth review round
+================================================
+
+Sources: design/tokens.json (all six states and twelve role descriptions),
+docs/design/interface-design.md (principles, component recipes, TUI cut list),
+all production Go files under ui/ and app/, plus doctor/report.go.
+Companion state-branches.txt enumerates rendering/style functions, conditions,
+switch arms and style assignments from the Go AST. style-constructions.txt also
+includes package-level style definitions. Geometry-only branches are retained
+in the inventory so a compact fallback cannot silently evade the review.
+
+This is a STATE audit, not a list of hex pairs. The axes below compose: liveness
+x operation x selection x focus x mode x geometry x terminal colour profile.
+A valid foreground alone is insufficient; the selected background must reach
+all cells, including the semantic glyph, inter-span gaps and secondary values.
+
+Notation: S=Surface, R=SurfaceRaised, I=Ink, M=InkMuted, A=Accent.
+State names used as colours refer to generated roles, never approximated colours.
+'B' explicitly marks the separately requested overlay/cut-list work, not a pass
+against the finished P5 design. These boundaries remain to be design-reviewed
+on B's stills; this inventory does not claim the entire #3916 is complete.
+
+LIVENESS AND IN-FLIGHT OPERATIONS
+--------------------------------
+L01 tree.InstanceRenderer.Render; search.renderFrame: Running -> blank cell.
+    No Ready dot and no animation. Unset -> blank cell, not invented liveness.
+L02 same: Ready -> ● / Ready; Lost -> ◌ / Lost; Dead -> ○ / Dead;
+    Archived -> ▧ / Archived; LimitReached -> ◆ / LimitReached.
+L03 same: Creating, Restoring, Killing, Archiving override EVERY liveness glyph
+    with a blank cell. No coloured spinner or stale Ready dot during an op.
+L04 search selected: state foreground remains its state role; ALL status cells
+    (including blank Running/op cells) and their gap are R. Cursor -> A/R;
+    name and branch -> I/R. Unselected name -> I; branch -> M.
+    Fifth-round fix: the status background previously remained S.
+L05 tree selected: selectedTitleStyle wraps the title, spacing and state glyph;
+    state foreground survives and inherits R. Selected description -> I/R.
+    Archived/deleting/name-placeholder branches do not override selected I.
+L06 tree unselected: normal title I; branch/repo/time M. Archived/deleting titles
+    currently recede to M; ordinary names otherwise never use a liveness role.
+    B row hierarchy will make name/detail treatment uniform with density cuts.
+L07 tree churn: [lost], [limit]/reset-time, [deleting], [remote], root-recreate,
+    [model changed] are text annotations; none creates a new semantic colour.
+    Incomplete-archive -> explicit failure detail in Dead; retained path is
+    part of the actionable failure. Lost is not reused for this warning.
+L08 tree idle detail: pane churn, restore exhaustion and idle reasons are text
+    in the description style; no glyph is inferred from timing. See B's
+    selected-detail hierarchy for separating failure prose from metadata.
+L09 tab_pane capture/live fallback: nil, creating, tearing down, dead, lost,
+    unavailable PTY, unstarted session and missing tab -> static explanatory I.
+    These are full sentences, not another coloured liveness indicator.
+L10 app sync/restore/control/attach guards change data, available actions or
+    choose a fallback/notice. They do not render a second state palette.
+
+OPERATOR KIND AND STRUCTURAL GLYPHS
+----------------------------------
+K01 tree.TabGlyph: Agent -> ◆; Shell/Process/unknown -> ›;
+    Web/VSCode -> ◱. Names and kind labels -> I, selected -> I/R.
+    B REQUIRED: remove the Agent ◆ collision with LimitReached, as Captain
+    explicitly assigned to B. No claim that column separation satisfies tokens.
+K02 tree active child tab: trailing * in I; ordinary and active row styles I,
+    selected row I/R. B REQUIRED: remove unexplained * and apply the documented
+    active-tab treatment. Child tab selection cursor is part of that recipe.
+K03 tree expanded/collapsed -> ▾/▸, nonexpandable -> blank; last/nonlast child
+    -> └/├; section expanded/collapsed -> arrows; root boundaries -> rule.
+    Structural disclosure has no liveness meaning. B folds selection markers
+    and reduced row structure into the rail recipe.
+K04 projects current -> ▹ in A, current name bold I; other names I.
+    Selected -> A/R marker (▹ current, ▸ other), label/count I/R.
+    Fifth-round audit removed ● (reserved Ready shape) and the accent name.
+K05 automations enabled/disabled -> [✓]/[✗]; health unknown -> [?]; attention
+    -> [!]. These are task diagnostics, not session liveness. Ordinary glyphs
+    I/M, actual attention Dead. Selected nonfailure glyphs -> I/R; attention
+    remains Dead/R; disclosure cursor -> A/R; name and gaps -> I/R.
+    Fifth-round fix: expanded rows were bold-only and lacked a raised surface.
+K06 creation defaults/options in Menu: checkmarks indicate a selected option;
+    shortcut labels and separators are not liveness. B owns footer grouping,
+    essential-action density, and action/metadata hierarchy.
+K07 scroll indicators -> arrows/ellipsis and hidden counts in M throughout
+    text/search/selection/project overlays. They are chrome, never rows.
+    Search zones use render-plan coordinates; title/indicator collisions tested.
+    Overflow regressions cover both directions, all three pickers, compact and
+    normal geometry, and both palettes. Selectable labels retain I.
+
+SELECTION / FOCUS / BLUR / MODE
+-------------------------------
+F01 SelectionOverlay: selected item -> A/R cursor + I/R item; others I;
+    compact/normal windows preserve assignments. Used for program, handoff,
+    backend, account and tab-kind selection; no per-operator colour overrides.
+F02 SearchOverlay: see L04; empty query/no results -> explanatory I; query I;
+    hints M; inline caret Surface/Accent, ASCII fallback ▌. B adds shared input
+    and dialog surfaces. Enter/click use identical visible-window identity.
+F03 ProjectPicker list: selected project name AND count -> I/R plus A/R cursor;
+    other names I/count M. Add-project row is an action I, selected I/R.
+    Fifth-round audit extends R over the selected count, too.
+F04 ProjectPicker add mode: instruction I, entered path I, fixed caret;
+    add failure or unreadable registry -> Dead. B common field/dialog recipe.
+F05 Hooks normal focus: selected command I/R, A/R cursor; other commands I.
+    Blurred: all command rows I, no active cursor. Enter/edit and n/add ->
+    buffer I/R plus A/R cursor and fixed caret. Both transitions tested in
+    both themes; edit/add captures are separate from ordinary selected rows.
+    Add mode removes the old row cursor: exactly one field owns selection.
+    B changes the legacy Accent heading and muted explanatory subtitle.
+F06 Config navigation: key and current value I; selected whole row I/R with
+    A/R cursor, including key/value gap. Edit mode keeps the selected row and
+    input on R via explicit TextStyle/PromptStyle/PlaceholderStyle assignments.
+    Bubbles reverses its cursor style internally; Accent/Surface input to that
+    style emits Surface/Accent, also in the contrast-checked set.
+    Purpose I, path M, enum/shortcut annotation M. Fifth-round audit
+    extends the background past the key instead of leaving a value-shaped hole.
+F07 Account navigation: identity, logged-in/not-logged-in and registration action
+    I; selected whole row I/R, A/R cursor; open registration field stays inside
+    that selected surface. No Ready/Lost/Dead glyphs for login state.
+F08 Config advanced/core grouping: sentence case. Accounts unavailable/empty
+    route to RecoveryContent; action access and remote identity are preserved.
+    B adjusts header/body/hint hierarchy, including the accounts explanation.
+F09 Task list: enabled and disabled primary name/status I. Unselected cron/watch
+    expression and delivery summary M, split BEFORE truncation. Selected header
+    I/R and A/R cursor. Fifth-round fix covers enabled/disabled x focused/blurred
+    x both palettes. Error summary stays Dead even on an unselected task.
+F10 Task form create/edit: field labels I; focused trigger/program selector I/R
+    with A/R arrows; unfocused selected values currently M. Schedule type has
+    the same pair. B shared control recipe must keep all field labels readable,
+    and moves the existing Accent title / M group headings to I.
+F11 Schedule checked weekdays -> bracketed letter (e.g. [M]), I/R bold;
+    unchecked -> plain letter, I. Focused day -> I/R bold plus underline,
+    retaining brackets only if checked. Both labels stay three cells wide;
+    the focused checked/unchecked value remains distinct without colour. Numeric/hour/minute/meridiem/day cells -> I, focused I/R
+    bold+underline. Empty cell -> dash, not liveness. Preview/next occurrence I,
+    raw cron M. All preset arms and Custom text input are in state-branches.txt.
+F12 Task textinput/textarea and PromptOverlay: typed text inherits I; placeholder
+    M, no Faint. Focused cursor-line style is neutralized. B common fields must
+    explicitly own R/border/focus for these library controls, including Custom
+    cron, prompt, target and path; their default styling is not a new token role.
+F13 Task save/create focused primary -> Surface on Accent. Unfocused action I;
+    B shared secondary-control recipe supplies its R/border treatment. Keyboard
+    affordance remains explicit; watch mode removes run-now instead of dimming it.
+F14 Sidebar title focused -> Surface/Accent; blurred -> Surface/InkMuted.
+    Both pairs are contrast checked. B removes decorative title-chip emphasis.
+    Selected group -> bold I/R; ordinary group I; hidden-count indicators M.
+F15 TabbedWindow header interactive/focused -> bold I/R; ordinary -> bold I;
+    no bound session -> M. Scroll/preview/origin are explicit text additions.
+    Frame precedence: preview Border; interactive double Accent; drop-target
+    Accent; sidebar-selected nonfocused Accent; ordinary/blurred Border.
+    B owns one frame + Keyboard/Preview wording, and removes stale green-focus
+    wording in interactive help. No success green is used by the styles.
+F16 Pane fallback/empty workspace -> neutral explanatory text. RecoveryScreen
+    empty states use I condition/body/action; failed state uses Dead heading
+    and I body/action. Tiny geometry preserves condition plus escape/action.
+F17 InputCaret: colour-capable static Surface/Accent cell; ASCII ▌. Embedded
+    terminal cursor is separate: ui/termpane uses the PTY cell's reverse attribute
+    only when the child owns the cursor. Child ANSI is deliberately preserved.
+
+WARNINGS / DIAGNOSTICS / CONFIRMATIONS
+-------------------------------------
+D01 ErrBox SetNotice vs SetError -> I/S vs Dead/S. Expire hides text but retains
+    category for details; Clear retracts it. Fifth-round audit fixed the real
+    failure branch which previously used Body unconditionally.
+D02 app showErrorDetails chooses 'Last notice'/'Last error'; TextOverlay body
+    currently I. B common dialog owns failure title/inline emphasis.
+D03 Config save/register success and restart-needed notices -> I; failed write,
+    login/register failure -> Dead. Paths never become success-state labels.
+D04 Recovery failure (daemon/snapshot/projects/tasks/accounts unavailable,
+    failed create/archive/kill/task save) -> Dead condition; I explanation/action.
+    Empty project/session/task/account and too-small terminal -> I, not Dead.
+D05 AlarmBanner pending-known/unknown target status -> Dead failure text; no
+    alarm -> no row. Counts/details do not invent a liveness role.
+D06 Task errored last-run summary and refused action -> Dead. Last timestamp,
+    agent and compact last-status annotation -> M. No Ready for successful runs.
+D07 Automations precedence: unschedulable > overdue > not armed > unknown.
+    [!] -> Dead, [?] -> neutral; disabling excludes ordinary health inference.
+    Narrow rendering preserves glyph colour (the old plain fallback lost it).
+    B detail hierarchy must split attention/next-run body from cron/time metadata.
+D08 Project registry failure -> Dead in picker; rail degraded count/detail
+    currently M. B common rail hierarchy must retain failure emphasis there.
+D09 Confirmation normal/escalated/too-small refusal: target and consequence
+    retained, static confirm key, escape remains available. Current frame can
+    use Dead; B REQUIRED: Border frame with Dead target-specific failure/destructive
+    text, one primary action, no danger fill and no global destructive emphasis.
+D10 doctor/report.go outside ui/app: PASS/FIXED/WARN -> I; FAIL -> Dead;
+    no-colour -> plain diagnostic words. Ready and Lost stay session-only.
+D11 app operation handlers route failures/notices through D01 or RecoveryScreen;
+    account-login/config-assistant PTYs are agent-owned content, not a palette.
+
+CROSS-CUTTING CHECKS AND BOUNDARIES
+----------------------------------
+X01 Compact/windowed/truncated rendering is included, not excluded as 'layout'.
+    Search glyph/background tests cross six liveness states + unset, five ops,
+    selected/unselected, Light/Dark, TrueColor/ASCII. Scroll-indicator collision
+    test covers normal and compact heights. Header truncation remains ANSI-aware.
+X02 All actual SVG cell foreground/background pairs are matched to generated
+    role pairs within the approved +/-1 channel tolerance. Token contrast checks
+    remain exact; emitted dark Accent/R is 4.491:1 due to termenv truncation.
+X03 The source literal guard covers production ui/app. Generated roles/styles
+    have typed accessors. No token edits, dependency patch, daemon/theme.go or
+    daemon ApplyTheme edit. C owns Light/Dark/System detection/config migration;
+    shared daemon retirement remains #3936.
+X04 A's corrections above are executable and captured. B items are intentionally
+    visible exceptions in this staged audit: common dialog/control/frame recipe,
+    heading/hint/metadata hierarchy, rail/tab marker and density cuts. In particular
+    Agent ◆ and trailing * are NOT endorsed by this report; they are Captain's
+    explicitly carried B findings. No merge/flip is performed by this lane.

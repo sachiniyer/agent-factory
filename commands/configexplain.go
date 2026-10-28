@@ -91,61 +91,6 @@ func selectedProjectDisplayRoot(selector, resolvedRoot string) string {
 	}
 }
 
-// isRootAgentExplainKey reports whether key names the root_agent table or one of
-// its leaves. It matches "root_agent" and "root_agent.<leaf>" but deliberately
-// NOT "root_agents" (the legacy map is a distinct key).
-func isRootAgentExplainKey(key string) bool {
-	return key == "root_agent" || strings.HasPrefix(key, "root_agent.")
-}
-
-// rootAgentReadValue returns the specialized four-layer root_agent resolution:
-// the whole table, or a projected leaf for a dotted key. It mirrors what the
-// daemon resolves (built-in/global/legacy/personal), unlike the generic
-// global<personal resolver. A dotted leaf is projected through the same
-// ResolvedValuePath machinery every other key uses, by wrapping the specialized
-// table in a throwaway ResolvedConfig — so concise and --explain reads cannot
-// disagree about the effective value.
-func rootAgentReadValue(projectSelector, keyPath string, strictProjectLookup bool) (config.ResolvedValue, error) {
-	parent, err := config.ResolveRootAgentForInspection(projectSelector, strictProjectLookup)
-	if err != nil {
-		return config.ResolvedValue{}, err
-	}
-	if keyPath == "root_agent" {
-		return parent, nil
-	}
-	// A fail-closed table (#3264) has no Origins for the generic projection to
-	// key on — no config source decided it — so its leaves project through the
-	// dedicated path that keeps every candidate's cause verbatim.
-	if config.RootAgentValueFailsClosed(parent) {
-		projected, ok := config.ProjectFailClosedRootAgentLeaf(parent, keyPath)
-		if !ok {
-			return config.ResolvedValue{}, unknownConfigKeyError(keyPath)
-		}
-		return projected, nil
-	}
-	synthetic := &config.ResolvedConfig{Resolution: []config.ResolvedValue{parent}}
-	projected, ok := synthetic.ResolvedValuePath(keyPath)
-	if !ok {
-		return config.ResolvedValue{}, unknownConfigKeyError(keyPath)
-	}
-	return projected, nil
-}
-
-func rootAgentAwareResolution(resolved *config.ResolvedConfig, projectSelector string, strictProjectLookup bool) ([]config.ResolvedValue, error) {
-	values := append([]config.ResolvedValue(nil), resolved.Resolution...)
-	rootAgent, err := config.ResolveRootAgentForInspection(projectSelector, strictProjectLookup)
-	if err != nil {
-		return nil, err
-	}
-	for i := range values {
-		if values[i].Key == "root_agent" {
-			values[i] = rootAgent
-			break
-		}
-	}
-	return values, nil
-}
-
 func configEntriesFromResolution(values []config.ResolvedValue) []configEntry {
 	entries := make([]configEntry, 0, len(values))
 	for _, value := range values {
@@ -188,7 +133,7 @@ func writeConfigExplanations(w io.Writer, resolved *config.ResolvedConfig, value
 }
 
 func writeConfigValueExplanation(w io.Writer, value config.ResolvedValue) error {
-	fmt.Fprintf(w, "%s = %s\n", value.Key, formatConfigExplanationValue(value.Value))
+	fmt.Fprintf(w, "%s = %s\n", value.Key, config.FormatExplainValue(value.Value))
 	if value.Default != "" {
 		fmt.Fprintf(w, "default: %s\n", value.Default)
 	}
@@ -199,7 +144,7 @@ func writeConfigValueExplanation(w io.Writer, value config.ResolvedValue) error 
 	for _, candidate := range value.Candidates {
 		candidateValue := "—"
 		if candidate.Present {
-			candidateValue = formatConfigExplanationValue(candidate.Value)
+			candidateValue = config.FormatExplainValue(candidate.Value)
 		}
 		location := "compiled default"
 		if candidate.Path != "" {
@@ -229,11 +174,4 @@ func writeConfigValueExplanation(w io.Writer, value config.ResolvedValue) error 
 		}
 	}
 	return nil
-}
-
-func formatConfigExplanationValue(value any) string {
-	if text, ok := value.(string); ok && text == "" {
-		return `""`
-	}
-	return formatConfigValue(value)
 }

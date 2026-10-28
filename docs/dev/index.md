@@ -1,0 +1,94 @@
+# Develop and maintain
+
+For contributors and maintainers, not for people using `af`. This section holds
+everything about working **on** the repository: the test harnesses, the gates a
+pull request has to clear, the release machinery, and the design notes behind
+the larger pieces.
+
+The operating contract for this repository — how work is triaged, what runs
+locally versus in CI, and the git hygiene a shared box needs — lives in
+[CLAUDE.md](https://github.com/sachiniyer/agent-factory/blob/master/CLAUDE.md)
+at the repository root. Read it first.
+
+## Suggested reading order
+
+1. Start here · read the repository operating contract linked above.
+2. Read [Container testing](container-testing.md) · learn the isolation boundary,
+   then [Fail-first probe runs](probe-runs.md) for the tests that must run in CI,
+   then [File-length lint](file-length-lint.md) for the structural gate.
+3. Choose your surface · [Surface parity](surface-parity.md), then
+   [Web client selftest](web-selftest.md) or [Manual TUI testing](tui-manual-testing.md).
+   Read [Performance baselines](perf-baselines.md) for the measured web/TUI budgets
+   and visual regression gate. Use [Demo assets](demo-assets.md) when refreshing documentation media.
+4. Follow the change into production · [Release process](release-process.md),
+   [Release testing plan](release-testing-plan.md), then
+   [Lifecycle testing](lifecycle-testing.md) for install and upgrade changes.
+5. Consult [Release notes](release-notes.md) and [Daemon memory](daemon-memory.md)
+   as needed · compatibility details, sizing, diagnosis…
+
+## Before opening a pull request
+
+```bash
+gofmt -l .                              # no output
+go build ./...
+go vet ./...
+golangci-lint run --timeout=3m --fast
+scripts/lint-file-length.sh
+go test ./<the-package-you-changed>/... # not ./... on a shared box
+
+# Generated-artifact drift — the same gate CI's Docs job runs. ~3s warm, up
+# to ~35s cold (two `go run` builds; no daemon, tmux, or containers). Needed
+# when the diff touches a generator input: a Cobra command in commands/ or
+# api/ (cli.md), daemon/httproutes.go (api.md), the plugin usage text in
+# session/systemprompt.go or session/agentskill.go (plugins/**,
+# .agents/.claude-plugin marketplaces), design/tokens.json or
+# design/style-guide.tmpl (web/src, ui/theme, docs/stylesheets, docs/design),
+# app/testdata/recovery/*.{svg,ansi} (docs/assets/recovery/tui-model-driver),
+# or a generator (commands/docs_gen.go, commands/plugins_gen.go,
+# internal/designtokens/, scripts/gen-docs.sh).
+scripts/gen-docs.sh
+git status --porcelain -- docs/reference plugins .agents .claude-plugin \
+    web/src/tokens.css web/src/index.html web/src/manifest.webmanifest \
+    ui/theme docs/stylesheets/tokens.css docs/design/style-guide.md \
+    docs/design/interface-design.md \
+    docs/assets/recovery/tui-model-driver   # must be empty
+```
+
+CI runs the rest — including `go test -race ./...`, the container suites, and
+the docs build — on every push.
+
+## The pages
+
+| Page | What it covers |
+| --- | --- |
+| [Container testing](container-testing.md) | Running the suite and play-tests inside docker, so real tmux servers and real daemons cannot escape. |
+| [Fail-first probe runs](probe-runs.md) | Proving a new `daemon/`, `app/` or `integration/` test fails without its fix, with one Linux `Test` job instead of a full CI run. |
+| [Demo assets](demo-assets.md) | Regenerating the web demo and theme-specific stills. |
+| [Lifecycle testing](lifecycle-testing.md) | Clean install and install → upgrade on a real machine: the bugs that need two versions to exist. |
+| [Web client selftest](web-selftest.md) | The Playwright acceptance proof for the embedded web client. |
+| [Performance baselines](perf-baselines.md) | The 1,000-session fixture, web/TUI CI budgets, and reviewed demo goldens. |
+| [Manual TUI testing](tui-manual-testing.md) | `scripts/tui-driver.sh`, the self-synchronizing driver for play-testing the live TUI. |
+| [Surface parity](surface-parity.md) | The drift check that keeps the TUI, web, and CLI the same product. |
+| [File-length lint](file-length-lint.md) | The structural-health guard that bounds Go file length. |
+| [Release process](release-process.md) | Stable and preview channels, version scheme, and how updates reach users. |
+| [Release testing plan](release-testing-plan.md) | The checklist a release commit has to pass. |
+| [Release notes](release-notes.md) | Curated notes for changes users need to know about. |
+| [Daemon memory](daemon-memory.md) | Sizing the daemon, and why the unit's `MemoryPeak` is not its memory. |
+| [TUI rewrite](../design/tui-rewrite.md) · [Agent handoff](../design/agent-handoff.md) | Accepted design notes for the larger epics. |
+
+## Documentation itself
+
+The site is MkDocs Material, built from `docs/` and `mkdocs.yml`:
+
+```bash
+python3 -m venv .venv-docs
+.venv-docs/bin/pip install -r requirements-docs.txt
+.venv-docs/bin/mkdocs serve          # live preview
+.venv-docs/bin/mkdocs build --strict # what CI gates on
+```
+
+`docs/reference/cli.md` and `docs/reference/api.md` are **generated** — run
+`scripts/gen-docs.sh` and commit the result rather than editing them; CI fails
+on drift. Pages under the docs root are user-facing, pages under `docs/dev/` are these,
+`docs/design/` holds accepted design notes, and `docs/reference/` is generated. When a page moves, add its old path to the `redirects` map in
+`mkdocs.yml` so published links keep resolving.

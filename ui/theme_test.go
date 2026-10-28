@@ -5,65 +5,44 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/ui/theme"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 )
 
-// TestAccentColorValue pins the default shared accent to Nord's Frost cyan.
-// Custom configs can override it through [theme].accent.
 func TestAccentColorValue(t *testing.T) {
-	if got := string(AccentColor); got != "#88C0D0" {
-		t.Fatalf("AccentColor = %q, want %q", got, "#88C0D0")
+	if AccentColor != theme.Colors()["accent"] {
+		t.Fatal("accent must use generated role")
 	}
 }
 
-// TestAccentSitesUseConstant guards against the half-finished migration that
-// left accent surfaces on unrelated literals while the rest of the TUI used
-// the configured accent. These are the most prominent accent surfaces.
-// Pane borders are semantic state colors and are covered in tabbed-window
-// tests.
-func TestAccentSitesUseConstant(t *testing.T) {
-	cases := []struct {
-		name string
-		got  lipgloss.TerminalColor
-	}{
-		{"sidebar title banner background", mainTitle.GetBackground()},
-		{"automations strip title", automationsTitleStyle.GetForeground()},
-		{"menu action group", actionGroupStyle.GetForeground()},
+// Headings and actionable shortcuts use ink; focus does not add a palette.
+func TestChromeCopyUsesInk(t *testing.T) {
+	if actionGroupStyle.GetForeground() != CurrentTheme().Accent || !keyStyle.GetBold() {
+		t.Fatal("footer actions need the shared accent and bold keys")
 	}
-	for _, c := range cases {
-		if c.got != lipgloss.TerminalColor(AccentColor) {
-			t.Errorf("%s = %v, want AccentColor (%s)", c.name, c.got, AccentColor)
+	for name, got := range map[string]lipgloss.TerminalColor{
+		"rail title":        mainTitle.GetForeground(),
+		"automations title": automationsTitleStyle.GetForeground(),
+	} {
+		if got != CurrentTheme().Ink {
+			t.Errorf("%s uses %v, want ink", name, got)
 		}
 	}
 }
 
-func TestApplyThemeRebuildsProminentStyles(t *testing.T) {
-	defaultTheme := config.DefaultThemeConfig()
-	t.Cleanup(func() { ApplyTheme(defaultTheme) })
-
-	custom := defaultTheme
-	custom.Accent = "#112233"
-	custom.Foreground = "#445566"
-	custom.ForegroundMuted = "#556677"
-	custom.SelectionBackground = "#223344"
-	custom.SelectionForeground = "#DDEEFF"
-	custom.PaneBorderDefault = "#778899"
-	ApplyTheme(custom)
-
-	assertColor := func(name string, got lipgloss.TerminalColor, want string) {
-		t.Helper()
-		if got != lipgloss.TerminalColor(lipgloss.Color(want)) {
-			t.Fatalf("%s = %v, want %s", name, got, want)
-		}
+func TestLegacyPaletteCannotOverrideRoles(t *testing.T) {
+	original := CurrentTheme()
+	ApplyTheme()
+	t.Cleanup(func() { ApplyTheme() })
+	if CurrentTheme() != original {
+		t.Fatal("legacy palette changed fixed roles")
 	}
-	assertColor("AccentColor", lipgloss.TerminalColor(AccentColor), "#112233")
-	assertColor("mainTitle background", mainTitle.GetBackground(), "#112233")
-	assertColor("window border", windowStyle.GetBorderBottomForeground(), "#778899")
-	assertColor("menu action group", actionGroupStyle.GetForeground(), "#112233")
-	assertColor("tree title", lipgloss.TerminalColor(tree.InstanceTitleColor), "#445566")
-	assertColor("pane focused header background", paneHeaderFocusedStyle.GetBackground(), "#223344")
-	assertColor("pane focused header foreground", paneHeaderFocusedStyle.GetForeground(), "#DDEEFF")
+	if tree.InstanceTitleColor != theme.Colors()["ink"] {
+		t.Fatal("tree must use ink")
+	}
+	if windowStyle.GetBorderBottomForeground() != theme.Colors()["border"] {
+		t.Fatal("frame must use border")
+	}
 }
 
 // TestAutomationTitleMatchesInstanceTitle pins #1126: an automation's title
@@ -74,5 +53,27 @@ func TestAutomationTitleMatchesInstanceTitle(t *testing.T) {
 	if got := automationItemTitleStyle.GetForeground(); got != lipgloss.TerminalColor(tree.InstanceTitleColor) {
 		t.Errorf("automation title foreground = %v, want tree.InstanceTitleColor (%v)",
 			got, tree.InstanceTitleColor)
+	}
+}
+
+func TestReviewedSelectionAndBlurredTitleRoles(t *testing.T) {
+	ApplyTheme()
+	roles := theme.Roles()
+	if configSelectedStyle.GetForeground() != roles.Ink || configSelectedStyle.GetBackground() != roles.SurfaceRaised {
+		t.Fatal("config key and account selections must use ink on surface-raised")
+	}
+	// Plain ink on surface removes the decorative chip while preserving contrast.
+	if blurredTitle.GetForeground() != roles.Ink || blurredTitle.GetBackground() != roles.Surface {
+		t.Fatal("blurred sidebar title must use the contrast-checked ink on surface pair")
+	}
+}
+
+func TestConfigLocationAndPurposeHierarchy(t *testing.T) {
+	roles := theme.Roles()
+	if configLocationStyle.GetForeground() != roles.InkMuted || configPurposeStyle.GetForeground() != roles.Ink {
+		t.Fatal("Config location must be muted without dimming entry purposes")
+	}
+	if taskPlaceholderStyle.GetFaint() {
+		t.Fatal("placeholder contrast must not be reduced below its token role")
 	}
 }

@@ -24,26 +24,31 @@ import (
 // daemon→disk read path (listSessions, getSessionByTitle, whoamiSession,
 // getSessionByTitleInScope) routes through so the "remote reads never fall back
 // to disk" contract cannot be silently reintroduced at a new read site (#1679,
-// #1681). On daemon success it returns (data, false, nil). On error it returns:
-//   - remote target: (nil, false, err) — surface the real error; a remote daemon
+// #1681). On daemon success it returns (data, skipped, false, nil), where
+// `skipped` carries repos the daemon dropped at startup due to a corrupted
+// instances.json (#603) — the wire-side incompleteness channel the caller uses
+// to refuse or caveat rather than silently serving a partial list as complete
+// (#730's principle extended to the wire surface #1029 PR 2 introduced). On
+// error it returns:
+//   - remote target: (nil, nil, false, err) — surface the real error; a remote daemon
 //     has no local disk to fall back to, and a bad token must not be masked by a
-//     same-machine disk read (docs/remote-tcp-auth.md, #1592 Phase 3 PR4).
-//   - local target:  (nil, true, err)  — the caller runs its own disk scan.
+//     same-machine disk read (docs/remote-http-auth.md, #1592 Phase 3 PR4).
+//   - local target:  (nil, nil, true, err)  — the caller runs its own disk scan.
 //
 // Callers switch on err == nil for the success path and, on error, consult the
 // fallBackToDisk flag before touching disk. This keeps each caller's exact local
 // disk-fallback behavior (diskListSessions / diskWhoami / findInstanceByTitle,
 // including their distinct not-found and corrupt-repo errors) while centralizing
 // the one decision that must never regress: whether disk may be read at all.
-func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, fallBackToDisk bool, err error) {
-	data, err = snapshotViaDaemon(req)
+func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, skipped []daemon.SkippedRepo, fallBackToDisk bool, err error) {
+	data, skipped, err = snapshotViaDaemon(req)
 	if err == nil {
-		return data, false, nil
+		return data, skipped, false, nil
 	}
 	if apiclient.IsRemoteTarget() {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	return nil, true, err
+	return nil, nil, true, err
 }
 
 // Shared flags
@@ -55,150 +60,6 @@ var (
 	// jsonOut/jsonError wrap output in the shared {data,error} Envelope (#1029).
 	envelopeOutput bool
 )
-
-// repoFromFlag resolves the --repo flag to a RepoContext. Its errors name the
-// offending path and distinguish "could not make the path absolute" from "the
-// path is not a git repository" so callers never mislabel a provided-but-invalid
-// --repo as missing (#892). Only call when repoFlag != "".
-func repoFromFlag() (*config.RepoContext, error) {
-	absPath, err := config.ResolveUserPath(repoFlag)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve --repo path %q: %w", repoFlag, err)
-	}
-	repo, err := config.RepoFromPath(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("--repo %q is not a valid git repository: %w", absPath, err)
-	}
-	return repo, nil
-}
-
-// optionalCurrentRepo resolves the cwd's project when one exists. Only the
-// positively identified outside-Git condition means "no project context";
-// treating any other discovery failure as absence would silently widen scoped
-// reads and mutations to every project (#3134).
-func optionalCurrentRepo() (*config.RepoContext, error) {
-	repo, err := config.CurrentRepo()
-	if err == nil {
-		return repo, nil
-	}
-	if errors.Is(err, config.ErrNotGitRepository) {
-		return nil, nil
-	}
-	return nil, fmt.Errorf("resolve current repository: %w", err)
-}
-
-// resolveRepoID resolves a repo ID from flags, cwd, or returns "" for all-repo mode.
-//
-// This ALWAYS consults the cwd, including when --daemon-url is set. That looks
-// wrong for a remote target — the client's cwd names a repo on this machine —
-// but its callers are the write commands (kill/archive/restore/send-prompt, tab
-// mutations) whose transport does NOT honor --daemon-url: daemon.* goes over the
-// local control socket (callDaemon → DaemonSocketPath). Dropping the cwd scope
-// for them would send an UNSCOPED destructive request to the LOCAL daemon, which
-// could then resolve a same-titled session in a different local repo and kill or
-// archive it. Keeping the cwd scope keeps those commands pointed where they
-// already point.
-//
-// Reads that genuinely reach the targeted daemon (sessions list/get/watch/preview)
-// use resolveRepoIDForLookup instead. If a write command is ever migrated onto the
-// apiclient transport, move it across too.
-func resolveRepoID() (string, error) {
-	if repoFlag != "" {
-		repo, err := repoFromFlag()
-		if err != nil {
-			return "", err
-		}
-		return repo.ID, nil
-	}
-	// Try cwd
-	repo, err := optionalCurrentRepo()
-	if err != nil {
-		return "", err
-	}
-	if repo == nil {
-		return "", nil // all-repo mode
-	}
-	return repo.ID, nil
-}
-
-// resolveRepoIDForLookup resolves the repo scope for a READ that is actually
-// served by the targeted daemon: the snapshot-based reads (`sessions list`,
-// `get`, `watch`) and `preview`, all of which route through apiclient and so
-// follow --daemon-url/AF_DAEMON_URL to the remote.
-//
-// The dividing line is the TRANSPORT, not the command: a caller belongs here if
-// its request reaches the targeted daemon, and on resolveRepoID if it goes over
-// the local control socket regardless of the target.
-//
-// It differs from resolveRepoID in one way: against a REMOTE target the cwd is
-// ignored. The client's cwd names a repo that exists HERE, not on the daemon's
-// machine, so scoping by it asks the remote for a repo ID it has never seen —
-// and the remote read path has no disk fallback (snapshotRead), so a bare-title
-// lookup that used to succeed would report a spurious not-found. Against a
-// remote only an EXPLICIT --repo scopes; a bare title resolves across the
-// remote's repos, with the ambiguity guard refusing to pick between them.
-//
-// Deliberately NOT shared with the write commands: their transport is the local
-// control socket regardless of --daemon-url, so an unscoped request there is a
-// destructive mis-target rather than a remote lookup (see resolveRepoID).
-//
-// Known limitation: --repo becomes an ID by hashing the path on THIS machine
-// (config.RepoIDFromRoot), so against a remote it only disambiguates when the
-// daemon has that project checked out at the same absolute path. Scoping a
-// remote by a repo identity the daemon owns needs a daemon-side repo lookup — a
-// separate change; until then, prefer a bare title against a remote.
-func resolveRepoIDForLookup() (string, error) {
-	if repoFlag != "" {
-		repo, err := repoFromFlag()
-		if err != nil {
-			return "", err
-		}
-		return repo.ID, nil
-	}
-	if apiclient.IsRemoteTarget() {
-		return "", nil // the client's cwd says nothing about the remote's repos
-	}
-	repo, err := optionalCurrentRepo()
-	if err != nil {
-		return "", err
-	}
-	if repo == nil {
-		return "", nil // all-repo mode, guarded by the ambiguity check
-	}
-	return repo.ID, nil
-}
-
-// resolveRepo is the single binding resolver for commands that can create
-// persistent project state (sessions create, tasks add, and send-prompt
-// --create). Besides resolving the repo, it enforces the shared AF-home refusal;
-// putting that invariant here keeps a new caller from remembering resolution
-// while forgetting the destructive binding guard (#1891/#2205).
-//
-// Errors are fully formed for callers to surface directly: a provided `--repo`
-// that does not resolve names the path, while an absent `--repo` whose cwd is
-// also not a repo reports that `--repo is required` (#892). Wrapping every
-// failure as "--repo is required" would be wrong when the user did provide it.
-func resolveRepo() (*config.RepoContext, error) {
-	var (
-		repo *config.RepoContext
-		err  error
-	)
-	if repoFlag != "" {
-		repo, err = repoFromFlag()
-	} else {
-		repo, err = config.CurrentRepo()
-		if err != nil {
-			return nil, fmt.Errorf("--repo is required: the current directory is not a git repository — pass --repo <path> to target a project (%w)", err)
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := guardProjectBinding(repo, repoFlag != ""); err != nil {
-		return nil, err
-	}
-	return repo, nil
-}
 
 // warnWriter is where a command's own caveats go — the "this answer is
 // INCOMPLETE" notices that accompany a successful result rather than replace it.
@@ -296,56 +157,148 @@ func repoPathsOf(matches []session.InstanceData) []string {
 	return paths
 }
 
-// diskRepoPathsForTitle returns the distinct repo paths holding the title across
-// the union of `known` and every PERSISTED row on disk.
+// diskRepoPathsForTitle widens an unscoped title lookup from the daemon snapshot
+// to the local disk, so a lone snapshot match cannot hide a second repo that also
+// holds the title.
 //
 // It backstops the daemon-snapshot read path: the snapshot only mirrors the
 // daemon's in-memory instances, and refresh skips rows it cannot restore, so a
 // lone snapshot match can hide a second repo that also holds the title.
-// Corrupted per-repo files are skipped — this is a best-effort widening of an
-// already-successful lookup, so it must never turn a working read into an error.
 //
-// The second return names repos whose file could not be READ, so the caller can
-// say the widening was incomplete instead of implying it was exhaustive (#3479).
-// Reported rather than refused, unlike the daemon's twin of this guard
-// (collectTitleRepoPathsOnDisk): that one gates the DESTRUCTIVE paths, which
-// resolve through findSession, while this backstops a read where breaking a
-// working lookup costs more than the wrong project name it would prevent.
-func diskRepoPathsForTitle(title string, known []string) ([]string, []config.RepoInstancesSkip, error) {
-	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
+// The FIRST return counts distinct PROJECTS by repoID (the storage map key,
+// never empty). The snapshot carries no repoID, so its own ambiguity check keys
+// on Path; keying THIS widening on Path too would let DedupeSorted drop an empty
+// value and collapse two repos into one — the asymmetry that left the disk twin
+// (findInstanceByTitle, keys on repoID) robust while this backstop was not.
+//
+// The snapshot holder is folded into this count too: an in-flight pendingCreates
+// row is exposed by daemon.SnapshotWithSkipped but not written to instances.json
+// until creation completes (daemon/manager_create.go), so a lone snapshot match
+// may be a project the disk widening cannot see. Its Path is the only handle;
+// when non-empty and no disk row shares it, the holder is added as a synthetic id
+// so the >1 count still flags the collision. An empty-Path holder is left to the
+// disk repoID count (its Path can't be matched to a disk repo, and counting it
+// would over-refuse a unique empty-Path match).
+//
+// The SECOND return keeps the human-readable repo Paths for the
+// AmbiguousTitleError message: a repoID is an opaque hash, so the message names
+// paths. When every holder has Path "" the path set is empty and
+// AmbiguousTitleError falls back to its defensive wording.
+//
+// A per-repo file that could not be READ, or whose JSON could not be PARSED, is
+// the same kind of gap either way (#3479): either could hold the title, so the
+// widening's exhaustiveness claim must not survive either. Both are reported
+// through the third and fourth returns rather than silently dropped, so the
+// caller can say the widening was incomplete instead of implying it was
+// exhaustive. Reported rather than refused — this is a best-effort widening of
+// an already-successful lookup, so it must never turn a working read into an
+// error. The daemon's twin of this guard (collectTitleRepoPathsOnDisk) gates the
+// DESTRUCTIVE paths, which resolve through findSession, while this backstops a
+// read where breaking a working lookup costs more than the wrong project name it
+// would prevent.
+//
+// The two gap classes are returned SEPARATELY because they take different
+// remedies: an unreadable file may be made readable again, but a parse-corrupted
+// instances.json must not be advised to REMOVE — af keeps no backup, so deleting
+// it discards the hidden sessions (#5530 review). The caller merges them for the
+// notice but applies the corruption-safe hint to the corrupted class.
+func diskRepoPathsForTitle(title string, known []string) (repoIDs, repoPaths []string, unreadable, corrupted []config.RepoInstancesSkip, err error) {
+	var allInstances map[string]json.RawMessage
+	allInstances, unreadable, err = config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
+	ids := make([]string, 0, len(allInstances))
 	paths := append([]string(nil), known...)
-	for _, raw := range allInstances {
+	for repoID, raw := range allInstances {
 		var rows []session.InstanceData
 		if err := json.Unmarshal(raw, &rows); err != nil {
+			// A repo whose instances.json could not be PARSED is the same kind
+			// of gap as one whose file could not be READ (#3479): either could
+			// hold this title, so silently skipping it let the widening claim
+			// exhaustiveness it did not have. Report it through the skip
+			// channel rather than dropping it, mirroring findInstanceByTitle,
+			// so warnIncompleteTitleWidening can caveat the result. The
+			// widening stays best-effort: this adds a NOTICE, never an error.
+			log.WarningLog.Printf("skipping repo %s while widening title: corrupted instances.json: %v", repoID, err)
+			path, _ := config.RepoInstancesPath(repoID)
+			corrupted = append(corrupted, config.RepoInstancesSkip{RepoID: repoID, Path: path, Err: err})
 			continue
 		}
 		for i := range rows {
 			if rows[i].Title == title {
+				// Count the repo once by its storage key (never ""), and
+				// collect its human-readable Path for the error message. A
+				// per-repo file holds at most one row of a given title
+				// (titles are unique per-repo), so the first match is the
+				// whole story for this repo.
+				ids = append(ids, repoID)
 				paths = append(paths, rows[i].Path)
+				break
 			}
 		}
 	}
-	return session.DedupeSorted(paths), unreadable, nil
+	// Retain the snapshot holder (known) in the project count: an in-flight
+	// pendingCreates row is not on disk, so fold its non-empty Path in as a
+	// synthetic id when no disk row shares it. An empty-Path holder is skipped
+	// (can't be matched to a disk repo; would over-refuse a unique match).
+	diskPaths := make(map[string]bool, len(paths)-len(known))
+	for _, p := range paths[len(known):] {
+		if p != "" {
+			diskPaths[p] = true
+		}
+	}
+	for _, p := range known {
+		if p != "" && !diskPaths[p] {
+			ids = append(ids, p)
+		}
+	}
+	return session.DedupeSorted(ids), session.DedupeSorted(paths), unreadable, corrupted, nil
+}
+
+// corruptedRepoRepairHint is the one-line remedy appended to every corruption
+// refusal/caveat. af stores per-repo state only in instances.json and keeps no
+// backup of it, so the operator has to repair the file themselves (#4742).
+const corruptedRepoRepairHint = "Stop the af daemon, copy the corrupt file(s) aside, fix the JSON or restore it from a backup, then start the daemon; af keeps no backup of these files."
+
+// corruptedRepoPaths renders the full path of each corrupted repo's
+// instances.json, resolved through the same home resolver the store uses
+// (config.RepoInstancesPath honors AGENT_FACTORY_HOME rather than a hard-coded
+// ~/.agent-factory). A bare repo id is the fallback only when the id is too
+// malformed to resolve to a path, which the corrupted repos the daemon reports
+// never are — they passed ValidateRepoID when first registered (#4742).
+func corruptedRepoPaths(corrupted []string) string {
+	sort.Strings(corrupted)
+	paths := make([]string, 0, len(corrupted))
+	for _, rid := range corrupted {
+		if p, err := config.RepoInstancesPath(rid); err == nil && p != "" {
+			paths = append(paths, p)
+		} else {
+			paths = append(paths, rid)
+		}
+	}
+	return strings.Join(paths, ", ")
 }
 
 // corruptedReposSuffix builds a sorted, human-readable clause naming the repos
 // whose instances.json failed to parse. Callers use it to surface corruption
-// loudly instead of silently returning empty/partial results (#730).
+// loudly instead of silently returning empty/partial results (#730). Each repo
+// is named by its full instances.json path and the message carries the repair
+// step, so a miss caveats with something the operator can act on (#4742).
 func corruptedReposSuffix(corrupted []string) string {
-	sort.Strings(corrupted)
-	return fmt.Sprintf("%d repo(s) have a corrupted instances.json and may be hiding it: %s", len(corrupted), strings.Join(corrupted, ", "))
+	return fmt.Sprintf("%d repo(s) have a corrupted instances.json and may be hiding it: %s\n%s",
+		len(corrupted), corruptedRepoPaths(corrupted), corruptedRepoRepairHint)
 }
 
 // corruptedReposError builds a structured error for aggregate queries (e.g.
 // `sessions list`) that name the repos whose instances.json failed to parse.
 // Returning this instead of a silently-truncated result lets users tell "no
 // sessions exist" apart from "sessions exist but the file is corrupted" (#730).
+// Each repo is named by its full instances.json path and the message carries the
+// repair step, so a refusal is actionable rather than a dead end (#4742).
 func corruptedReposError(corrupted []string) error {
-	sort.Strings(corrupted)
-	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s", len(corrupted), strings.Join(corrupted, ", "))
+	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s\n%s",
+		len(corrupted), corruptedRepoPaths(corrupted), corruptedRepoRepairHint)
 }
 
 // diskListSessions is the disk-read fallback for `sessions list` when no daemon
@@ -476,6 +429,58 @@ func repoHasInstanceTitle(repoID, title string) (bool, error) {
 	return false, nil
 }
 
+// repoHasLiveInstanceTitle is like repoHasInstanceTitle but skips rows the
+// daemon treats as non-reservations. Used by the sessions-create pre-check so
+// a title the daemon would ALLOW reaches it instead of aborting client-side with
+// the wrong error. RecordedLiveness resolves both the explicit Liveness field
+// and the legacy Status fallback so a row persisted before the Liveness field
+// existed is still detected and skipped.
+//
+// The skip-set mirrors the daemon's authoritative title scan,
+// findTitleConflictLocked (plus its parallel scans in archive_names.go and
+// manager_create_titles.go), exactly:
+//
+//   - Archived rows (RecordedLiveness == LiveArchived): the daemon reclaims the
+//     title by renaming the archived record to "<title> (archived)" and
+//     proceeding (renameArchivedForReuseLocked), so counting an archived row as
+//     "already exists" would abort a create the daemon would allow.
+//   - Status == Loading "ghost" rows: a legacy TUI binary (#551) could persist
+//     a Loading-status row to disk on quit. The daemon treats such ghosts as
+//     overwritable — appendInstanceData overwrites a same-titled Loading ghost
+//     and findTitleConflictLocked skips them when deciding a title is free,
+//     specifically so they do not "block title reuse forever" — so counting one
+//     as a collision would block a create the daemon would allow. RecordedLiveness
+//     resolves a Loading row to LivenessUnset, not LiveArchived, so the archived
+//     skip above does NOT cover it; this carve-out is separate on purpose.
+//
+// Deleting is deliberately NOT skipped: a persisted Deleting row is a real
+// titleConflictDisk collision to the daemon, so letting it through here would
+// hand the daemon a create it would then refuse — aborting client-side is the
+// correct, fail-fast behavior for a genuine live collision.
+//
+// The authoritative race-safe check still happens inside the daemon under the
+// per-repo file lock, so letting these rows through is safe.
+//
+// NOTE: do NOT use this for the send-prompt existence pre-check
+// (instanceTitleExistsInScope). Send-prompt to an archived session should fall
+// through to the daemon, which returns the actionable "session is Archived;
+// restore it first" error (promptTargetLivenessError). Using this filtered
+// predicate there would return "not found" instead.
+func repoHasLiveInstanceTitle(repoID, title string) (bool, error) {
+	instances, err := loadRepoInstanceData(repoID)
+	if err != nil {
+		return false, err
+	}
+	for i := range instances {
+		skip := session.RecordedLiveness(instances[i]) == session.LiveArchived ||
+			instances[i].Status == session.Loading
+		if instances[i].Title == title && !skip {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 	raw, err := config.LoadRepoInstances(repoID)
 	if err != nil {
@@ -560,7 +565,11 @@ func instanceTitleExistsInScope(repoID, title string) (bool, error) {
 
 // scopedInstance is a persisted session paired with the repo ID it belongs to,
 // which the broadcast delivery path needs to address the daemon SendPrompt RPC.
+// ID is the row's stable identity: the broadcast enumerates its targets before
+// dispatching, so the send must carry it or a killed-and-recreated row could
+// inherit a prompt meant for the session the user actually listed.
 type scopedInstance struct {
+	ID     string
 	RepoID string
 	Title  string
 	Status session.Status
@@ -577,7 +586,7 @@ func scopedInstancesForRepo(repoID string) ([]scopedInstance, error) {
 	}
 	out := make([]scopedInstance, 0, len(instances))
 	for i := range instances {
-		out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+		out = append(out, scopedInstance{ID: instances[i].ID, RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
 	}
 	return out, nil
 }
@@ -611,7 +620,7 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 			continue
 		}
 		for i := range instances {
-			out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+			out = append(out, scopedInstance{ID: instances[i].ID, RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
 		}
 	}
 	return out, corrupted, nil
@@ -622,7 +631,13 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 // wraps the payload in the shared success Envelope.
 func jsonOut(v any) error {
 	if envelopeOutput {
-		return apiproto.WriteEnvelope(os.Stdout, apiproto.Success(v))
+		// close quietly so a dirty --json success leaves stderr empty, matching jsonError (#3169);
+		// only close after the envelope is written so a write failure retains the dirty-log diagnostic
+		if err := apiproto.WriteEnvelope(os.Stdout, apiproto.Success(v)); err != nil {
+			return err
+		}
+		log.CloseQuiet()
+		return nil
 	}
 	data, err := apiproto.MarshalIndented(v)
 	if err != nil {
@@ -663,6 +678,8 @@ func silenceCobraOutput() {
 	TasksCmd.SilenceErrors = true
 	ProjectsCmd.SilenceUsage = true
 	ProjectsCmd.SilenceErrors = true
+	ProposalCmd.SilenceUsage = true
+	ProposalCmd.SilenceErrors = true
 	if root := SessionsCmd.Root(); root != nil {
 		root.SilenceUsage = true
 		root.SilenceErrors = true
@@ -702,13 +719,14 @@ func init() {
 	sessionsCreateCmd.Flags().StringVar(&createNameFlag, "name", "", "Session title (alternative to positional <title>)")
 	sessionsCreateCmd.Flags().StringVar(&createPromptFlag, "prompt", "", "Initial prompt to send")
 	sessionsCreateCmd.Flags().StringVar(&createProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
-	sessionsCreateCmd.Flags().StringVar(&createAccountFlag, "account", "", "Credential account `name` to run the agent as (register it with af accounts add; defaults to the ambient identity)")
+	sessionsCreateCmd.Flags().StringVar(&createAccountFlag, "account", "", "Credential account `name` to run the agent as (register it with af accounts add; defaults to this project's default_accounts entry for the agent, else the ambient identity)")
 	sessionsCreateCmd.Flags().BoolVar(&createHereFlag, "here", false, "Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both)")
 	sessionsCreateCmd.Flags().BoolVar(&createInPlaceFlag, "in-place", false, "Alias for --here")
 	// The enum comes from config.SupportedBackendsString() so the help can never
 	// advertise a stale set — but knowing a backend EXISTS is not knowing this
 	// project can use it, which is what "af sessions backends" answers (#1933).
 	// Naming that verb here is the only place a --backend reader will look.
+	sessionsCreateCmd.Flags().StringVar(&createHostFlag, "host", "", "Listed host to run the session on, by name from the global host list (af config set hosts …); implies --backend ssh. Run \"af sessions backends\" to see each host and whether it is usable")
 	sessionsCreateCmd.Flags().StringVar(&createBackendFlag, "backend", "", "Runtime to run the session on (one of: "+config.SupportedBackendsString()+"; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run \"af sessions backends\" for which of these this project can actually use, and why not")
 
 	// Tab addressing for `sessions preview` (#1948). The daemon's PreviewRequest
@@ -727,6 +745,7 @@ func init() {
 	// way. The positional stays supported: this is additive, not a migration.
 	sessionsSendPromptCmd.Flags().StringVar(&sendPromptPromptFlag, "prompt", "", "The prompt to send (alias for the positional <prompt>, matching 'sessions create --prompt')")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptCreateFlag, "create", false, "Auto-create the session if it doesn't exist")
+	sessionsSendPromptCmd.Flags().StringVar(&sendPromptHostFlag, "host", "", "With --create: place a NEWLY created session on a host from your global `hosts` list, over ssh (see `af sessions backends`). If the session already exists the prompt is sent to it unchanged")
 	sessionsSendPromptCmd.Flags().StringVar(&sendPromptProgramFlag, "program", "", "Program to run when creating a new session (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllFlag, "all", false, "Broadcast the prompt to every live session in scope (current repo by default; excludes the reserved root session)")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllReposFlag, "all-repos", false, "With --all, broadcast across every repo instead of only the current/--repo one")
@@ -736,6 +755,7 @@ func init() {
 	// can imply that it affects the always-destructive kill operation.
 	sessionsKillCmd.Flags().Bool("force", false, "Deprecated no-op, accepted for compatibility: kill always destroys the session (use 'af sessions archive' to keep it restorable)")
 	sessionsArchiveCmd.Flags().BoolVar(&sessionsArchiveSelf, "self", false, "Archive the current session (resolved via whoami); use from inside a session when your work is done")
+	sessionsArchiveCmd.Flags().BoolVar(&sessionsArchivePush, "push", false, "Push an ssh/sandbox session's branch to origin before archiving. Without it nothing is published: the agent stops and the workspace stays on its host (docker and hook sessions always push)")
 
 	sessionsHandoffCmd.Flags().StringVar(&sessionsHandoffTo, "to", "", "Agent to hand the session off to (one of "+tmux.SupportedProgramsString()+")")
 	sessionsHandoffCmd.Flags().StringVar(&sessionsHandoffBrief, "brief", "", "Mission for the incoming agent, replacing the session's stored prompt")
@@ -765,7 +785,16 @@ func init() {
 	// opt-in to global breadth, matching `tasks list` (#2089).
 	sessionsListCmd.Flags().BoolVar(&sessionsListAllFlag, "all", false, "List sessions across every project instead of only the current one")
 	sessionsListCmd.Flags().BoolVar(&sessionsListLiveFlag, "live", false, "Exclude archived sessions")
-	sessionsListCmd.Flags().StringArrayVar(&sessionsListStatusesFlag, "status", nil, "Filter by lifecycle status; repeat for more than one (running, ready, lost, dead, archived, limit-reached)")
+	// The vocabulary comes from session's canonical Liveness ↔ name table, which
+	// is also what every row's `liveness_name` is spelled from (#3631) — so the
+	// help can never advertise a word the payload does not report, or miss one it
+	// does. It names liveness_name and NOT status_name deliberately: status_name
+	// spells the legacy axis, which has no word for loading/deleting and reads
+	// `ready` for a limit-reached row, so pointing users at it here would send
+	// them to a filter value that selects a different set of rows than they read.
+	sessionsListCmd.Flags().StringArrayVar(&sessionsListStatusesFlag, "status", nil,
+		fmt.Sprintf("Filter by lifecycle status; repeat for more than one (%s). Matches each row's liveness_name; status_name names the legacy status integer and is not a filter value",
+			strings.Join(session.LivenessNameList(), ", ")))
 	sessionsListCmd.Flags().DurationVar(&sessionsListMaxAgeFlag, "max-age", 0, "Only list sessions created within this duration (for example 24h)")
 	sessionsListCmd.Flags().IntVar(&sessionsListLimitFlag, "limit", 0, "Return at most N sessions after filtering (must be greater than 0 when set; omitted is unbounded)")
 
@@ -792,6 +821,12 @@ func init() {
 	sessionsRestoreCmd.Flags().Bool("force-reap", false,
 		"replace a reachable sandbox WITHOUT pushing its work first (discards anything it has not pushed)")
 	SessionsCmd.AddCommand(sessionsRestoreCmd)
+
+	sessionsPruneCmd.Flags().StringVar(&sessionsPruneOlderThanStr, "older-than", "",
+		"Report sessions archived longer than this duration ago (required, for example 720h for thirty days)")
+	sessionsPruneCmd.Flags().BoolVar(&sessionsPruneAllFlag, "all", false,
+		"Span every project instead of only the current/--repo one")
+	SessionsCmd.AddCommand(sessionsPruneCmd)
 	SessionsCmd.AddCommand(sessionsAttachCmd)
 	SessionsCmd.AddCommand(sessionsWhoamiCmd)
 
@@ -800,6 +835,7 @@ func init() {
 	ProjectsCmd.AddCommand(projectsListCmd)
 	ProjectsCmd.AddCommand(newProjectsAddCmd())
 	ProjectsCmd.AddCommand(projectsRebindCmd)
+	ProjectsCmd.AddCommand(projectsColorCmd)
 	ProjectsCmd.AddCommand(projectsDeleteCmd)
 
 	// Tasks
@@ -808,6 +844,7 @@ func init() {
 	tasksAddCmd.Flags().StringVar(&taskAddCronFlag, "cron", "", "Cron expression (exactly one of --cron / --watch-cmd)")
 	tasksAddCmd.Flags().StringVar(&taskAddWatchCmdFlag, "watch-cmd", "", "Long-running watch command; each stdout line triggers the task (exactly one of --cron / --watch-cmd)")
 	tasksAddCmd.Flags().StringVar(&taskAddTargetSessionFlag, "target-session", "", "Deliver the prompt into this session (auto-created if missing); empty creates a new session per run")
+	tasksAddCmd.Flags().StringVar(&taskAddHostFlag, "host", "", "Place each session this task creates on a host from your global `hosts` list, over ssh (see `af sessions backends`); empty uses the repo's backend. A name that is not in the list is refused")
 	tasksAddCmd.Flags().IntVar(&taskAddMaxConcurrentRunsFlag, "max-concurrent-runs", 0, "Cap how many sessions this watch task may have in flight at once; excess events are queued in order instead of spawning runs, subject to the durable queue's retention limits (0 = unlimited; --watch-cmd tasks without --target-session only)")
 	tasksAddCmd.Flags().StringVar(&taskAddOnCompleteFlag, "on-complete", "", "What happens to the session a run spawns once it finishes: keep (default, leaves it in place), archive (restorable, but retains its whole worktree), or kill (reclaims the worktree and prunes the session's branch). Not for --target-session tasks, whose session is meant to be reused")
 	tasksAddCmd.Flags().StringVar(&taskAddProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
@@ -822,10 +859,12 @@ func init() {
 
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateNameFlag, "name", "", "New task name")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdatePromptFlag, "prompt", "", "New prompt")
+	tasksUpdateCmd.Flags().StringVar(&taskUpdatePromptFileFlag, "prompt-file", "", "Read the new prompt verbatim from a local file (mutually exclusive with --prompt)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateCronFlag, "cron", "", "New cron expression (clears watch-cmd)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateWatchCmdFlag, "watch-cmd", "", "New watch command (clears cron)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateTargetSessionFlag, "target-session", "", "New target session; pass an empty value to revert to a new session per run")
 	tasksUpdateCmd.Flags().IntVar(&taskUpdateMaxConcurrentRunsFlag, "max-concurrent-runs", 0, "New in-flight session cap for this watch task; pass 0 to revert to unlimited")
+	tasksUpdateCmd.Flags().StringVar(&taskUpdateHostFlag, "host", "", "New host for the sessions this task creates (a name from your global `hosts` list); pass an empty value (--host \"\") to clear it")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateOnCompleteFlag, "on-complete", "", "New spawned-session lifecycle: keep, archive, or kill; pass keep to revert to leaving sessions in place")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateProjectPathFlag, "project-path", "", "Move the task to this git repository (distinct from --repo, which scopes its current project)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateEnabledFlag, "enabled", "", "Enable or disable the task (true/false)")
@@ -833,6 +872,7 @@ func init() {
 
 	TasksCmd.AddCommand(tasksListCmd)
 	TasksCmd.AddCommand(tasksGetCmd)
+	TasksCmd.AddCommand(tasksShowCmd)
 	TasksCmd.AddCommand(tasksAddCmd)
 	TasksCmd.AddCommand(tasksUpdateCmd)
 	TasksCmd.AddCommand(tasksRemoveCmd)

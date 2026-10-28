@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -14,11 +15,24 @@ import (
 // returns a pointer to the slice of InstanceOptions the daemon handed to
 // session.NewInstance, so tests can assert request fields (InPlace) survive
 // the CreateSession plumbing without spinning up real tmux/git worktrees.
+//
+// The append is locked because the factory is genuinely called from several
+// goroutines at once: one ensure pass can enable roots for two repos, and since
+// #3721 each of those creates runs on its own goroutine. READS of the returned
+// slice are not locked and do not need to be — a test reads it after joining
+// the creates (ensureRootAgentsAndWait, or a create that returned), and that
+// join is the happens-before edge. Reading it while a create is still in flight
+// is a race whatever this mutex does, so do not.
 func installOptionsRecordingBackend(t *testing.T) *[]session.InstanceOptions {
 	t.Helper()
-	var seen []session.InstanceOptions
+	var (
+		mu   sync.Mutex
+		seen []session.InstanceOptions
+	)
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, absPath string) (session.Backend, error) {
+		mu.Lock()
 		seen = append(seen, opts)
+		mu.Unlock()
 		backend := session.NewFakeBackend()
 		backend.CompleteStart()
 		return readyFakeBackend{backend}, nil

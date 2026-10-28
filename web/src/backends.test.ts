@@ -71,6 +71,53 @@ test("an unconfigured backend is offered, explained, and blocked from submitting
   assert.match(backendNotice(choices, "docker"), /docker\.image/, "and picking it explains exactly why");
 });
 
+// The callback advisory (#5571 W3.1): a backend the daemon says will create
+// WITHOUT an af callback is still a working choice — the advisory rides the
+// same `reason` channel as a refusal but never blocks selection.
+test("a callbackless backend stays selectable and carries the advisory", () => {
+  const refusal = "refusing to give this sandbox a callback credential: require_token is false";
+  const choices = backendChoices(
+    catalog({
+      backends: [
+        { name: "local", label: "local", status: "available" },
+        { name: "ssh", label: "ssh", status: "available", callback_unavailable_reason: refusal },
+        { name: "docker", label: "docker", status: "unavailable", reason: "requires docker.image", callback_unavailable_reason: refusal },
+      ],
+    }),
+  );
+
+  const ssh = choices.find((c) => c.value === "ssh");
+  assert.ok(ssh);
+  assert.equal(ssh.status, "available", "an advisory is not a precondition — the backend stays usable");
+  assert.equal(ssh.reason, `af callback unavailable: ${refusal}`,
+    "the advisory renders under the same prefix every other surface uses");
+  assert.equal(backendSelectable(choices, "ssh"), true,
+    "selecting it must still submit — a callback-less session beats no session");
+  assert.equal(backendNotice(choices, "ssh"), `af callback unavailable: ${refusal}`);
+
+  // An unavailable backend keeps its OWN reason — the advisory must not clobber
+  // the precondition the user has to fix first.
+  const docker = choices.find((c) => c.value === "docker");
+  assert.ok(docker);
+  assert.match(docker.reason, /docker\.image/, "the refusal names what to fix, not the callback it would also lack");
+  assert.equal(backendSelectable(choices, "docker"), false);
+});
+
+test("the repo default carries the resolved backend's advisory", () => {
+  const refusal = "no control-plane listener is accepting";
+  const choices = backendChoices(
+    catalog({
+      default: "ssh",
+      default_status: "available",
+      backends: [{ name: "ssh", label: "ssh", status: "available", callback_unavailable_reason: refusal }],
+    }),
+  );
+
+  assert.equal(choices[0].reason, `af callback unavailable: ${refusal}`,
+    "choosing the default that resolves to a callbackless backend says so before submitting");
+  assert.equal(backendSelectable(choices, REPO_DEFAULT), true);
+});
+
 test("a configured backend is selectable with nothing to explain", () => {
   const choices = backendChoices(
     catalog({ backends: [{ name: "docker", label: "docker", status: "available" }] }),
@@ -185,4 +232,15 @@ test("an unavailable catalog degrades to the repo default alone", () => {
   assert.deepEqual(choices.map((c) => c.value), [REPO_DEFAULT]);
   assert.equal(choices[0].label, "Repo default");
   assert.equal(backendSelectable(choices, REPO_DEFAULT), true, "a create must still be possible when the catalog is unknown");
+});
+
+test("a stale or unprobed host note rides beside an available backend without blocking it", () => {
+  const choices = backendChoices({
+    backends: [{ name: "sandbox", label: "sandbox", status: "available", readiness: "unprobed", note: "not probed yet — the host is checked when a session is created" }],
+    default: "",
+    default_status: "available",
+  });
+  const sandbox = choices.find((c) => c.value === "sandbox");
+  assert.match(sandbox?.reason ?? "", /not probed yet/);
+  assert.equal(backendSelectable(choices, "sandbox"), true);
 });

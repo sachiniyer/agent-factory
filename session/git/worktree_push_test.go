@@ -195,6 +195,73 @@ func TestSnapshotAndPushBranch_PreservesWorkWhenHeadDetached(t *testing.T) {
 		"uncommitted work committed on a detached HEAD must survive on the session branch")
 }
 
+// TestSnapshotAndPushBranch_ProbesWorktreeFilesystem pins the two #5295-review
+// invariants together: the push path probes the worktree itself — the
+// destination filesystem git writes hit, including when the worktree is a
+// mount point and its parent sits on another filesystem — AND no
+// .af-add-probe-* debris may linger in the tracked tree, where a later
+// archive retry's `git add -A` would stage it as user content. The probe's
+// unlink-before-write is what makes inside-tree probing safe.
+func TestSnapshotAndPushBranch_ProbesWorktreeFilesystem(t *testing.T) {
+	sandboxHome(t)
+	gw, _ := pushTestRepo(t, "root/probe")
+	wt := gw.GetWorktreePath()
+
+	// Force the push to fail so annotateGitWriteError runs: repoint origin at
+	// a path that does not exist.
+	runGit(t, gw.GetRepoPath(), "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+
+	var probed []string
+	old := writeSpaceProbe
+	writeSpaceProbe = func(dir string) error {
+		probed = append(probed, dir)
+		return nil
+	}
+	defer func() { writeSpaceProbe = old }()
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.Error(t, err, "push to a dead origin must fail")
+
+	assert.Contains(t, probed, wt,
+		"the destination filesystem itself must be probed — a mount-point worktree's parent answers for a different filesystem")
+	matches, _ := filepath.Glob(filepath.Join(wt, ".af-add-probe-*"))
+	assert.Empty(t, matches, "no probe debris inside the tracked worktree")
+}
+
+// TestSnapshotAndPushBranch_UnprovenProbeNameIsUserContent pins the
+// two-sided debris contract (#5295 review): an .af-add-probe-* file the
+// sweep cannot prove it created — here, ANY file, since this process
+// abandoned none — is treated as user content end to end: it is NOT
+// deleted, and it IS included in the archive snapshot like any other
+// file. Excluding probe-shaped names from `add` would silently drop a
+// user file whose only sin is its name; a committed stray is a cosmetic
+// wart, data loss is not.
+func TestSnapshotAndPushBranch_UnprovenProbeNameIsUserContent(t *testing.T) {
+	sandboxHome(t)
+	gw, bare := pushTestRepo(t, "root/debris")
+	wt := gw.GetWorktreePath()
+
+	// An unproven probe-named file — the shape CreateTemp emits, content a
+	// user could plausibly have. Also real user work.
+	debris := filepath.Join(wt, ".af-add-probe-123456")
+	require.NoError(t, os.WriteFile(debris, []byte("looks like probe debris, is not"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "real.txt"), []byte("work"), 0o600))
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+
+	// Snapshotted as user content: the commit carries both files.
+	tree := runGitOut(t, bare, "ls-tree", "-r", "--name-only", "refs/heads/root/debris")
+	assert.Contains(t, tree, "real.txt")
+	assert.Contains(t, tree, ".af-add-probe-123456",
+		"an unproven probe-named file is user content — the snapshot must keep it")
+
+	// And never deleted by the sweep.
+	data, rerr := os.ReadFile(debris)
+	require.NoError(t, rerr, "unproven probe-named file must survive the sweep")
+	assert.Equal(t, "looks like probe debris, is not", string(data))
+}
+
 // TestSnapshotAndPushBranch_RejectsExternalWorktree pins that an in-place/external
 // worktree (the user's own tree) is never pushed by the archive primitive.
 func TestSnapshotAndPushBranch_RejectsExternalWorktree(t *testing.T) {
@@ -204,4 +271,176 @@ func TestSnapshotAndPushBranch_RejectsExternalWorktree(t *testing.T) {
 	if _, err := gw.SnapshotAndPushBranch(); err == nil {
 		t.Fatal("SnapshotAndPushBranch on an external worktree: want error")
 	}
+}
+
+// behindOriginRepo is the #5407 shape: origin's session branch is at B, but the
+// sandbox's HEAD sits one commit behind it at A (an agent ran `git reset --hard
+// HEAD~1` or checked out an older commit). HEAD is an ancestor of origin's tip.
+func behindOriginRepo(t *testing.T, branch string) (gw *GitWorktree, bare, tipA, tipB string) {
+	t.Helper()
+	gw, bare = pushTestRepo(t, branch)
+	wt := gw.GetWorktreePath()
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a"), 0644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "A")
+	tipA = branchTip(t, wt, "HEAD")
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "b.txt"), []byte("b"), 0644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "B")
+	tipB = branchTip(t, wt, "HEAD")
+	runGit(t, wt, "push", "origin", "HEAD:refs/heads/"+branch)
+	runGit(t, wt, "reset", "--hard", tipA)
+	return gw, bare, tipA, tipB
+}
+
+// commitOnOrigin makes a commit on origin's branch from outside the sandbox
+// (another clone), the way a teammate or an earlier session would.
+func commitOnOrigin(t *testing.T, bare, branch string, files map[string]string) string {
+	t.Helper()
+	clone := filepath.Join(t.TempDir(), "other")
+	require.NoError(t, exec.Command("git", "clone", "-q", "--branch", branch, bare, clone).Run())
+	runGit(t, clone, "config", "user.email", "o@agent-factory.local")
+	runGit(t, clone, "config", "user.name", "Other")
+	for name, body := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(clone, name), []byte(body), 0644))
+	}
+	runGit(t, clone, "add", "-A")
+	runGit(t, clone, "commit", "-m", "from origin")
+	runGit(t, clone, "push", "origin", "HEAD:refs/heads/"+branch)
+	return branchTip(t, clone, "HEAD")
+}
+
+func treeFiles(t *testing.T, repo, rev string) string {
+	t.Helper()
+	return runGitOut(t, repo, "ls-tree", "-r", "--name-only", rev)
+}
+
+// TestSnapshotAndPushBranch_BehindOnlyCleanHeadIsAlreadyDurable: a clean HEAD that
+// is an ancestor of origin's session branch has nothing to push — origin already
+// holds every commit — so the archive succeeds instead of aborting on a
+// non-fast-forward rejection, and origin's tip never moves backwards (#5407).
+func TestSnapshotAndPushBranch_BehindOnlyCleanHeadIsAlreadyDurable(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, tipB := behindOriginRepo(t, "root/behind-clean")
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err, "a behind-only HEAD is recoverable, not divergent")
+	assert.Equal(t, "root/behind-clean", got)
+	assert.Equal(t, tipB, branchTip(t, bare, "refs/heads/root/behind-clean"), "origin's tip must not move backwards")
+}
+
+// TestSnapshotAndPushBranch_BehindDirtyMergesWithoutTouchingTheWorktree: uncommitted
+// work on a behind HEAD is captured in the snapshot FIRST, then merged with
+// origin's tip in the object database and pushed as a fast-forward. The sandbox
+// working tree is never rewritten — origin's b.txt does not appear in it (#5407).
+func TestSnapshotAndPushBranch_BehindDirtyMergesWithoutTouchingTheWorktree(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, tipB := behindOriginRepo(t, "root/behind-dirty")
+	wt := gw.GetWorktreePath()
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "dirty.txt"), []byte("uncommitted"), 0644))
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/behind-dirty", got)
+
+	pushed := branchTip(t, bare, "refs/heads/root/behind-dirty")
+	runGit(t, bare, "merge-base", "--is-ancestor", tipB, pushed) // fast-forward of origin's tip
+	files := treeFiles(t, bare, pushed)
+	assert.Contains(t, files, "dirty.txt", "the uncommitted work is in what origin holds")
+	assert.Contains(t, files, "b.txt", "origin's own commits are kept")
+	assert.NoFileExists(t, filepath.Join(wt, "b.txt"), "the archive must not rewrite the sandbox working tree")
+}
+
+// An untracked file that the INCOMING .gitignore would ignore must still be in the
+// snapshot: the work is recorded under the worktree's current ignore rules before
+// anything else happens (#5407).
+func TestSnapshotAndPushBranch_UntrackedFileSurvivesAnIncomingIgnoreRule(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, _ := behindOriginRepo(t, "root/ignore-rule")
+	wt := gw.GetWorktreePath()
+	commitOnOrigin(t, bare, "root/ignore-rule", map[string]string{".gitignore": "secret.txt\n"})
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "secret.txt"), []byte("my work"), 0644))
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+
+	pushed := branchTip(t, bare, "refs/heads/root/ignore-rule")
+	assert.Contains(t, treeFiles(t, bare, pushed), "secret.txt", "the untracked file must be in the pushed snapshot")
+	assert.Equal(t, "my work", strings.TrimSpace(runGitOut(t, bare, "show", pushed+":secret.txt")))
+}
+
+// With merge.autoStash / rebase.autoStash enabled the archive must still never
+// write refs/stash — a stack shared by every linked worktree (CLAUDE.md "Git
+// hygiene in a shared repo"). The path performs no merge or rebase on the working
+// tree at all; a reference-transaction hook records any refs/stash update, even a
+// transient push-then-pop.
+func TestSnapshotAndPushBranch_NeverTouchesTheSharedStash(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, _ := behindOriginRepo(t, "root/autostash")
+	wt := gw.GetWorktreePath()
+	runGit(t, wt, "config", "merge.autoStash", "true")
+	runGit(t, wt, "config", "rebase.autoStash", "true")
+	commitOnOrigin(t, bare, "root/autostash", map[string]string{"a.txt": "a remote"})
+
+	hooks := filepath.Join(strings.TrimSpace(runGitOut(t, wt, "rev-parse", "--git-common-dir")), "hooks")
+	if !filepath.IsAbs(hooks) {
+		hooks = filepath.Join(wt, hooks)
+	}
+	require.NoError(t, os.MkdirAll(hooks, 0o755))
+	trace := filepath.Join(t.TempDir(), "stash-writes")
+	hook := "#!/bin/sh\nif grep -q 'refs/stash' ; then echo touched >> '" + trace + "'; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(hooks, "reference-transaction"), []byte(hook), 0o755))
+
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a local"), 0o644)) // conflicts with origin's edit
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.NoFileExists(t, trace, "the archive must never write refs/stash")
+	assert.Equal(t, "a local", strings.TrimSpace(mustRead(t, filepath.Join(wt, "a.txt"))), "the sandbox working tree is untouched")
+}
+
+// A divergence that does not combine cleanly (both sides edited a.txt) must not
+// fail the archive and must not lose the work: HEAD goes to a side branch that
+// nothing else writes, the session branch on origin is left exactly as it was,
+// and the side branch's name is returned so the caller records it for restore.
+func TestSnapshotAndPushBranch_ConflictingDivergenceGoesToASideBranch(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, _ := behindOriginRepo(t, "root/conflict")
+	wt := gw.GetWorktreePath()
+	tipOrigin := commitOnOrigin(t, bare, "root/conflict", map[string]string{"a.txt": "a remote"})
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a local"), 0o644))
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err, "a conflicting divergence must not fail the archive and strand the work")
+	assert.True(t, strings.HasPrefix(got, "root/conflict-af-archive-"), "the returned branch names the side ref, got %q", got)
+	assert.Equal(t, tipOrigin, branchTip(t, bare, "refs/heads/root/conflict"), "origin's session branch is left exactly as it was")
+	side := branchTip(t, bare, "refs/heads/"+got)
+	assert.Equal(t, branchTip(t, wt, "HEAD"), side)
+	assert.Equal(t, "a local", strings.TrimSpace(runGitOut(t, bare, "show", side+":a.txt")), "the local work is on the side branch")
+}
+
+// A committed divergence that merges cleanly is pushed as a fast-forward of the
+// session branch (no side branch).
+func TestSnapshotAndPushBranch_CleanDivergenceMergesAndFastForwards(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, tipB := behindOriginRepo(t, "root/diverged")
+	wt := gw.GetWorktreePath()
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "c.txt"), []byte("c"), 0644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "C")
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/diverged", got)
+	pushed := branchTip(t, bare, "refs/heads/root/diverged")
+	runGit(t, bare, "merge-base", "--is-ancestor", tipB, pushed)
+	files := treeFiles(t, bare, pushed)
+	assert.Contains(t, files, "b.txt")
+	assert.Contains(t, files, "c.txt")
+}
+
+func mustRead(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	require.NoError(t, err)
+	return string(b)
 }

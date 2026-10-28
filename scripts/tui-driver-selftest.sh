@@ -46,6 +46,164 @@ step() {
     fi
 }
 
+# #4017/#4054: the model of tab deletion must require dialog consent. Keep the
+# real wait/count helpers; replace only terminal I/O and focus setup.
+# shellcheck disable=SC2317
+_expect_tab_delete_consent() {
+    local AF_DRIVER_TIMEOUT=1 AF_DRIVER_POLL=0.02
+    (
+        local tabs=3 dialog=0 confirms=0 show_dialog=1 output
+        af_ensure_nav() { :; }
+        af_focus_tree() { :; }
+        _af_tab_count() { printf '%s\n' "$tabs"; }
+        af_capture() {
+            if [ "$dialog" -eq 1 ]; then
+                printf '%s\n' 'Delete tab "shell" from session "stub"?' '[y] Yes · [n] No'
+            else
+                printf '%s\n' 'Sessions · no deletion dialog'
+            fi
+        }
+        af_send() {
+            case "$1" in
+                w) dialog="$show_dialog" ;;
+                n) dialog=0 ;;
+                y)
+                    confirms=$((confirms + 1))
+                    [ "$dialog" -eq 1 ] || { _af_fail 'confirmed before the dialog appeared'; return 1; }
+                    tabs=$((tabs - 1)); dialog=0 ;;
+            esac
+        }
+        af_send w
+        if [ "$tabs" -ne 3 ] || [ "$dialog" -ne 1 ]; then
+            _af_fail 'bare w must open consent without reducing the tab count'; return 1
+        fi
+        af_send n
+        af_close_tab || return 1
+        if [ "$tabs" -ne 2 ] || [ "$confirms" -ne 1 ]; then
+            _af_fail 'af_close_tab must confirm once before the tab count drops'; return 1
+        fi
+        show_dialog=0
+        output="$(mktemp)"
+        trap 'rm -f "$output"' EXIT
+        if af_close_tab >"$output" 2>&1; then
+            _af_fail 'missing deletion dialog must fail'; return 1
+        fi
+        if [ "$confirms" -ne 1 ] || [ "$tabs" -ne 2 ]; then
+            _af_fail 'missing dialog must never send consent or delete a tab'; return 1
+        fi
+        grep -q 'delete-tab confirmation did not appear' "$output" || {
+            cat "$output" >&2
+            _af_fail 'missing dialog must name the failed confirmation guard'; return 1
+        }
+    )
+}
+
+# Every ERE metacharacter must stay literal in session/title assertions (#4037).
+# shellcheck disable=SC2317
+_expect_regex_escape_literal() {
+    local literal="$1" decoy="$2" pattern
+    pattern="$(_af_regex_escape "$literal")"
+    if ! printf '▾ %s\n' "$literal" | grep -qE "^▾ ${pattern}$"; then
+        _af_log "escaped pattern '$pattern' did not match literal '$literal'"
+        return 1
+    fi
+    if printf '▾ %s\n' "$decoy" | grep -qE "^▾ ${pattern}$"; then
+        _af_log "escaped pattern '$pattern' wrongly matched '$decoy'"
+        return 1
+    fi
+}
+
+# A rail title can contain a corner glyph before the actual matched border.
+# Keep top and bottom prefixes independent so either edge can regress (#4048).
+# shellcheck disable=SC2317
+_expect_tasks_frame_after_rail_corner() {
+    if ! printf '%s%s\n' \
+        "$1" '╭────────────────────────────────╮' \
+        '                   ' '│ n new · esc back               │' \
+        "$2" '╰────────────────────────────────╯' | _af_tasks_overlay_visible; then
+        _af_log 'task dialog rejected because a rail corner precedes its matched border'
+        return 1
+    fi
+}
+
+# Same-row candidates must retain their own footer and bottom geometry (#4006).
+# shellcheck disable=SC2317
+_expect_tasks_frame_beside_foreign_box() {
+    local side_by_side
+    side_by_side=$'╭───╮ ╭────────────────────╮\n│   │ │ Tasks              │\n│   │ │ n new · esc back   │\n╰───╯ ╰────────────────────╯'
+    if ! printf '%s\n' "$side_by_side" | _af_tasks_overlay_visible; then
+        _af_fail 'a complete foreign box left of the same-row task frame hid it'
+        return 1
+    fi
+    # The left box cannot close the right candidate before its own bottom.
+    local missing_task_bottom
+    missing_task_bottom=$'╭───╮ ╭────────────────────╮\n│   │ │ n new · esc back   │\n╰───╯ │                    │'
+    if printf '%s\n' "$missing_task_bottom" | _af_tasks_overlay_visible; then
+        _af_fail 'a foreign bottom closed an incomplete task-frame candidate'
+        return 1
+    fi
+}
+
+# Exercise the public create/select/assert path, not just the escape helper.
+# shellcheck disable=SC2317
+_expect_literal_instance_title() {
+    local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
+    af_resize 80 24 || return 1
+    af_new_instance 'a+b' || return 1
+    af_select 'a+b' || return 1
+    af_expect_selected 'a+b' || return 1
+    printf '\n=== literal a+b created, ready, and selected: 80x24 ===\n'
+    af_capture
+    af_resize "$saved_cols" "$saved_rows" || return 1
+}
+
+# Both lists are empty: the workspace and task recovery share their action copy.
+# Inject one captured pre-overlay frame to make the stale-frame race deterministic,
+# then exercise the real dialog and prove closing it sends exactly one Escape.
+# shellcheck disable=SC2317
+_expect_empty_tasks_over_empty_workspace() (
+    local probe escape_count=0 rc=0
+    probe="$(mktemp -d)"
+    trap 'rm -rf "$probe"' EXIT
+    af_assert_screen 'Sessions \(0\)' 'session list is empty' || return 1
+    af_assert_screen 'No sessions yet' 'first-run workspace is visible' || return 1
+    af_capture >"$probe/workspace"
+    af_capture() {
+        if [ -f "$probe/stale" ]; then
+            rm "$probe/stale"
+            cat "$probe/workspace"
+        else
+            touch "$probe/fresh"
+            tmux capture-pane -p -t "$AF_DRIVER_SESSION" 2>/dev/null
+        fi
+    }
+    af_send() {
+        [ "$1" != m ] || touch "$probe/stale"
+        if [ "$1" = Escape ]; then
+            escape_count=$((escape_count + 1))
+        fi
+        tmux send-keys -t "$AF_DRIVER_SESSION" "$@"
+    }
+    af_open_tasks || return 1
+    if [ ! -f "$probe/fresh" ]; then
+        _af_log 'empty tasks: open accepted the stale workspace frame'
+        rc=1
+    fi
+    af_wait_for 'No tasks' 10 'empty task dialog really painted' || return 1
+    printf '\n=== empty tasks over empty workspace: before close ===\n'
+    af_capture
+    af_close_tasks || rc=1
+    if [ "$escape_count" -ne 1 ]; then
+        _af_log "empty tasks: close sent $escape_count Escapes, expected exactly one"
+        rc=1
+    fi
+    af_wait_gone 'No tasks' 3 'empty task dialog closed' || return 1
+    af_assert_screen 'No sessions yet' 'plain workspace remains after one Escape' || return 1
+    printf '\n=== empty tasks over empty workspace: after close ===\n'
+    af_capture
+    return "$rc"
+)
+
 # _expect_resize_rejected — the NEGATIVE check for af_resize (Greptile, #1201):
 # a resize tmux cannot honor must FAIL LOUDLY, never masquerade as success (or a
 # tiny-size gate would keep running at the wrong size). We point af_resize at a
@@ -169,7 +327,7 @@ _expect_archive_confirm_names_the_restore_key() {
     af_select alpha || return 1
     af_send a
     af_wait_for 'Archive session' 10 'archive confirmation opened' || return 1
-    # The off-ramp names the in-TUI restore key ("Restore later with r."), and
+    # The off-ramp names the in-TUI restore key ("Restore with r."), and
     # carries no `af sessions` shell command (#2479).
     af_assert_screen 'with r' 'archive dialog names the restore key' || return 1
     af_refute_screen 'af sessions' 'archive dialog prescribes no shell command' || return 1
@@ -277,18 +435,67 @@ SCREEN
     return 0
 }
 
+# Pane output must not impersonate the status bar, even with a complete menu.
+# The target stays display-selected while the cursor is on a section header.
+# shellcheck disable=SC2317  # dispatched indirectly via step().
+_expect_af_select_ignores_pane_verb() (
+    local verb="$1" footer='n new · ? help · q quit'
+    af_ensure_nav() { :; }
+    af_focus_tree() { return 0; }
+    af_send() { :; }
+    sleep() { :; }
+    af_capture() {
+        printf ' ▾ target      │ D %s                                  │\n' "$verb"
+        printf '               │ n new · D %s · ? help · q quit         │\n' "$verb"
+        printf '%s\n' '               │ x hide pane                            │' \
+            '               └────────────────────────────────────────┘' \
+            "$footer" 'notice below the menu' ''
+    }
+    if af_select target >/dev/null 2>&1; then
+        _af_fail "af_select accepted pane text 'D $verb' with a section-header footer"
+        return 1
+    fi
+    # Only the footer changes: the same display-selected row is now actionable.
+    footer="n new · D $verb · ? help · q quit"
+    af_select target || return 1
+    # The footer alone is sufficient; pane text is not required for success.
+    af_capture() { printf ' ▾ target\n%s\n\n' "$footer"; }
+    af_select target
+)
+
+# A delayed renderer can keep returning the selected frame while navigation is
+# queued. Selecting that same actionable row must not enqueue keys that move it
+# away after success (the #4056 pre-relaunch race).
+# shellcheck disable=SC2317
+_expect_af_select_already_selected() (
+    local queued=0
+    af_ensure_nav() { :; }
+    af_focus_tree() { return 0; }
+    sleep() { :; }
+    af_send() { queued=$((queued + 1)); }
+    af_capture() {
+        printf '%s\n' ' ▾ target' 'n new · D delete session · ? help · q quit'
+    }
+    af_select target || return 1
+    if [ "$queued" -ne 0 ]; then
+        _af_fail "af_select accepted the old selected frame with $queued navigation keys still queued"
+        return 1
+    fi
+)
+
 # _expect_af_select_boundary — regression proof for #1759. af_select must
 # evaluate its ready condition AFTER the final downward `j`, not only before it.
 # Drive af_select against stubbed send/capture (no live TUI, no real sleeps) in
 # a subshell so nothing leaks: a counter tracks `j` presses, and the row is
-# rendered actionable (▾ + `D kill`) ONLY once the count reaches 40 — exactly
-# the loop boundary. The old loop pressed the 40th `j` and exited without a
+# display-selected (▾) throughout, but the instance verb appears ONLY once
+# the count reaches 40 — exactly the loop boundary. The old loop pressed the 40th `j` and exited without a
 # trailing capture, so it never saw the actionable frame and returned non-zero
 # here; the fixed loop checks the post-`j` state and returns 0.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_af_select_boundary() {
     (
         _AF_BOUNDARY_JCOUNT=0
+        local verb="${1:-delete session}"
         # Stubs local to this subshell; the sourced af_select resolves them
         # dynamically when it calls them.
         af_ensure_nav() { :; }
@@ -297,23 +504,27 @@ _expect_af_select_boundary() {
         af_send() { [ "${1:-}" = j ] && _AF_BOUNDARY_JCOUNT=$((_AF_BOUNDARY_JCOUNT + 1)); return 0; }
         af_capture() {
             if [ "$_AF_BOUNDARY_JCOUNT" -ge 40 ]; then
-                printf '%s\n' ' ▾ target                       │ menu: D kill'
+                printf ' ▾ target\nn new · D %s · ? help · q quit\n' "$verb"
             else
-                printf '%s\n' ' ▸ target                       │ menu: n new'
+                printf '%s\n' ' ▾ target' 'n new · ? help · q quit'
             fi
         }
-        af_select target
+        af_select target || return 1
+        [ "$_AF_BOUNDARY_JCOUNT" -eq 40 ] || {
+            _af_fail "af_select accepted display selection without the instance verb"
+            return 1
+        }
     )
 }
 
 # _expect_af_select_open_pane — regression proof for #1996. Scanning onto an
 # instance that already has an open workspace pane auto-focuses that pane, which
-# replaces the tree footer (removing 'D kill') and stops the scan keys from
+# replaces the tree footer (removing 'D delete session') and stops the scan keys from
 # driving the tree — so af_select used to exhaust its scan and report a false
 # selection failure even though the instance WAS selected. Stubbed (no live TUI):
 # a `j` counter flips the target to display-selected-with-pane-menu at the loop
 # midpoint, and af_focus_tree restores the tree footer. The old af_select never
-# saw 'D kill' and failed; the fixed one detects the pane menu, re-focuses the
+# saw 'D delete session' and failed; the fixed one detects the pane menu, re-focuses the
 # tree, and finalizes.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_af_select_open_pane() {
@@ -333,11 +544,11 @@ _expect_af_select_open_pane() {
         }
         af_capture() {
             if [ "$_AF_OPENPANE_JCOUNT" -lt 5 ]; then
-                printf '%s\n' ' ▸ target                       │ menu: n new'
+                printf '%s\n' ' ▸ target' 'n new · ? help · q quit'
             elif [ "$_AF_OPENPANE_FOCUS" = pane ]; then
-                printf '%s\n' ' ▾ target                       │ ← prev pane · → next pane │ s open pane · x hide pane'
+                printf '%s\n' ' ▾ target' '← prev pane · → next pane · s open pane · x hide pane · ? help · q quit'
             else
-                printf '%s\n' ' ▾ target                       │ menu: n new · D kill'
+                printf '%s\n' ' ▾ target' 'n new · D delete session · ? help · q quit'
             fi
         }
         af_select target
@@ -581,8 +792,8 @@ _expect_cycle_jumps_land() {
 
 # _expect_cycle_w_closes_viewed — the #1884 destructive divergence: the tree's
 # active tab is shell-2 (last created), but the FOCUSED pane is jumped to shell.
-# w must close the tab the user is VIEWING (shell), leaving shell-2 — not the
-# tree's active tab. Verified by content: after w, tab 2 is now shell-2 (its
+# Confirmed w must delete the tab the user is VIEWING (shell), leaving shell-2 — not the
+# tree's active tab. Verified by content: after w then y, tab 2 is now shell-2 (its
 # marker), and shell's marker is gone. The old bug closed shell-2 and left shell
 # here, which the refute would catch.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
@@ -593,7 +804,9 @@ _expect_cycle_w_closes_viewed() {
     af_wait_for 'AF_CYCLE_T2' 10 'pane viewing shell (tab 2) before close' || return 1
 
     local before; before="$(_af_tab_count)"
-    af_send w                             # closes the FOCUSED pane's tab (#1884)
+    # Keep pane focus: af_close_tab would focus the tree and change this target.
+    af_send w || return 1                  # asks about the VIEWED tab (#1884)
+    _af_confirm_tab_delete || return 1
     local deadline; deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
     while [ "$(_af_tab_count)" -ge "$before" ]; do
         if [ "$(_af_now)" -ge "$deadline" ]; then
@@ -603,12 +816,12 @@ _expect_cycle_w_closes_viewed() {
     done
 
     # Reopen a pane and land on tab 2: it must now be shell-2 (its marker), proof
-    # that w closed the VIEWED shell tab and left shell-2 alive.
+    # that confirmed w deleted the VIEWED shell tab and left shell-2 alive.
     af_ensure_nav
     af_focus_tree || return 1
     af_open_pane || return 1
     af_send 2
-    af_wait_for 'AF_CYCLE_T3' 10 'surviving tab 2 is shell-2 — w closed the VIEWED tab (#1884)' || return 1
+    af_wait_for 'AF_CYCLE_T3' 10 'surviving tab 2 is shell-2 — confirmed w deleted the VIEWED tab (#1884)' || return 1
     af_refute_screen 'AF_CYCLE_T2' 'the viewed shell tab was closed, so its marker is gone' || return 1
 }
 
@@ -693,7 +906,7 @@ _expect_scrolled_rail_reads_as_booted() {
                       │                                        │
     └ 1 ◆ Agent *     │                                        │
                       ╰────────────────────────────────────────╯
-     n new · D kill │ t new tab · w close tab │ ? help · q quit
+     n new · D delete session │ t new tab · w del tab │ ? help · q quit
 SCREEN
         }
         # Premise: the frame really is missing the header, or this is just
@@ -729,8 +942,8 @@ SCREEN
     )
 }
 
-# _expect_scrolled_rail_relaunch — the LIVE half of #2148. Three sessions at
-# 80x24 with the lowest selected is exactly the reported state: the rail scrolls,
+# _expect_scrolled_rail_relaunch — the LIVE half of #2148. At 80x24, seed
+# enough sessions for the current row density and select the last: the rail scrolls,
 # the header is gone, and the boot gate has to read the frame as booted anyway.
 # af_relaunch shares af_boot's gate, so this drives the real thing end to end.
 #
@@ -742,15 +955,35 @@ _expect_scrolled_rail_relaunch() {
     local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS" rc=0
 
     af_resize 80 24 || return 1
-    if af_select cycle; then
+    # Compact rows can fit the original three-session fixture without scrolling.
+    # Grow the fixture until it establishes the premise, with a bounded cap.
+    local last=cycle n cap
+    af_select "$last" || return 1
+    for n in $(seq 1 10); do
+        if af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
+            break
+        fi
+        last="scroll-$n"
+        af_new_instance "$last" || return 1
+        af_select "$last" || return 1
+    done
+    if af_select "$last"; then
+        printf '\n=== scrolled rail before relaunch: 80x24 (%s) ===\n' "$last"
+        af_capture
         af_relaunch || rc=$?
         if [ "$rc" -eq 0 ]; then
-            if ! af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
+            cap="$(af_capture)"
+            if ! printf '%s\n' "$cap" | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
                 _af_log "#2148 premise not met: the 80x24 rail did NOT scroll, so this step proves nothing"
+                printf '%s\n' "$cap" >&2
                 rc=1
-            elif af_capture | grep -qE -- 'Sessions \('; then
+            elif printf '%s\n' "$cap" | grep -qE -- 'Sessions \('; then
                 _af_log "#2148 premise not met: the header is still visible, so the old gate would have passed too"
+                printf '%s\n' "$cap" >&2
                 rc=1
+            else
+                printf '\n=== scrolled rail after relaunch: 80x24 ===\n'
+                printf '%s\n' "$cap"
             fi
         fi
     else
@@ -765,9 +998,10 @@ _expect_scrolled_rail_relaunch() {
 # even when scripts/testbox.sh reuses a pinned AF_SELFTEST_NAME. The sandbox
 # reset intentionally preserves config.toml, so a previous run otherwise leaves
 # codex active before the editor writes codex again. This command runs after the
-# reset killed the sandbox daemon and RequestApplyConfig is non-spawning; the
+# reset killed the sandbox daemon and the apply poke is non-spawning; the
 # daemon therefore boots from claude, then the editor must transition it to
 # codex for the live ListPrograms readback below to pass.
+# shellcheck disable=SC2317  # dispatched indirectly via step().
 _seed_config_editor_start_value() {
     (cd / && af config set default_program claude >/dev/null) || return 1
     grep -q "default_program = 'claude'" "$AGENT_FACTORY_HOME/config.toml" || {
@@ -780,15 +1014,39 @@ _seed_config_editor_start_value() {
 printf '=== tui-driver self-test (#1161) ===\n'
 printf 'session=%s size=%sx%s home=%s\n' \
     "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
+SELFTEST_BASE_COLS="$AF_DRIVER_COLS"
+SELFTEST_BASE_ROWS="$AF_DRIVER_ROWS"
 
 # Start from a clean slate so the run is deterministic even in a reused
 # container (scoped to the sandbox; fails closed on a non-sandbox home).
+step "tab deletion requires confirmation (#4017/#4054)" _expect_tab_delete_consent
+step "literal plus (#4037)" _expect_regex_escape_literal 'a+b' 'ab'
+step "literal dot (#4037)" _expect_regex_escape_literal 'x.y' 'xay'
+step "literal brackets (#4037)" _expect_regex_escape_literal '[tag]' 't'
+step "literal alternation (#4037)" _expect_regex_escape_literal 'a|b' 'a'
+# shellcheck disable=SC2016
+step "literal dollar (#4037)" _expect_regex_escape_literal '$HOME' 'HOME'
+step "literal backslash (#4037)" _expect_regex_escape_literal 'path\title' 'pathtitle'
+# shellcheck disable=SC1003  # the literal intentionally ends with a backslash.
+step "all ERE metacharacters (#4037)" _expect_regex_escape_literal '.[](){}*+?^$|\' 'unrelated'
+
+step "task frame accepts an earlier top corner in the rail" _expect_tasks_frame_after_rail_corner '  project╭name     ' '  project-name     '
+step "task frame accepts an earlier bottom corner in the rail" _expect_tasks_frame_after_rail_corner '  project-name     ' '  project╰name     '
+step "task frame accepts earlier rail corners on both edges" _expect_tasks_frame_after_rail_corner '  project╭name     ' '  project╰name     '
+
+step "task frame beside a foreign same-row box retains its own geometry" _expect_tasks_frame_beside_foreign_box
+
+step "af_select leaves an already actionable selection in place (#4056)" _expect_af_select_already_selected
+step "af_select rejects delete-session text in a pane (#4055 review)" _expect_af_select_ignores_pane_verb "delete session"
+step "af_select rejects legacy kill text in a pane (#4055 review)" _expect_af_select_ignores_pane_verb "kill"
+
 step "reset sandbox to a clean state"                       af_reset_sandbox
 step "seed a non-codex default before daemon boot"           _seed_config_editor_start_value
 # af_boot routes launch geometry through af_resize, which verifies the window
 # actually took the requested size — so a green boot is also positive proof
 # af_resize works (#1174 item 2 / #1201).
 step "boot af at ${AF_DRIVER_COLS}x${AF_DRIVER_ROWS}"        af_boot
+step "empty task dialog over empty workspace opens and closes once" _expect_empty_tasks_over_empty_workspace
 step "af_resize fails loudly on an impossible resize"       _expect_resize_rejected
 # --- #2148 regression: the boot gate must survive a scrolled rail ---
 # The `Sessions (N)` header is the rail's first windowed ROW, not chrome, so a
@@ -804,7 +1062,7 @@ step "create instance 'alpha'"                              af_new_instance alph
 # selected. The old af_select returned on iteration 0 (▾ present) and a
 # play-test could wrongly "pass". af_select now lands the cursor on an
 # actionable tab row, so `o attach` MUST actually fire here. If the bug returns,
-# either af_select fails (no 'D kill') or af_attach times out waiting for the
+# either af_select fails (no 'D delete session') or af_attach times out waiting for the
 # chrome to vanish.
 step "select the SOLE instance alpha"                       af_select alpha
 step "assert alpha display-selected (sole instance)"        af_expect_selected alpha
@@ -826,13 +1084,326 @@ step "assert beta is selected"                              af_expect_selected b
 # --- #1759 regression: af_select must check AFTER the final scan step ---
 # A row that only becomes actionable on the loop's boundary `j` used to be
 # missed (false selection failure). Deterministic stub proof — no live TUI.
-step "af_select evaluates the boundary step (#1759)"        _expect_af_select_boundary
+step "af_select evaluates the boundary step with delete session (#4054)" _expect_af_select_boundary "delete session"
+step "af_select still accepts the legacy kill verb (#4054)"  _expect_af_select_boundary "kill"
 step "af_select handles a target with an open pane (#1996)"  _expect_af_select_open_pane
 
-# --- #1757 regression: the task-overlay run action ---
-# `m` drops straight into the selected task's EDIT form when a task exists, and
-# at 80x24 its footer collapses `r run now` to `r run`. af_open_tasks used to
-# wait for the stale `run now` and time out here; it now syncs on `r run`.
+# --- #1757/#3995 regressions: task-overlay context and run action ---
+# A populated reopen may settle in list mode after a refresh or remain in the
+# selected task's edit form. af_open_tasks syncs on the rounded dialog plus its
+# pinned footer rather than a scrollable title or optional run action. Reveal
+# secondary actions only in list mode, then retain #1757's assertion that the
+# compact run action is discoverable.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_overlay_marker_context() {
+    local pane foreign_modal list_modal compact_list_modal nested_edit footer_below no_footer_below glyph_footer_below glyph_no_footer_below scrolled_edit
+    pane=$'┌────────────────────┐\n│ alpha · Terminal   │\n│ Tasks              │\n└────────────────────┘'
+    if printf '%s\n' "$pane" | _af_tasks_overlay_visible; then
+        _af_fail 'a bare Tasks line inside a workspace pane satisfied the task-overlay marker'
+        return 1
+    fi
+
+    foreign_modal=$'        ╭────────────────────╮\n        │  Agent prompt      │\n        │  esc back          │\n        ╰────────────────────╯'
+    if printf '%s\n' "$foreign_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a foreign rounded dialog with an Esc footer satisfied the task-overlay marker'
+        return 1
+    fi
+
+    list_modal=$'        ╭────────────────────╮\n        │                    │\n        │  Tasks             │\n        │  n new · esc back  │\n        │                    │\n        ╰────────────────────╯'
+    if ! printf '%s\n' "$list_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'the rounded task dialog and its pinned list footer did not satisfy the marker'
+        return 1
+    fi
+
+    local preceding_box mismatched_bottom
+    preceding_box=$'╭────────╮\n│ output │\n╰────────╯\n│ n new · esc back │'
+    if ! printf '%s\n%s\n' "$preceding_box" "$list_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a footer-less rounded box above the real task dialog hid it'
+        return 1
+    fi
+    mismatched_bottom=$'╭────────────────────╮\n│ n new · esc back │\n    ╰────────╯'
+    if printf '%s\n' "$mismatched_bottom" | _af_tasks_overlay_visible; then
+        _af_fail 'an unrelated bottom with different geometry satisfied the task marker'
+        return 1
+    fi
+
+    local outside_footer hooks_modal
+    outside_footer=$'╭───────╮\n│ agent │ n new · esc back │\n╰───────╯'
+    if printf '%s\n' "$outside_footer" | _af_tasks_overlay_visible; then
+        _af_fail 'task-like text outside the candidate frame satisfied the marker'
+        return 1
+    fi
+    hooks_modal=$'╭────────────────────────────────────────────╮\n│ Post-worktree hooks                        │\n│ n add · enter edit · D delete · esc back    │\n╰────────────────────────────────────────────╯'
+    if printf '%s\n' "$hooks_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'the hooks overlay footer satisfied the task marker'
+        return 1
+    fi
+
+    local footer_with_top
+    footer_with_top=$'╭────────────────────╮\n│  Tasks             │\n│  n new · esc back  │ ╭──╮\n╰────────────────────╯'
+    if ! printf '%s\n' "$footer_with_top" | _af_tasks_overlay_visible; then
+        _af_fail 'a pane top-edge fragment beside the footer hid the real task dialog'
+        return 1
+    fi
+
+    local stray_corner
+    stray_corner=$'╭ text  ╭────────────────────╮\n        │  Tasks             │\n        │  n new · esc back  │\n╰ text  ╰────────────────────╯'
+    if ! printf '%s\n' "$stray_corner" | _af_tasks_overlay_visible; then
+        _af_fail 'stray corner glyphs before the matched edges hid the task dialog'
+        return 1
+    fi
+
+    local unavailable_editor
+    unavailable_editor=$'╭────────────────────────────────────────────╮\n│ Cannot load tasks                          │\n│ tab fields · typing · esc back             │\n╰────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$unavailable_editor" | _af_tasks_overlay_visible; then
+        _af_fail 'the unavailable editor live-key footer was not recognized'
+        return 1
+    fi
+
+    local side_by_side
+    side_by_side=$'╭───╮ ╭────────────────────╮\n│   │ │ Tasks              │\n│   │ │ n new · esc back   │\n╰───╯ ╰────────────────────╯'
+    if ! printf '%s\n' "$side_by_side" | _af_tasks_overlay_visible; then
+        _af_fail 'a complete foreign box left of the same-row task frame hid it'
+        return 1
+    fi
+
+    local incomplete_enclosing
+    incomplete_enclosing=$'╭────────────────────────────────────╮\n        ╭────────────────────╮\n        │ Tasks              │\n        │ n new · esc back   │\n        ╰────────────────────╯'
+    if ! printf '%s\n' "$incomplete_enclosing" | _af_tasks_overlay_visible; then
+        _af_fail 'an incomplete enclosing pane frame hid the completed task dialog'
+        return 1
+    fi
+
+    local create_modal
+    create_modal=$'╭────────────────────────────────────────────────────────────╮\n│New task                                                    │\n│tab/shift+tab fields · enter create · esc cancel · q quit   │\n╰────────────────────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$create_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a task create form footer was not recognized'
+        return 1
+    fi
+    create_modal=$'╭────────────────────────────────────────────────────────────╮\n│New task                                                    │\n│tab fields · enter · esc cancel · q quit                    │\n╰────────────────────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$create_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'a task create form footer was not recognized'
+        return 1
+    fi
+
+    compact_list_modal=$'╭──────────────────────────────────────╮\n│                                      │\n│  enter edit · ? actions · esc        │\n│                                      │\n╰──────────────────────────────────────╯'
+    if ! printf '%s\n' "$compact_list_modal" | _af_tasks_overlay_visible; then
+        _af_fail 'the rounded task dialog and its compact list footer did not satisfy the marker'
+        return 1
+    fi
+
+    # No title row here on purpose: the edit title is a marker of its own, and
+    # this fixture must prove the OUTER footer survives the nested box.
+    nested_edit=$'╭────────────────────────────────────────────╮\n│  Prompt: ╭────────╮                        │\n│          │ inner  │                        │\n│          ╰────────╯                        │\n│  tab×2 → r/x/D · esc list                  │\n╰────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$nested_edit" | _af_tasks_overlay_visible; then
+        _af_fail 'a task prompt containing a rounded box displaced the outer frame marker'
+        return 1
+    fi
+
+    footer_below=$'╭────────────────────╮\n│  Tasks             │\n│  n new · esc back  │\n╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if ! printf '%s\n' "$footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'footer-like pane output below the task frame rejected an open dialog'
+        return 1
+    fi
+
+    no_footer_below=$'╭────────────────────╮\n│  Agent prompt      │\n╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if printf '%s\n' "$no_footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'footer-like pane output below a foreign frame satisfied the task marker'
+        return 1
+    fi
+
+    glyph_footer_below=$'● agent  ╭────────────────────╮\n  shell  │  Tasks             │\n◆ beta   │  n new · esc back  │\n         ╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if ! printf '%s\n' "$glyph_footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'multibyte-prefix task frame with footer-like output below was rejected'
+        return 1
+    fi
+
+    glyph_no_footer_below=$'● agent  ╭────────────────────╮\n  shell  │  Tasks             │\n◆ beta   │                    │\n         ╰────────────────────╯\n│ opened in new tab · esc to interrupt │'
+    if printf '%s\n' "$glyph_no_footer_below" | _af_tasks_overlay_visible; then
+        _af_fail 'multibyte-prefix frame with only footer-like output below was accepted'
+        return 1
+    fi
+
+    scrolled_edit=$'╭────────────────────────────────────────────────────╮\n│  ↑ more                                            │\n│  Name: focused                                     │\n│  tab → r run now · x toggle · D delete · esc list  │\n╰────────────────────────────────────────────────────╯'
+    if ! printf '%s\n' "$scrolled_edit" | _af_tasks_overlay_visible; then
+        _af_fail 'a windowed edit dialog without its title did not satisfy the pinned-footer marker'
+        return 1
+    fi
+}
+
+# --- #5538 (landed by #5549): the editor's action row is contextual and tiered ---
+# A focused text field names the verbs only as the destination of the tab steps,
+# and the row compacts as the overlay narrows: "tab → r run now · x toggle · …"
+# at 80x10 but "tab → r/x/D · esc list" at the 40x10 floor. Neither compact tier
+# says "x toggle", the fragment the recognizer used to key on, so the live 40x10
+# step timed out on master (CI run 40566933350) while every stub fixture above
+# still passed: they all carried footers the renderer no longer prints. The
+# fixtures below pin every rung of the ladder in ui/task_pane_edit.go, no TUI.
+
+# _task_dialog_frame <inner-width> <row>... — a rounded dialog the way the tasks
+# overlay paints one: a blank padding row above and below, two-cell gutters, and
+# every row padded to <inner-width> CHARACTER columns. Padding is counted the way
+# _af_tasks_dialog_has counts (a UTF-8 continuation byte belongs to the character
+# before it), so →, × and · take one cell each even under the sandbox's C/POSIX
+# locale, where ${#row} would count bytes and push the right border out.
+# shellcheck disable=SC2317  # reached only via _expect_task_editor_footer_ladder.
+_task_dialog_frame() {
+    local inner="$1"
+    shift
+    printf '%s\n' "$@" | LC_ALL=C awk -v inner="$inner" '
+        function cols(text) { gsub(/[\200-\277]/, "", text); return length(text) }
+        function pad(n,    spaces) {
+            spaces = ""
+            while (n-- > 0) { spaces = spaces " " }
+            return spaces
+        }
+        function rule(left, right,    line, i) {
+            line = left
+            for (i = 0; i < inner + 4; i++) { line = line "─" }
+            return line right
+        }
+        function row(text) { return "│  " text pad(inner - cols(text)) "  │" }
+        BEGIN { print rule("╭", "╮"); print row("") }
+        { print row($0) }
+        END { print row(""); print rule("╰", "╯") }
+    '
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_editor_footer_ladder() {
+    local frame prefix rung footer
+
+    # The 40x10 floor exactly as CI captured it from the failing run: the editor
+    # opens on the Name text field, so the pinned row is the compact tab path.
+    frame=$'╭──────────────────────────────────────╮\n│                                      │\n│  Edit task 3a6e4e3b                  │\n│                                      │\n│  Essentials                          │\n│  Name:    > selftest-task         …  │\n│    ↓ more                            │\n│  tab → r/x/D · esc list              │\n│                                      │\n╰──────────────────────────────────────╯'
+    if ! printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
+        _af_fail 'the compact task editor at the 40x10 floor was not recognized (#5549)'
+        return 1
+    fi
+
+    # Footer path alone: no title row, as when the form scrolls it away at 80x10,
+    # so only the pinned action row identifies the dialog. Every rung of
+    # renderEditMode's ladder — the tab-path rungs under each tab count the
+    # renderer can print, then the rungs a selector or button stop shows.
+    for prefix in 'tab → ' 'tab×2 → ' 'tab×3 → '; do
+        for rung in \
+            'r run now · x toggle · D delete · esc list' \
+            'r run · x toggle · D del · esc list' \
+            'r/x/D · esc list' \
+            'x toggle · D delete · esc list' \
+            'x toggle · D del · esc list' \
+            'x/D · esc list'; do
+            footer="${prefix}${rung}"
+            frame="$(_task_dialog_frame 56 'Name:    > selftest-task' "$footer")"
+            if ! printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
+                _af_fail "the task editor footer '${footer}' was not recognized"
+                printf '%s\n' "$frame" >&2
+                return 1
+            fi
+        done
+    done
+    for footer in \
+        'esc list' \
+        'r run now · x toggle · D delete · esc list' \
+        'r run · x toggle · D del · esc list' \
+        'r run · x toggle · D del · esc' \
+        'x toggle · D delete · esc list' \
+        'x toggle · D del · esc list' \
+        'x toggle · D del · esc'; do
+        frame="$(_task_dialog_frame 56 'Trigger: ▸ cron' "$footer")"
+        if ! printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
+            _af_fail "the task editor footer '${footer}' was not recognized"
+            printf '%s\n' "$frame" >&2
+            return 1
+        fi
+    done
+
+    # Title path alone: the form is windowed but its id-bearing title is still in
+    # view, so the dialog is recognized whatever the footer below it says.
+    frame="$(_task_dialog_frame 40 'Edit task 3a6e4e3b' 'Essentials' 'Name:    > selftest-task')"
+    if ! printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
+        _af_fail 'a complete dialog showing the edit title was not recognized'
+        return 1
+    fi
+
+    # The anchors must not leak. `esc list` is evidence only on a complete
+    # rounded dialog's own row, at a word boundary...
+    local square_pane outside_frame decoy
+    square_pane=$'┌──────────────────────────────┐\n│ tab → r/x/D · esc list       │\n└──────────────────────────────┘'
+    if printf '%s\n' "$square_pane" | _af_tasks_overlay_visible; then
+        _af_fail 'esc list inside a square-cornered pane satisfied the task-overlay marker'
+        return 1
+    fi
+    outside_frame=$'╭───────╮\n│ agent │ tab → r/x/D · esc list │\n╰───────╯'
+    if printf '%s\n' "$outside_frame" | _af_tasks_overlay_visible; then
+        _af_fail 'esc list outside the candidate frame satisfied the task-overlay marker'
+        return 1
+    fi
+    frame="$(_task_dialog_frame 40 'Name:    > selftest-task' 'see desc list')"
+    if printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
+        _af_fail 'a word ending in esc list satisfied the task-overlay marker'
+        return 1
+    fi
+    # ...and the title must carry the task id the editor prints, in a rounded
+    # frame: prose that merely says "Edit task" is not the dialog.
+    decoy=$'┌──────────────────────────────┐\n│  Edit task 3a6e4e3b          │\n└──────────────────────────────┘'
+    if printf '%s\n' "$decoy" | _af_tasks_overlay_visible; then
+        _af_fail 'an edit title inside a square-cornered pane satisfied the task-overlay marker'
+        return 1
+    fi
+    frame="$(_task_dialog_frame 40 'Edit task' 'Name:    > selftest-task')"
+    if printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
+        _af_fail 'an Edit task line with no task id satisfied the task-overlay marker'
+        return 1
+    fi
+}
+
+# #4048 explicitly tests list-to-editor entry. A populated #4006 reopen can
+# already be editing, so establish list mode before that Enter step.
+# shellcheck disable=SC2317
+_open_tasks_list_for_selftest() {
+    af_open_tasks || return 1
+    if ! af_capture | _af_tasks_list_visible; then
+        af_send Escape
+    fi
+    af_wait_for "$_AF_TASKS_LIST_TITLE" 10 'task list'
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_run_action() {
+    local screen
+    screen="$(af_capture)"
+    if _af_tasks_list_visible <<<"$screen"; then
+        af_send '?'
+    fi
+    af_wait_for "$_AF_TASKS_RUN_HINT" "$AF_DRIVER_TIMEOUT" 'task-overlay run action' || return 1
+    af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_edit_title_scrolled() {
+    local screen
+    screen="$(af_capture)"
+    if grep -qE -- 'Edit task[[:space:]][^[:space:]]+' <<<"$screen"; then
+        _af_fail '80x10 still shows the edit title, so the footer-only premise was not reached'
+        return 1
+    fi
+    if ! _af_tasks_overlay_visible <<<"$screen"; then
+        _af_fail 'the open 80x10 edit dialog was not recognized after its title scrolled away'
+        return 1
+    fi
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_overlay_closed() {
+    local screen
+    screen="$(af_capture)"
+    if _af_tasks_overlay_visible <<<"$screen"; then
+        _af_fail 'the compact task overlay remained visible after af_close_tasks'
+        return 1
+    fi
+}
+
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 # _expect_config_editor_writes — the config editor's end-to-end flow against the
 # sandbox's throwaway AF home: open it, assert it rendered a tier-1 key FROM THE
@@ -892,6 +1463,44 @@ _expect_config_editor_writes() {
         printf 'daemon did not apply default_program = codex live:\n%s\n' "$programs"
         return 1
     }
+
+    # Restore claude through the SAME live path — editor write, file check,
+    # ListPrograms readback. Since #4893 the new-session form follows the LIVE
+    # default_program rather than the boot-time value (this step's own readback
+    # above is the proof that resolution is live). Leaving codex here would
+    # make the later 'cycle: create a multi-tab instance' step hit preflight —
+    # codex is not installed in the test image — instead of exercising its
+    # flow. The sandbox's claude resolves to bash via program_overrides, so
+    # claude is the value the rest of the suite can actually spawn.
+    af_open_config || return 1
+    af_send Enter
+    for i in $(seq 1 32); do af_send BSpace; done
+    af_send_literal 'claude' || return 1
+    af_send Enter
+
+    af_wait_for 'set default_program = claude' "$AF_DRIVER_TIMEOUT" 'config write echo' || return 1
+    af_wait_for 'using the new value now' "$AF_DRIVER_TIMEOUT" 'config live-apply notice' || return 1
+    af_close_config || return 1
+
+    grep -q "default_program = 'claude'" "$AGENT_FACTORY_HOME/config.toml" || {
+        printf 'config.toml was not restored to claude:\n'
+        cat "$AGENT_FACTORY_HOME/config.toml"
+        return 1
+    }
+
+    programs="$(curl --fail --silent --show-error \
+        --max-time "$AF_DRIVER_TIMEOUT" \
+        --unix-socket "$socket_path" \
+        http://localhost/v1/ListPrograms \
+        -d '{}')" || {
+        printf 'could not re-read the live program catalog from the daemon\n'
+        return 1
+    }
+    printf '%s' "$programs" |
+        jq -e '.error == null and .data.default == "claude"' >/dev/null || {
+        printf 'daemon did not restore default_program = claude live:\n%s\n' "$programs"
+        return 1
+    }
 }
 
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
@@ -919,6 +1528,31 @@ _expect_config_editor_rejects() {
     af_close_config || return 1
     af_close_config 2>/dev/null || true
     return 0
+}
+
+# #4087: the scalar root-agent forms share the config panes' writer and effect
+# notice. Exercise them in the sandbox so both the merge and the full
+# restart-plus-kill guidance stay present in the real CLI response.
+# shellcheck disable=SC2317
+_expect_root_agent_config_set_copy() {
+    local enabled_out program_out notice
+    notice='Saved — this setting takes effect on the next daemon start. · An already-running root session is adopted as-is, so after changing its program, disabling it, or removing its enabling entry, restart the daemon first and then kill that session.'
+
+    enabled_out="$(af config set root_agent.enabled false 2>&1)" || {
+        printf '%s\n' "$enabled_out" >&2
+        return 1
+    }
+    program_out="$(af config set root_agent.program 'codex --profile work' 2>&1)" || {
+        printf '%s\n' "$program_out" >&2
+        return 1
+    }
+    printf '%s\n' "$enabled_out" "$program_out" | grep -Fq "$notice" || {
+        printf 'root-agent config set omitted its live-session adoption notice:\n%s\n%s\n' "$enabled_out" "$program_out" >&2
+        return 1
+    }
+    grep -q '^\[root_agent\]$' "$AGENT_FACTORY_HOME/config.toml" || return 1
+    grep -q '^enabled = false$' "$AGENT_FACTORY_HOME/config.toml" || return 1
+    grep -q "^program = 'codex --profile work'$" "$AGENT_FACTORY_HOME/config.toml" || return 1
 }
 
 # _expect_config_agent_attaches_in_tmux — regression proof for #2019. This is the
@@ -988,11 +1622,25 @@ _expect_config_agent_attaches_in_tmux() {
     return 0
 }
 
+step "task marker rejects a pane's bare Tasks line"         _expect_task_overlay_marker_context
+step "task marker recognizes every task-editor footer tier (#5538)" _expect_task_editor_footer_ladder
 step "seed a task via the create form"                      af_add_task selftest-task
 step "close the tasks overlay after create"                 af_close_tasks
-step "reopen tasks — edit-mode overlay recognized (#1757)"  af_open_tasks
-step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
+step "resize to the supported 80x10 floor"                  af_resize 80 10
+step "reopen tasks — pinned footer recognized (#1757/#3995)" af_open_tasks
+step "edit marker survives its scrolled-away title"         _expect_task_edit_title_scrolled
+step "reveal and assert the task run action"                _expect_task_run_action
 step "close the tasks overlay"                              af_close_tasks
+step "reopen tasks list"                                    _open_tasks_list_for_selftest
+step "open the selected task editor"                        af_send Enter
+step "task editor run action recognized (#1757)"             af_wait_for "$_AF_TASKS_RUN_HINT" 10
+step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
+step "close the explicitly opened task editor"              af_close_tasks
+step "resize to the documented 40x10 floor"                 af_resize 40 10
+step "open the populated task at 40x10"                     af_open_tasks
+step "close the compact task overlay"                       af_close_tasks
+step "assert the compact task overlay is gone"               _expect_task_overlay_closed
+step "restore the self-test launch size"                    af_resize "$SELFTEST_BASE_COLS" "$SELFTEST_BASE_ROWS"
 
 # --- #2019 regression: the config agent (C) must attach even though af is nested
 # inside tmux. On unfixed code the takeover collapses to "config agent: exit
@@ -1006,6 +1654,7 @@ step "close the tasks overlay"                              af_close_tasks
 # config agent runs bash and needs no real agent binary.
 step "config agent (C) attaches while af runs inside tmux (#2019)"  _expect_config_agent_attaches_in_tmux
 
+step "root-agent dotted config merges and names adopted sessions (#4087)" _expect_root_agent_config_set_copy
 step "open the config editor (,) and write through the real path"  _expect_config_editor_writes
 step "config editor refuses an invalid value with the CLI error"   _expect_config_editor_rejects
 
@@ -1076,7 +1725,7 @@ step "assert selection survived the batched tap"            af_expect_selected b
 step "hide a pane while another remains, then the last (#1822)" _expect_multipane_hide
 step "af_hide_pane fails loudly with no pane focused (#1822)"  _expect_hide_pane_rejects_tree_focus
 
-# --- #1884/#1885 multi-tab pane cycling: number jumps land + w closes the viewed tab ---
+# --- #1884/#1885 multi-tab pane cycling: number jumps land + confirmed w deletes the viewed tab ---
 # Runs last: it creates its own 'cycle' instance and ends with a pane open.
 step "cycle: create a multi-tab instance"                   af_new_instance cycle
 step "cycle: select it"                                     af_select cycle
@@ -1084,11 +1733,11 @@ step "cycle: add a shell tab (t)"                           af_new_tab
 step "cycle: add a shell-2 tab (t)"                         af_new_tab
 step "cycle: open the active tab as a pane"                 af_open_pane
 step "cycle: pane number-jumps land and STAY (#1885)"       _expect_cycle_jumps_land
-step "cycle: w closes the VIEWED tab, not the tree's (#1884)" _expect_cycle_w_closes_viewed
+step "cycle: confirmed w deletes the VIEWED tab, not the tree's (#1884)" _expect_cycle_w_closes_viewed
 
-# --- #2148 live: relaunch at 80x24 with three sessions and the lowest selected.
-# Runs last because it needs a third instance ('cycle') to make the rail scroll,
-# and because it relaunches the TUI.
+# --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
+# Runs last because it adds sessions and relaunches the TUI.
+step "literal a+b creates, reaches ready, and is selectable" _expect_literal_instance_title
 step "relaunch boots with the rail scrolled past the header (#2148)" _expect_scrolled_rail_relaunch
 
 printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"

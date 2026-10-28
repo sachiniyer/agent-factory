@@ -113,21 +113,25 @@ func TestPlaceOverlayEqualHeight(t *testing.T) {
 	}
 }
 
+// The fade only shows on rows the modal does not touch: #5297 made the cells
+// beside the modal blank backdrop rather than chopped background, so a
+// one-row background would have nothing faded left to assert. Each test below
+// puts the styled row on row 0 and the modal on row 1.
 func TestPlaceOverlayBasicBackgroundFade(t *testing.T) {
-	result := PlaceOverlay(0, 0, "XX", "\x1b[41mred-bg\x1b[0m", false)
+	result := PlaceOverlay(0, 1, "XX", "\x1b[41mred-bg\x1b[0m\nplain", false)
 
-	if strings.Contains(result, "\x1b[38;5;240m") {
+	if strings.Contains(result, "\x1b["+testBackdropFG()+"m") {
 		t.Fatalf("basic background code was faded as foreground: %q", result)
 	}
-	if !strings.Contains(result, "\x1b[48;5;236m") {
+	if !strings.Contains(result, "\x1b["+testBackdropBG()+"m") {
 		t.Fatalf("expected faded background code, got: %q", result)
 	}
 }
 
 func TestPlaceOverlayReverseVideoFadesAsBackground(t *testing.T) {
-	result := PlaceOverlay(0, 0, "XX", "\x1b[7mreverse\x1b[0m", false)
+	result := PlaceOverlay(0, 1, "XX", "\x1b[7mreverse\x1b[0m\nplain", false)
 
-	if !strings.Contains(result, "\x1b[48;5;236m") {
+	if !strings.Contains(result, "\x1b["+testBackdropBG()+"m") {
 		t.Fatalf("expected reverse-video styling to preserve background semantics, got: %q", result)
 	}
 }
@@ -136,9 +140,9 @@ func TestPlaceOverlayReverseVideoFadesAsBackground(t *testing.T) {
 // single-parameter case (e.g. \x1b[37m) is still faded to the medium-gray
 // foreground. Regression guard for the regex broadening in #469.
 func TestPlaceOverlaySingleParamForegroundFade(t *testing.T) {
-	result := PlaceOverlay(0, 0, "XX", "\x1b[37mhello\x1b[0m", false)
+	result := PlaceOverlay(0, 1, "XX", "\x1b[37mhello\x1b[0m\nplain", false)
 
-	if !strings.Contains(result, "\x1b[38;5;240m") {
+	if !strings.Contains(result, "\x1b["+testBackdropFG()+"m") {
 		t.Fatalf("expected single-param fg code to be faded, got: %q", result)
 	}
 	if strings.Contains(result, "\x1b[37m") {
@@ -154,12 +158,12 @@ func TestPlaceOverlaySingleParamForegroundFade(t *testing.T) {
 // white). The original regex only matched single-parameter sequences, so these
 // passed through the fade logic unchanged and stayed visible under overlays.
 func TestPlaceOverlayMultiParamForegroundFade(t *testing.T) {
-	result := PlaceOverlay(0, 0, "XX", "\x1b[1;37mhello\x1b[0m", false)
+	result := PlaceOverlay(0, 1, "XX", "\x1b[1;37mhello\x1b[0m\nplain", false)
 
 	if strings.Contains(result, "\x1b[1;37m") {
 		t.Fatalf("multi-param SGR \\x1b[1;37m leaked through fade: %q", result)
 	}
-	if !strings.Contains(result, "\x1b[38;5;240m") {
+	if !strings.Contains(result, "\x1b["+testBackdropFG()+"m") {
 		t.Fatalf("expected multi-param fg code to be faded, got: %q", result)
 	}
 	if !strings.Contains(result, "\x1b[0m") {
@@ -171,12 +175,12 @@ func TestPlaceOverlayMultiParamForegroundFade(t *testing.T) {
 // whose parameters include a background-color code is faded to the dark-gray
 // background rather than the foreground gray.
 func TestPlaceOverlayMultiParamBackgroundFade(t *testing.T) {
-	result := PlaceOverlay(0, 0, "XX", "\x1b[1;41mbold-red-bg\x1b[0m", false)
+	result := PlaceOverlay(0, 1, "XX", "\x1b[1;41mbold-red-bg\x1b[0m\nplain", false)
 
 	if strings.Contains(result, "\x1b[1;41m") {
 		t.Fatalf("multi-param SGR \\x1b[1;41m leaked through fade: %q", result)
 	}
-	if !strings.Contains(result, "\x1b[48;5;236m") {
+	if !strings.Contains(result, "\x1b["+testBackdropBG()+"m") {
 		t.Fatalf("expected multi-param bg code to be faded to bg gray, got: %q", result)
 	}
 }
@@ -187,9 +191,9 @@ func TestPlaceOverlayMultiParamBackgroundFade(t *testing.T) {
 // missing from the background detector) re-faded it as foreground gray.
 func TestPlaceOverlayExtendedBackgroundFade(t *testing.T) {
 	input := "\x1b[48;5;196mred-bg\x1b[0m"
-	result := PlaceOverlay(0, 0, "XX", input, false)
+	result := PlaceOverlay(0, 1, "XX", input+"\nplain", false)
 
-	if strings.Contains(result, "\x1b[38;5;240m") && strings.Contains(input, "\x1b[48;5;") {
+	if strings.Contains(result, "\x1b["+testBackdropFG()+"m") && strings.Contains(input, "\x1b[48;5;") {
 		t.Fatalf("BUG CONFIRMED: extended background was faded as foreground.\nInput had 48;5 (bg), output has 38;5 (fg)")
 	}
 }
@@ -199,9 +203,9 @@ func TestPlaceOverlayExtendedBackgroundFade(t *testing.T) {
 // different input shape.
 func TestPlaceOverlayTrueColorBackgroundFade(t *testing.T) {
 	input := "\x1b[48;2;255;0;0mtrue-color-red-bg\x1b[0m"
-	result := PlaceOverlay(0, 0, "XX", input, false)
+	result := PlaceOverlay(0, 1, "XX", input+"\nplain", false)
 
-	if strings.Contains(result, "\x1b[38;5;240m") && strings.Contains(input, "\x1b[48;2;") {
+	if strings.Contains(result, "\x1b["+testBackdropFG()+"m") && strings.Contains(input, "\x1b[48;2;") {
 		t.Fatalf("BUG CONFIRMED: true-color background was faded as foreground")
 	}
 }
@@ -246,8 +250,10 @@ func TestPlaceOverlayCJKWideCharStraddleCentered(t *testing.T) {
 	}
 }
 
-// TestPlaceOverlayASCIINoRegression is a guard that the #647 fix doesn't change
-// the ASCII-only path, where rightWidth always equals remainingWidth exactly.
+// TestPlaceOverlayASCIINoRegression pins the ASCII composition shape: the
+// modal sits exactly at placeX and the cells either side of it are blank
+// backdrop — #5297 made them blanks rather than the background's own cells,
+// which rendered as chopped fragments beside the box.
 func TestPlaceOverlayASCIINoRegression(t *testing.T) {
 	bg := "abcdefghij" // width 10
 	fg := "XX"
@@ -260,18 +266,17 @@ func TestPlaceOverlayASCIINoRegression(t *testing.T) {
 		t.Fatalf("ASCII PlaceOverlay width changed: got %d, want %d (result=%q)",
 			gotWidth, bgWidth, result)
 	}
-	if !strings.Contains(result, "abc") || !strings.Contains(result, "XX") || !strings.Contains(result, "fghij") {
-		t.Fatalf("ASCII composition incorrect: %q", result)
+	if want := "   XX     "; result != want {
+		t.Fatalf("ASCII composition incorrect: got %q, want %q", result, want)
 	}
 }
 
-// TestPlaceOverlayCJKAlignedNoTruncation verifies that when pos lands cleanly
-// on a CJK grapheme boundary (even pos in this layout), TruncateLeft already
-// returns the exact remaining width and no re-truncation is needed. This guards
-// against the fix accidentally trimming a cell in the well-behaved case.
+// TestPlaceOverlayCJKAlignedNoTruncation guards the CJK-shaped background: a
+// modal row never emits background cells at all, so no glyph can end up
+// half-written at the modal's edge — the straddle bugs this style of test
+// guarded (#647, #723) cannot recur in cells that are blanked wholesale.
 func TestPlaceOverlayCJKAlignedNoTruncation(t *testing.T) {
-	// 6 ASCII + three 2-cell CJK = width 12. fg width 2 placed at x=6 →
-	// pos=8 lands exactly between the first and second CJK glyph.
+	// 6 ASCII + three 2-cell CJK = width 12. fg width 2 placed at x=6.
 	bg := "abcdef界界界"
 	fg := "ZZ"
 	bgWidth := ansi.PrintableRuneWidth(bg)
@@ -283,8 +288,12 @@ func TestPlaceOverlayCJKAlignedNoTruncation(t *testing.T) {
 		t.Fatalf("CJK-aligned PlaceOverlay width changed: got %d, want %d (result=%q)",
 			gotWidth, bgWidth, result)
 	}
-	// Both trailing CJK glyphs should survive since pos sits on the boundary.
-	if !strings.Contains(result, "界界") {
-		t.Fatalf("expected trailing CJK glyphs preserved, got: %q", result)
+	// Nothing of the background row survives beside the modal — no ASCII, no
+	// CJK, whole or partial.
+	if strings.Contains(result, "界") || strings.Contains(result, "abcdef") {
+		t.Fatalf("expected a blank margin, got background cells: %q", result)
+	}
+	if want := "      ZZ    "; result != want {
+		t.Fatalf("composition incorrect: got %q, want %q", result, want)
 	}
 }

@@ -116,7 +116,8 @@ func seedArmingTask(t *testing.T, id, status string) task.Task {
 	}
 	require.NoError(t, task.AddTask(tsk))
 	ran := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
-	require.NoError(t, task.UpdateTaskStatus(id, &ran, status))
+	_, err := task.UpdateTaskStatus(id, &ran, status)
+	require.NoError(t, err)
 	return reloadArmingTask(t, id)
 }
 
@@ -151,7 +152,7 @@ func TestClearStaleNotArmedStatus_ClearsWhenTheTargetIsDropped(t *testing.T) {
 	require.Empty(t, seeded.TargetSession, "seeded without a target: the dropped-target repair shape")
 
 	m := &Manager{}
-	snapshot, err := m.persistedTasksForArming()
+	snapshot, err := m.persistedTasksForArming(everyWatchTask())
 	require.NoError(t, err)
 	require.Empty(t, snapshot.refused)
 

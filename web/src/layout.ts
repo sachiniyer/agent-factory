@@ -146,6 +146,42 @@ export function closeLeaf(root: LayoutNode, leafId: string): LayoutNode | null {
   return remove(root);
 }
 
+/** The sibling subtree of the leaf `leafId` — the OTHER child of the leaf's parent
+ *  split — or null when the leaf IS the whole tree (a single-leaf layout, which
+ *  closeLeaf already rejects as the un-closable last pane).
+ *
+ *  This is the subtree closeLeaf() substitutes in place of the collapsed parent to
+ *  absorb the closed pane's screen region, so it is the natural focus successor when
+ *  the closed pane held the keyboard: the pane that grew into the freed space is
+ *  where an operator's eye and hand already are, and focusing a leaf in a DIFFERENT
+ *  root branch (the previous leaves(root)[0] formula) sends keystrokes to an
+ *  unrelated session. Reference-stable: the returned node survives closeLeaf()
+ *  unchanged (remove() hands the sibling back as-is), so it can be read on the tree
+ *  BEFORE the close and still name the same subtree after.
+ *
+ *  Returns the sibling subtree itself (which may be a single leaf OR a split whose
+ *  own first leaf leaves() selects); which leaf of a multi-leaf sibling subtree gets
+ *  focus is a separate, deliberately narrower policy the caller applies. */
+export function siblingSubtreeOf(root: LayoutNode, leafId: string): LayoutNode | null {
+  if (root.kind === "leaf") {
+    return null; // a single-leaf tree has no sibling
+  }
+  // The leaf is a DIRECT child of this split: the sibling is the other child.
+  if (root.a.kind === "leaf" && root.a.id === leafId) {
+    return root.b;
+  }
+  if (root.b.kind === "leaf" && root.b.id === leafId) {
+    return root.a;
+  }
+  // Otherwise the leaf lives inside one child; descend into the side that contains
+  // it. The sibling (the other child of the leaf's parent) sits inside that same
+  // child, not in this split's other half.
+  if (findLeaf(root.a, leafId)) {
+    return siblingSubtreeOf(root.a, leafId);
+  }
+  return siblingSubtreeOf(root.b, leafId);
+}
+
 /** Drops every leaf bound to `tab` except the one with id `keepId`, collapsing each
  *  removal. Enforces the one-tab-one-pane invariant after a split/replace. */
 function dedupeExcept(root: LayoutNode, tab: number, keepId: string): LayoutNode {
@@ -368,10 +404,20 @@ export function tabsRebound(
  *
  *  Surviving tabs follow their identity. A leaf whose identity is gone (its tab was
  *  really closed) keeps its ordinal and lets reconcile rebuild it against whatever
- *  now occupies that slot — the same degradation as a plain tab-count shrink. The one
- *  conflict is a dead leaf sitting on an ordinal a survivor has just claimed: the
- *  survivor wins (it is the pane that actually holds that tab) and the dead leaf is
- *  closed, since the tab it was showing no longer exists. That priority matters —
+ *  now occupies that slot — the same degradation as a plain tab-count shrink — UNLESS
+ *  a pure shrink left that ordinal with no slot at all (the closed tab was the
+ *  highest-ordinal one and nothing was created to take its place) AND the slot it
+ *  would clamp down onto is already claimed by a survivor. Only then is the dead
+ *  leaf closed here: validate() would otherwise clamp it down onto the survivor's
+ *  ordinal and, keeping the FIRST leaf in visual order, evict that survivor —
+ *  handing the pane's live terminal to the tab that just died. When the clamp
+ *  target is NOT claimed — a backfilled survivor whose identity string changed
+ *  (#1779) so `moved` doesn't track it, or an unshown tab whose pane a multi-pane
+ *  layout legitimately keeps — validate() rebinds the leaf to that unclaimed slot
+ *  harmlessly, so this loop leaves it alone. The one other conflict is a dead leaf
+ *  sitting on an ordinal a survivor has just claimed: the survivor wins (it is the
+ *  pane that actually holds that tab) and the dead leaf is closed, since the tab it
+ *  was showing no longer exists. Both priorities matter for the same reason —
  *  validate() also drops duplicates, but it keeps the FIRST leaf in visual order,
  *  which would just as easily evict the survivor and keep the pane whose tab died.
  *
@@ -407,6 +453,80 @@ export function remapByIdentity(root: LayoutNode, prevIds: string[], ids: string
   for (const leaf of leaves(cur)) {
     if (!moved.has(leaf.id) && claimed.has(leaf.tab)) {
       cur = closeLeaf(cur, leaf.id) ?? cur;
+    }
+  }
+  // Drop a dead-identity leaf whose ordinal no longer has a slot after a pure
+  // shrink (the closed tab was the highest-ordinal one, nothing replaced it) — but
+  // ONLY the DEAD one, so validate()'s clamp does not evict a SURVIVOR. validate()
+  // clamps every out-of-range leaf to the last ordinal (`ids.length - 1`) and then
+  // drops duplicates keeping the FIRST in visual order; that evicts a survivor at
+  // that ordinal only when a dead leaf is also clamped onto it (and happens to come
+  // first). Closing the dead leaf here pre-empts that eviction.
+  //
+  // A clamp collision has TWO shapes, and the dead leaf is in a different position
+  // in each:
+  //  1. The dead leaf is OUT OF RANGE and a survivor holds `max`. This is the common
+  //     shrink (the closed tab was the highest-ordinal one). Close the dead leaf so
+  //     validate() does not clamp it onto the survivor.
+  //  2. A backfilled survivor is out of range and the DEAD leaf holds `max` (a
+  //     different, lower tab closed while the snapshot also adopted a real id onto
+  //     the survivor — #1779). Closing the out-of-range survivor here would discard
+  //     its live terminal; the dead holder at `max` is the leaf to drop, so the
+  //     survivor rebinds to `max` via validate() instead.
+  // The holder at `max` may itself be a backfilled survivor whose identity string
+  // changed (#1779): a synthesized `kind:name` that a later snapshot replaces with a
+  // real id is the SAME tab to ui.ts, but `moved` matches by identity string, so the
+  // backfill reads as "identity gone" and the leaf falls out of `moved`/`claimed`
+  // while staying at its (in-range) ordinal. `claimed` (or any leaf at `max`) alone
+  // cannot tell a survivor holder from a dead one, so the dead leaf is identified by
+  // its identity: a real id gone from `ids` is a genuinely closed tab, while a
+  // synthesized `kind:name` gone from `ids` is an ADOPTED survivor (not closed) as
+  // long as a backfill happened (a real id appeared in `ids` that was not in
+  // `prevIds`). A synthesized id gone with NO backfill is a closed legacy tab (pre
+  // #1738, no id) and degrades like any other dead leaf. A real daemon id is hex or
+  // `t-` (session/tab.go newTabID); a synthesized id is `${kind}:${name}`
+  // (ui.ts tabIdentity), so a leading `digits:` distinguishes them.
+  //
+  // When `max` is empty (no leaf there), validate() rebinds an out-of-range leaf to
+  // the unclaimed slot with no duplicate to drop — closing it would collapse a
+  // multi-pane layout the new tab count still admits, so this loop leaves it alone
+  // (the [A,_,C]→[A,B] case keeps C's pane, clamped to the unshown B).
+  // `closeLeaf` returns null for the last pane, so `?? cur` leaves a sole dead leaf
+  // in place to degrade as before (validate clamps it to max).
+  const max = ids.length - 1;
+  const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
+  if (maxLeaf) {
+    const isSynth = (id: string): boolean => /^\d+:/.test(id);
+    // A backfill happened when a real id (not synthesized, not empty) is in `ids`
+    // but was not in `prevIds` — the daemon resolved a tab's id after a prior snapshot
+    // tracked it by the synthesized `kind:name` fallback.
+    const backfill = ids.some((id) => id !== "" && !isSynth(id) && !prevIds.includes(id));
+    // A !moved leaf is DEAD (its tab was genuinely closed) when its prev identity is a
+    // real id that's gone from `ids`, or a synthesized `kind:name` that's gone with no
+    // backfill (a closed pre-#1738 legacy tab). A backfilled survivor (synthesized id
+    // gone, but a real id took its place) is NOT dead — its pane must be preserved.
+    const deadIdentity = (tab: number): boolean => {
+      const prev = prevIds[tab];
+      if (prev === undefined || prev === "") {
+        return true;
+      }
+      return !isSynth(prev) || !backfill;
+    };
+    // (1) Close a dead leaf clamped out of range onto a survivor's slot at `max`.
+    for (const leaf of leaves(cur)) {
+      if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
+        cur = closeLeaf(cur, leaf.id) ?? cur;
+      }
+    }
+    // (2) A dead leaf HOLDING `max`, with a backfilled survivor still out of range
+    //     that would clamp onto it: close the dead holder so the survivor rebinds to
+    //     `max`, instead of closing the survivor and handing its pane to the dead tab.
+    if (
+      !moved.has(maxLeaf.id) &&
+      deadIdentity(maxLeaf.tab) &&
+      leaves(cur).some((l) => !moved.has(l.id) && l.tab >= ids.length && !deadIdentity(l.tab))
+    ) {
+      cur = closeLeaf(cur, maxLeaf.id) ?? cur;
     }
   }
   return cur;
@@ -456,4 +576,16 @@ export interface DragPayload {
   id?: string;
   index: number;
   tabs: string[];
+}
+
+/** What a touch drop on a pane resolved to (split.ts dropTabAt). Two questions
+ *  need two answers (#4434): `landed` is the gesture-consumption fact — a pane
+ *  was under the release — and `changed` is the mutation fact — the layout
+ *  actually committed. A landed-but-rejected drop (stale payload, or the sole
+ *  tab released on its own pane's edge) is still consumed, but nothing about
+ *  the session's composition changed, so it must not retire user state the way
+ *  a real tab move does. */
+export interface TabDropResult {
+  landed: boolean;
+  changed: boolean;
 }

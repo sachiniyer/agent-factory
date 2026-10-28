@@ -64,7 +64,7 @@ func stubDaemon(t *testing.T) *daemonCalls {
 	origTrigger := daemonTriggerTask
 	origList := daemonListTasksNoSpawn
 
-	daemonAddTask = func(tk task.Task) error {
+	daemonAddTask = func(tk task.Task, _ task.Actor) error {
 		if calls.addErr != nil {
 			return calls.addErr
 		}
@@ -74,7 +74,7 @@ func stubDaemon(t *testing.T) *daemonCalls {
 		calls.writes++
 		return nil
 	}
-	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation, _ task.Actor) (task.Task, error) {
 		calls.lastExpect = expect
 		if calls.updateErr != nil {
 			return task.Task{}, calls.updateErr
@@ -136,6 +136,9 @@ func resetUpdateFlags(t *testing.T) {
 	reset := func() {
 		taskUpdateNameFlag = ""
 		taskUpdatePromptFlag = ""
+		taskUpdatePromptFileFlag = ""
+		tasksUpdateCmd.Flags().Lookup("prompt-file").Changed = false
+		tasksUpdateCmd.Flags().Lookup("prompt").Changed = false
 		taskUpdateCronFlag = ""
 		taskUpdateWatchCmdFlag = ""
 		taskUpdateTargetSessionFlag = ""
@@ -290,7 +293,7 @@ func TestTasksAdd_CommittedReloadFailureIsNotRetryable(t *testing.T) {
 	stubDaemon(t)
 	repo := setupAddRepo(t)
 
-	daemonAddTask = func(tk task.Task) error {
+	daemonAddTask = func(tk task.Task, _ task.Actor) error {
 		require.NoError(t, task.AddTask(tk))
 		return committedTaskMutationTestError{}
 	}
@@ -427,7 +430,7 @@ func TestTasksUpdate_CommittedReadbackFailureIsNotRetryable(t *testing.T) {
 
 	seedTask(t, task.Task{ID: "committed-update", Name: "before", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 	taskUpdateNameFlag = "after"
-	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation, _ task.Actor) (task.Task, error) {
 		_, err := task.UpdateTask(id, update, expect)
 		require.NoError(t, err)
 		// Model another client removing the task after this update committed but
@@ -1102,10 +1105,33 @@ func TestTasksList_FallsBackToDiskWhenNoDaemon(t *testing.T) {
 	stubDaemon(t) // daemonListTasksNoSpawn defaults to ErrDaemonUnavailable
 	seedTask(t, task.Task{ID: "d1", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
-	tasks, err := listTasks()
+	tasks, err := listTasks("af tasks list")
 	require.NoError(t, err)
 	require.Len(t, tasks, 1, "list must fall back to the on-disk task")
 	assert.Equal(t, "d1", tasks[0].ID)
+}
+
+// TestTasksListCarriesPersistedDroppedEvents pins the command's observable
+// contract for #4357. The input is a task record written in the public JSON
+// shape, not a Go struct field, so this test failed on the old reader by
+// silently discarding the count and emitting a healthy-looking row.
+func TestTasksListCarriesPersistedDroppedEvents(t *testing.T) {
+	useTempConfig(t)
+	stubDaemon(t)
+	previousAll := tasksListAllFlag
+	tasksListAllFlag = true
+	t.Cleanup(func() { tasksListAllFlag = previousAll })
+
+	path, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	raw := `{"schema_version":1,"tasks":[{"id":"d4357001","name":"watcher","watch_cmd":"tail -f events.log","program":"claude","enabled":true,"created_at":"2026-09-11T12:00:00Z","last_run_status":"dropped: event rate limit exceeded","dropped_events":7}]}`
+	require.NoError(t, os.WriteFile(path, []byte(raw), 0644))
+
+	out := captureStdout(t, func() {
+		require.NoError(t, tasksListCmd.RunE(tasksListCmd, nil))
+	})
+	require.Contains(t, out, `"dropped_events": 7`,
+		"af tasks list must preserve the durable rate-drop count")
 }
 
 // TestTasksList_PrefersDaemonSnapshot pins that when a daemon IS reachable the
@@ -1120,7 +1146,7 @@ func TestTasksList_PrefersDaemonSnapshot(t *testing.T) {
 		return []task.Task{{ID: "live", Prompt: "p", CronExpr: "0 1 * * *", Enabled: true}}, nil
 	}
 
-	tasks, err := listTasks()
+	tasks, err := listTasks("af tasks list")
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, "live", tasks[0].ID, "a reachable daemon's snapshot is authoritative")
@@ -1130,14 +1156,15 @@ func TestTasksList_PrefersDaemonSnapshot(t *testing.T) {
 // fallback and its not-found behavior against the seeded disk state.
 func TestTasksGet_FallsBackToDiskWhenNoDaemon(t *testing.T) {
 	useTempConfig(t)
+	resetScopeFlags(t)
 	stubDaemon(t)
 	seedTask(t, task.Task{ID: "g1", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
-	got, err := getTaskByID("g1")
+	got, _, err := resolveTaskArg("af tasks get", "g1")
 	require.NoError(t, err)
 	assert.Equal(t, "g1", got.ID)
 
-	_, err = getTaskByID("missing1")
+	_, _, err = resolveTaskArg("af tasks get", "missing1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -1147,6 +1174,7 @@ func TestTasksGet_FallsBackToDiskWhenNoDaemon(t *testing.T) {
 // returns not-found WITHOUT re-reading disk (even though disk holds the id).
 func TestTasksGet_PrefersDaemonSnapshot(t *testing.T) {
 	useTempConfig(t)
+	resetScopeFlags(t)
 	stubDaemon(t)
 	// Disk holds "shadow"; the daemon does NOT report it.
 	seedTask(t, task.Task{ID: "shadow", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
@@ -1154,13 +1182,13 @@ func TestTasksGet_PrefersDaemonSnapshot(t *testing.T) {
 		return []task.Task{{ID: "live", Prompt: "p", CronExpr: "0 1 * * *", Enabled: true}}, nil
 	}
 
-	got, err := getTaskByID("live")
+	got, _, err := resolveTaskArg("af tasks get", "live")
 	require.NoError(t, err)
 	assert.Equal(t, "live", got.ID)
 
 	// A daemon miss is authoritative — no disk fallback even though "shadow"
 	// exists on disk.
-	_, err = getTaskByID("shadow")
+	_, _, err = resolveTaskArg("af tasks get", "shadow")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found",
 		"a reachable daemon's miss is authoritative; get must not re-read disk")

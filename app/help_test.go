@@ -1,10 +1,12 @@
 package app
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
@@ -12,6 +14,12 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+func TestGeneralHelpEntryTextOmitsIssueNumbers(t *testing.T) {
+	issueNumber := regexp.MustCompile(`#[0-9]{3,}`)
+
+	require.NotRegexp(t, issueNumber, helpTypeGeneral{}.toContent())
+}
 
 // TestHelpReflectsKeymapRebinds is the regression guard for the #1141
 // play-test blocker 2: the help overlay rendered hardcoded key literals, so a
@@ -37,6 +45,75 @@ func TestHelpReflectsKeymapRebinds(t *testing.T) {
 	if strings.Contains(content, "q         - Quit") || strings.Contains(content, "↑/k, ↓/j") {
 		t.Errorf("help still shows default keys after a rebind; got:\n%s", content)
 	}
+}
+
+// TestHelpTabsRowReflectsOpenPaneRebind is the scoped companion to
+// TestHelpReflectsKeymapRebinds. The general-help Tabs row embeds the rebindable
+// open_pane glyph inside its description prose ("… · s open · …") rather than its
+// key column, so the key-column-only assertions above never inspect it. That hid
+// a #1141 regression: the description hardcoded the default "s" instead of routing
+// it through helpKey, so a rebind of open_pane showed the new glyph in the
+// Workspace row one section up but left the stale "s" in this row — one help
+// screen, one action, two glyphs. The rebindable glyph must come from the binding
+// table here too; only the non-rebindable "enter" stays literal.
+func TestHelpTabsRowReflectsOpenPaneRebind(t *testing.T) {
+	// tabsRow locates the Tabs "Select tab 1–9" row by its description prefix,
+	// independent of the key column's padded width (which shifts under any
+	// unrelated rebind). "Select tab 1" is ASCII-safe and unique to this row.
+	tabsRow := func(content string) string {
+		for _, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, "Select tab 1") {
+				return line
+			}
+		}
+		return ""
+	}
+
+	t.Run("default glyphs", func(t *testing.T) {
+		content := xansi.Strip(helpTypeGeneral{}.toContent())
+		row := tabsRow(content)
+		require.NotEmpty(t, row, "general help must render its Tabs row")
+		require.Contains(t, row, "s open",
+			"at default bindings the Tabs row must advertise open_pane's default glyph; got:\n%s", row)
+		require.NotContains(t, row, "O open",
+			"nothing should assert the rebound glyph before any rebind; got:\n%s", row)
+	})
+
+	t.Run("open_pane rebind surfaces in the description", func(t *testing.T) {
+		// "O" is a single rune, not reserved, and conflicts with no default
+		// binding (KeyAttach is lowercase "o"), so ApplyOverrides accepts it.
+		require.NoError(t, keys.ApplyOverrides(map[string][]string{
+			"open_pane": {"O"},
+		}))
+		t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+		content := xansi.Strip(helpTypeGeneral{}.toContent())
+
+		// Control: the rebind reached the help screen at all — the Workspace
+		// row's key column now leads with the rebound glyph. (At default it
+		// is "s", so this discriminates the rebind from the default.)
+		var wsRow string
+		for _, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, "Open or focus the tab") {
+				wsRow = strings.TrimSpace(line)
+				break
+			}
+		}
+		require.NotEmpty(t, wsRow)
+		require.True(t, strings.HasPrefix(wsRow, "O "),
+			"the Workspace key column must follow the open_pane rebind; got %q", wsRow)
+
+		// Load-bearing: the Tabs row's *description* — not its key column —
+		// must follow the same rebind. This is the assertion the existing
+		// key-column guard cannot make, and the one the hardcoded literal
+		// failed.
+		row := tabsRow(content)
+		require.NotEmpty(t, row, "general help must render its Tabs row after a rebind")
+		require.Contains(t, row, "O open",
+			"the Tabs row description must use the rebound open_pane glyph (one source of truth); got:\n%s", row)
+		require.NotContains(t, row, "s open",
+			"the Tabs row description must drop the default glyph after an open_pane rebind; got:\n%s", row)
+	})
 }
 
 func TestGeneralHelpReboundDismissKeyWinsOverPaging(t *testing.T) {
@@ -135,6 +212,28 @@ func TestGeneralHelpNavigationMatchesBindings(t *testing.T) {
 	}
 }
 
+// TestGeneralHelpNamesEveryNamingFormField pins the one surface that advertises
+// the naming form's optional fields at EVERY width. The status bar sheds them by
+// terminal width (ui/menu.go hintDropOrder) and the account field (#3844) sheds
+// first, so on a narrow terminal this row is the only place a user can discover
+// that a session's credential account is choosable at all. A shipped capability
+// nobody can find is the failure this guards.
+func TestGeneralHelpNamesEveryNamingFormField(t *testing.T) {
+	content := helpTypeGeneral{}.toContent()
+
+	for _, want := range []string{
+		helpKey(keys.KeyChangeProgram),
+		helpKey(keys.KeySetPrompt),
+		helpKey(keys.KeySetBackend),
+		helpKey(keys.KeySetAccount),
+		"prompt · backend · account",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("the general help must name the naming form's %q field; got:\n%s", want, content)
+		}
+	}
+}
+
 // TestInstanceStartHelpRemoteOmitsUnsupportedTabKeys removed — remote (hook)
 // backends now have full local parity including TabManagement, so the
 // instance-start help advertises the same t/w/1-9 tab keys for remote as for
@@ -144,7 +243,7 @@ func TestInstanceStartHelpMentionsFullScreenDetach(t *testing.T) {
 	local := newStartedInstance(t, "local")
 	content := helpStart(local).toContent()
 
-	if !strings.Contains(content, "ctrl-w") || !strings.Contains(content, "Detach from a full-screen session") {
+	if !strings.Contains(content, "ctrl+w") || !strings.Contains(content, "Leave full-screen") {
 		t.Errorf("instance-start help must name the full-screen detach key; got:\n%s", content)
 	}
 }
@@ -195,7 +294,7 @@ func TestInstanceAttachHelpShowsProceedCancelAndDetach(t *testing.T) {
 		"preview scrolling works only in navigation mode",
 		"enter attach full-screen · esc cancel",
 		"Detach later with",
-		"ctrl-w",
+		"ctrl+w",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("attach help missing %q; got:\n%s", want, content)
@@ -285,7 +384,7 @@ func TestHelpAttachOnlyNamesControlsForAgentTab(t *testing.T) {
 func TestGeneralHelpSeparatesPreviewAndAttachedScrolling(t *testing.T) {
 	content := helpTypeGeneral{}.toContent()
 
-	require.Contains(t, content, "Scroll the current tab preview (navigation mode only)")
+	require.Contains(t, content, "Scroll preview in navigation mode")
 	require.Contains(t, content, "Claude")
 	require.Contains(t, content, claudeAttachedScrollControls)
 	require.Contains(t, content, "Codex")
@@ -294,6 +393,10 @@ func TestGeneralHelpSeparatesPreviewAndAttachedScrolling(t *testing.T) {
 }
 
 func TestGeneralHelpOverlayFitsAndMarksScrollAt80x24(t *testing.T) {
+	// Use a release title to distinguish the overlay from the unversioned rail.
+	originalVersion := Version
+	Version = "test"
+	t.Cleanup(func() { Version = originalVersion })
 	h := newTestHome(t)
 	resizeHome(h, 80, 24)
 
@@ -367,6 +470,10 @@ func TestGeneralHelpOverlayShiftArrowsScrollAt80x24(t *testing.T) {
 }
 
 func TestGeneralHelpOverlayPagesAndJumpsAt80x24(t *testing.T) {
+	// Use a release title to distinguish the overlay from the unversioned rail.
+	originalVersion := Version
+	Version = "test"
+	t.Cleanup(func() { Version = originalVersion })
 	h := newTestHome(t)
 	resizeHome(h, 80, 24)
 	_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
@@ -415,21 +522,368 @@ func TestGeneralHelpWrappedDescriptionsStayOutOfKeyColumnAt80x24(t *testing.T) {
 	lines := strings.Split(xansi.Strip(h.textOverlay.Render()), "\n")
 	var retryLine, continuationLine string
 	for _, line := range lines {
-		if strings.Contains(line, "Retry") {
+		if strings.Contains(line, "Restore ·") {
 			retryLine = line
 		}
-		if strings.Contains(line, "usage limit") {
+		if strings.Contains(line, "last push") {
 			continuationLine = line
 		}
 	}
-	require.NotEmpty(t, retryLine, "the narrow help viewport must contain the retry binding")
-	require.NotEmpty(t, continuationLine, "the retry description must wrap at 80 columns")
+	require.NotEmpty(t, retryLine, "the narrow help viewport must contain the restore binding")
+	require.NotEmpty(t, continuationLine, "the restore description must wrap at 80 columns")
 
 	retryContent := strings.TrimSuffix(strings.TrimPrefix(retryLine, "│"), "│")
 	continuationContent := strings.TrimSuffix(strings.TrimPrefix(continuationLine, "│"), "│")
-	descriptionColumn := strings.Index(retryContent, "Retry")
+	descriptionColumn := strings.Index(retryContent, "Restore")
 	require.GreaterOrEqual(t, descriptionColumn, 0)
 	continuationColumn := len(continuationContent) - len(strings.TrimLeft(continuationContent, " "))
 	require.Equal(t, descriptionColumn, continuationColumn,
 		"wrapped descriptions must use a hanging indent at the description column")
+}
+
+// TestHelpKeyColumnCapStopsOneWideKeyStarvingEveryRow is #3629. The key column
+// was sized to the widest key across ALL sections with no cap, and the help has
+// exactly one wide key — the naming form's field row, 27 cells since #3844 added
+// its account field to it — against ~30 rows of 1-6. At 80x24 (overlay 48 wide,
+// contentWidth 44) it took 29 of the 44 content columns and left 13 for every
+// description.
+func TestHelpKeyColumnCapStopsOneWideKeyStarvingEveryRow(t *testing.T) {
+	// contentWidth at 80x24: layoutTextOverlay sets the overlay to 80*0.6 = 48,
+	// textWidth() subtracts 2*textOverlayHorizontalPadding.
+	narrow := 44
+	// The real distribution: the 27-cell outlier, then the widest ordinary key
+	// ("ctrl+u/ctrl+d", 13), then the rest.
+	widths := []int{27, 13, 9, 8, 6, 6, 5, 1, 1, 1}
+
+	got := helpKeyColumnWidth(widths, narrow)
+	require.LessOrEqual(t, got, int(float64(narrow)*helpKeyColumnFraction),
+		"the key column must never exceed its share of the content width")
+	require.Equal(t, 15, got,
+		"it snaps to the widest key that FITS under the 17-cell cap (13+2), not to the cap")
+
+	desc := narrow - got - 2
+	require.Greater(t, desc, got,
+		"the descriptions must get more columns than the keys — 16 of 44 was the bug")
+	require.Equal(t, 27, desc)
+
+	// Wide terminals are untouched: at 200x50 contentWidth is 116, the cap is 46,
+	// and the natural 29 is far below it.
+	wide := 116
+	require.Equal(t, 29, helpKeyColumnWidth(widths, wide),
+		"the cap must be inert where the layout already reads correctly")
+}
+
+// The cap must claim exactly one victim — the outlier that caused the problem.
+// Snapping to the widest key that FITS under the cap, rather than to the cap
+// itself, is what keeps an ordinary key from wrapping as collateral.
+func TestHelpKeyColumnWrapsOnlyTheOutlier(t *testing.T) {
+	narrow := 44
+	sections := []helpSection{{title: "Managing:", rows: []helpRow{
+		{"tab/shift+tab ctrl+r/ctrl+o",
+			"New session: agent · prompt · backend · account"},
+		{"ctrl+u/ctrl+d", "Scroll preview in navigation mode"},
+		{"n", "Create a session"},
+	}}}
+
+	lines := strings.Split(xansi.Strip(renderHelpSections("header", sections, narrow)), "\n")
+	var wideRow, ordinaryRow string
+	for _, line := range lines {
+		if strings.Contains(line, "ctrl+u/ctrl+d") {
+			ordinaryRow = line
+		}
+		if strings.Contains(line, "shift+tab") {
+			wideRow = line
+		}
+	}
+	require.NotEmpty(t, ordinaryRow)
+	require.NotEmpty(t, wideRow)
+
+	require.Contains(t, ordinaryRow, "Scroll preview",
+		"the widest ORDINARY key must still fit its column on one line, beside its description")
+	require.NotContains(t, wideRow, "ctrl+o",
+		"the over-cap key must wrap inside its own column rather than widen everyone's")
+	// The 2 cells past the widest key are a GUTTER: a wrapped key must not spend
+	// them, or the row reads "tab / shift+tab- While naming…" — the key colliding
+	// with its own separator.
+	for _, line := range lines {
+		if i := strings.Index(line, "- "); i > 0 {
+			require.Equalf(t, " ", line[i-1:i],
+				"the key column must keep a blank cell before its separator: %q", line)
+		}
+	}
+	for _, line := range lines {
+		require.LessOrEqualf(t, lipgloss.Width(line), narrow,
+			"no rendered row may exceed the content width: %q", line)
+	}
+}
+
+// TestGeneralHelpReadsInFarFewerPagesAt80x24 is the user-visible metric from
+// #3629: the help was 8 page-downs at 80x24 versus 1 at 200x50, because every
+// description had 16 columns and wrapped into 3-5-line ribbons.
+//
+// 3 is the structural floor at this size — ~36 rows plus the header and section
+// chrome is more than twice an 18-row viewport even if every row were a single
+// line — so this asserts the count is near it, not at 1.
+func TestGeneralHelpReadsInFarFewerPagesAt80x24(t *testing.T) {
+	pagesToBottom := func(w, hgt int) int {
+		h := newTestHome(t)
+		resizeHome(h, w, hgt)
+		_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+		pages := 0
+		for strings.Contains(xansi.Strip(h.View()), "↓ more") {
+			_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyPgDown})
+			pages++
+			require.Less(t, pages, 30, "paging must reach the bottom of the help")
+		}
+		return pages
+	}
+
+	narrow := pagesToBottom(80, 24)
+	require.LessOrEqualf(t, narrow, 5,
+		"the help must read in at most 5 page-downs at 80x24 (it was 8); got %d", narrow)
+
+	wide := pagesToBottom(200, 50)
+	require.LessOrEqualf(t, wide, 1,
+		"200x50 already read in one page and must not regress; got %d", wide)
+}
+
+// TestInstanceStartHelpScrollsRatherThanDismissingAt80x24 is the #3628
+// regression. The first-run "Session created" screen overflows 80x24, so
+// TextOverlay paints "↓ more" — and the overlay closed on ANY key, including
+// the ↓ it advertised. Being a once-per-home screen, that took the whole tail
+// with it permanently: the tab line, the kill key, and the "Actions:" section
+// whose "esc close" is the only instruction for getting out.
+func TestInstanceStartHelpScrollsRatherThanDismissingAt80x24(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	local := newStartedInstance(t, "todo-notes")
+
+	_, _ = h.showHelpScreen(helpStart(local), nil)
+	require.Equal(t, stateHelp, h.state)
+	require.True(t, h.textOverlay.Scrollable(),
+		"precondition: the session-created screen overflows 80x24")
+	initial := xansi.Strip(h.View())
+	require.Contains(t, initial, "Session created")
+	require.Contains(t, initial, "↓ more", "precondition: the overlay advertises more content")
+	require.NotContains(t, initial, "esc close",
+		"precondition: the line naming the dismiss key starts below the fold")
+
+	// The advertised key must scroll, not close the screen out from under it.
+	for _, msg := range []tea.KeyMsg{
+		{Type: tea.KeyDown},
+		{Type: tea.KeyRunes, Runes: []rune("j")},
+		{Type: tea.KeyPgDown},
+		{Type: tea.KeySpace},
+	} {
+		_, _ = h.handleHelpState(msg)
+		require.Equalf(t, stateHelp, h.state, "%v must scroll the session-created overlay, not dismiss it", msg)
+		require.Falsef(t, h.textOverlay.Dismissed, "%v must not mark the overlay dismissed", msg)
+	}
+	require.Contains(t, xansi.Strip(h.View()), "↑ more", "the viewport must have moved down")
+
+	// The tail is reachable, so the screen can actually be finished.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEnd})
+	bottom := xansi.Strip(h.View())
+	require.Contains(t, bottom, "Actions:", "End must reach the section that was unreachable")
+	require.Contains(t, bottom, "esc close", "the dismiss instruction must be readable")
+
+	// …and scrolling back up still works.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyHome})
+	require.Contains(t, xansi.Strip(h.View()), "Session created", "Home must return to the top")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "esc — the key the screen names — closes it")
+}
+
+// The other half of #3628: the seen bit is a record of the user DISMISSING the
+// screen, not of af painting it. Burning it on display is what made the lost
+// tail permanent — the screen never came back to be finished.
+func TestFirstRunHelpMarkedSeenOnDismissNotDisplay(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	local := newStartedInstance(t, "todo-notes")
+	mask := helpTypeInstanceStart{}.mask()
+
+	_, _ = h.showHelpScreen(helpStart(local), nil)
+	require.Equal(t, stateHelp, h.state)
+	require.Zero(t, h.appState.GetHelpScreensSeen()&mask,
+		"displaying the screen must not mark it seen")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyDown})
+	require.Equal(t, stateHelp, h.state)
+	require.Zero(t, h.appState.GetHelpScreensSeen()&mask,
+		"scrolling is reading, not dismissing — the screen is still open")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state)
+	require.NotZero(t, h.appState.GetHelpScreensSeen()&mask,
+		"dismissing the screen is what records it as seen")
+
+	// And it stays a one-shot: a second creation does not re-open it.
+	_, _ = h.showHelpScreen(helpStart(local), nil)
+	require.Equal(t, stateDefault, h.state, "a dismissed one-shot screen must not come back")
+}
+
+// A screen the user never dismissed has not been seen: quitting with the
+// overlay open must leave it to be shown again (#3628).
+func TestFirstRunHelpAbandonedUndismissedIsNotSeen(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	local := newStartedInstance(t, "todo-notes")
+	mask := helpTypeInstanceStart{}.mask()
+
+	_, _ = h.showHelpScreen(helpStart(local), nil)
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyPgDown})
+	require.Equal(t, stateHelp, h.state, "precondition: the user is still reading")
+
+	// The process ends here — nothing dismissed the overlay. The gate the next
+	// run evaluates is GetHelpScreensSeen()&mask, and it is still open.
+	require.Zero(t, h.appState.GetHelpScreensSeen()&mask)
+	h.state, h.textOverlay = stateDefault, nil
+	_, _ = h.showHelpScreen(helpStart(local), nil)
+	require.Equal(t, stateHelp, h.state,
+		"a screen abandoned mid-read must be offered again")
+}
+
+// The attach overlay keeps its enter/esc policy, and gains scrolling for free
+// when its content overflows — the class property #3628 asks for, not a
+// per-caller patch.
+func TestAttachHelpScrollsWhenItOverflowsAndKeepsItsPolicy(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+
+	_, _ = h.showHelpScreen(helpTypeInstanceAttach{agent: tmux.ProgramClaude}, nil)
+	require.Equal(t, stateHelp, h.state)
+	// Squeeze the viewport so the screen overflows regardless of copy length.
+	h.textOverlay.SetHeight(8)
+	require.True(t, h.textOverlay.Scrollable(), "precondition: the attach screen overflows")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyDown})
+	require.Equal(t, stateHelp, h.state, "↓ must scroll the attach overlay")
+	require.Contains(t, xansi.Strip(h.textOverlay.Render()), "↑ more")
+
+	// Esc still cancels, exactly as attachHelpDismissPolicy says.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "esc must still cancel the attach overlay")
+}
+
+// The general `?` help is unchanged except that enter and q now close it too:
+// it is the screen the dismiss-key set was designed around (#1290/#1399/#1447).
+func TestGeneralHelpClosesOnEnterAndQuitKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{"enter", tea.KeyMsg{Type: tea.KeyEnter}},
+		{"quit key", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}},
+		{"esc", tea.KeyMsg{Type: tea.KeyEsc}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			resizeHome(h, 80, 24)
+			_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+			require.Equal(t, stateHelp, h.state)
+
+			_, _ = h.handleHelpState(tc.msg)
+			require.Equal(t, stateDefault, h.state)
+		})
+	}
+}
+
+// TestGeneralHelpHidesAliasShadowedByAQuitRebind answers the Codex review on
+// #3634. Adding q to the dismiss set means a user who configures
+// `[keys] quit = "pgdown"` has made pgdn a dismiss key — so the help must stop
+// advertising it as a paging control, exactly as it already does for a rebound
+// help key (TestGeneralHelpHidesPagingAliasShadowedByRebind). Dismissal keeps
+// precedence over paging; the copy is what has to follow.
+func TestGeneralHelpHidesAliasShadowedByAQuitRebind(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override string
+		prefix   string
+		hidden   string
+		msg      tea.KeyMsg
+	}{
+		{"paging alias", "pgdown", "Page:", "pgdn", tea.KeyMsg{Type: tea.KeyPgDown}},
+		{"jump alias", "home", "Line:", "home", tea.KeyMsg{Type: tea.KeyHome}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {tc.override}}))
+			t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+			var line string
+			for _, l := range strings.Split(xansi.Strip(helpTypeGeneral{}.toContent()), "\n") {
+				if strings.HasPrefix(l, tc.prefix) {
+					line = l
+					break
+				}
+			}
+			require.NotEmpty(t, line, "the help must still render its %s controls", tc.prefix)
+			require.NotContainsf(t, line, tc.hidden,
+				"a quit rebind made %q a dismiss key; the help must not advertise it as navigation", tc.hidden)
+
+			// …and the key really does dismiss, so the copy is telling the truth.
+			h := newTestHome(t)
+			resizeHome(h, 80, 24)
+			_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+			require.Equal(t, stateHelp, h.state)
+			_, _ = h.handleHelpState(tc.msg)
+			require.Equal(t, stateDefault, h.state,
+				"the configured quit key must close the help, matching what the copy no longer promises")
+		})
+	}
+}
+
+// TestAttachHelpScrollKeyReboundToQuitStillReachesItsPolicy answers the second
+// Codex finding on #3634. The attach overlay has its own dismiss policy —
+// enter attaches, esc cancels, everything else is a no-op. Gating the scroll
+// branch on the GENERIC dismiss set meant a key the generic set called a
+// dismissal (say `[keys] quit = "pgdown"`) skipped scrolling and was then
+// refused by the policy: dead in both branches, on the exact key the overflow
+// marker advertises.
+func TestAttachHelpScrollKeyReboundToQuitStillReachesItsPolicy(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {"pgdown"}}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	_, _ = h.showHelpScreen(helpTypeInstanceAttach{agent: tmux.ProgramClaude}, nil)
+	require.Equal(t, stateHelp, h.state)
+	h.textOverlay.SetHeight(8)
+	require.True(t, h.textOverlay.Scrollable(), "precondition: the attach screen overflows")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyPgDown})
+	require.Equal(t, stateHelp, h.state, "the attach overlay must not close on a paging key")
+	require.Contains(t, xansi.Strip(h.textOverlay.Render()), "↑ more",
+		"a key the attach policy refuses must still scroll the overflowing overlay")
+
+	// Its own policy is untouched.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "esc still cancels the attach overlay")
+}
+
+// TestFirstRunInteractiveHelpKeepsAnyKeyDismissalWhenItOverflows answers the
+// third Codex finding on #3634, and it is #2413's trap in reverse. The
+// interactive help is a press-any-key gate BY DESIGN: the dismiss keystroke is
+// the user's first pane input and gets replayed (#1576). Suspending that gate
+// whenever the content overflows made every non-scroll key inert at small
+// sizes — including ctrl+], the key the overlay's own last line names.
+func TestFirstRunInteractiveHelpKeepsAnyKeyDismissalWhenItOverflows(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	_, _ = h.showHelpScreen(helpTypeInteractive{}, nil)
+	require.Equal(t, stateHelp, h.state)
+	// Squeeze it the way a 40x10 terminal does.
+	h.textOverlay.SetHeight(7)
+	require.True(t, h.textOverlay.Scrollable(), "precondition: the interactive help overflows")
+
+	// The scroll affordance it now paints is honoured…
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyDown})
+	require.Equal(t, stateHelp, h.state, "↓ must scroll an overflowing overlay")
+	require.Contains(t, xansi.Strip(h.textOverlay.Render()), "↑ more")
+
+	// …and every other key still dismisses, including the one it names.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	require.Equal(t, stateDefault, h.state,
+		"ctrl+] — the key this overlay tells the user to press — must still close it (#2413)")
 }

@@ -152,6 +152,8 @@ func TestDockerAccount_RejectsIdentityRunArgs(t *testing.T) {
 		{name: "env file", args: []string{"--env-file", "repo.env"}, wantErr: "env-file"},
 		{name: "account mount", args: []string{"--mount", "type=bind,src=/tmp/other,dst=/af-account"}, wantErr: "account mount"},
 		{name: "account volume", args: []string{"-v", "/tmp/other:/af-account"}, wantErr: "account mount"},
+		{name: "account volume equals form", args: []string{"-v=/tmp/other:/af-account"}, wantErr: "account mount"},
+		{name: "account volume equals single path", args: []string{"-v=/af-account/.config"}, wantErr: "account mount"},
 		{name: "volumes from", args: []string{"--volumes-from", "repo-donor"}, wantErr: "--volumes-from"},
 		{name: "volumes from inline", args: []string{"--volumes-from=repo-donor"}, wantErr: "--volumes-from"},
 	}
@@ -237,6 +239,30 @@ func TestDockerAccount_RefusesRemoteDockerEngine(t *testing.T) {
 	require.False(t, runCalled, "a local account path must never be sent to a remote daemon")
 }
 
+// TestDockerAccount_RefusesLoopbackTCPDockerEngine is the Codex P1 on this PR:
+// tcp://127.0.0.1:2375 can be an SSH local-forward (`ssh -L`, Docker's
+// documented remote-access transport) to a remote daemon, under which a bind
+// mount resolves on the REMOTE host. Loopback connectivity is enough for a
+// non-account session's dial-back but is not host-identity proof, so the
+// account path must refuse it rather than risk mounting an unrelated
+// same-named remote path under this account's name.
+func TestDockerAccount_RefusesLoopbackTCPDockerEngine(t *testing.T) {
+	f := newDockerAccountFixture(t, "", "codex", nil)
+	t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+	runCalled := false
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "run" {
+			runCalled = true
+		}
+		return fakeLocalDockerResponse(args)
+	}))
+
+	_, err := createDockerAccountSession(f, "codex", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "remote Docker")
+	require.False(t, runCalled, "a local account path must never be sent to a possibly-remote daemon")
+}
+
 func TestDockerAccount_ReprovisionCarriesThePersistedAccount(t *testing.T) {
 	f := newDockerAccountFixture(t, "", "codex", nil)
 	var runArgs []string
@@ -291,6 +317,12 @@ func TestDockerAccount_AgentServerRunsAsTheAccountOwner(t *testing.T) {
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		if out, err := fakeLocalDockerResponse(args); out != nil || err != nil {
+			return out, err
+		}
+		// The #3598 runtime boundary check runs on every account provision, so a
+		// fixture that cannot answer it refuses before this test reaches what it
+		// asserts. A clean container: af's account mount and nothing else.
+		if out, err := fakeAccountBoundaryDockerResponse(args, f.accountDir); out != nil || err != nil {
 			return out, err
 		}
 		switch args[0] {
@@ -371,6 +403,12 @@ func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
 		if out, err := fakeLocalDockerResponse(args); out != nil || err != nil {
 			return out, err
 		}
+		// The #3598 runtime boundary check runs on every account provision, so a
+		// fixture that cannot answer it refuses before this test reaches what it
+		// asserts. A clean container: af's account mount and nothing else.
+		if out, err := fakeAccountBoundaryDockerResponse(args, f.accountDir); out != nil || err != nil {
+			return out, err
+		}
 		switch args[0] {
 		case "run":
 			return []byte(dockerCreatedID + "\n"), nil
@@ -423,14 +461,30 @@ func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
 		"readBanner() timeout diagnostic log read should run as the account owner; calls=%v", calls)
 }
 
-// TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged pins the other half
-// of the fix: a non-account (daemon-user) session has no containerUser, so
-// sessionExecOptions() returns nil and readBanner() must issue a plain
-// `docker exec <container> cat <banner>` with no --user flag. The account-owner
-// path must not leak a --user into ordinary daemon sessions, where it would
-// either name a nonexistent uid or shadow the image's default USER.
-func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
+// TestDockerAccount_ReadBannerRunsAsTheImageDefaultUser pins the non-account
+// half of the readBanner security-context rule after the non-root-USER fix.
+// A non-account (daemon-user) session used to leave containerUser empty, so
+// sessionExecOptions() returned nil and readBanner() issued a plain
+// `docker exec <container> cat <banner>` that ran as the image's default USER.
+// That was the bug for a BYO image whose USER is non-root: provisioning had
+// already failed at `git config --global` against a root-owned /root, and even
+// if it had not, the banner read/write security contexts disagreed.
+//
+// prepareNonAccountUser now probes the image's default USER and records it in
+// containerUser, so sessionExecOptions() returns `--user <uid:gid> -e HOME=/root`
+// for a non-account session too. readBanner() and startAgentServer() therefore
+// run as the SAME image-default user, matching the account path's contract
+// (writer == reader). For a root-default image the probe reports 0:0 and the
+// behavior is unchanged from before; for a non-root image the read now runs as
+// that user with a HOME it owns, so a banner written with a restrictive umask
+// stays readable to the same uid that wrote it.
+func TestDockerAccount_ReadBannerRunsAsTheImageDefaultUser(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the non-account pre-run locality guard passes without a
+	// docker call; this test exercises the banner-read exec, not the remote-engine
+	// refusal.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
 	repo := initTempGitRepo(t)
 	runGit(t, repo, "remote", "add", "origin", "https://example.invalid/fixture.git")
@@ -452,7 +506,15 @@ func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
 			return []byte("127.0.0.1:49152\n"), nil
 		case "exec":
 			joined := strings.Join(args, " ")
-			if strings.Contains(joined, "cat "+dockerBannerPath) {
+			switch {
+			case strings.Contains(joined, "id -u"):
+				// prepareNonAccountUser's probe of the image's default USER.
+				// This fake image defaults to a non-root user 1000:1000, the
+				// scenario the bug report reproduces.
+				return []byte("1000:1000\n"), nil
+			case isMountTableExec(args):
+				return mountTableAnswer(), nil
+			case strings.Contains(joined, "cat "+dockerBannerPath):
 				return []byte(`{"addr":":8000","token":"test-only","title":"non-account"}`), nil
 			}
 			return nil, nil
@@ -468,8 +530,13 @@ func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
 		Backend: BackendDocker,
 	})
 	require.NoError(t, err)
-	// No account → no --user flag on any exec; the banner read is plain
-	// `exec <container> cat <banner>`, matching the pre-account behavior.
+	// The fix probes the image's default user and runs every subsequent exec
+	// (provisioning, agent-server, banner read) as that user with HOME=/root.
+	// A non-root image-default user must therefore reach the banner read with
+	// --user 1000:1000 and HOME=/root, NOT the pre-fix plain exec that ran as
+	// the image default with no explicit --user and would have failed before
+	// reaching readBanner at all.
+	foundBannerReadAsImageUser := false
 	for _, call := range calls {
 		if len(call) < 2 || call[0] != "exec" {
 			continue
@@ -478,9 +545,14 @@ func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
 		if !strings.Contains(joined, "cat "+dockerBannerPath) {
 			continue
 		}
-		require.NotContains(t, joined, "--user",
-			"non-account readBanner() must not carry a --user flag; calls=%v", calls)
+		require.Contains(t, joined, "--user 1000:1000",
+			"non-account readBanner() must run as the image's default user after the fix; calls=%v", calls)
+		require.Contains(t, joined, "HOME=/root",
+			"non-account readBanner() keeps HOME=/root (the credential-mount anchor); calls=%v", calls)
+		foundBannerReadAsImageUser = true
 	}
+	require.True(t, foundBannerReadAsImageUser,
+		"readBanner() was never invoked; the non-account provision did not reach it; calls=%v", calls)
 }
 
 // TestDockerAccount_RejectsProtectedMountTargetsInAnyFieldCase pins the Docker
@@ -580,6 +652,114 @@ func TestDockerAccount_RejectsProtectedTargetsInColonMountForms(t *testing.T) {
 			err := validateAccountDockerRunArgs(tt.args, "codex")
 			require.Errorf(t, err, "a colon-form mount reached the account boundary: %v", tt.args)
 			require.Contains(t, err.Error(), "account mount")
+		})
+	}
+}
+
+// TestDockerAccount_RejectsProtectedTargetsInVolumeEqualsForm pins the `-v=`
+// short-option equals form. pflag resolves `-v=<value>` by stripping both `-v`
+// and the `=` together (before it consults the option's kind at all), so a
+// `-v=/af-account/.config` installs exactly the mount `-v /af-account/.config`
+// does. The minus-equals form was previously intercepted by the generic
+// `HasPrefix(arg, "-v") && len(arg) > 2` case, which strips only `-v` and leaves
+// the leading `=`, so accountProtectedPath never matched and the lexical guard
+// accepted a mount over the account boundary. The runtime verifier caught the
+// same input against the running container, but the lexical guard's job is to
+// refuse BEFORE the container is created — its failure here started the
+// container and reaped it, and Docker left a root-owned mountpoint residue
+// inside the account bind mount on the host.
+//
+// The equivalent `-v <path>` (separate) and `-v<path>` (attached, no `=`) forms
+// are already covered by TestDockerAccount_RejectsProtectedTargetsInColonMountForms;
+// this holds the missing `-v=<path>` form to the same standard. The single-path
+// rows are the cases the colon-split fallback inside checkMount does NOT catch
+// (no colon to leave the protected field intact), so they pin the fix itself,
+// while the colon rows are regression checks that the fallback still fires.
+func TestDockerAccount_RejectsProtectedTargetsInVolumeEqualsForm(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "account root", args: []string{"-v=/af-account"}},
+		{name: "account subdirectory anonymous volume", args: []string{"-v=/af-account/.config"}},
+		{name: "account auth file", args: []string{"-v=/af-account/auth.json"}},
+		{name: "runtime home root", args: []string{"-v=/af-home"}},
+		{name: "runtime home subdirectory", args: []string{"-v=/af-home/.config"}},
+		{name: "normalized account root trailing dot", args: []string{"-v=/af-account/."}},
+		{name: "normalized account subdir with redundant segment", args: []string{"-v=/af-account/./auth.json"}},
+		{name: "colon form to account", args: []string{"-v=/tmp/other:/af-account"}},
+		{name: "colon form to account subdir", args: []string{"-v=/tmp/other:/af-account/.config"}},
+		{name: "colon form to runtime home", args: []string{"-v=/tmp/other:/af-home"}},
+		{name: "colon form to runtime home subdir", args: []string{"-v=/tmp/other:/af-home/.config"}},
+		{name: "read-only colon form", args: []string{"-v=/tmp/other:/af-account/.config:ro"}},
+		{name: "relabelled colon form", args: []string{"-v=/tmp/other:/af-home/.config:z"}},
+		{name: "colon form with trailing slash on account", args: []string{"-v=/tmp/other:/af-account/"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "a -v= form mount reached the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "account mount")
+		})
+	}
+}
+
+// TestDockerAccount_AllowsHarmlessTargetsInVolumeEqualsForm holds the
+// over-refusal boundary for the `-v=` form. The fix strips the leading `=`, so
+// the check must still accept the paths the colon-form and attached-form tests
+// already allow: harmless destinations and the similarly-named paths that are
+// NOT the account boundary. The #3398 boundary is at-or-under the path, never a
+// substring, so /af-account-cache and /AF-ACCOUNT stay accepted alongside
+// ordinary mounts outside the boundary.
+func TestDockerAccount_AllowsHarmlessTargetsInVolumeEqualsForm(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "harmless anonymous volume", args: []string{"-v=/workspace/data"}},
+		{name: "harmless colon form", args: []string{"-v=/tmp/cache:/workspace"}},
+		{name: "named volume to harmless path", args: []string{"-v=repo-vol:/workspace"}},
+		{name: "similarly named path", args: []string{"-v=/af-account-cache"}},
+		{name: "similarly named path colon form", args: []string{"-v=/tmp/cache:/af-account-cache"}},
+		{name: "another similarly named path", args: []string{"-v=/tmp/cache:/af-accountant"}},
+		{name: "differently cased path", args: []string{"-v=/AF-ACCOUNT"}},
+		{name: "runtime similarly named path", args: []string{"-v=/tmp/cache:/af-homework"}},
+		{name: "harmless colon form with options", args: []string{"-v=/tmp/cache:/workspace:ro"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "a harmless -v= mount was refused: %v", tt.args)
+		})
+	}
+}
+
+// TestDockerAccount_VolumeEqualsFormMatchesOtherForms pins parity across the
+// three spellings of the same `-v` mount. pflag treats `-v <path>`, `-v<path>`,
+// and `-v=<path>` as the same option with the same value, so the lexical guard
+// must give the same verdict for all three. Before the fix the `-v=` spelling
+// was the lone accept against a protected path while the other two refused.
+func TestDockerAccount_VolumeEqualsFormMatchesOtherForms(t *testing.T) {
+	cases := []struct {
+		name     string
+		onePath  string   // value used for the -v= spelling (single argument)
+		twoArg   []string // -v <value> spelling (two arguments)
+		attached string   // -v<value> spelling (attached, no =)
+	}{
+		{name: "account subdir", onePath: "/af-account/.config", twoArg: []string{"-v", "/af-account/.config"}, attached: "-v/af-account/.config"},
+		{name: "runtime home", onePath: "/af-home", twoArg: []string{"-v", "/af-home"}, attached: "-v/af-home"},
+		{name: "colon form to account", onePath: "/tmp/other:/af-account", twoArg: []string{"-v", "/tmp/other:/af-account"}, attached: "-v/tmp/other:/af-account"},
+		{name: "harmless subdir", onePath: "/workspace/data", twoArg: []string{"-v", "/workspace/data"}, attached: "-v/workspace/data"},
+		{name: "similarly named path", onePath: "/af-account-cache", twoArg: []string{"-v", "/af-account-cache"}, attached: "-v/af-account-cache"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			equalsErr := validateAccountDockerRunArgs([]string{"-v=" + tt.onePath}, "codex")
+			twoArgErr := validateAccountDockerRunArgs(tt.twoArg, "codex")
+			attachedErr := validateAccountDockerRunArgs([]string{tt.attached}, "codex")
+			require.Equalf(t, twoArgErr == nil, equalsErr == nil,
+				"-v= verdict (err=%v) does not match -v <path> verdict (err=%v) for %q", equalsErr, twoArgErr, tt.onePath)
+			require.Equalf(t, attachedErr == nil, equalsErr == nil,
+				"-v= verdict (err=%v) does not match -v<path> verdict (err=%v) for %q", equalsErr, attachedErr, tt.onePath)
 		})
 	}
 }
@@ -884,6 +1064,157 @@ func TestDockerAccount_RefusesEveryMountInstallingOption(t *testing.T) {
 		t.Run(tt.option, func(t *testing.T) {
 			require.Errorf(t, validateAccountDockerRunArgs(tt.args, "codex"),
 				"%s can install a filesystem at a container path and is not guarded", tt.option)
+		})
+	}
+}
+
+// TestDockerAccount_RejectsProtectedDeviceTargets covers --device, whose value
+// is host:container[:permissions] — a container path the repository chooses,
+// the same shape -v has. Docker creates the node at that path, and under af's
+// account bind mount the node is written THROUGH to the operator's registered
+// account directory on the host, root-owned and outliving the container
+// (#3521).
+//
+// #3403 recorded --device as "not a vector" and that reading was too narrow: it
+// tested a container path that already EXISTS, which Docker leaves intact. A
+// path that does not exist yet is created, and `.HostConfig.Devices` records it
+// while `.Mounts` stays empty — the column the earlier classifier never read.
+func TestDockerAccount_RejectsProtectedDeviceTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "account subdirectory", args: []string{"--device", "/dev/zero:/af-account/.config/planted"}},
+		{name: "account root", args: []string{"--device", "/dev/zero:/af-account"}},
+		{name: "runtime home subdirectory", args: []string{"--device", "/dev/zero:/af-home/.config/planted"}},
+		{name: "inline spelling", args: []string{"--device=/dev/zero:/af-account/.config/planted"}},
+		{name: "with permissions", args: []string{"--device", "/dev/zero:/af-account/.config/planted:rwm"}},
+		{name: "inline spelling on the runtime home", args: []string{"--device=/dev/zero:/af-home:rwm"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "a --device wrote a node into the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "--device")
+		})
+	}
+}
+
+// TestDockerAccount_AllowsHarmlessDeviceTargets is the over-refusal boundary
+// #3398 drew for /af-account-cache, held for --device: passing a real device
+// through is ordinary configuration, and refusing the whole option would break
+// GPU, FUSE and audio passthrough for every account-scoped session while
+// buying nothing the path check does not already give.
+//
+// Measured on Docker 29.4.0, reading `.HostConfig.Devices`: each row below
+// resolves to the container path shown, and none of them is under the boundary.
+func TestDockerAccount_AllowsHarmlessDeviceTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "host path only", args: []string{"--device", "/dev/fuse"}},                          // -> /dev/fuse
+		{name: "explicit container path", args: []string{"--device", "/dev/nvidia0:/dev/nvidia0"}}, // -> /dev/nvidia0
+		{name: "permissions in the second field", args: []string{"--device", "/dev/zero:rwm"}},     // -> /dev/zero
+		{name: "similarly named path", args: []string{"--device", "/dev/sda:/af-account-cache/disk"}},
+		{name: "another similarly named path", args: []string{"--device", "/dev/sda:/af-accountant/disk"}},
+		{name: "inline spelling", args: []string{"--device=/dev/snd"}},
+		// pflag reads a single dash as a shorthand cluster, so `-device X` is
+		// `-d -e vice` and X becomes the IMAGE — measured: Docker fails with
+		// "invalid reference format" and installs no device at all.
+		{name: "single dash is not the option", args: []string{"-device", "/dev/zero:/af-account/.config/planted"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "a harmless --device was refused: %v", tt.args)
+		})
+	}
+}
+
+// TestDockerAccount_DeviceScanDoesNotSkipALaterMount pins that consuming
+// --device's value does not step over what follows it, the same trap #3402's
+// cluster scan had to avoid.
+func TestDockerAccount_DeviceScanDoesNotSkipALaterMount(t *testing.T) {
+	tests := [][]string{
+		{"--device", "/dev/fuse", "--mount", "type=bind,src=/tmp/other,dst=/af-account"},
+		{"--device", "/dev/fuse", "--mount", `type=bind,src=/tmp/other,"DST=/af-account/.config"`},
+		{"--device=/dev/fuse", "-v", "/tmp/other:/af-home"},
+		{"--device", "/dev/fuse", "-e", "CODEX_API_KEY=repo-identity"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
+				"a guarded option after --device escaped validation: %v", args)
+		})
+	}
+}
+
+// TestDockerDeviceMode_MatchesDockersMask pins the predicate that tells a
+// permission mask from a container path. Docker accepts any non-empty
+// combination of r, w and m with no repeats, in any order; anything else is
+// read as a path and must then be absolute (measured on 29.4.0: `rwmm` and `x`
+// both fail with "is not an absolute path").
+func TestDockerDeviceMode_MatchesDockersMask(t *testing.T) {
+	for _, mask := range []string{"r", "w", "m", "rw", "rm", "wm", "rwm", "mrw", "wr"} {
+		require.Truef(t, dockerDeviceMode(mask), "%q is a permission mask to Docker", mask)
+	}
+	// Repeats are masks HERE by choice, not by Docker's behaviour: 29.4.0
+	// refuses `--device /dev/zero:rr` outright ("rr is not an absolute path")
+	// because its validator deletes each letter as it is seen. Reading them as
+	// a mask keeps the effective target on the HOST field, which is the
+	// fail-closed side if any build honours the `^[rwm]{1,3}$` its regexp
+	// advertises, and it costs nothing: a container target must be absolute, so
+	// a bare `rr` is never a legitimate one.
+	for _, repeat := range []string{"rr", "rww", "mmm", "wrr"} {
+		require.Truef(t, dockerDeviceMode(repeat), "%q must be read as a mask so the host path stays the target", repeat)
+	}
+	for _, notMask := range []string{"", "rwmm", "rrrr", "x", "rwx", "/dev/zero", "/af-account", "rwm/"} {
+		require.Falsef(t, dockerDeviceMode(notMask), "%q is not a permission mask to Docker", notMask)
+	}
+}
+
+// TestDockerAccount_ChecksTheEffectiveDeviceTarget checks the container path
+// Docker actually creates the node at, rather than every ':' field. The
+// host-side field is a path on the HOST and never where the node lands, so
+// checking it refused valid mappings such as
+// `--device /af-account/devices/fuse:/dev/fuse:rwm`, whose node is created at
+// /dev/fuse — outside the boundary entirely.
+//
+// The target is not simply "field 2": Docker reads a two-field value whose
+// second field is a permission mask as host-only, leaving the container path
+// equal to the host path. Every row's expectation below is what
+// `.HostConfig.Devices[].PathInContainer` reported on Docker 29.4.0.
+func TestDockerAccount_ChecksTheEffectiveDeviceTarget(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		refused bool
+	}{
+		{name: "host side under the boundary, container path outside", value: "/af-account/devices/fuse:/dev/fuse:rwm"},
+		{name: "host side under the runtime home", value: "/af-home/devices/snd:/dev/snd"},
+		{name: "mask keeps the host path as the target", value: "/dev/zero:rwm"},
+		{name: "short mask", value: "/dev/zero:r"},
+		{name: "reordered mask", value: "/dev/zero:mrw"},
+		{name: "container path ending in a mask-like segment", value: "/dev/zero:/af-account/rwm", refused: true},
+		{name: "container path with a mask third field", value: "/dev/zero:/af-account/x:r", refused: true},
+		{name: "container path under the runtime home", value: "/dev/zero:/af-home/x", refused: true},
+		{name: "single field naming the boundary", value: "/af-account/planted", refused: true},
+		// The mask reading keeps the HOST field as the target, so a host device
+		// under the boundary is refused rather than validated as the harmless
+		// relative string "rr". Docker 29.4.0 refuses this value outright, so
+		// nothing is installed either way — af simply does not depend on that.
+		{name: "repeated mask over a host path under the boundary", value: "/af-account/dev/zero:rr", refused: true},
+		{name: "repeated mask over a harmless host path", value: "/dev/zero:rr"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs([]string{"--device", tt.value}, "codex")
+			if tt.refused {
+				require.Errorf(t, err, "a device node landed inside the account boundary: --device %s", tt.value)
+				require.Contains(t, err.Error(), "--device")
+				return
+			}
+			require.NoErrorf(t, err, "a device Docker creates outside the boundary was refused: --device %s", tt.value)
 		})
 	}
 }

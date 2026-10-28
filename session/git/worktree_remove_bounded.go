@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -69,12 +70,38 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 	ctx, cancel := context.WithTimeout(context.Background(), localGitTimeout)
 	defer cancel()
 
+	// Resolve a relative repoRoot against the daemon's launch cwd, mirroring
+	// runGitCommandContextWithEnvironment: the daemon chdirs to the AF home, so a
+	// relative `-C repoRoot` would otherwise resolve beneath the AF home instead
+	// of the launch cwd. See daemonLaunchCwd in worktree_git.go.
+	if !filepath.IsAbs(repoRoot) && daemonLaunchCwd != "" {
+		repoRoot = filepath.Join(daemonLaunchCwd, repoRoot)
+	}
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...)
-	// The environment is INHERITED rather than filtered. Cleanup's runner filters
-	// because it carries a session's hook passthrough; this path has no session and
-	// no secrets to scope, and a filtered env here would change what git resolves
-	// (PATH, HOME, GIT_* overrides) — a behaviour change beyond the bug being fixed.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// Start git already cwd'd at repoRoot instead of inheriting the caller's cwd
+	// (the reset path is the daemon, whose cwd can be a managed worktree). See
+	// runGitCommandContextWithEnvironment for the inherited-cwd hazard the worktree
+	// writer-reaper's cwd match can hit. Gated on repoRoot being an existing
+	// directory for the same repo-gone-classification reason; the reset path's
+	// own call sites pass a live repo root, so the gate is a no-op there but
+	// keeps the two runners consistent if a future caller probes a gone path.
+	// repoRoot is now absolute (a relative one was resolved above), for the same
+	// relative-path double-resolution reason as the main runner (a relative
+	// repoRoot set as cmd.Dir makes git resolve `-C repoRoot` relative to that
+	// new cwd).
+	if filepath.IsAbs(repoRoot) {
+		// BoundedLstat, not os.Stat: this runner exists to bound filesystem
+		// access, and a plain Stat on a stalled FUSE/NFS root would wedge the
+		// call before the context-controlled git process ever starts (#5136
+		// Codex round 10).
+		if info, err := BoundedLstat(repoRoot); err == nil && info.IsDir() {
+			cmd.Dir = repoRoot
+		}
+	}
+	// Preserve ambient runtime/credential settings, but not repository selection:
+	// Git hooks export GIT_DIR, which otherwise overrides the explicit -C path
+	// and can turn a registered worktree into a false "ours to delete" answer.
+	cmd.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 	// Own process group, so the deadline tears down git AND anything it spawned.
 	// exec.CommandContext's default Cancel SIGKILLs only the direct child, which on
 	// a stalled unlink leaves the work still running against the dead mount.
@@ -116,6 +143,14 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 		return out, fmt.Errorf("%w: git %s made no progress in %s — a stalled filesystem or a process "+
 			"holding a file in the tree; git was killed rather than waited on: %w",
 			ErrWorktreeRemovalTimedOut, strings.Join(args, " "), localGitTimeout, ctx.Err())
+	}
+	// A non-zero git exit reached callers as a bare *exec.ExitError, whose
+	// Error() is only "exit status N" while the reason git gave sat unread in
+	// its Stderr (#3392). Not for the `combined` form: CombinedOutput routes
+	// stderr into out instead of Stderr, so there is nothing to add and
+	// commandFailureDetail correctly returns "".
+	if detail := commandFailureDetail(err); detail != "" {
+		return out, fmt.Errorf("git %s failed: %s (%w)", strings.Join(args, " "), detail, err)
 	}
 	return out, err
 }

@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
@@ -156,6 +158,34 @@ func TestReserveCreate_UnclaimableGuardStaysOutOfTheWay(t *testing.T) {
 	assert.Nil(t, renamed)
 }
 
+// TestReserveCreate_TaskOrphanTmuxRefusalKeepsCleanupCommandPasteable covers a
+// command-bearing refusal newly admitted to the shared task boundary. The wire
+// marker must classify the failure without trailing the advertised shell command
+// with another command fragment.
+func TestReserveCreate_TaskOrphanTmuxRefusalKeepsCleanupCommandPasteable(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	const title = "task-orphan"
+	tmuxName := tmux.SanitizedNameForRepo(title, repoPath)
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", tmuxName, "sh").CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+tmuxName).Run() })
+
+	_, _, release, _, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath:   repoPath,
+		Title:      title,
+		Program:    "claude",
+		TaskOrigin: true,
+		TaskRepoID: repoID,
+	})
+	if release != nil {
+		release()
+	}
+	require.Error(t, err)
+	require.True(t, isNotAttemptedErr(err), "the task refusal must remain refundable")
+	wantSuffix := "Clean it up with: " + shellsuggest.Command("tmux", "kill-session", "-t", tmuxName)
+	assert.True(t, strings.HasSuffix(err.Error(), wantSuffix), "cleanup command must remain the final pasteable text: %q", err)
+}
+
 // TestValidateTitleClaimable_IgnoresTheRowBeingRenamed is the other direction of
 // the fix, and the regression it could most easily have introduced. The archived
 // row is the claim the rename is about to release, so counting it against the new
@@ -172,14 +202,14 @@ func TestValidateTitleClaimable_IgnoresTheRowBeingRenamed(t *testing.T) {
 	hookRow := []session.InstanceData{{Title: "MyApp", Path: repoPath, BackendType: "remote"}}
 	require.True(t, hookRow[0].IsRemoteHook(), "the fixture must actually be a hook row or this asserts nothing")
 
-	err = manager.validateTitleClaimableLocked(repoID, repoPath, "MyApp", "claude", runtimeNamespaceRemoteHook, false, hookRow, archived)
+	err = manager.validateTitleClaimableLocked(repoID, repoPath, "MyApp", "claude", runtimeNamespaceRemoteHook, false, hookRow, archived, false)
 	require.NoError(t, err,
 		"the archived row being renamed must not be counted as the collision that blocks its own reuse")
 
 	// Without the exclusion the very same row refuses — proof the scan really does
 	// see it, so the NoError above is the exclusion working rather than a scan that
 	// never fired.
-	err = manager.validateTitleClaimableLocked(repoID, repoPath, "MyApp", "claude", runtimeNamespaceRemoteHook, false, hookRow, nil)
+	err = manager.validateTitleClaimableLocked(repoID, repoPath, "MyApp", "claude", runtimeNamespaceRemoteHook, false, hookRow, nil, false)
 	require.Error(t, err, "an unignored hook row with the same slug must still refuse")
 	assert.Contains(t, err.Error(), "already maps to hook name")
 }

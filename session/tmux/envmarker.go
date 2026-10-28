@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Ancestry env markers (#1104). Every process spawned inside an af tmux pane
@@ -34,7 +36,58 @@ const (
 	// the same sanitized name and Agent Factory home. AF_SESSION proves the
 	// reusable name, not which process generation carried it (#3309).
 	EnvMarkerGeneration = "AF_SESSION_GEN"
+	// envMarkerTestguardRun carries a test process's stable ownership identity
+	// across per-test AGENT_FACTORY_HOME overrides. It is deliberately private:
+	// production consumers authorize ownership with AF_HOME, while testguard uses
+	// the same string literal to diagnose test leaks without importing this package.
+	envMarkerTestguardRun = "AF_TESTGUARD_RUN"
 )
+
+// PanePidMarker is the pane-scoped user option that records a pane's identity
+// bundle — "<pane_pid>:<deaths>:<pane_tty>" — while it is alive. tmux ≥3.8
+// stops reporting pane_pid once a pane's root exits (#5319), but user options
+// live on the pane struct, which remain-on-exit preserves — so teardown can
+// keep naming the dead root by the pid it had while alive. The launch shim
+// stamps the bundle itself (sessionenv stamps — the shim IS the pane root),
+// which keeps the record current even across a user's commandless
+// respawn-pane, and ApplyRemainOnExit stamps still-alive pre-stamp panes as a
+// heal. The deaths, tty-name and @af_pane_cmd proofs are what let the reader
+// distrust a stamp a respawn carried into a new incarnation; what keeps a
+// respawn from running under the stale record at all is the shim's own
+// restamp-or-die (sessionenv).
+// Measured on tmux 3.8: a stamped pane answers `#{@af_pane_pid}` after
+// death while `#{pane_pid}` comes back empty. On tmux older than 3.8
+// pane_pid itself survives death, so a missing stamp loses nothing.
+const PanePidMarker = sessionenv.PanePidUserOption
+
+// paneDeathsMarker is the pane-died counter the freshness check compares the
+// stamp's deaths field against; paneCommandMarker pins the stamped
+// incarnation's pane_start_command for the byte-equality check. Both are
+// defined and documented in sessionenv beside the shim that writes them.
+const (
+	paneDeathsMarker  = sessionenv.PaneDeathsUserOption
+	paneCommandMarker = sessionenv.PaneCommandUserOption
+)
+
+// panePidStampArgs heals the pane identity record on an already-existing
+// pane: `-o` never overwrites a stamp that is already there (a pane that died
+// before the heal would re-expand #{pane_pid} to EMPTY on tmux ≥3.8 and
+// clobber its own good record), and `-F` expands the live pane_pid for a
+// still-running, pre-stamp pane. The pane-died hook is installed too — a
+// healed pane otherwise has no deaths counter, and its eventual death would
+// leave the stamp's freshness unprovable. The hook installs under a
+// dedicated array key (sessionenv.PaneDeathsHookName) so it neither clobbers
+// nor is clobbered by an operator's own pane-died hook.
+//
+// paneTarget is any pane target: `=name:` resolves to the session's active
+// pane, and a `%N` id targets a specific pane exactly.
+func panePidStampArgs(paneTarget string) []string {
+	return []string{
+		"set-option", "-o", "-F", "-p", "-t", paneTarget, PanePidMarker, sessionenv.PanePidStampFormat, ";",
+		"set-option", "-o", "-F", "-p", "-t", paneTarget, paneCommandMarker, "#{pane_start_command}", ";",
+		"set-hook", "-p", "-t", paneTarget, sessionenv.PaneDeathsHookName, sessionenv.PaneDeathsHookCommand,
+	}
+}
 
 // newSessionGeneration mints the process-generation identity stamped into one
 // tmux launch. It is a package var so tests can make exact argv assertions. The
@@ -67,11 +120,7 @@ func SetNewSessionEnvSupportForTest(supported bool) func() {
 // passing it there would fail session creation outright, which is far worse
 // than a missing diagnostic marker.
 func sessionEnvFlags(sanitizedName, generation string) []string {
-	supported := tmuxSupportsNewSessionEnv
-	if newSessionEnvSupportedOverride != nil {
-		supported = func() bool { return *newSessionEnvSupportedOverride }
-	}
-	if !supported() {
+	if !SessionEnvSupported() {
 		return nil
 	}
 	flags := []string{
@@ -80,6 +129,9 @@ func sessionEnvFlags(sanitizedName, generation string) []string {
 	}
 	if home, err := afHomeDir(); err == nil {
 		flags = append(flags, "-e", EnvMarkerHome+"="+home)
+	}
+	if testRun := os.Getenv(envMarkerTestguardRun); testRun != "" {
+		flags = append(flags, "-e", envMarkerTestguardRun+"="+testRun)
 	}
 	return flags
 }
@@ -99,6 +151,31 @@ func SessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 	return sessionHomeMarker(cmdExec, sanitizedName)
 }
 
+// SessionGenerationMarker reads a tmux session's AF_SESSION_GEN generation
+// marker with the same three-valued contract as SessionHomeMarker: (gen, true,
+// nil) when tmux answered and the session carries one, ("", false, nil) when
+// tmux answered and it carries none (a pre-generation pane or tmux < 3.2), and a
+// non-nil error when tmux did not answer — ownership remains UNKNOWN.
+//
+// Used by adopt to bind the verified generation identity through the
+// verification-to-track window: if the session is replaced between the marker
+// read and the track call, the generation will differ and adoption fails closed.
+func SessionGenerationMarker(cmdExec cmd.Executor, sanitizedName string) (generation string, present bool, err error) {
+	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerGeneration)
+}
+
+// SessionEnvVar reads a named variable from a tmux session's environment with
+// the same three-valued contract as SessionHomeMarker: (value, true, nil) when
+// tmux answered and the session carries the variable, ("", false, nil) when tmux
+// answered and it carries no such variable, and a non-nil error when tmux did
+// not answer — so the caller cannot mistake "absent" for "unknown".
+//
+// Used by the legacy-pane migration check to read the agent's credential-root
+// variable (e.g. CODEX_HOME) and verify account identity before refusing.
+func SessionEnvVar(cmdExec cmd.Executor, sanitizedName, varName string) (value string, present bool, err error) {
+	return sessionEnvMarker(cmdExec, sanitizedName, varName)
+}
+
 // sessionHomeMarker reads the AF_HOME ancestry marker from a tmux session's
 // environment (stamped via `new-session -e` at creation). A false present value
 // means tmux answered and the session carries no marker — created by a pre-marker
@@ -116,29 +193,35 @@ func SessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 // the named variable was absent. If neither query answers, ownership remains
 // unknown and cleanup decides whether the exact session has since vanished.
 func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
+	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerHome)
+}
+
+// sessionEnvMarker binds the query, response parser, and absence classifier to
+// one marker name so readers cannot accidentally classify a different variable.
+func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker string) (string, bool, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerHome)
+	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), marker)
 	markerTimedOut := ctx.Err() != nil
 	cancel()
 	if markerErr == nil {
 		line := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
-		if line == "-"+EnvMarkerHome {
+		if line == "-"+marker {
 			return "", false, nil
 		}
 		if strings.ContainsAny(line, "\r\n") {
-			return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: malformed multiline response", EnvMarkerHome, sanitizedName)
+			return "", false, fmt.Errorf("read %s marker for tmux session %s: malformed multiline response", marker, sanitizedName)
 		}
-		home, ok := strings.CutPrefix(line, EnvMarkerHome+"=")
+		value, ok := strings.CutPrefix(line, marker+"=")
 		if !ok {
-			return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: malformed response %q", EnvMarkerHome, sanitizedName, line)
+			return "", false, fmt.Errorf("read %s marker for tmux session %s: malformed response %q", marker, sanitizedName, line)
 		}
-		return home, true, nil
+		return value, true, nil
 	}
 	if markerTimedOut {
 		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
 	}
-	if !missingSessionEnvMarker(markerErr) {
-		return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: %w", EnvMarkerHome, sanitizedName, markerErr)
+	if !missingSessionEnvMarker(markerErr, marker) {
+		return "", false, fmt.Errorf("read %s marker for tmux session %s: %w", marker, sanitizedName, markerErr)
 	}
 
 	// The targeted result itself identified an absent variable. Ask for the
@@ -156,47 +239,76 @@ func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
 	}
 
-	return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: targeted query: %v; environment query: %w",
-		EnvMarkerHome, sanitizedName, markerErr, allErr)
+	return "", false, fmt.Errorf("read %s marker for tmux session %s: targeted query: %v; environment query: %w",
+		marker, sanitizedName, markerErr, allErr)
 }
 
 // missingSessionEnvMarker recognizes tmux's explicit absent-variable answer
 // from the TARGETED query. Exit status alone is insufficient: a transient
 // wrapper/server failure may also be nonzero, and a later command succeeding
 // cannot retroactively determine why the first failed.
-func missingSessionEnvMarker(err error) bool {
+func missingSessionEnvMarker(err error, marker string) bool {
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr) &&
-		strings.TrimSpace(string(exitErr.Stderr)) == "unknown variable: "+EnvMarkerHome
+		strings.TrimSpace(string(exitErr.Stderr)) == "unknown variable: "+marker
 }
 
 var (
-	newSessionEnvOnce      sync.Once
+	newSessionEnvMu        sync.Mutex
+	newSessionEnvCached    bool
 	newSessionEnvSupported bool
 )
 
-// tmuxSupportsNewSessionEnv probes `tmux -V` once per process. Unparseable
-// versions ("openbsd-7.4", exotic builds) conservatively report false.
+// resetNewSessionEnvProbeCache clears the cached `-e` support probe so the next
+// call re-probes `tmux -V`. Tests that install a tmux shim on PATH use this to
+// start from an unprobed state; production never calls it (the cache is valid
+// for the process lifetime once a probe succeeds).
+func resetNewSessionEnvProbeCache() {
+	newSessionEnvMu.Lock()
+	newSessionEnvCached = false
+	newSessionEnvSupported = false
+	newSessionEnvMu.Unlock()
+}
+
+// tmuxSupportsNewSessionEnv probes `tmux -V` and caches the answer for the
+// process lifetime — but only on SUCCESS. A transient probe failure (a one-shot
+// fork/exec error, a flaky wrapper script exiting nonzero on a single
+// invocation) is NOT cached: the next call re-probes, so a recovered tmux is
+// picked up instead of permanently downgrading the daemon to "tmux < 3.2".
+// Unparseable versions ("openbsd-7.4", exotic builds) are a successful probe
+// that conservatively reports false, and ARE cached — the version is
+// deterministic, not transient.
+//
+// This mirrors the sibling tmuxSupportsNoStart probe in server_scope_linux.go,
+// which deliberately avoids caching on error for the same reason
+// (TestNoStartProbeFailureDoesNotDowngradeAndIsRetried pins that intent there).
+// The earlier sync.Once here latched false on any error, permanently blinding
+// cleanup, adoption, orphan reaping, and doctor to every session created after
+// a single hiccup.
 //
 // Bounded like every other tmux command in this package (#2099), though the
 // hazard here is narrower and worth naming honestly: `tmux -V` is answered by the
 // CLIENT and never contacts the server, so a wedged SERVER — the failure mode
 // #2099/#2105 are about — cannot stall it. What can is a hanging tmux BINARY (a
 // wrapper script, a stalled network filesystem holding the executable). That is
-// defensive rather than reproduced, but the blast radius justifies the three
-// lines: this sits behind a sync.Once on the session-CREATE path, so a single
-// hang would wedge session creation for the entire process lifetime and every
-// later caller would block on the Once rather than retry.
+// defensive rather than reproduced, but the blast radius justifies the bound:
+// without it a single hang would wedge session creation for the entire process
+// lifetime and every later caller would block on the mutex rather than retry.
 func tmuxSupportsNewSessionEnv() bool {
-	newSessionEnvOnce.Do(func() {
-		ctx, cancel := tmuxTimeoutContext()
-		defer cancel()
-		out, err := outputTmuxBoundedWith(ctx, cmd.MakeExecutor(), "-V")
-		if err != nil {
-			return
-		}
-		newSessionEnvSupported = versionSupportsNewSessionEnv(strings.TrimSpace(string(out)))
-	})
+	newSessionEnvMu.Lock()
+	defer newSessionEnvMu.Unlock()
+	if newSessionEnvCached {
+		return newSessionEnvSupported
+	}
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := outputTmuxBoundedWith(ctx, cmd.MakeExecutor(), "-V")
+	if err != nil {
+		log.WarningLog.Printf("tmux -V probe failed; ancestry env markers disabled until a successful probe: %v", err)
+		return false
+	}
+	newSessionEnvSupported = versionSupportsNewSessionEnv(strings.TrimSpace(string(out)))
+	newSessionEnvCached = true
 	return newSessionEnvSupported
 }
 
@@ -259,13 +371,10 @@ func afHomeDir() (string, error) {
 	return filepath.Join(home, ".agent-factory"), nil
 }
 
-// newSessionEnvSupportedForAccounts reports the same tmux capability probe that
-// gates the ancestry markers, reused as the account gate.
-//
-// Reused rather than re-derived so the two cannot disagree about what tmux is
-// running, and honouring the same test override so account tests are not forced
-// to run against a real tmux binary.
-func newSessionEnvSupportedForAccounts() bool {
+// SessionEnvSupported reports whether af can stamp session identity through
+// new-session -e. Identity consumers must not trust inherited markers when the
+// launch path cannot replace them. Shares the cached probe and test override.
+func SessionEnvSupported() bool {
 	if newSessionEnvSupportedOverride != nil {
 		return *newSessionEnvSupportedOverride
 	}

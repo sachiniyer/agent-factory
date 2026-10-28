@@ -1,5 +1,10 @@
 # Configuration
 
+For anyone tuning `af`: which agent it launches, where worktrees go, and what a
+checked-in repository file may decide for everyone who clones it. After this page
+you will know the layers config is merged from, every key and its scope, and where
+each file lives.
+
 Agent Factory reads config from several layers, merged field by field:
 
 1. **Global** — `~/.agent-factory/config.toml`: your personal defaults, applied everywhere.
@@ -12,7 +17,13 @@ Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you 
 
 You can also read and write config from the CLI. Bare `af config get <key>` / `af config list` read the current repository's effective config; outside Git they fall back to global values. Add `--repo <repository-path>` to inspect another repository, and add `--explain` to see every candidate, whether it was present and allowed, and why it won or lost. Dotted reads such as `af config get program_overrides.codex --repo . --explain` show the source of one merged-table leaf. `--project` remains accepted as a deprecated read alias. The repository path is only a read-time selector: these commands do not register a project or write project identity. Displayed source locations preserve the selected/configured path spelling; symlinks are resolved only when paths must be compared for identity.
 
-`af config set <key> <value>` writes any global config key **in place**, preserving unrelated comments and ordering and validating the value before it writes. Scalars use their ordinary text form. Tables and the `session_env_passthrough` list use the same compact JSON shown by `af config get` and the two config panes, for example `af config set keys '{"quit":"Q"}'`; `theme` also accepts the named `nord` and `zenburn` presets. `program_overrides` and `limit_patterns` retain their convenient dotted single-entry forms, and `network.cors_allowed_origins` remains a comma-separated list. The canonical network spellings are `network.listen_addr`, `network.preview_listen_addr`, `network.require_token`, `network.require_loopback_token`, and `network.cors_allowed_origins`; the old flat spellings `listen_addr`, `preview_listen_addr`, `require_token`, `require_loopback_token`, and `cors_allowed_origins` remain permanent TOML/CLI aliases and the permanent JSON spellings. The grouped spellings `docker.mount_agent_credentials`, `ssh.host_key_verification`, and `sandbox.ssh` are canonical too; their old flat spellings remain permanent aliases, and if both forms occur in TOML the grouped value wins. Without `--project`, `set` edits the global config; with `--project <id-or-path>` it writes a permitted personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. A global write uses the same apply-on-save path as the TUI and web panes: most keys apply to the running daemon with no session loss, while each command prints the exact notice for values that wait for the next daemon or `af` launch. A `--project` write and a raw hand-edit are read the next time the relevant operation resolves that project's config.
+`af config set <key> <value>` writes any global config key **in place**, preserving unrelated comments and ordering and validating the value before it writes. Scalars use their ordinary text form. Tables and the `session_env_passthrough` list use the same compact JSON shown by `af config get` and the two config panes, for example `af config set keys '{"quit":"Q"}'`. `program_overrides` and `limit_patterns` retain their convenient dotted single-entry forms, while `network.cors_allowed_origins` and `limit_account_candidates` remain comma-separated lists. The canonical network spellings are `network.listen_addr`, `network.preview_listen_addr`, `network.require_token`, `network.require_loopback_token`, `network.allow_unauthenticated_network`, and `network.cors_allowed_origins`; the old flat spellings `listen_addr`, `preview_listen_addr`, `require_token`, `require_loopback_token`, `allow_unauthenticated_network`, and `cors_allowed_origins` remain permanent TOML/CLI aliases and the permanent JSON spellings. The grouped spellings `docker.mount_agent_credentials`, `ssh.host_key_verification`, `sandbox.ssh`, and `sandbox.binary` are canonical too; their old flat spellings remain permanent aliases, and if both forms occur in TOML the grouped value wins. Without `--project`, `set` edits the global config; with `--project <id-or-path>` it writes a permitted personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. A global write uses the same apply-on-save path as the TUI and web panes: most keys apply to the running daemon with no session loss, while each command prints the exact notice for values that wait for the next daemon or `af` launch. A `--project` write and a raw hand-edit are read the next time the relevant operation resolves that project's config. Both `set` and `unset` check the rewrite before saving it: the edited file must still load, and it must still mean what it meant — a rewrite that would move any value other than the key you named is refused, naming that value, with nothing written. That matters for a multiline value such as an `on_archive_command` shell script, whose text can legitimately contain a line shaped like `key = value` or `[section]`; such lines are string contents and are never edited (#3662).
+
+**A symlinked global config is followed, not replaced.** If `~/.agent-factory/config.toml` is a symlink — a dotfiles repository being the usual reason — the global-config writers resolve it and rewrite the file it points at, leaving the link in place; `af config migrate` puts its `.bak` beside that real file too, where a dotfiles `git status` will show it. af logs one line per link per process saying where the write landed. A **broken** link is an error naming both ends rather than a silent replacement: af cannot tell whether you meant it to create the missing target or to write a real file at the link's own path, so it stops and lets you decide. This applies to the **global** config only. In-repo `.agent-factory/config.toml` follows a link **within the repository** and refuses one that leaves it. When the link resolves to a file still inside the repo, af rewrites that target and leaves the link in place, exactly as it does for the global file — renaming over the link instead would replace it with a regular file and strand its target holding stale content, which is the bug #1092 closed. When the link resolves outside the repository, the save is refused, naming both ends and writing nothing; reads of that file are refused the same way. That containment rule is the difference, not a blanket refusal to follow: the in-repo file is checked into a repository whose contents a clone does not control, so a link someone else committed must never be able to aim af's write at a path outside your clone. **af's own managed files refuse a symlinked path outright** (#3672). The daemon bearer token, the daemon PID file, the editor-origin secret, the autostart unit/plist, the VS Code owner record, the in-place executable swap, the auto-update check cache, the event-queue cursor, and the plugin and skill files af regenerates all stop with an error naming both ends and write nothing. These are af's own files at paths af chose, so neither answer above fits: replacing the link would silently destroy an arrangement af never asked about, and writing through it would be a promise ("af will maintain a file wherever you point this") that none of them ever made. The refusal covers deletion too, which is the asymmetry that prompted it — an autostart unit written through a link but cleaned up by unlinking the link would have left af's content behind in the target, still being read by systemd. **`tasks.json` is the exception and follows a link**, like the global config: it is the one store in the af home that users write by hand, so keeping it in a dotfiles repository is the same reasonable arrangement, and af rewrites the target and leaves the link alone. Everything else af writes — its own state files, the TUI state, the project registry — keeps the historical behaviour of replacing a link.
+
+**A link that moves mid-write is refused, not raced.** af resolves the path once, locks the file that resolution named, and does the whole read-modify-write against it. If the link — or a symlinked `AGENT_FACTORY_HOME` above an ordinary `config.toml` — is repointed inside that window by a `stow` run, a `chezmoi` apply, a branch switch in your dotfiles repo, or an operator moving a mount, af stops and says so, naming both the file it locked and the file your path now reaches, and writes nothing. That is deliberate rather than cautious: a peer `af` that resolved the path after the move holds a *different* `.lock` over the file you would be about to rewrite, so writing anyway would silently drop one of the two edits. Re-run the command. Nothing about where the `.lock` lives changes for any arrangement — it sits beside the file af resolved to, which for a linked home is the directory the link resolves to, exactly where the kernel was already putting it.
+
+`af config migrate` ends a deprecated-key warning rather than repeating it. It rewrites the deprecated spellings in the global config to their current ones in place, prints the diff, and keeps the previous file as `config.toml.bak` (an existing backup is never overwritten; the copy is numbered). It changes spelling and never meaning — a single-line value is carried over as its own bytes while a multiline one is re-encoded compactly (its formatting can change, its contents cannot), the result is re-parsed before it is saved, a leading byte-order mark is preserved, and a rewrite that would change any effective value is refused instead. It is idempotent, and the readers of the old spellings stay, so an older config keeps loading and the running configuration is untouched. Before a downgrade, note that the grouped spellings have only been read since #3354 (2026-08-14): an older af falls back to the built-in default for a migrated key instead of reading it. That is conservative for most keys but not for two, both because the listener defaults to a live `127.0.0.1:8443`: migrating `network.require_token = true` costs an older binary the token it could read, and migrating an **empty** `network.listen_addr` hides that the web server was turned *off*, so an older binary starts one. `migrate` compares what such a binary saw before and after and prints a caution naming the backup that restores it. It refuses, naming the key, when a setting is written in **both** spellings with **different** values — af uses the grouped value at load time, but a migration must not make that tie-break permanent for you; when the two agree, the redundant flat line is simply dropped. `root_agents` is reported and left in place, because its successor is a *registered* project's personal `[root_agent]` and migrating it would mean registering projects for you. The report names each legacy path and the step: register the path as a project, set `enabled = true` plus the optional program in its personal `[root_agent]`, then remove its `root_agents` entry — the removal is what actually ends the warning. See [`af config`](reference/cli.md#af-config) in the CLI reference.
 
 ## Global config
 
@@ -22,6 +33,7 @@ You can also read and write config from the CLI. Bare `af config get <key>` / `a
 default_program = "claude"
 auto_update = true
 daemon_poll_interval = "1s"
+watcher_events_per_minute = 10
 branch_prefix = "username/"
 on_archive_command = 'find . -type d -name node_modules -prune -exec rm -rf {} +'
 worktree_root = "sibling"
@@ -30,16 +42,17 @@ log_max_size_mb = 50
 log_max_backups = 2
 update_channel = "stable"
 limit_auto_resume = false
+limit_account_candidates = []
 global_agent_skills = false
 limit_retry_interval = "30m"
 session_env_passthrough = []
-theme = "nord"
 
 [network]
 listen_addr = "127.0.0.1:8443"
 preview_listen_addr = ""
 require_token = false
 require_loopback_token = false
+allow_unauthenticated_network = false
 cors_allowed_origins = []
 
 [program_overrides]
@@ -49,34 +62,56 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 | Field | Description |
 |-------|-------------|
 | `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`. |
-| `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`. Agent-specific injection (claude's `--plugin-dir` flag, aider's `--read` flag, opencode's `OPENCODE_CONFIG` env var pointing at an af-owned config, devin's `--respect-workspace-trust false` to skip its workspace-trust modal, and — when `global_agent_skills = true` — the af skill file dropped into codex/gemini/amp/devin's own skills folder) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
+| `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`. Agent-specific injection (claude's `--plugin-dir` flag, aider's `--read` flag, opencode's `OPENCODE_CONFIG` env var pointing at an af-owned config, codex's `-c check_for_update_on_startup=false` so its startup update prompt never blocks a launch or restore — the flag is injected only when codex is the command's executable: the first word, optionally behind `VAR=val` assignments, one bare `exec`, or an `env` invocation. A command that wraps codex in anything af does not model (`sudo codex`, `ionice -c 3 codex`) or merely names codex as a later argument (`my-chat --persona codex`) is left untouched, so the update check still runs there and af answers the picker. A `program_overrides.codex` command carrying a `-c`/`--config` override for that key is left alone, and `-c check_for_update_on_startup=true` opts the prompt back in: codex runs its startup check because you asked for it, and af answers the picker Skip as it does for any launch the flag never touched, devin's `--respect-workspace-trust false` to skip its workspace-trust modal, and — when `global_agent_skills = true` — the af skill file dropped into codex/gemini/amp/devin's own skills folder) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
+| `default_accounts` | Optional map from agent enum to the credential **account** a new session for that agent runs as when the create names none (#3386). Keys are the agents that support accounts (`claude`, `codex`, `gemini`); values are account names as `af accounts list` spells them. Precedence is `--account` (or the TUI/web picker) → this key → the agent's ambient login, and the key merges per agent, so scoping `codex` leaves a `claude` session on whatever the lower layers said. Most useful **per project** — one project on your work identity, another on your personal one — which is why it admits the personal per-project layer and is rejected from checked-in in-repo config: identity policy is never checked in, and a committed account name means nothing to anyone else who clones the repository. A default naming an account that is not registered **refuses the create**, naming this key, rather than falling back to the ambient identity. An **empty value** is meaningful: it clears a global entry (`af config unset` without `--project` covers only the migrated alias settings — the `network.*` and backend keys — not this one), and in a project's personal config it opts that project out of a global default. See [Accounts](usage-limits.md#accounts). |
 | `session_env_passthrough` | Extra exact environment variable names agent sessions may inherit. Default: none beyond af's built-in runtime, Git/GitHub, network, and selected-agent authentication allowlist; Docker requires explicit names because repo config selects its image. Global-only; values stay in the process environment and must not be placed in this list. See [Session environment isolation](#session-environment-isolation). |
 | `auto_update` | Startup self-update. Defaults to `true`: an interactive `af` checks the configured `update_channel` on launch — at most once every 6 hours, so a relaunch inside that window costs nothing and makes no network call — and when a newer release exists it installs it, restarts the daemon from it (sessions survive), and relaunches you into the new version straight away. It never downgrades, never interrupts an `af` that is already running, and skips silently when the check fails or you are offline. It is also skipped whenever stdout is not a terminal, so a script or CI job that calls `af` keeps the binary it installed. A running daemon checks too, on the same 6-hour window and only when an interactive `af` has not just used it, so a box that never opens the TUI still records in its log when a newer release exists — the daemon only reports it; installing is still the launch path's job, or `af upgrade`. Set to `false`, or set `AGENT_FACTORY_AUTO_UPDATE=0`, to pin the installed version and stop both checks — no release lookup, no network call; `af upgrade` still works either way. A daemon can also be opted in to installing what it finds, through a transactional upgrade that preserves the previous binary and rolls back automatically if the new one does not come up healthy: set `AGENT_FACTORY_DAEMON_UPGRADE=1` in the daemon's environment. It is off by default and `auto_update = false` still overrides it. |
 | `daemon_poll_interval` | Daemon polling interval as a duration such as `"1500ms"` or `"30m"`; legacy integer milliseconds remain accepted. |
-| `network.listen_addr` | Address the daemon serves the bundled **web UI** + HTTP/WS API on, over **plain HTTP** (no TLS). Defaults to `127.0.0.1:8443` (loopback), so a fresh install has a browser client at `http://127.0.0.1:8443` that connects with no token and no login screen. Set it to `""` to **disable** the web server entirely (pure-unix daemon); set it to a routable host:port like `0.0.0.0:8443` to expose it to the network — pair that with **`network.require_token = true`** unless you trust the network, because a tokenless network bind serves the control API to anyone who can reach it. af **allows** it and warns once at daemon start rather than refusing (see [Remote daemon access](remote-http-auth.md#the-tokenless-network-warning)). af serves no TLS either way, so front a routable listener with a TLS-terminating proxy or a private network. A web-port bind conflict is logged and skipped — it never blocks the daemon. Global-only. See [The web client](web.md) and [Remote daemon access](remote-http-auth.md). |
-| `network.require_token` | Whether the web/TCP listener requires the bearer token for **non-loopback** (network) peers (default **`false`** — the token is off and auth is **opt-in**, so the bundled web UI opens with no login). What keeps that safe is the loopback-only `network.listen_addr` default. A **network** bind under this default serves an **unauthenticated** control plane to anyone who can route to it — including `DeliverPrompt`, which runs instructions through your agents. af permits that (the call is yours) and warns once at daemon start, in `af config set`, in `af doctor`, and in `af daemon status`; set `network.require_token = true` unless you trust every host that can reach the port. Note `network.require_loopback_token` does **not** substitute: it is inert while `network.require_token` is `false`. Set `true` to require the token from network peers (loopback stays exempt on a loopback bind — see `network.require_loopback_token`). The listener is plain HTTP, so the token travels over the connection as-is — front it with a proxy/private network. Global-only. |
+| `watcher_events_per_minute` | Maximum events each watch task may deliver in a rolling minute (default: 10). Must be positive. Excess source events are discarded rather than queued, and the task's cumulative `dropped_events` count records the loss. Applied on the next daemon start. |
+| `network.listen_addr` | Address the daemon serves the bundled **web UI** + HTTP/WS API on, over **plain HTTP** (no TLS). Defaults to `127.0.0.1:8443` (loopback), so a fresh install has a browser client at `http://127.0.0.1:8443` that connects with no token and no login screen. Set it to `""` to **disable** the web server entirely (pure-unix daemon); set it to a routable host:port like `0.0.0.0:8443` to expose it to the network — pair that with **`network.require_token = true`**, because a tokenless network bind would serve the control API to anyone who can reach it. Without the token (and without the `network.allow_unauthenticated_network` opt-in) af **refuses the TCP listener**: the daemon still starts and its unix sockets keep working, but the port never binds, the refusal is logged at ERROR and reported by `af doctor` and `af daemon status`, and `af config set` declines to write the combination (see [Remote daemon access](remote-http-auth.md#the-unauthenticated-network-listener)). af serves no TLS either way, so front a routable listener with a TLS-terminating proxy or a private network. A web-port bind conflict is logged and skipped — it never blocks the daemon. Global-only. See [The web client](web.md) and [Remote daemon access](remote-http-auth.md). |
+| `network.require_token` | Whether the web/TCP listener requires the bearer token for **non-loopback** (network) peers (default **`false`** — the token is off and auth is **opt-in**, so the bundled web UI opens with no login). What keeps that safe is the loopback-only `network.listen_addr` default. A **network** bind under this default would serve an **unauthenticated** control plane to anyone who can route to it — including `DeliverPrompt`, which runs instructions through your agents — so af **refuses the listener**: the daemon starts and its unix sockets keep working, but the TCP port stays unbound until you set `network.require_token = true` (`af token show` prints the token), move back to a loopback `network.listen_addr`, or set `network.allow_unauthenticated_network = true` to accept the exposure explicitly. Note `network.require_loopback_token` does **not** substitute: it is inert while `network.require_token` is `false`. Set `true` to require the token from network peers (loopback stays exempt on a loopback bind — see `network.require_loopback_token`). The listener is plain HTTP, so the token travels over the connection as-is — front it with a proxy/private network. Global-only. |
 | `network.require_loopback_token` | Whether even **loopback** peers (`127.0.0.1`/`::1`) must present the bearer token on the web/TCP listener (default `false`). The default loopback web UI is reachable with no token, which grants **any local process or user** the same access as you — weaker than the unix control socket, whose `0600` perms restrict it to your account. On a **shared/multi-user machine** set **both** `network.require_token = true` **and** this `true` so a same-machine browser must present the token (`af token show`), or set `network.listen_addr = ""` to disable the web server. It only tightens the loopback path, so it is **inert on its own**: `network.require_token = false` (the default) disables the token for all peers, loopback included. Global-only. |
-| `network.preview_listen_addr` | Address for a **separate** plain-HTTP listener that serves **web-tab previews** (and, on a loopback fixed port, a per-session **VS Code editor origin**) on their own origin, kept apart from `network.listen_addr` (#1856). Defaults to `""` (**disabled**) — no second port opens unless you set one. With it set, each web tab is served from its own `http://af<label>.localhost:<port>/` origin whose root **is** the dev server's root, so an app's **absolute-path assets** (`/assets/app.js`) load with no base-path configuration, and the distinct origin keeps one preview from reading another or reaching the web UI's token. `*.localhost` is resolved by the browser to its own loopback, so this is **same-machine only**: a remote viewer keeps the same-origin sandboxed preview on `network.listen_addr`. A non-loopback value gains a remote **browser** nothing, but it is not harmless: `*.localhost` binds the browser, not the port, so any client that reaches the address can send `Host: <tab>.localhost` itself, and a tab's hostname is the **only** credential this listener checks — a network bind makes every tab hostname a network-reachable capability, and one leaked through a log, a screenshot, or browser history stops being usable only from this machine. Editor tabs are withheld entirely while it is network-bound, and it is warned about once at daemon start. **Keep it on loopback.** It accepts the same `host:port` grammar as `network.listen_addr`, and a bind conflict is logged and skipped, never fatal. It serves **previews/editors only — never the daemon control API**. See [Web UI → per-tab preview origins](web.md#per-tab-preview-origins). Global-only. |
+| `network.allow_unauthenticated_network` | The explicit opt-in that releases the unauthenticated-listener refusal (default **`false`**). With a **non-loopback** `network.listen_addr` and `network.require_token = false`, af refuses to bind the TCP listener — the daemon starts and the unix control socket keeps working, but the port stays closed — because it would serve the full control API, `DeliverPrompt` included, to anyone who can route to it with no authentication and no TLS. Set this `true` only to accept that risk deliberately: the listener then binds and serves unauthenticated, and af says so once (daemon log, `af doctor`, `af daemon status`). It changes nothing on a loopback or tokened listener, and it applies live — turning it off under a serving tokenless network listener retires that listener at the next apply. Global-only, like the rest of the network surface. See [Remote daemon access](remote-http-auth.md#the-unauthenticated-network-listener). |
+| `network.preview_listen_addr` | Address for a **separate** plain-HTTP listener that serves **web-tab previews** (and, on a loopback fixed port, a per-session **VS Code editor origin**) on their own origin, kept apart from `network.listen_addr` (#1856). Defaults to `""` (**disabled**) — no second port opens unless you set one. With it set, each web tab is served from its own `http://af<label>.localhost:<port>/` origin whose root **is** the dev server's root, so an app's **absolute-path assets** (`/assets/app.js`) load with no base-path configuration, and the distinct origin keeps one preview from reading another or reaching the web UI's token. `*.localhost` is resolved by the browser to its own loopback, so this is **same-machine only**: a remote viewer keeps the same-origin sandboxed preview on `network.listen_addr`. A non-loopback value gains a remote **browser** nothing, but it is not harmless: `*.localhost` binds the browser, not the port, so any client that reaches the address can send `Host: <tab>.localhost` itself, and a tab's hostname is the **only** credential this listener checks — a network bind makes every tab hostname a network-reachable capability, and one leaked through a log, a screenshot, or browser history stops being usable only from this machine. Editor tabs are withheld entirely while it is network-bound, and it is warned about once at daemon start, in `af config set`, and in the TUI and web config panes. **Keep it on loopback.** It accepts the same `host:port` grammar as `network.listen_addr`, and a bind conflict is logged and skipped, never fatal. It serves **previews/editors only — never the daemon control API**. See [Web UI → per-tab preview origins](web.md#per-tab-preview-origins). Global-only. |
 | `network.cors_allowed_origins` | Exact-match allow-list of browser origins permitted to call the API cross-origin, e.g. `["https://af.example.com"]`. Empty (the default) emits no `Access-Control-Allow-Origin`, so no cross-origin browser can reach the API; non-browser clients (TUI/CLI, `curl`) are unaffected. The bundled web UI is same-origin and needs no entry here — this is for a web client you host yourself. Global-only. See [Remote daemon access](remote-http-auth.md). |
+| `debug_pprof` | Serve Go runtime profiles from the daemon at `GET /v1/debug/pprof/{profile}` — the stdlib `net/http/pprof` set (`heap`, `goroutine`, `allocs`, `profile`, `block`, `mutex`, `trace`). Defaults to **`false`**. It is served **only on the daemon's unix control socket**, whose `0600` permissions are the authentication, and is **never** mounted on `network.listen_addr` or `network.preview_listen_addr` — not behind the bearer token, not on loopback, not on any interface. While it is `false` the path returns the ordinary 404 unknown-route envelope, so a daemon that did not opt in is indistinguishable from one built before the endpoint existed. Both properties exist because a heap or goroutine profile is a dump of **live process memory**, which on this daemon holds session titles, worktree paths, and prompt text: turn it on to investigate and turn it back off. `AF_DEBUG_PPROF=1` in the daemon's environment overrides the key for one process. The `block` and `mutex` sampling rates stay at Go's default of `0`, so those two profiles read empty until a rate is set separately and enabling the endpoint costs nothing on its own. Read at **daemon start** — the route table is built when the listeners bind, so a change waits for the next start. Global-only. See [Daemon memory](dev/daemon-memory.md#profiling-the-daemon). |
 | `vscode_server_binary` | Binary that backs a **VS Code tab** (`af sessions tab-create <title> --kind vscode`, and the web UI's `+` menu). Empty (the default) **detects** one on the daemon's `PATH`: `code-server` first, then `openvscode-server`. af never bundles or installs either — when neither is found the tab still creates and the pane renders an install hint. Set a full path (a leading `~` is expanded) when the editor lives outside `PATH` or under another name; a configured path that is not executable is an **error**, never a silent fall back to detection. **Global-only**, like `root_agents`/`network.listen_addr`: it names a binary the daemon executes, so a repo's checked-in config must never be able to choose what af runs on your machine. See [VS Code tabs](web.md#vs-code-tabs). |
-| `branch_prefix` | Prefix for worktree branches (defaults to `username/`). |
-| `on_archive_command` | Optional operator-authored shell command run with the worktree as its current directory after every session pane has exited and immediately before the local worktree moves into the archive. Empty (default) disables it. It receives `AF_SESSION_ID`, `AF_SESSION_TITLE`, `AF_REPO_ROOT`, `AF_WORKTREE_PATH`, and `AF_ARCHIVE_PATH`, plus af's filtered session environment. A failure or 30-minute timeout is surfaced as a warning, but the archive still proceeds and remains restorable. Restore does not run a counterpart command; if this hook removes reconstructible dependencies, rerun their package manager after restoring. Set globally or in personal per-project config only; checked-in config is rejected because archiving a cloned repository must never execute repository-controlled code on the daemon host. af never supplies a default pruning command because it cannot distinguish disposable dependencies from deliberately retained fixture data. The example above is shaped to be safe to run on *every* archive in its scope: it succeeds when there is nothing to prune (a command that fails on a missing directory reports a hook failure for a healthy archive, and teaches you to ignore the warning that reports real ones), it reaches the per-package trees a workspace repo creates rather than only the root one, and `-type d` steps over a `node_modules` *symlink* so it never deletes through one into a package-manager store shared with your other worktrees. |
+| `branch_prefix` | Prefix for worktree branches (defaults to `username/`). Global-only for now: a personal per-project value is accepted and stored but ignored — every project uses this global prefix until [#4539](https://github.com/sachiniyer/agent-factory/issues/4539) lands the real feature. |
+| `on_archive_command` | Optional operator-authored shell command run with the worktree as its current directory after every session pane has exited and immediately before the local worktree moves into the archive. Empty (default) disables it. It receives `AF_SESSION_ID`, `AF_SESSION_TITLE`, `AF_REPO_ROOT`, `AF_WORKTREE_PATH`, and `AF_ARCHIVE_PATH`, plus af's filtered session environment. When the session's worktree was deleted outside af, there is nothing to move: the command runs in an empty scratch directory, `AF_WORKTREE_PATH` names the deleted path, and `AF_ARCHIVE_PATH` is empty — test for an empty `AF_ARCHIVE_PATH` if your command should skip that case. A failure or 30-minute timeout is surfaced as a warning, but the archive still proceeds and remains restorable. Restore does not run a counterpart command; if this hook removes reconstructible dependencies, rerun their package manager after restoring. Set globally or in personal per-project config only; checked-in config is rejected because archiving a cloned repository must never execute repository-controlled code on the daemon host. af never supplies a default pruning command because it cannot distinguish disposable dependencies from deliberately retained fixture data. The example above is shaped to be safe to run on *every* archive in its scope: it succeeds when there is nothing to prune (a command that fails on a missing directory reports a hook failure for a healthy archive, and teaches you to ignore the warning that reports real ones), it reaches the per-package trees a workspace repo creates rather than only the root one, and `-type d` steps over a `node_modules` *symlink* so it never deletes through one into a package-manager store shared with your other worktrees. |
+| `move_cmd` | Optional script the operator writes and af runs on the daemon host when it moves a live local session to a sandbox (contract: [backends.md](backends.md#moving-a-live-session-to-a-sandbox-move-script)). It receives the session spec as JSON on stdin and `AF_SSH` (ssh options, no destination), `AF_SSH_DEST` and `AF_SSH_FULL` in the environment; exit 0 continues the move, anything else aborts it. Empty (default) means no script. Global config only: checked-in config is rejected, because a repository must never choose a program af runs with the session environment and the operator credentials. |
 | `worktree_root` | Where new worktrees are created: `sibling` (default, next to the repo as `<repo>-<session>`) or `subdirectory` (under `~/.agent-factory/worktrees/<branch>`). |
 | `detach_keys` | Key combination that detaches from an attached session (defaults to `ctrl-w`). |
 | `log_max_size_mb` | Size cap in MB for `agent-factory.log`, the dedicated tmux server log, and per-task watch-script logs before they are rotated (defaults to 50). Must be positive. |
 | `log_max_backups` | How many rotated logs (`agent-factory.log.1`, `.2`, ...) to keep per log file; older ones are deleted (defaults to 2). `0` keeps none. |
-| `update_channel` | Release channel that auto-update and `af upgrade` follow: `stable` (default) tracks manual `1.x.y` releases only; `preview` opts into the automatic `1.x.y-preview-z` prereleases cut every 3 hours. Any other value falls back to `stable` with a warning. See [release-process.md](release-process.md). |
+| `update_channel` | Release channel that auto-update and `af upgrade` follow: `stable` (default) tracks manual `1.x.y` releases only; `preview` opts into the automatic `1.x.y-preview-z` prereleases cut every 3 hours. Any other value falls back to `stable` with a warning. See [release-process.md](dev/release-process.md). |
+| `upgrade_clear_unverifiable_artifacts` | What an upgrade does about binaries another upgrade staged beside the `af` executable and never cleaned up. A transaction preserves the running binary as `.af.af-upgrade-<id>.previous` so it can roll back, and a cleanup interrupted at the wrong moment can leave that file behind. af clears the ones it can account for on its own — the record beside the artifact names the agent-factory home that staged it, and if that home says the transaction is over, or nothing records an owner at all and nothing has touched the files for an hour, they are moved aside as `.debris-<timestamp>` and named in the log. It refuses, and names the file, only when there IS an owner record and af cannot read the home it points at: an unreadable claim is still a claim, and an unmounted home looks exactly like a finished transaction. Set this to `true` on a box where an upgrade keeps refusing on such a file and you have checked it yourself; af then sets those aside too. Defaults to `false`. Nothing is ever deleted — the bytes stay on disk under the `.debris-` name for you to remove. |
 | `root_agents` | **Legacy path map** of repositories that get an always-ensured `root` agent (default: none). It remains accepted forever for compatibility; use the current `root_agent` project profile for new configuration. See [Root agents](#root-agents-always-ensured). |
 | `root_agent` | **Current project profile** and singleton successor to `root_agents`: whether a **registered project** keeps a `root` agent and the command it runs (default: not enabled). A global default plus an optional personal per-project override; layers with the legacy `root_agents` map. See [The `[root_agent]` singleton](#the-root_agent-singleton). |
 | `limit_auto_resume` | Opt in to the daemon auto-resuming a session parked at a usage-limit wall once its limit window elapses (default: `false`). See [Usage-limit auto-resume](#usage-limit-auto-resume). |
+| `limit_account_candidates` | Ordered registered account names an unpinned usage-limited session may switch to before waiting (default: none). Global or machine-local personal-project only; checked-in config cannot choose an identity. |
 | `limit_retry_interval` | Fallback retry cadence (Go duration, e.g. `30m`) used only when `limit_auto_resume` is on **and** the limit banner carried no parseable reset time (default: `30m`). Empty or `0` disables the fallback. |
 | `global_agent_skills` | Opt in to af writing its `agent-factory` skill file into your **global** codex/gemini/amp/devin config directories so those agents discover af's CLI guidance (default: `false`). See [Agent guidance and your global agent config](#agent-guidance-and-your-global-agent-config). |
 | `docker.mount_agent_credentials` | Opt in to a `backend = "docker"` session bind-mounting the operator's on-disk credential file for **that session's own agent** (only), read-only, so a containerised agent can authenticate (default: `false`). Global-only: a repo selects the docker image, but only the operator grants it credential access. See [backends.md → Agent credentials in a container](backends.md#agent-credentials-in-a-container). |
 | `ssh.host_key_verification` | How the `backend = "ssh"` runtime verifies a remote host key: `strict` (default — verify, refuse an unknown or changed key), `accept-new` (trust-on-first-use: record an unknown key, still refuse a changed one), or `insecure` (no verification). Global-only: a repo selects `ssh.host`, but only the operator relaxes verification (a repo-settable waiver + repo-settable host would be a one-commit MITM). `accept-new` writes learned keys to an af-owned store under the AF home, never `~/.ssh/known_hosts`. See [backends.md → SSH backend](backends.md#ssh-backend). |
 | `sandbox.ssh` | Free-form ssh command that reaches a `backend = "sandbox"` host. Global-only because af executes it on the daemon host; a repository may select the sandbox backend but cannot choose this command. See [backends.md → Sandbox backend](backends.md#sandbox-backend). |
+| `sandbox.binary` | Daemon-local path to an `af` binary af streams to `backend = "sandbox"`/`backend = "ssh"` hosts instead of the daemon's own build or the matching release artifact — the air-gapped and unbuilt-platform escape hatch (default: unset). Global-only: the path lives on the daemon host and its contents run on the sandbox, so a repository must never choose either. |
+| `hosts` | Named host list: a table of `[hosts.<name>]` entries, each with `host` (the ssh destination — required), and optional `user`, `port`, `identity_file`, `workspace_root`, `host_key_verification` (`strict` | `accept-new` | `insecure`; default: the global `ssh.host_key_verification`, itself strict) and `use_ssh_config` (opt this one host into your `~/.ssh/config`; then af applies no host-key options of its own, so it cannot be combined with `host_key_verification`). Names match `^[a-z0-9][a-z0-9-]{0,62}$`; `identity_file` and `workspace_root` must be absolute paths; `workspace_root` is the directory on the host under which each session's own dir is created (default `~/.af-sessions`). Set the whole table with `af config set hosts '{"box1":{"host":"box1.tailnet.ts.net"}}'`. Global-only. `sandbox.ssh` and in-repo `[ssh] host` keep working as unnamed hosts. Invalid entries are dropped at load with a warning. |
+| `default_host` | Name of the `hosts` entry used when a session does not pick one; empty means none. `af config set` refuses a name that is not a listed host (and refuses rewriting `hosts` out from under it); a hand-edited one is ignored at load with a warning. Global-only. |
 | `limit_patterns` | Optional map from agent enum to a regex that overrides the built-in usage-limit **detection** banner for that agent (the built-in reset-time parser is kept). Default: none. See [Custom usage-limit detection](#custom-usage-limit-detection-limit_patterns). |
-| `theme` | Optional interface palette. Defaults to the named Nord preset; `zenburn` preserves the previous default, and a custom table accepts `#RRGGBB` values. The TUI and web share the palette while the browser keeps its local light/dark choice. See [Theme colors](#theme-colors-theme). |
+| `appearance` | TUI Light / Dark / System; `light`, `dark`, or `system` (default). Applied on the next TUI launch. |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
+| `web` | Browser-client display preferences as a `[web]` table (default `{"terminal_font_size_desktop":13,"terminal_font_size_phone":6.5}`). `web.terminal_font_size_desktop` is the web terminal's text size at desktop width; `web.terminal_font_size_phone` is its size at the phone breakpoint (`max-width: 768px`) — half the desktop pitch by default (#5492). Each accepts a number in [4, 32]; the terminal's `A−`/`A+` controls step (0.5 on phone, 1 on desktop) and save the class in use through the same write path. A browser picks up a saved value on its next config read. Global-only. |
+
+af caches Claude detection by `SHELL`, `PATH`, and `HOME`, so ordinary repeated
+config reads in one process reuse the same result. Changing one of those inputs
+triggers a fresh probe. When found, the command becomes the built-in
+`program_overrides.claude` value. Claude Code is optional: when neither an alias
+nor its binary is found and `program_overrides.claude` is not already configured,
+af leaves that override unset and writes one warning for that environment. Set
+`program_overrides.claude` to point af at another program.
+On first run, af materializes the detected override into `config.toml`; that
+persisted value remains until you edit it, even if the detection environment
+later changes.
 
 ### Agent approval behavior
 
@@ -172,8 +207,8 @@ The built-in allowlist keeps the pieces sessions need:
   resolved command (for example,
   `program_overrides.claude = "CLAUDE_CODE_USE_BEDROCK=1 claude"`). A
   command-local selector is trusted only when the entire command is one literal
-  Claude invocation (optionally through `env` or `exec`) or af's own generated
-  agent-server handoff. Compound commands, redirects, arbitrary wrappers, and
+  Claude invocation (optionally through `env` or `exec`). Compound commands,
+  redirects, arbitrary wrappers, and
   dynamic words require exporting the selector before starting af, or explicitly
   listing the provider credential names. Codex gets
   `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_HOME`,
@@ -222,8 +257,20 @@ in-repo `.agent-factory/config.toml` may set, and a checked-in value carrying on
 of those assignments is **rejected at load** with an error naming the selector:
 otherwise cloning a repository and starting a session would hand that
 repository's agent your cloud credentials. A repo may still choose *which*
-program runs — a path, flags, a wrapper — because that grants nothing. Set the
-selector in your own global config or export it in your shell if you want it.
+program runs — a bare name, a relative path, flags, a wrapper — because that
+grants nothing it cannot prove. An **absolute executable path is also rejected
+at load** in checked-in config: the launcher's credential grant treats absolute
+paths as operator-attributable, and a spelling the repository chooses can be
+aimed at content it controls — a file committed in another checkout of the same
+repo, or a payload `post_worktree_commands` writes during setup. And **any
+command-local environment change is rejected at load** in checked-in config — a
+shell assignment prefix like `LD_PRELOAD=./x.so codex` or an `env NAME=…`/
+`env -u`/`env -i`/`env -C` mutation — because the launch grant sees only the
+command string and cannot tell a checked-in assignment apart from one in your
+own global config. Absolute paths and environment-bearing overrides remain
+available in the global config and the machine-local personal per-project file,
+which only you control. Set the selector, the absolute path, or the assignment
+in your own global config or export it in your shell if you want it.
 
 Gemini's cloud modes work the same way, selected by `GOOGLE_GENAI_USE_VERTEXAI`
 or `GOOGLE_GENAI_USE_GCA`. Choosing *which* agent runs is also a repo's to make
@@ -251,38 +298,67 @@ that lets the repo-selected image receive it. New and respawned panes use the
 current list. A pane that was already running before an upgrade keeps the
 environment it started with until that process is restarted.
 
-### Theme colors (`theme`)
+### Appearance and legacy theme migration
 
-The terminal and browser palettes default to Nord, whose Polar Night surfaces,
-Snow Storm text, and Frost cyan accent form the shared semantic source. Choose
-the former default by name without copying its nineteen slots:
+Appearance has exactly **Light**, **Dark** and **System**, using two fixed product
+palettes. For the TUI, set the global TOML key `appearance = "system"`, or use
+`af config set appearance light` (also `dark` or `system`). The Config pane shows
+the same choice. Changes apply on the next TUI launch. This preference belongs
+to the machine where the TUI runs; a remote Config editor still edits its named
+remote target. It is global-only and is not accepted from a repository's config.
+Read it with `af config get appearance`; `af config list` includes it as well.
+The default is `system`. See the [global example](https://github.com/sachiniyer/agent-factory/blob/master/examples/config.toml).
 
-```toml
-theme = "zenburn"
-```
+System detects the terminal background through OSC 11, with `COLORFGBG` as the
+terminal library's fallback and **dark** when no background is available.
+Explicit Light/Dark bypass detection. The browser keeps its independent local
+header preference and follows OS appearance for System. The CLI edits the TUI
+preference; it has no persistent visual renderer and does not set the browser
+preference. Agent-owned ANSI output remains unchanged.
 
-The browser derives both light and dark tokens from the same daemon palette;
-its Auto/Light/Dark choice remains a local browser preference. For a custom
-palette, override any slot in the global `[theme]` table. Omitted or malformed
-slots fall back independently to the readable Nord default rather than making
-the configuration or interface unusable.
+Legacy global config migrates once on a normal config read — no separate
+`af config migrate` invocation is needed for this retirement:
 
-```toml
-[theme]
-accent = "#88C0D0"
-success = "#A3BE8C"
-warning = "#EBCB8B"
-error = "#CC8A91"
-pane_border_preview = "#B48EAD"
-```
+| Legacy value | Saved replacement |
+| --- | --- |
+| `appearance = "auto"` | `appearance = "system"` |
+| `theme = "light"` | `appearance = "light"` |
+| `theme = "dark"` | `appearance = "dark"` |
+| `theme = "auto"` or `theme = "system"` | `appearance = "system"` |
+| `theme = "nord"` or `theme = "zenburn"` | `appearance = "system"` |
+| Custom `[theme]` table | `appearance = "system"` |
 
-All custom values must be `#RRGGBB`. Unknown preset names fail validation with
-the available names; invalid custom values are ignored with a warning and the
-Nord default for that slot is used. The web additionally checks derived text
-colors against WCAG AA and state/focus colors against the 3:1 non-text floor,
-falling back to a readable built-in value when a custom combination misses it.
-`theme` is global-only and TOML-only, like `[keys]`: in-repo configs reject it
-so a cloned repository cannot recolor your interfaces.
+Legacy JSON `theme` strings and objects follow the same mapping: strings map
+like their TOML equivalents, and objects map like custom tables. TOML inline
+tables (`theme = { accent = "#ffffff" }`) and dotted table keys
+(`theme.accent = "#ffffff"`) also follow the custom `[theme]` table mapping.
+
+An existing `appearance` wins over every legacy theme value; `auto` means
+`system`, even beside a legacy light/dark theme. Migration removes the legacy
+key/table, logs the old key
+and the new `appearance` value, and persists the result idempotently: subsequent
+reads do not repeat the rewrite or migration log. Legacy `appearance = "auto"`
+normalizes to `system`; new writes accept only `light`, `dark`, and `system`.
+No preset or custom color is projected into either client's fixed roles.
+
+Read-only diagnostics preserve their no-write contract: `LoadConfigReadOnly`
+and `af config validate` do not persist migration changes.
+
+CLI access to `theme` and every `theme.*` key is explicitly rejected with a
+retirement error directing users to `appearance`; these keys are also removed
+from Config panes and assistant color-editor routes. This includes:
+
+- `theme.foreground`, `theme.foreground_strong`, `theme.foreground_muted`, `theme.foreground_dim`
+- `theme.background`, `theme.background_subtle`, `theme.background_panel`
+- `theme.accent`, `theme.success`, `theme.warning`, `theme.error`, `theme.info`, `theme.purple`
+- `theme.selection_background`, `theme.selection_foreground`
+- `theme.pane_border_default`, `theme.pane_border_selected`, `theme.pane_border_interactive`, `theme.pane_border_preview`
+
+The renderer-read `POST /v1/GetTheme` endpoint is retired. The launch-only
+`ApplyTheme` RPC is removed entirely: the TUI reads `appearance` locally.
+Launching a TUI must never apply pending listener/auth configuration edits.
+Explicit apply-on-save through `af config set` or the Config panes remains the
+operator action that applies daemon configuration.
 
 ### Root agents (always-ensured)
 
@@ -303,14 +379,14 @@ Keys are repository paths (a leading `~` expands to your home directory). Per-re
 Behavior and guarantees:
 
 - **Strictly opt-in and global-only.** Nothing gets a root agent unless you add it here, in *your* `~/.agent-factory/config.toml`. The key is rejected in in-repo configs, so cloning a repository can never opt your machine into an always-on agent.
-- **Adopt, never clobber.** If a session titled `root` already exists and is alive — however it was created — the daemon leaves it completely alone. Only a `root` whose tmux has died (status `Dead`) or that is missing entirely is (re-)created.
+- **Adopt, never clobber.** If a session titled `root` already exists and is alive — however it was created — the daemon leaves it completely alone. Only a `root` whose tmux has died (status `Dead`) or that is missing entirely is (re-)created. If the adopted session's command differs from the profile frozen when the daemon started, the daemon logs one warning for that repository with bounded, redacted labels for the configured and running commands. Run `af doctor` for the exact local comparison against the current config on disk. An adopted root whose launch command was never recorded — adopted, or launched before the field existed — reports `INFO` there ("unknown, not comparable") rather than a warning; the field is filled on the root's next launch. A recorded command is pinned to the launched pane process's (pid, start-time) identity, so a daemon restart's reattach keeps the claim when that same process still stands behind the tmux name — only a genuinely unverifiable reattach retires it. The remedy for a reported drift is to restart the daemon, then kill the root so the restarted daemon recreates it from the current profile.
 - **A re-created root keeps its conversation.** Healing a root replaces its session record rather than re-spawning into it (that is what makes the root always-ensured), so the daemon carries the recorded conversation across and relaunches the agent on it — the same `--resume` every other recovered session gets. The application log says which happened: resumed its prior conversation, or started with a fresh context. A fresh context is the deliberate fallback when the conversation cannot be recovered — the configured root program runs a different agent, it pins its own resume flag, or the provider no longer has that conversation — because an always-on root that exists outranks one that keeps its history.
 - **A root that came back without its history says so.** When a re-create does not demonstrably resume the prior conversation, the replacement carries a one-shot note that every rail renders on its row: `fresh context` when the context is provably gone, `context unknown` when the resolved command selects its own conversation and af cannot tell. The note survives a daemon restart and clears the first time you open that session's pane. A root that resumed cleanly carries no note.
-- **A re-created root keeps its tabs.** The rest of the tab strip rides across the same replacement: every terminal, process, web, and editor tab comes back with its name, its target, and its position. The processes behind them are new — the tmux server died, so nothing survived to reconnect to — so a terminal tab comes back at a fresh prompt and a process tab re-runs its recorded command, exactly as they do when any other session is restored. The application log reports how many came back.
+- **A re-created root keeps its tabs.** The rest of the tab strip rides across the same replacement: every terminal, process, web, and editor tab comes back with its name, its target, and its position. The tmux server died, so nothing survived to reconnect to — a terminal tab comes back at a fresh prompt, but a process tab restores inert (its recorded command is not re-run), exactly as in any other session restoration. The application log reports how many came back.
 - **The name `root` is reserved.** Normal session creation (TUI, `af sessions create`, the API, task spawns) rejects the title `root` (case-insensitively); auto-derived titles skip it.
 - **An explicit kill gets a grace window.** If you kill the `root` session (TUI `D`, `af sessions kill root`), the running daemon grants an in-memory grace: after about 2 minutes the root becomes eligible for re-creation on a following ensure pass. Restarting the daemon ends the grace immediately and re-asserts configured state. To keep the root down, first disable it in configuration: remove its legacy `root_agents` entry only if no other root-agent layer enables it, or set its personal per-project `[root_agent]` to `enabled = false`. Restart the daemon to apply the disable, then kill any `root` session that is still running.
 - **Failures back off but never give up.** If ensuring a root repeatedly fails (e.g. the configured path is not a git repository, or the tmux server is temporarily unusable), the daemon retries with exponential backoff that settles at one attempt every 5 minutes, logging each outcome to the application log (with an escalation to ERROR after 6 consecutive failures). The first attempt after the cause clears heals the root — no daemon restart needed.
-- Changes to `root_agents` are picked up on the next **daemon restart**.
+- Changes to `root_agents` are picked up on the next **daemon restart**. The table is path-keyed, so `af config set root_agents '<compact-json>'` writes the whole table; dotted path forms are not accepted. An already-running root session is adopted as-is, so after changing its program, disabling it, or removing its enabling entry, restart the daemon first and then kill that session.
 
 Because the default profile skips permission prompts, only opt in repositories where you are comfortable with a fully autonomous agent running at the repo root.
 
@@ -337,12 +413,12 @@ Semantics:
 
 - **Precedence (low → high): built-in `enabled=false` < global `[root_agent]` < legacy `root_agents[path]` < personal per-project `[root_agent]`.** Layers merge **by field**: a higher layer overrides `enabled` only if it set it (an explicit `false` counts) and `program` only if non-empty. So a personal `enabled = false` can disable a root that the global default — or a legacy `root_agents` entry — turned on.
 - **The global default reaches registered projects only.** It never scans disk for repositories; a project must be registered (`af projects add`) to receive it. Legacy `root_agents` entries keep working unchanged and forever.
-- **Editable everywhere.** `af config set root_agent '<json>'`, the TUI pane, and the web pane all write the whole validated profile through the same apply-on-save path.
+- **Editable everywhere.** `af config set root_agent '<json>'`, the TUI pane, and the web pane all validate the profile through the same apply-on-save path. The whole-table form merges the supplied fields: omitted fields keep their current values, so `af config set root_agent '{"enabled":true}' --project .` preserves a custom `program`. The dotted scalar forms merge the same way: `af config set root_agent.enabled true --project .` changes only `enabled`, and `af config set root_agent.program 'codex --profile work' --project .` changes only `program`. Use an explicit `"program":""` or `af config set root_agent.program ''` to clear the program override, or `af config unset root_agent --project .` to remove the personal profile.
 - **Strictly opt-in, and global or machine-local only.** Like `root_agents`, `[root_agent]` is rejected in checked-in in-repo config: it is valid only in *your* `~/.agent-factory/config.toml` or a project's **personal** per-project file, both of which are yours. Cloning a repository can never opt your machine into an always-on agent through either key.
-- **Restart-to-apply**, exactly like `root_agents`: changes take effect on the next daemon start. All the always-ensure guarantees above (adopt-never-clobber, reserved name, temporary kill grace window, back-off-but-never-give-up) apply identically to a root the singleton enables.
+- **Restart-to-apply**, exactly like `root_agents`: changes take effect on the next daemon start. The daemon's root-agent layers are frozen at startup, so a later config edit does not change the profile it is currently enforcing. An already-running root session is adopted as-is, so after changing its program, disabling it, or removing its enabling entry, restart the daemon first and then kill that session. The save notice names both steps, and `af doctor` reports an on-disk configured command that differs from the running command. All the always-ensure guarantees above (adopt-never-clobber, reserved name, temporary kill grace window, back-off-but-never-give-up) apply identically to a root the singleton enables.
 - **An unloadable personal config fails closed.** If a registered project's personal config file exists but cannot be loaded when the daemon starts — unreadable permissions, a TOML syntax error, an invalid key, or a file emptied by hand (the loader rejects a contentless file; `af config unset` deletes an emptied file instead of leaving one) — the daemon will not start (or re-create) a root agent for that project, whatever the lower layers say. A file af cannot load may hold the highest-precedence `enabled = false`, so every load failure is treated the same conservative way rather than guessing per cause. A root that is already running is left alone. The daemon logs a warning naming the project at startup and keeps re-attempting the read on its ensure cadence, healing in the safe direction only: a file that stays unreadable stays failed closed, and once it loads again the daemon resumes from whatever the file actually says — a disable stays down (now from config), an enable brings the root up, no restart needed. Edits to a config that *did* load at startup still apply on the next daemon start, like every other root-agent config change.
 - **An unlistable project registry fails everything closed.** The registry is the only index of the personal configs that can carry a disabling `enabled = false`, so if it cannot be listed when the daemon starts — a permissions problem on the registry directory itself, a filesystem error reading it — no root agent is started or healed at all, legacy `root_agents` entries included: with the registry unreadable, no repository can be proven un-disabled. The daemon logs an error naming the registry directory. An *absent* registry is not a failure — a machine with no registered projects keeps its legacy roots exactly as before. Roots that are already running are left alone. The daemon re-attempts the listing on its ensure cadence and resumes only after two consecutive matching reads (one backoff cadence apart — a mount flap that exposes an empty directory between passes must not release the latch), freezing that agreed snapshot as its configuration exactly as a daemon start would; a registry that stays unlistable keeps everything closed. A single record the registry *can* list but cannot read, parse, or validate is narrower: only that one project's root agent is suppressed (named in a warning, with its record directory for repair), while every other registered project and every legacy `root_agents` entry is unaffected.
-- **A project root that does not resolve keeps its personal layer.** If a registered project's recorded root does not resolve to a git repository when the daemon starts (an external disk or network mount that is not attached yet, a checkout that was deleted), its personal `[root_agent]` layer still applies, attributed by the recorded path. In particular a personal `enabled = false` keeps suppressing a legacy `root_agents` entry for the same repository even when that path only becomes resolvable after startup — previously the project was skipped wholesale and the legacy entry started the root with no personal layer. The `[root_agent]` singleton alone does not start a root for such a project until a daemon start where the path resolves; a legacy `root_agents` entry for the same repository keeps its per-tick retry and starts the root — personal layer applied — as soon as the path appears. This attribution works for a project recorded at its repository's main checkout path, which is what registration writes for a normal clone; a project recorded at a linked worktree of a bare clone keeps its personal layer only from a daemon start where its path resolves.
+- **A project root that does not resolve keeps its personal layer.** If a registered project's recorded root does not resolve to a git repository when the daemon starts (an external disk or network mount that is not attached yet, a checkout that was deleted), its personal `[root_agent]` layer still applies, attributed by the recorded path. In particular a personal `enabled = false` keeps suppressing a legacy `root_agents` entry for the same repository even when that path only becomes resolvable after startup — previously the project was skipped wholesale and the legacy entry started the root with no personal layer. While the path stays unresolved the `[root_agent]` singleton cannot start the root; a legacy `root_agents` entry for the same repository keeps its per-tick retry and starts the root — personal layer applied — as soon as the path appears. The daemon re-checks unresolved recorded paths on its ensure cadence: once the path resolves and the checkout there still carries the project's registry marker (a different clone reusing the path is left alone), the project resumes fully and its root can be created without a daemon restart. That recovery covers a project recorded at its repository's own root, which is what registration writes for an ordinary clone. A project whose recorded root is NOT its repository's root — a linked worktree of a bare clone, or a path that later resolves through a symlink to a different toplevel — still keeps its personal layer by recorded path, but resumes only at a daemon start where the path resolves.
 
 ### Usage-limit auto-resume
 
@@ -354,6 +430,7 @@ When a `claude`, `codex`, or `devin` session hits a plan usage-limit wall, af ma
 
 ```toml
 limit_auto_resume = true
+limit_account_candidates = ["work", "personal"]
 limit_retry_interval = "30m"
 ```
 
@@ -361,7 +438,10 @@ limit_retry_interval = "30m"
 - **When it resumes.** If the banner carried a parseable reset time, the daemon resumes shortly after that time (a small grace buffer is added because limit windows are rolling and approximate). A reset time already in the past resumes promptly.
 - **No parseable reset time.** Some banners don't state a reset time. In that case the daemon falls back to retrying on the fixed `limit_retry_interval` cadence (a Go duration such as `30m` or `1h`). Setting `limit_retry_interval` to empty or `0` leaves such a session surface-only.
 - **Re-limit backoff.** If a resumed session immediately hits the wall again, the daemon backs off exponentially (settling at one attempt every 5 minutes) rather than hammering a genuinely exhausted plan. Killing the session is always the off-ramp.
-- **Global-only, daemon behavior.** Both keys are rejected in in-repo configs. A save through `af config set` (or the web config editor) applies them to the running daemon at once — no restart; a raw hand-edit of `config.toml` takes effect on the next daemon start.
+- **Account switching is separately opt-in.** A non-empty ordered `limit_account_candidates` list lets an unpinned local session replace its current identity immediately instead of waiting. Only registered names in the current agent's account namespace are considered, and any account with a current limit observation is skipped. If none qualifies, the ordinary reset wait remains. The replacement prompt names both identities in the session. Docker account-scoped creates remain supported, but automatic Docker replacement stays disabled until af can persist both an immutable provision plan and the container identity required for conclusive crash cleanup.
+- **Explicit pins win.** A session created with `--account` never switches automatically. Scheduler-selected accounts remain eligible to move again if they later hit their own limit.
+- **Observation, not guessed quota.** af has no provider quota endpoint. “Eligible” means af has no current limit observation for that account, not that the provider guaranteed remaining entitlement.
+- **Operator-only identity policy.** All three keys are rejected in checked-in config. `limit_auto_resume` and `limit_retry_interval` are global; `limit_account_candidates` may be global or a machine-local personal-project override. A clone can never opt the operator into moving work to another identity.
 
 Resuming re-delivers the session's stored task prompt (task-driven sessions resume their work); an interactive session with no stored prompt is sent a bare `continue`, which loses the agent's prior in-context state.
 
@@ -378,7 +458,7 @@ the parsed reset time.
 ```toml
 [limit_patterns]
 claude = "Claude usage limit reached\\."
-codex  = "You've hit your usage limit"
+codex  = "You['’]ve hit your usage limit"
 ```
 
 - Keys must be a supported agent enum (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`).
@@ -394,25 +474,48 @@ The TUI's key bindings are rebindable from a `[keys]` table. Each entry maps an 
 ```toml
 [keys]
 quit = "Q"
-new = "c"
-up = ["u", "ctrl+p"]
+new = "ctrl+n"
+up = ["u", "ctrl+k"]
 tasks = "ctrl+t"
 ```
 
 - Key strings are the forms the terminal reports: a single character (`Q`, `/`, `?`), a named key (`up`, `enter`, `f5`, `space`), or a `ctrl+`/`alt+`/`shift+` combination (`ctrl+t`, `shift+up`).
-- **Rebindable actions:** `up`, `down`, `scroll_up`, `scroll_down`, `attach`, `new`, `kill`, `quit`, `help`, `new_remote`, `new_tab`, `close_tab`, `tasks`, `search`, `open_pr`, `copy_pr`, `hooks`, `config_agent`, `config_editor`, `open_pane`, `split_pane`, `hide_pane`, `pane_prev`, `pane_next`, `collapse`, `expand`, `next_section`, `prev_section`, `archive`, `restore`, `limit_retry`, `handoff`, `error_details`, `switch_project`. (Run `af keys` to print the full effective table.)
+- **Compatibility binding:** `[keys].new_remote` has no default key. If configured,
+  it opens the creation form with the backend field focused, where you choose the
+  backend; it no longer forces remote creation or checks local `remote_hooks` first.
+- **Rebindable actions:** `up`, `down`, `scroll_up`, `scroll_down`, `attach`, `new`, `kill`, `quit`, `help`, `new_remote`, `new_tab`, `close_tab`, `rename_tab`, `move_tab_left`, `move_tab_right`, `tasks`, `search`, `hooks`, `config_agent`, `config_editor`, `open_pane`, `split_pane`, `hide_pane`, `pane_prev`, `pane_next`, `collapse`, `expand`, `next_section`, `prev_section`, `archive`, `restore`, `limit_retry`, `handoff`, `error_details`, `switch_project`. (Run `af keys` to print the full effective table.)
 - `pane_prev` / `pane_next` are contextual: their default `left` / `right` bindings switch panes only while a workspace pane has focus. With tree focus, the same arrows keep the tree's collapse/expand behavior.
 - **Reserved keys** are rejected: binding any action to `enter`, `tab`, `shift+tab`, `esc`, `ctrl+]`, or a digit `1`–`9` is a startup error naming the key and why it's reserved (they drive interaction, the focus ring, overlay cancel, the interactive-mode exit, and the 1–9 tab jump respectively).
 - **`ctrl+c` is a fixed hard exit, not a reserved key.** Validation does *not* reject it — you can write `quit = "ctrl+c"` (or point any action at it) with no error — but `ctrl+c` always quits and is handled before the keymap ever sees the keypress, so binding an action to it has no effect: the hard exit wins. It is therefore not *effectively* rebindable, which is different from the reserved keys above that are outright rejected at load.
-- Any problem — an unknown action, an unparseable or reserved key, or two user overrides bound to the same key — is a **hard error at startup** that names the file and the offending action, so a typo can't silently leave you with a dead key. A user override on a key *suppresses* any default binding for that key rather than erroring, so an upgrade that ships a new default binding never breaks an existing config — the user's binding wins and the new action is simply unbound by default. The bottom menu and the `?` help overlay both reflect your rebinds.
+- Any problem — an unknown action, an unparseable or reserved key, or two user overrides bound to the same key — is a **hard error at startup** that names the file and the offending action, so a typo can't silently leave you with a dead key. **Compatibility exception:** the retired `open_pr` and `copy_pr` actions are ignored with a one-line warning naming the config file and removed action (once per file and action per process). Every other unknown action remains a hard startup error. A user override on a key *suppresses* any default binding for that key rather than erroring, so an upgrade that ships a new default binding never breaks an existing config — the user's binding wins and the new action is simply unbound by default. The bottom menu and the `?` help overlay both reflect your rebinds.
+
+**Intentional default-key conflict.** If you assign keys that another action has
+only by default, your overrides win and those defaults are suppressed:
+
+```toml
+[keys]
+new = "c"
+up = ["u", "ctrl+p"]
+```
+
+Here `c` creates a session and `ctrl+p` moves up. `limit_retry` and
+`switch_project` become unbound; `af keys` reports them as
+`— (c taken by new)` and `— (ctrl+p taken by up)` so every lost key remains
+visible and actionable. This is not a startup error because neither losing
+claim came from another user override.
+If only one key from a multi-key default is taken, the row keeps its remaining
+keys and names the loss separately, such as `up   up   (k taken by new)`.
+Suppressed fixed bindings use their description in the action column so the
+disabled behavior is still identifiable.
+
 - **Global-only.** `keys` is rejected in in-repo configs — a cloned repository can never rebind your terminal.
 - **TOML-only.** The keymap exists only in `config.toml`; a `keys` block in a legacy `config.json` is ignored with a warning.
 
 Run `af keys` to see the effective bindings (defaults plus your rebinds).
 
 The default TUI keys changed to ergonomic lower-case bindings in #1027:
-archive is `a`, restore is `r` (#1605), the task manager is `m`, copy PR URL
-is `y`, hooks is `e`, and preview scrolling is `ctrl+u` / `ctrl+d`. The previous
+archive is `a`, restore is `r` (#1605), the task manager is `m`, hooks is `e`,
+and preview scrolling is `ctrl+u` / `ctrl+d`. The previous
 defaults are not built-in
 aliases; restore any old binding you still want by pinning it here:
 
@@ -421,7 +524,6 @@ aliases; restore any old binding you still want by pinning it here:
 archive = "A"
 tasks = "S"
 split_pane = "alt+s"
-copy_pr = "P"
 hooks = "H"
 scroll_up = "shift+up"
 scroll_down = "shift+down"
@@ -433,13 +535,15 @@ af teaches each agent how to drive `af` itself — `af sessions whoami`, `af ses
 
 For **claude**, **aider** and **opencode**, af owns the file and points the agent at it for that launch only (`--plugin-dir`, `--read`, and `OPENCODE_CONFIG` respectively). Everything lives under af's own config directory, so it disappears when you uninstall af and is invisible to an agent af did not launch.
 
-**codex**, **gemini** and **amp** auto-discover skills from a directory in your home and offer no per-launch pointer to an extra one. The only way to reach them is to write a file into *your* config — `$CODEX_HOME/skills/agent-factory/`, `~/.gemini/skills/agent-factory/`, `~/.config/amp/skills/agent-factory/` — which outlives the session, survives uninstalling af, and applies when you run those agents by hand somewhere af has nothing to do with. Creating a session is not consent to that, so **af does not do it by default**:
+**codex**, **gemini**, **amp** and **devin** auto-discover skills from a directory in your home and offer no per-launch pointer to an extra one. The only way to reach them is to write a file into *your* config — `$CODEX_HOME/skills/agent-factory/`, `~/.gemini/skills/agent-factory/`, `~/.config/amp/skills/agent-factory/`, `~/.config/devin/skills/agent-factory/` — which outlives the session, survives uninstalling af, and applies when you run those agents by hand somewhere af has nothing to do with. Creating a session is not consent to that, so **af does not do it by default**:
 
 ```toml
 global_agent_skills = true
 ```
 
-With it on, af writes (and keeps up to date) a single `agent-factory/SKILL.md` under each of those agents' skills directories. With it off — the default — those three agents simply do not get af's guidance; everything else about the session is unchanged.
+With it on, af writes (and keeps up to date) a single `agent-factory/SKILL.md` under each of those agents' skills directories. With it off — the default — those four agents simply do not get af's guidance; everything else about the session is unchanged.
+
+For codex and gemini, that directory is the one each launch actually reads. A session with an account uses the account's directory. Otherwise a `CODEX_HOME`, `GEMINI_CLI_HOME` or `HOME` set in the launch command wins over af's own environment: with `program_overrides.codex = "CODEX_HOME=/srv/codex codex"` the skill goes to `/srv/codex/skills/agent-factory/`, the same store af watches for that session's conversation. If the command sets one of those variables to something af cannot read ahead of time, such as `$VAR`, af writes nothing for that launch.
 
 af only ever manages the file it wrote. Each one carries an af marker, and:
 
@@ -466,7 +570,7 @@ default_program = "codex"
 post_worktree_commands = ["npm install"]
 
 [program_overrides]
-codex = "/usr/local/bin/codex --profile work"
+codex = "codex --profile work"
 
 [remote_hooks]
 launch_cmd = "./infra/launch.sh"
@@ -480,9 +584,76 @@ delete_cmd = "./infra/delete.sh"
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
 | `backend`, `docker`, `ssh` | **In-repo only.** Select the runtime a repo's sessions run on. |
-| `auto_update`, `network.require_token`, `network.require_loopback_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.cors_allowed_origins`, `daemon_poll_interval`, `branch_prefix`, `on_archive_command`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `theme`, `root_agents`, `root_agent`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns`, `vscode_server_binary`, `global_agent_skills`, `docker.mount_agent_credentials`, `ssh.host_key_verification`, `sandbox.ssh`, `session_env_passthrough` | Operator-only. Setting them in-repo is rejected with an error naming the key. Most are global only; `branch_prefix`, `on_archive_command`, and `root_agent` also admit the machine-local personal-project layer. The daemon network-surface keys (`network.require_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `on_archive_command` and `vscode_server_binary` are rejected in-repo because they name code the daemon host executes. `session_env_passthrough`, `docker.mount_agent_credentials`, and `ssh.host_key_verification` are global-only so a cloned repo cannot grant its own docker image access to the daemon environment or the operator's credentials, nor waive ssh host-key verification (a repo-settable waiver + repo-settable `ssh.host` is a one-commit MITM) — a repo selects the image/host, only the operator relaxes the safeguard. `sandbox.ssh` is the strongest case of the same rule: af EXECUTES it on the daemon host, so a repo-settable version would be arbitrary code execution from a cloned repository rather than merely a widened permission — a repo selects `backend = "sandbox"`, only the operator says what command reaches the sandbox. All eight legacy flat spellings listed above remain accepted aliases so existing configs do not break. See [remote-http-auth.md](remote-http-auth.md). |
+
+| `auto_update`, `network.require_token`, `network.require_loopback_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.allow_unauthenticated_network`, `network.cors_allowed_origins`, `daemon_poll_interval`, `watcher_events_per_minute`, `debug_pprof`, `branch_prefix`, `on_archive_command`, `move_cmd`, `default_accounts`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `web`, `appearance`, `root_agents`, `root_agent`, `limit_auto_resume`, `limit_account_candidates`, `limit_retry_interval`, `limit_patterns`, `vscode_server_binary`, `global_agent_skills`, `docker.mount_agent_credentials`, `ssh.host_key_verification`, `sandbox.ssh`, `sandbox.binary`, `hosts`, `default_host`, `session_env_passthrough`, `upgrade_clear_unverifiable_artifacts` | Operator-only. Setting them in-repo is rejected with an error naming the key. Most are global only; `branch_prefix`, `on_archive_command`, `default_accounts`, `root_agent`, and `limit_account_candidates` also admit the machine-local personal-project layer — though a personal `branch_prefix` is accepted and stored but currently ignored, since the key is global-only in effect until [#4539](https://github.com/sachiniyer/agent-factory/issues/4539). `default_accounts` is rejected in-repo because it names an identity: a committed account name is meaningless for everyone else who clones the repository, and a repo must never choose whose quota its sessions spend. `limit_account_candidates` is rejected in-repo for the same reason, and it is the stronger case: it names the accounts af may move a session ONTO by itself. The daemon network-surface keys (`network.require_token`, `network.listen_addr`, `network.preview_listen_addr`, `network.allow_unauthenticated_network`, `network.cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `on_archive_command` and `vscode_server_binary` are rejected in-repo because they name code the daemon host executes. `move_cmd` is global-only for the same reason, more strongly: it is the script af runs, with the session environment in reach, when it moves a live session to a sandbox, and the user who owns the machine writes it. A repository must never choose a program af runs with the operator credentials, so a checked-in `move_cmd` is a load error, not a warning. `debug_pprof` is global-only for the adjacent reason: a profile is a dump of the daemon's live memory, so a repo-settable version would let merely cloning a repository arrange for one to be servable on the machine that runs it. `session_env_passthrough`, `docker.mount_agent_credentials`, and `ssh.host_key_verification` are global-only so a cloned repo cannot grant its own docker image access to the daemon environment or the operator's credentials, nor waive ssh host-key verification (a repo-settable waiver + repo-settable `ssh.host` is a one-commit MITM) — a repo selects the image/host, only the operator relaxes the safeguard. `sandbox.ssh` is the strongest case of the same rule: af EXECUTES it on the daemon host, so a repo-settable version would be arbitrary code execution from a cloned repository rather than merely a widened permission — a repo selects `backend = "sandbox"`, only the operator says what command reaches the sandbox. `sandbox.binary` is the same rule from the other side: it names a daemon-host file whose contents af streams to the sandbox and executes there, so a repo-settable version would let a cloned repository substitute the code the sandbox runs. All eight legacy flat spellings listed above remain accepted aliases so existing configs do not break. `upgrade_clear_unverifiable_artifacts` is global-only for the same reason as the rest of the upgrade surface: it governs what af may move aside next to its own executable, which a cloned repository has no business deciding. See [remote-http-auth.md](remote-http-auth.md). |
+
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
+
+On Linux, when the **daemon** creates the worktree — `af sessions create`, a
+task-started session, or a restore — each `post_worktree_commands` entry and
+`on_archive_command` run in their own transient systemd scope named
+`af-hook-<session id>-<run>-<n>.scope`, rather than inside
+`agent-factory-daemon.service`. Two consequences an operator can rely on:
+
+- **The daemon's resource accounting is the daemon's.** `systemctl --user status
+  agent-factory-daemon.service` no longer charges your build's memory and CPU to
+  the daemon, so a `MemoryMax=`/`CPUQuota=` you set on the unit constrains the
+  daemon rather than your `npm install`. Each hook's own cost is visible on its
+  scope (`systemctl --user status 'af-hook-*'`).
+- **A running hook survives a daemon restart.** The scope has no dependency edge
+  to the daemon unit, so restarting or auto-upgrading the daemon does not kill an
+  in-flight build. It is stopped when af is about to rebuild or delete that
+  worktree, and left alone otherwise.
+
+  The restarted daemon also picks that hook back up rather than forgetting it.
+  It waits for the survivor to finish, then resumes the remaining
+  `post_worktree_commands` entries in order, each in its own scope and output
+  log. The original list is saved before launch; configuration edits do not
+  change a pending run. Publication waits at most two seconds to acquire the
+  journal lock; on timeout it reports that another process holds the lock and
+  the hooks could not start. Started entries are never replayed, and completed or
+  deliberately cancelled lists are not resumed. Only the owning managed session
+  can adopt a saved list, after verifying worktree registration and Git linkage.
+  A hook may switch branches or detach HEAD within that verified worktree without
+  preventing the remaining entries from running. A missing or replaced checkout
+  leaves the journal pending for normal worktree recovery. External `--here`, tombstoned, and archived sessions
+  never resume it. Runs without a progress record or recorded owning session ID
+  keep survivor observation only.
+
+  Safe kill/archive teardown removes finished journals and their receipts after
+  hook writers have stopped. Interrupted retirements are reclaimed after grace
+  and lease/liveness checks even while their owning session stays active.
+  Standalone pruning uses the same bounded journal-lock acquisition as publication.
+  If cancellation encounters an unreadable journal,
+  it keeps retrying terminalization; teardown refuses to modify the checkout
+  until the journal is terminal or provably absent/invalid. On creation, completed
+  journals whose sessions no longer exist are pruned to the newest 20 and a maximum age of 14 days, excluding
+  files modified within five seconds. A live local runner holds a publication
+  lease across launch gaps. Leased journals, live scopes, and unfinished journals
+  with stored owners are preserved; old unfinished ownerless journals can be
+  reclaimed once both scope and launcher are absent. Unpublished receipt
+  directories are removed after a failed publication; unreferenced directories left by a crash are pruned after
+  the five-second grace period. Malformed or unreadable journals protect ambiguous
+  receipts while independently valid journals can still be pruned. Pruning
+  completed journals is skipped when session ownership or scope
+  liveness cannot be established.
+  A session whose hook is still running reports it as in flight exactly as it
+  did on its first run, so the agent's startup budget is not charged for the
+  build, and a task's `on_complete` teardown waits instead of moving the tree
+  out from under it. The hook itself is neither restarted nor stopped: it is
+  watched until it exits.
+
+  A hook is discoverable from the instant it is launched, not from the instant
+  its scope appears. Before a scope is registered the launching `systemd-run` is
+  itself the handle, so af waits for it rather than treating the missing unit as
+  proof the worktree is free. That wait is normally imperceptible; if a launcher
+  never registers — a user manager that stops answering — af refuses to rebuild
+  or archive that worktree and names the pid, rather than moving a tree a hook is
+  about to be started in.
+
+Sessions created from the TUI or the CLI in-process are unaffected — those hooks
+run exactly as before — and on macOS the behaviour is unchanged everywhere.
 
 ### Backend runtime (`backend`, `docker`, `ssh`)
 
@@ -492,9 +663,10 @@ it per `af sessions create`:
 | Value | Runtime |
 |-------|---------|
 | `local` (default, or unset) | Today's in-process runtime: the agent runs as a tmux session in a git worktree on the machine running the daemon. |
-| `hook` | The remote-hook backend — a bring-your-own provisioner driven by the `[remote_hooks]` scripts (equivalent to the TUI's "new remote session"). |
+| `hook` | The remote-hook backend — a bring-your-own provisioner driven by the `[remote_hooks]` scripts. In the TUI's creation form, press `ctrl+r` to open the backend picker and select `hook`. |
 | `docker` | Run the workspace + agent in a container started from `[docker].image`. |
 | `ssh` | Run the workspace + agent on `[ssh].host` over ssh. |
+| `sandbox` | Run the workspace + agent on whatever the operator's global `sandbox.ssh` command reaches — a free-form ssh line for jump hosts, `ProxyCommand`, bastions. `sandbox.ssh` is global-only (it executes on the daemon host), so a repo can select `backend = "sandbox"` but cannot dictate the command. |
 
 ```toml
 backend = "docker"
@@ -512,6 +684,16 @@ identity_file = "~/.ssh/id_ed25519"
 
 An unknown `backend` value (or `--backend`) is reported when the session's
 runtime is resolved at create time, naming the valid options.
+
+An unknown key inside `[docker]` or `[ssh]` — `runargs` for `run_args`, say — is
+ignored, so the setting it was meant to carry has no effect. af warns about it:
+on stderr when you run an `af` command (except under `--json`, whose stderr is
+reserved for the envelope), as a WARNING in the log (including the daemon's), and
+as a WARN finding in `af doctor`. The warning names the file and the key and,
+when a known key is close, suggests it (`did you mean "run_args"?`). Key case does
+not matter: `Image` and `image` are the same key. A later release will refuse to
+load a file with an unknown `[docker]`/`[ssh]` key, so fix these when you see
+them ([#4845](https://github.com/sachiniyer/agent-factory/issues/4845)).
 
 ### In-repo file name: `config.toml` or `config.json`
 
@@ -533,7 +715,7 @@ An in-repo config executes what it configures: `post_worktree_commands` run afte
 
 ## Personal per-project config
 
-The global config applies everywhere and the in-repo config is checked in for everyone who clones a repository. Sometimes you want neither: a preference that is **yours**, on **this machine**, for **one project** — a different default agent for your work monorepo than your side projects, a project-specific `program_overrides` path, a branch prefix that matches a team convention. That is the personal per-project layer.
+The global config applies everywhere and the in-repo config is checked in for everyone who clones a repository. Sometimes you want neither: a preference that is **yours**, on **this machine**, for **one project** — a different default agent for your work monorepo than your side projects, a project-specific `program_overrides` path, an archive-cleanup command only this project needs. That is the personal per-project layer.
 
 It lives outside the repository, under your agent-factory home:
 
@@ -558,7 +740,7 @@ af config set program_overrides.claude "/opt/claude --verbose" --project prj_012
 af config unset default_program --project ~/work/myrepo   # fall back to the lower layers
 ```
 
-Only preference/operator keys admit this layer: **`default_program`**, **`program_overrides.<agent>`**, **`branch_prefix`**, **`on_archive_command`**, and the **`[root_agent]`** table (whether this project keeps a `root` agent — the highest-precedence root-agent layer, so it can disable one the global default or a legacy `root_agents` entry enabled). `on_archive_command` is safe here because the file is machine-local and operator-written; the same key is rejected from checked-in in-repo config. Setting a global-only key (`network.listen_addr`, daemon tuning, …) or a repo-contract key (`backend`, `docker`, `ssh`) per project is rejected with the location it actually belongs to. Setting a value **equal** to the lower layer is still a present, winning override — use `af config unset` to genuinely fall through again; it removes only the key you name (comments and other keys are preserved) and deletes the file once its last override is cleared.
+Only preference/operator keys admit this layer: **`default_program`**, **`program_overrides.<agent>`**, **`default_accounts.<agent>`** (which credential account this project's sessions for that agent run as), **`branch_prefix`** (accepted and stored but ignored for now — it is global-only in effect until [#4539](https://github.com/sachiniyer/agent-factory/issues/4539), and both `af config set --project` and a load of this file warn about that), **`on_archive_command`**, **`limit_account_candidates`** (which registered accounts a usage-limited session in this project may switch to), and the **`[root_agent]`** table (whether this project keeps a `root` agent — the highest-precedence root-agent layer, so it can disable one the global default or a legacy `root_agents` entry enabled). `on_archive_command` is safe here because the file is machine-local and operator-written; the same key is rejected from checked-in in-repo config. Setting a global-only key (`network.listen_addr`, daemon tuning, …) or a repo-contract key (`backend`, `docker`, `ssh`) per project is rejected with the location it actually belongs to. Setting a value **equal** to the lower layer is still a present, winning override (`branch_prefix` aside — its personal value never wins until [#4539](https://github.com/sachiniyer/agent-factory/issues/4539)) — use `af config unset` to genuinely fall through again; it removes only the key you name (comments and other keys are preserved) and deletes the file once its last override is cleared.
 
 Precedence for a key that admits every layer is:
 
@@ -566,7 +748,18 @@ Precedence for a key that admits every layer is:
 app default → global → in-repo (shared) → personal per-project
 ```
 
-Inspect exactly which layer wins, and why, with `af config get <key> --repo <path> --explain` (or `af config list --repo <path> --explain`): the trace shows the personal-project candidate alongside the others, marked won, shadowed, absent, or — for a key that cannot be overridden per project — disallowed. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+Inspect exactly which layer wins, and why, with `af config get <key> --repo <path> --explain` (or `af config list --repo <path> --explain`): the trace shows the personal-project candidate alongside the others, marked won, shadowed, absent, ignored, or — for a key that cannot be overridden per project — disallowed. For the live-resolved keys (`default_program`, `program_overrides`, `default_accounts`, `on_archive_command`, `limit_account_candidates`) changes take effect the next time the relevant operation resolves that project's config, the same as a hand-edit. For the startup-only `[root_agent]` table the running daemon keeps its frozen startup value — a daemon restart is required for it to take effect. `branch_prefix` is the exception in this list: a personal value is written and kept, but it never wins — `af config list --repo` marks the shown global value "(project override ignored: not supported yet)" until [#4539](https://github.com/sachiniyer/agent-factory/issues/4539).
+
+### Project colors
+
+Give a registered project a color so you can find its browser tab or window quickly. The web client paints the frame around the session and the tab's favicon with the selected project's color:
+
+```bash
+af projects color ~/work/myrepo '#e11d48'   # a prj_ id or any path inside the project
+af projects color ~/work/myrepo ''          # clear it
+```
+
+In the web client, open the project menu and pick a swatch, a custom color, or **No color**. Picking a color for a project that is known only from its sessions registers it first. The color is stored beside the project record in `appearance.json`, so it is machine-local like the rest of this layer.
 
 ## Migrating from JSON
 
@@ -582,7 +775,7 @@ The **in-repo** file is not auto-converted — see [In-repo file name](#in-repo-
 
 ## Where state lives
 
-All data (sessions, tasks) is scoped to the current git repository — the TUI shows only what's relevant to the active project. Press `Ctrl-p` to switch projects without restarting.
+All data (sessions, tasks) is scoped to the current git repository — the TUI shows only what's relevant to the active project. Press `ctrl+p` to switch projects without restarting.
 
 | Path | Contents |
 |------|----------|
@@ -592,6 +785,7 @@ All data (sessions, tasks) is scoped to the current git repository — the TUI s
 | `~/.agent-factory/instances/<repoID>/instances.json` | Persisted sessions, per repo. |
 | `~/.agent-factory/tasks.json` | Tasks (see [tasks.md](tasks.md)). |
 | `~/.agent-factory/logs/task-<id>.log` | Per-task watch-script logs. Rotated with the same `log_max_size_mb`/`log_max_backups` policy as the application log (`task-<id>.log.1`, `.2`). |
+| `~/.agent-factory/logs/hooks/{post-worktree,on-archive}-<run>.log` | Complete stdout/stderr retained for a failed or daemon-interrupted operator hook command, in a private per-run file the hook can keep writing across a daemon restart. Failure messages include the exact path and a bounded excerpt of the last output lines; normally completed logs are removed. Opening a hook log prunes kept `*-v1-*.log` files to the newest 20 per kind and removes those last modified more than 14 days ago, excluding active logs protected by an inherited descriptor lock, the file being opened, and files modified less than 5 seconds ago. Closing a completed log refreshes its modification time before releasing the lock, starting retention and the five-second grace period at completion. If timestamp refresh fails, a private `<log>.done` completion sidecar supplies that clock instead; retention uses the later of the log and sidecar modification times, and cleanup removes both files. No sidecar is created when timestamp refresh succeeds. Unversioned logs from older versions or filesystems where locking fails are preserved for manual cleanup after their hooks stop; locking failures disable pruning for that run without preventing the hook from running. Individual run output is not size-capped; `af doctor` warns when total file size under `logs/hooks` exceeds 100 MiB. |
 | `~/.agent-factory/tmux-server.log` | Linux tmux server stdout/stderr and wrapper exit evidence. The daemon starts the shared server in a dedicated user scope and rotates this file with the same policy as the application log. |
 | `~/.config/agent-factory/agent-factory.log` | Application log (`os.UserConfigDir` on other platforms). Rotated once it exceeds `log_max_size_mb` (default 50 MB); the most recent `log_max_backups` rotations (default 2) are kept as `agent-factory.log.1`, `.2`. |
 

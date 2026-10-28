@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -84,10 +85,6 @@ func (target sessionActionTarget) restoreRequest() daemon.RestoreSessionRequest 
 	return daemon.RestoreSessionRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
 }
 
-func (target sessionActionTarget) refreshPRInfoRequest() daemon.RefreshPRInfoRequest {
-	return daemon.RefreshPRInfoRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
-}
-
 // newStatusPollHolder mints an identity for one HOLDER of the daemon's pause
 // lease (#3027). The daemon keys the lease by holder so a release only lifts the
 // pause when the last holder leaves; a holder that is not unique per lifecycle
@@ -125,14 +122,22 @@ func (target sessionActionTarget) resumeStatusPollRequestAs(holder string) daemo
 	}
 }
 
-func (target sessionActionTarget) handoffRequest(to string) daemon.HandoffSessionRequest {
+func (target sessionActionTarget) handoffRequest(to string, accounts ...string) daemon.HandoffSessionRequest {
+	account := ""
+	if len(accounts) > 0 {
+		account = accounts[0]
+	}
 	return daemon.HandoffSessionRequest{
-		ID: target.id, Title: target.title, RepoID: target.repoID, To: to,
+		ID: target.id, Title: target.title, RepoID: target.repoID, To: to, Account: account,
 	}
 }
 
 func (target sessionActionTarget) resumeFromLimitRequest() daemon.ResumeFromLimitRequest {
 	return daemon.ResumeFromLimitRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
+}
+
+func (target sessionActionTarget) confirmHandoffDeliveryRequest() daemon.ConfirmHandoffDeliveryRequest {
+	return daemon.ConfirmHandoffDeliveryRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
 }
 
 func (target sessionActionTarget) createTabRequest(kind session.TabKind) (daemon.CreateTabRequest, bool) {
@@ -155,4 +160,38 @@ func (target sessionActionTarget) closeTabRequest(tabID, tabName string) daemon.
 		ID: target.id, Title: target.title, RepoID: target.repoID,
 		TabID: tabID, TabName: tabName,
 	}
+}
+
+func (target sessionActionTarget) reorderTabRequest(tabID, tabName string, newIndex int) daemon.ReorderTabRequest {
+	return daemon.ReorderTabRequest{
+		ID: target.id, Title: target.title, RepoID: target.repoID,
+		TabID: tabID, TabName: tabName, NewIndex: newIndex,
+	}
+}
+
+// renameTabRequest addresses the tab by its stable TabID the way
+// closeTabRequest does (#1929): a name is freed by a close and handed to the
+// next tab that asks for it, so the id — minted once and never reused — is what
+// names the tab the user was actually looking at when the prompt opened.
+// TabName rides along as the compatibility fallback for a pre-#1738 roster with
+// no ids, exactly as closeTabRequest does.
+func (target sessionActionTarget) renameTabRequest(tabID, tabName, newName string) daemon.RenameTabRequest {
+	return daemon.RenameTabRequest{
+		ID: target.id, Title: target.title, RepoID: target.repoID,
+		TabID: tabID, TabName: tabName, NewName: newName,
+	}
+}
+
+// streamAddress returns the WS stream address for inst. A session with a
+// recorded stable id is dialed by it, ID-only (apiclient.StreamSession sends
+// by=id): a killed-and-recreated row cannot inherit the pane's input the way a
+// reused title can, a deferred attach really does reach the captured session
+// (#716's intent, carried onto the wire), and a stale id is refused rather than
+// reinterpreted as some other session's title (#4760 review). A pre-ID record
+// keeps the repo-scoped title contract: an empty id must not occupy the id slot.
+func streamAddress(inst *session.Instance, repoID string) apiclient.StreamSession {
+	if inst.ID != "" {
+		return apiclient.StreamSession{ID: inst.ID}
+	}
+	return apiclient.StreamSession{Title: inst.Title, RepoID: repoID}
 }

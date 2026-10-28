@@ -391,15 +391,15 @@ func TestPTYBrokerReDialStopsWhenTheLastSubscriberLeaves(t *testing.T) {
 		t.Fatal("the re-dial never reached StartCapture, so the in-flight window was never entered")
 	}
 
-	// Detach CONCURRENTLY. Close blocks: remove() hands off to maybeStopCapture,
-	// which waits for captureMu — held by the dial we are gating. That is the real
-	// shape (a detach during a slow handshake genuinely waits), so the test has to
-	// let it happen rather than serialise it and deadlock itself.
+	// Detach CONCURRENTLY. Close returns after removing the subscriber (#4319),
+	// while its asynchronous maybeStopCapture waits for captureMu — held by the
+	// dial we are gating. The test has to let that teardown park rather than
+	// serialise it and deadlock itself.
 	closed := make(chan error, 1)
 	go func() { closed <- a.Close() }()
 
-	// Give Close time to reach maybeStopCapture and park on captureMu, so the
-	// teardown is genuinely pending when the dial lands.
+	// Give the asynchronous teardown time to reach maybeStopCapture and park on
+	// captureMu, so it is genuinely pending when the dial lands.
 	time.Sleep(50 * time.Millisecond)
 	releaseGate() // let the dial complete, with nobody attached
 

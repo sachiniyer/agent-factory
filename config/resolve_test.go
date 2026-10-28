@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	stdlog "log"
 	"os"
 	"path/filepath"
@@ -11,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // setupResolveTest gives the test a hermetic config home with an explicit
@@ -20,9 +20,8 @@ func setupResolveTest(t *testing.T, globalConfig string) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
-	// LoadConfig probes the user's shell for a claude alias on every call;
-	// an interactive bash probe costs seconds. A plain sh takes the fast
-	// `which` path and keeps the resolver tests snappy.
+	// LoadConfig may perform a cached claude alias probe. A plain
+	// sh takes the fast `which` path and keeps the resolver tests snappy.
 	t.Setenv("SHELL", "/bin/sh")
 	require.NoError(t, os.WriteFile(filepath.Join(home, ConfigFileName), []byte(globalConfig), 0644))
 	return t.TempDir()
@@ -32,12 +31,17 @@ func setupResolveTest(t *testing.T, globalConfig string) string {
 // also clears the once-per-source removed-key memo (#2496) so a test observing
 // the warning log sees the notice fire regardless of whether an earlier test in
 // the same process already warned for the same source string.
-func captureLog(t *testing.T, logger **stdlog.Logger) *bytes.Buffer {
+func captureLog(t *testing.T, logger **stdlog.Logger) *logtest.Buffer {
 	t.Helper()
 	resetRemovedAutoYesWarnings()
 	resetLegacyRootAgentsWarnings()
 	resetConfigAliasWarnings()
-	var buf bytes.Buffer
+	resetShellValueWarnings()
+	resetUnknownTableLeafWarnings()
+	resetProjectBranchPrefixWarnings()
+	resetRetainedLegacyBareRepoConfigWarnings()
+	resetDeadShiftRuneWarnings()
+	var buf logtest.Buffer
 	old := *logger
 	*logger = stdlog.New(&buf, "", 0)
 	t.Cleanup(func() { *logger = old })
@@ -72,13 +76,15 @@ func TestResolveConfigPrecedence(t *testing.T) {
 
 	t.Run("program_overrides merge key-wise", func(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude", "program_overrides": {"codex": "/opt/codex", "aider": "/opt/aider"}}`)
-		writeInRepoConfig(t, repoRoot, `{"program_overrides": {"codex": "/repo/codex --fast", "gemini": "/repo/gemini"}}`)
+		// In-repo program_overrides may not spell absolute executables (#5265),
+		// so the shared-file leaves use relative spellings.
+		writeInRepoConfig(t, repoRoot, `{"program_overrides": {"codex": "repo/codex --fast", "gemini": "repo/gemini"}}`)
 
 		res, err := ResolveConfig(repoRoot)
 		require.NoError(t, err)
-		assert.Equal(t, "/repo/codex --fast", res.ProgramOverrides["codex"], "in-repo entry wins per key")
+		assert.Equal(t, "repo/codex --fast", res.ProgramOverrides["codex"], "in-repo entry wins per key")
 		assert.Equal(t, "/opt/aider", res.ProgramOverrides["aider"], "global entry without in-repo counterpart survives")
-		assert.Equal(t, "/repo/gemini", res.ProgramOverrides["gemini"], "in-repo-only entry applies")
+		assert.Equal(t, "repo/gemini", res.ProgramOverrides["gemini"], "in-repo-only entry applies")
 	})
 
 	t.Run("global-only fields always come from global", func(t *testing.T) {
@@ -285,7 +291,7 @@ func TestResolveConfigInRepoLoadLog(t *testing.T) {
 // config that LoadConfig callers see.
 func TestResolveConfigDoesNotMutateGlobal(t *testing.T) {
 	repoRoot := setupResolveTest(t, `{"default_program": "claude", "program_overrides": {"codex": "/opt/codex"}}`)
-	writeInRepoConfig(t, repoRoot, `{"program_overrides": {"codex": "/repo/codex"}}`)
+	writeInRepoConfig(t, repoRoot, `{"program_overrides": {"codex": "repo/codex"}}`)
 
 	_, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)

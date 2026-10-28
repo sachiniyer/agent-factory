@@ -31,6 +31,29 @@ func TestParseConfigRootAgents(t *testing.T) {
 	assert.Equal(t, "claude --model opus", custom.Program)
 }
 
+func TestRootAgentProgramsPreserveNonemptyWhitespaceAtLoadBoundary(t *testing.T) {
+	const command = `wrapper --suffix foo\ `
+	global, err := parseConfigTOML([]byte(`
+[root_agent]
+enabled = true
+program = 'wrapper --suffix foo\ '
+
+[root_agents."/repo"]
+program = 'wrapper --suffix foo\ '
+`), "config.toml")
+	require.NoError(t, err)
+	assert.Equal(t, command, global.RootAgent.Program)
+	assert.Equal(t, command, global.RootAgents["/repo"].Program)
+
+	personal, err := parseProjectConfig([]byte(`
+[root_agent]
+enabled = true
+program = 'wrapper --suffix foo\ '
+`), "project-config.toml")
+	require.NoError(t, err)
+	assert.Equal(t, command, personal.RootAgent.Program)
+}
+
 // TestDefaultConfigHasNoRootAgents pins the conservative default: nothing is
 // opted in until the user edits config.json.
 func TestDefaultConfigHasNoRootAgents(t *testing.T) {
@@ -52,7 +75,7 @@ func TestLegacyRootAgentsLoadWarning(t *testing.T) {
 	_, err = parseConfigTOML(data, source)
 	require.NoError(t, err)
 
-	const want = "config legacy-root-agents.toml: root_agents is the legacy path map; use [root_agent], the current project profile, for new configuration; for exact per-path equivalence, register the project and set enabled = true plus the optional program in its personal [root_agent] config; no file was rewritten"
+	const want = "config legacy-root-agents.toml: root_agents is the legacy path map; use [root_agent], the current project profile, for new configuration; for exact per-path equivalence, register the path as a project, set enabled = true plus the optional program in its personal [root_agent], then remove its root_agents entry; `af config migrate` rewrites the other deprecated keys but leaves this one in place, since it cannot register a project for you"
 	assert.Equal(t, 1, strings.Count(warnings.String(), want),
 		"repeat loads of one shared config file must not flood the daemon log")
 }

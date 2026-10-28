@@ -43,12 +43,17 @@ func vscodeOwnerPath(socketPath string) string {
 	return strings.TrimSuffix(socketPath, vscodeSocketExt) + vscodeOwnerExt
 }
 
+// The owner record REFUSES a symlinked path (#3672). Its path is derived from
+// the socket path af itself chose, and its content is process proof the daemon
+// re-reads before signalling — a file af generates, consumes, and deletes, never
+// one a user authors. A link there is unexpected in both directions, so it fails
+// closed naming both ends rather than replacing it or writing past it.
 func writeVSCodeOwner(path string, owner vscodeOwnerRecord) error {
 	raw, err := json.Marshal(owner)
 	if err != nil {
 		return err
 	}
-	return config.AtomicWriteFile(path, append(raw, '\n'), 0o600)
+	return config.AtomicWriteFileRefusingLink(path, append(raw, '\n'), 0o600)
 }
 
 // writeVSCodeOwnerForStart is the startup persistence seam. Production uses the

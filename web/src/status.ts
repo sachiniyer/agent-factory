@@ -12,7 +12,15 @@
 // and a filled diamond for LimitReached. Colors (the `kind`) map to the exact hexes
 // render.go paints (see styles.css .af-dot-*).
 
-import { InFlightOp, Liveness, Status, type IdleReason, type SessionData } from "./types.js";
+import {
+  InFlightOp,
+  Liveness,
+  Status,
+  type IdleReason,
+  type PromptDeliveryStatus,
+  type SessionData,
+} from "./types.js";
+import { formatDuration } from "./time.js";
 import type { IconName } from "./icon.js";
 
 /** The visual kind of a status dot, one per color bucket the TUI paints. Drives
@@ -69,6 +77,7 @@ const IDLE_REASON_LABELS: Record<IdleReason, string> = {
   "usage-limit": "usage limit",
   "process-exited": "process exited",
   "restore-gave-up": "restore gave up",
+  "restore-waiting-on-environment": "restore waiting on environment",
   "recreate-pending": "recreate notice pending",
   "prompt-not-delivered": "prompt not delivered",
   "delivery-unconfirmed": "delivery unknown",
@@ -91,6 +100,15 @@ export function idleReasonDetail(s: SessionData, now: Date = new Date()): string
       detail = `restore gave up after ${attempts} ${noun}: ${error}`;
     }
   }
+  // Mirror of session.LostRestoreWait.Detail — the wait names the error that
+  // armed it until a restore attempt or a structural failure retires it.
+  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
+    const { attempts, error } = s.lost_restore_wait;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
+      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
+    }
+  }
   if (s.last_pane_churn_at) {
     const churn = new Date(s.last_pane_churn_at);
     if (!Number.isNaN(churn.getTime())) {
@@ -105,15 +123,25 @@ function idleReasonLabel(reason: IdleReason | undefined): string {
   return reason ? (IDLE_REASON_LABELS as Partial<Record<string, string>>)[reason] ?? "" : "";
 }
 
+/** Row detail for a live remote-probe outage (#5571 W1.3): static text, never
+ *  an animated indicator, mirroring the TUI's "unreachable <age> · <err>"
+ *  (render.go). It outranks the idle detail — the outage is why every other
+ *  fact on the row may be stale. Returns "" when the pair is incomplete, so a
+ *  malformed projection renders nothing rather than half a claim. */
+export function unreachableDetail(s: SessionData, now: Date = new Date()): string {
+  const u = s.unreachable;
+  if (!u?.since || !u.error) {
+    return "";
+  }
+  const since = new Date(u.since);
+  if (Number.isNaN(since.getTime())) {
+    return "";
+  }
+  return `unreachable ${formatPaneChurnAge(since, now)} ago · ${u.error}`;
+}
+
 function formatPaneChurnAge(churn: Date, now: Date): string {
-  const ageMs = Math.max(0, now.getTime() - churn.getTime());
-  const minute = 60_000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (ageMs < minute) return "<1m";
-  if (ageMs < hour) return `${Math.floor(ageMs / minute)}m`;
-  if (ageMs < day) return `${Math.floor(ageMs / hour)}h`;
-  return `${Math.floor(ageMs / day)}d`;
+  return formatDuration(now.getTime() - churn.getTime());
 }
 
 const READY_ICON: IconName = "circle";
@@ -277,6 +305,119 @@ export function isLimitReached(s: SessionData): boolean {
   );
 }
 
+/** True when an operator must inspect the pane before explicitly retrying a
+ * manual handoff mission whose first submission may already have landed. The
+ * verdict is transaction-scoped; session-wide prompt evidence may describe a
+ * later, unrelated delivery. */
+export function isPendingManualHandoffDeliveryUnconfirmed(s: SessionData): boolean {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  return (
+    (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None &&
+    s.startup_state_unknown !== true &&
+    s.user_killed !== true &&
+    (liveness === Liveness.Running || liveness === Liveness.Ready) &&
+    pending?.manual === true &&
+    pending.replacement_panes_started === true &&
+    pending.mission_delivery_status !== undefined &&
+    pending.mission_delivery_status !== "not-delivered"
+  );
+}
+
+/** True when a mission verdict leaves it unknown whether the mission landed.
+ * The one list of those verdicts on this side; mirrors
+ * session.ambiguousHandoffDelivery. */
+function ambiguousHandoffDelivery(status: PromptDeliveryStatus | undefined): boolean {
+  return status === "sent-unverified" || status === "could-not-confirm";
+}
+
+/** True when an operator may retire a pending mission on the attestation that
+ * it already landed (#4429): any ambiguous verdict, plus a recorded delivery
+ * whose settle a crash interrupted. Mirrors session.confirmableHandoffDelivery. */
+function confirmableHandoffDelivery(status: PromptDeliveryStatus | undefined): boolean {
+  return ambiguousHandoffDelivery(status) || status === "delivered";
+}
+
+/** True when an agent-only handoff has a known incoming pane whose mission
+ * submission was ambiguous. The operator may inspect that pane and explicitly
+ * override the replay fence; positive non-delivery stays owned by automation.
+ *
+ * A startup-unknown row DOES admit the explicit retry (#4429): the daemon
+ * probes the pane first and restores the runtime binding only if it answers,
+ * then runs readiness and the send; a pane that does not answer refuses the
+ * retry. Dead liveness states still refuse: restore owns a runtime that no
+ * longer exists. Mirrors session.Instance.CanRetryPendingHandoffMissionDelivery. */
+export function isPendingAgentHandoffDeliveryUnconfirmed(s: SessionData): boolean {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead =
+    liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return (
+    s.pending_handoff_mission !== undefined &&
+    s.pending_handoff_mission !== "" &&
+    ambiguousHandoffDelivery(status) &&
+    s.user_killed !== true &&
+    !dead &&
+    (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) &&
+    (op === InFlightOp.None || op === InFlightOp.Replacing)
+  );
+}
+
+/** True when the operator can attest the agent handoff's pending mission
+ * already landed and retire it WITHOUT a resend (#4429) — the "mark delivered"
+ * exit for an ambiguous verdict, and the supported way out of a startup-unknown
+ * wedge. A delivered verdict is included: it is the crash window between a
+ * confirmed send and its clearing settle. Not-delivered belongs to automatic
+ * recovery; dead liveness belongs to restore. Mirrors
+ * session.Instance.CanConfirmPendingHandoffDelivery. */
+export function isPendingAgentHandoffDeliveryConfirmable(s: SessionData): boolean {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead =
+    liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return (
+    s.pending_handoff_mission !== undefined &&
+    s.pending_handoff_mission !== "" &&
+    confirmableHandoffDelivery(status) &&
+    s.user_killed !== true &&
+    !dead &&
+    (op === InFlightOp.None || op === InFlightOp.Replacing) &&
+    (s.startup_state_unknown === true ||
+      liveness === Liveness.Running ||
+      liveness === Liveness.Ready ||
+      liveness === Liveness.LimitReached)
+  );
+}
+
+/** True when a manual account swap's pending mission can be retired on the
+ * operator's attestation that it already landed — the account-swap half of
+ * #4429's confirm verb. Unlike the retry gate this admits startup-unknown and
+ * an orphaned respawn fence: the daemon probes the pane before honoring the
+ * attestation. Mirrors
+ * session.Instance.CanConfirmPendingManualAccountSwapDelivery. */
+export function isPendingManualSwapDeliveryConfirmable(s: SessionData): boolean {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead =
+    liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return (
+    pending?.manual === true &&
+    pending.replacement_panes_started === true &&
+    confirmableHandoffDelivery(status) &&
+    s.user_killed !== true &&
+    !dead &&
+    (op === InFlightOp.None || op === InFlightOp.Respawning) &&
+    (s.startup_state_unknown === true ||
+      liveness === Liveness.Running ||
+      liveness === Liveness.Ready ||
+      liveness === Liveness.LimitReached)
+  );
+}
+
 /** True when this session's agent can be handed off to a different one in place
  *  (#2013) — the state that gates the Handoff action, mirroring the TUI, which
  *  advertises `F` only for a handoff-capable selection (app/handle_handoff.go) and
@@ -291,30 +432,6 @@ export function canHandoff(s: SessionData): boolean {
   return s.can_handoff === true;
 }
 
-/** The pane header's PR badge (#3285), or null when the session has no usable PR.
- *
- *  The web CONSUMES the daemon-discovered pr_info projection (#3232/#3287) — the
- *  same discipline as can_kill/can_handoff: no gh call, no derivation, just the
- *  snapshot field every surface receives. Fails closed twice over: the wire
- *  carries `pr_info: {}` when nothing is known (Go omitempty cannot drop a
- *  struct), and a record without both a number and a url renders nothing — the
- *  badge exists to be FOLLOWED, so the link target is part of the minimum, not
- *  an extra.
- *
- *  Copy: sentence case, ` · ` separator, static text (#1766). gh reports state
- *  uppercase (OPEN/MERGED/CLOSED); it is lowercased for display rather than
- *  mapped through a table so an unrecognized future state renders honestly
- *  instead of vanishing. */
-export function prBadgeContent(s: SessionData): { label: string; url: string; tooltip: string } | null {
-  const pr = s.pr_info;
-  if (!pr || !pr.number || pr.number <= 0 || !pr.url) {
-    return null;
-  }
-  const state = (pr.state ?? "").toLowerCase();
-  const label = state === "" ? `PR #${pr.number}` : `PR #${pr.number} · ${state}`;
-  const tooltip = pr.title ? `${pr.title} — open on GitHub` : `Open PR #${pr.number} on GitHub`;
-  return { label, url: pr.url, tooltip };
-}
 
 /**
  * Whether a session is the reserved root agent (#2513). The web CONSUMES the
@@ -367,26 +484,46 @@ export function compareSessionsForRail(a: SessionData, b: SessionData): number {
   return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
 }
 
+/** The backend types whose workspace lives off-box (session/archive_sandbox.go
+ *  backendKindForType: docker, ssh, "sandbox", and "remote" — the hook runtime).
+ *  None of them can service tab management: every Add*Tab path needs a
+ *  daemon-side git worktree they do not have, so the daemon's
+ *  Capabilities().TabManagement is false for all four (#1874).
+ *
+ *  This list is the ONE place the web names backend types. It exists only because
+ *  the session envelope carries `backend_type` but not the daemon's capability
+ *  bits — the honest fix is to serialize the capability so no client re-derives
+ *  it (see #1874). Until then, a NEW off-box runtime must be added here, which is
+ *  what ui.test.ts pins. */
+const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
+
+/** The existing backend-type fallback for off-box workspace ownership. */
+export function isOffBoxWorkspace(s: Pick<SessionData, "backend_type">): boolean {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
+
 /**
- * Builds the row title with the same prefixes the TUI prepends (render.go:304-345),
+ * Builds the row title with the same prefixes the TUI prepends (render.go:400-465),
  * in the same precedence for ordinary status prefixes, with the orthogonal model
  * diagnostic outermost so narrow rows cannot hide it. Archived rows carry NO
- * word prefix (render.go:326-338) — the glyph + dimming say it, and an 11-char
+ * word prefix (render.go:423-434) — the glyph + dimming say it, and an 11-char
  * prefix would eat the title cell.
  */
 export function rowTitle(s: SessionData): string {
   const lv = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
   let title = s.title;
+  if (isOffBoxWorkspace(s)) {
+    title = "[remote] " + title;
+  }
+  if (lv === Liveness.Lost) {
+    title = "[lost] " + title;
+  }
   if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
     title = "[deleting] " + title;
-  } else if (lv === Liveness.Lost) {
-    title = "[lost] " + title;
-  } else if (lv === Liveness.LimitReached) {
-    title = limitBadgePrefix(s) + title;
   }
-  if (s.backend_type === "remote") {
-    title = "[remote] " + title;
+  if (lv === Liveness.LimitReached) {
+    title = limitBadgePrefix(s) + title;
   }
   const recreate = rootRecreateNote(s);
   if (recreate) {
@@ -394,6 +531,11 @@ export function rowTitle(s: SessionData): string {
   }
   if (archiveWarningText(s) !== "") {
     title = "[archive incomplete] " + title;
+  }
+  // Mirroring render.go: the outage marker is static text and sits just inside
+  // [model changed]; only a complete since/error pair earns it.
+  if (s.unreachable?.since && s.unreachable?.error) {
+    title = "[unreachable] " + title;
   }
   if (s.model_change) {
     title = "[model changed] " + title;
@@ -406,6 +548,28 @@ export function rowTitle(s: SessionData): string {
  * about whether a warning exists. */
 export function archiveWarningText(s: SessionData): string {
   return s.archive_warning?.trim() ?? "";
+}
+
+/** The cross-surface phrase every surface renders before the reason a session
+ *  has no af callback (#5571 W3.1) — kept as one exported constant so the rail
+ *  banner, the row tooltip and the backend picker can never spell it three ways.
+ *  Mirrors session.CallbackUnavailablePrefix. */
+export const CALLBACK_UNAVAILABLE_PREFIX = "af callback unavailable: ";
+
+/** The daemon-projected callback-absence reason, rendered under the shared
+ *  prefix. "" means callback was delivered (or the backend injects none). */
+export function callbackUnavailableText(s: SessionData): string {
+  const reason = s.callback_unavailable?.trim() ?? "";
+  return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
+}
+
+/** Every session-level notice the persistent pane banner carries — the
+ *  incomplete-archive warning and the callback-absence advisory — joined so a
+ *  row carrying both cannot drop either. "" means there is nothing to show. */
+export function sessionWarningText(s: SessionData): string {
+  return [archiveWarningText(s), callbackUnavailableText(s)]
+    .filter((t) => t !== "")
+    .join(" · ");
 }
 
 /** Mirrors session.RootRecreateContext.Note (session/root_recreate.go): the short

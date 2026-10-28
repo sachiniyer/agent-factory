@@ -5,44 +5,75 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 var (
-	sessionsHandoffTo    string
-	sessionsHandoffBrief string
+	sessionsHandoffTo      string
+	sessionsHandoffBrief   string
+	sessionsHandoffAccount string
 )
 
 // handoffSessionViaDaemon is the daemon seam, matching the other session verbs
 // in api/sessions.go so tests can substitute it.
-var handoffSessionViaDaemon = daemon.HandoffSession
+var handoffSessionViaDaemon = routedHandoffSession
 
 var sessionsHandoffCmd = &cobra.Command{
 	Use:   "handoff <title>",
 	Short: "Continue a session under a different agent, in place",
-	Long: `Hand a session's work over to a different agent without losing it.
+	Long: `Hand a session's work over to another agent or account without losing it.
+
+Use --account to choose a registered account. Omit --to to keep the same
+agent and stored prompt, or combine both flags to change agent and account.
+A manual handoff moves an explicit account pin; automatic rotation still
+respects it. Targets with current usage-limit evidence are refused.
+
+An account belongs to one agent, so a scoped session that changes agents
+must name the incoming agent's account with --account — unless the target
+has no account support at all, which drops the scope instead and reports
+it on from_account. What decides capability is the command the target
+resolves to, not the enum: program_overrides can make aider launch codex
+(a codex account is then required) or codex launch something unscopable
+(the scope is dropped). A resolved command af cannot classify as an agent
+at all — a wrapper like "npx codex" may launch an account-capable agent
+underneath — refuses rather than drop the pin on an unproven answer. The
+drop is one-way: handing back to an account-capable agent later does not
+restore it, so name the account again with --account. Dropping the scope
+restarts only the agent pane, so a session with shell, process, or VS Code
+sibling tabs is refused until those tabs are closed — they would keep
+running under the dropped account's environment.
 
 The session keeps its identity, its git worktree, and its branch — only the
-agent process changes. The incoming agent starts a fresh conversation and is
+agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
+
+A same-agent account handoff (--account alone, or --to naming the current
+agent) keeps the conversation for claude and codex: af copies the transcript
+into the new account's home and resumes it. If that copy cannot be made, the
+new account starts a fresh conversation, and its brief says why.
 
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
 the window to reset (see 'af sessions list' for a [limit] badge, and
 docs/usage-limits.md for the waiting path).
 
-Agent conversations are not portable between providers: the incoming agent
-cannot read what its predecessor was thinking, only the working tree and the git
-history. The brief points it at both. Because of that, a handoff is recorded —
-the swap and the branch tip at the moment it happened — so a reviewer reading
-the resulting diff can tell which agent wrote which part.
+Agent conversations are not portable between providers: after a cross-agent
+handoff the incoming agent cannot read what its predecessor was thinking, only
+the working tree and the git history. The brief points it at both. Because of
+that, a handoff is recorded — the swap and the branch tip at the moment it
+happened — so a reviewer reading the resulting diff can tell which agent wrote
+which part.
 
-Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
-sandbox is a different lifecycle and is not supported yet.
+Local-worktree sessions and ssh/sandbox sessions whose agent-server supports it
+can be handed off in place: the sandbox's agent-server swaps the agent in the same
+workspace and resolves the new agent's program on its own host. An account-scoped
+sandbox session, and docker or hook sessions, cannot be handed off yet.
 
 Examples:
+  af sessions handoff fix-auth --account personal
   af sessions handoff fix-auth --to claude
   af sessions handoff fix-auth --to gemini --brief "finish the retry test, skip the docs"`,
 	Args: cobra.ExactArgs(1),
@@ -51,37 +82,55 @@ Examples:
 		defer log.Close()
 
 		title := args[0]
-		if sessionsHandoffTo == "" {
-			return jsonError(fmt.Errorf("--to is required: name the agent to hand off to (one of %s)", tmux.SupportedProgramsString()))
+		if sessionsHandoffTo == "" && sessionsHandoffAccount == "" {
+			return jsonError(fmt.Errorf("--to or --account is required: name the agent to hand off to (one of %s)", tmux.SupportedProgramsString()))
 		}
-		if !tmux.IsSupportedProgram(sessionsHandoffTo) {
+		if sessionsHandoffTo != "" && !tmux.IsSupportedProgram(sessionsHandoffTo) {
 			return jsonError(fmt.Errorf("unknown agent %q: --to must be one of %s", sessionsHandoffTo, tmux.SupportedProgramsString()))
 		}
 
 		// Honor --repo scoping the way kill/archive do: an empty repoID keeps the
 		// all-repo search, a non-empty one confines the swap to that repo so a
 		// same-titled session elsewhere is never touched.
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
 
 		resp, err := handoffSessionViaDaemon(daemon.HandoffSessionRequest{
-			Title:  title,
-			RepoID: repoID,
-			To:     sessionsHandoffTo,
-			Brief:  sessionsHandoffBrief,
+			Title:   title,
+			RepoID:  repoID,
+			To:      sessionsHandoffTo,
+			Brief:   sessionsHandoffBrief,
+			Account: sessionsHandoffAccount,
 		})
-		if err != nil {
+		warning := ""
+		if err != nil && apiclient.IsMutationCommitted(err) {
+			warning = err.Error()
+		} else if err != nil {
 			return jsonError(err)
 		}
 
-		return jsonOut(map[string]any{
+		output := map[string]any{
 			"ok":       true,
 			"title":    title,
 			"from":     resp.From,
 			"to":       resp.To,
 			"head_sha": resp.HeadSHA,
-		})
+		}
+		if warning != "" {
+			output["warning"] = warning
+		}
+		if resp.FromAccount != "" {
+			output["from_account"] = resp.FromAccount
+		}
+		if resp.ToAccount != "" {
+			output["to_account"] = resp.ToAccount
+		}
+		return jsonOut(output)
 	},
+}
+
+func init() {
+	sessionsHandoffCmd.Flags().StringVar(&sessionsHandoffAccount, "account", "", "Registered target account; omit --to to keep the same agent")
 }

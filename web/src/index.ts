@@ -11,6 +11,11 @@
 // /v1/sessions/{id}/stream WebSocket.
 
 import "./styles.css";
+import "./tokens.css";
+import "./recovery.css";
+import { appendMutationOutcome, type MutationOutcomeNotice } from "./recovery.js";
+import { parseRoute, replaceRoute, restoreLoginRoute, stashLoginRoute, clearLoginRoute, sessionURL } from "./route.js";
+import { copyText } from "./clipboard.js";
 import {
   addTask,
   ApiError,
@@ -23,75 +28,99 @@ import {
   createVSCodeTab,
   deleteProject,
   registerProject,
+  rebindProject,
+  setProjectColor,
+  type RegisteredProject,
   errorText,
-  fetchSnapshot,
+  explainConfig,
+  fetchSessionSnapshot,
   killSession,
   getConfig,
-  getTheme,
   isMutationCommittedError,
+  isMutationOutcomeUncertain,
+  isProjectReboundError,
   handoffSession,
   listBackends,
   listDirectory,
+  listOnComplete,
   listProjects,
   listPrograms,
   suggestSessionName,
   listTasks,
   setConfigValue,
+  listAccounts,
+  quotaReport,
+  registerAccount as registerAccountRPC,
+  startAccountLogin,
   loadToken,
   probeAuthRequired,
-  probeToken,
   removeTask,
   renameTab,
   reorderTab,
   restoreSession,
   resumeFromLimit,
+  confirmHandoffDelivery,
   shouldForgetToken,
   storeToken,
   triggerTask,
   updateTask,
 } from "./api.js";
-import { createKeyedQueue } from "./config.js";
+import { createKeyedQueue, type ExplainOutcome, saveNotice } from "./config.js";
+import {
+  bindTerminalFontPersist,
+  setTerminalFontSizes,
+  stepTerminalFontSize,
+  terminalFontClassForKey,
+  terminalFontSizesFromConfig,
+} from "./terminal-font.js";
+import { emptyAccountsState } from "./accounts.js";
+import { emptyQuotaState } from "./quota.js";
+import { accountSkewMessage } from "./account_scope.js";
+import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
-import { eventRequestsPaletteRefresh, EventStream, type EventStreamStatus } from "./events.js";
+import { EventStream, type EventStreamStatus } from "./events.js";
 import {
   addProjectModal,
   confirmDeleteProjectModal,
   confirmModal,
   handoffModal,
+  markDeliveredModal,
   type ModalHandle,
   newSessionModal,
+  rebindProjectModal,
+  removeTaskModal,
 } from "./modals.js";
+import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
+import { restoreShortcutFocus } from "./shortcut-focus.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
-import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
+import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
-  applyEvent,
   clampActiveTab,
   pickSelection,
   rebindTargetAfterAwait,
+  tabRebindRefusalNotice,
+  type TabRebindVerb,
   tabToKeepOnClose,
-  upsertSession,
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
-import { canHandoff, isArchived, type OperatorKind } from "./status.js";
-import { isRenameableTab } from "./tablabel.js";
+import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
+import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
+import { PendingRestores, type RestoreEvidence } from "./pending_restores.js";
+import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
 import {
-  applyDaemonTheme,
   bootStampTheme,
   connectionAttemptMayCommit,
-  createLatestRequestGate,
-  hasConnectedToken,
-  paletteFetchFailurePlan,
   persistThemeChoice,
   refreshThemeMode,
-  resetDaemonTheme,
   stampTheme,
   type ThemeChoice,
 } from "./theme.js";
+import { createFencedRefetcher, createLatestRequestGate, retryWithBackoff, type LatestRequest } from "./refetch.js";
 import { addTaskModal, type AddTaskInput, buildTask, editTaskModal } from "./tasks.js";
 import type { ProgramCatalog } from "./programs.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -99,9 +128,12 @@ import {
   AppShell,
   isActionableSession,
   orderedSessions,
+  clearLoginDraft,
   renderLogin,
   sessionTabs,
   canManageTabs,
+  restoreRequiresConfirmation,
+  isOffBoxWorkspace,
   canMutateTabRoster,
   canCreateTabKind,
   canCloseTabs,
@@ -112,7 +144,9 @@ import {
   type KillableSession,
   type NewTabKind,
 } from "./ui.js";
-import type { SessionData, TaskData, WireEvent } from "./types.js";
+import { createLatestWriter } from "./project_color_writes.js";
+import { captureTabDeleteTarget } from "./tab_delete_target.js";
+import type { AccountsResponse, SessionData, SkippedRepo, TaskData, WireEvent } from "./types.js";
 
 // Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
 // mounts (before first paint), so an explicit light/dark choice shows no flash. This
@@ -131,6 +165,8 @@ const store = new Store<AppState>({
   config: [],
   configPath: "",
   configStatus: null,
+  accounts: emptyAccountsState(),
+  quota: emptyQuotaState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -141,6 +177,9 @@ const store = new Store<AppState>({
   connecting: true,
   loginError: null,
   sessions: [],
+  // No skipped repos until a Snapshot carries the incompleteness channel (#4742);
+  // the rail renders no notice in this default state.
+  skippedRepos: [],
   selectedId: null,
   live: "connecting",
   termStatus: "connecting",
@@ -169,12 +208,18 @@ const store = new Store<AppState>({
 // `token === null`, never `!token`, or a tokenless client's create/kill/archive/
 // restore/retry/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
+let connectionGeneration = 0;
+let pendingRestoreResync = false;
 let stream: EventStream | null = null;
+const optimisticSessions = new OptimisticSessions();
+const pendingRestores = new PendingRestores(
+  ids => store.set({ pendingRestores: ids }),
+  e => isMutationCommittedError(e) || isMutationOutcomeUncertain(e),
+  isMutationCommittedError,
+  () => globalThis.performance.now(),
+  requestPendingRestoreResync,
+);
 const connectionGate = createLatestRequestGate();
-const paletteRefreshGate = createLatestRequestGate();
-const PALETTE_RETRY_MS = 1000;
-let paletteRetryTimer: number | null = null;
-let hasDaemonPalette = false;
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
  *  offer a program picker: new session, add task, edit task. One helper rather than
@@ -186,9 +231,16 @@ let hasDaemonPalette = false;
  *  to the repo default rather than blocking its form. */
 const loadPrograms = (repoPath: string): Promise<ProgramCatalog> =>
   token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
+/** The create form's account registry (#3844). The registry itself is not
+ *  per-project — accounts live in the DAEMON's home, not in a repo — but the
+ *  default it reports is (#3386), so this takes the picked project's path like the
+ *  two catalogs beside it. */
+const loadCreateAccounts = (repoPath: string): Promise<AccountsResponse> =>
+  token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
+let resyncCompletions: Array<{ resolve: () => void; reject: (error: unknown) => void }> = [];
 // Snapshot and events are two asynchronous projections of the same session state.
 // Fence them independently so a Snapshot requested before a session event cannot
 // resolve afterwards and rewind the event's newer roster (#2330).
@@ -224,6 +276,10 @@ let modal: ModalHandle | null = null;
 // so any overlay-open or teardown path reaps it — an orphaned controller would keep a
 // hidden terminal streaming and never fire its close-time DELETE.
 let configAssistant: ConfigAssistantController | null = null;
+// The open account-login overlay (#3385), tracked for the same reason: an orphaned
+// controller would keep streaming a login pane in a removed overlay and never fire
+// its close-time account refresh.
+let accountLogin: AccountLoginController | null = null;
 
 // The appbar's "Install app" affordance (feat: PWA). Built ONCE here, for the same
 // reason termHost and modalHost are: rerender() drops `shell` on logout and builds a
@@ -256,6 +312,8 @@ function mount(): void {
   if (!root) {
     throw new Error("af-web: #app root element missing from index.html");
   }
+  restoreLoginRoute();
+  window.addEventListener("hashchange", resolveRoute);
   store.subscribe(rerender);
   rerender();
 
@@ -266,7 +324,7 @@ function mount(): void {
   // chord is swallowed here (stopPropagation) so it never leaks into the PTY.
   document.addEventListener("keydown", onKeydown, true);
 
-  // Follow the OS theme while the choice is Auto (redesign PR1).
+  // Follow the OS theme while the choice is System (redesign PR1).
   watchSystemTheme();
 
   void bootstrap();
@@ -280,13 +338,13 @@ function mount(): void {
  *  itself and falls back to the paste form, once. A probe transport failure also
  *  falls back to the token login — never auto-connects on uncertainty. */
 async function bootstrap(): Promise<void> {
+  store.set({ connecting: true, loginCondition: undefined, loginError: null });
   let required = true;
   try {
     required = await probeAuthRequired();
   } catch {
-    // Can't reach the probe (daemon down / wrong host): fail safe to the
-    // token login — the user can still paste a token and retry.
-    required = true;
+    store.set({ connecting: false, loginCondition: "unavailable" });
+    return;
   }
   if (!required) {
     // Tokenless client (loopback / require_token=false): connect straight through
@@ -315,13 +373,13 @@ function rerender(): void {
   }
   const state = store.get();
   if (state.phase === "login") {
+    stashLoginRoute();
     if (shell) {
       shell.dispose();
       shell = null; // dropped from the tree by renderLogin below
     }
     disposeSplit();
-    closeModal();
-    closeConfigAssistant();
+    closeOverlays();
     renderLogin(root, state, actions);
     return;
   }
@@ -329,7 +387,12 @@ function rerender(): void {
     shell = new AppShell(actions, termHost, modalHost, installAffordance.el);
     root.replaceChildren(shell.el);
   }
-  shell.update(state);
+  // Unrelated event paints must not overwrite a hashchange queued by the browser.
+  if (!resolvingRoute && state.selectedId !== routeSelection) {
+    replaceRoute(state.selectedId ? { session: state.selectedId } : null);
+  }
+  routeSelection = state.selectedId;
+  shell.update(state, parseRoute(location.hash) !== null);
   syncSplit(state);
 }
 
@@ -339,10 +402,21 @@ function rerender(): void {
  *  token only when the daemon REJECTED it (shouldForgetToken). */
 async function connect(candidate: string): Promise<void> {
   const attempt = connectionGate.begin();
-  store.set({ connecting: true, loginError: null });
+  pendingRestores.reset();
+  const restoreSnapshot = pendingRestores.beginSnapshot();
+  store.set({ connecting: true, loginError: null, loginCondition: undefined });
   let sessions: SessionData[];
+  let operationLockTimeoutMs: number | undefined;
+  let operationClockMs: number | undefined;
+  let daemonBootId: string | undefined;
+  let skippedRepos: SkippedRepo[] | undefined;
   try {
-    sessions = await probeToken(candidate);
+    const snapshot = await fetchSessionSnapshot(candidate);
+    sessions = snapshot.sessions;
+    operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
+    operationClockMs = snapshot.operationClockMs;
+    daemonBootId = snapshot.daemonBootId;
+    skippedRepos = snapshot.skippedRepos;
   } catch (e) {
     if (!attempt.isCurrent()) return;
     // A rejected credential is forgotten so the next load prompts cleanly instead of
@@ -351,8 +425,16 @@ async function connect(candidate: string): Promise<void> {
     // Either way we land on the login view exactly once — no retry loop.
     if (shouldForgetToken(e)) {
       clearToken();
+      // The credential was rejected. Flip authRequired so loginView routes to the
+      // paste form with the "Login expired" title — mirroring the resync path that
+      // calls disconnect(describeError(error), true). Without this flip a tokenless
+      // client (authRequired === false from an earlier probe) stays routed to
+      // noAuthLoginView, which re-issues the same empty-token request that just 401'd
+      // and never surfaces a token field for in-app recovery.
+      store.set({ phase: "login", connecting: false, authRequired: true, loginError: describeError(e), loginCondition: "expired" });
+      return;
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e) });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: e instanceof ApiError && e.status === 0 ? "unavailable" : undefined });
     return;
   }
   if (!attempt.isCurrent()) return;
@@ -361,40 +443,49 @@ async function connect(candidate: string): Promise<void> {
   // sentinel (no-auth client, #1696) is never stored — bootstrap re-probes
   // /v1/auth-info on every load, so a tokenless daemon needs nothing on disk.
   storeToken(candidate);
-  // Palette and mode have separate owners (#3220): the daemon supplies the
-  // semantic colors, while the browser keeps its local Auto/Light/Dark choice.
-  // Apply before mounting the app phase so the first authenticated paint and a
-  // newly constructed xterm use the same palette. A failed additive read keeps
-  // the built-in Nord floor rather than blocking an otherwise valid login.
-  await refreshDaemonPalette(candidate);
-  // A token can rotate after Snapshot accepted it but before GetTheme returns.
-  // That rejection routes through disconnect(), which clears token and returns to
-  // login; do not let this older connect continue mounting the authenticated app.
-  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Fetch the tasks BEFORE choosing the initial project scope (redesign PR2, Greptile
   // follow-on Fix 2): the persisted selection must reconcile against the FULL project
   // list — sessions AND tasks — so a persisted TASK-ONLY project restores AS ITSELF,
   // not as a temporary session-backed fallback that would then stick (reconcile keeps
   // a valid current selection). A transport failure degrades to no tasks (the events
   // plane / a view switch refetches); the scope then falls back until they load.
-  let tasks: TaskData[] = [];
-  try {
-    tasks = await listTasks(candidate);
-  } catch {
-    tasks = [];
+  const [taskResult, projectResult, configResult] = await Promise.all([
+    listTasks(candidate).then(tasks => ({ tasks, error: "" }))
+      .catch(error => ({ tasks: [] as TaskData[], error: errorText(error) })),
+    fetchRegisteredProjects(candidate),
+    // The terminal font sizes MUST be resolved before the first attach — #5500:
+    // an attach that opened at the compiled-in defaults and jumped when the
+    // config landed would size its first OpResize on the wrong pitch. A failed
+    // read degrades to those defaults, same as the tasks fetch degrades to
+    // none; the terminals still come up correctly formed, just unpersisted-
+    // sized until the next config read lands.
+    getConfig(candidate).catch(() => null),
+  ]);
+  const { tasks, error: tasksError } = taskResult;
+  const { projects: registeredProjects, error: projectsError } = projectResult;
+  // Fence the final app commit against a disconnect during tasks/projects loading.
+  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
+  // Landed ahead of phase:"app", so the first AttachTerminal's constructor —
+  // and the grid its initial OpResize reports — already reflects the persisted
+  // sizes rather than the defaults the controller started on.
+  if (configResult) {
+    setTerminalFontSizes(terminalFontSizesFromConfig(configResult.entries));
+  } else {
+    // The connect-time read fell back to the compiled defaults. That must not
+    // be the last word — a transient GetConfig failure would otherwise leave
+    // the terminal on un-persisted sizes until an unrelated action refetched,
+    // and on a reconnect the module singleton would keep the PREVIOUS
+    // connection's sizes. The bounded reconcile retries through the fenced
+    // refetcher, so the first landed read applies the served values through
+    // the normal commit — always, not only when this fetch succeeded.
+    void reconcileConfigRead(candidate, attempt);
   }
-  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
-  // Fetch the registered projects too (the #2456 union): the reconcile must see a
-  // registered-but-sessionless project as a real, restorable selection, or a persisted
-  // choice on an empty registered repo would fall back on connect. Degrades to none on
-  // a transport failure — the projects.changed resync refetches it.
-  const registeredProjects = await fetchRegisteredProjects(candidate);
-  // A delayed palette retry can reject the credential while tasks/projects are
-  // loading. Fence the FINAL app commit, not only the first palette response.
-  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
-  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
+  connectionGeneration++;
+  optimisticSessions.reset(sessions);
+  resolvingRoute = true;
   store.set({
     phase: "app",
     view: "sessions",
@@ -402,28 +493,51 @@ async function connect(candidate: string): Promise<void> {
     connecting: false,
     loginError: null,
     sessions,
+    skippedRepos: skippedRepos ?? [],
     selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
+    mutationError: undefined,
     tasks,
+    tasksError,
+    projectsError,
     registeredProjects,
   });
+  applySessions(sessions, {
+    kind: "snapshot", generation: restoreSnapshot,
+    operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
+  }, sessions);
+  resolvingRoute = false;
+  resolveRoute();
+  clearLoginRoute();
   startStream(candidate);
+  if (pendingRestoreResync) {
+    pendingRestoreResync = false;
+    requestResync();
+  }
 }
 
-/** Fetches the daemon's registered-project roots for the #2456 union, degrading to
- *  none on a transport failure (like the tasks fetch): the union is additive, so a
+/** The roots of the daemon's registered projects — the #2456 union input the
+ *  derived project lists consume (projectSummaries / pickerProjects /
+ *  reconcileProject take roots; the registry's identity fields are what state
+ *  keeps the RECORDS for, so a stale registration can be rebound). */
+function projectRoots(projects: RegisteredProject[]): string[] {
+  return projects.map((p) => p.root);
+}
+
+/** Fetches the daemon's registered-project records for the #2456 union, degrading
+ *  to none on a transport failure (like the tasks fetch): the union is additive, so a
  *  missing registry just means the derived-from-sessions list until the next
- *  projects.changed resync. Maps the registry records to their roots — the only field
- *  the switcher/picker union consumes. */
-async function fetchRegisteredProjects(tok: string): Promise<string[]> {
+ *  projects.changed resync. The records — not just their roots — are kept: a
+ *  registration's id + path_exists are what the rebind affordance needs. */
+async function fetchRegisteredProjects(tok: string): Promise<{ projects: RegisteredProject[]; error: string }> {
   try {
-    return (await listProjects(tok)).map((p) => p.root);
-  } catch {
-    return [];
+    return { projects: await listProjects(tok), error: "" };
+  } catch (e) {
+    return { projects: [], error: errorText(e) };
   }
 }
 
@@ -432,14 +546,19 @@ async function fetchRegisteredProjects(tok: string): Promise<string[]> {
  *  now that the credential persists across visits: on a shared machine, or after a
  *  rotation, Disconnect is what makes the next load prompt again. */
 function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
+  if (loginError && root) clearLoginDraft(root);
+  store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
+  connectionGeneration++;
+  // An in-flight rebind belongs to the connection just torn down; its
+  // completions are fenced off, so its guard goes with it.
+  rebindInFlight = null;
+  pendingRestores.reset();
+  optimisticSessions.reset();
   stopStream();
-  closeModal();
-  closeConfigAssistant();
+  closeOverlays();
   token = null;
   clearToken();
-  resetDaemonTheme();
-  hasDaemonPalette = false;
   store.set({
     phase: "login",
     view: "sessions",
@@ -454,6 +573,7 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
+    mutationError: undefined,
     tasks: [],
     registeredProjects: [],
   });
@@ -469,6 +589,35 @@ function tabIdsOf(list: SessionData[], id: string | null): string[] {
   return s ? sessionTabs(s).map(tabIdentity) : [];
 }
 
+// Resolve only against an authenticated snapshot, never a partially loaded rail.
+let resolvingRoute = false;
+let routeSelection: string | null = null;
+const createSelectionIntent = new CreateSelectionIntent();
+function resolveRoute(): void {
+  createSelectionIntent.navigate();
+  if (store.get().phase !== "app") {
+    stashLoginRoute();
+    return;
+  }
+  const route = parseRoute(location.hash);
+  resolvingRoute = true;
+  try {
+    const session = route && store.get().sessions.find((s) => s.id === route.session);
+    if (session?.id) {
+      if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
+      setStatusFilter(operatorKind(session), true);
+      openFromRail(session.id);
+    } else {
+      store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+      if (route) showTransientNotice("No session with that id in this daemon");
+    }
+  } finally {
+    resolvingRoute = false;
+    const id = store.get().selectedId;
+    replaceRoute(id ? { session: id } : null);
+  }
+}
+
 /** Moves the rail selection to a session by its stable id and puts the keyboard in
  *  rail-nav mode. This is the keyboard path (j/k): selecting a row never steals the
  *  keyboard into the terminal — you attach explicitly with Enter. Resetting focus to
@@ -477,6 +626,7 @@ function tabIdsOf(list: SessionData[], id: string | null): string[] {
  *  follows the layout the split view will actually show (settledTab) — a session shown
  *  before keeps its retained pane, and only one never shown starts on its agent tab. */
 function moveSelection(id: string): void {
+  createSelectionIntent.navigate();
   clearTabError();
   store.set({
     selectedId: id,
@@ -549,6 +699,7 @@ function focusRail(): void {
  *  view switch composes with the #1694 focus model instead of fighting it. Switching
  *  INTO the tasks view refreshes the task list so it is current on arrival. */
 function switchView(view: View): void {
+  createSelectionIntent.navigate();
   if (store.get().view === view) {
     return;
   }
@@ -562,6 +713,13 @@ function switchView(view: View): void {
   }
   if (view === "config") {
     refreshConfig();
+    // The accounts read rides with the config read for the same reason: the
+    // section shows them as they are NOW, including an account registered from
+    // the CLI or logged in from the TUI since this tab was opened.
+    refreshAccounts();
+    // And the usage report (#2983): a session parked at a limit since this tab
+    // was opened is exactly the signal the section exists to show.
+    refreshQuota();
   }
 }
 
@@ -596,6 +754,7 @@ function resetStatusFilter(): void {
  *  reconciliation can choose this valid fallback while storage names a project that
  *  just disappeared (#2276). */
 function switchProject(root: string): void {
+  createSelectionIntent.navigate();
   persistProjectChoice(root);
   if (store.get().selectedProject === root) {
     return;
@@ -633,11 +792,19 @@ function selectedSession(): { id: string; title: string } | null {
   return s ? { id: s.id ?? "", title: s.title } : null;
 }
 
+let restoreModalFocus: (() => void) | null = null;
+let stopModalProjectionWatch: (() => void) | null = null;
+
 /** Closes and clears the open modal, if any. */
 function closeModal(): void {
   if (modal) {
+    const restoreFocus = restoreModalFocus;
+    restoreModalFocus = null;
+    stopModalProjectionWatch?.();
+    stopModalProjectionWatch = null;
     modal.close();
     modal = null;
+    restoreFocus?.();
   }
 }
 
@@ -650,14 +817,103 @@ function closeConfigAssistant(): void {
   }
 }
 
-/** Mounts a fresh modal, replacing any currently open overlay (a form modal OR the
- *  config-assistant chat) — one overlay at a time, and the assistant is torn down
- *  (terminal disposed, session reaped) rather than left streaming behind the modal. */
-function openModal(m: ModalHandle): void {
+/** Closes any open account-login overlay and its terminal stream. */
+function closeAccountLogin(): void {
+  accountLogin?.close();
+  accountLogin = null;
+}
+
+/** Reaps every imperative overlay owned by modalHost. Keep the complete owner list
+ *  here so host teardown and replacement cannot orphan a controller by omission. */
+function closeOverlays(): void {
   closeModal();
   closeConfigAssistant();
-  modal = m;
-  modalHost.replaceChildren(m.el);
+  closeAccountLogin();
+}
+
+/** The only opener-facing path to modalHost: reap every current owner before giving
+ *  a constructor access to the shared mount point. A new overlay gets replacement
+ *  semantics by using this seam instead of reproducing the owner list. */
+function mountOverlay<T>(open: (mountHost: HTMLElement) => T): T {
+  closeOverlays();
+  return open(modalHost);
+}
+
+interface ModalInvoker {
+  sessionId?: string;
+  actionLabel: string | null;
+  header: boolean;
+}
+
+/** Stable return identity survives optimistic removal and retained-dialog remounts. */
+function captureModalInvoker(): ModalInvoker {
+  const focused = document.activeElement as HTMLElement | null;
+  const row = focused?.closest(".af-row");
+  return {
+    sessionId: row?.querySelector<HTMLElement>("[data-session-id]")?.dataset.sessionId,
+    actionLabel: focused?.getAttribute("aria-label") ?? null,
+    header: !row && !!focused?.closest(".af-term-head"),
+  };
+}
+
+/** Mounts a fresh modal, replacing any currently open overlay. Controllers are
+ *  reaped before their DOM is replaced so no hidden terminal keeps streaming. */
+function openModal(m: ModalHandle, focusCard = false, explicitInvoker?: ModalInvoker): void {
+  mountOverlay((mountHost) => {
+    const focused = document.activeElement as HTMLElement | null;
+    const invoker = explicitInvoker ?? captureModalInvoker();
+    const { sessionId, actionLabel } = invoker;
+    const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
+    const header = invoker.header ? root?.querySelector<HTMLElement>(".af-term-head") : null;
+    if (focusCard || row) {
+      restoreModalFocus = () => {
+        const canFocus = (el: HTMLElement | null | undefined): el is HTMLElement =>
+          !!el && el.isConnected && el !== document.body && !el.matches(":disabled") &&
+          el.getClientRects().length > 0 && getComputedStyle(el).visibility === "visible";
+        // Header actions do not live in the rail; return to their invoking control.
+        if (!row && !explicitInvoker && canFocus(focused)) {
+          focused.focus({ preventScroll: true });
+          return;
+        }
+        if (!row && header?.isConnected) {
+          // Pending-state reconciliation can replace the original header button.
+          const action = actionLabel ? header.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+          const target = canFocus(action) ? action : header.querySelector<HTMLButtonElement>(".af-term-more");
+          if (canFocus(target)) {
+            target.focus({ preventScroll: true });
+            return;
+          }
+        }
+        // A phone row action closes the drawer before mounting its dialog. Hidden
+        // rail controls still have rectangles, but cannot receive keyboard focus.
+        const toggle = root?.querySelector<HTMLButtonElement>(".af-nav-toggle");
+        if (!root?.querySelector(".af-app.af-nav-open") && canFocus(toggle)) {
+          focusRail();
+          toggle.focus({ preventScroll: true });
+          return;
+        }
+        focusRail();
+        const menu = sessionId ? root?.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
+        const action = actionLabel ? menu?.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+        const target = canFocus(action) ? action : menu?.querySelector<HTMLButtonElement>("button");
+        if (canFocus(target)) target.focus({ preventScroll: true });
+        else {
+          const rail = root?.querySelector<HTMLElement>(".af-rail");
+          if (canFocus(rail)) { rail.tabIndex = -1; rail.focus({ preventScroll: true }); }
+        }
+      };
+    }
+    modal = m;
+    mountHost.replaceChildren(m.el);
+    // Reinstall this handle's Tab trap. A fresh modal already installed it in
+    // modalChrome, so this reaps and re-adds the same listener (a no-op); a
+    // retained handle remounted after a refused RPC — openModal re-inserts the
+    // existing el without rebuilding it — had its trap reaped by any modalChrome
+    // that ran in between (an intervening modal opened and closed), so the
+    // reopened error dialog would otherwise have no Tab containment.
+    m.reactivate?.();
+    if (focusCard) m.el.querySelector<HTMLElement>(".af-modal-card")?.focus({ preventScroll: true });
+  });
 }
 
 /** Opens the conversational config assistant (#2467): spawn-or-reuse, stream into a
@@ -668,15 +924,13 @@ function doOpenConfigAssistant(): void {
   if (tok === null) {
     return;
   }
-  closeModal();
-  closeConfigAssistant();
-  configAssistant = openConfigAssistant({
+  configAssistant = mountOverlay((mountHost) => openConfigAssistant({
     token: tok,
-    mountHost: modalHost,
+    mountHost,
     onClosed: () => {
       configAssistant = null;
     },
-  });
+  }));
 }
 
 /** Opens the new-session modal, its picker seeded from the live projects. Submit
@@ -685,7 +939,8 @@ function doOpenConfigAssistant(): void {
  *  removes it. A failure surfaces through the shared operation toast because the
  *  form is deliberately no longer held open by the RPC. */
 function newSession(): void {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const invoker = captureModalInvoker();
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       // The backend catalog is per-repo and read at choose time (#1933), so the
@@ -695,6 +950,10 @@ function newSession(): void {
       loadBackends: (repoPath: string) => (token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token)),
       // The agent catalog, same contract (#1970): the daemon owns the enum.
       loadPrograms,
+      // The credential-account registry (#3844): the daemon owns it, and it lives
+      // on the daemon's host rather than in any repo — but the account default it
+      // reports is the project's (#3386), so this follows the project picker.
+      loadAccounts: loadCreateAccounts,
       // The autocreate-name suggestion (#2470): the daemon owns the wordlist, so
       // the web asks rather than generating a name of its own.
       suggestName: () => (token === null ? Promise.reject(new Error("not authorized")) : suggestSessionName(token)),
@@ -707,34 +966,65 @@ function newSession(): void {
         const m = modal;
         clearTabError();
         // Latch the detached form against a duplicate submit, then release the UI
-        // immediately. The row that follows is NOT synthesized here: it comes from
-        // the daemon's session.updated OpCreating projection.
+        // immediately. Project Creating before sending the RPC; only the daemon
+        // response may replace this local identity with an attachable session.
         m.setBusy(true);
         closeModal();
+        const requestedAccount = values.account ?? "";
+        const navigationAtSubmit = createSelectionIntent.submit();
+        const mutation = optimisticSessions.beginCreate(values);
+        applySessions(optimisticSessions.project());
         void createSession(values, tok)
           .then((created) => {
-            // Upsert the created row AND select it in one update, so it opens
-            // attached immediately. Upserting here (not just setting selectedId)
-            // matters: the async created event may not have landed yet, and
-            // selecting an id whose row isn't in the list would leave the pane
-            // stuck empty (the shell only re-renders the main pane on a selection
-            // change). CreateSession returns the full projection, so the row is
-            // complete; the later created event just upserts the same id again.
-            if (created.id) {
-              const sessions = upsertSession(store.get().sessions, created);
-              // Reset to the agent tab: selecting a DIFFERENT session must show its
-              // tab 0 (a new session has only the agent tab), or a stale activeTab
-              // would stream ?tab=<n> for a tab this session doesn't have. This is
-              // the same invariant moveSelection enforces for the keyboard path.
-              store.set({ sessions, selectedId: created.id, activeTab: 0, tabError: null });
+            if (!created || typeof created.title !== "string") throw new Error("The daemon response did not identify the created session.");
+            if (!optimisticSessions.succeed(mutation, created)) return;
+            requestResync();
+            // Preserve later create submissions and navigation while the RPC was pending.
+            const maySelect = createSelectionIntent.isCurrent(navigationAtSubmit) && store.get().view === "sessions";
+            applySessions(optimisticSessions.project());
+            if (created.id && maySelect && store.get().selectedProject === values.repoPath &&
+                store.get().sessions.some(session => session.id === created.id)) {
+              store.set({ selectedId: created.id, activeTab: 0, tabError: null });
+            }
+            // Version skew on the account field (#3844): a daemon predating account
+            // support drops it silently, and the row just selected is about to be
+            // shown — and reported by every later surface — as the session the user
+            // asked for. Checked against what came BACK, because the daemon is the
+            // authority on what it stored, and SURFACED rather than thrown: the
+            // session exists, so the message names it as something to remove instead
+            // of implying the create failed.
+            //
+            // It runs AFTER the upsert, not before, because the store.set above
+            // carries `tabError: null` — raising the notice first would have it
+            // cleared by the very update that puts the wrongly-scoped row on screen.
+            const skew = accountSkewMessage(requestedAccount, created);
+            if (skew !== "") {
+              surfaceTabError(new Error(skew));
             }
           })
           .catch((e) => {
+            const uncertain = isMutationOutcomeUncertain(e);
+            const outcome = optimisticSessions.reject(mutation, uncertain);
+            if (outcome === "stale") return;
+            applySessions(optimisticSessions.project());
             // The daemon publishes session.killed for the provisional id. Resync as a
             // direct fallback so even a missed delete event cannot strand a
             // phantom creating row, and surface the daemon's unmodified error text.
             requestResync();
-            surfaceTabError(e);
+            if (outcome !== "reverted") {
+              surfaceMutationError(outcome === "uncertain"
+                ? new Error(`The create response could not confirm the outcome. ${errorText(e)}`)
+                : e, outcome);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+            if (!modal && token === tok) {
+              openModal(m, true, invoker);
+              m.el.querySelector<HTMLElement>(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")
+                ?.focus({ preventScroll: true });
+            }
+            else surfaceMutationError(e);
           });
       },
       onCancel: closeModal,
@@ -745,51 +1035,169 @@ function newSession(): void {
 /** Opens the kill/archive/restore confirm modal for the rail row that invoked it.
  *  This cannot derive its target from selection now that hover exposes actions on
  *  unselected rows (#2223). Restore remains the reverse of archive (#1932). */
-function openConfirm(action: "kill" | "archive" | "restore", session: ActionableSession | KillableSession): void {
+function openConfirm(
+  action: "kill" | "archive" | "restore", session: ActionableSession | KillableSession,
+  invoker: ModalInvoker = captureModalInvoker(),
+): void {
+  if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
-  openModal(
+  const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
+  const hasRootAcknowledgment = action === "kill" && session.is_root === true;
+  const refreshRootConsent = (latest: SessionData | undefined): boolean => {
+    // Consent may get stronger while this dialog is open, never weaker. Keeping
+    // the existing acknowledgment after root → non-root is harmless.
+    if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
+      openConfirm("kill", { ...session, title: latest.title, is_root: true }, invoker);
+      return true;
+    }
+    return false;
+  };
+  const mountConfirmation = (m: ModalHandle) => {
+    openModal(m, true, invoker);
+    // This also covers retained failed dialogs. The shared close path removes
+    // the watch before restoring focus or mounting another modal.
+    const refresh = () => { refreshRootConsent(store.get().sessions.find(s => s.id === target.id)); };
+    stopModalProjectionWatch = store.subscribe(refresh);
+    refresh();
+  };
+  const onConfirm = () => {
+    const tok = token;
+    // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+    if (tok === null || !modal) {
+      return;
+    }
+    const latest = store.get().sessions.find(s => s.id === target.id);
+    if (action === "kill" && !latest) {
+      modal.setError("This session is no longer available to delete.");
+      return;
+    }
+    // A queued submit can still come from a replaced generic form. Re-read
+    // the projection at the point of mutation even though the watch refreshes
+    // the visible dialog as soon as the root identity changes.
+    if (refreshRootConsent(latest)) return;
+    if (action === "restore" && pendingRestores.has(target.id)) return;
+    const m = modal;
+    const requestGeneration = action === "restore" ? connectionGeneration : 0;
+    const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
+    const captureArchiveSuccess = action === "archive"
+      ? pendingRestores.captureArchiveSuccess(target.id) : null;
+    if (action !== "restore" && !mutation) return;
+    m.setBusy(true);
+    if (mutation) {
+      closeModal();
+      applySessions(optimisticSessions.project());
+    }
+    const run =
+      action === "kill"
+        ? killSession(target.id, target.title, tok)
+        : action === "archive"
+          ? archiveSession(target.id, target.title, tok)
+          : pendingRestores.run(target.id, daemonBootId => restoreSession(
+            target.id, target.title, tok, daemonBootId ?? undefined,
+          ),
+            isActionableSession(session) && session.lifecycle_action === "restore");
+    if (!run) return;
+    void run.then(() => {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+        // PendingRestores owns the reconnect-aware confirming Snapshot. Suppress
+        // only the old connection's modal work here.
+        return;
+      }
+      if (mutation) {
+        captureArchiveSuccess?.();
+        if (!optimisticSessions.succeed(mutation)) return;
+        applySessions(optimisticSessions.project());
+        requestResync();
+      } else {
+        if (modal === m) closeModal();
+        // PendingRestores starts and awaits the confirming Snapshot before it
+        // schedules another reconciliation attempt.
+      }
+    }).catch((e) => {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+        // The request survived reconnect; refresh the current connection without
+        // publishing the old connection's modal or error into it.
+        if (token !== null && store.get().phase === "app") requestResync();
+        else pendingRestoreResync = true;
+        return;
+      }
+      if (mutation) {
+        const committed = isMutationCommittedError(e);
+        const outcome = committed
+          ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")
+          : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
+        if (committed || outcome === "confirmed") captureArchiveSuccess?.();
+        if (outcome === "stale") return;
+        applySessions(optimisticSessions.project());
+        requestResync();
+        if (outcome !== "reverted") {
+          surfaceMutationError(outcome === "uncertain"
+            ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`)
+            : e, outcome);
+          return;
+        }
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (!modal) mountConfirmation(m);
+        else surfaceMutationError(e);
+        return;
+      }
+      if (isMutationCommittedError(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(e, "confirmed");
+        return;
+      }
+      if (isMutationOutcomeUncertain(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+        return;
+      }
+      const showRefusal = () => {
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (immediateRestore && modal !== m) surfaceMutationError(e);
+      };
+      // A definitive guarded refusal may come from a replacement daemon. Keep
+      // every restore entry point fenced until an accepted Snapshot refreshes
+      // the boot id used by the request. Failed probes retry through the ledger's
+      // reconciliation backoff. The UI still belongs to the same connection only
+      // if both ownership guards survive that wait.
+      if (action === "restore") {
+        void pendingRestores.waitForRefusalResync(target.id).then(() => {
+          if (requestGeneration !== connectionGeneration || token !== tok) return;
+          showRefusal();
+        });
+      } else showRefusal();
+    });
+  };
+  mountConfirmation(
     confirmModal({
       action,
       sessionTitle: target.title,
-      onConfirm: () => {
-        const tok = token;
-        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
-        if (tok === null || !modal) {
-          return;
-        }
-        const m = modal;
-        m.setBusy(true);
-        const run =
-          action === "kill"
-            ? killSession(target.id, target.title, tok)
-            : action === "archive"
-              ? archiveSession(target.id, target.title, tok)
-              : restoreSession(target.id, target.title, tok);
-        void run.then(closeModal).catch((e) => {
-          if (isMutationCommittedError(e)) {
-            closeModal();
-            requestResync();
-            surfaceTabError(e);
-            return;
-          }
-          m.setBusy(false);
-          m.setError(errorText(e));
-        });
-      },
+      immediateRestore,
+      isRoot: hasRootAcknowledgment,
+      archived: isArchived(session),
+      offBox: isOffBoxWorkspace(session),
+      externalWorktree: session.worktree?.external_worktree === true,
+      branchCreatedByUs: session.worktree?.branch_created_by_us === true,
+      onConfirm,
       onCancel: closeModal,
     }),
   );
+  if (immediateRestore) onConfirm();
 }
 
 /** Opens the delete-project confirm for a project row (#1735). On confirm it
  *  archives the repo's regular live sessions, tears down in-place ones, and
  *  removes any durable project registration via DeleteProject; the lifecycle
  *  events + projects.changed resync the rail and drop the project from the view. */
-function openDeleteProject(root: string, label: string, sessionCount: number): void {
+function openDeleteProject(root: string, label: string): void {
   openModal(
     confirmDeleteProjectModal({
       projectLabel: label,
-      sessionCount,
+      ...projectDeletionBreakdown(store.get().sessions, root),
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -798,19 +1206,52 @@ function openDeleteProject(root: string, label: string, sessionCount: number): v
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root, tok)
-          .then(closeModal)
-          .catch((e) => {
-            if (isMutationCommittedError(e)) {
-              closeModal();
-              requestResync();
-              refreshRegisteredProjects();
-              surfaceTabError(e);
-              return;
+        const connection = connectionGeneration;
+        void projectColorWriter.cancel(root).then(async () => {
+          if (!isCurrentConnection(connection, tok)) return;
+          // A registration whose outcome never reached us can still commit
+          // daemon-side: a delete sent now would run first as a no-op and the
+          // registration would land after it. Re-drive the idempotent call so
+          // the registration is determinate before the delete.
+          const learned = projectColorRegistrations.get(root);
+          if (learned && "uncertain" in learned) {
+            try {
+              await registerProject(root, tok);
+            } catch (e) {
+              if (!isMutationCommittedError(e) && isMutationOutcomeUncertain(e)) {
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(new Error(`The project registration outcome could not be confirmed. ${errorText(e)}`));
+                return;
+              }
+              // Committed or determinately refused: either way the record's
+              // fate is settled, so the delete is safe to send.
             }
-            m.setBusy(false);
-            m.setError(errorText(e));
-          });
+            projectColorRegistrations.delete(root);
+          }
+          // The registration recovery await may outlive the credential it ran
+          // under: re-fence so a disconnect or re-login cannot let the delete
+          // land with the old token.
+          if (!isCurrentConnection(connection, tok)) return;
+          return deleteProject(root, tok)
+            .then(() => {
+              projectColorRegistrations.delete(root);
+              if (modal === m) closeModal();
+            })
+            .catch((e) => {
+              if (isMutationCommittedError(e)) {
+                projectColorRegistrations.delete(root);
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(e);
+                return;
+              }
+              m.setBusy(false);
+              m.setError(errorText(e));
+            });
+        });
       },
       onCancel: closeModal,
     }),
@@ -855,8 +1296,290 @@ function openAddProject(): void {
         const m = modal;
         m.setBusy(true);
         void registerProject(path, tok)
-          .then(closeModal)
+          .then(() => { if (modal === m) closeModal(); })
           .catch((e) => {
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
+/** The label of the rebind the daemon is deciding right now, or null. It lives
+ *  outside the modal on purpose: Escape disposes the modal while the RPC runs, so a
+ *  guard kept on the modal would let a reopened Rebind submit a second, racing
+ *  registry mutation. */
+let rebindInFlight: string | null = null;
+
+/** The connection generation rebindInFlight was set under. A guard left by a
+ *  previous connection must not block this one: its attempt's completions are
+ *  fenced off (see openRebindProject), so nothing would ever clear it. */
+let rebindInFlightGeneration = 0;
+
+/** How long a rebind may go unanswered before the UI stops waiting on it. The
+ *  mutation is not aborted — the daemon may still commit it — so hitting this
+ *  releases the in-flight guard, reports the outcome as unknown, and re-reads the
+ *  registry rather than claiming success or failure. */
+const REBIND_ANSWER_MS = 30_000;
+
+/** How long the registry re-read that re-arms a conflicted rebind may run.
+ *  fetch carries no timeout, so without a bound a never-settling read would
+ *  leave an open modal busy forever — and a dismissed modal's definitive
+ *  refusal would never surface (#4888 review). On the bound the read's late
+ *  answer is dropped and the UI converges to the same end state a failed read
+ *  reaches: the fenced refetch still re-reads the registry, and the original
+ *  refusal is reported. */
+const REBIND_REFRESH_MS = 10_000;
+
+/** The one notice for a rebind whose outcome is not known — unanswered within
+ *  REBIND_ANSWER_MS, or failed in transport. The selection is left alone; the
+ *  refreshed project list is where the user sees what actually happened. */
+function rebindOutcomeUnknown(label: string): Error {
+  return new Error(`Rebind of ${label} · outcome unknown · check the project list`);
+}
+
+/** Follows a CONFIRMED rebind to where the registry binds the project now: one
+ *  registry read issued after the daemon answered — never the RPC's echo, which a
+ *  newer rebind or delete from another client may already have superseded. The
+ *  read is fenced by the connection and credential it was issued under, a record
+ *  that is gone is not followed, and a fenced refetch afterwards settles anything
+ *  that raced this read. */
+function followConfirmedRebind(projectId: string, tok: string, connection: number): void {
+  void listProjects(tok)
+    .then((projects) => {
+      if (connection !== connectionGeneration || token !== tok) return;
+      const root = projects.find((p) => p.id === projectId)?.root;
+      if (root !== undefined) {
+        store.set({ registeredProjects: projects });
+        switchProject(root);
+      }
+      refreshRegisteredProjects();
+    })
+    .catch(() => {
+      if (connection === connectionGeneration && token === tok) refreshRegisteredProjects();
+    });
+}
+
+/** Opens the rebind-project modal (`af projects rebind`, made reachable from the
+ *  switcher): the repair when the checkout a registration names was moved or
+ *  recloned — the stable project id survives, only where it points changes. Same
+ *  host-path field + directory browser as add-project; the daemon's rejection
+ *  (unknown id, not a git repo, a root another project owns) is shown inline and
+ *  the modal stays open to correct.
+ *
+ *  Outcomes:
+ *  - a confirmed, in-time success follows the project to where the registry now
+ *    binds it (followConfirmedRebind), provided the user is still in this rebind:
+ *    the modal that submitted is still open, or the selection is still the old root;
+ *  - an outcome that is not known — unanswered within REBIND_ANSWER_MS, failed in
+ *    transport — never follows: the registry is re-read, the selection is left
+ *    alone, and one notice says so. A reply that arrives after the wait only
+ *    re-reads the registry;
+ *  - a definitive refusal is shown inline and re-arms the form. The request
+ *    carries the root this modal was opened on, so a rebind that another client
+ *    beat to the registry is refused rather than silently overwriting it (#4822);
+ *    that refusal re-reads the registry first and re-arms against the root the
+ *    project is bound to now. */
+function openRebindProject(projectId: string, label: string): void {
+  if (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
+    // Escape dismissed the modal while the daemon was still deciding. A second
+    // submission now would race the first registry mutation, and whichever
+    // landed last would win regardless of which modal appeared to finish.
+    showTransientNotice(`Rebind of ${rebindInFlight} is still running — try again when it finishes.`);
+    return;
+  }
+  // The root the registration points at NOW: a selection still on it is the user
+  // still in this rebind, which a confirmed success may follow.
+  const shown = store.get().registeredProjects.find((r) => r.id === projectId);
+  const oldRoot = shown?.root ?? null;
+  // The (root, checkout id) pair the next submission tells the daemon it
+  // expects (#4822 spec): it starts as the pair the switcher showed, and moves
+  // only when a "rebound elsewhere" refusal re-reads the registry and reports
+  // the pair it records now — a same-path reclone changes the checkout half
+  // while leaving the root spelling alone.
+  let expectedRoot = oldRoot;
+  let expectedCheckoutID = shown?.checkout_id ?? null;
+  openModal(
+    rebindProjectModal({
+      projectLabel: label,
+      // Same per-call token + daemon read as add-project's browser.
+      loadDirectory: (path: string) => {
+        const tok = token;
+        if (tok === null) {
+          return Promise.reject(new Error("not connected"));
+        }
+        return listDirectory(path, tok);
+      },
+      errorText,
+      onSubmit: (path: string) => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal || (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration)) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        rebindInFlight = label;
+        const connection = connectionGeneration;
+        rebindInFlightGeneration = connection;
+        // Every completion below is fenced by the connection that submitted it:
+        // after a disconnect or reconnect, this attempt's timer and reply must
+        // not show notices or refetch with the new token.
+        const current = (): boolean => connection === connectionGeneration;
+        // Every outcome goes through settle() exactly once: the reply, or the
+        // bounded wait below, whichever comes first. The guard lives only as long
+        // as this attempt is undecided; a reply after the wait gave up only
+        // re-reads the registry — the notice already said the outcome is unknown.
+        let settled = false;
+        const settle = (): boolean => {
+          if (settled) {
+            return false;
+          }
+          settled = true;
+          window.clearTimeout(unanswered);
+          if (rebindInFlightGeneration === connection) {
+            rebindInFlight = null;
+          }
+          return true;
+        };
+        // The user is still in this rebind: its modal is open, or the selection
+        // has not left the old root. Decided at reply time — nothing is carried
+        // forward to a later read.
+        const stillHere = (): boolean => modal === m || (oldRoot !== null && store.get().selectedProject === oldRoot);
+        // Another rebind moved the project after this modal read it: nothing was
+        // written. Re-read the registry, then re-arm the form against the root it
+        // reports now, so the user decides again knowing where the project is.
+        // The read that re-arms the form is ALSO the registry refresh — it is
+        // committed through commitRegisteredProjects, the same reconciliation a
+        // fenced refetch lands in — because a snapshot used only to re-arm and
+        // never stored leaves the switcher (and the next attempt's expected
+        // root) on the pre-rebind registry whenever the refresh loses.
+        const reArmAfterRebound = (e: unknown): void => {
+          // The end state a bound or failed read converges to: the fenced
+          // refetch still re-reads the registry so the switcher cannot keep
+          // showing the refused root, and the original refusal is reported —
+          // inline when the modal is still up, else as the tab error it was
+          // promised.
+          const missed = (): void => {
+            if (!current()) return;
+            refreshRegisteredProjects();
+            if (modal !== m) {
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          };
+          // The read runs through projectsRefetcher so its commit joins the
+          // same latest-request fence as every other registry refresh — a
+          // late conflict answer can no longer overwrite a newer refresh
+          // that committed while it was in flight (#4888 review). The
+          // re-arm then reads the committed store state; REBIND_REFRESH_MS
+          // still bounds how long the modal waits on it before missed().
+          let readSettled = false;
+          const bound = window.setTimeout(() => {
+            if (readSettled) return;
+            readSettled = true;
+            missed();
+          }, REBIND_REFRESH_MS);
+          void projectsRefetcher.refresh()
+            .then(() => {
+              if (readSettled) return;
+              readSettled = true;
+              window.clearTimeout(bound);
+              if (!current()) return;
+              // A read under a credential this page no longer holds says nothing
+              // it may act on; the form still re-arms, on the daemon's message.
+              const own = token === tok;
+              if (own && store.get().projectsError) {
+                // The fenced read failed — same end state as the bound.
+                missed();
+                return;
+              }
+              const now = own ? store.get().registeredProjects.find((p) => p.id === projectId) : undefined;
+              if (own) {
+                if (now !== undefined) {
+                  expectedRoot = now.root;
+                  expectedCheckoutID = now.checkout_id;
+                }
+                // Settle anything that raced this read — the same trailing
+                // fenced refetch followConfirmedRebind uses.
+                refreshRegisteredProjects();
+              }
+              if (modal !== m) {
+                surfaceTabError(e);
+                return;
+              }
+              m.setBusy(false);
+              m.setError(now !== undefined ? `Rebound elsewhere, to ${now.root} · submit again to move it from there` : errorText(e));
+            });
+        };
+        const unknownOutcome = (): void => {
+          if (modal === m) closeModal();
+          refreshRegisteredProjects();
+          surfaceMutationError(rebindOutcomeUnknown(label), "uncertain");
+        };
+        // No client-side timeout on the mutation itself: aborting it cannot undo
+        // a rebind the daemon already committed. Instead the UI stops waiting and
+        // reports the outcome as unknown.
+        const unanswered = window.setTimeout(() => {
+          if (!current() || !settle()) return;
+          unknownOutcome();
+        }, REBIND_ANSWER_MS);
+        void rebindProject(projectId, path, tok, expectedRoot, expectedCheckoutID)
+          .then(() => {
+            if (!current()) return;
+            if (!settle()) {
+              refreshRegisteredProjects();
+              return;
+            }
+            const follow = stillHere();
+            if (modal === m) closeModal();
+            if (follow) {
+              followConfirmedRebind(projectId, tok, connection);
+            } else {
+              refreshRegisteredProjects();
+            }
+          })
+          .catch((e) => {
+            if (!current()) return;
+            if (!settle()) {
+              refreshRegisteredProjects();
+              return;
+            }
+            if (isMutationCommittedError(e)) {
+              // The daemon committed the rebind and then a follow-up step failed:
+              // the move is confirmed, so it is followed like a success, and the
+              // follow-up failure is reported.
+              const follow = stillHere();
+              if (modal === m) closeModal();
+              if (follow) {
+                followConfirmedRebind(projectId, tok, connection);
+              } else {
+                refreshRegisteredProjects();
+              }
+              surfaceMutationError(e, "confirmed");
+              return;
+            }
+            if (isMutationOutcomeUncertain(e)) {
+              // The rebind may have landed (a lost reply, an unverified error from
+              // an intermediary). Re-arming the form would invite a second move of
+              // the durable identity. Only a definitive daemon refusal re-arms.
+              unknownOutcome();
+              return;
+            }
+            if (isProjectReboundError(e)) {
+              reArmAfterRebound(e);
+              return;
+            }
+            if (modal !== m) {
+              // The modal was dismissed mid-flight, so its inline error has
+              // nowhere to show — and must not land in whatever modal is open now.
+              surfaceTabError(e);
+              return;
+            }
             m.setBusy(false);
             m.setError(errorText(e));
           });
@@ -892,6 +1615,20 @@ function openTab(index: number): void {
   focusTerminal();
 }
 
+// Issue order among awaited tab rebinds — see rebindTargetAfterAwait. The layout
+// generation alone cannot order overlapping awaited gestures: their applies land
+// through setFocusedTabAwaited, which moves no generation because a gesture's own
+// landing write is not newer user intent (#5061). tabRebindSeq is taken when the
+// RPC is issued; newestAppliedRebindBySession records the newest gesture whose
+// rebind actually landed PER SESSION, so a completion arriving after a newer
+// same-session gesture's apply refuses to clobber it while an older gesture's
+// landing vetoes nothing newer. The per-session keying is load-bearing: an apply
+// writes the focused pane of the session it targeted and each session's layout
+// tree is kept apart, so a newer gesture's landing on ANOTHER session neither
+// vetoes this one nor may overwrite this session's record (#5061 Codex).
+let tabRebindSeq = 0;
+const newestAppliedRebindBySession = new Map<string, number>();
+
 /** Runs a tab mutation whose post-await step re-points the FOCUSED pane, applying the
  *  two guards every such rebind needs so a new async gesture can't forget them
  *  (#2000). Both create and close await a round trip and then point the focused pane
@@ -907,38 +1644,94 @@ function openTab(index: number): void {
  *  to one roster). The roster is committed unconditionally so the grown/shrunk tab list
  *  always lands; only the pane rebind is gated, by sessions.rebindTargetAfterAwait —
  *  the one place the guard lives, so both call sites (and the next) stay in step.
- *  `attach` attaches the focused terminal after (a create/open, mirroring the TUI's
- *  `t`), or leaves the keyboard where it is (a close). Errors (e.g. a remote session,
- *  or the tab cap) surface on the pane header's status line. */
+ *  `verb` is the gesture: a create attaches the focused terminal after (mirroring the
+ *  TUI's `t`), a close leaves the keyboard where it is, and both name themselves in
+ *  the notice a refusal now carries. Errors (e.g. a remote session, or the tab cap)
+ *  surface on the pane header's status line. */
 function guardedTabRebind(
   selId: string,
-  run: () => Promise<SessionData[]>,
+  run: () => Promise<AcceptedSessionSnapshot | null>,
   resolve: (sessions: SessionData[]) => number,
-  attach: boolean,
+  verb: TabRebindVerb,
 ): void {
   // Pinned BEFORE the RPC is issued, exactly where closeSessionTab captured `gen`.
   const gen = splitView.layoutGeneration();
+  const seq = ++tabRebindSeq;
   void run()
-    .then((sessions) => {
+    .then(async (snapshot) => {
+      if (snapshot === null) return;
+      // A selftest seam: parks this gesture's whole post-await step until released,
+      // so web-driver.spec.ts can force the order two overlapping gestures land in
+      // rather than racing RPC round trips (#5061). Unset in production; a non-
+      // promise return means "no hold".
+      const hold = (globalThis as {
+        __afTabRebindHold?: (verb: TabRebindVerb) => Promise<void> | void;
+      }).__afTabRebindHold?.(verb);
+      if (hold) {
+        await hold;
+      }
+      const {
+        sessions, authoritative, generation,
+        operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
+      } = snapshot;
       const targetIdx = resolve(sessions);
-      // Commit the roster first (rerender → syncSplit re-validates the tree against the
-      // new tabCount), then re-point the focused pane only if the pinned intent still
+      // Read the generation BEFORE committing the roster. The guard asks whether the
+      // USER formed a newer intent during the await, and this commit's own rerender is
+      // not one. It does not move the generation today — syncSplit calls only
+      // setSession, which reaches neither of layoutGen's two writers, commit() and
+      // focusPane() — but reading first means a future setSession that DID bump could
+      // never turn this commit into a refusal of itself (#3663).
+      const currentGen = splitView.layoutGeneration();
+      // Commit the roster (rerender → syncSplit re-validates the tree against the new
+      // tabCount), then re-point the focused pane only if the pinned intent still
       // holds. selectedId is read AFTER the set so it reflects any session switch the
-      // user made during the await (pickSelection keeps their newer choice).
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-      const idx = rebindTargetAfterAwait(gen, selId, splitView.layoutGeneration(), store.get().selectedId, targetIdx);
-      if (idx >= 0) {
-        splitView.setFocusedTab(idx);
-        if (attach) {
+      // user made during the await (pickSelection keeps their newer choice) — the one
+      // input that deliberately does read the committed state.
+      applySessions(sessions, {
+        kind: "snapshot", generation, operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
+      }, authoritative);
+      // Whether the session this gesture was aimed at survived the round trip. A
+      // session killed by another client mid-flight ALSO moves the selection
+      // (pickSelection lands elsewhere) and ALSO takes the target with it, so without
+      // this the guard would report the user's own doing for something done to them
+      // (#3668 Codex). An EMPTY pinned id is not evidence of a death: a record with no
+      // id never matches the store's selection either, and the selection guard is the
+      // one that refuses it.
+      const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
+      const outcome = rebindTargetAfterAwait({
+        pinnedGen: gen,
+        pinnedSelId: selId,
+        currentGen,
+        currentSelId: store.get().selectedId,
+        pinnedSessionAlive,
+        targetIdx,
+        rebindSeq: seq,
+        newestAppliedSeqs: newestAppliedRebindBySession,
+      });
+      if (outcome.kind === "rebind") {
+        // Recorded before the apply: this gesture's landing is the newest intent on
+        // record, and awaited applies land without counting as layout intent — the
+        // ordering above is what keeps a stale completion from clobbering it.
+        newestAppliedRebindBySession.set(selId, seq);
+        splitView.setFocusedTabAwaited(outcome.idx);
+        if (verb === "create") {
           focusTerminal();
         }
+        return;
       }
+      // The refusal itself is #2000's and stands: the user's newer intent wins, and a
+      // tab that is gone cannot be focused. What changes is that it no longer LOOKS
+      // like a hang. The roster is committed either way, so the tab bar grew or shrank
+      // while the pane stayed put and the keyboard kept going to the tab the user
+      // thought they had left — with nothing said anywhere, which is the #3663
+      // signature. Recovering instead would re-point the pane against a roster that
+      // newer intent has already moved past, which is exactly what #2000 forbids.
+      surfaceNotice(tabRebindRefusalNotice(outcome.reason, verb));
     })
     .catch((e) => surfaceTabError(e));
 }
 
-/** Creates the requested tab on the selected session (`t` sends shell; the
- *  labelled New tab menu can also send vscode), then
+/** Creates the tab kind chosen in the New tab menu on the selected session, then
  *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
  *  mirroring the TUI's `t`, which opens the fresh tab as a pane. The resync is
  *  kept for THIS window's own mutation because it must select+attach the new tab
@@ -966,7 +1759,7 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
     () =>
       create(selId, sel.title, tok).then((name) => {
         createdName = name;
-        return fetchSnapshot(tok);
+        return fetchProjectedSnapshot(tok);
       }),
     // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
     // an ordinal, and a concurrent create from another client landing inside this
@@ -977,7 +1770,7 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
       const grown = sessions.find((s) => s.id === selId);
       return grown ? sessionTabs(grown).findIndex((t) => t.name === createdName) : -1;
     },
-    true,
+    "create",
   );
 }
 
@@ -998,6 +1791,30 @@ function closeSessionTab(index: number): void {
   if (!target) {
     return;
   }
+  const resolveTarget = captureTabDeleteTarget(target);
+  const sessionId = sel.id;
+  openModal(confirmDeleteTabModal({
+    sessionTitle: sel.title,
+    tabName: tabDisplayLabel(target),
+    kind: target.kind,
+    onCancel: closeModal,
+    onConfirm: () => {
+      const current = store.get().sessions.find(session => session.id === sessionId);
+      const at = current ? resolveTarget(sessionTabs(current)) : -1;
+      if (!current || at <= 0 || !canCloseTabs(current)) {
+        modal?.setError("This tab is no longer available to delete.");
+        return;
+      }
+      closeModal();
+      deleteConfirmedSessionTab(current, at, tok);
+    },
+  }));
+}
+
+/** Apply the existing mutation to the confirmed identity's current slot. */
+function deleteConfirmedSessionTab(sel: SessionData, index: number, tok: string): void {
+  const tabs = sessionTabs(sel);
+  const target = tabs[index];
   clearTabError();
   const selId = sel.id ?? "";
   // Decide WHICH TAB the pane should end on by IDENTITY, not by arithmetic on an
@@ -1028,10 +1845,10 @@ function closeSessionTab(index: number): void {
   // The post-await rebind — and its layoutGeneration + selectedId guard, once
   // spelled out here and the source of the #1815 finding — now lives in
   // guardedTabRebind, which createSessionTab shares so neither can forget it (#2000).
-  // A close only re-points the focused pane; it does not attach (attach = false).
+  // A close only re-points the focused pane; it does not attach (verb "close").
   guardedTabRebind(
     selId,
-    () => closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchSnapshot(tok)),
+    () => closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)),
     // Resolve the kept tab's CURRENT ordinal in the post-close roster; -1 (a concurrent
     // close took it too) leaves the pane where syncSplit's identity remap already
     // settled it rather than guessing again.
@@ -1039,7 +1856,7 @@ function closeSessionTab(index: number): void {
       const shrunk = sessions.find((s) => s.id === selId);
       return shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
     },
-    false,
+    "close",
   );
 }
 
@@ -1120,9 +1937,16 @@ function renameSessionTab(id: string, name: string, editedSessionId: string): vo
   // a pre-#1738 record. An empty id sends no tab_id and the daemon resolves by name,
   // which is the documented fallback for a roster that has no ids to key on (#1929).
   void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok)
-    .then(() => fetchSnapshot(tok))
-    .then((sessions) => {
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    .then(() => fetchProjectedSnapshot(tok))
+    .then((snapshot) => {
+      if (snapshot === null) return;
+      applySessions(snapshot.sessions, {
+        kind: "snapshot", generation: snapshot.generation,
+        operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+        operationClockMs: snapshot.operationClockMs,
+        daemonBootId: snapshot.daemonBootId,
+        skippedRepos: snapshot.skippedRepos,
+      }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
 }
@@ -1161,11 +1985,23 @@ function reorderSessionTab(from: number, to: number): void {
   // than by a name/ordinal read from a roster that may already have shifted is the
   // whole point (#1929). See renameSessionTab for why tabRealId and not tabIdentity.
   void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok)
-    .then(() => fetchSnapshot(tok))
-    .then((sessions) => {
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    .then(() => fetchProjectedSnapshot(tok))
+    .then((snapshot) => {
+      if (snapshot === null) return;
+      applySessions(snapshot.sessions, {
+        kind: "snapshot", generation: snapshot.generation,
+        operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+        operationClockMs: snapshot.operationClockMs,
+        daemonBootId: snapshot.daemonBootId,
+        skippedRepos: snapshot.skippedRepos,
+      }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
+}
+
+/** Keep every overlapping mutation outcome readable until explicitly dismissed. */
+function surfaceMutationError(error: unknown, kind: MutationOutcomeNotice["kind"] = "failed"): void {
+  store.set({ mutationError: appendMutationOutcome(store.get().mutationError, { kind, detail: errorText(error) }) });
 }
 
 /** Surfaces a failed asynchronous operation as a transient toast. Tab mutations
@@ -1178,17 +2014,18 @@ function surfaceTabError(e: unknown): void {
   // message (e.g. create failure or tab cap) or a fail-closed refusal verbatim.
   const msg = errorText(e);
   console.error("af-web: operation failed:", msg);
-  showTransientNotice(msg);
+  showTransientNotice(msg, false);
 }
 
 /** Shows `msg` in the transient toast and arms its auto-dismiss, resetting the timer
  *  on a fresh message. Shared by the failed-operation path above and by UI notices
  *  (ui.ts `notice`), so there is ONE toast lifecycle rather than two that drift. */
-function showTransientNotice(msg: string): void {
+function showTransientNotice(msg: string, notice = true): void {
   if (tabErrorTimer !== null) {
     window.clearTimeout(tabErrorTimer);
   }
-  store.set({ tabError: msg });
+  store.set({ tabError: msg, tabNotice: notice });
+  if (!notice) return;
   tabErrorTimer = window.setTimeout(() => {
     tabErrorTimer = null;
     store.set({ tabError: null });
@@ -1215,9 +2052,13 @@ function clearTabError(): void {
 
 // --- task actions (#1592 Phase 5 PR8) --------------------------------------
 
-/** Refetches the authoritative task list and commits it to the store. Failures are
- *  swallowed: the events plane / a later action retries, exactly like the Snapshot
- *  resync. `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696). */
+/** Counts config reads that committed through the fence — the landing witness
+ *  for the connect-time read's background reconcile below: only a response
+ *  that passed the generation AND token checks moves it, so a request disowned
+ *  mid-flight still lets the retry continue (the newer read owns that outcome)
+ *  while a transport failure leaves it free to try again. */
+let configReadCommits = 0;
+
 /** Re-reads the config manifest and the user's live values.
  *
  *  Always from the daemon, never from a cached copy: config.toml is hand-editable
@@ -1227,20 +2068,217 @@ function clearTabError(): void {
  *
  *  A failure leaves the last-known list up and is surfaced in the tab-error line
  *  rather than swallowed — an empty config screen would read as "you have no
- *  settings". */
-function refreshConfig(): void {
+ *  settings".
+ *
+ *  Fenced (#3659) because two triggers overlap by design: entering the view fetches,
+ *  and setting a value refetches. Set a key soon after arriving and the view-entry
+ *  response can land afterwards, redisplaying the value the write just replaced as
+ *  though it had not taken. */
+const configRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: getConfig,
+  commit: (resp) => {
+    configReadCommits++;
+    // Every config read is also the font sizes' update path (#5500): a value
+    // stepped from another client lands here on the next read, and our own
+    // save's echo refetch is a no-op through the set() change guard.
+    setTerminalFontSizes(terminalFontSizesFromConfig(resp.entries));
+    store.set({ config: resp.entries, configPath: resp.path });
+  },
+  // Surfaced, not swallowed: an empty config screen would read as "you have no
+  // settings" rather than "the read failed". Under the fence like the commit — an
+  // older request's transport blip must not paint an error over the fresher answer
+  // already on screen, which is the same "the older one commits nothing" rule.
+  onError: (err: unknown) => {
+    surfaceTabError(err);
+  },
+});
+
+function refreshConfig(): Promise<void> {
+  return configRefetcher.refresh();
+}
+
+/** Backoff for the background reconcile behind a failed connect-time config
+ *  read: enough attempts to absorb a brief unavailability window without
+ *  turning a dead daemon into an endless poller. */
+const CONNECT_CONFIG_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
+
+/** Retries the config read after the connect-time fetch fell back to
+ *  defaults (#5500). The commit counter is the landing witness — only a read
+ *  that passed the fence counts, so a refresh disowned by a newer one does
+ *  not end the loop (that newer read owns the outcome) and a transport
+ *  failure retries. The connect attempt's freshness is re-checked before
+ *  every request: a disconnect or a newer connect ends the loop rather than
+ *  fetching for a session that is gone.
+ *
+ *  The loop is SILENT: a per-retry toast would keep reporting a failure the
+ *  loop recovered from — or is about to — so the in-flight reads suppress
+ *  the fenced onError. Only a fully spent budget surfaces, and then through
+ *  one ordinary loud read whose onError carries the daemon's real message
+ *  (and which still lands the sizes if that last request happens to
+ *  succeed). */
+async function reconcileConfigRead(candidate: string, attempt: LatestRequest): Promise<void> {
+  const landed = await retryWithBackoff(
+    async () => {
+      const before = configReadCommits;
+      await configRefetcher.refresh({ silent: true });
+      return configReadCommits > before;
+    },
+    () => connectionAttemptMayCommit(attempt, token, candidate),
+    CONNECT_CONFIG_RETRY_DELAYS_MS,
+    ms => new Promise<void>(resolve => window.setTimeout(resolve, ms)),
+  );
+  if (!landed && connectionAttemptMayCommit(attempt, token, candidate)) {
+    await refreshConfig();
+  }
+}
+
+/** The accounts read (#3385), fenced like the config read and for the same
+ *  reason: entering the view fetches, and every account action refetches, so an
+ *  older response can otherwise land after a newer one and redisplay the state a
+ *  login just changed (#3659).
+ *
+ *  A failure becomes the SECTION's own message rather than a tab error: the config
+ *  view is still useful when the accounts cannot be read, and an empty section
+ *  would read as "you have no accounts" — a different thing, needing a different
+ *  action, from "af could not look". */
+const accountsRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  // The refetch reads every agent's defaults, never a single repo's — wrap
+  // rather than pass listAccounts directly, whose second parameter is
+  // repoPath, so an AbortSignal the refetcher hands out could never land in it.
+  fetch: (tok) => listAccounts(tok),
+  commit: (resp) => {
+    store.set({
+      accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "", loaded: true },
+    });
+  },
+  onError: (err: unknown) => {
+    store.set({ accounts: { ...store.get().accounts, error: errorText(err) } });
+  },
+});
+
+function refreshAccounts(): void {
+  accountsRefetcher.refresh();
+}
+
+/** The usage/quota read (#2983), fenced like the accounts read and for the same
+ *  reason: entering the view fetches, and an older response must not land after
+ *  a newer one and redisplay a parked session that has since resumed.
+ *
+ *  A failure becomes the SECTION's own message rather than a tab error, matching
+ *  accounts: an empty section would read as "no usage to report", which is the
+ *  fabricated-answer shape this report exists to refuse. */
+const quotaRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], error: "", loaded: true },
+    });
+  },
+  onError: (err: unknown) => {
+    store.set({ quota: { ...store.get().quota, error: errorText(err) } });
+  },
+});
+
+function refreshQuota(): void {
+  quotaRefetcher.refresh();
+}
+
+/** Records the outcome of an account action on the row that produced it. */
+function setAccountStatus(agent: string, name: string, message: string, error: boolean): void {
+  store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
+}
+
+/** Creates an account's credential directory (#3385).
+ *
+ *  The name goes to the daemon unvalidated BY DESIGN, exactly as a config value
+ *  does: agentaccount.ValidateName, the case-collision rule and the agent roster
+ *  all live where the directory is created, so a refusal comes back in the
+ *  daemon's own words and is shown verbatim. A second copy of those rules in the
+ *  browser is how a UI comes to accept a name the writer rejects.
+ *
+ *  A register failure is recorded against an EMPTY account name, which is what the
+ *  register form matches on: the name it was for is already gone from the input. */
+function doRegisterAccount(agent: string, name: string): void {
   const tok = token;
   if (tok === null) {
     return;
   }
-  void getConfig(tok)
+  const requestGeneration = connectionGeneration;
+  void registerAccountRPC(agent, name, tok)
     .then((resp) => {
-      store.set({ config: resp.entries, configPath: resp.path });
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        // Stale connection: suppress the row status, but still reconcile the
+        // current session's account view — the registration succeeded and the
+        // daemon's account list changed; an open config view would otherwise
+        // show the pre-registration state until the user leaves and re-enters.
+        refreshAccounts();
+        return;
+      }
+      const notices = resp.notices?.length ? ` · ${resp.notices.join(" · ")}` : "";
+      setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
+      refreshAccounts();
     })
     .catch((err: unknown) => {
-      // Surfaced, not swallowed: an empty config screen would read as "you have
-      // no settings" rather than "the read failed".
-      surfaceTabError(err);
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
+      setAccountStatus(agent, "", errorText(err), true);
+    });
+}
+
+/** Runs the agent's own login flow for an account on the daemon host and opens its
+ *  pane here (#3384/#3385).
+ *
+ *  The spawn happens BEFORE the overlay, so a refusal the operator must see — an
+ *  agent with no verified login flow, the codex keyring collapse, a missing binary
+ *  — lands on the account's own row rather than behind an overlay that opens onto
+ *  an error. A flow that finished without needing a terminal likewise reports on
+ *  the row: there is no pane to watch, and that is a real outcome rather than a
+ *  failure.
+ *
+ *  On close the accounts are re-read: the login's whole point is a state change
+ *  the section has to reflect, and it is read from the AGENT's own credential
+ *  file rather than from what the browser believes happened. */
+function doOpenAccountLogin(agent: string, name: string): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  const requestGeneration = connectionGeneration;
+  setAccountStatus(agent, name, `Starting the ${agent} login…`, false);
+  void startAccountLogin(agent, name, tok)
+    .then((login) => {
+      // A disconnect during AccountLogin's RPC leaves accountLogin null for the
+      // reaper; a stale response would mount an orphan overlay bound to tok into
+      // the detached modalHost (reused by the next AppShell), which reappears on
+      // reconnect. Commit only while the same connection generation and credential
+      // are still installed — the same gate openConfirm's restore branch uses.
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
+      if (login.finished || login.session_name === "") {
+        const copy = loginWithoutPaneCopy(login);
+        setAccountStatus(agent, name, `${copy.status} · ${copy.detail}`, !login.logged_in);
+        refreshAccounts();
+        return;
+      }
+      const notices = login.notices?.length ? ` · ${login.notices.join(" · ")}` : "";
+      setAccountStatus(agent, name, `Running ${login.program}${notices}`, false);
+      accountLogin = mountOverlay((mountHost) => openAccountLogin({
+        token: tok,
+        mountHost,
+        login,
+        onClosed: () => {
+          accountLogin = null;
+          refreshAccounts();
+        },
+      }));
+    })
+    .catch((err: unknown) => {
+      // The complementary await-exit takes the same gate: a rejection that
+      // lands across a disconnect must not write the dead connection's error
+      // onto the row.
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
+      setAccountStatus(agent, name, errorText(err), true);
     });
 }
 
@@ -1260,57 +2298,135 @@ function refreshConfig(): void {
  *  the only side that can keep the user's order. */
 const queueConfigSave = createKeyedQueue();
 
-function applyConfigValue(key: string, value: string): void {
+/** Returns the queue item's settle promise — the write AND the refetch it
+ *  triggers — so the font controls' stale-read guard can cover the whole round
+ *  trip rather than lapsing when the POST alone lands. */
+function applyConfigValue(key: string, value: string): Promise<void> {
   const tok = token;
   if (tok === null) {
-    return;
+    return Promise.resolve();
   }
-  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+  return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+}
+
+/** ExplainConfig (#4803): the config view's Explain affordance. Returns the
+ *  daemon's own ResolvedValue — which on-disk layer won, which were shadowed,
+ *  absent, or disallowed — for the pane to FORMAT, never compute. A refusal
+ *  (unknown key, a daemon too old for the route) settles as `{ok:false}` with
+ *  the daemon's message already rendered, so the view never interprets errors. */
+function explainConfigValue(key: string): Promise<ExplainOutcome> {
+  const tok = token;
+  if (tok === null) {
+    return Promise.resolve({ ok: false, error: "not connected to the daemon" });
+  }
+  return explainConfig(key, tok).then(
+    (resp) => ({ ok: true, resp }) as ExplainOutcome,
+    (err: unknown) => ({ ok: false, error: errorText(err) }),
+  );
 }
 
 function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {
+  const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok)
     .then((resp) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        // Stale connection: suppress the status write, but still reconcile the
+        // current session's config view — the write committed and the daemon
+        // holds the new value; an open config view would otherwise display the
+        // pre-write state until the user leaves and re-enters.
+        return refreshConfig();
+      }
       store.set({
         configStatus: {
           key: resp.result.key,
           // Echo the CANONICAL value the writer reported, not the one sent.
           value: resp.result.value,
-          notice: resp.result.requires_restart ? resp.restart_notice : "",
+          notice: saveNotice(resp),
           error: "",
         },
       });
-      refreshConfig();
+      // Awaited, not fired: the queue item — and with it the font module's
+      // pending-save guard — is not done until the post-write read has landed.
+      return refreshConfig();
     })
     .catch((err: unknown) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
+      // A font-size save has no manifest row to hang this error on — the pane
+      // renders only the `web` table row — so it must reach the shared toast or
+      // the stepped size would keep displaying as though it had saved.
+      if (terminalFontClassForKey(key) !== null) {
+        surfaceTabError(new Error(`the terminal text size was not saved: ${errorText(err)}`));
+      }
     });
 }
 
-function refreshTasks(): void {
-  const tok = token;
-  if (tok === null) {
-    return;
+// The font-size controls' saves ride the same path (#5500): the per-key queue
+// serializes a phone-size write against a desktop-size write, the returned
+// promise carries the write's whole round trip back to the font module's
+// stale-read guard, and a failed write leaves the applied size on screen while
+// the error surfaces on the toast — the size is display state first.
+bindTerminalFontPersist(applyConfigValue);
+
+// How often an OPEN tasks view refetches, for the verdicts that change with the
+// clock rather than with an event (#3626).
+//
+// overdue / missed_occurrences / next_run_at are derived from now at read time, so
+// a task crosses into overdue with nothing to announce it: the daemon publishes
+// task.* on a MUTATION, and going quiet is the absence of one. Without this the
+// list showed whatever was true when the view was opened, and a row could sit
+// there reading healthy for as long as someone left the page up — which is
+// precisely the wall-mounted, nobody-opens-the-TUI box this feature is for.
+//
+// A minute is well inside the smallest window a verdict can flip in (the slack is
+// at least five minutes) and is one small RPC, which is what the view already
+// issues on arrival and on every task event.
+const TASK_HEALTH_POLL_MS = 60_000;
+
+// The GUARD is in the tick, not in switchView, deliberately: the view is also set
+// directly in places that never route through the switch (creating a session
+// jumps to "sessions"), so a start/stop pair hung off the switch would leak a
+// timer down one path and miss starting it down another. Asking the store each
+// tick cannot get out of step with it.
+window.setInterval(() => {
+  const state = store.get();
+  if (state.phase === "app" && state.view === "tasks") {
+    refreshTasks();
   }
-  void listTasks(tok)
-    .then((tasks) => {
-      // Reconcile the project scope against the new task set (redesign PR2): a
-      // task-only project appears once its tasks load, and drops when its last task
-      // is removed (if it also has no live sessions). This is what makes a task-only
-      // repo reachable in the switcher and its tasks scoped to it.
-      const selectedProject = reconcileProject(
-        store.get().sessions,
-        tasks,
-        loadProjectChoice(),
-        store.get().selectedProject,
-        store.get().registeredProjects,
-      );
-      store.set({ tasks, selectedProject });
-    })
-    .catch(() => {
-      // Transport/auth failure: leave the last-known list up; a task.* event or the
-      // next mutation refetches. Nothing to surface here.
-    });
+}, TASK_HEALTH_POLL_MS);
+
+/** Refetches the authoritative task list and commits it to the store. Failures are
+ *  swallowed: the events plane / a later action retries, exactly like the Snapshot
+ *  resync.
+ *
+ *  Fenced (#3654) because this is called from a mutation, a debounced event resync,
+ *  a view switch, and the poll above: a request issued just before an edit can
+ *  resolve just after the edit's own refetch, restoring the pre-mutation list — an
+ *  old health verdict, or a row that was removed — until something else happens to
+ *  refresh. The poll is what made these genuinely concurrent rather than merely
+ *  capable of it (#3626 review). */
+const tasksRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: listTasks,
+  commit: (tasks) => {
+    // Reconcile the project scope against the new task set (redesign PR2): a
+    // task-only project appears once its tasks load, and drops when its last task
+    // is removed (if it also has no live sessions). This is what makes a task-only
+    // repo reachable in the switcher and its tasks scoped to it.
+    const selectedProject = reconcileProject(
+      store.get().sessions,
+      tasks,
+      loadProjectChoice(),
+      store.get().selectedProject,
+      projectRoots(store.get().registeredProjects),
+    );
+    store.set({ tasks, selectedProject, tasksError: "" });
+  },
+  onError: (e: unknown) => store.set({ tasksError: errorText(e) }),
+});
+
+function refreshTasks(): void {
+  tasksRefetcher.refresh();
 }
 
 /** Debounced task refetch for a burst of task.* events, mirroring requestResync. */
@@ -1329,32 +2445,111 @@ function requestTaskResync(): void {
  *  what makes the "+ Add project" affordance observable: openAddProject writes via
  *  RegisterProject and closes the modal, and the resulting projects.changed event
  *  lands here to surface the new project in the switcher — no reload, no session
- *  required. Mirrors refreshTasks; a transport failure leaves the last-known list up. */
-function refreshRegisteredProjects(): void {
-  const tok = token;
-  if (tok === null) {
-    return;
+ *  required. Mirrors refreshTasks; a transport failure leaves the last-known list up.
+ *
+ *  Fenced (#3659) because registering a project fires BOTH triggers by design: the
+ *  modal calls this directly, and the projects.changed it causes schedules the
+ *  debounced resync. Both are in flight at once, so an unfenced direct response
+ *  resolving last commits the PRE-registration list — the just-registered project
+ *  drops back out of the switcher, and selectedProject is recomputed from that stale
+ *  list. That is the one interaction the affordance exists for.
+ *
+ *  fetch is listProjects, NOT fetchRegisteredProjects (which degrades to [] for the
+ *  initial connect): on a resync a transport blip must LEAVE the last-known list up,
+ *  exactly as refreshTasks does — blanking it to [] would drop a registered project
+ *  out of the switcher on a transient failure. */
+/** Bounds one registry read. fetch carries no deadline, so a daemon that
+ *  accepts and never answers would keep the request — and its per-origin
+ *  connection-pool slot — pending forever, and every conflict timer or settle
+ *  refetch that calls refreshRegisteredProjects would pile up one more (#4888
+ *  review). 30s is far past anything a local registry read should take. */
+const REGISTRY_READ_MS = 30_000;
+
+const projectsRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: listProjects,
+  timeoutMs: REGISTRY_READ_MS,
+  commit: commitRegisteredProjects,
+  onError: (e: unknown) => store.set({ projectsError: errorText(e) }),
+});
+
+/** Commits a fenced registry read, reconciling the selected project against it. */
+function commitRegisteredProjects(projects: RegisteredProject[]): void {
+  // The authoritative list settles what a learned registration became: a settled
+  // id the registry no longer holds was deleted or rebound away, so a later write
+  // must re-register instead of failing on the stale id; an uncertain outcome the
+  // registry now names is determinate and takes the recorded id.
+  const byRoot = new Map(projects.map((p) => [p.root, p.id]));
+  for (const [root, learned] of projectColorRegistrations) {
+    if ("uncertain" in learned) {
+      const id = byRoot.get(root);
+      if (id !== undefined) projectColorRegistrations.set(root, { id });
+    } else if (byRoot.get(root) !== learned.id) {
+      // The registry must still map THIS root to the learned id: an id that
+      // survives only under another root means this one was rebound away, and
+      // the stale mapping would write the next color onto the rebound project.
+      projectColorRegistrations.delete(root);
+    }
   }
-  // Call listProjects directly (NOT fetchRegisteredProjects, which degrades to [] for
-  // the initial connect): on a resync a transport blip must LEAVE the last-known list
-  // up, exactly as refreshTasks does — blanking it to [] would drop a registered
-  // project out of the switcher on a transient failure.
-  void listProjects(tok)
-    .then((projects) => {
-      const registeredProjects = projects.map((p) => p.root);
-      const selectedProject = reconcileProject(
-        store.get().sessions,
-        store.get().tasks,
-        loadProjectChoice(),
-        store.get().selectedProject,
-        registeredProjects,
-      );
-      store.set({ registeredProjects, selectedProject });
-    })
-    .catch(() => {
-      // Transport/auth failure: keep the last-known registry up; the next
-      // projects.changed event or reconnect refetches. Never blank the union on a blip.
-    });
+  const selectedProject = reconcileProject(
+    store.get().sessions,
+    store.get().tasks,
+    loadProjectChoice(),
+    store.get().selectedProject,
+    projectRoots(projects),
+  );
+  store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
+}
+
+function refreshRegisteredProjects(): void {
+  projectsRefetcher.refresh();
+}
+
+/** What the writer learned about a root's durable registration. A settled id
+ *  feeds later queued writes — a choice captured before the first write
+ *  registered the project must not call registerProject again, or a rebind in
+ *  between would register the old root as a second project. An uncertain one
+ *  gates a following delete until registerProject makes it determinate. */
+const projectColorRegistrations = new Map<string, { id: string } | { uncertain: true }>();
+
+/** Sets a project's color. A project known only from its sessions has no registry
+ *  record to hold a color, so it is registered first (idempotent on the daemon).
+ *  Each choice is fenced to the connection and credential it was made under, and
+ *  keeps the project id it was made for, so a rebind cannot turn it into a new
+ *  registration of the old root. Deleting the project cancels it (openDeleteProject). */
+const projectColorWriter = createLatestWriter<{ color: string; tok: string; connection: number; projectId: string | null }>(
+  async (root, { color, tok, connection, projectId: known }) => {
+    const current = (): boolean => isCurrentConnection(connection, tok);
+    if (!current()) return;
+    const learned = projectColorRegistrations.get(root);
+    const projectId = known ?? (learned && "id" in learned ? learned.id : null) ?? await (async () => {
+      try {
+        const project = await registerProject(root, tok);
+        projectColorRegistrations.set(root, { id: project.id });
+        return project.id;
+      } catch (e) {
+        if (isMutationOutcomeUncertain(e)) projectColorRegistrations.set(root, { uncertain: true });
+        throw e;
+      }
+    })();
+    if (!current()) return;
+    await setProjectColor(projectId, color, tok);
+    if (current()) refreshRegisteredProjects();
+  },
+  (e: unknown, _root, { tok, connection }) => {
+    if (isCurrentConnection(connection, tok)) surfaceMutationError(e);
+  },
+);
+
+function isCurrentConnection(connection: number, tok: string): boolean {
+  return connection === connectionGeneration && token === tok;
+}
+
+function doSetProjectColor(root: string, color: string): void {
+  const tok = token;
+  if (tok === null) return;
+  const projectId = store.get().registeredProjects.find((r) => r.root === root)?.id ?? null;
+  void projectColorWriter.set(root, { color, tok, connection: connectionGeneration, projectId });
 }
 
 /** Debounced registry refetch for a burst of projects.changed events, mirroring
@@ -1378,10 +2573,11 @@ function openAddTask(): void {
   // follow-on Fix 1), so a TASK-ONLY project is selectable and the default lands on
   // the currently-scoped project — adding a task targets ITS repo, and is never
   // blocked by the absence of a session.
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
+      loadOnComplete: () => listOnComplete(token ?? ""),
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -1392,12 +2588,14 @@ function openAddTask(): void {
         m.setBusy(true);
         void addTask(buildTask(input), tok)
           .then(() => {
-            closeModal();
+            // An RPC that resolves across a reconnect must not close whatever
+            // modal the NEW connection has open — only ours.
+            if (modal === m) closeModal();
             refreshTasks();
           })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
-              closeModal();
+              if (modal === m) closeModal();
               refreshTasks();
               surfaceTabError(e);
               return;
@@ -1423,10 +2621,11 @@ function openAddTask(): void {
  *  must appear at this exact call site. The unused trigger is cleared to "" — safe on
  *  the HTTP/JSON path, which (unlike the CLI's gob socket) never elides "" to nil. */
 function openEditTask(task: TaskData): void {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
+      loadOnComplete: () => listOnComplete(token ?? ""),
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -1435,6 +2634,7 @@ function openEditTask(task: TaskData): void {
         }
         const m = modal;
         m.setBusy(true);
+        const value = buildTask(input);
         void updateTask(
           task,
           {
@@ -1443,18 +2643,19 @@ function openEditTask(task: TaskData): void {
             cron_expr: input.trigger === "cron" ? input.cron : "",
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
+            on_complete: value.on_complete ?? "",
             project_path: input.projectPath,
             program: input.program,
           },
           tok,
         )
           .then(() => {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
           })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
-              closeModal();
+              if (modal === m) closeModal();
               refreshTasks();
               surfaceTabError(e);
               return;
@@ -1499,7 +2700,14 @@ function doTriggerTask(task: TaskData): void {
   }
   void triggerTask(task, tok)
     .then(refreshTasks)
-    .catch((e) => surfaceTabError(e));
+    .catch((e) => {
+      // A committed run (auto-created session, start unconfirmed) still moved
+      // last-run: refetch, and show the warning rather than a plain success.
+      if (isMutationCommittedError(e)) {
+        refreshTasks();
+      }
+      surfaceTabError(e);
+    });
 }
 
 /**
@@ -1516,8 +2724,10 @@ function doTriggerTask(task: TaskData): void {
  * the projection ahead of the daemon and show a resumed session that, if the
  * resume failed downstream, is still parked.
  *
- * The daemon refuses a session that is not actually limit-blocked, so a click that
- * races the limit clearing itself surfaces an error rather than an unwanted prompt.
+ * The same endpoint explicitly retries an inspected, delivery-unconfirmed
+ * account or agent handoff. The daemon still refuses a row with neither recovery
+ * obligation, so a click that races settlement surfaces an error rather than an
+ * unwanted prompt.
  */
 function doRetryLimit(): void {
   const sel = selectedSession();
@@ -1526,7 +2736,64 @@ function doRetryLimit(): void {
   if (!sel || tok === null) {
     return;
   }
-  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
+  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      surfaceMutationError(e, "confirmed");
+      return;
+    }
+    surfaceTabError(e);
+  });
+}
+
+/**
+ * Retires the selected session's pending handoff mission WITHOUT resending it
+ * (#4429) — the web's "Mark delivered", the no-resend half of the TUI's `c`
+ * resolve picker.
+ *
+ * Unlike Retry this DOES confirm: the attestation is the operator's — "the pane
+ * already shows the incoming agent acting on its mission" — and it retires a
+ * durable obligation on that word, so the click must be deliberate. The daemon
+ * probes the runtime, settles the leftover fence, and persists; the resulting
+ * session.updated event drops the row's pending-delivery state. No optimistic
+ * clear, same as doRetryLimit: the web is the daemon's projection.
+ *
+ * Uses the FULL projection (selectedSessionData, not the id/title-only
+ * selectedSession): the re-check on the freshest snapshot keeps a stale button
+ * from attesting against a row whose verdict already settled.
+ */
+function doMarkDelivered(): void {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id) {
+    return;
+  }
+  const target = { id: sel.id, title: sel.title };
+  openModal(
+    markDeliveredModal(
+      target.title,
+      () => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void confirmHandoffDelivery(target.id, target.title, tok)
+          .then(closeModal)
+          .catch((e) => {
+            if (isMutationCommittedError(e)) {
+              if (modal === m) closeModal();
+              requestResync();
+              surfaceMutationError(e, "confirmed");
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
+      },
+      closeModal,
+    ),
+  );
 }
 
 /**
@@ -1548,10 +2815,12 @@ function doHandoff(): void {
   }
   const target = { id: sel.id, title: sel.title };
   openModal(
-    handoffModal(sel.title, sel.current_agent ?? "", {
+    handoffModal(sel.title, sel.current_agent ?? "", sel.program ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
-      onSubmit: (to: string) => {
+      loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
+      currentAccount: sel.account,
+      onSubmit: (to: string, account?: string) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
         if (tok === null || !modal) {
@@ -1559,9 +2828,17 @@ function doHandoff(): void {
         }
         const m = modal;
         m.setBusy(true);
-        void handoffSession(target.id, target.title, to, tok)
-          .then(closeModal)
+        void handoffSession(target.id, target.title, to, tok, account)
+          .then(() => {
+            if (modal === m) closeModal();
+          })
           .catch((e) => {
+            if (isMutationCommittedError(e)) {
+              if (modal === m) closeModal();
+              requestResync();
+              surfaceMutationError(e, "confirmed");
+              return;
+            }
             m.setBusy(false);
             m.setError(errorText(e));
           });
@@ -1577,9 +2854,22 @@ function doRemoveTask(task: TaskData): void {
   if (tok === null) {
     return;
   }
-  void removeTask(task, tok)
-    .then(refreshTasks)
-    .catch((e) => surfaceTabError(e));
+  openModal(removeTaskModal(task.name || task.id, () => {
+    if (!modal || token !== tok) return;
+    const handle = modal;
+    handle.setBusy(true);
+    void removeTask(task, tok).then(() => { if (modal === handle) closeModal(); return refreshTasks(); })
+      .catch((error) => {
+        if (isMutationCommittedError(error)) {
+          if (modal === handle) closeModal();
+          refreshTasks();
+          surfaceTabError(error);
+          return;
+        }
+        handle.setBusy(false);
+        handle.setError(errorText(error));
+      });
+  }, closeModal));
 }
 
 /** The action callbacks the shell + login view invoke. */
@@ -1599,7 +2889,7 @@ function setTheme(choice: ThemeChoice): void {
   splitView.applyTheme();
 }
 
-/** While the choice is Auto, follow the OS: a prefers-color-scheme flip re-themes the
+/** While the choice is System, follow the OS: a prefers-color-scheme flip re-themes the
  *  terminals to match (the CSS chrome already reacts via the media query). An explicit
  *  Light/Dark choice ignores the OS. */
 function watchSystemTheme(): void {
@@ -1610,7 +2900,7 @@ function watchSystemTheme(): void {
     return; // no matchMedia (very old / headless): nothing to follow
   }
   const onChange = (): void => {
-    if (store.get().themeChoice === "auto") {
+    if (store.get().themeChoice === "system") {
       refreshThemeMode();
       splitView.applyTheme();
     }
@@ -1627,26 +2917,45 @@ const actions = {
   connect,
   disconnect,
   open: openFromRail,
+  copyLink: () => {
+    const id = store.get().selectedId;
+    if (!id) return;
+    void copyText(sessionURL(id)).then((ok) =>
+      showTransientNotice(ok ? "Link copied" : "Copy failed · copy the address bar link"),
+    );
+  },
   newSession,
   kill: (session: KillableSession) => openConfirm("kill", session),
   archive: (session: ActionableSession) => openConfirm("archive", session),
   restore: (session: ActionableSession) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),
+  closePane: () => splitView.closeFocusedPane(),
   openTab,
   newTab: createSessionTab,
   closeTab: closeSessionTab,
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
+  dismissNotice: () => {
+    if (store.get().mutationError) store.set({ mutationError: undefined });
+    else clearTabError();
+  },
+  retryConnection: () => { void bootstrap(); },
+  retryTasks: refreshTasks,
   notice: surfaceNotice,
   paneDropHintAt: (x: number, y: number) => splitView.showTabDropHintAt(x, y),
   clearPaneDropHint: () => splitView.clearTabDropHint(),
   dropTabOnPaneAt: (x: number, y: number, drag: DragPayload) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  stepTerminalFontSize: (delta: number) => stepTerminalFontSize(delta),
   openConfigAssistant: doOpenConfigAssistant,
+  explainConfig: explainConfigValue,
+  registerAccount: doRegisterAccount,
+  openAccountLogin: doOpenAccountLogin,
   switchProject,
   setStatusFilter,
   resetStatusFilter,
@@ -1657,6 +2966,8 @@ const actions = {
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
   addProject: openAddProject,
+  rebindProject: openRebindProject,
+  setProjectColor: doSetProjectColor,
   setTheme,
 };
 
@@ -1716,6 +3027,7 @@ function syncSplit(state: AppState): void {
     tabRealIds,
     archived,
     tabNames,
+    runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.web_proxied) : [],
   );
 }
 
@@ -1732,56 +3044,20 @@ function startStream(tok: string): void {
     onEvent,
     onResync: () => {
       requestResync();
-      void refreshDaemonPalette(tok);
     },
     onStatus: (s: EventStreamStatus) => store.set({ live: s }),
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    },
   });
   stream.start();
-}
-
-function clearPaletteRetry(): void {
-  if (paletteRetryTimer === null) return;
-  window.clearTimeout(paletteRetryTimer);
-  paletteRetryTimer = null;
-}
-
-/** Refreshes the daemon-owned palette for both CSS chrome and every open xterm.
- *  Called during login and on every events-stream open, including reconnects after
- *  a daemon restart. Transient failures retain the last good palette and retry. */
-async function refreshDaemonPalette(tok: string): Promise<void> {
-  clearPaletteRetry();
-  const request = paletteRefreshGate.begin();
-  let paletteChanged = false;
-  try {
-    const theme = await getTheme(tok);
-    if (token !== tok || !request.isCurrent()) return;
-    applyDaemonTheme(theme);
-    hasDaemonPalette = true;
-    paletteChanged = true;
-  } catch (error) {
-    if (token !== tok || !request.isCurrent()) return;
-    const status = error instanceof ApiError ? error.status : 0;
-    const plan = paletteFetchFailurePlan(status, hasDaemonPalette);
-    if (plan.reauthenticate) {
-      // Reuse the one credential-rejection path: stop every authenticated stream,
-      // forget the stored bearer, reset the palette, and show the login surface.
-      // Retrying the same rejected token once a second can never recover.
-      disconnect(describeError(error), true);
-      return;
-    }
-    if (plan.reset) {
-      resetDaemonTheme();
-      hasDaemonPalette = false;
-      paletteChanged = true;
-    }
-    if (plan.retry) {
-      paletteRetryTimer = window.setTimeout(() => {
-        paletteRetryTimer = null;
-        if (token === tok) void refreshDaemonPalette(tok);
-      }, PALETTE_RETRY_MS);
-    }
-  }
-  if (paletteChanged) splitView.applyTheme();
 }
 
 function stopStream(): void {
@@ -1789,13 +3065,27 @@ function stopStream(): void {
   // prevents a request that has not started; a response from the previous stream
   // must not land in a newly-connected (possibly differently-authorized) app.
   resyncRequestGeneration += 1;
-  paletteRefreshGate.invalidate();
-  clearPaletteRetry();
+  // And every fenced projection, for the same reason and through one door the
+  // generation+token fence cannot close by itself: reconnecting with the SAME
+  // credential moves neither of them, and the tokenless loopback (#1696) makes
+  // "the same credential" the ordinary path rather than an edge case. connect()
+  // loads tasks and projects directly rather than through their refetchers, so
+  // without this a request still in flight from the previous stream outlives the
+  // disconnect and overwrites the freshly-connected list, restoring rows that were
+  // removed while it was away (#3626 review). Config joins them in #3659: its view
+  // is reachable straight after a reconnect, and the file the stale answer describes
+  // may be a different daemon's.
+  tasksRefetcher.invalidate();
+  projectsRefetcher.invalidate();
+  configRefetcher.invalidate();
+  accountsRefetcher.invalidate();
+  quotaRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
   }
+  rejectResyncCompletions(new Error("Snapshot resync superseded by disconnect"));
   if (taskResyncTimer !== null) {
     window.clearTimeout(taskResyncTimer);
     taskResyncTimer = null;
@@ -1818,10 +3108,6 @@ function stopStream(): void {
  * terminal down for.
  */
 function onEvent(ev: WireEvent): void {
-  if (eventRequestsPaletteRefresh(ev)) {
-    if (hasConnectedToken(token)) void refreshDaemonPalette(token);
-    return;
-  }
   // Task deltas (#1592 Phase 5 PR8) don't touch the session list; the daemon owns
   // tasks.json, so a task.created/updated/removed event just triggers a debounced
   // ListTasks refetch (the authoritative task projection). The session reducer
@@ -1843,9 +3129,11 @@ function onEvent(ev: WireEvent): void {
     requestProjectsResync();
   }
   sessionEventGeneration += 1;
-  const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
-  applySessions(sessions);
-  if (needsResync) {
+  const needsResync = optimisticSessions.event(ev);
+  const evidence: RestoreEvidence | undefined = ev.data?.id
+    ? { kind: ev.type === "session.restored" ? "restored" : "updated", id: ev.data.id } : undefined;
+  applySessions(optimisticSessions.project(), evidence);
+  if (needsResync || ev.type === "session.restored") {
     requestResync();
   }
 }
@@ -1856,7 +3144,8 @@ function onEvent(ev: WireEvent): void {
  *  so a tab closed/created out-of-band by another client can't leave the visible
  *  tab or the streamed tab pointing past the end; if the selection changed (e.g.
  *  the selected session was killed), the active tab resets to the agent tab. */
-function applySessions(sessions: SessionData[]): void {
+function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
+  authoritative: ReadonlyArray<SessionData> = optimisticSessions.authoritativeRows()): void {
   const prevSel = store.get().selectedId;
   // Reconcile the project scope against the new session set (redesign PR2): a project
   // that vanished (its last session gone) falls back gracefully to the persisted/
@@ -1866,7 +3155,7 @@ function applySessions(sessions: SessionData[]): void {
     store.get().tasks,
     loadProjectChoice(),
     store.get().selectedProject,
-    store.get().registeredProjects,
+    projectRoots(store.get().registeredProjects),
   );
   let selectedId = pickSelection(sessions, prevSel);
   // Drop a selection that no longer belongs to the scoped project, so the terminal
@@ -1877,15 +3166,71 @@ function applySessions(sessions: SessionData[]): void {
       selectedId = null;
     }
   }
-  // An unchanged selection keeps its active tab; one the snapshot MOVED (the selected
-  // session was archived/killed, so pickSelection landed elsewhere) takes the tab its
-  // retained layout will settle on rather than asserting 0 (#1855, as moveSelection).
-  const settled =
-    selectedId === prevSel
-      ? store.get().activeTab
-      : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
+  // The split layout owns which TAB is focused; resolve its retained identity against
+  // this roster before store.set synchronously rerenders AppShell. Keeping the old
+  // ordinal for an unchanged selection is wrong when another client reordered tabs:
+  // until syncSplit remaps the layout, that ordinal names a neighbour. A changed
+  // selection uses the same retained-layout rule (#1855, as moveSelection).
+  const settled = selectedId
+    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId))
+    : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
-  store.set({ sessions, selectedProject, selectedId, activeTab });
+  // Stamp the daemon's startup-skipped repo set onto the store when the snapshot
+  // evidence carries it (#4742): the rail renders a persistent incompleteness
+  // notice from this state instead of presenting the truncated rows as complete.
+  // Event deltas (no snapshot evidence) leave skippedRepos untouched — the skip
+  // set changes only on a snapshot refresh, so a session.* event never clears it.
+  store.set({ sessions, selectedProject, selectedId, activeTab,
+    ...(evidence?.kind === "snapshot" ? { skippedRepos: evidence.skippedRepos ?? [] } : {}),
+  });
+  // Evidence distinguishes causal completion from delayed updates/cache repaints.
+  if (evidence) pendingRestores.observe(authoritative.map(s => ({
+    id: s.id, restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
+    restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive",
+  })), evidence);
+}
+
+/** Tab mutations also fetch full snapshots. Fold those through the same ledger
+ * so their next event cannot restore the pre-tab roster or erase local feedback. */
+interface AcceptedSessionSnapshot {
+  sessions: SessionData[];
+  authoritative: SessionData[];
+  generation: number;
+  operationLockTimeoutMs?: number;
+  operationClockMs?: number;
+  daemonBootId?: string;
+  skippedRepos?: SkippedRepo[];
+}
+async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnapshot | null> {
+  if (token !== tok) return null;
+  try {
+    let generation = 0;
+    let authoritative: SessionData[] = [];
+    let operationLockTimeoutMs: number | undefined;
+    let operationClockMs: number | undefined;
+    let daemonBootId: string | undefined;
+    let skippedRepos: SkippedRepo[] | undefined;
+    const sessions = await optimisticSessions.refresh(async () => {
+      // refresh may retry after an intervening event. Carry the issuance stamp
+      // and raw rows from the accepted attempt together to the commit site.
+      generation = pendingRestores.beginSnapshot();
+      const snapshot = await fetchSessionSnapshot(tok);
+      authoritative = snapshot.sessions;
+      operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
+      operationClockMs = snapshot.operationClockMs;
+      daemonBootId = snapshot.daemonBootId;
+      skippedRepos = snapshot.skippedRepos;
+      return authoritative;
+    });
+    return sessions === null ? null : {
+      sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
+    };
+  } catch (error) {
+    // The gesture cannot safely rebind without its post-mutation roster. Keep
+    // ordinary background reconciliation alive after its bounded retries fail.
+    requestResync();
+    throw error;
+  }
 }
 
 /** Re-fetches the authoritative Snapshot (debounced) and replaces the rail — the
@@ -1904,11 +3249,15 @@ function requestResync(): void {
     const tok = token;
     // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
     if (tok === null) {
+      rejectResyncCompletions(new Error("Snapshot resync lost its connection"));
       return;
     }
     const eventGeneration = sessionEventGeneration;
-    void fetchSnapshot(tok)
-      .then((sessions) => {
+    const mutationFence = optimisticSessions.snapshotFence();
+    const restoreSnapshot = pendingRestores.beginSnapshot();
+    void fetchSessionSnapshot(tok)
+      .then((snapshot) => {
+        const sessions = snapshot.sessions;
         // A stop/reconnect or a newer resync owns the result now.
         if (requestGeneration !== resyncRequestGeneration || token !== tok) {
           return;
@@ -1921,19 +3270,54 @@ function requestResync(): void {
           requestResync();
           return;
         }
-        applySessions(sessions);
+        if (!optimisticSessions.snapshot(sessions, mutationFence)) {
+          requestResync();
+          return;
+        }
+        applySessions(optimisticSessions.project(), {
+          kind: "snapshot", generation: restoreSnapshot,
+          operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+          operationClockMs: snapshot.operationClockMs,
+          daemonBootId: snapshot.daemonBootId,
+          skippedRepos: snapshot.skippedRepos,
+        }, sessions);
         // A successful HTTP response is not necessarily authoritative: either fence
         // above can discard it and schedule a replacement. Stamp the stable app root
         // only after the winning response reaches the store, giving black-box clients
         // an application-level settlement signal instead of a network-timing guess
         // (#3081). stopStream clears it before a new stream owns the connection.
         root?.setAttribute("data-af-resync-settled", "");
+        resolveResyncCompletions();
       })
-      .catch(() => {
-        // Transport/auth failure: the events stream owns reconnection; a later
-        // reconnect fires onResync again. Nothing to surface here.
+      .catch((error) => {
+        if (requestGeneration !== resyncRequestGeneration || token !== tok) return;
+        if (shouldForgetToken(error)) disconnect(describeError(error), true);
+        // Transport failures retain state; the events stream owns reconnection.
+        rejectResyncCompletions(error);
       });
   }, 150);
+}
+
+function resolveResyncCompletions(): void {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const completion of completions) completion.resolve();
+}
+
+function rejectResyncCompletions(error: unknown): void {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const completion of completions) completion.reject(error);
+}
+
+function requestPendingRestoreResync(): Promise<void> {
+  if (token === null || store.get().phase !== "app") {
+    pendingRestoreResync = true;
+    return Promise.resolve();
+  }
+  const completion = new Promise<void>((resolve, reject) => { resyncCompletions.push({ resolve, reject }); });
+  requestResync();
+  return completion;
 }
 
 // --- keyboard navigation ---------------------------------------------------
@@ -1960,14 +3344,17 @@ function onKeydown(e: KeyboardEvent): void {
   if (state.phase !== "app") {
     return;
   }
-  // Let native controls handle their own keys, EXCEPT the terminal (whose textarea
-  // lives in termHost and is driven by the nav state machine) and Escape (which must
-  // still close a modal even from a focused field). Without this a focused + New /
+  // Let native controls handle their own keys, EXCEPT the terminal (whose xterm helper
+  // textarea lives in termHost and is driven by the nav state machine) and Escape (which
+  // must still close a modal even from a focused field). Without this a focused + New /
   // Disconnect / pane-action button would have its Enter hijacked as an attach, and
-  // modal typing would move the rail.
+  // modal typing would move the rail. The split view's per-pane close <button> is also a
+  // native control inside termHost; only the xterm <textarea> must stay on the nav state
+  // machine, so the gate keys on the textarea tag rather than on "anything in termHost".
   const target = e.target as HTMLElement | null;
   const inTerminal = target ? termHost.contains(target) : false;
-  if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
+  const isTerminalTextarea = inTerminal && target?.tagName === "TEXTAREA";
+  if (!isTerminalTextarea && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
   // The mode is "terminal" only when a session is selected (so a pane exists to own
@@ -2006,8 +3393,6 @@ function onKeydown(e: KeyboardEvent): void {
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
       tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
-      // `t` opens a shell specifically, so it asks the shell verdict (#3060).
-      shellCreatable: actionableSelected ? canCreateTabKind(actionableSelected, "shell") : false,
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
@@ -2043,16 +3428,28 @@ function onKeydown(e: KeyboardEvent): void {
       focusRail();
       break;
     case "switchTab":
-      switchTab(action.index);
+      if (shell) shell.switchTab(action.index);
+      else switchTab(action.index);
       break;
-    case "newTab":
-      createSessionTab();
+    case "newTab": {
+      const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      shell?.openNewTabPicker(() => {
+        focusRail();
+        // Control+] commonly leaves document.body as the nominal focus target.
+        // Focusing body is a no-op, which can leave the picker item focused after
+        // its hidden ancestors close; the next shortcut is then swallowed as a
+        // native-button key. Give rail navigation a stable DOM focus target.
+        restoreShortcutFocus(navigationTarget, root?.querySelector<HTMLElement>(".af-rail") ?? null);
+      });
       break;
+    }
     case "closeTab":
-      closeSessionTab(store.get().activeTab);
+      if (shell) shell.closeTab(store.get().activeTab);
+      else closeSessionTab(store.get().activeTab);
       break;
     case "switchView":
-      switchView(action.view);
+      if (shell) shell.switchView(action.view);
+      else switchView(action.view);
       break;
     case "cyclePane":
       splitView.cyclePane(action.delta);

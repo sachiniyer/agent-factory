@@ -92,7 +92,7 @@ func TestValidateTitleRejectsRemoteHookWithoutASCIIAlphanumeric(t *testing.T) {
 		strings.Repeat("-", 200) + "a", // the only alphanumeric is truncated before fallback
 	} {
 		manager.mu.Lock()
-		err := manager.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceRemoteHook, false, nil)
+		err := manager.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceRemoteHook, false, nil, false)
 		manager.mu.Unlock()
 		if err == nil {
 			t.Errorf("remote hook title %q retains no ASCII letter or digit in its bounded slug but was accepted", title)
@@ -105,7 +105,7 @@ func TestValidateTitleRejectsRemoteHookWithoutASCIIAlphanumeric(t *testing.T) {
 
 	for _, title := range []string{"SESSION!", "日本語-2", strings.Repeat("-", 199) + "a"} {
 		manager.mu.Lock()
-		err := manager.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceRemoteHook, false, nil)
+		err := manager.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceRemoteHook, false, nil, false)
 		manager.mu.Unlock()
 		if err != nil {
 			t.Errorf("remote hook title %q has an ASCII component and must remain valid: %v", title, err)
@@ -113,7 +113,7 @@ func TestValidateTitleRejectsRemoteHookWithoutASCIIAlphanumeric(t *testing.T) {
 	}
 
 	manager.mu.Lock()
-	err := manager.validateTitleAvailableLocked(repoID, repoPath, "日本語", "claude", runtimeNamespaceSandbox, false, nil)
+	err := manager.validateTitleAvailableLocked(repoID, repoPath, "日本語", "claude", runtimeNamespaceSandbox, false, nil, false)
 	manager.mu.Unlock()
 	if err != nil {
 		t.Fatalf("non-hook sandbox titles do not claim the global hook namespace: %v", err)
@@ -129,7 +129,7 @@ func TestNextAvailableTitleRejectsGenericRemoteHookSlug(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 
 	manager.mu.Lock()
-	got, err := manager.nextAvailableTitleLocked(repoID, repoPath, "日本語", "claude", runtimeNamespaceRemoteHook, nil)
+	got, err := manager.nextAvailableTitleLocked(repoID, repoPath, "日本語", "claude", runtimeNamespaceRemoteHook, nil, false)
 	manager.mu.Unlock()
 	if err == nil {
 		t.Fatalf("remote hook TitleBase without a specific slug resolved to %q", got)

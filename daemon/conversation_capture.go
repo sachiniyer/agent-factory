@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -39,10 +38,17 @@ func (m *Manager) startConversationCaptureLocked(repoID, key string, inst *sessi
 	}
 	m.pendingConversationCaptures[inst]++
 	timeout := conversationCaptureTimeout
-	go func() {
+	if m.launchBackgroundMutation(func(_ <-chan struct{}) {
 		defer m.finishConversationCapture(inst)
 		m.captureAgentConversation(repoID, key, inst, snap, token, timeout)
-	}()
+	}) {
+		return
+	}
+	if m.pendingConversationCaptures[inst] <= 1 {
+		delete(m.pendingConversationCaptures, inst)
+	} else {
+		m.pendingConversationCaptures[inst]--
+	}
 }
 
 func (m *Manager) finishConversationCapture(inst *session.Instance) {
@@ -65,7 +71,7 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	}
 	conv, err := session.CaptureAgentConversation(agent, snap, timeout)
 	if err != nil {
-		log.WarningLog.Printf("conversation capture for %q failed: %v", inst.Title, err)
+		m.warn().Printf("conversation capture for %q failed: %v", inst.Title, err)
 		return
 	}
 	if !conv.HasID() {
@@ -73,7 +79,7 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	}
 
 	// Serialize the mutate+persist against this session's archive/kill/restore
-	// teardown, exactly as SetPRInfo (#2437) and the tab verbs do: take the
+	// teardown, exactly as the tab verbs do: take the
 	// per-session op-lock first, re-confirm the tracked session, and refuse an
 	// archived one. With no op-lock (the earlier behavior) this write could
 	// interleave INSIDE ArchiveSession — between its teardown and its persist — and
@@ -146,6 +152,6 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 			// applied to its sibling write).
 			inst.ReconcileRootRecreateContext(previousNotice)
 		}
-		log.WarningLog.Printf("failed to persist conversation id for %q: %v", inst.Title, err)
+		m.warn().Printf("failed to persist conversation id for %q: %v", inst.Title, err)
 	}
 }

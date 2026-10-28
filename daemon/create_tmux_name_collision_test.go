@@ -107,7 +107,7 @@ func TestValidateTitleRejectsTmuxNameCollisions(t *testing.T) {
 			}
 			disk := tc.claim(m)
 
-			err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, "claude", runtimeNamespaceLocalTmux, false, disk)
+			err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, "claude", runtimeNamespaceLocalTmux, false, disk, false)
 			if err == nil {
 				t.Fatal("accepted two titles that map to the same repo-scoped tmux session name")
 			}
@@ -144,11 +144,11 @@ func TestTmuxNameCollisionIsScopedToTwoLocalRuntimes(t *testing.T) {
 	}
 
 	localRow := []session.InstanceData{{Title: existing, BackendType: "local"}}
-	if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, "claude", runtimeNamespaceSandbox, false, localRow); err != nil {
+	if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, "claude", runtimeNamespaceSandbox, false, localRow, false); err != nil {
 		t.Fatalf("sandbox create was blocked by a host tmux name it will not claim: %v", err)
 	}
 	remoteRow := []session.InstanceData{{Title: existing, BackendType: "docker"}}
-	if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, "claude", runtimeNamespaceLocalTmux, false, remoteRow); err != nil {
+	if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, "claude", runtimeNamespaceLocalTmux, false, remoteRow, false); err != nil {
 		t.Fatalf("local create was blocked by a sandbox row with no host tmux name: %v", err)
 	}
 }

@@ -25,6 +25,14 @@ func TestMain(m *testing.M) {
 	// that forgets IsolateTmux can never create or sweep sessions on the
 	// developer's real server.
 	restoreTmux := testguard.SandboxTmux()
+	// #3708: the config pane's read and save now follow the remote daemon target,
+	// so an AF_DAEMON_URL inherited from the developer's shell would silently
+	// point this package's config tests at someone else's daemon — and the local
+	// ones would then fail for a reason nothing on screen explains. Clear it for
+	// the package run, in the same spirit as the two sandboxes above. The tests
+	// that WANT a remote target set it themselves (config_target_test.go).
+	_ = os.Unsetenv("AF_DAEMON_URL")
+	_ = os.Unsetenv("AF_DAEMON_TOKEN")
 	code := m.Run()
 	restoreTmux()
 	restoreHome()

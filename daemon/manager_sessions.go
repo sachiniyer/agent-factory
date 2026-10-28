@@ -6,7 +6,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -24,15 +23,44 @@ var errSessionNotFound = errors.New("not found")
 // request's own (possibly stale) id under a cross-repo title collision (#1592
 // Phase 5 follow-up).
 func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, error) {
-	return m.killSessionRequestedBy(req, "internal daemon caller")
+	return m.killSessionRequestedBy(req, "internal daemon caller", nil)
 }
 
-func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester string) (session.InstanceData, error) {
+// sessionTeardownGuard is an extra precondition a caller may attach to a
+// destructive session op. It is evaluated INSIDE that op's fence — after the
+// per-session op-lock is held and the killsInFlight claim is registered, and
+// before the op touches anything — and is handed the instance the map holds
+// under m.mu at that moment (nil when the target is a ghost record with no live
+// instance). A non-nil return aborts the op with the session bit-for-bit
+// unchanged.
+//
+// It exists because a decision taken OUTSIDE that fence cannot be acted on
+// safely: whatever it observed can change in the gap before the destructive
+// call, which is exactly how a task teardown reached a session a user had
+// adopted (#3865). Every caller but that teardown passes nil.
+type sessionTeardownGuard func(current *session.Instance) error
+
+// runSessionTeardownGuard evaluates guard against the instance the manager holds
+// under key RIGHT NOW. Both destructive ops call it from inside their fence, and
+// they read the map rather than reusing the instance they resolved before it —
+// the whole point of a guard here is that it answers about current state, not
+// about the state that motivated the operation.
+func (m *Manager) runSessionTeardownGuard(guard sessionTeardownGuard, key string) error {
+	if guard == nil {
+		return nil
+	}
+	m.mu.Lock()
+	current := m.instances[key]
+	m.mu.Unlock()
+	return guard(current)
+}
+
+func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester string, guard sessionTeardownGuard) (session.InstanceData, error) {
 	instance, repoID, title, resolvedID, data, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return session.InstanceData{}, err
 	}
-	log.InfoLog.Printf("KillSession requested for session %q (id %s, repo %s) by %s", title, resolvedID, repoID, requester)
+	m.info().Printf("KillSession requested for session %q (id %s, repo %s) by %s", title, resolvedID, repoID, requester)
 	// Canonicalize to the resolved session's title so the killsInFlight key,
 	// storage delete, and event all key off the identity we actually resolved
 	// (by id), not the request's title. req is a value copy, so this is local.
@@ -93,8 +121,8 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	// a timeout at this line leaves the session bit-for-bit unchanged and the
 	// retry the error asks for is a true retry.
 	opLock := m.opLockFor(key)
-	if !lockWithin(opLock, opLockTimeout) {
-		log.WarningLog.Printf("kill of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", req.Title, opLockTimeout)
+	if acquired, _ := lockWithin(opLock, opLockTimeout); !acquired {
+		m.warn().Printf("kill of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", req.Title, opLockTimeout)
 		return session.InstanceData{}, errKillBusy(req.Title, opLockTimeout)
 	}
 	defer opLock.Unlock()
@@ -112,8 +140,16 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 
 	stage.set("checking instance identity")
 	if m.currentInstanceReplaced(key, instance, targetID) {
-		log.InfoLog.Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
+		m.info().Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
 		return resolved, nil
+	}
+	// The caller's own precondition, asked here and nowhere earlier: this line
+	// sits inside both the killsInFlight claim (registered above, before the
+	// op-lock acquire) and the op-lock, which together are the fence every
+	// delivery path contends on. Nothing destructive has happened yet, so a
+	// refusal leaves the session exactly as it was.
+	if err := m.runSessionTeardownGuard(guard, key); err != nil {
+		return session.InstanceData{}, err
 	}
 	// Admission belongs before the commit point and before AgentServer.Kill closes
 	// brokers or the local backend tears panes down. Cleanup's later backstop can
@@ -248,10 +284,13 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		restoreCheckpoint := instance.SetRepoGoneFinalizationCheckpoint(func() error {
 			return m.persistInstanceErr(repoID, instance)
 		})
-		teardownErr = instance.Kill()
+		// Trusting: this call sits inside killsInFlight + the per-session op-lock
+		// acquired above, which rules out a same-name replacement appearing
+		// mid-teardown (#3413) — see Instance.KillTrustingOwnLifecycleLock.
+		teardownErr = instance.KillTrustingOwnLifecycleLock()
 		restoreCheckpoint()
 		if session.TeardownStateUnknown(teardownErr) {
-			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
+			m.warn().Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
 			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)}
 		}
 		// Checkpoint the settled live teardown BEFORE either fallible tail step.
@@ -288,7 +327,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 				recovery.State == sessiongit.RelocationRecoveryCleanupFinalizing)
 		var lateCleanup <-chan error
 		teardownErr, lateCleanup = ghostCleanup(data, req.Title, func(data *session.InstanceData) error {
-			return m.persistGhostCleanupStall(repoID, data)
+			return m.persistLateGhostCleanupCheckpoint(repoID, data)
 		})
 		settledDescriptorGhostCleanup = descriptorCleanup && teardownErr == nil && lateCleanup == nil
 		if session.TeardownStateUnknown(teardownErr) {
@@ -310,10 +349,10 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 			// which merely outlived its deadline is not retried: its one definitive
 			// result is reconciled above, while the process fence blocks duplicates.
 			if descriptorStalled {
-				log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, and no second descriptor cleanup may start in this process — restart the daemon before retrying if the first worker does not settle: %v", req.Title, teardownErr)
+				m.warn().Printf("kill of session %q could not complete its ghost teardown; the record is kept, and no second descriptor cleanup may start in this process — restart the daemon before retrying if the first worker does not settle: %v", req.Title, teardownErr)
 				return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — restart the daemon before retrying once the cause clears: %w", req.Title, teardownErr)}
 			}
-			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill once the cause clears: %v", req.Title, teardownErr)
+			m.warn().Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill once the cause clears: %v", req.Title, teardownErr)
 			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)}
 		}
 	}
@@ -333,7 +372,13 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	stage.set("deleting record from storage")
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
 	// is unknown, so this call site cannot be the one that forgets.
-	deleted, err := m.deleteSessionRecord(repoID, req.Title, targetID, teardownErr)
+	var evidence session.InstanceData
+	if instance != nil {
+		evidence = instance.ToInstanceData()
+	} else if data != nil {
+		evidence = *data
+	}
+	deleted, err := m.deleteSessionRecord(repoID, req.Title, targetID, teardownErr, evidence)
 	if err != nil {
 		if settledDescriptorGhostCleanup {
 			m.reconcileSettledGhostCleanup(repoID, req.Title, key, targetID)
@@ -346,13 +391,13 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		// this call never returning: that is what starved the finisher and made
 		// the session undeletable until a daemon restart.
 		if errors.Is(err, config.ErrLockTimeout) {
-			log.WarningLog.Printf("kill of session %q: the instances record is locked by another agent-factory process; the kill is committed and the daemon will finish it on a later poll: %v", req.Title, err)
+			m.warn().Printf("kill of session %q: the instances record is locked by another agent-factory process; the kill is committed and the daemon will finish it on a later poll: %v", req.Title, err)
 			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not update its record because another agent-factory process is holding the repo's instances lock; the session is already marked killed and will be reaped automatically — retry if it lingers: %w", req.Title, err)}
 		}
 		return resolved, &mutationCommittedError{err: fmt.Errorf("failed to delete instance from storage: %w", err)}
 	}
 	if !deleted {
-		log.InfoLog.Printf("kill of session %q skipped storage delete: current record has a different instance identity", req.Title)
+		m.info().Printf("kill of session %q skipped storage delete: current record has a different instance identity", req.Title)
 		return resolved, nil
 	}
 
@@ -371,7 +416,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		// unconfigured repos (harmless — the loop never visits them — and it
 		// keeps kill-vs-config-change ordering race-free).
 		m.rootKilledAt[repoID] = nowFunc()
-		log.InfoLog.Printf("root agent for repo %s killed by user; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
+		m.info().Printf("root agent for repo %s killed by user; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
 	}
 	m.mu.Unlock()
 	return resolved, nil
@@ -387,6 +432,15 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 // It performs no extra wait: local tmux and remote agent-server paths return
 // the observation their existing submit already made.
 func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, error) {
+	return m.sendPromptGuarded(req, nil)
+}
+
+// sendPromptGuarded is SendPromptWithStatus with an optional send guard. The
+// guard runs under the target's op lock on the instance the send is about to
+// reach and may refuse it; a sandbox-created task uses it to pin the delivery to
+// the session it authorized (#5571 W3.5). It is an argument, not a request
+// field: the request is wire data and stays comparable.
+func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *session.Instance, repoID string) error) (session.PromptDeliveryStatus, error) {
 	if req.Prompt == "" {
 		return session.PromptCouldNotConfirm, fmt.Errorf("prompt is required")
 	}
@@ -440,8 +494,42 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	if instance.IsTearingDown() {
 		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
 	}
-	if err := promptTargetLivenessError(req.Title, instance.GetLiveness()); err != nil {
-		return session.PromptCouldNotConfirm, notAttempted(err)
+	if guard != nil {
+		if gerr := guard(instance, repoID); gerr != nil {
+			return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("%w; %s", gerr, notDeliveredMarker))
+		}
+	}
+	releaseObservationFence := func() {}
+	releaseLimitFence := func() {}
+	if req.TaskOrigin {
+		// The per-instance fence lets any older pane snapshot publish its derived
+		// liveness before this check. The manager fence orders the final read with
+		// direct limit publication, while this session's op lock and observation
+		// fence keep same-instance lifecycle/observation changes outside the send.
+		// Release the manager-wide fence before transport I/O: a wedged target must
+		// not block unrelated task deliveries or limit publication daemon-wide.
+		testHookTaskPromptBeforeObservationFence()
+		releaseObservationFence = instance.HoldAgentObservationSettlement()
+		testHookTaskPromptBeforeLimitFence()
+		m.accountLimitMu.Lock()
+		releaseLimitFence = m.accountLimitMu.Unlock
+	}
+	livenessErr := taskPromptTargetLivenessError(req.Title, instance.GetLiveness(), req.TaskOrigin)
+	releaseLimitFence()
+	if livenessErr != nil {
+		releaseObservationFence()
+		return session.PromptCouldNotConfirm, notAttempted(livenessErr)
+	}
+	// Liveness cannot express "owed a stale-pane teardown": a committed retry
+	// restores LiveRunning/LiveReady for its owner, and the pane this would
+	// reach may still be bound to the deleted inode. The durable flag is the
+	// fence — refused here rather than in the liveness guard so the rejection
+	// carries notAttempted and the watch path refunds the rate slot (#5371
+	// review). Recovery owns the row and retries through its own seam.
+	if instance.RebuildTeardownPending() {
+		releaseObservationFence()
+		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf(
+			"target session %q still owes the teardown of the runtime its rebuilt worktree replaced; prompt not delivered; its recovery retries on its own", req.Title))
 	}
 	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
 	// Backend method — the daemon's delivery path is runtime-agnostic. SendPrompt
@@ -449,13 +537,23 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
 	status, err := instance.SendPromptWithEvidence(req.Prompt, nowFunc)
+	releaseObservationFence()
 	// Delivery evidence changes the row even when liveness does not. Publish it
 	// immediately so list clients can distinguish a confirmed miss from #3162's
 	// honest could-not-confirm instead of waiting for the status poll.
 	if perr := m.persistSettlement(repoID, key, instance); perr != nil {
-		log.WarningLog.Printf("prompt delivery evidence for %q: %v", instance.Title, perr)
+		m.warn().Printf("prompt delivery evidence for %q: %v", instance.Title, perr)
 	}
 	if err != nil {
+		// The adoption-discharge refusal is the ONE send-path error that is not
+		// ambiguous: NoteAdoptionDelivery returns it only after refusing the
+		// write, so this attempt provably delivered nothing and stays refundable
+		// (#4984). notAttempted() supplies the wire marker that carries the
+		// classification across the control socket to the watch path — a
+		// sentinel alone would be flattened to text by net/rpc.
+		if errors.Is(err, session.ErrDischargeRefusedDelivery) {
+			return status, notAttempted(err)
+		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
 	return status, nil
@@ -471,12 +569,25 @@ func promptTargetLivenessError(title string, liveness session.Liveness) error {
 		// Archived sessions have no live tmux to deliver into (#1529): without
 		// this case the prompt falls through to a confusing backend error. Point
 		// at the off-ramp, mirroring the TUI's interactiveGuard message. The
-		// restore command embeds the title, so shell-quote it — a title with
-		// spaces or shell metacharacters must not turn a copy-pasted
-		// `af sessions restore ...` into the wrong target or a second command.
-		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (%s)", title, shellsuggest.Command("af", "sessions", "restore", title))
+		// restore command embeds the title, so it goes through shellsuggest — a title
+		// with spaces or shell metacharacters must not turn a copy-pasted
+		// `af sessions restore ...` into the wrong target or a second command, and a
+		// title beginning with "-" must not be parsed as a flag by af itself (#3432).
+		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (%s)", title, shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, title))
 	}
 	return nil
+}
+
+// taskPromptTargetLivenessError extends the ordinary target guard only for an
+// automated task delivery. LiveLimitReached is intentionally allowed by the
+// manual helper above: typing into a limit or credits picker can be the only way
+// for an operator to recover the lane. A scheduler has no such intent, and its
+// keystrokes can cancel an agent's own timed auto-continue.
+func taskPromptTargetLivenessError(title string, liveness session.Liveness, taskOrigin bool) error {
+	if taskOrigin && liveness == session.LiveLimitReached {
+		return fmt.Errorf("%w: target session %q is at a usage limit; prompt not delivered", errTargetLimitReached, title)
+	}
+	return promptTargetLivenessError(title, liveness)
 }
 
 // agentServerForStream resolves the /v1/sessions/{id}/stream target to its cached
@@ -487,12 +598,20 @@ func promptTargetLivenessError(title string, liveness session.Liveness) error {
 // return the tracked instance's cached agent-server singleton whose ring
 // buffer/subscribers persist.
 func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentServer, *session.Instance, error) {
-	instance, resolvedRepoID, title, err := m.resolveStreamSession(idOrTitle, repoID)
+	return m.agentServerForStreamTarget(authoritativeStreamTarget(idOrTitle, repoID))
+}
+
+func (m *Manager) agentServerForStreamTarget(target streamTarget) (session.AgentServer, *session.Instance, error) {
+	instance, resolvedRepoID, title, err := m.resolveStreamTarget(target)
 	if err != nil {
 		return nil, nil, err
 	}
 	if instance == nil {
-		return nil, nil, fmt.Errorf("session %q not found", idOrTitle)
+		name := target.title
+		if name == "" {
+			name = target.stableID
+		}
+		return nil, nil, fmt.Errorf("session %q not found", name)
 	}
 	// Reject a new subscription while a kill is in flight for this session, the
 	// same killsInFlight gate SendPrompt checks (#1632). Streaming previously
@@ -520,7 +639,13 @@ func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentS
 // while an unscoped Web ID gets first refusal after refresh before legacy title
 // fallback (#2187/#2279 review).
 func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Instance, string, string, error) {
-	target := authoritativeStreamTarget(idOrTitle, repoID)
+	return m.resolveStreamTarget(authoritativeStreamTarget(idOrTitle, repoID))
+}
+
+func (m *Manager) resolveStreamTarget(target streamTarget) (*session.Instance, string, string, error) {
+	if target.idOnly {
+		return m.resolveStreamSessionByIDOnly(target.stableID)
+	}
 	m.mu.Lock()
 	if instance, rid, title := m.trackedStreamSessionLocked(target); instance != nil {
 		m.mu.Unlock()
@@ -534,14 +659,40 @@ func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Insta
 	return instance, resolvedRepoID, instance.Title, err
 }
 
-// streamTarget makes the route's two authority shapes mutually exclusive. A
-// scoped target can carry only {repo,title}; an unscoped target may carry the
-// stable-id interpretation of the same opaque segment. No resolver phase can
-// accidentally give a foreign global ID precedence over an explicit repo scope.
+// resolveStreamSessionByIDOnly is the by=id shape: the tracked map, then one
+// refresh, then the same id lookup again — and a miss is a refusal. It never
+// consults the title namespace, because the caller has told us the segment is an
+// id: a stale one reinterpreted as a title could open an input stream to a
+// DIFFERENT session (#4760 review).
+func (m *Manager) resolveStreamSessionByIDOnly(id string) (*session.Instance, string, string, error) {
+	if id == "" {
+		return nil, "", "", fmt.Errorf("session id is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if instance, rid := m.trackedSessionByIDLocked(id); instance != nil {
+		return instance, rid, instance.Title, nil
+	}
+	if err := m.refreshLocked(); err != nil {
+		return nil, "", "", err
+	}
+	if instance, rid := m.trackedSessionByIDLocked(id); instance != nil {
+		return instance, rid, instance.Title, nil
+	}
+	return nil, "", "", fmt.Errorf("session with id %q %w", id, errSessionNotFound)
+}
+
+// streamTarget makes the route's authority shapes mutually exclusive. A scoped
+// target can carry only {repo,title}; an unscoped target may carry the
+// stable-id interpretation of the same opaque segment; an id-only target
+// carries no title at all. No resolver phase can accidentally give a foreign
+// global ID precedence over an explicit repo scope, nor a title precedence
+// over an explicit id.
 type streamTarget struct {
 	stableID string
 	title    string
 	repoID   string
+	idOnly   bool
 }
 
 func authoritativeStreamTarget(idOrTitle, repoID string) streamTarget {
@@ -802,7 +953,7 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 	if tracked := m.instances[key]; tracked != nil {
 		m.mu.Unlock()
 		if err := instance.CloseAttachOnly(); err != nil {
-			log.WarningLog.Printf("findSession %q: closing duplicate instance attach failed: %v", title, err)
+			m.warn().Printf("findSession %q: closing duplicate instance attach failed: %v", title, err)
 		}
 		return tracked, rid, data, nil
 	}

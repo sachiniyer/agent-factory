@@ -82,7 +82,7 @@ export function truncationNote(listing: DirectoryListing): string {
   if (!listing.truncated) {
     return "";
   }
-  return `Showing the first ${listing.entries.length} directories — type the path below to reach one that is not listed.`;
+  return `First ${listing.entries.length} directories · enter a path for more.`;
 }
 
 // --- persistence -----------------------------------------------------------

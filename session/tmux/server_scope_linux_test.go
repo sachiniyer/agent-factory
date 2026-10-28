@@ -19,13 +19,14 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 func TestNewTmuxServerCommandScopesDaemonUnitSpawn(t *testing.T) {
 	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
 
-	cmd, scoped := newTmuxServerCommand("new-session", "-d", "-s", "af_worker")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), "new-session", "-d", "-s", "af_worker")
 	if !scoped {
 		t.Fatal("daemon-owned tmux server command was not marked systemd-scoped")
 	}
@@ -53,7 +54,7 @@ func TestNewTmuxServerCommandDoesNotScopeClientWhenServerAlreadyExists(t *testin
 	restore := ConfigureDaemonServer(t.TempDir())
 	t.Cleanup(restore)
 
-	cmd, scoped := newTmuxServerCommand("new-session", "-d", "-s", "af_worker")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), "new-session", "-d", "-s", "af_worker")
 	if scoped {
 		t.Fatal("session client was put in a transient scope even though the shared server already exists")
 	}
@@ -143,7 +144,7 @@ printf '%s\n' 'tmux 3.4'
 	restore := ConfigureDaemonServer(t.TempDir())
 	t.Cleanup(restore)
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	oldWarningOut, oldWarningFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
 	log.WarningLog.SetOutput(&warnings)
 	log.WarningLog.SetFlags(0)
@@ -295,7 +296,7 @@ func TestNewTmuxServerCommandDoesNotTrustInheritedSystemdMarker(t *testing.T) {
 	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()+1))
 
-	cmd, scoped := newTmuxServerCommand("new-session")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), "new-session")
 	if scoped {
 		t.Fatal("descendant with inherited marker was marked systemd-scoped")
 	}
@@ -382,7 +383,7 @@ func TestDedicatedServerFailureFallsBackToSessionScope(t *testing.T) {
 	restore := ConfigureDaemonServer(t.TempDir())
 	t.Cleanup(restore)
 
-	cmd, scoped := newTmuxServerCommand("new-session", "-d", "-s", "af_worker")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), "new-session", "-d", "-s", "af_worker")
 	if !scoped {
 		t.Fatal("dedicated-scope failure refused the historical per-session fallback")
 	}
@@ -562,7 +563,7 @@ func TestDedicatedServerWrapperAppliesLiveRotationPolicy(t *testing.T) {
 	tmuxShim := filepath.Join(dir, "tmux")
 	script := `#!/bin/sh
 : >"$AF_TEST_TMUX_READY"
-while [ ! -f "$AF_TEST_TMUX_RELEASE" ]; do sleep 0.01; done
+` + testguard.BoundedGateWait(releasePath, 10*time.Millisecond, 5*time.Minute) + `
 cat "$AF_TEST_TMUX_PAYLOAD" >&2
 exit 42
 `
@@ -650,7 +651,7 @@ exec "$@"
 		t.Fatalf("private server exit-empty = %q, want off", got)
 	}
 
-	cmd, scoped := newTmuxServerCommand("new-session", "-d", "-s", "af_worker", "sleep", "60")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), "new-session", "-d", "-s", "af_worker", "sleep", "60")
 	if scoped {
 		t.Fatal("session spawn still owned a scope after the dedicated server became ready")
 	}
@@ -688,8 +689,6 @@ func (f refusingTrackedPtyFactory) StartTracked(*exec.Cmd) (*os.File, <-chan err
 	close(done)
 	return ptmx, done, nil
 }
-
-func (refusingTrackedPtyFactory) Close() {}
 
 // TestSystemdRunRefusalIsActionableButCleanupUnsafe covers the severe failure
 // mode where the wrapper binary exists but the user manager refuses the

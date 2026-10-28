@@ -481,10 +481,10 @@ func (p *schedulePicker) selectedWeekdays() []time.Weekday {
 func (p *schedulePicker) render() string {
 	t := CurrentTheme()
 	labelStyle := lipgloss.NewStyle().Bold(true)
-	dimStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
-	previewStyle := lipgloss.NewStyle().Foreground(t.Foreground)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(t.Warning)
-	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim)
+	dimStyle := lipgloss.NewStyle().Foreground(t.InkMuted)
+	previewStyle := lipgloss.NewStyle().Foreground(t.Ink)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
+	dimSelectedStyle := lipgloss.NewStyle().Foreground(t.Ink)
 
 	lines := []string{labelStyle.Render("Schedule:") + " " + p.renderTypeSelector(selectedStyle, dimSelectedStyle)}
 	lines = append(lines, p.renderContextLines()...)
@@ -492,7 +492,7 @@ func (p *schedulePicker) render() string {
 		lines = append(lines, preview)
 	}
 	if p.focused {
-		lines = append(lines, indentSub+dimStyle.Render(p.hint()))
+		lines = append(lines, indentSub+previewStyle.Render(p.hint()))
 	}
 
 	for i := range lines {
@@ -515,7 +515,8 @@ const indentSub = "  "
 // three times in the block — the Cron input right above already shows it
 // (#2596). Custom gets the one fact that input line cannot carry instead: when
 // the expression next fires, in the same "Jan 02 15:04" shape the automations
-// rail's next-run column uses. A half-typed or invalid expression has no next
+// rail's next-run column uses — or, past task.FarOutThreshold, the lists'
+// dated far-out note, since "Jan 02" hides a year-out run (#4855). A half-typed or invalid expression has no next
 // run, so the line is dropped rather than padded back out with a repeat —
 // which also retires the empty-raw case that used to render a bare "Custom:".
 func (p *schedulePicker) renderPreviewLine(preview, dim lipgloss.Style) string {
@@ -530,11 +531,19 @@ func (p *schedulePicker) renderPreviewLine(preview, dim lipgloss.Style) string {
 		// the ZERO time.Time, which formats as a thoroughly plausible
 		// "Jan 01 00:00". Promising a fire time the task will never reach is
 		// worse than the echo this line replaced, so name the absence.
-		next := sched.Next(p.now())
+		now := p.now()
+		next := sched.Next(now)
 		if next.IsZero() {
 			return indentSub + preview.Render("No upcoming run")
 		}
-		return indentSub + preview.Render("Next run "+next.Format("Jan 02 15:04"))
+		// "Jan 02" has no year, so a dated cron typed just after its date read
+		// as this year's run when it is next year's (#4855). Past the far-out
+		// threshold, word it the way the task lists do.
+		when := next.Format("Jan 02 15:04")
+		if note := task.FarOutNoteAt(next, now); note != "" {
+			when = note
+		}
+		return indentSub + preview.Render("Next run "+when)
 	}
 	return indentSub + preview.Render(p.Describe()) + dim.Render("  ·  "+p.Cron())
 }
@@ -542,7 +551,7 @@ func (p *schedulePicker) renderPreviewLine(preview, dim lipgloss.Style) string {
 func (p *schedulePicker) renderTypeSelector(selected, dim lipgloss.Style) string {
 	label := scheduleTypes[p.typ].label
 	if p.focused && p.activeCell() == cellType {
-		return selected.Render("◂ " + label + " ▸")
+		return SelectionMarker("◂ ") + selected.Render(label) + SelectionMarker(" ▸")
 	}
 	return dim.Render(label)
 }
@@ -550,7 +559,7 @@ func (p *schedulePicker) renderTypeSelector(selected, dim lipgloss.Style) string
 // renderContextLines renders the inputs specific to the selected type.
 func (p *schedulePicker) renderContextLines() []string {
 	t := CurrentTheme()
-	plain := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+	plain := lipgloss.NewStyle().Foreground(t.Ink)
 	switch p.kind() {
 	case schedule.EveryNMinutes:
 		return []string{indentSub + plain.Render("Every") + p.chip(cellInterval, p.interval) + plain.Render("minutes")}
@@ -575,13 +584,17 @@ func (p *schedulePicker) renderContextLines() []string {
 	}
 }
 
+// renderTimeLine reads exactly like the summary under it — "At 3:00 AM" — so
+// its cells are unpadded and the plain text carries the only spacing. Padded
+// chips put a space either side of the colon and doubled the one before the
+// meridiem (#4958).
 func (p *schedulePicker) renderTimeLine(plain lipgloss.Style) string {
 	meridiem := "AM"
 	if p.meridiemPM {
 		meridiem = "PM"
 	}
-	return plain.Render("At") + p.chip(cellHour, p.hourStr) + plain.Render(":") +
-		p.chip(cellMinute, p.minuteStr) + p.chip(cellMeridiem, meridiem)
+	return plain.Render("At ") + p.tightChip(cellHour, p.hourStr) + plain.Render(":") +
+		p.tightChip(cellMinute, p.minuteStr) + plain.Render(" ") + p.tightChip(cellMeridiem, meridiem)
 }
 
 func (p *schedulePicker) renderWeekdayRow() string {
@@ -589,14 +602,18 @@ func (p *schedulePicker) renderWeekdayRow() string {
 	active := p.focused && p.activeCell() == cellWeekdays
 	var b strings.Builder
 	for i, letter := range weekdayLetters {
-		style := lipgloss.NewStyle().Foreground(t.ForegroundMuted)
+		label := " " + letter + " "
+		style := lipgloss.NewStyle().Foreground(t.Ink)
 		if p.weekdays[i] {
-			style = lipgloss.NewStyle().Foreground(t.Warning).Bold(true)
+			// Checked state is text, independent of focus styling and colour.
+			// Brackets retain the existing three-cell width.
+			label = "[" + letter + "]"
+			style = lipgloss.NewStyle().Foreground(t.Ink).Background(t.SurfaceRaised).Bold(true)
 		}
 		if active && i == p.weekdayCursor {
-			style = style.Reverse(true)
+			style = style.Background(t.SurfaceRaised).Foreground(t.Ink).Bold(true).Underline(true)
 		}
-		b.WriteString(style.Render(" " + letter + " "))
+		b.WriteString(style.Render(label))
 	}
 	return b.String()
 }
@@ -604,15 +621,29 @@ func (p *schedulePicker) renderWeekdayRow() string {
 // chip renders one value cell, highlighting it when it is the focused cell of a
 // focused picker (matching the form's focused-button treatment).
 func (p *schedulePicker) chip(cell scheduleCell, text string) string {
+	return p.cellStyle(cell).Render(" " + chipText(text) + " ")
+}
+
+// tightChip is chip without the surrounding padding, for a line whose own text
+// already spaces its cells. A blank value still keeps one cell, so the focused
+// highlight never collapses to nothing while the user is typing.
+func (p *schedulePicker) tightChip(cell scheduleCell, text string) string {
+	return p.cellStyle(cell).Render(chipText(text))
+}
+
+func (p *schedulePicker) cellStyle(cell scheduleCell) lipgloss.Style {
 	t := CurrentTheme()
-	if strings.TrimSpace(text) == "" {
-		text = " "
-	}
-	style := lipgloss.NewStyle().Foreground(t.Foreground)
 	if p.focused && p.activeCell() == cell {
-		style = lipgloss.NewStyle().Bold(true).Background(t.Accent).Foreground(t.Background)
+		return lipgloss.NewStyle().Bold(true).Underline(true).Background(t.SurfaceRaised).Foreground(t.Ink)
 	}
-	return style.Render(" " + text + " ")
+	return lipgloss.NewStyle().Foreground(t.Ink)
+}
+
+func chipText(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return " "
+	}
+	return text
 }
 
 // hint is the picker's one-line internal-navigation help, tailored to the

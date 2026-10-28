@@ -1,26 +1,22 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 )
 
-// prInfoStaleAfter throttles repeated TUI pokes for one local projection. The
-// daemon independently owns the authoritative debounce across all clients.
-const prInfoStaleAfter = 60 * time.Second
-
 // -- Ticker message types --
 
-type tickUpdatePRInfoMessage struct{}
 type tickRefreshExternalMessage struct{}
 
 // snapshotFetchedMsg carries the result of an off-loop daemon Snapshot fetch
@@ -47,6 +43,8 @@ type snapshotFetchedMsg struct {
 	// disk task read still succeeds.
 	tasks    []task.Task
 	tasksErr error
+	// remote is the target's registry and tasks read on this poll, nil locally.
+	remote *remoteReads
 	// alarms carries any persistent watch-task delivery-failure alarms projected
 	// on the same daemon snapshot (#1238). It rides the session snapshot because
 	// it is a field of the one authoritative Snapshot response, not a separate
@@ -62,21 +60,9 @@ type snapshotFetchedMsg struct {
 	allReposErr error
 }
 
-// prInfoRefreshFinishedMsg reports only whether the daemon accepted a refresh
-// poke. It carries no PR data: Snapshot is the TUI's sole projection read path.
-type prInfoRefreshFinishedMsg struct {
-	target sessionActionTarget
-	err    error
-}
-
 // -- Ticker commands --
 // Each ticker sleeps for a fixed interval, then returns its message type to
 // re-enter Update(). The ticker is re-scheduled at the end of its handler.
-
-var tickUpdatePRInfoCmd = func() tea.Msg {
-	time.Sleep(60 * time.Second)
-	return tickUpdatePRInfoMessage{}
-}
 
 // snapshotRefreshInterval is how often the TUI polls the daemon for the
 // authoritative session snapshot and reconciles its sidebar to it (#960 PR 3).
@@ -108,7 +94,9 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	repoID := m.repoID
 	repoRoot := m.repoRoot
 	fetch := m.snapshotFetcher
+	lifetime := m.ctx
 	allRepos := allReposSnapshotFetcher
+	liveArming := liveTaskArmingFetcher
 	return func() tea.Msg {
 		resp, err := fetch(repoID)
 		// Re-read the ACTIVE repo's tasks on the same poll so an out-of-band task
@@ -117,15 +105,38 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// reads the switched-to project's tasks — not the launch repo's. Its own
 		// error is carried separately so a warming-daemon RPC failure never
 		// suppresses a successful disk task read.
-		tasks, tasksErr := task.LoadTasksForKnownRepo(repoRoot, repoID)
+		var remote *remoteReads
+		var tasks []task.Task
+		var tasksErr error
+		if isRemoteTarget() {
+			remote = fetchRemoteReads(lifetime)
+			if repoID != "" {
+				tasks, tasksErr = filterTasksToProject(remote.tasks, repoRoot, repoID), remote.tasksErr
+			}
+		} else {
+			tasks, tasksErr = task.LoadTasksForKnownRepo(repoRoot, repoID)
+		}
+		// The disk read is the DEFINITION and stays authoritative; what it cannot
+		// see is whether the running scheduler is holding each task, which is
+		// observable only inside the daemon. Fetched here, beside the snapshot,
+		// rather than by teaching the rail to talk to the daemon on its own: one
+		// poll, one place, and the rail keeps its single input (#3626).
+		//
+		// On a failed fetch this is a no-op and every record keeps arming UNKNOWN,
+		// which is what the rail renders as the labelled cron-expression fallback.
+		// Nothing here can turn a missed poll into a not-armed accusation.
+		observed, armingErr := liveArming()
+		if armingErr == nil {
+			tasks = task.ApplyLiveArming(tasks, observed)
+		}
 		// Fetch the cross-repo session list on the same off-loop poll so the
 		// always-visible Projects section's per-repo counts stay live (#1590).
 		// Read here (not in the handler) to keep the daemon RPC off the event
 		// loop; its error is carried separately so a hiccup keeps the last rows.
-		allReposData, allReposErr := allRepos()
+		allReposData, allReposErr := allRepos(context.Background())
 		return snapshotFetchedMsg{
 			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
-			tasks: tasks, tasksErr: tasksErr, repoID: repoID,
+			tasks: tasks, tasksErr: tasksErr, repoID: repoID, remote: remote,
 			allRepos: allReposData, allReposErr: allReposErr,
 		}
 	}
@@ -149,10 +160,11 @@ var coldStartWarmupWait = 2 * time.Minute
 // reconnecting tabs to their tmux sessions by name so a restored session is
 // immediately attachable. A single unrestorable record is logged and skipped,
 // never aborting the whole cold start. Returns an error only on a hard
-// (non-warming) daemon failure, which newHome surfaces and exits on — there is
-// no standalone fallback anymore (#960 PR 6 dropped no-daemon mode).
+// (non-warming) daemon failure. Startup renders recovery and keeps normal
+// snapshot polling alive; unavailable data is never presented as an empty list.
 func (m *home) coldStartFromSnapshot() error {
 	data, err := m.fetchColdStartSnapshot(m.repoID)
+	m.snapshotUnavailable = err != nil
 	if err != nil {
 		return err
 	}
@@ -167,6 +179,9 @@ func (m *home) coldStartFromSnapshot() error {
 // A single unrestorable record is logged and skipped, never aborting the batch.
 func (m *home) materializeSnapshot(data []session.InstanceData) {
 	for _, d := range data {
+		if snapshotAwaitingWorktree(d) {
+			continue
+		}
 		inst, err := buildInstanceFromSnapshot(d)
 		if err != nil {
 			// The session's tmux/worktree may have been destroyed externally;
@@ -215,54 +230,42 @@ func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, er
 	}
 }
 
-// refreshPRInfoCmd pokes daemon-owned discovery off the event loop. The TUI
-// captures stable identity only: it never inspects a worktree, runs gh, accepts
-// PR fields in this message, or writes the projection. force bypasses the local
-// transport throttle for the minute tick; the daemon still atomically debounces
-// concurrent clients.
-func refreshPRInfoCmd(inst *session.Instance, repoID string, force bool) tea.Cmd {
-	if inst == nil {
-		return nil
-	}
-	if !force && inst.PRInfoAge() < prInfoStaleAfter {
-		return nil
-	}
-	// This is a client-side transport throttle only. The daemon repeats the
-	// debounce atomically because other windows do not share this timestamp.
-	inst.MarkPRInfoFetched()
-	target := captureSessionActionTarget(inst, repoID)
-	refresh := refreshPRInfoThroughDaemon
-	request := target.refreshPRInfoRequest()
-	return func() tea.Msg {
-		refreshStart := time.Now()
-		detachTraceMark("refreshPRInfoCmd-goroutine-entry")
-		err := refresh(request)
-		detachTrace(refreshStart, "refreshPRInfoCmd-daemon-returned")
-		return prInfoRefreshFinishedMsg{target: target, err: err}
-	}
-}
-
 // -- Sync methods --
 
-// handleSnapshot applies a fetched daemon snapshot to the projection store and reports
-// whether anything changed (the caller repaints only on a diff). On a fetch
-// error it degrades rather than dropping the sidebar: a warming daemon (#829) is
-// retried on the next tick (callDaemon already waited out the warm-up window),
-// and any other error is logged and skipped, leaving the last-known sidebar
-// intact. The Snapshot RPC is the TUI's ONLY sync path (#960 PR 4): the daemon is
-// the sole owner/writer of session state, so there is no disk-based reconcile to
-// fall back to.
+// snapshotFailureGrace keeps transient poll failures from replacing a loaded layout.
+const snapshotFailureGrace = 3 * time.Second
+
+// handleSnapshot applies the daemon's authoritative snapshot and reports whether
+// the caller needs to repaint. Failed polls retain the last-known projection;
+// non-starting failures show recovery only after the grace window. A warming
+// daemon (#829) is retried without changing the view. Success clears the outage
+// and its timer. Cold-start recovery remains immediate because no data was loaded.
+// The Snapshot RPC is the sole sync path (#960 PR 4); there is no disk fallback.
 func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
+	wasUnavailable := m.snapshotUnavailable
 	if msg.err != nil {
 		if daemon.IsDaemonStartingErr(msg.err) {
-			// Daemon still restoring (#829); the cold-start Snapshot already
-			// populated the sidebar. Retry next tick — nothing to reconcile yet.
+			// Daemon still restoring (#829). Retain the current view and
+			// failure window; only a successful snapshot ends the outage.
 			return false
 		}
+		now := time.Now
+		if m.snapshotClock != nil {
+			now = m.snapshotClock
+		}
+		at := now()
+		if m.snapshotFailureSince == nil {
+			m.snapshotFailureSince = &at
+		}
+		if at.Sub(*m.snapshotFailureSince) >= snapshotFailureGrace {
+			m.snapshotUnavailable = true
+		}
 		log.WarningLog.Printf("failed to fetch daemon snapshot: %v", msg.err)
-		return false
+		return m.snapshotUnavailable != wasUnavailable
 	}
-	changed := false
+	m.snapshotUnavailable = false
+	m.snapshotFailureSince = nil
+	changed := wasUnavailable
 	// An empty active scope owns no sessions, so there is nothing to reconcile
 	// (#2864). The daemon reads an empty repoID as "every repo" — the same
 	// all-repos answer the cold start deliberately refuses in registry mode
@@ -280,7 +283,7 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 	// does not touch, so the cross-repo view a registry-mode user actually needs
 	// stays live.
 	if m.repoID != "" {
-		changed = m.reconcileSnapshot(msg.data)
+		changed = m.reconcileSnapshot(msg.data) || changed
 	}
 	if m.applyDeliveryAlarms(msg.alarms) {
 		changed = true
@@ -324,30 +327,36 @@ func (m *home) applyDeliveryAlarms(alarms []daemon.DeliveryAlarm) bool {
 // invisible until relaunch (#1168 — the tasks sibling of the #959 tab fix).
 // Tasks are a disk-backed store shared between the TUI and the daemon, so the
 // TUI re-reads them on the snapshot poll rather than through the daemon's
-// session Snapshot. The automations rail (store) always mirrors the fresh list;
-// the tasks overlay pane is re-synced only when the user is not mid-edit, so a
-// background refresh can never clobber an in-progress create/edit or unsaved
-// deletions. Returns whether anything visible changed (the caller repaints on a
+// session Snapshot. The automations rail (store) and the tasks overlay pane both
+// mirror the fresh list; the pane reconciles it around whatever the user is
+// holding — an open form, unsaved or failed edits, queued deletions — so a
+// background refresh never clobbers them and never leaves the rest stale
+// (#4487). Returns whether anything visible changed (the caller repaints on a
 // diff). A read error leaves the last-known list intact, matching handleSnapshot.
 func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
+	changed := m.automations.TaskPane().SetUnavailable(tasksErr)
 	if tasksErr != nil {
 		log.WarningLog.Printf("failed to refresh tasks: %v", tasksErr)
-		return false
+		return changed
 	}
-	changed := false
 	if !reflect.DeepEqual(m.store.GetTasks(), tasks) {
+		countChanged := m.store.NumTasks() != len(tasks)
 		m.store.SetTasks(tasks)
 		changed = true
-	}
-	// The overlay pane owns transient edit state (create/edit buffers, pending
-	// deletions): only re-sync it while idle so a background refresh never wipes
-	// the user's in-flight form or unsaved deletes.
-	sp := m.automations.TaskPane()
-	if !sp.IsEditing() && !sp.IsCreating() && !sp.IsDirty() {
-		if !reflect.DeepEqual(sp.GetTasks(), tasks) {
-			sp.SetTasks(tasks)
-			changed = true
+		if countChanged {
+			// The task count feeds the rail's automations-section height
+			// (#1126), read only in relayout — reflow on this poll, as the
+			// TUI's own write paths do, so a CLI-added first task appears and
+			// a removed last one goes (#4965). A same-count edit leaves every
+			// grid input alone, so the 750ms poll doesn't churn the layout.
+			m.relayout()
 		}
+	}
+	// A held draft keeps the pane's list different from disk, so the pane, not
+	// this comparison, says whether the reconcile changed anything visible.
+	sp := m.automations.TaskPane()
+	if !reflect.DeepEqual(sp.GetTasks(), tasks) && sp.SetTasks(tasks) {
+		changed = true
 	}
 	return changed
 }
@@ -359,7 +368,7 @@ func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
 //     reconnecting tabs by tmux name) and added;
 //   - sessions gone from the snapshot are removed;
 //   - existing rows are updated IN PLACE — same *session.Instance pointer, only
-//     its tab list and PR info mutated — which is the #959 "live display" fix
+//     its tab list mutated — which is the #959 "live display" fix
 //     (an out-of-band tab now appears without a restart);
 //   - a same-title row whose identity (CreatedAt) differs from the snapshot is a
 //     kill+recreate of the title (#765); it is swapped for a freshly built
@@ -447,7 +456,7 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 			// first would reclassify its adopted op as local — vetoing every later
 			// retry and turning a transient build failure into the permanent stale row
 			// this change exists to prevent.
-			if m.swapInstanceFromSnapshot(d) {
+			if m.swapInstanceFromSnapshot(d, selectedTitle) {
 				m.adoptedSnapshotOps.forget(inst)
 				changed = true
 			}
@@ -466,7 +475,7 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		// Archived→live transition specifically (not merely !Started), so it fires
 		// on real restores without disturbing live in-place updates.
 		if inst.GetLiveness() == session.LiveArchived && snapshotLiveness(inst.GetLiveness(), d) != session.LiveArchived {
-			if m.swapInstanceFromSnapshot(d) {
+			if m.swapInstanceFromSnapshot(d, selectedTitle) {
 				changed = true
 			}
 			continue
@@ -512,6 +521,30 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	// exit without each one having to remember this map (#3005).
 	m.adoptedSnapshotOps.pruneTo(m.store.GetInstances())
 
+	// Re-pin the selection to the same logical instance (by title) if it
+	// survived the reconcile, BEFORE the pane-prune relayout. Re-resolving by
+	// title correctly re-pins across a swap because the rebuilt instance keeps
+	// the same title (#969). The store's SelectInstance records the assertion;
+	// the sidebar moves its cursor onto the asserted row on its next read. If
+	// the selected title is gone from the snapshot, leave the sidebar's own
+	// clamp behavior as-is.
+	//
+	// The re-pin runs ahead of pruneDeadPanes's relayout for the same #5298
+	// reason the swap path pre-pins ahead of its own: that relayout reads the
+	// sidebar (the footer's row-verb target), and a rebuild running while the
+	// cursor still holds its removal-drifted flat index commits the drifted
+	// row via pushSelection and rewrites the lastCursor* identity evidence the
+	// re-pin's replaced-session (by-name) tab lookup depends on. Running the
+	// assertion first turns that relayout's sync into a cursor move on intact
+	// evidence instead of a drift commit. The re-pin still runs after the
+	// per-row loop and the removals above (which shift indices), so it
+	// re-resolves the survivor by title against the post-removal roster.
+	if selectedTitle != "" {
+		if inst := m.store.GetInstanceByTitle(selectedTitle); inst != nil {
+			m.store.SelectInstance(inst)
+		}
+	}
+
 	// Prune panes whose backing session can no longer render — a removed
 	// instance takes its open panes with it (#1088), and a session archived out
 	// of band (`af sessions archive` while the TUI runs, #1028) leaves its pane
@@ -519,21 +552,10 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	// selectionChanged tick, so the focus ring and pane layout are consistent
 	// the moment the reconcile returns. Unconditional: pruneDeadPanes is O(open
 	// panes) and only relayouts when it actually closed something, so a reconcile
-	// with nothing to prune is a cheap no-op.
+	// with nothing to prune is a cheap no-op. The selection re-pin above already
+	// ran, so this relayout's sidebar sync commits a cursor move, not a drift.
 	if m.pruneDeadPanes() {
 		m.relayout()
-	}
-
-	// Re-pin the selection to the same logical instance (by title) if it
-	// survived the reconcile. Re-resolving by title correctly re-pins across a
-	// swap because the rebuilt instance keeps the same title (#969). The store's
-	// SelectInstance records the assertion; the sidebar moves its cursor onto
-	// the asserted row on its next read. If the selected title is gone from the
-	// snapshot, leave the sidebar's own clamp behavior as-is.
-	if selectedTitle != "" {
-		if inst := m.store.GetInstanceByTitle(selectedTitle); inst != nil {
-			m.store.SelectInstance(inst)
-		}
 	}
 
 	return changed
@@ -554,11 +576,25 @@ func sameSession(inst *session.Instance, d session.InstanceData) bool {
 	return inst.CreatedAt.Equal(d.CreatedAt)
 }
 
+// snapshotAwaitingWorktree reports whether a record is the daemon's pending
+// create projection: published (so clients see the session at once) before the
+// worktree exists, so its empty worktree path is an expected transient and the
+// next reconcile picks the row up. The same empty path on a record with no
+// create in flight stays a real fault and keeps its warning, whatever its
+// liveness says (the pending projection itself claims LiveReady).
+func snapshotAwaitingWorktree(d session.InstanceData) bool {
+	return d.InFlightOp == session.OpCreating && d.Worktree.WorktreePath == ""
+}
+
 // addInstanceFromSnapshot builds a live instance from a snapshot record and adds
 // it to the projection store. Returns true on success (a real change). A build
 // failure is logged and skipped — a single unrestorable record must not abort
 // the whole reconcile.
 func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
+	if snapshotAwaitingWorktree(d) {
+		log.InfoLog.Printf("deferring instance %q: create in flight, worktree not populated yet", d.Title)
+		return false
+	}
 	inst, err := buildInstanceFromSnapshot(d)
 	if err != nil {
 		log.WarningLog.Printf("failed to build instance %q from snapshot: %v", d.Title, err)
@@ -572,8 +608,13 @@ func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 // swapInstanceFromSnapshot replaces a stale same-title row with a freshly
 // built instance for the recreated session (#765), preserving the selection.
 // Built BEFORE the swap so a transient build failure leaves the existing row in
-// place rather than dropping it.
-func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
+// place rather than dropping it. selectedTitle is the title of the row the
+// sidebar cursor rested on at the start of this reconcile ("" while it rested on
+// a section header), captured once before the per-row loop — see reconcileSnapshot.
+func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle string) bool {
+	if snapshotAwaitingWorktree(d) {
+		return false
+	}
 	inst, err := buildInstanceFromSnapshot(d)
 	if err != nil {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
@@ -601,21 +642,106 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 		// The row vanished between read and swap; add it fresh.
 		m.store.AddInstance(inst)()
 	}
-	if m.reconcilePanesForTabs(inst, oldKeys, replacedSessionTabs) {
-		m.relayout()
+	// Record the roster the TUI observed at swap time: the daemon builds a
+	// recreated session's tabs one call at a time, so a poll can swap in a
+	// partial roster, and the real-TUI scenarios (scripts/tui-swap-pane-repin-
+	// scenario.sh, #5620) need this evidence to tell that setup race from a
+	// re-pin defect.
+	tabNames := make([]string, 0, len(inst.GetTabs()))
+	for _, tab := range inst.GetTabs() {
+		tabNames = append(tabNames, tab.Name)
+	}
+	log.InfoLog.Printf("same-title swap of %q: replacement roster [%s]", d.Title, strings.Join(tabNames, ","))
+	// Pre-pin the cursor to the surviving selectedTitle BEFORE any
+	// sidebar-reading relayout this swap can trigger (#5298 ordering, applied
+	// to the swap path). ReplaceInstanceByTitle re-sorts the whole projection,
+	// so a non-selected swap drifts the cursor's flat index too — an open pane
+	// on the swapped session makes reconcilePanesForTabs call relayout, and a
+	// cursor still holding its removal/re-sort drifted flat index then commits
+	// a different row through pushSelection, rewriting lastCursor* and
+	// clobbering that session's tab identity ahead of the tail by-title re-pin.
+	// Re-pin the surviving selectedTitle (by title) so the relayout's sidebar
+	// sync is a cursor move on intact lastCursor* evidence instead of a drift
+	// commit: a non-selected swap re-resolves the still-present row the cursor
+	// was on, and a selected-swap resolves to the fresh replacement
+	// ReplaceInstanceByTitle kept under that title (same instance the old
+	// selectedTitle==d.Title path pinned). ReplaceInstance's silent re-point
+	// deliberately never asserts — a cursor resting on a section header must
+	// not be yanked onto any row — so the empty-title header guard is retained
+	// here, the same capture reconcileSnapshot uses to drive the tail re-pin.
+	// The sidebar consumes the assertion lazily on its next read; the pane
+	// reconcile's relayout (when a pane closed or re-bound) is that read, so
+	// moveCursorToInstance resolves the replacement's equivalent tab by name
+	// from the corpse's intact evidence instead of letting pushSelection commit
+	// the stale flat index and rewrite lastCursor* first.
+	if selectedTitle != "" {
+		if sel := m.store.GetInstanceByTitle(selectedTitle); sel != nil {
+			m.store.SelectInstance(sel)
+		}
 	}
 	// The tree selection is another binding into the same replaced-session
 	// roster. Carry it through the same name domain as panes: every ID is freshly
-	// minted, while the equivalent replacement tab keeps its name (#1991).
+	// minted, while the equivalent replacement tab keeps its name (#1991). Bound
+	// before the pane reconcile for the same #5298 reason as the in-place path —
+	// a sidebar-reading relayout must not run while the selection binding is
+	// unresolved. The pre-pin above closed the swap's window for the CURSOR too
+	// (the in-place path uses SyncCursorToActiveTab; the swap re-sorts, so it
+	// re-pins by identity via SelectInstance instead), leaving only the active-tab
+	// binding for remapActiveTabForTabs to resolve.
 	m.remapActiveTabForTabs(inst, oldKeys, replacedSessionTabs)
+	if m.reconcilePanesForTabs(inst, oldKeys, replacedSessionTabs) {
+		m.relayout()
+	}
 	return true
 }
 
 // updateInstanceFromSnapshot reconciles an existing row's tab list and
-// PR badge to the snapshot IN PLACE (same pointer, so view state survives).
+// metadata to the snapshot IN PLACE (same pointer, so view state survives).
 // Returns whether anything changed.
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
 	changed := false
+	// A combined agent+account handoff replaces the process behind the same row
+	// and tmux address. Reconcile every source CurrentAgentName consults before
+	// later action predicates choose which agent's accounts to load.
+	if inst.ReconcileAgentRuntimeSnapshot(d) {
+		changed = true
+	}
+	// Account identity and its pending delivery obligation can change while the
+	// row stays Running/Ready. Mirror them before action predicates are evaluated,
+	// so Retry addresses the daemon's transaction instead of stale local state.
+	if inst.ReconcileAccountHandoffSnapshot(d.Account, d.AccountAgent, d.AccountAutoSelected, d.PendingAccountSwap) {
+		changed = true
+	}
+	if inst.ReconcilePendingHandoffSnapshot(d.PendingHandoffMission, d.HandoffDeliveryStatus) {
+		changed = true
+	}
+	// Startup-unknown is a fail-closed, monotonic outcome for this live runtime.
+	// Marking it locally also clears the stale started binding, matching a cold
+	// materialization of the same snapshot.
+	if d.StartupStateUnknown && !inst.StartupStateUnknown() {
+		inst.MarkStartupStateUnknown()
+		changed = true
+	}
+	// Mirror the daemon's durable mechanical evidence BEFORE the liveness
+	// transition below (#5221 review): the task-run completion gate consults it
+	// inside the transition, and a Ready snapshot can carry a turn observation
+	// the edge needs to see. The run marker itself is mirrored outright — a
+	// client that missed the snapshot carrying the evidence (always possible:
+	// the final Ready snapshot scrubs the window fields with the run) cannot
+	// re-derive the end locally, so the daemon's decision is authoritative.
+	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt,
+		d.TaskRunPromptAttemptAt, d.TaskRunTurnObservedAt) {
+		changed = true
+	}
+	if inst.ReconcileTaskRunState(d.TaskRunActive, d.TaskRunIdleEdgeHeld, d.TaskRunTurnGateHeld) {
+		changed = true
+	}
+	// The outage flag is daemon truth on every snapshot: this is the reconcile
+	// path for rows the snapshot updates IN PLACE, where FromInstanceData never
+	// runs (#5571 W1.3).
+	if inst.ReconcileUnreachable(d.Unreachable) {
+		changed = true
+	}
 	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
 	// the daemon poll computes Running/Ready/Lost/Archived/LimitReached (the #935
 	// liveness) and the TUI renders it. Applied UNCONDITIONALLY — daemon liveness
@@ -677,16 +803,31 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileArchiveWarning(d.ArchiveWarning) {
 		changed = true
 	}
+	// The callback-absence reason is the same class of axis: a sandbox create
+	// stamps it while liveness stays Ready/Running, and it never flips a status
+	// on its own (#5571 W3.1).
+	if inst.ReconcileCallbackUnavailable(d.CallbackUnavailable) {
+		changed = true
+	}
 	// Automatic restore can exhaust its attempts while liveness stays Lost. Mirror
 	// that durable terminal axis independently so an already-open TUI surfaces the
 	// reason immediately rather than only after cold-start materialization.
 	if inst.ReconcileLostRestoreFailure(d.LostRestoreFailure) {
 		changed = true
 	}
-	// Mirror the daemon's durable mechanical evidence independently of liveness.
-	// An interactive send can change delivery status while the row remains Ready,
-	// and pane churn can race the next Running transition (#3168).
-	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt) {
+	// The environmental wait is the same axis at the non-terminal end: it
+	// appears while the loop defers a retry and disappears when an attempt
+	// goes through or the failure turns structural (#5295). A row whose
+	// tombstone was already adopted keeps it cleared: a delayed pre-kill
+	// snapshot still carries the armed wait while its UserKilled=false
+	// leaves the monotonic tombstone untouched, so applying the snapshot
+	// value here would re-arm a wait no restore can ever consume — the
+	// same lie the tombstone commit itself retires (#5295 review).
+	wait := d.LostRestoreWait
+	if tombstoned {
+		wait = nil
+	}
+	if inst.ReconcileLostRestoreWait(wait) {
 		changed = true
 	}
 	// Same shape for the re-created-root notice (#2629): it appears when the
@@ -697,13 +838,14 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileRootRecreateContext(d.RootRecreateContext) {
 		changed = true
 	}
-	// Backends without user-managed tabs (the off-box docker/ssh/hook runtimes)
-	// have a tab list their runtime owns — a single agent tab, fixed at Launch —
-	// so there is nothing for the snapshot to reconcile against. Skipping is a
+	// Backends without user-managed tabs (the off-box docker/ssh/sandbox/hook
+	// runtimes) have a tab list their runtime owns: the agent tab, plus any
+	// metadata-only external web tabs the daemon admits (#3062). There is no
+	// local tmux session behind those for the snapshot to reconcile against. Skipping is a
 	// no-op rather than a behavior change: ReconcileTabsFromData already returns
 	// early for an instance with no local worktree, which is every sandbox
 	// instance (#1874).
-	if inst.Capabilities().TabManagement {
+	{
 		// Capture the slot→identity list before the tab reconcile mutates it: an
 		// out-of-band tab change (another client, `af sessions tab-delete` /
 		// `tab-rename`, daemon-side) must apply the SAME pane close/rebind
@@ -720,186 +862,36 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		if tabsChanged {
 			changed = true
 		}
-		// Re-bind the panes whenever the tab IDENTITY list moved — NOT merely when
-		// the reconcile reported a visible change. The two are not the same: an id
-		// adoption is deliberately silent, and a pane bound to an id that just left
-		// the roster must still close. Gating this on tabsChanged left panes on dead
-		// ids whenever the roster change didn't register as "visible" (#1886).
+		// Re-bind the roster's bindings whenever the tab IDENTITY list moved —
+		// NOT merely when the reconcile reported a visible change. The two are
+		// not the same: an id adoption is deliberately silent, and a binding
+		// holding an id that just left the roster must still be repaired.
+		// Gating this on tabsChanged left panes on dead ids whenever the roster
+		// change didn't register as "visible" (#1886).
 		if !sameTabSlotKeys(oldKeys, paneTabKeys(inst)) {
-			if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
-				m.relayout()
-			}
 			// The tree's selection is the OTHER binding into that roster, and it
-			// needs the SAME identity remap for the same reason: a reorder lands
-			// entirely here (no local action, #1813), and the clamps only keep the
-			// index in range — which a permutation never violates — so an
-			// index-keyed selection silently becomes a different tab.
+			// needs the SAME identity remap — a reorder lands entirely here (no
+			// local action, #1813), and the clamps only keep the index in range,
+			// which a permutation never violates, so an index-keyed selection
+			// silently becomes a different tab.
+			//
+			// Resolve it BEFORE the pane reconcile's relayout: relayout re-reads
+			// the sidebar (the footer's row-verb target), and a rebuild while
+			// the cursor still holds its pre-shrink flat index drifts it onto the
+			// NEXT row — the following session's instance row when the dropped
+			// tab was the last child — which pushSelection commits as the new
+			// display selection, leaving the remap below no session to repair
+			// (#5298).
 			if m.remapActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
 				// An in-place roster update never re-sorts the projection, so the
 				// sidebar indices are current and can follow the remapped tab now.
 				m.sidebar.SyncCursorToActiveTab()
 				changed = true
 			}
+			if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
+				m.relayout()
+			}
 		}
-	}
-	// PR info mirrors the daemon's recorded value. The TUI has no PR producer;
-	// Snapshot is the sole path that applies these projected fields (#3296).
-	if prInfoDiffersFromData(inst, d.PRInfo) {
-		inst.SetPRInfo(prInfoFromData(d.PRInfo))
-		changed = true
 	}
 	return changed
-}
-
-// reconcileSnapshotOp mirrors the daemon snapshot's operation axis while
-// preserving local optimistic operations until the daemon liveness confirms an
-// outcome. Snapshot ops are transient but authoritative for daemon-side
-// archive/restore windows (#1436); terminal snapshots carry OpNone and clear
-// stale overlays through the Transition chokepoint.
-func (m *home) reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
-	if op != session.OpNone {
-		return m.adoptSnapshotOp(inst, op, lv)
-	}
-
-	switch inst.GetInFlightOp() {
-	case session.OpArchiving, session.OpKilling:
-		if lv == session.LiveArchived || lv == session.LiveLost {
-			_ = inst.Transition(session.ClearOp())
-			m.adoptedSnapshotOps.forget(inst)
-			return true
-		}
-	case session.OpRestoring:
-		if lv != session.LiveArchived {
-			_ = inst.Transition(session.ClearOp())
-			m.adoptedSnapshotOps.forget(inst)
-			return true
-		}
-	case session.OpReplacing:
-		// A daemon handoff owns the replacement fence. Once its snapshot settles
-		// to OpNone, the projection must release the same fence regardless of the
-		// resulting liveness (running, limit-parked, or startup-unknown).
-		_ = inst.Transition(session.ClearOp())
-		m.adoptedSnapshotOps.forget(inst)
-		return true
-	case session.OpRespawning:
-		// Same contract for the limit-resume fence (#2997), and for the same reason:
-		// a respawn settles to running, back to limit-parked, or to lost, so keying
-		// the release on any particular liveness would strand the fence on the
-		// others. This clause is what makes adopting the op above safe — and unlike
-		// OpCreating, a missed release would not even show, since OpRespawning
-		// composes to the settled liveness rather than masking it as Loading.
-		_ = inst.Transition(session.ClearOp())
-		// Drop the provenance with the op, exactly as the three cases above do
-		// (#3005/#3006 landed after this case was written). Leaving it is benign only
-		// by accident — vetoesReconcile short-circuits on OpNone, so the stale entry is
-		// never read — but it survives pruneTo for as long as the row is live, and the
-		// next path that consults provenance without checking the op first would
-		// inherit a wrong answer.
-		m.adoptedSnapshotOps.forget(inst)
-		return true
-	}
-	return false
-}
-
-func (m *home) adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
-	if inst.GetInFlightOp() == op {
-		// Already carrying it, but provenance may not be recorded yet — a row whose
-		// op the daemon reported before this build learned to track it, or one this
-		// reconcile adopted on an earlier pass. Record it either way: the guards ask
-		// about the CURRENT op, not about who set it first.
-		m.adoptedOpsFor().note(inst, op)
-		return false
-	}
-	if inst.GetInFlightOp() != session.OpNone {
-		_ = inst.Transition(session.ClearOp())
-	}
-
-	var err error
-	switch op {
-	case session.OpCreating:
-		err = inst.Transition(session.BeginCreate())
-	case session.OpKilling:
-		err = inst.Transition(session.BeginKill())
-	case session.OpArchiving:
-		if lv == session.LiveArchived {
-			m.adoptedOpsFor().note(inst, op)
-			return true
-		}
-		err = inst.Transition(session.BeginArchive())
-	case session.OpRestoring:
-		err = inst.Transition(session.MarkRestoring())
-	case session.OpReplacing:
-		err = inst.Transition(session.BeginHandoff())
-	case session.OpRespawning:
-		// A limit resume re-spawning the runtime (#2997). Adopted so this TUI's action
-		// gating agrees with the daemon that owns the fence. It DOES also change how
-		// the row reads, which an earlier version of this comment wrongly denied:
-		// ui/tree/render.go masks the liveness glyph for any non-None op, so a
-		// respawning row shows the blank working glyph rather than its limit diamond,
-		// and web/src/status.ts classifies it as working (project.ts counts it that
-		// way). That is consistent with every other op and with #1766 — a resume in
-		// flight IS work in flight — and the "[limit] resets …" title prefix still
-		// renders throughout, so the state is not hidden. Without adopting, this TUI's own
-		// ValidateRuntimeAction(RuntimeActionHandoff) reads OpNone and opens the
-		// picker, and the daemon then refuses the selected handoff because its
-		// authoritative instance still carries the fence — an action offered and
-		// then rejected. The settle path below must clear it; see there for why
-		// adopting is safe here in a way adopting OpCreating on an established row
-		// was not.
-		err = inst.Transition(session.BeginRespawn())
-	default:
-		return false
-	}
-	if err != nil {
-		log.WarningLog.Printf("failed to adopt snapshot op %v for %q: %v", op, inst.Title, err)
-		return false
-	}
-	// The row now carries a DAEMON-owned op with no local completion handler
-	// waiting on it. Recorded here, at the only moment the fact is known (#3005).
-	m.adoptedOpsFor().note(inst, op)
-	return true
-}
-
-// prInfoFromData rebuilds a *git.PRInfo from its serialized form, returning nil
-// for the zero value (Number 0 = "no PR"), matching FromInstanceData.
-func prInfoFromData(d session.PRInfoData) *git.PRInfo {
-	if d.Number == 0 {
-		return nil
-	}
-	return &git.PRInfo{Number: d.Number, Title: d.Title, URL: d.URL, State: d.State, Branch: d.Branch}
-}
-
-// prInfoDiffersFromData reports whether an instance's in-memory PR info differs
-// from the snapshot's, so the reconcile only writes (and reports a change) on an
-// actual diff.
-func prInfoDiffersFromData(inst *session.Instance, d session.PRInfoData) bool {
-	cur := inst.GetPRInfo()
-	if d.Number == 0 {
-		return cur != nil
-	}
-	if cur == nil {
-		return true
-	}
-	return cur.Number != d.Number || cur.Title != d.Title || cur.URL != d.URL || cur.State != d.State || cur.Branch != d.Branch
-}
-
-// snapshotLiveness resolves the daemon-owned liveness a snapshot record carries
-// (#1195). It prefers the explicit `liveness` field; a record from a daemon that
-// predates the field (LivenessUnset) falls back to the legacy `status` int.
-//
-// A legacy TRANSIENT (Loading/Deleting) carries NO real liveness in the two-axis
-// model — the new daemon only ever sends liveness, so a legacy transient is
-// version-skew noise from an upgrade window. It must NOT be mapped to Ready
-// (LivenessForStatus's default), which would flip a mid-kill row (legacy
-// `status: Deleting`) to Ready during the window. Instead we keep the row's
-// CURRENT liveness untouched; the daemon reports a real liveness on a later poll
-// once it's upgraded. `cur` is the existing row's liveness for exactly this.
-func snapshotLiveness(cur session.Liveness, d session.InstanceData) session.Liveness {
-	if d.Liveness != session.LivenessUnset {
-		return d.Liveness
-	}
-	if d.Status == session.Loading || d.Status == session.Deleting {
-		return cur
-	}
-	return session.LivenessForStatus(d.Status)
 }

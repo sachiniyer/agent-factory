@@ -1,6 +1,10 @@
 package tmux
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+)
 
 // DetectAgentFromCommand is the seam every agent-conditional spawn/restore
 // behavior keys off (#1116, #1131): it must identify the agent a resolved
@@ -45,6 +49,19 @@ func TestDetectAgentFromCommand(t *testing.T) {
 		{"opencode ionice wrapper", "ionice -c 3 opencode", ProgramOpencode},
 		{"opencode env wrapper", "env FOO=1 opencode --continue", ProgramOpencode},
 
+		// A bare `env -` (or `env --`) ends option parsing, so the next token
+		// — even an option-looking one — is env's command. GNU env execs that
+		// token and passes the words after it only as its arguments, so an
+		// agent-shaped argument is not the running agent (#5036/#5052). The
+		// command itself still counts when it names a supported agent.
+		{"dash command is the agent", "env - claude", ProgramClaude},
+		{"dash option-looking command not its arg", "env - -u claude", ""},
+		{"dash chdir-looking command not its arg", "env - -C /evilpath claude", ""},
+		{"dash terminator before ignore flag not agent", "env - -i claude", ""},
+		{"double dash option-looking command not its arg", "env -- -u claude", ""},
+		{"double dash runs the agent command", "env -- claude", ProgramClaude},
+		{"dash agent keeps its own flags", "env - claude --continue", ProgramClaude},
+
 		// devin: bare, absolute path, the af-injected trust flag, and a wrapper.
 		// The default install symlinks ~/.local/bin/devin at a versioned path, so
 		// the absolute-path shape is common for it.
@@ -70,5 +87,50 @@ func TestDetectAgentFromCommand(t *testing.T) {
 				t.Errorf("DetectAgentFromCommand(%q) = %q, want %q", tt.command, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDetectAgentExecutableAgreesWithAgentNamespaceForCommandOnCoveredSpellings
+// guards the #4356 narrowing's fix. Before #4356, AgentForCommand matched env by
+// basename, the same rule DetectAgentExecutable uses at the create gate, so a
+// program the gate accepted was classifiable on restore. #4356 tightened
+// AgentForCommand to the strict isTrustedEnvExecutable set while the gate kept the
+// basename rule, and the two surfaces drifted: a path-qualified env wrapper such
+// as /usr/local/bin/env ... codex was accepted onto a session but could no longer
+// be classified by the VS Code editor scope, so a restored session's editor
+// refused with ErrUnsupportedAgent. AgentNamespaceForCommand restores the basename
+// rule for the namespace-only callers.
+//
+// Scope: this is NOT a universal invariant. DetectAgentExecutable and
+// AgentNamespaceForCommand are independent implementations — the gate parses with
+// its own SplitShellTokens and resolves the executable via baseCommand, the
+// namespace surface parses with mvdan.cc/sh and filepath.Base — and they diverge
+// on spellings outside this corpus (e.g. "codex >output", "codex 2>/dev/null",
+// "codex --model $MODEL", and "env env codex" all classify as codex at the gate
+// but "" on the namespace side). This test asserts agreement only for the
+// spellings enumerated below — the env-wrapper forms the #4356 bug turns on plus
+// a few bare-agent and reject cases — so that drift does not return there.
+func TestDetectAgentExecutableAgreesWithAgentNamespaceForCommandOnCoveredSpellings(t *testing.T) {
+	for _, command := range []string{
+		"env codex",
+		"/bin/env codex",
+		"/usr/bin/env codex",
+		"/usr/local/bin/env CODEX_HOME=/x codex",
+		"/run/current-system/sw/bin/env codex",
+		"./env codex",
+		"/tmp/env CLAUDE_CONFIG_DIR=/y claude",
+		"env -i HOME=/h gemini --resume latest",
+		"codex",
+		"/opt/bin/claude --permission-mode plan",
+		"bash",
+		"/usr/bin/some-other-tool --foo",
+		"",
+	} {
+		gate := DetectAgentExecutable(command)
+		scope := sessionenv.AgentNamespaceForCommand(command)
+		if gate != scope {
+			t.Errorf("create gate and editor scope disagree on %q: DetectAgentExecutable=%q AgentNamespaceForCommand=%q",
+				command, gate, scope)
+		}
 	}
 }

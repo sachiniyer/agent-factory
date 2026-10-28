@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +181,122 @@ func TestHookCleanupHandlePreservesResolvedNoAgent(t *testing.T) {
 	}
 }
 
+// The storage-only cleanup fixtures' sentinels (#3783).
+//
+// NUMERIC BECAUSE THEY MUST BE. RemotePID looks like free-form string state,
+// but restoreRuntimeCleanup validates it with positivePID
+// (runtime_cleanup.go:164), which is strconv.Atoi plus a positivity check, so a
+// word here fails the restore half of every round-trip below.
+//
+// LONG BECAUSE OF WHAT THEY SIT NEXT TO. The old values were "4242" and "991",
+// short enough to appear inside another field's digits: a marshalled record
+// carries RFC3339 timestamps, and 08:16:41.424242007Z contains "4242". These
+// are longer than any digit run such a record can produce — nanoseconds are
+// nine digits, a year four, a port five — so they cannot be confused with a
+// clock, an id or an address even by a reader that looks at raw bytes.
+const (
+	cleanupFixturePID    = "4242424242424242"
+	cleanupFixtureAltPID = "9919919919919919"
+)
+
+// cleanupLeaksIn reports every place a marshalled record carries storage-only
+// cleanup state, as JSON paths. Empty means the record is clean.
+//
+// IT ASSERTS THE CLAIM, WHICH IS ABOUT FIELDS (#3783). The assertion this
+// replaced searched the marshalled bytes for the fixtures' values, so any field
+// that happened to contain those characters read as a leak — which is exactly
+// how a timestamp's nanoseconds were reported as a leaked remote PID. Comparing
+// whole decoded values instead cannot make that mistake: a timestamp is not
+// equal to a PID, however many of its digits it shares.
+//
+// It deliberately keeps the one thing the byte search was good at. A key-only
+// check ("is runtime_cleanup absent?") answers a narrower question than the
+// claim, because a leak that lands under an unexpected key would pass it. So
+// this walks the whole decoded document and reports BOTH the cleanup key at any
+// depth AND any string value equal to a private one wherever it appears — the
+// substring search's reach, without its false positives.
+func cleanupLeaksIn(t *testing.T, raw []byte, private []string) []string {
+	t.Helper()
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal record for leak inspection: %v", err)
+	}
+	values := make(map[string]struct{}, len(private))
+	for _, v := range private {
+		if v != "" {
+			values[v] = struct{}{}
+		}
+	}
+	var leaks []string
+	var walk func(path string, node any)
+	walk = func(path string, node any) {
+		switch n := node.(type) {
+		case map[string]any:
+			for _, key := range slices.Sorted(maps.Keys(n)) {
+				child := path + "." + key
+				if key == "runtime_cleanup" {
+					leaks = append(leaks, child+" (storage-only key present)")
+				}
+				walk(child, n[key])
+			}
+		case []any:
+			for i, item := range n {
+				walk(fmt.Sprintf("%s[%d]", path, i), item)
+			}
+		case string:
+			if _, private := values[n]; private {
+				leaks = append(leaks, fmt.Sprintf("%s = %q", path, n))
+			}
+		}
+	}
+	walk("", decoded)
+	return leaks
+}
+
+// TestCleanupLeakOracleCatchesALeak is the mutation that proves the oracle
+// above has teeth. An assertion that reports "clean" is only worth something if
+// it reports "dirty" when the thing it guards actually happens, so this feeds it
+// a record that DOES carry the cleanup handle and requires it to name both the
+// key and the values — including a value moved to an unexpected key, which a
+// key-only check would miss.
+func TestCleanupLeakOracleCatchesALeak(t *testing.T) {
+	const host = "leak.example.test"
+	leaked, err := json.Marshal(InstanceData{
+		ID:        "leak-id",
+		Title:     "leak",
+		UpdatedAt: time.Date(2026, 9, 3, 8, 16, 41, 424242007, time.UTC),
+		RuntimeCleanup: &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+			Config:     config.SSHConfig{Host: host, User: "remote"},
+			SessionDir: "/srv/af/leaked",
+			RemotePID:  cleanupFixturePID,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal leaked record: %v", err)
+	}
+
+	leaks := cleanupLeaksIn(t, leaked, []string{host, "/srv/af/leaked", cleanupFixturePID})
+	joined := strings.Join(leaks, "\n")
+	for _, want := range []string{
+		".runtime_cleanup (storage-only key present)",
+		".runtime_cleanup.ssh.config.host = " + strconv.Quote(host),
+		".runtime_cleanup.ssh.session_dir = \"/srv/af/leaked\"",
+		".runtime_cleanup.ssh.remote_pid = " + strconv.Quote(cleanupFixturePID),
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("the leak oracle missed %s; it reported:\n%s", want, joined)
+		}
+	}
+
+	// And the timestamp that started #3783 is NOT reported, though its digits
+	// contain the PID's. This is the false positive the oracle exists to not have.
+	for _, leak := range leaks {
+		if strings.Contains(leak, "updated_at") {
+			t.Fatalf("the leak oracle reported a clock reading as cleanup state: %s", leak)
+		}
+	}
+}
+
 // TestSSHCleanupHandleSurvivesTombstoneRoundTrip covers the restart half of
 // #2198's cleanup retry contract. A kill tombstone can survive only if the exact
 // off-box teardown handle survives with it; an inert no-op backend would delete
@@ -184,7 +304,7 @@ func TestHookCleanupHandlePreservesResolvedNoAgent(t *testing.T) {
 func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	p := newSSHSandboxProvisioner(ProvisionSpec{Title: "restart-reap"}, "ssh cleanup.example.test", "", "")
 	p.sessionDir = "/home/remote/.af-sessions/restart-reap.1234"
-	p.remotePID = "4242"
+	p.remotePID = cleanupFixturePID
 	teardown := p.reap
 	inst := &Instance{
 		ID:    "restart-reap-id",
@@ -206,14 +326,18 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	// The private staging handle must survive that exact ordering without leaking
 	// into the ordinary daemon snapshot.
 	precommit := inst.ToInstanceData()
+	// #3783: pin the timestamp CI actually drew when ToInstanceData still
+	// stamped UpdatedAt at serialization. On 2026-09-03T08:16:41.424242007Z the
+	// nanosecond digits contained this fixture's "4242" remote PID, so the
+	// substring assertion below reported a leak that had not happened. Pinning it
+	// turns a rare collision into a deterministic one.
+	precommit.UpdatedAt = time.Date(2026, 9, 3, 8, 16, 41, 424242007, time.UTC)
 	snapshotRaw, err := json.Marshal(precommit)
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
 	}
-	for _, private := range []string{"cleanup.example.test", p.sessionDir, p.remotePID, "runtime_cleanup"} {
-		if strings.Contains(string(snapshotRaw), private) {
-			t.Fatalf("daemon snapshot leaked storage-only cleanup value %q: %s", private, snapshotRaw)
-		}
+	if leaks := cleanupLeaksIn(t, snapshotRaw, []string{"cleanup.example.test", p.sessionDir, p.remotePID}); len(leaks) > 0 {
+		t.Fatalf("daemon snapshot leaked storage-only cleanup state at %v: %s", leaks, snapshotRaw)
 	}
 
 	precommit.UserKilled = true
@@ -244,7 +368,7 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &stored); err != nil {
 		t.Fatalf("unmarshal tombstone: %v", err)
 	}
-	stored = stored.ForStorage() // Storage.LoadInstances normalizes here before FromInstanceData.
+	stored = stored.ForStorage() // the daemon normalizes through ForStorage before FromInstanceData.
 	if stored.RuntimeCleanup == nil {
 		t.Fatal("storage normalization dropped the loaded cleanup handle")
 	}
@@ -341,12 +465,12 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 				provisioner: &sandboxProvisioner{
 					sshCmd:     "ssh -o User='ci' builder.internal",
 					sessionDir: "/srv/af/session.123",
-					remotePID:  "991",
+					remotePID:  cleanupFixtureAltPID,
 				},
 				cleanup: &SSHRuntimeCleanupData{
 					Config:     config.SSHConfig{Host: "builder.internal", User: "ci"},
 					SessionDir: "/srv/af/session.123",
-					RemotePID:  "991",
+					RemotePID:  cleanupFixtureAltPID,
 				},
 			},
 		},
@@ -371,9 +495,48 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := &Instance{ID: tc.name + "-id", Title: tc.name + "-cleanup", Path: "/repo", backend: tc.backend}
-			if liveStored := inst.ToInstanceData().ForStorage(); liveStored.RuntimeCleanup != nil {
-				t.Fatalf("ordinary live record persisted cleanup handle: %#v", liveStored.RuntimeCleanup)
+			// The KilledWithoutLiveRuntime fix: a sandbox row's off-box runtime
+			// SURVIVES a daemon restart. Persisting the cleanup handle on the
+			// ordinary (non-killed) snapshot is exactly what lets the next load
+			// rebuild a real teardown handle and reap for real — instead of
+			// staging an unearned "nothing owed" marker from the reload-inert
+			// backend's nil runtimeTeardown alone and orphaning a still-live
+			// ssh workspace or hook-provisioned sandbox. The tombstone path still
+			// publishes its handle (verified below), but ordinary sandbox rows
+			// now publish theirs too.
+			liveStored := inst.ToInstanceData().ForStorage()
+			if liveStored.RuntimeCleanup == nil {
+				t.Fatalf("ordinary live %s sandbox record must persist its cleanup handle so a restart can rebuild a teardown that reaps for real: %#v", tc.name, liveStored.RuntimeCleanup)
 			}
+			if liveStored.UserKilled || liveStored.KilledWithoutLiveRuntime {
+				t.Fatalf("ordinary live %s sandbox record must not look tombstoned: user_killed=%v marker=%v", tc.name, liveStored.UserKilled, liveStored.KilledWithoutLiveRuntime)
+			}
+			liveRaw, err := json.Marshal(liveStored)
+			if err != nil {
+				t.Fatalf("marshal ordinary live %s record: %v", tc.name, err)
+			}
+			var liveDecoded InstanceData
+			if err := json.Unmarshal(liveRaw, &liveDecoded); err != nil {
+				t.Fatalf("unmarshal ordinary live %s record: %v", tc.name, err)
+			}
+			liveDecoded = liveDecoded.ForStorage()
+			if !reflect.DeepEqual(liveDecoded.RuntimeCleanup, liveStored.RuntimeCleanup) {
+				t.Fatalf("ordinary live %s cleanup handle changed across JSON+ForStorage:\n got %#v\nwant %#v", tc.name, liveDecoded.RuntimeCleanup, liveStored.RuntimeCleanup)
+			}
+			// The production refresh path hands the unmarshalled row DIRECTLY to
+			// FromInstanceData — exactly as daemon.go does — so its rebuild branch
+			// can restore the off-box teardown handle from the persisted cleanup
+			// data. A non-nil handle on the reloaded row means a kill committed
+			// against it reaps for real instead of running the no-op path the
+			// inert-only reload would produce.
+			liveRestored, err := FromInstanceData(liveDecoded)
+			if err != nil {
+				t.Fatalf("restore ordinary live %s record: %v", tc.name, err)
+			}
+			if liveRestored.runtimeTeardown == nil {
+				t.Fatalf("ordinary live %s sandbox record reloaded with no teardown handle — the rebuild path did not restore it, so a kill would stage the unearned nothing-owed marker", tc.name)
+			}
+
 			inst.userKilled = true
 			stored := inst.ToInstanceData().ForStorage()
 			if stored.RuntimeCleanup == nil {
@@ -527,7 +690,7 @@ func TestArchivedKillTombstoneDoesNotPersistRuntimeCleanup(t *testing.T) {
 	cleanup := &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
 		Config:     config.SSHConfig{Host: secretHost, User: "remote"},
 		SessionDir: "/srv/af/already-archived",
-		RemotePID:  "4242",
+		RemotePID:  cleanupFixturePID,
 	}}
 	stored := (InstanceData{
 		ID:             "archived-id",
@@ -545,8 +708,8 @@ func TestArchivedKillTombstoneDoesNotPersistRuntimeCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal archived tombstone: %v", err)
 	}
-	if strings.Contains(string(raw), secretHost) {
-		t.Fatalf("archived tombstone leaked cleanup identity: %s", raw)
+	if leaks := cleanupLeaksIn(t, raw, []string{secretHost, "/srv/af/already-archived", cleanupFixturePID}); len(leaks) > 0 {
+		t.Fatalf("archived tombstone leaked cleanup identity at %v: %s", leaks, raw)
 	}
 }
 
@@ -642,5 +805,245 @@ func TestArchivedRemoteTombstoneNeedsNoCleanupHandle(t *testing.T) {
 	}
 	if err := restored.Kill(); err != nil {
 		t.Fatalf("already-reaped archive required a remote cleanup handle: %v", err)
+	}
+}
+
+// newInertSandboxInstance builds an Instance whose backend is the inert rebuild
+// FromInstanceData itself produces for a reloaded sandbox session: zero-valued,
+// with no live runtime handle (runtimeTeardown == nil). It is the shape a kill
+// runs against after a daemon restart reloaded the row inert, and the shape the
+// inert-at-kill bug report is about.
+func newInertSandboxInstance(t *testing.T, backendType, title string) *Instance {
+	t.Helper()
+	return &Instance{
+		ID:      title + "-id",
+		Title:   title,
+		Path:    "/repo",
+		backend: newInertSandboxBackend(backendType),
+		// runtimeTeardown stays nil: an inert rebuild owed nothing to reap.
+	}
+}
+
+// TestInertSandboxKillTombstoneWritesNothingOwedMarker is the core regression for
+// the inert-at-kill wedge. Killing a sandbox session reloaded inert (nil
+// runtimeTeardown) commits a tombstone whose RuntimeCleanup is nil on purpose —
+// the inert backend has no container/dir to reap. The fix writes a
+// KilledWithoutLiveRuntime marker at commit time so the next load admits that
+// "nothing owed" shape instead of installing a permanent fail-closed teardown.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the tombstone staged a nil RuntimeCleanup,
+// ForStorage published no handle, and FromInstanceData classified the
+// handle-less tombstone as malformed — installing unavailableRuntimeCleanup,
+// so Kill returned ErrWorkspaceStateUnknown forever and the record could never
+// be deleted.
+func TestInertSandboxKillTombstoneWritesNothingOwedMarker(t *testing.T) {
+	inst := newInertSandboxInstance(t, "docker", "inert-kill")
+	inst.MarkUserKilled()
+
+	stored := inst.ToInstanceData().ForStorage()
+	if stored.RuntimeCleanup != nil {
+		t.Fatalf("inert-at-kill tombstone staged a cleanup handle: %#v", stored.RuntimeCleanup)
+	}
+	if !stored.KilledWithoutLiveRuntime {
+		t.Fatal("inert-at-kill tombstone omitted the KilledWithoutLiveRuntime marker")
+	}
+	if stored.UserKilled != true {
+		t.Fatalf("tombstone did not carry the kill-intent flag")
+	}
+
+	// The marker is the only durable token distinguishing this current-binary
+	// "nothing owed" shape from a legacy handle-less tombstone, so it must
+	// survive a JSON round-trip exactly the way a daemon restart reloads it.
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal tombstone: %v", err)
+	}
+	var reloaded InstanceData
+	if err := json.Unmarshal(raw, &reloaded); err != nil {
+		t.Fatalf("unmarshal tombstone: %v", err)
+	}
+	if !reloaded.KilledWithoutLiveRuntime {
+		t.Fatal("KilledWithoutLiveRuntime did not survive the JSON round-trip")
+	}
+	if reloaded.RuntimeCleanup != nil {
+		t.Fatalf("tombstone acquired a cleanup handle across the round-trip: %#v", reloaded.RuntimeCleanup)
+	}
+
+	// The daemon normalizes through ForStorage before FromInstanceData; a reloaded
+	// row keeps its public marker because the private staging field is lost on
+	// unmarshal (it is unexported), mirroring how RuntimeCleanup is preserved.
+	normalized := reloaded.ForStorage()
+	if !normalized.KilledWithoutLiveRuntime {
+		t.Fatal("ForStorage dropped a reloaded KilledWithoutLiveRuntime marker")
+	}
+
+	restored, err := FromInstanceData(normalized)
+	if err != nil {
+		t.Fatalf("restore inert-at-kill tombstone: %v", err)
+	}
+	if restored.runtimeTeardown != nil {
+		teardownErr := restored.runtimeTeardown()
+		t.Fatalf("inert-at-kill tombstone installed a teardown instead of admitting nothing was owed: %v", teardownErr)
+	}
+	// The no-op success path the inert runtime was designed for: nil teardown ⇒
+	// nil error ⇒ the pending record delete can proceed.
+	if err := restored.Kill(); err != nil {
+		t.Fatalf("inert-at-kill tombstone Kill did not complete the no-op reap: %v", err)
+	}
+}
+
+// TestInertSandboxKillTombstoneAdmitsEveryBackendType mirrors the inert-at-kill
+// fix across every sandbox backend so the admission is not docker-specific.
+// Each backend reloads inert the same way (newInertSandboxBackend) and owes no
+// teardown for the same reason (runtimeTeardown == nil). It loads the reloaded
+// row DIRECTLY (no ForStorage), matching the production refresh path in
+// daemon.go that hands the unmarshalled InstanceData straight to FromInstanceData.
+func TestInertSandboxKillTombstoneAdmitsEveryBackendType(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			inst := newInertSandboxInstance(t, backendType, "inert-"+backendType)
+			inst.MarkUserKilled()
+
+			stored := inst.ToInstanceData().ForStorage()
+			if !stored.KilledWithoutLiveRuntime {
+				t.Fatalf("%s tombstone omitted the marker", backendType)
+			}
+			if stored.RuntimeCleanup != nil {
+				t.Fatalf("%s tombstone staged a handle: %#v", backendType, stored.RuntimeCleanup)
+			}
+
+			raw, err := json.Marshal(stored)
+			if err != nil {
+				t.Fatalf("marshal %s tombstone: %v", backendType, err)
+			}
+			var reloaded InstanceData
+			if err := json.Unmarshal(raw, &reloaded); err != nil {
+				t.Fatalf("unmarshal %s tombstone: %v", backendType, err)
+			}
+			// Direct load, no ForStorage: the public marker survives JSON and is
+			// read straight FromInstanceData, exactly as daemon.go:774 does.
+			restored, err := FromInstanceData(reloaded)
+			if err != nil {
+				t.Fatalf("restore %s tombstone: %v", backendType, err)
+			}
+			if restored.runtimeTeardown != nil {
+				t.Fatalf("%s tombstone installed a fail-closed teardown: %v", backendType, restored.runtimeTeardown())
+			}
+			if err := restored.Kill(); err != nil {
+				t.Fatalf("%s tombstone Kill did not complete the no-op reap: %v", backendType, err)
+			}
+		})
+	}
+}
+
+// TestLiveSandboxKillTombstoneStagesNoMarker pins the other side of the
+// admission: a kill against a LIVE sandbox session (one with a real teardown
+// handle and a non-nil RuntimeCleanup) must NOT stage the marker. Its tombstone
+// carries a real handle and reloads a working teardown, exactly as before.
+func TestLiveSandboxKillTombstoneStagesNoMarker(t *testing.T) {
+	inst := &Instance{
+		ID:    "live-kill-id",
+		Title: "live-kill",
+		Path:  "/repo",
+		backend: &dockerBackend{
+			provisioner: &dockerProvisioner{containerID: "sha256:live-container", engineID: "engine-live"},
+			cleanup: &DockerRuntimeCleanupData{
+				ContainerID: "sha256:live-container",
+				EngineID:    "engine-live",
+			},
+		},
+	}
+	// A live session owes its container reap; the marker is gated on a nil
+	// runtimeTeardown, so installing a real one keeps the marker off.
+	SetRuntimeTeardownForTest(inst, func() error { return nil })
+	inst.MarkUserKilled()
+
+	stored := inst.ToInstanceData().ForStorage()
+	if stored.KilledWithoutLiveRuntime {
+		t.Fatal("live sandbox kill staged the nothing-owed marker; it owes a real reap")
+	}
+	if stored.RuntimeCleanup == nil || stored.RuntimeCleanup.Docker == nil {
+		t.Fatalf("live sandbox kill tombstone lost its docker cleanup handle: %#v", stored.RuntimeCleanup)
+	}
+
+	restored, err := FromInstanceData(stored)
+	if err != nil {
+		t.Fatalf("restore live tombstone: %v", err)
+	}
+	if restored.runtimeTeardown == nil {
+		t.Fatal("live sandbox tombstone reloaded with no teardown handle")
+	}
+}
+
+// TestLegacyHandlelessTombstoneWithoutMarkerFailsClosed pins the fail-closed
+// behavior for a handle-less tombstone that carries NO marker — the on-disk
+// shape a binary predating this fix writes, and the shape an incompletely
+// written record might leave. Without the marker the load path cannot tell
+// "nothing owed" from "legacy/malformed", so it must keep failing closed rather
+// than launder a missing handle into no-op success. This guarantees the fix
+// admits ONLY the current-binary inert-at-kill shape the marker vouches for.
+func TestLegacyHandlelessTombstoneWithoutMarkerFailsClosed(t *testing.T) {
+	restored, err := FromInstanceData(InstanceData{
+		ID:          "legacy-tombstone-id",
+		Title:       "legacy-tombstone",
+		Path:        "/repo",
+		BackendType: "docker",
+		UserKilled:  true,
+		// No RuntimeCleanup and no KilledWithoutLiveRuntime: indistinguishable
+		// from a pre-fix record on disk.
+	})
+	if err != nil {
+		t.Fatalf("restore legacy tombstone: %v", err)
+	}
+	if restored.runtimeTeardown == nil {
+		t.Fatal("legacy handle-less tombstone was admitted without a marker; only the marked inert-at-kill shape may be admitted")
+	}
+	if err := restored.Kill(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("legacy handle-less tombstone without a marker must fail closed, got: %v", err)
+	}
+}
+
+// TestInertKillMarkerNeverLeaksIntoSnapshot mirrors the storage-only guarantee
+// RuntimeCleanup has: the nothing-owed marker is staged privately and published
+// only at the kill-tombstone retention boundary. An ordinary snapshot of an
+// inert sandbox session (not yet killed) must not carry the durable marker, so
+// the kill commit point — not every observation — is what vouches for it.
+func TestInertKillMarkerNeverLeaksIntoSnapshot(t *testing.T) {
+	inst := newInertSandboxInstance(t, "docker", "inert-snapshot")
+
+	snapshot := inst.ToInstanceData()
+	if snapshot.KilledWithoutLiveRuntime {
+		t.Fatal("ordinary snapshot published the nothing-owed marker before any kill")
+	}
+	if snapshot.RuntimeCleanup != nil {
+		t.Fatalf("ordinary snapshot published a cleanup handle: %#v", snapshot.RuntimeCleanup)
+	}
+	// ForStorage of an inert, not-yet-killed row keeps the marker off the disk
+	// record too: the marker is a tombstone property, not a live observation.
+	stored := snapshot.ForStorage()
+	if stored.KilledWithoutLiveRuntime {
+		t.Fatal("ForStorage published the nothing-owed marker for a non-tombstone row")
+	}
+	if stored.UserKilled {
+		t.Fatal("ForStorage set UserKilled on an instance that was never killed")
+	}
+}
+
+// TestArchivedInertKillTombstoneDropsMarker pins the archived carve-out: an
+// archived row reaped its runtime already, so it never enters the tombstone
+// restore branch and the marker is cleared rather than carried. This is the
+// sandbox analog of TestArchivedRemoteTombstoneNeedsNoCleanupHandle, asserted
+// against the marker rather than the handle.
+func TestArchivedInertKillTombstoneDropsMarker(t *testing.T) {
+	inst := newInertSandboxInstance(t, "docker", "archived-inert")
+	inst.MarkUserKilled()
+	raw := inst.ToInstanceData()
+	raw.Liveness = LiveArchived
+	stored := raw.ForStorage()
+	if stored.KilledWithoutLiveRuntime {
+		t.Fatal("archived tombstone retained the nothing-owed marker; archived rows need no admission")
+	}
+	if stored.RuntimeCleanup != nil {
+		t.Fatalf("archived tombstone retained a cleanup handle: %#v", stored.RuntimeCleanup)
 	}
 }

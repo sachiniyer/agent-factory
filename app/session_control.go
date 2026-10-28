@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -40,28 +41,74 @@ const (
 // on callDaemon's implicit ensure to boot the daemon at cold start — spawning is
 // a lifecycle concern, independent of which transport the control calls take),
 // then the call rides daemon-http.sock. A package var so a future integration
-// test can point it at a fake without a real daemon; the unit suite stubs the
-// higher-level *ThroughDaemon seams instead, so this runs only in production.
+// test can point it at a fake without a real daemon. newTestHome stubs the
+// higher-level mutation and snapshot-fetch seams, including all-repos discovery,
+// so its incidental snapshot polls never reach this launcher. Tests exercising
+// this transport must explicitly replace it or provide an isolated daemon.
+//
+// It is for READS only. It retries every transport failure, including one that
+// arrives after the request was sent — harmless for a read, a duplicate or an
+// overwrite for a mutation. Mutations use withDaemonHTTPMutation (#4820).
 var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
+	return callDaemonHTTP(fn, httpCallRetryable)
+}
+
+// withDaemonHTTPMutation is withDaemonHTTP for a call that changes daemon state.
+// It retries only while the daemon provably never received the request — a
+// refused dial or a missing socket during the bind race, or a lifecycle
+// admission refusal the daemon answers before running the handler. A failure
+// after the request may have been received is returned at once, never re-sent:
+// the daemon may have committed it and lost only the reply (#4820). Callers
+// classify that error with apiclient.IsMutationOutcomeUncertain. A package var
+// for the same reason as withDaemonHTTP.
+var withDaemonHTTPMutation = func(fn func(*apiclient.Client) error) error {
+	return callDaemonHTTP(fn, mutationCallRetryable)
+}
+
+// callDaemonHTTP is the shared body of withDaemonHTTP and withDaemonHTTPMutation:
+// ensure a daemon, dial it, call fn, and repeat fn while retryable says the
+// failure is transient, up to daemonHTTPRetryWait.
+func callDaemonHTTP(fn func(*apiclient.Client) error, retryable func(error) bool) error {
+	c, err := daemonHTTPClient()
+	if err != nil {
+		return err
+	}
+	// Every helper here builds a fresh Client for ONE round-trip, and a fresh
+	// Client is a fresh http.Transport. A completed keep-alive connection stays in
+	// that transport's idle pool with its read-loop goroutine, and the pool is
+	// never drained: the transport is unreachable but not collectable, because the
+	// goroutine holds it. Measured against a real unix-socket server: 200 one-shot
+	// clients leak 400 descriptors (both ends), and two forced GCs reclaim none of
+	// them. The TUI polls through here twice every 750ms, so this is the one place
+	// it compounds (#3626 review).
+	//
+	// The same discipline the WS path already applies to its cloned transport
+	// (apiclient/stream.go, session/agentserver_remote.go). It costs the keep-alive
+	// only for callers that were never going to reuse the connection anyway —
+	// which is all of them, since the Client dies with this function.
+	defer c.CloseIdleConnections()
+	err = fn(c)
+	deadline := time.Now().Add(daemonHTTPRetryWait)
+	for retryable(err) && time.Now().Before(deadline) {
+		time.Sleep(daemonHTTPRetryPoll)
+		err = fn(c)
+	}
+	return err
+}
+
+// daemonHTTPClient ensures a daemon and returns a Client targeting it. A package
+// var so a test can point the production retry policy at a socket it owns,
+// without EnsureDaemon; tests that swap it must not run in parallel.
+var daemonHTTPClient = func() (*apiclient.Client, error) {
 	// A remote target's daemon runs on another machine — EnsureDaemon would spawn
 	// a superfluous LOCAL daemon we never talk to, so skip it and dial the remote
 	// directly (#1592 Phase 3 PR4). The local default is unchanged: ensure + dial.
 	if !apiclient.IsRemoteTarget() {
 		if err := daemon.EnsureDaemon(); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	c, err := apiclient.NewTargeted()
-	if err != nil {
-		return err
-	}
-	err = fn(c)
-	deadline := time.Now().Add(daemonHTTPRetryWait)
-	for httpCallRetryable(err) && time.Now().Before(deadline) {
-		time.Sleep(daemonHTTPRetryPoll)
-		err = fn(c)
-	}
-	return err
+	return apiclient.NewTargeted()
 }
 
 // httpCallRetryable reports whether an HTTP control error is transient: a
@@ -83,6 +130,16 @@ func httpCallRetryable(err error) bool {
 	return daemon.IsDaemonAdmissionRetryable(err) || apiclient.IsTransportError(err)
 }
 
+// mutationCallRetryable is httpCallRetryable narrowed to failures the daemon
+// provably never acted on. Any outcome apiclient.IsMutationOutcomeUncertain
+// reports — a transport failure after the request may have been received, a
+// committed error, an unverifiable reply — is final, so what is left to retry
+// is a transport failure that never sent the request and the daemon's own
+// admission refusal, which it answers without running the handler (#4820).
+func mutationCallRetryable(err error) bool {
+	return !apiclient.IsMutationOutcomeUncertain(err) && httpCallRetryable(err)
+}
+
 type sessionStartRequest struct {
 	Title     string
 	TitleBase string
@@ -91,26 +148,40 @@ type sessionStartRequest struct {
 	Prompt    string
 	// Backend is the runtime picked in the naming form's backend field (#1933),
 	// or "" to let the repo's `backend` config key decide — the same defaulting
-	// `af sessions create` applies when --backend is absent. It takes precedence
-	// over ForceRemote in the daemon (session/instance_factory.go
-	// resolveBackendKind), which is why the TUI can offer the whole catalog
-	// through one field while `N` keeps its hook-only shortcut.
-	Backend     string
-	ForceRemote bool
+	// `af sessions create` applies when --backend is absent.
+	Backend string
+	// Account is the credential account picked in the naming form's account field
+	// (#3844), or "" for the ambient identity — the same default `af sessions
+	// create` applies with no --account. It is a directory name in the DAEMON's
+	// account registry and never carries credential material.
+	Account string
+	// ProgramChosen records whether Program was a user CHOICE — a picker pick
+	// or launch --program — rather than a wire value the account-pairing or
+	// implicit-resolution rules produced. A failed-create draft needs the
+	// distinction the wire string alone cannot carry: a non-empty Program may
+	// only be the account-pinned echo of the displayed default, which must
+	// restore config-following rather than chosen (#4889 review).
+	ProgramChosen bool
+	// AccountChosen is the same distinction for Account: an explicit "Ambient
+	// identity" pick and an untouched field both serialize as "", but only
+	// the untouched one may be re-preselected with the daemon's default on
+	// restore — overwriting a deliberate ambient pick would lose the user's
+	// input (#4889 review).
+	AccountChosen bool
 }
 
 var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartRequest) (*session.Instance, error) {
 	var data *session.InstanceData
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		data, e = c.CreateSession(daemon.CreateSessionRequest{
-			Title:       req.Title,
-			TitleBase:   req.TitleBase,
-			RepoPath:    req.RepoPath,
-			Program:     req.Program,
-			Prompt:      req.Prompt,
-			Backend:     req.Backend,
-			ForceRemote: req.ForceRemote,
+			Title:     req.Title,
+			TitleBase: req.TitleBase,
+			RepoPath:  req.RepoPath,
+			Program:   req.Program,
+			Prompt:    req.Prompt,
+			Backend:   req.Backend,
+			Account:   req.Account,
 		})
 		return e
 	})
@@ -147,7 +218,7 @@ var errDaemonUnresponsive = errors.New("daemon did not respond")
 var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), killRPCTimeout)
 	defer cancel()
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.KillSession(ctx, request)
 	})
 	// A deadline here means the daemon took the request and went quiet, so this
@@ -168,7 +239,7 @@ var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 // test suite can stub them without dialing a real daemon.
 var archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (string, error) {
 	var path string
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		path, e = c.ArchiveSession(request)
 		return e
@@ -178,7 +249,7 @@ var archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (st
 
 var restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (string, error) {
 	var path string
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		path, e = c.RestoreSession(request)
 		return e
@@ -192,7 +263,7 @@ var restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (st
 // A package var so the app test suite can stub it without dialing a real daemon.
 var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeleteProjectResponse, error) {
 	var resp daemon.DeleteProjectResponse
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		resp, e = c.DeleteProject(daemon.DeleteProjectRequest{RepoPath: repoRoot, RepoID: repoID})
 		return e
@@ -207,10 +278,27 @@ var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeletePro
 // and switches on its own, so only the error matters here. A package var so the
 // app test suite can stub it without dialing a real daemon.
 var registerProjectThroughDaemon = func(path string) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		_, e := c.RegisterProject(path)
 		return e
 	})
+}
+
+// rebindProjectThroughDaemon routes the TUI's rebind-project verb — the picker's
+// `b` — through the daemon (the single writer): config.RebindProject moves the
+// registration's stable id to the replacement checkout, refusing a path another
+// project owns, and publishes projects.changed. expectedRoot/expectedCheckoutID
+// are the (root, checkout) pair the picker showed; the daemon refuses the
+// rebind if the registry has moved on since (#4822). A package var so the app
+// test suite can stub it without dialing a real daemon.
+var rebindProjectThroughDaemon = func(projectID, expectedRoot, expectedCheckoutID, path string) (config.Project, error) {
+	var project config.Project
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
+		var e error
+		project, e = c.RebindProject(projectID, expectedRoot, expectedCheckoutID, path)
+		return e
+	})
+	return project, err
 }
 
 // resumeFromLimitThroughDaemon routes the TUI's `c` (retry usage-limit session)
@@ -219,34 +307,43 @@ var registerProjectThroughDaemon = func(path string) error {
 // state. A package var so the app test suite can stub it without dialing a real
 // daemon.
 var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.ResumeFromLimit(request)
+	})
+}
+
+// confirmHandoffDeliveryThroughDaemon routes the "mark delivered" half of the
+// resolve-delivery picker (#4429) through the daemon: retire the pending
+// mission on the operator's attestation without a resend. A package var so the
+// app test suite can stub it without dialing a real daemon.
+var confirmHandoffDeliveryThroughDaemon = func(request daemon.ConfirmHandoffDeliveryRequest) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
+		return c.ConfirmHandoffDelivery(request)
 	})
 }
 
 // handoffSessionThroughDaemon routes the TUI's handoff verb (#2013) through the
 // daemon — the single writer (#960) — which swaps the session's agent program in
 // place, re-launches it in the same worktree, and delivers the mission brief. It
-// returns the OUTGOING agent the daemon actually resolved, so the TUI reports the
-// swap that happened rather than the one it assumed: the picker's idea of the
-// current agent can be a poll tick stale. A package var so the app test suite can
-// stub it without dialing a real daemon.
-var handoffSessionThroughDaemon = func(req daemon.HandoffSessionRequest) (string, error) {
-	var from string
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+// returns the agent and account pair the daemon actually resolved, so the TUI
+// reports the swap that happened rather than the picker's potentially stale view.
+// A package var so the app test suite can stub it without dialing a real daemon.
+var handoffSessionThroughDaemon = func(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
+	var response daemon.HandoffSessionResponse
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		resp, e := c.HandoffSession(req)
+		response = resp
 		if e != nil {
 			return e
 		}
-		from = resp.From
 		return nil
 	})
-	return from, err
+	return response, err
 }
 
 // SetHandoffRunnerForTest swaps the handoff seam (#2013) so a test can assert the
 // TUI routes its handoff through the daemon — without dialing a real one.
-func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (string, error)) func() {
+func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error)) func() {
 	prev := handoffSessionThroughDaemon
 	handoffSessionThroughDaemon = fn
 	return func() { handoffSessionThroughDaemon = prev }
@@ -263,7 +360,7 @@ func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (string, erro
 // package var so the app test suite can stub the trigger without dialing a real
 // daemon.
 var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectation) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.TriggerTask(taskID, expect)
 	})
 }
@@ -292,16 +389,16 @@ var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectatio
 // the snapshot fetcher / poll-pause seams).
 var (
 	addTaskThroughDaemon = func(t task.Task) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error { return c.AddTask(t) })
+		return withDaemonHTTPMutation(func(c *apiclient.Client) error { return c.AddTask(t, task.ActorTUI) })
 	}
 	updateTaskThroughDaemon = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error {
-			_, err := c.UpdateTask(id, update, expect)
+		return withDaemonHTTPMutation(func(c *apiclient.Client) error {
+			_, err := c.UpdateTask(id, update, expect, task.ActorTUI)
 			return err
 		})
 	}
 	removeTaskThroughDaemon = func(id string, expect task.ProjectExpectation) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error { return c.RemoveTask(id, expect) })
+		return withDaemonHTTPMutation(func(c *apiclient.Client) error { return c.RemoveTask(id, expect) })
 	}
 )
 
@@ -317,14 +414,21 @@ var (
 // swap under `go test -parallel -race` (the #964 / #960-PR4 snapshot-fetcher
 // race). The seams live per-home instead; tests assign a fake to
 // h.pauseStatusPoll / h.resumeStatusPoll directly.
+//
+// Unlike the other mutations, neither needs uncertain-outcome handling at its
+// call site (#4824). Both are idempotent per holder: a repeated pause renews the
+// same lease, and a repeated resume releases an already-released one. Neither is
+// user-visible — the callers only log a failure. And both self-heal: the attach
+// heartbeat re-sends the pause every statusPollRenewInterval, and a resume that
+// did not land is covered by the lease expiring.
 func pauseStatusPollThroughDaemon(request daemon.PauseStatusPollRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.PauseStatusPoll(request)
 	})
 }
 
 func resumeStatusPollThroughDaemon(request daemon.ResumeStatusPollRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.ResumeStatusPoll(request)
 	})
 }
@@ -336,7 +440,7 @@ func resumeStatusPollThroughDaemon(request daemon.ResumeStatusPollRequest) error
 // between the transport and the local projection.
 var createTabThroughDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 	var response daemon.CreateTabResponse
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		response, e = c.CreateTab(req)
 		return e
@@ -348,18 +452,42 @@ var createTabThroughDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTab
 // which kills the tab's tmux session and persists the shrunk list. The TUI drops
 // the now-dead tab locally via Instance.DropClosedTab.
 var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		_, e := c.CloseTab(request)
 		return e
 	})
 }
 
-// refreshPRInfoThroughDaemon pokes daemon-owned PR discovery for the selected
-// session. The TUI sends identity only and learns the result from Snapshot.
-var refreshPRInfoThroughDaemon = func(request daemon.RefreshPRInfoRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.RefreshPRInfo(request)
+// reorderTabThroughDaemon routes the TUI's </> tab move to the daemon's
+// ReorderTab RPC — the same /v1/ReorderTab route the web's drag reorder calls
+// (web/src/api.ts) and `af sessions tab-reorder` reaches over the control
+// socket, so all three surfaces permute one roster one way and the daemon's
+// agent-tab pinning and rollback rules apply identically. The response carries
+// the resolved final index, which the projection applies rather than trusting
+// its own arithmetic.
+var reorderTabThroughDaemon = func(request daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
+	var response daemon.ReorderTabResponse
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
+		var e error
+		response, e = c.ReorderTab(request)
+		return e
 	})
+	return response, err
+}
+
+// renameTabThroughDaemon routes the TUI's `R` (rename tab) mutation to the
+// daemon's RenameTab RPC — the same /v1/RenameTab the web calls and
+// `af sessions tab-rename` reaches over the control socket — and returns the
+// RESOLVED name (sanitized, collision-suffixed), which the TUI applies to its
+// local projection so the bar reads it before the next snapshot lands.
+var renameTabThroughDaemon = func(request daemon.RenameTabRequest) (string, error) {
+	var resolved string
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
+		var e error
+		resolved, e = c.RenameTab(request)
+		return e
+	})
+	return resolved, err
 }
 
 // snapshotThroughDaemon fetches the daemon's authoritative session list for a
@@ -401,16 +529,98 @@ func previewThroughDaemon(req daemon.PreviewRequest) (resp daemon.PreviewRespons
 	return resp, err
 }
 
+// liveTaskArmingFetcher returns the daemon's task list, whose records carry the
+// LIVE arming state — whether the running scheduler is actually holding each
+// task, and what its armed entry will fire next (#3623).
+//
+// The TUI reads tasks.json itself every 750ms (#1168) and that read can observe
+// nothing about the running scheduler, so the automations rail had to fall back
+// to evaluating the cron expression: it rendered a confident "next Mar 04 09:00"
+// for a task no daemon was holding, which is exactly how two tasks went dark for
+// 18 days while every surface called them healthy. This is the observation the
+// rail was missing (#3626).
+//
+// It deliberately does NOT go through withDaemonHTTP, which is the only seam in
+// this file that does not. Two reasons, both about what a 750ms poll is allowed
+// to do:
+//
+//   - withDaemonHTTP ensures a daemon, and EnsureDaemon SPAWNS one when none is
+//     running. Starting a background process is not something an observation may
+//     do as a side effect — least of all this observation, whose entire subject
+//     is whether a daemon is holding these tasks. Snapshot already owns the
+//     ensure; the TUI's cold start cannot proceed without it, so by the time this
+//     runs the daemon question has been settled by something whose job it is.
+//   - withDaemonHTTP also retries a transient failure for up to five seconds,
+//     inline. This call shares its goroutine with the session snapshot, so a
+//     down daemon would stretch the poll from 750ms to five seconds and stall
+//     the sidebar behind a health field.
+//
+// So it dials whatever is already listening, once. No daemon means no answer,
+// which is the case the fallback exists for.
+//
+// A package var, like allReposSnapshotFetcher above and for the same reasons: it
+// holds no per-home state, tests swap it wholesale, and fetchSnapshotCmd reads it
+// ON the event loop before handing the value to its goroutine.
+//
+// Its error is deliberately not surfaced. A daemon that cannot answer this also
+// cannot answer Snapshot, which reports the outage once; and the failure mode
+// here is benign by construction — no observation leaves every record's arming
+// UNKNOWN, which is the honest answer, and never the not-armed that would accuse
+// every task on the box of being broken because one poll missed.
+// liveArmingTimeout bounds one arming read. ListTasks takes the task-control
+// lock, which every task mutation holds across its write AND its scheduler
+// reload — a watch edit waits out a SIGTERM-resistant watcher in there — and the
+// local socket carries no overall deadline (apiclient.callCtx). Unbounded, a
+// blocked read would pin the poll goroutine, and because the next tick is armed
+// only after this one's result is handled, it would stall the SESSION snapshot
+// behind a health field. Two seconds is long enough that an ordinary read never
+// trips it and short enough that the worst case is a couple of stale polls; a
+// trip leaves arming UNKNOWN, which the rail already renders honestly (#3626
+// review).
+const liveArmingTimeout = 2 * time.Second
+
+var liveTaskArmingFetcher = func() ([]task.Task, error) {
+	// Not in remote mode. The rail's task DEFINITIONS come from the local
+	// tasks.json (LoadTasksForKnownRepo) while NewTargeted would send this to the
+	// daemon named by --daemon-url / AF_DAEMON_URL, so the answer would be about a
+	// different machine's tasks. Mostly that yields UNKNOWN, which is true and
+	// harmless — but two stores that share a task id and a cron expression would
+	// copy a remote task's arming onto an unrelated local one, and a fabricated
+	// "armed" is exactly the false clean bill #3623 exists to remove. Observation
+	// and definition have to come from the same daemon; until the rail reads
+	// remote tasks too, the honest answer for a remote target is "nothing
+	// reported" (#3626 review).
+	if apiclient.IsRemoteTarget() {
+		return nil, nil
+	}
+	c, err := apiclient.NewTargeted()
+	if err != nil {
+		return nil, err
+	}
+	defer c.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(context.Background(), liveArmingTimeout)
+	defer cancel()
+	return c.ListTasks(ctx)
+}
+
+// SetLiveTaskArmingFetcherForTest swaps the live arming fetcher and returns a
+// restore func. Test-only.
+func SetLiveTaskArmingFetcherForTest(f func() ([]task.Task, error)) func() {
+	prev := liveTaskArmingFetcher
+	liveTaskArmingFetcher = f
+	return func() { liveTaskArmingFetcher = prev }
+}
+
 // allReposSnapshotFetcher returns the daemon's session list across EVERY repo
 // (RepoID:"" = all repos), used only to build the project-picker's list with a
 // per-project session count (#1461). A package var so the project-switch tests
 // can inject a fake multi-repo snapshot. It is a plain read — the switch itself
 // still re-scopes through home.snapshotFetcher(m.repoID).
-var allReposSnapshotFetcher = func() ([]session.InstanceData, error) {
+var allReposSnapshotFetcher = func(ctx context.Context) ([]session.InstanceData, error) {
 	var resp daemon.SnapshotResponse
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		resp, e = c.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: ""})
+		resp, e = c.SnapshotWithAlarmsCtx(ctx, daemon.SnapshotRequest{RepoID: ""})
 		return e
 	})
 	if err != nil {
@@ -421,7 +631,7 @@ var allReposSnapshotFetcher = func() ([]session.InstanceData, error) {
 
 // SetAllReposSnapshotFetcherForTest swaps the all-repos discovery fetcher and
 // returns a restore func. Test-only.
-func SetAllReposSnapshotFetcherForTest(f func() ([]session.InstanceData, error)) func() {
+func SetAllReposSnapshotFetcherForTest(f func(context.Context) ([]session.InstanceData, error)) func() {
 	prev := allReposSnapshotFetcher
 	allReposSnapshotFetcher = f
 	return func() { allReposSnapshotFetcher = prev }
@@ -479,6 +689,14 @@ func SetLimitResumerForTest(f func(daemon.ResumeFromLimitRequest) error) func() 
 	return func() { resumeFromLimitThroughDaemon = prev }
 }
 
+// SetHandoffDeliveryConfirmerForTest swaps the resolve-picker's confirm seam
+// (#4429) so a test can assert the mark-delivered arm routes through the daemon.
+func SetHandoffDeliveryConfirmerForTest(f func(daemon.ConfirmHandoffDeliveryRequest) error) func() {
+	prev := confirmHandoffDeliveryThroughDaemon
+	confirmHandoffDeliveryThroughDaemon = f
+	return func() { confirmHandoffDeliveryThroughDaemon = prev }
+}
+
 func SetTabCreatorForTest(f func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error)) func() {
 	prev := createTabThroughDaemon
 	createTabThroughDaemon = f
@@ -491,10 +709,18 @@ func SetTabCloserForTest(f func(daemon.CloseTabRequest) error) func() {
 	return func() { closeTabThroughDaemon = prev }
 }
 
-func SetPRInfoRefresherForTest(f func(daemon.RefreshPRInfoRequest) error) func() {
-	prev := refreshPRInfoThroughDaemon
-	refreshPRInfoThroughDaemon = f
-	return func() { refreshPRInfoThroughDaemon = prev }
+// SetTabReordererForTest swaps the ReorderTab seam so a test can assert the
+// TUI routes a </> tab move through the daemon — without dialing a real one.
+func SetTabReordererForTest(f func(daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error)) func() {
+	prev := reorderTabThroughDaemon
+	reorderTabThroughDaemon = f
+	return func() { reorderTabThroughDaemon = prev }
+}
+
+func SetTabRenamerForTest(f func(daemon.RenameTabRequest) (string, error)) func() {
+	prev := renameTabThroughDaemon
+	renameTabThroughDaemon = f
+	return func() { renameTabThroughDaemon = prev }
 }
 
 func SetInstanceBuilderForTest(f func(session.InstanceData) (*session.Instance, error)) func() {

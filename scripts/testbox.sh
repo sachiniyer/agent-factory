@@ -10,6 +10,9 @@
 #   scripts/testbox.sh selftest                run the TUI driver self-test (#1161)
 #   scripts/testbox.sh drive                   boot af via the driver + attach
 #   scripts/testbox.sh lifecycle [scenario]    clean-install / install->upgrade gate
+#   scripts/testbox.sh web-selftest            browser gate for the web client (#1592)
+#   scripts/testbox.sh perf                    web/TUI budgets + demo still pixel diffs (#3908)
+#   scripts/testbox.sh web-demo                record docs/assets/web/ (#3855) — NOT a gate
 #   scripts/testbox.sh build                   (re)build the image only
 #   scripts/testbox.sh clean                   reclaim this harness's disk (#2133)
 #
@@ -20,6 +23,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/container/playtest-lifetime.sh
+source "$REPO_ROOT/scripts/container/playtest-lifetime.sh"
 IMAGE="${AF_TESTBOX_IMAGE:-agent-factory-testbox}"
 # The web-driver-selftest uses a SEPARATE, heavier image (Go + Node + Chromium);
 # see scripts/container/Dockerfile.web-selftest. Kept distinct so it never bloats
@@ -106,6 +111,44 @@ else
     echo "testbox: need docker or podman on PATH" >&2
     exit 1
 fi
+
+# engine_run — `$ENGINE run`, with this harness's network mode applied.
+#
+# AF_TESTBOX_NETWORK is UNSET by default, and unset passes no --network at all,
+# so every existing run stays byte-identical. Deliberately not defaulted to
+# `bridge`: that is docker's default network name but not podman's, and this
+# script supports both — a default here would change behaviour for one engine
+# while claiming to change nothing.
+#
+# The lever exists because a box can lose its bridge. `docker0` is a device the
+# daemon creates, and a daemon restart can come back without it; when that
+# happens EVERY default-network run dies before a single test compiles —
+#
+#   failed to set up container networking: … adding interface veth… to bridge
+#   docker0 failed: Device does not exist
+#
+# — which takes out the only sanctioned way to run the daemon/ and app/ suites,
+# since those never run on the host. `AF_TESTBOX_NETWORK=none` runs them anyway:
+# these containers do not need the network, and the warm host module cache is
+# already mounted as a file:// GOPROXY below precisely so a run does not need it.
+#
+# Every `run` in this file goes through here, rather than through RUN_FLAGS
+# alone: fix_cache_perms and the web-selftest build their own flag lists, so a
+# RUN_FLAGS-only override would silently miss them — and missing ONE run is the
+# same as having no override at all, because that one dies first.
+#
+# `run` only, never `build`: an image build fetches packages and modules, so
+# forcing it offline would fail for an unrelated reason. Same for the targets
+# that genuinely reach the network from INSIDE the container — `lifecycle`
+# downloads releases, and `web-selftest` runs `npm ci`. See
+# docs/dev/container-testing.md for which targets survive being cut off.
+engine_run() {
+    if [ -n "${AF_TESTBOX_NETWORK:-}" ]; then
+        "$ENGINE" run --network "$AF_TESTBOX_NETWORK" "$@"
+        return
+    fi
+    "$ENGINE" run "$@"
+}
 
 # ---------------------------------------------------------------- image lease
 #
@@ -403,6 +446,33 @@ if command -v go >/dev/null 2>&1; then
     fi
 fi
 
+# AF_TESTBOX_TMPFS=<dest>[:<opts>] adds a size-limited --tmpfs mount under a
+# chosen path — the only moment a mount can be added is docker-run time, and
+# the playtest container is unprivileged so an in-container `mount` cannot
+# substitute. A scenario uses it to put a REAL ENOSPC under a write target:
+# mount a scratch path and symlink the real target into it, e.g.
+# AF_TESTBOX_TMPFS=/home/dev/wt-tmpfs:mode=1777,size=16m with
+# $AGENT_FACTORY_HOME/worktrees -> /home/dev/wt-tmpfs created by the scenario,
+# so a restore's rebuild genuinely fails on a full filesystem.
+#
+# Two traps the option text above encodes:
+#   * Mountpoint PARENTS the image lacks are created by dockerd as root:root —
+#     --tmpfs /home/dev/sandbox/home/worktrees leaves sandbox/home unwritable
+#     by the dev user and the playtest entry dies on its first write. Pick a
+#     dest whose parent already exists in the image (/home/dev does).
+#   * A tmpfs root is root-owned 0755 unless mode= is given — the scenario's
+#     filler and the session worktree are written by `dev`, so mode=1777 (or
+#     uid=1000 where supported) is required for the fill to work.
+# A scenario that cannot run without the mount declares it with a literal
+# `AF_TESTBOX_TMPFS_DEFAULT=<dest>[:<opts>]` line, so `testbox.sh scenario <it>`
+# works with no hand-set environment. An explicit AF_TESTBOX_TMPFS still wins.
+if [ -z "${AF_TESTBOX_TMPFS:-}" ] && [ "${1:-}" = scenario ] && [ -f "$REPO_ROOT/${2:-}" ]; then
+    AF_TESTBOX_TMPFS="$(sed -n 's/^AF_TESTBOX_TMPFS_DEFAULT=//p' "$REPO_ROOT/$2" | head -1)"
+fi
+if [ -n "${AF_TESTBOX_TMPFS:-}" ]; then
+    RUN_FLAGS+=(--tmpfs "$AF_TESTBOX_TMPFS")
+fi
+
 # Cache volumes created by older harness versions (or manual root runs)
 # can be root-owned, which the non-root test user can't write to. A
 # one-shot root chown makes the harness self-healing.
@@ -411,7 +481,7 @@ fi
 # or being current.
 fix_cache_perms() {
     ensure_cache_volumes af-testbox-gomod af-testbox-gobuild
-    "$ENGINE" run --rm --label "$LABEL" --user 0 \
+    engine_run --rm --label "$LABEL" --user 0 \
         -v af-testbox-gomod:/cache/gomod \
         -v af-testbox-gobuild:/cache/gobuild \
         "${1:-$IMAGE}" chown -R dev:dev /cache >/dev/null
@@ -432,11 +502,15 @@ fix_cache_perms() {
 # (#1596, regression of the #1498 opt-out). Override to `true` to exercise the
 # real auto-update path in the sandbox.
 start_playtest_detached() {
-    local rc=0
+    local rc=0 lifetime
+    lifetime="$(playtest_lifetime "${AF_PLAYTEST_MAX_LIFETIME:-}")" || return
+    reap_playtest_sandboxes
     watch_image_start "$PLAYTEST_NAME"
-    "$ENGINE" run -d \
+    engine_run -d \
         "${RUN_FLAGS[@]}" \
         --name "$PLAYTEST_NAME" \
+        --label af.playtest.mode=detached \
+        -e "AF_PLAYTEST_MAX_LIFETIME=$lifetime" \
         -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
         -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
         -e "AF_PLAYTEST_AGENT=${AF_PLAYTEST_AGENT:-standin}" \
@@ -449,8 +523,10 @@ start_playtest_detached() {
 # ensure_playtest_up — start the detached sandbox if it is not already
 # running, then block until every driver prerequisite has been scaffolded.
 ensure_playtest_up() {
+    reap_playtest_sandboxes
     if ! "$ENGINE" inspect -f '{{.State.Running}}' "$PLAYTEST_NAME" 2>/dev/null | grep -q true; then
-        "$ENGINE" rm -f "$PLAYTEST_NAME" >/dev/null 2>&1 || true
+        # A same-name container is never grounds for deletion. Docker reports
+        # collisions; only the age-scoped labelled sweep may reap old runs.
         build_image
         fix_cache_perms
         echo "testbox: starting sandbox '$PLAYTEST_NAME' (af builds on boot)..." >&2
@@ -490,7 +566,7 @@ test)
     rc=0
     TESTBOX_NAME="af-testbox-test-$RUN_TOKEN"
     watch_image_start "$TESTBOX_NAME"
-    "$ENGINE" run "${RUN_FLAGS[@]}" --name "$TESTBOX_NAME" "$IMAGE" \
+    engine_run "${RUN_FLAGS[@]}" --name "$TESTBOX_NAME" "$IMAGE" \
         bash /src/scripts/container/run-tests.sh "$@" || rc=$?
     finish_image_start
     exit "$rc"
@@ -509,9 +585,10 @@ playtest)
     else
         rc=0
         watch_image_start "$PLAYTEST_NAME"
-        "$ENGINE" run -it \
+        engine_run -it \
             "${RUN_FLAGS[@]}" \
             --name "$PLAYTEST_NAME" \
+            --label af.playtest.mode=interactive \
             -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
             -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
             -e "AF_PLAYTEST_AGENT=${AF_PLAYTEST_AGENT:-standin}" \
@@ -564,8 +641,40 @@ scenario)
         PLAYTEST_NAME="af-driver-scenario-$(_uniq)"; teardown=yes
     fi
     ensure_playtest_up
+    # Scenarios that run a master control leg consume provenance inputs
+    # (AF_BRANCH_SHA / AF_MASTER_SHA / AF_MASTER_TAR). Inside the sandbox the
+    # mounted /src may be a linked worktree whose .git file points at a
+    # host-only gitdir, so the script cannot rev-parse or archive there —
+    # produce the inputs here whenever the script declares them.
+    exec_env=()
+    if grep -qE 'AF_(BRANCH|MASTER)_SHA|AF_MASTER_TAR' "$REPO_ROOT/$scenario_rel"; then
+        branch_sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+        # A bugfix scenario may pin its control to a known-buggy revision with
+        # a literal AF_CONTROL_SHA=<40hex> line — once the fix merges, archiving
+        # the moving origin/master would build a fixed control that can never
+        # reproduce the bug, and the master leg would fail forever after.
+        master_sha="$(grep -oE 'AF_CONTROL_SHA=[0-9a-f]{40}' "$REPO_ROOT/$scenario_rel" \
+            | head -1 | cut -d= -f2 || true)"
+        [ -n "$master_sha" ] || master_sha="$(git -C "$REPO_ROOT" rev-parse origin/master 2>/dev/null \
+            || git -C "$REPO_ROOT" rev-parse master 2>/dev/null || true)"
+        [ -n "$branch_sha" ] && exec_env+=(-e "AF_BRANCH_SHA=$branch_sha")
+        if [ -n "$master_sha" ]; then
+            master_tar="$(mktemp "${TMPDIR:-/tmp}/af-master.XXXXXX.tar")"
+            # mktemp makes the tar 0600 and docker cp preserves the host uid
+            # numerically, so on a host whose user is not uid 1000 the tar lands
+            # unreadable by the container's dev user (1000) — "Permission
+            # denied" inside the scenario. It is a public-source archive; open
+            # the mode before the copy.
+            chmod 0644 "$master_tar"
+            if git -C "$REPO_ROOT" archive --format=tar "$master_sha" > "$master_tar"; then
+                "$ENGINE" cp "$master_tar" "$PLAYTEST_NAME:/tmp/af-master-src.tar" >/dev/null
+                exec_env+=(-e "AF_MASTER_SHA=$master_sha" -e "AF_MASTER_TAR=/tmp/af-master-src.tar")
+            fi
+            rm -f "$master_tar"
+        fi
+    fi
     rc=0
-    "$ENGINE" exec "$PLAYTEST_NAME" bash "/src/$scenario_rel" || rc=$?
+    "$ENGINE" exec "${exec_env[@]}" "$PLAYTEST_NAME" bash "/src/$scenario_rel" || rc=$?
     if [ "$teardown" = yes ]; then
         "$ENGINE" rm -f "$PLAYTEST_NAME" >/dev/null 2>&1 || true
     fi
@@ -614,7 +723,7 @@ lifecycle)
     fix_cache_perms "$LIFECYCLE_IMAGE"
     rc=0
     watch_image_start "$LIFECYCLE_NAME"
-    "$ENGINE" run --rm \
+    engine_run --rm \
         "${RUN_FLAGS[@]}" \
         --name "$LIFECYCLE_NAME" \
         -e "GITHUB_TOKEN=${GITHUB_TOKEN:-}" \
@@ -624,7 +733,9 @@ lifecycle)
     finish_image_start
     exit "$rc"
     ;;
-web-selftest)
+web-selftest|perf)
+    # The perf variant shares this entire fence and artifact mount; its entry
+    # reuses demo stills before seeding 1000 storage rows for both clients.
     # Playwright web-driver-selftest (#1592 Phase 5 PR6): build the dedicated
     # Go+Node+Chromium image, then run the whole harness in ONE ephemeral
     # container — it builds af, boots a real daemon on a loopback TLS+token
@@ -664,6 +775,7 @@ web-selftest)
     # graceful path never happens — a SIGKILLed container skips every trap, and that
     # is precisely the case this mount exists to rescue.
     WEB_RESULTS="$REPO_ROOT/web/test-results/$RUN_TOKEN"
+    echo ">>> artifacts: $WEB_RESULTS"
     # Old runs are gitignored and only ever created by FAILURES, but they are traces
     # of ~1MB each, so age them out. Best-effort, and it can never touch a concurrent
     # run: that directory is minutes old, not days.
@@ -672,9 +784,11 @@ web-selftest)
     rm -rf "$WEB_RESULTS"
     mkdir -p "$WEB_RESULTS"
     rc=0
+    WEB_ENTRY=web-selftest-entry.sh
+    if [ "$cmd" = perf ]; then WEB_ENTRY=web-demo-entry.sh; fi
     WEB_SELFTEST_NAME="af-web-selftest-$RUN_TOKEN"
     watch_image_start "$WEB_SELFTEST_NAME"
-    "$ENGINE" run --rm --label "$LABEL" --init \
+    engine_run --rm --label "$LABEL" --init \
         --name "$WEB_SELFTEST_NAME" \
         -v "$REPO_ROOT":/src:ro \
         -v "$WEB_RESULTS":/work/web/test-results \
@@ -683,7 +797,54 @@ web-selftest)
         --pids-limit "${AF_TESTBOX_PIDS:-2048}" \
         --memory "${AF_WEB_TESTBOX_MEMORY:-4g}" \
         -e AF_PLAYWRIGHT_ARGS \
-        "$WEB_IMAGE" bash /src/scripts/container/web-selftest-entry.sh || rc=$?
+        -e AF_PERF_MODE="$([ "$cmd" = perf ] && echo 1 || echo 0)" \
+        -e AF_PERF_RECORD -e AF_UPDATE_GOLDENS -e CI \
+        "$WEB_IMAGE" bash "/src/scripts/container/$WEB_ENTRY" || rc=$?
+    finish_image_start
+    exit "$rc"
+    ;;
+web-demo)
+    # The DEMO recorder (#3855) — the same image, cache volumes and container
+    # shape as web-selftest above, pointed at a different entry script. It boots
+    # a real daemon on a throwaway home, seeds a small plausible project, drives
+    # the SPA through the core flows while recording video and stills, converts
+    # the recording with the image's ffmpeg, and writes the finished media into
+    # docs/assets/web/.
+    #
+    # It is NOT a gate and CI never runs it: `make demo-assets` is how the
+    # product's face gets refreshed, and the assets it writes are committed.
+    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.web-selftest" -q --label "$LABEL" -t "$WEB_IMAGE" >/dev/null
+    ensure_cache_volumes af-web-selftest-gomod af-web-selftest-gobuild
+    # The ONE path out of the container, and deliberately the committed asset
+    # directory rather than a scratch dir the caller then has to copy: `make
+    # demo-assets` should leave a `git status` to review, not a homework
+    # assignment. The entry script stages every file and only copies them in
+    # once every conversion and size budget has passed, so a run that dies
+    # halfway leaves what is committed untouched.
+    #
+    # Unlike web-selftest's per-run results dir this is a FIXED path, because it
+    # is a tracked directory — which also means two concurrent recorders would
+    # fight over it. That is the right trade for a target a maintainer runs by
+    # hand every few months.
+    DEMO_OUT="$REPO_ROOT/docs/assets/web"
+    mkdir -p "$DEMO_OUT" "$REPO_ROOT/docs/assets/tui"
+    rc=0
+    WEB_DEMO_NAME="af-web-demo-$RUN_TOKEN"
+    watch_image_start "$WEB_DEMO_NAME"
+    engine_run --rm --label "$LABEL" --init \
+        --name "$WEB_DEMO_NAME" \
+        -v "$REPO_ROOT":/src:ro \
+        -v "$DEMO_OUT":/work/demo-out \
+        -v "$REPO_ROOT/docs/assets/tui":/work/tui-out \
+        -v af-web-selftest-gomod:/cache/gomod \
+        -v af-web-selftest-gobuild:/cache/gobuild \
+        --pids-limit "${AF_TESTBOX_PIDS:-2048}" \
+        --memory "${AF_WEB_TESTBOX_MEMORY:-4g}" \
+        -e AF_TUI_STILLS_ONLY \
+        -e AF_DEMO_TARGET_SECONDS \
+        -e AF_DEMO_MAX_GIF_BYTES \
+        -e AF_DEMO_MAX_MP4_BYTES \
+        "$WEB_IMAGE" bash /src/scripts/container/web-demo-entry.sh || rc=$?
     finish_image_start
     exit "$rc"
     ;;
@@ -748,7 +909,7 @@ clean)
     "$ENGINE" system df
     ;;
 *)
-    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | lifecycle | web-selftest | build | clean)" >&2
+    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | lifecycle | web-selftest | perf | web-demo | build | clean)" >&2
     exit 1
     ;;
 esac

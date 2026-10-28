@@ -1,0 +1,60 @@
+TAP version 13
+# Subtest: phone header at 360 folds secondary controls; desktop renders the same controls inline
+ok 1 - phone header at 360 folds secondary controls; desktop renders the same controls inline
+  ---
+  duration_ms: 4.396328
+  type: 'test'
+  ...
+# Subtest: phone overflow has native keyboard activation and Escape returns focus to its trigger
+ok 2 - phone overflow has native keyboard activation and Escape returns focus to its trigger
+  ---
+  duration_ms: 3.041274
+  type: 'test'
+  ...
+# Subtest: truncated session title retains the complete name for pointer and accessible text
+ok 3 - truncated session title retains the complete name for pointer and accessible text
+  ---
+  duration_ms: 1.373134
+  type: 'test'
+  ...
+# Subtest: session-first composition moves all secondary controls into one menu and restores desktop order
+ok 4 - session-first composition moves all secondary controls into one menu and restores desktop order
+  ---
+  duration_ms: 2.029571
+  type: 'test'
+  ...
+# Subtest: session-first applies to selected terminals at phone widths, regardless of keyboard ownership
+not ok 5 - session-first applies to selected terminals at phone widths, regardless of keyboard ownership
+  ---
+  duration_ms: 6.342432
+  type: 'test'
+  location: '/home/siyer/Desktop/claude-squad-fix-3981-phone-session-first/web/src/phone-header.test.ts:1:5210'
+  failureType: 'testCodeFailure'
+  error: |-
+    opening the drawer must retain terminal composition
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/home/siyer/Desktop/claude-squad-fix-3981-phone-session-first/web/src/phone-header.test.ts:132:14)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 4
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1417.364411

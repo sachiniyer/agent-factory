@@ -74,7 +74,7 @@ func finishRecoverTabFailure(
 	setupErr := fmt.Errorf("recover: restore tabs for session %q: %w", title, err)
 	if restoreResult == tmux.RestoreRespawned {
 		if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {
-			setupErr = fmt.Errorf("%w (cleanup error: %v)", setupErr, cleanupErr)
+			setupErr = fmt.Errorf("%w (cleanup error: %w)", setupErr, cleanupErr)
 		}
 	}
 	return markRecoverRebuilt(rebuilt, setupErr)
@@ -96,17 +96,33 @@ func retainsInertInstance(err error) bool {
 	return errors.As(err, &unknownScope) || errors.Is(err, tmux.ErrAccountEnvironmentRefresh)
 }
 
+// restoreDeferred reports a restore that was refused so the row can be kept
+// exactly as it was and retried later: a spawn-dir refusal (#5172) or a
+// possibly-live server behind an unverified socket (#4135). Nothing was spawned
+// or torn down under either, so the persisted binding must survive intact.
+func restoreDeferred(err error) bool {
+	return errors.Is(err, tmux.ErrSpawnDirMissing) || errors.Is(err, tmux.ErrSessionSocketUnverified)
+}
+
 func finishLaunchTabFailure(firstTime bool, tmuxSession *tmux.TmuxSession, err error) error {
 	// A retained failure is not a teardown. The agent here was REATTACHED, not
 	// spawned by this load, and the inconclusive report was about a sibling —
 	// closing it destroys a running agent and its scrollback to report a problem
 	// with a different tab. finishRecoverTabFailure draws the same line by only
 	// closing what it respawned.
-	if firstTime || tmuxSession == nil || retainsInertInstance(err) {
+	//
+	// A sibling spawn-dir refusal is the same shape: the binding (live or
+	// never-spawned) is what Recover reattaches or re-spawns, and the loader
+	// routes the row Lost rather than dropping it (#5172). Closing the agent
+	// here would kill the live session behind the preserved handle that launch
+	// just decided to keep — the contradiction retainsInertInstance's own
+	// comment calls out. Mirror the two preserveAgentHandle sites in launch by
+	// sparing the agent from this error too.
+	if firstTime || tmuxSession == nil || retainsInertInstance(err) || restoreDeferred(err) {
 		return err
 	}
 	if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {
-		return fmt.Errorf("%w (cleanup error: %v)", err, cleanupErr)
+		return fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 	}
 	return err
 }
@@ -117,7 +133,7 @@ func cleanupRespawnedAccountTabs(setupErr error, sessions []*tmux.TmuxSession) e
 	}
 	for _, session := range sessions {
 		if _, err := session.CloseAndWaitForPaneExit(); err != nil {
-			setupErr = fmt.Errorf("%w (cleanup respawned account tab: %v)", setupErr, err)
+			setupErr = fmt.Errorf("%w (cleanup respawned account tab: %w)", setupErr, err)
 		}
 	}
 	return setupErr

@@ -34,7 +34,6 @@ type failingPtyFactory struct{}
 func (failingPtyFactory) Start(*exec.Cmd) (*os.File, error) {
 	return nil, fmt.Errorf("simulated pty start failure")
 }
-func (failingPtyFactory) Close() {}
 
 // wedgeKillSessionAfterCreateOnPath installs a fake `tmux` on PATH that:
 //   - answers the FIRST has-session "no such session" (exit 1), so Start's up-front

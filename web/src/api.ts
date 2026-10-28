@@ -28,13 +28,18 @@
 import type { BackendCatalog } from "./backends.js";
 import type { ProgramCatalog } from "./programs.js";
 import type {
+  OnCompleteOption,
+  AccountLoginResponse,
+  AccountsResponse,
   ConfigResponse,
   ConfigSetResponse,
+  ExplainConfigResponse,
+  QuotaReportResponse,
+  RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
+  SkippedRepo,
   SnapshotResponse,
-  DaemonTheme,
-  ThemeResponse,
   TaskData,
   TaskMutationRef,
   TasksResponse,
@@ -111,6 +116,7 @@ export function shouldForgetToken(e: unknown): boolean {
  * object. Mirrors apiclient/client.go, which reads env.Error.Message.
  */
 interface EnvelopeError {
+  daemon_rejected?: boolean;
   message: string;
   code?: string;
 }
@@ -190,7 +196,16 @@ function envelopeErrorCode(err: unknown): string {
   return typeof code === "string" ? code : "";
 }
 
+function isDaemonRejection(err: EnvelopeError | null | undefined, status: number): boolean {
+  return err?.daemon_rejected === true && status !== 502 && status !== 504 &&
+    envelopeErrorCode(err) !== MUTATION_COMMITTED_ERROR_CODE;
+}
+
 export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
+
+/** apiproto.ErrorCodeProjectRebound: a rebind carrying expected_root was refused
+ *  because another rebind moved the project first (#4822). Nothing was written. */
+export const PROJECT_REBOUND_ERROR_CODE = "project_rebound";
 
 /**
  * A failed API call. `status` is the HTTP status (0 for a network/transport
@@ -199,16 +214,31 @@ export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, message: string, code = "") {
+  /** A positively marked daemon refusal, excluding committed outcomes. */
+  readonly daemonRejected: boolean;
+  constructor(status: number, message: string, code = "", daemonRejected = false) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.daemonRejected = daemonRejected;
   }
 }
 
 export function isMutationCommittedError(e: unknown): e is ApiError {
-  return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE;
+  return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE &&
+    e.status !== 502 && e.status !== 504;
+}
+
+/** The daemon refused a rebind because the project is no longer bound to the
+ *  root the caller expected — a definitive refusal, never an unknown outcome. */
+export function isProjectReboundError(e: unknown): e is ApiError {
+  return e instanceof ApiError && e.daemonRejected && e.code === PROJECT_REBOUND_ERROR_CODE;
+}
+
+/** Only a definitive daemon refusal permits an immediate mutation retry. */
+export function isMutationOutcomeUncertain(e: unknown): boolean {
+  return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 
 /**
@@ -217,7 +247,7 @@ export function isMutationCommittedError(e: unknown): e is ApiError {
  * a non-null error, or on a transport failure — mirroring apiclient.call so the
  * whole client shares one error path.
  */
-export async function af<T>(method: string, body: unknown, token: string): Promise<T> {
+export async function af<T>(method: string, body: unknown, token: string, signal?: AbortSignal): Promise<T> {
   // An empty token is the "this client needs none" sentinel (loopback, or
   // require_token=false, #1696): send no Authorization header at all rather than a
   // bogus "Bearer " — the daemon exempts the peer, so the header is simply absent.
@@ -231,6 +261,7 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
       method: "POST",
       headers,
       body: JSON.stringify(body ?? {}),
+      signal: signal ?? null,
     });
   } catch (e) {
     // A TypeError from fetch is a transport failure (daemon down, wrong host).
@@ -249,10 +280,13 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
 
   const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error));
+    // A proxy can return its own JSON error after forwarding the mutation.
+    // Require the daemon's explicit refusal marker, not merely an error shape.
+    const daemonRejected = isDaemonRejection(env?.error, resp.status);
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error), daemonRejected);
   }
   if (env && env.error != null) {
-    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error));
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error), isDaemonRejection(env.error, resp.status));
   }
   return env?.data as T;
 }
@@ -262,19 +296,40 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
  * is the read side of the single-writer model (#960): the daemon owns the state
  * and the web mirrors this Snapshot exactly like the TUI does, seeding the rail on
  * login and re-seeding it after an events-stream reconnect. Returns the instances
- * (never null — an empty daemon yields []); throws ApiError on transport/auth
+ * (never null — an empty daemon yields []) and the daemon's startup-skipped repo
+ * set (omitted/empty when nothing was dropped); throws ApiError on transport/auth
  * failure so callers share one error path.
+ *
+ * `skippedRepos` is the incompleteness channel the daemon fills when it dropped a
+ * repo's instances.json at startup (#4742). The rail surfaces it as a persistent
+ * notice rather than presenting the truncated `instances` as complete — the same
+ * contract the CLI's list/get/whoami honor by refusing or caveating. Empty in the
+ * healthy steady state, so a clean daemon renders no notice.
  */
-export async function fetchSnapshot(token: string): Promise<SessionData[]> {
-  const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "" }, token);
-  return resp.instances ?? [];
+export interface SessionSnapshot {
+  sessions: SessionData[];
+  operationLockTimeoutMs?: number;
+  operationClockMs?: number;
+  daemonBootId?: string;
+  /** Repos the daemon dropped at startup (daemon SnapshotResponse.skipped_repos),
+   *  so the rail can name them rather than silently hiding their sessions. Empty
+   *  when no repo was skipped. */
+  skippedRepos?: SkippedRepo[];
 }
 
-/** Fetches the daemon's resolved semantic palette. The browser owns only the
- * light/dark choice; it never substitutes a second product palette. */
-export async function getTheme(token: string): Promise<DaemonTheme> {
-  const resp = await af<ThemeResponse>("GetTheme", {}, token);
-  return resp.theme;
+export async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
+  const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "" }, token);
+  return {
+    sessions: resp.instances ?? [],
+    operationLockTimeoutMs: resp.operation_lock_timeout_ms,
+    operationClockMs: resp.operation_clock_ms,
+    daemonBootId: resp.boot_id,
+    skippedRepos: resp.skipped_repos,
+  };
+}
+
+export async function fetchSnapshot(token: string): Promise<SessionData[]> {
+  return (await fetchSessionSnapshot(token)).sessions;
 }
 
 /**
@@ -344,6 +399,11 @@ export interface CreateSessionInput {
    *  choose, and createSession then sends NO backend so the repo's own config
    *  decides. */
   backend?: string;
+  /** The credential account the session's agent runs as (#3844) — a name from
+   *  ListAccounts, mirroring `af sessions create --account`. Empty means the user
+   *  did not choose, and createSession then sends NO account so the session runs
+   *  on the ambient identity. It is a directory name, never credential material. */
+  account?: string;
 }
 
 /** Lists the runtimes a session in this repo can be created on, whether the repo's
@@ -392,6 +452,14 @@ export async function createSession(input: CreateSessionInput, token: string): P
   const backend = (input.backend ?? "").trim();
   if (backend !== "") {
     body.backend = backend;
+  }
+  // `account` is sent ONLY when the user picked one, for the same reason: absent is
+  // the only way to mean "the ambient identity", and an account name sent on every
+  // create would pin every session to whichever identity the form happened to
+  // resolve (#3844).
+  const account = (input.account ?? "").trim();
+  if (account !== "") {
+    body.account = account;
   }
   const resp = await af<{ instance: SessionData; warning?: string }>("CreateSession", body, token);
   if (resp.warning) {
@@ -464,8 +532,15 @@ export async function archiveSession(id: string, title: string, token: string): 
  *  repo_id stays empty because the web is an all-project client; the daemon's
  *  id-first resolver supplies the canonical repo and title. The
  *  session.restored event triggers a rail resync. */
-export async function restoreSession(id: string, title: string, token: string): Promise<void> {
-  const result = await af<{ warning?: string }>("RestoreSession", { id, title, repo_id: "" }, token);
+export async function restoreSession(
+  id: string,
+  title: string,
+  token: string,
+  expectedDaemonBootId?: string,
+): Promise<void> {
+  const result = await af<{ warning?: string }>("RestoreSession", {
+    id, title, repo_id: "", expected_daemon_boot_id: expectedDaemonBootId,
+  }, token);
   if (result.warning) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
@@ -488,41 +563,118 @@ export async function restoreSession(id: string, title: string, token: string): 
 export interface ResumeFromLimitResult {
   ok: boolean;
   reason?: string;
+  warning?: string;
+  code?: string;
 }
 
 export async function resumeFromLimit(id: string, title: string, token: string): Promise<void> {
   const result = await af<ResumeFromLimitResult>("ResumeFromLimit", { id, title, repo_id: "" }, token);
+  // A committed-but-not-performed resume (daemon/limit.go's respawn-fail-after-
+  // rebuild path) returns ok:false alongside the committed warning: the rebuild
+  // mutated durable workspace state even though the resume did not complete. The
+  // ok:false branch below would otherwise swallow that warning and surface the
+  // generic "another operation owns its retry" reason, hiding an unsafe-to-repeat
+  // committed mutation. Check the committed warning first, the way the daemon's
+  // other committed outcomes already do (#3236).
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
   if (!result.ok) {
     throw new Error(result.reason || "resume was not performed");
   }
 }
 
+export interface ConfirmHandoffDeliveryResult {
+  ok: boolean;
+  reason?: string;
+  warning?: string;
+  code?: string;
+}
+
+const CONFIRM_HANDOFF_UNSUPPORTED =
+  "daemon does not serve ConfirmHandoffDelivery (likely an older daemon — upgrade it); the pending mission was left untouched";
+
+/** Retires a pending handoff mission on the operator's attestation that it
+ *  already landed (#4429) — the web's "Mark delivered" button, the no-resend
+ *  half of the TUI's `c` resolve picker. The daemon probes the runtime, settles
+ *  the replacement fence, lifts startup-unknown, and clears the obligation in
+ *  one commit; the resulting session.updated event repaints the rail.
+ *
+ *  Sends `id` like resumeFromLimit — this verb marks a durable obligation
+ *  delivered, so a misroute would retire the wrong session's mission. A daemon
+ *  predating the route cannot serve it: the 404 becomes an upgrade message, NOT
+ *  a fallback resend — a resend is the double-delivery this verb prevents. */
+export async function confirmHandoffDelivery(id: string, title: string, token: string): Promise<void> {
+  let result: ConfirmHandoffDeliveryResult;
+  try {
+    result = await af<ConfirmHandoffDeliveryResult>("ConfirmHandoffDelivery", { id, title, repo_id: "" }, token);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
+      throw new ApiError(404, CONFIRM_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "delivery was not confirmed");
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+}
+
 /** The daemon's HandoffSession response (daemon.HandoffSessionResponse): the
- *  outgoing and incoming agents, echoed so the toast can name the swap without
- *  re-reading the snapshot. */
+ *  outgoing and incoming agents and optional account identities, echoed so the
+ *  UI can report the committed swap without re-reading the snapshot. */
 export interface HandoffResult {
   from: string;
   to: string;
+  from_account?: string;
+  to_account?: string;
+  head_sha?: string;
+  warning?: string;
+  code?: string;
 }
 
-/** Continues a session under a different agent, in place (#2013) — the web half of
- *  the TUI's `F`. The daemon swaps the agent program, keeps the worktree and
- *  branch, and delivers a mission brief to the incoming agent; the resulting
- *  session.updated event repaints the rail. `to` is a supported agent enum name
- *  from ListPrograms, never the current one (the daemon's same-agent guard rejects
- *  that, and the picker already excludes it).
+const ACCOUNT_AWARE_HANDOFF_METHOD = "HandoffSessionV2";
+const ACCOUNT_AWARE_HANDOFF_UNSUPPORTED =
+  "daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon — upgrade it); the handoff was not sent";
+
+/** Continues a session under another agent or account, in place (#2013) — the
+ *  web half of the TUI's `F`. The daemon keeps the worktree and branch and
+ *  delivers a mission brief to the incoming identity; the resulting
+ *  session.updated event repaints the rail. `to` is optional when an account
+ *  changes under the current agent.
  *
  *  Sends `id` like kill/archive/resumeFromLimit, NOT title-only: a handoff STOPS a
  *  live agent and starts another, so resolving a duplicate title across repos to
  *  the wrong session would tear down an unrelated agent. `brief` is deliberately
  *  not sent — the mission defaults to the session's stored prompt, and inline
- *  override is `af sessions handoff --brief`'s surface (see docs/surface-parity.md,
+ *  override is `af sessions handoff --brief`'s surface (see docs/dev/surface-parity.md,
  *  field_coverage HandoffSession.brief).
  *
  *  A failed handoff (not found, busy, unsupported backend, same agent) comes back
  *  as an envelope error and throws ApiError, so callers share one error path. */
-export async function handoffSession(id: string, title: string, to: string, token: string): Promise<HandoffResult> {
-  return af<HandoffResult>("HandoffSession", { id, title, repo_id: "", to }, token);
+export async function handoffSession(id: string, title: string, to: string, token: string, account = ""): Promise<HandoffResult> {
+  let result: HandoffResult;
+  try {
+    // The route itself is the capability check. An older daemon cannot serve it,
+    // so it returns 404 before its legacy target-only mutation can run.
+    result = await af<HandoffResult>(ACCOUNT_AWARE_HANDOFF_METHOD, { id, title, repo_id: "", to, account }, token);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
+      throw new ApiError(404, ACCOUNT_AWARE_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
+  const requestedAccount = account.trim();
+  if (requestedAccount && result.to_account !== requestedAccount) {
+    const mismatch = `daemon did not honor the requested account ${JSON.stringify(requestedAccount)} (likely an older daemon — upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces`;
+    throw new ApiError(200, result.warning ? `${result.warning}\n${mismatch}` : mismatch, MUTATION_COMMITTED_ERROR_CODE);
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  return result;
 }
 
 /** The daemon's DeleteProject response: how many sessions it archived vs tore
@@ -556,6 +708,16 @@ export interface RegisteredProject {
   root: string;
   relative_root: string;
   path_exists: boolean;
+  /** The user-chosen display color (#rrggbb); absent when none is set. */
+  color?: string;
+  /** The repository identity this project RESOLVED to (config.Project.RepoID,
+   *  `repo_id` on the wire) — a short hex hash from config.RepoIDFromRoot, NOT the
+   *  registry `id` (`prj_...`). Empty for a record written before this field
+   *  existed; the daemon backfills it on the first successful resolution. This is
+   *  the key the snapshot's `skipped_repos[].repo_id` carries, so the rail maps a
+   *  skipped repo to its registered root through it (not through `id`, which is the
+   *  registry identity and never matches a repo hash). */
+  repo_id?: string;
 }
 
 /** Registers a git checkout as a durable, sessionless project (mirrors
@@ -576,14 +738,95 @@ export async function registerProject(path: string, token: string): Promise<Regi
   return resp.project;
 }
 
+/** The documented remedy when a guarded rebind's versioned route proves absent:
+ *  mirrors daemon.ErrGuardedRebindUnsupported's wording so every client names
+ *  the same fix. */
+const GUARDED_REBIND_UNSUPPORTED =
+  "this daemon predates guarded rebinds — upgrade it, or rebind from the daemon host";
+
+/** Moves a registered project's stable identity to the checkout at `path`
+ *  (mirrors `af projects rebind`): the repair after the checkout a registration
+ *  names was moved or recloned elsewhere — the `id` survives, only where it
+ *  points changes. `path` follows the registerProject rule — a path ON THE
+ *  DAEMON HOST, sent verbatim for the daemon to resolve; the daemon refuses a
+ *  root another project already owns. A rejection (unknown id, not a git repo,
+ *  ownership conflict) throws an ApiError carrying the daemon's actionable
+ *  message for inline display; on success the echoed projects.changed refetches
+ *  the registry and the rebound root lands in the switcher union.
+ *
+ *  `expectedRoot`/`expectedCheckoutID` are the pair the UI showed for the
+ *  project — its recorded root and the checkout marker behind it. The daemon
+ *  applies the rebind only while the registry still records BOTH, and otherwise
+ *  refuses with PROJECT_REBOUND_ERROR_CODE (#4822): a reclone at the same path
+ *  keeps the root spelling but mints a new checkout marker, so the pair is what
+ *  a same-path replacement fails on. Each rides verbatim — a value the record
+ *  never showed is sent as no field rather than an empty one, because a guarded
+ *  precondition the client cannot fully name is a refusal, not a silent
+ *  last-writer-wins. A guarded send goes to RebindProjectGuarded — the route
+ *  is the capability check (#4888 review): a daemon that predates it answers
+ *  its marked 404 instead of dropping the expected_* fields it does not know
+ *  and applying the move unconditionally. */
+export async function rebindProject(
+  id: string,
+  path: string,
+  token: string,
+  expectedRoot: string | null = null,
+  expectedCheckoutID: string | null = null,
+): Promise<RegisteredProject> {
+  const request: { id: string; path: string; expected_root?: string; expected_checkout_id?: string } = {
+    id,
+    path,
+  };
+  if (expectedRoot !== null && expectedRoot !== "") {
+    request.expected_root = expectedRoot;
+  }
+  if (expectedCheckoutID !== null && expectedCheckoutID !== "") {
+    request.expected_checkout_id = expectedCheckoutID;
+  }
+  // Two literal af() calls: the parity inventory derives web RPCs statically.
+  if (request.expected_root !== undefined || request.expected_checkout_id !== undefined) {
+    let resp: { ok: boolean; project: RegisteredProject };
+    try {
+      resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProjectGuarded", request, token);
+    } catch (e) {
+      // The route is the capability check, so its proven absence must surface
+      // as the guarded-rebind remedy rather than a bare 404 the modal invites
+      // the user to retry. daemonRejected marks the daemon's own catch-all;
+      // the legacy sentence covers daemons older than that marker — the same
+      // pair routeNotServed404 accepts on the Go side. An unmarked 404 (an
+      // intermediary's answer) stays an ordinary ApiError: the outcome is
+      // unconfirmed, not unsupported.
+      if (
+        e instanceof ApiError &&
+        e.status === 404 &&
+        (e.daemonRejected || (e.code === "" && e.message === 'unknown route "/v1/RebindProjectGuarded"'))
+      ) {
+        throw new ApiError(404, GUARDED_REBIND_UNSUPPORTED, e.code, true);
+      }
+      throw e;
+    }
+    return resp.project;
+  }
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", request, token);
+  return resp.project;
+}
+
+/** Sets (or, with "", clears) a registered project's display color (mirrors
+ *  `af projects color`). The daemon normalizes it to #rrggbb and emits
+ *  projects.changed, so every open client repaints from the refetched registry. */
+export async function setProjectColor(id: string, color: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("SetProjectColor", { id, color }, token);
+  return resp.project;
+}
+
 /** Lists the daemon's registered projects (the #2355 registry) — the read half of
  *  the #2456 union. The client ∪s these roots with the projects it derives from live
  *  sessions and tasks, so a registered-but-sessionless project still shows in the
  *  switcher and is creatable-into (projectSummaries / pickerProjects). The web is the
  *  only client that reads the registry over HTTP; the TUI and CLI read
  *  config.ListProjects() in-process, so this has no Go apiclient twin. */
-export async function listProjects(token: string): Promise<RegisteredProject[]> {
-  const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token);
+export async function listProjects(token: string, signal?: AbortSignal): Promise<RegisteredProject[]> {
+  const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token, signal);
   return resp.projects ?? [];
 }
 
@@ -945,6 +1188,12 @@ export async function probeWebTab(path: string, token: string, timeoutMs: number
 // through to the daemon's first-match, the task analogue of the #1678 id-scoping
 // class the session write-path fixed.
 
+/** Fetches the daemon's lifecycle choices in presentation order. */
+export async function listOnComplete(token: string): Promise<OnCompleteOption[]> {
+  const resp = await af<{ values: OnCompleteOption[] }>("ListOnComplete", {}, token);
+  return resp.values;
+}
+
 /** Fetches every task across all repos (mirrors `af tasks list`). Returns [] for an
  *  empty daemon (never null); throws ApiError on transport/auth failure so callers
  *  share one error path. The read side of the task single-writer model (#1029 PR3). */
@@ -1002,7 +1251,13 @@ export async function updateTask(task: TaskMutationRef, update: TaskUpdate, toke
  *  DISPLAYED record and pins its project binding (#3230). */
 export async function triggerTask(task: TaskMutationRef, token: string): Promise<void> {
   requireTaskID(task.id, "trigger a task");
-  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
+  const result = await af<{ warning?: string }>("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
+  if (result.warning) {
+    // The run reached a committed outcome — e.g. it auto-created its target
+    // session but could not confirm the start. Surface it through the shared
+    // mutation-committed path like every sibling mutation, not as plain success.
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 
 /** Removes a task (mirrors `af tasks remove`). Refuses a task with no stable
@@ -1035,6 +1290,19 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
  *  form shows it verbatim rather than substituting its own wording. */
 export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
   return af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
+}
+
+/** ExplainConfig (#4803): the same `config.ResolvedValue` `af config get
+ *  --explain` renders — which on-disk layer supplied the effective value, and
+ *  which were shadowed, absent, or disallowed — served to clients that cannot
+ *  resolve in-process. Global scope; the daemon reports on-disk sources and
+ *  deliberately does not consult its running config snapshot.
+ *
+ *  Throws ApiError carrying the daemon's message on an unknown key or on a
+ *  daemon too old to know the route — the view shows it verbatim rather than
+ *  fabricating a trace. */
+export async function explainConfig(key: string, token: string): Promise<ExplainConfigResponse> {
+  return af<ExplainConfigResponse>("ExplainConfig", { key }, token);
 }
 
 // --- config assistant (#2467) ----------------------------------------------
@@ -1098,4 +1366,57 @@ export async function reapConfigAssistant(token: string): Promise<void> {
       envelopeErrorCode(env?.error),
     );
   }
+}
+
+// --- accounts (#3384/#3385) -------------------------------------------------
+//
+// An account is a DIRECTORY on the daemon host that an agent CLI treats as its
+// home. Nothing below carries credential material in either direction, and
+// nothing may be added that does: af points one variable at a directory and runs
+// the agent's own login flow there. A design in which the browser POSTs a token
+// to the daemon is out of scope by the epic's standing constraint (#3388).
+
+/** Lists the accounts registered on the DAEMON's host with their logged-in
+ *  state, plus the agents an account can be registered for.
+ *
+ *  `repoPath` is optional and sharpens ONE thing: `defaults`, which is a
+ *  per-project fact even though the registry is not — `default_accounts` admits
+ *  the machine-local per-project config layer, so which account a create here
+ *  would use depends on which project "here" is (#3386). The registry view passes
+ *  nothing and gets the global answer. */
+export async function listAccounts(token: string, repoPath = ""): Promise<AccountsResponse> {
+  const body = repoPath === "" ? {} : { repo_path: repoPath };
+  const resp = await af<AccountsResponse>("ListAccounts", body, token);
+  // resolved_agents must pass through untouched: the handoff pickers classify
+  // targets by the agent the resolved command launches, and dropping the map
+  // here would silently return them to enum semantics (#4430 review round 5).
+  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
+}
+
+/** Reads the daemon's per-agent usage/quota report (#2983): the same
+ *  records→quota.Build read `af quota` makes, with the words rendered
+ *  server-side — so this surface shows exactly what the CLI prints rather than
+ *  re-deriving vocabulary from fields. */
+export async function quotaReport(token: string): Promise<QuotaReportResponse> {
+  const resp = await af<QuotaReportResponse>("QuotaReport", {}, token);
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
+}
+
+/** Creates an account's credential directory without logging in. Idempotent.
+ *
+ *  Throws ApiError carrying the daemon's own refusal — the name rule, the
+ *  case-collision rule, the agent roster — which the form shows verbatim rather
+ *  than substituting its own wording, for the same reason config does. */
+export async function registerAccount(agent: string, name: string, token: string): Promise<RegisterAccountResponse> {
+  return af<RegisterAccountResponse>("RegisterAccount", { agent, name }, token);
+}
+
+/** Opens the agent's own login flow for an account in a tmux session on the
+ *  daemon host, registering the account if it does not exist yet.
+ *
+ *  It returns as soon as the pane is running: the flow is an interactive OAuth or
+ *  device-code step only a human can finish, so the caller streams the pane
+ *  (accountLoginStreamEndpoint) rather than awaiting a result. */
+export async function startAccountLogin(agent: string, name: string, token: string): Promise<AccountLoginResponse> {
+  return af<AccountLoginResponse>("AccountLogin", { agent, name }, token);
 }

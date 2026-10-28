@@ -1,11 +1,15 @@
 package api
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -30,9 +34,10 @@ import (
 //     an actionable "--repo is required" rather than guessing.
 //     - Listing spans every project, because breadth is honest here, not a
 //     guess. `--all` asks for that breadth explicitly from inside a repo.
-//     - A command taking a handle (session title, task id) resolves it across
-//     projects, but refuses to pick when the handle is held by several — the
-//     #1814 ambiguity rule, extended to tasks by this change.
+//     - A command taking a handle (session title, task id or name) resolves it
+//     across projects, but refuses to pick when the handle is held by several —
+//     the #1814 ambiguity rule, extended to tasks by this change and to task
+//     names by #4676.
 //
 // Rule 3 is what keeps `af` usable from a systemd unit or a CI step, where
 // there is no cwd repo; it never guesses, because "unique across all projects"
@@ -41,15 +46,173 @@ import (
 // Remote targets (--daemon-url) are deliberately exempt from rule 2 wherever a
 // command's request actually reaches the remote: the client's cwd names a repo
 // on THIS machine, which says nothing about the daemon's projects. That
-// exemption lives in resolveRepoIDForLookup (api.go), NOT here — the dividing
-// line is the transport, not the command.
+// exemption lives in resolveRepoIDForLookup for the session reads, and in
+// resolveProjectScope below for the task verbs — the dividing line is the
+// transport, not the command, and #3730 moved the whole `af tasks` group across
+// it.
 //
-// resolveProjectScope below therefore always consults the cwd, which is correct
-// only because its callers are the task commands, and every task RPC goes over
-// the LOCAL control socket regardless of --daemon-url (daemon.ListTasksNoSpawn,
-// AddTask, …). If a task command is ever migrated onto the apiclient transport,
-// it must take resolveRepoIDForLookup's remote branch too, or a bare id against
-// a remote daemon will be scoped by a repo the remote has never heard of.
+// The task verbs go one step further than the session reads: against a remote
+// target they refuse --repo instead of honouring it. A session lookup can send
+// its repo ID to the daemon and let the daemon decide, with the documented
+// limitation that the ID only matches when both hosts have the project at the
+// same absolute path. A task scope has no such out — the daemon serves no
+// repo-filtered task read, so the filtering happens HERE, against records the
+// remote sent, using an identity derived by hashing a path on THIS machine
+// (config.RepoIDFromRoot). When the two hosts disagree about the path, that
+// filter matches nothing and `af tasks list --daemon-url … --repo …` prints an
+// empty list for a project that has tasks. A silently empty answer about the
+// wrong machine is the #3730 shape exactly, so it is refused rather than
+// rendered. Scoping a remote by a project the daemon owns needs a daemon-side
+// lookup, which is additive when it exists.
+
+// repoFromFlag resolves the --repo flag to a RepoContext. Its errors name the
+// offending path and distinguish "could not make the path absolute" from "the
+// path is not a git repository" so callers never mislabel a provided-but-invalid
+// --repo as missing (#892). Only call when repoFlag != "".
+func repoFromFlag() (*config.RepoContext, error) {
+	absPath, err := config.ResolveUserPath(repoFlag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve --repo path %q: %w", repoFlag, err)
+	}
+	repo, err := config.RepoFromPath(absPath)
+	if err != nil {
+		if config.RepoProbeUnanswered(err) {
+			return nil, fmt.Errorf("%s — retry, or pass a different --repo: %w", config.RepoProbeUnansweredClaim("--repo", absPath), err)
+		}
+		return nil, fmt.Errorf("--repo %q is not a valid git repository: %w", absPath, err)
+	}
+	return repo, nil
+}
+
+// optionalCurrentRepo resolves the cwd's project when one exists. Only the
+// positively identified outside-Git condition means "no project context";
+// treating any other discovery failure as absence would silently widen scoped
+// reads and mutations to every project (#3134).
+func optionalCurrentRepo() (*config.RepoContext, error) {
+	repo, err := config.CurrentRepo()
+	if err == nil {
+		return repo, nil
+	}
+	if errors.Is(err, config.ErrNotGitRepository) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("resolve current repository: %w", err)
+}
+
+// resolveRepoID resolves a repo ID from flags, cwd, or returns "" for all-repo mode.
+//
+// This ALWAYS consults the cwd. Its remaining callers only run on paths a
+// remote target never reaches — the send-prompt broadcast (refused against a
+// remote before it runs) and prune's non-remote branch — so the cwd scope is
+// the right one there: it names a repo on this machine, which is the machine
+// those requests act on.
+//
+// Every verb that genuinely reaches the targeted daemon — reads AND the routed
+// lifecycle/tab mutations (W9.1/W9.3) — uses resolveRepoIDForLookup instead.
+func resolveRepoID() (string, error) {
+	if repoFlag != "" {
+		repo, err := repoFromFlag()
+		if err != nil {
+			return "", err
+		}
+		return repo.ID, nil
+	}
+	// Try cwd
+	repo, err := optionalCurrentRepo()
+	if err != nil {
+		return "", err
+	}
+	if repo == nil {
+		return "", nil // all-repo mode
+	}
+	return repo.ID, nil
+}
+
+// resolveRepoIDForLookup resolves the repo scope for a request routed to the
+// TARGETED daemon: the snapshot-based reads (`sessions list`, `get`, `watch`,
+// `preview`, `attach`) and the lifecycle/tab mutations W9.1/W9.3 moved onto
+// apiclient (kill/archive/restore/send-prompt/retry-limit/handoff, the tab
+// verbs), all of which follow --daemon-url/AF_DAEMON_URL to the remote.
+//
+// The dividing line is the TRANSPORT, not the command: a caller belongs here if
+// its request reaches the targeted daemon, and on resolveRepoID if it can only
+// run against this machine anyway.
+//
+// It differs from resolveRepoID in one way: against a REMOTE target the cwd is
+// ignored. The client's cwd names a repo that exists HERE, not on the daemon's
+// machine, so scoping by it asks the remote for a repo ID it has never seen —
+// and the remote read path has no disk fallback (snapshotRead), so a bare-title
+// lookup that used to succeed would report a spurious not-found. Against a
+// remote only an EXPLICIT --repo scopes; a bare title resolves across the
+// remote's repos, with the ambiguity guard refusing to pick between them.
+//
+// Known limitation: --repo becomes an ID by hashing the path on THIS machine
+// (config.RepoIDFromRoot), so against a remote it only disambiguates when the
+// daemon has that project checked out at the same absolute path. Scoping a
+// remote by a repo identity the daemon owns needs a daemon-side repo lookup — a
+// separate change; until then, prefer a bare title against a remote.
+func resolveRepoIDForLookup() (string, error) {
+	if repoFlag != "" {
+		repo, err := repoFromFlag()
+		if err != nil {
+			return "", err
+		}
+		return repo.ID, nil
+	}
+	if apiclient.IsRemoteTarget() {
+		return "", nil // the client's cwd says nothing about the remote's repos
+	}
+	repo, err := optionalCurrentRepo()
+	if err != nil {
+		return "", err
+	}
+	if repo == nil {
+		return "", nil // all-repo mode, guarded by the ambiguity check
+	}
+	return repo.ID, nil
+}
+
+// resolveRepo is the single binding resolver for commands that can create
+// persistent project state (sessions create, tasks add, and send-prompt
+// --create). Besides resolving the repo, it enforces the shared AF-home refusal;
+// putting that invariant here keeps a new caller from remembering resolution
+// while forgetting the destructive binding guard (#1891/#2205).
+//
+// Errors are fully formed for callers to surface directly: a provided `--repo`
+// that does not resolve names the path, while an absent `--repo` whose cwd is
+// also not a repo reports that `--repo is required` (#892). Wrapping every
+// failure as "--repo is required" would be wrong when the user did provide it.
+func resolveRepo() (*config.RepoContext, error) {
+	var (
+		repo *config.RepoContext
+		err  error
+	)
+	if repoFlag != "" {
+		repo, err = repoFromFlag()
+	} else {
+		repo, err = config.CurrentRepo()
+		if err != nil {
+			if config.RepoProbeUnanswered(err) {
+				// Name the directory the probe actually ran in: a user reading
+				// this may not be where they think they are, and the claim
+				// helper wants a path rather than a pronoun.
+				cwd, cwdErr := os.Getwd()
+				if cwdErr != nil {
+					cwd = "."
+				}
+				return nil, fmt.Errorf("--repo is required: %s — retry, or pass --repo <path> to target a project (%w)", config.RepoProbeUnansweredClaim("the current directory", cwd), err)
+			}
+			return nil, fmt.Errorf("--repo is required: the current directory is not a git repository — pass --repo <path> to target a project (%w)", err)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := guardProjectBinding(repo, repoFlag != ""); err != nil {
+		return nil, err
+	}
+	return repo, nil
+}
 
 // projectScope is the resolved project context for one command invocation. A
 // nil Repo means "no project context" (rule 3): unscoped, not "every project by
@@ -74,6 +237,20 @@ func resolveProjectScope(allFlag bool) (projectScope, error) {
 	}
 	if allFlag {
 		return projectScope{All: true}, nil
+	}
+	if apiclient.IsRemoteTarget() {
+		if repoFlag != "" {
+			return projectScope{}, fmt.Errorf(
+				"--repo cannot scope tasks on the daemon at %s: a project's identity is derived from its path on THIS machine, "+
+					"so filtering the daemon's tasks by it would silently match nothing when the two hosts hold the project at "+
+					"different paths. Drop --repo to act across the daemon's projects (task ids are unique), or run the command on the daemon host",
+				apiclient.RemoteTargetURL())
+		}
+		// No project context (rule 3), for the reason resolveRepoIDForLookup gives:
+		// the client's cwd names a repository here, not on the daemon's machine. An
+		// id therefore resolves across the remote's projects, exactly as it does
+		// from outside a git repository locally.
+		return projectScope{}, nil
 	}
 	if repoFlag != "" {
 		// A provided-but-invalid --repo must name the path it could not
@@ -178,15 +355,19 @@ func sessionRepoRoot(data *session.InstanceData) string {
 // Shared by `archive --self` and `whoami` so the two cannot drift.
 func sessionRepoID(data *session.InstanceData) string {
 	if data.Worktree.RepoPath != "" {
-		return config.RepoIDForRecordedRoot(data.Worktree.RepoPath)
+		// Canonical role (#3530): RepoPath is already the identity root, and
+		// this must stay bit-identical to session storage's key or scoping
+		// stops finding the rows it filters.
+		return config.RepoIDFromRoot(filepath.Clean(data.Worktree.RepoPath))
 	}
 	if data.Path != "" {
-		return config.RepoIDForPath(data.Path)
+		return session.RepoIDForStoragePath(data.Path)
 	}
 	return ""
 }
 
-// requireTaskInScope enforces the contract on a task command that takes an id.
+// requireTaskInScope enforces the contract on a task command that takes an id
+// or a name (#4676): both resolve through resolveTaskArg to the same check.
 //
 // Task ids are globally unique, so this is not an ambiguity guard — it is a
 // blast-radius guard. Without it, an id is a capability to mutate ANY project's
@@ -254,14 +435,7 @@ func guardProjectBinding(repo *config.RepoContext, explicit bool) error {
 func pathIsInside(parent, child string) bool {
 	p := resolveRealPath(parent)
 	c := resolveRealPath(child)
-	rel, err := filepath.Rel(p, c)
-	if err != nil {
-		return false
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return true
+	return pathutil.IsAtOrInside(c, p)
 }
 
 func resolveRealPath(path string) string {

@@ -1,7 +1,6 @@
 package git
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	stdlog "log"
@@ -14,10 +13,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // relocationWriterFixture starts a real survivor inside dir and returns its exit
@@ -118,7 +119,7 @@ func TestArchiveWorktree_ReportsResidueAtTheVacatedPath(t *testing.T) {
 	}
 	t.Cleanup(func() { worktreeMoveFast = prev })
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
@@ -149,7 +150,7 @@ func TestArchiveWorktree_ReportsResidueAtTheVacatedPath(t *testing.T) {
 // be worse than no check at all — it is the shape that trains an operator to
 // ignore the one that matters.
 func TestArchiveWorktree_SilentWhenTheVacatedPathStaysGone(t *testing.T) {
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
@@ -235,7 +236,7 @@ func TestArchiveWorktree_DoesNotKillTmuxServer(t *testing.T) {
 	root := normalizeWorktreePath(srcPath)
 	requireEventually(t, 5*time.Second, func() bool {
 		cwd, ok := proctree.WorkingDir(process.PID)
-		return ok && pathAtOrUnder(root, filepath.Clean(cwd))
+		return ok && pathutil.IsAtOrInside(filepath.Clean(cwd), root)
 	}, "the tmux-server fixture cwd never became observable inside the worktree")
 
 	require.NoError(t, gw.ArchiveWorktree(dest))
@@ -306,7 +307,7 @@ func TestArchiveWorktree_ReportsResidueAtTheRecoveryAlternatePath(t *testing.T) 
 	require.NoError(t, err)
 	gw.beginRelocationRecovery(dest, srcPath, identity)
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
@@ -326,7 +327,7 @@ func TestReportRelocationResidue_UnreadableProbeIsNotAssumedClear(t *testing.T) 
 	restore := SetRelocationIdentityErrorForTest(vacated, context.DeadlineExceeded)
 	t.Cleanup(restore)
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
@@ -344,9 +345,7 @@ func TestReportRelocationResidue_UnreadableProbeIsNotAssumedClear(t *testing.T) 
 // teardown with its result established and nothing able to finalize it — the
 // exact class #1917 bounded the rest of this path for.
 func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
-	prevTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { relocationIdentityTimeout = prevTimeout })
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 
 	dir := t.TempDir()
 	vacated := filepath.Join(dir, "stalled")
@@ -366,7 +365,7 @@ func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
 		relocationPathIdentity = prevIdentity
 	})
 
-	var warnings bytes.Buffer
+	var warnings logtest.Buffer
 	origWarning := aflog.WarningLog
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })

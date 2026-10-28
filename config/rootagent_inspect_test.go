@@ -149,7 +149,8 @@ func TestRootAgentInspectionErrorUsesCanonicalProjectWording(t *testing.T) {
 // TestLegacyRootAgentForRepoMatchesUnresolvableKeyByRecordedRoot: a
 // root_agents key whose path does not resolve (absent mount, not yet cloned)
 // must still be attributed to the repo its recorded spelling names, by the
-// same RepoIDForRecordedRoot rule the daemon snapshot uses — an empty entry
+// same DerivedRepoIDForUnresolvedRoot rule the daemon snapshot uses — an empty
+// entry
 // means enabled, and dropping it told consumers "no layer enables this repo"
 // about a repo whose opt-in sat in root_agents the whole time (#3264).
 func TestLegacyRootAgentForRepoMatchesUnresolvableKeyByRecordedRoot(t *testing.T) {
@@ -157,12 +158,12 @@ func TestLegacyRootAgentForRepoMatchesUnresolvableKeyByRecordedRoot(t *testing.T
 	cfg := DefaultConfig()
 	cfg.RootAgents = map[string]RootAgentConfig{missing: {Program: "custom"}}
 
-	entry, key := LegacyRootAgentForRepo(cfg, RepoIDForRecordedRoot(missing))
+	entry, key := LegacyRootAgentForRepo(cfg, RepoIDFromRoot(filepath.Clean(missing)))
 	require.NotNil(t, entry, "an unresolvable key must match by recorded-root identity")
 	assert.Equal(t, missing, key)
 	assert.Equal(t, "custom", entry.Program)
 
-	other, _ := LegacyRootAgentForRepo(cfg, RepoIDForRecordedRoot(filepath.Join(t.TempDir(), "elsewhere")))
+	other, _ := LegacyRootAgentForRepo(cfg, RepoIDFromRoot(filepath.Clean(filepath.Join(t.TempDir(), "elsewhere"))))
 	assert.Nil(t, other, "the fallback matches only the recorded spelling's own identity")
 }
 
@@ -196,4 +197,48 @@ func TestRootAgentInspectionFindsRegisteredBareRepoFromSiblingWorktree(t *testin
 		"a sibling linked worktree must find the personal project by shared bare identity")
 	assert.Equal(t, string(RootAgentSourcePersonal), rv.Origins["enabled"].Layer)
 	assert.Equal(t, RootAgent{Enabled: false}, rv.Value)
+}
+
+// TestRootAgentInspectionFindsRecordedRootOptIn pins #3530 review id 3917756780.
+//
+// A root_agents key is a PATH, and rootAgentKeyMatchesRepo falls back to hashing
+// one it cannot resolve — which is nobody's identity once a registered project
+// is addressed by the identity it RECORDED. The daemon asks for such an entry
+// deliberately; --explain describes the same next start, so it must too, or it
+// reports a profile disabled because it could not see an opt-in the daemon will
+// apply when the recorded worktree returns.
+func TestRootAgentInspectionFindsRecordedRootOptIn(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "af-home")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	seed := initProjectRegistryRepo(t, filepath.Join(base, "seed"))
+	runProjectRegistryGit(t, seed, "config", "user.email", "test@example.com")
+	runProjectRegistryGit(t, seed, "config", "user.name", "Test")
+	runProjectRegistryGit(t, seed, "commit", "--allow-empty", "--quiet", "-m", "initial")
+	bare := filepath.Join(base, "origin.git")
+	first := filepath.Join(base, "first-worktree")
+	second := filepath.Join(base, "second-worktree")
+	runProjectRegistryGit(t, base, "clone", "--quiet", "--bare", seed, bare)
+	runProjectRegistryGit(t, bare, "worktree", "add", "--quiet", "--detach", first)
+	runProjectRegistryGit(t, bare, "worktree", "add", "--quiet", "--detach", second)
+
+	if _, err := RegisterProject(first); err != nil {
+		t.Fatalf("RegisterProject: %v", err)
+	}
+	// The registered workspace goes away; its opt-in, spelled as that path, is
+	// what survives — and that spelling resolves to nothing now, so it answers
+	// only to the path's own hash.
+	require.NoError(t, os.RemoveAll(first))
+	require.NotEqual(t, RepoIDFromRoot(filepath.Clean(first)), RepoIDFromRoot(bare),
+		"fixture must use a recorded root that is not the repository's identity root")
+	require.NoError(t, os.MkdirAll(home, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, TomlConfigFileName),
+		[]byte("schema_version = 1\n\n[root_agents.\""+first+"\"]\n"), 0o644))
+
+	rv, err := ResolveRootAgentForInspection(second, true)
+	require.NoError(t, err)
+	legacy, ok := rootAgentCandidateByLayer(rv, RootAgentSourceLegacy)
+	require.True(t, ok)
+	assert.True(t, legacy.Present,
+		"the project's own root_agents opt-in, spelled as its recorded root, must reach --explain: the daemon applies it when that worktree returns, so reporting the profile without it describes a different next start")
 }

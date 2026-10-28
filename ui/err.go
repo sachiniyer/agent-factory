@@ -5,8 +5,9 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/theme"
 )
 
 type ErrBox struct {
@@ -28,9 +29,16 @@ type ErrBox struct {
 	// failure (handleError) or informational guidance (handleNotice / a success
 	// message), which is what the details overlay titles itself from.
 	retainedIsFailure bool
+	// detailsHint, when set, replaces the error_details binding's hint on a
+	// clipped notice. A modal text field types `E` as a character, so it
+	// advertises the key that does open the details from there (#4123).
+	detailsHint string
+	// hideDetailsHint drops the hint altogether, for a field where no key opens
+	// the details: advertising one there would name an action that does nothing.
+	hideDetailsHint bool
 }
 
-var errStyle = lipgloss.NewStyle().Foreground(activeTheme.Error)
+var errStyle = lipgloss.NewStyle().Foreground(activeTheme.Dead)
 
 func NewErrBox() *ErrBox {
 	return &ErrBox{}
@@ -43,6 +51,14 @@ func (e *ErrBox) SetError(err error) { e.set(err, true) }
 // redirected, or something it did on the user's behalf. Same bar, different
 // category — see retainedIsFailure.
 func (e *ErrBox) SetNotice(err error) { e.set(err, false) }
+
+// SetHint shows an ephemeral acknowledgment that `E details` must not be able
+// to reopen: it paints on the same bar and fades on the same Expire timer, but
+// it never lands in retained. That is the difference between answering a key
+// and creating a notice — "the store is empty" is itself not a notice, so a
+// second `E` after the hint expires must find the store still empty rather
+// than opening "Last notice" on the hint's own text (#5351 review).
+func (e *ErrBox) SetHint(err error) { e.err = err }
 
 func (e *ErrBox) set(err error, failure bool) {
 	e.err = err
@@ -66,6 +82,17 @@ func (e *ErrBox) Clear() {
 	e.err = nil
 	e.retained = nil
 	e.retainedIsFailure = false
+}
+
+// SetDetailsHint overrides the hint a clipped notice carries; "" restores the
+// error_details binding's own hint.
+func (e *ErrBox) SetDetailsHint(hint string) {
+	e.detailsHint = hint
+}
+
+// HideDetailsHint drops the hint from a clipped notice while hide is set.
+func (e *ErrBox) HideDetailsHint(hide bool) {
+	e.hideDetailsHint = hide
 }
 
 func (e *ErrBox) SetSize(width, height int) {
@@ -100,17 +127,32 @@ func (e *ErrBox) String() string {
 	if e.err != nil {
 		err = e.statusLine()
 	}
-	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, errStyle.Render(err))
+	style := theme.Styles().Body
+	if e.retainedIsFailure {
+		style = theme.Styles().Error
+	}
+	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, style.Render(err))
 }
 
 func (e *ErrBox) statusLine() string {
 	line := strings.Join(strings.Split(e.FullError(), "\n"), " · ")
-	if runewidth.StringWidth(line) <= e.width {
+	// Measure on the contract measure the status bar's ClampToRect enforces,
+	// not on runewidth: the two under-count what tmux advances on the ordinary
+	// emoji classes (heart+VS16, keycap, regional indicators) and on
+	// lipgloss-expanded tabs, so a line this test accepts can still be wider
+	// than the bar to the clamp, which then silently right-cuts it — taking the
+	// trailing content and the `E details` hint itself with no ellipsis.
+	// layout.Cells is "the ONE width answer for the TUI" (see layout/cells.go).
+	if layout.Cells(line) <= e.width {
 		return line
 	}
-	if hint := errorDetailsHint(); hint != "" {
+	hint := e.detailsHint
+	if hint == "" {
+		hint = errorDetailsHint()
+	}
+	if hint != "" && !e.hideDetailsHint {
 		const sep = "  "
-		hintWidth := runewidth.StringWidth(sep + hint)
+		hintWidth := layout.Cells(sep + hint)
 		if prefixWidth := e.width - hintWidth; prefixWidth > 3 {
 			return truncateStatusText(line, prefixWidth) + sep + hint
 		}
@@ -125,11 +167,25 @@ func sanitizeError(raw string) string {
 	// so width math and the final truncate operate on plain text only — a
 	// bespoke regex repeatedly missed variants (#525 → #552 → #565).
 	clean := xansi.Strip(raw)
-	// xansi.Strip handles ANSI escapes but leaves bare \r untouched. Hook
-	// scripts commonly emit \r from progress indicators on stderr (see #668);
-	// a \r reaching the terminal moves the cursor back to column 0, overwriting
-	// lipgloss.Place's padding and corrupting the box.
-	return strings.ReplaceAll(clean, "\r", "")
+	// Strip escape sequences first so OSC terminators still delimit payloads.
+	// Then remove bare C0, DEL, and UTF-8 C1 controls that can move the cursor
+	// or trigger terminal effects. Newlines become the same separator used by
+	// the status bar so recovery details occupy one line.
+	clean = strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\n' && r != '\t' || r >= 0x7f && r <= 0x9f {
+			return -1
+		}
+		return r
+	}, clean)
+	// Tabs are expanded to four spaces — what lipgloss's default TabWidth
+	// renders — so the width budget and final truncate count what the
+	// terminal actually draws. A kept tab is 0 cells to every measure, so it
+	// passes the fit test only for the status bar's clamp to find the 4-cell
+	// expansion lipgloss emits and silently cut the trailing content (the
+	// same hard-cut shape #3614 took the contract measure to close, by way of
+	// a different cause). Expanding here makes the budget match the render.
+	clean = strings.ReplaceAll(clean, "\t", "    ")
+	return strings.ReplaceAll(clean, "\n", " · ")
 }
 
 func truncateStatusText(text string, width int) string {
@@ -137,16 +193,46 @@ func truncateStatusText(text string, width int) string {
 	// content plus "…" is shorter than the original. Otherwise just
 	// hard-truncate to avoid losing more content to the ellipsis than
 	// we save by truncating.
+	//
+	// All width decisions are on layout.Cells (the contract measure
+	// ClampToRect enforces); xansi.Truncate cuts on the same measure and
+	// reserves the tail's width inside the budget it is given. The two are
+	// the ONE width answer for the TUI, so a result that fits here fits the
+	// bar's clamp without the silent right-cut runewidth's under-reporting
+	// used to leave behind (the `E details` hint itself could be cut to
+	// `E deta` on a heart+VS16 notice the fit test accepted).
+	if width <= 0 {
+		return ""
+	}
+	if layout.Cells(text) <= width {
+		return text
+	}
 	tail := "…"
-	tailWidth := runewidth.StringWidth(tail)
-	if width < tailWidth {
+	if width < layout.Cells(tail) {
 		// Container is too narrow to fit "…"; drop the tail to avoid
 		// overflowing past width (lipgloss.Place won't clip).
 		tail = ""
-	} else if runewidth.StringWidth(text) <= width+tailWidth {
+	} else if layout.Cells(text) <= width+layout.Cells(tail) {
+		// Truncating would hide at most as many cells as the tail costs,
+		// so keep the content and skip the ellipsis marker.
 		tail = ""
 	}
-	return runewidth.Truncate(text, width, tail)
+	// xansi.Truncate cuts by its own grapheme-cluster count, which the
+	// Cells measure can call over-wide after the fact: the keycap grapheme
+	// is the one in this fix's corpus — its leading ASCII character is
+	// printed before its modifier continuation, so the truncator counts
+	// one cell, keeps the whole 2-cell cluster, and returns it at a width
+	// of one. Ask the truncator for progressively less until the result
+	// actually fits the budget on the contract measure; this is the same
+	// progressive loop layout.TruncateToCells and truncateToContract use
+	// when the truncator and the measure disagree.
+	for w := width; w >= 0; w-- {
+		out := xansi.Truncate(text, w, tail)
+		if layout.Cells(out) <= width {
+			return out
+		}
+	}
+	return ""
 }
 
 func errorDetailsHint() string {

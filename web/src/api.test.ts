@@ -15,10 +15,13 @@ import {
   type CreateSessionInput,
   createTab,
   errorText,
+  fetchSessionSnapshot,
   fetchPreviewOrigin,
-  getTheme,
   handoffSession,
   isMutationCommittedError,
+  isMutationOutcomeUncertain,
+  isProjectReboundError,
+  PROJECT_REBOUND_ERROR_CODE,
   killSession,
   listBackends,
   listDirectory,
@@ -27,6 +30,7 @@ import {
   probeWebTab,
   reapConfigAssistant,
   registerProject,
+  rebindProject,
   removeTask,
   renameTab,
   reorderTab,
@@ -59,7 +63,14 @@ function stubFetch(): Captured {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({ data: { ok: true, name: "shell" }, error: null }),
+      json: async () => ({
+        data: {
+          ok: true,
+          name: "shell",
+          to_account: typeof cap.body.account === "string" ? cap.body.account.trim() : undefined,
+        },
+        error: null,
+      }),
     } as unknown as Response;
   };
   return cap;
@@ -67,6 +78,58 @@ function stubFetch(): Captured {
 
 afterEach(() => {
   delete (globalThis as { fetch?: unknown }).fetch;
+});
+
+test("Snapshot carries daemon identity and lifecycle admission timing with its rows", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        instances: [{ id: "session" }],
+        operation_lock_timeout_ms: 30_000,
+        operation_clock_ms: 12_345,
+        boot_id: "daemon-a",
+      },
+      error: null,
+    }),
+  }) as unknown as Response;
+  const snapshot = await fetchSessionSnapshot("tok");
+  assert.equal(snapshot.sessions[0]?.id, "session");
+  assert.equal(snapshot.operationLockTimeoutMs, 30_000);
+  assert.equal(snapshot.operationClockMs, 12_345);
+  assert.equal(snapshot.daemonBootId, "daemon-a");
+  // A healthy daemon omits skipped_repos (omitempty on the Go side), so the web
+  // decodes nothing here — no incompleteness notice. Guards the happy path against
+  // a regression that would render a spurious "sessions hidden" banner (#4742).
+  assert.deepEqual(snapshot.skippedRepos, undefined);
+});
+
+test("Snapshot carries the daemon's startup-skipped repos so the rail can surface them (#4742)", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        instances: [{ id: "survivor" }],
+        skipped_repos: [
+          { repo_id: "abc123", reason: "corrupted-instances-json" },
+          { repo_id: "def456", reason: "rows-failed-to-load", failed_rows: 3 },
+        ],
+      },
+      error: null,
+    }),
+  }) as unknown as Response;
+  const snapshot = await fetchSessionSnapshot("tok");
+  // The incompleteness channel must be plumbed through verbatim: the rail renders
+  // its notice from these, and the daemon's reason codes are the contract. Before
+  // the fix the web decoded only `instances` and silently dropped the skip set.
+  assert.equal(snapshot.sessions[0]?.id, "survivor");
+  assert.equal(snapshot.skippedRepos?.length, 2);
+  assert.deepEqual(snapshot.skippedRepos?.[0], { repo_id: "abc123", reason: "corrupted-instances-json" });
+  assert.deepEqual(snapshot.skippedRepos?.[1], { repo_id: "def456", reason: "rows-failed-to-load", failed_rows: 3 });
 });
 
 // The backend-on-create contract (#1933). The daemon already accepted `backend`;
@@ -104,6 +167,51 @@ test("createSession omits backend when the field is absent altogether", async ()
   await createSession(createInput(), "tok");
 
   assert.equal("backend" in cap.body, false, "an undefined backend is the same 'let the repo decide' as an empty one");
+});
+
+// The account-on-create contract (#3844), the same shape one level over. The
+// daemon has accepted `account` since #3051 and the web never sent it, so a session
+// could only be scoped to a credential identity from the CLI.
+
+for (const account of ["work", "personal"]) {
+  test(`createSession sends account=${account} when the user picks it`, async () => {
+    const cap = stubFetch();
+    await createSession(createInput({ account }), "tok");
+
+    assert.equal(cap.body.account, account, "an explicit choice must reach the daemon verbatim, as `af sessions create --account` does");
+  });
+}
+
+test("createSession omits account entirely when the user left it on the ambient identity", async () => {
+  // Same subtlety as the backend default, with a sharper edge: an account name sent
+  // on every create would pin every session to whichever identity the form happened
+  // to resolve, and an account name that does not exist is a refused create. Absent
+  // is the only encoding of "run as the agent's own login".
+  const cap = stubFetch();
+  await createSession(createInput({ account: "" }), "tok");
+
+  assert.equal("account" in cap.body, false, "no choice must send NO account key");
+});
+
+test("createSession omits account when the field is absent altogether", async () => {
+  const cap = stubFetch();
+  await createSession(createInput(), "tok");
+
+  assert.equal("account" in cap.body, false, "an undefined account is the same ambient identity as an empty one");
+});
+
+// The standing constraint of the accounts epic (#3388): no credential material
+// crosses this transport, in either direction. An account is a DIRECTORY NAME, so
+// the create body may gain that one string and nothing else.
+test("a scoped create carries a name and nothing else new", async () => {
+  const cap = stubFetch();
+  await createSession(createInput({ account: "work" }), "tok");
+
+  assert.deepEqual(
+    Object.keys(cap.body).sort(),
+    ["account", "program", "prompt", "repo_path", "title_base"],
+    "the account field adds a name to the request and nothing that could carry a secret",
+  );
 });
 
 test("listBackends asks the daemon for the picked repo's catalog", async () => {
@@ -145,6 +253,65 @@ test("resumeFromLimit rejects the daemon's no-op outcome", async () => {
   );
 });
 
+test("resumeFromLimit surfaces a successful response's committed settlement warning", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: true,
+        code: "mutation_committed",
+        warning: "mission delivered; settlement pending",
+      },
+      error: null,
+    }),
+  });
+
+  const err = await resumeFromLimit("id-repoB", "feature", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /settlement pending/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
+test("resumeFromLimit surfaces a not-performed resume's committed rebuild warning, not the generic no-op reason", async () => {
+  // The respawn-rebuilt-then-failed path (daemon/limit.go) returns ok:false with a
+  // committed mutation warning: the rebuild mutated durable state even though the
+  // resume did not complete. The web must surface that committed warning rather
+  // than the ok:false "another operation owns its retry" reason, which would hide
+  // an unsafe-to-repeat committed mutation behind a generic retryable no-op.
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: false,
+        reason: "the session changed or another operation owns its retry",
+        code: "mutation_committed",
+        warning: "re-spawn for \"feature\" failed after recovery rebuilt its worktree",
+      },
+      error: null,
+    }),
+  });
+
+  const err = await resumeFromLimit("id-repoB", "feature", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError, "a committed mutation must surface as ApiError, not a plain Error");
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /rebuilt its worktree/);
+  assert.doesNotMatch(err.message, /another operation owns/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
 // #2013: a handoff STOPS a live agent and starts another, so it must key by stable
 // id like kill/archive — a title-resolved misroute would tear down an unrelated
 // repo's agent. `brief` is deliberately never sent from the web (the mission
@@ -154,13 +321,53 @@ test("handoffSession posts the stable id and target agent, and never a brief", a
   const cap = stubFetch();
   await handoffSession("id-repoB", "feature", "gemini", "tok");
 
-  assert.equal(cap.url, "/v1/HandoffSession");
+  assert.equal(cap.url, "/v1/HandoffSessionV2",
+    "the mutation endpoint itself proves the receiving daemon supports account-aware admission");
   assert.equal(cap.auth, "Bearer tok");
   assert.equal(cap.body.id, "id-repoB", "the daemon resolves by id first, so a duplicate title cannot misroute the swap");
   assert.equal(cap.body.title, "feature", "the title rides along for the event and the title-only fallback");
   assert.equal(cap.body.to, "gemini", "the picked agent is the incoming program");
   assert.equal(cap.body.repo_id, "", "an all-repos web client scopes by id, not repo");
   assert.equal("brief" in cap.body, false, "the web never sends a brief — the mission defaults to the stored prompt");
+});
+
+test("handoffSession refuses a daemon without the version-bound mutation endpoint", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({ data: null, error: { message: 'unknown route "/v1/HandoffSessionV2"', daemon_rejected: true } }),
+  });
+
+  const err = await handoffSession("id", "worker", "codex", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, true, "the absent route proves no handoff handler ran");
+  assert.match(err.message, /account-aware handoff endpoint/);
+  assert.match(err.message, /handoff was not sent/);
+});
+
+test("handoffSession preserves uncertainty when an intermediary substitutes a 404", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({ data: null, error: { message: "proxy could not read the upstream response" } }),
+  });
+
+  const err = await handoffSession("id", "worker", "codex", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, false);
+  assert.equal(isMutationOutcomeUncertain(err), true);
+  assert.match(err.message, /proxy could not read the upstream response/);
+  assert.doesNotMatch(err.message, /handoff was not sent/);
 });
 
 test("listPrograms asks the daemon for the agent catalog (#1970)", async () => {
@@ -197,28 +404,7 @@ test("suggestSessionName asks the daemon and returns the name", async () => {
   assert.equal(name, "shell", "the resolved name is read from the envelope");
 });
 
-test("getTheme returns the daemon palette instead of a browser-owned default", async () => {
-  const theme = { name: "nord", accent: "#88C0D0", background: "#2E3440" };
-  const cap: Captured = { url: "", body: {}, auth: undefined, calls: 0 };
-  (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
-    cap.calls += 1;
-    cap.url = url;
-    cap.body = JSON.parse(String(init.body));
-    cap.auth = (init.headers as Record<string, string>).Authorization;
-    return {
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      json: async () => ({ data: { theme }, error: null }),
-    } as unknown as Response;
-  };
 
-  const got = await getTheme("tok");
-  assert.equal(cap.url, "/v1/GetTheme");
-  assert.equal(cap.auth, "Bearer tok");
-  assert.deepEqual(cap.body, {});
-  assert.deepEqual(got, theme);
-});
 
 test("killSession posts the stable id as the primary key alongside the title", async () => {
   const cap = stubFetch();
@@ -242,14 +428,23 @@ test("archiveSession posts the stable id alongside the title", async () => {
 // Restore is retained intent too: the confirmation may outlive the row it names,
 // so it sends the same stable session id as archive/kill and cannot retarget a
 // same-title replacement before the user confirms.
-test("restoreSession posts the stable id alongside the title", async () => {
+test("restoreSession pins the stable session and daemon identities", async () => {
   const cap = stubFetch();
-  await restoreSession("id-repoB", "feature", "tok");
+  await restoreSession("id-repoB", "feature", "tok", "daemon-a");
   assert.equal(cap.url, "/v1/RestoreSession", "must hit the same route af sessions restore / the TUI `r` use");
   assert.equal(cap.auth, "Bearer tok");
   assert.equal(cap.body.id, "id-repoB", "id must be sent so title reuse cannot redirect the restore");
   assert.equal(cap.body.title, "feature");
   assert.equal(cap.body.repo_id, "", "web is an all-repos client; repo_id stays empty, as it does for archive/kill");
+  assert.equal(cap.body.expected_daemon_boot_id, "daemon-a",
+    "a restarted daemon must refuse the stale request before restore admission");
+});
+
+test("restoreSession omits the daemon pin when an older Snapshot supplied none", async () => {
+  const cap = stubFetch();
+  await restoreSession("id-repoB", "feature", "tok");
+  assert.equal("expected_daemon_boot_id" in cap.body, false,
+    "legacy daemons must receive the request body they already understand");
 });
 
 test("createTab / closeTab post the stable id alongside the title", async () => {
@@ -394,6 +589,24 @@ test("triggerTask / removeTask post the stable id", async () => {
   assert.equal(cap.body.id, "t-abc123");
 });
 
+test("triggerTask surfaces a committed run's warning instead of plain success (#5762)", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: { ok: true, code: "mutation_committed", warning: "session created, but its start could not be confirmed" },
+      error: null,
+    }),
+  });
+  const err = await triggerTask(displayedTask(), "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError, "a committed run must reject, not resolve as success");
+  assert.equal(isMutationCommittedError(err), true);
+  assert.match((err as ApiError).message, /start could not be confirmed/);
+});
+
 test("task mutations pin the displayed record's project binding (#3230)", async () => {
   const cap = stubFetch();
   const pinned = { enforce: true, project_path: "/repo/one" };
@@ -518,6 +731,76 @@ test("archiveSession surfaces a successful response's committed hook warning", a
   assert.match(err.message, /on-archive hook/);
   assert.equal(isMutationCommittedError(err), true);
 });
+
+test("handoffSession surfaces a successful response's committed settlement warning", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: true,
+        from: "claude",
+        to: "claude",
+        from_account: "work",
+        to_account: "personal",
+        head_sha: "abc123",
+        warning: "handoff delivered, but completion has a pending settlement",
+        code: "mutation_committed",
+      },
+      error: null,
+    }),
+  });
+  const err = await handoffSession("id", "worker", "claude", "tok", "personal").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /pending settlement/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
+test("handoffSession accepts the canonical account echoed by the daemon", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: { ok: true, from: "claude", to: "claude", to_account: "personal" },
+      error: null,
+    }),
+  });
+
+  const result = await handoffSession("id", "worker", "claude", "tok", " personal ");
+  assert.equal(result.to_account, "personal");
+});
+
+for (const echoed of ["", "work"]) {
+  test(`handoffSession treats an ${echoed ? "incorrect" : "absent"} account echo as committed`, async () => {
+    stubFetchResponse({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        data: { ok: true, from: "claude", to: "codex", ...(echoed ? { to_account: echoed } : {}) },
+        error: null,
+      }),
+    });
+
+    const err = await handoffSession("id", "worker", "codex", "tok", "personal").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    assert.ok(err instanceof ApiError);
+    assert.equal(err.code, "mutation_committed");
+    assert.match(err.message, /did not honor the requested account/);
+    assert.match(err.message, /resulting credential identity is unknown/);
+    assert.match(err.message, /source account label may have carried across agent namespaces/);
+    assert.doesNotMatch(err.message, /ambient identity/);
+  });
+}
 
 test("restoreSession surfaces a successful response's durable archive warning", async () => {
   stubFetchResponse({
@@ -826,6 +1109,138 @@ test("registerProject surfaces a non-git path error for inline display", async (
   assert.doesNotMatch(errorText(err), /Login failed/);
 });
 
+// --- rebindProject: the web rebind affordance (project.rebind parity) ----------
+//
+// Same wire contract as registerProject: the path names a directory on the
+// daemon host, sent VERBATIM for the daemon to resolve; the stable id is what
+// moves. The daemon's rejection (unknown id, path owned by another project)
+// surfaces inline.
+
+test("rebindProject posts id + verbatim path to RebindProject", async () => {
+  const cap = stubFetch();
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "~/repos/moved", "tok");
+  assert.ok(cap.url.endsWith("/v1/RebindProject"), `posted to ${cap.url}`);
+  assert.equal(cap.body.id, "prj_0123456789abcdef0123456789abcdef");
+  assert.equal(cap.body.path, "~/repos/moved", "the path is forwarded unchanged for the daemon to resolve");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("rebindProject sends the observed pair as expected_root + expected_checkout_id", async () => {
+  const cap = stubFetch();
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok", "/old", "chk_observed");
+  assert.ok(
+    cap.url.endsWith("/v1/RebindProjectGuarded"),
+    `a guarded send hits the guarded route — the route is the capability check (#4888 review), posted to ${cap.url}`,
+  );
+  assert.equal(cap.body.expected_root, "/old", "the daemon compares the registry against the root the UI showed (#4822)");
+  assert.equal(
+    cap.body.expected_checkout_id,
+    "chk_observed",
+    "the checkout half is what catches a same-path reclone the root spelling cannot (#4822 spec)",
+  );
+});
+
+test("rebindProject omits the precondition when no pair was observed", async () => {
+  const cap = stubFetch();
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok");
+  assert.ok(!("expected_root" in cap.body), "no observed root sends no precondition, not an empty one");
+  assert.ok(
+    !("expected_checkout_id" in cap.body),
+    "no observed checkout sends no field — an empty one would be a guard that cannot hold",
+  );
+});
+
+test("a project_rebound refusal classifies as a definitive rebind conflict", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 409,
+    json: async () => ({
+      data: null,
+      error: { message: "project prj_A was rebound elsewhere", code: PROJECT_REBOUND_ERROR_CODE, daemon_rejected: true },
+    }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").catch((e: unknown) => e);
+  assert.ok(isProjectReboundError(err), "the code identifies the conflict");
+  assert.equal(isMutationOutcomeUncertain(err), false, "a conflict is a refusal, not an unknown outcome");
+});
+
+test("rebindProject translates the guarded route's marked 404 into the upgrade remedy", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({
+      data: null,
+      error: { message: 'unknown route "/v1/RebindProjectGuarded"', daemon_rejected: true },
+    }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, true, "the absent route proves no guarded handler ran");
+  assert.match(err.message, /predates guarded rebinds/);
+  assert.match(err.message, /upgrade it, or rebind from the daemon host/);
+});
+
+test("rebindProject keeps an unmarked 404 unconfirmed rather than unsupported", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({ data: null, error: { message: "proxy could not read the upstream response" } }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, false);
+  assert.equal(isMutationOutcomeUncertain(err), true, "an intermediary's 404 never claims route absence");
+  assert.doesNotMatch(err.message, /predates guarded rebinds/);
+});
+
+test("rebindProject returns the rebound project", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: {
+        ok: true,
+        project: {
+          id: "prj_0123456789abcdef0123456789abcdef",
+          checkout_id: "chk_00000000000000000000000000000000",
+          root: "/new/checkout",
+          relative_root: ".",
+          path_exists: true,
+        },
+      },
+      error: null,
+    }),
+  });
+  const project = await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new/checkout", "tok");
+  assert.equal(project.id, "prj_0123456789abcdef0123456789abcdef", "the stable id survives the move");
+  assert.equal(project.root, "/new/checkout");
+});
+
+test("rebindProject surfaces a daemon rejection for inline display", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    json: async () => ({ data: null, error: { message: "path is already bound to another project" } }),
+  });
+  const err = await rebindProject("prj_0123456789abcdef0123456789abcdef", "/tmp/taken", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(errorText(err), "path is already bound to another project");
+});
+
 // --- listProjects: the registry read half of the #2456 union -------------------
 //
 // The client ∪s these roots with the projects it derives from live sessions + tasks,
@@ -1054,4 +1469,99 @@ test("fetchPreviewOrigin: every failure degrades to '' rather than throwing", as
     throw new TypeError("network down");
   };
   assert.equal(await fetchPreviewOrigin("s", "t", "tok"), "");
+});
+
+test("create refusal provenance distinguishes daemon rejection from lost or gateway replies", async () => {
+  for (const status of [400, 500, 503]) {
+    stubFetchResponse({ ok: false, status, json: async () => ({ data: null, error: { message: "refused", daemon_rejected: true } }) });
+    await assert.rejects(createSession(createInput(), "tok"), error =>
+      error instanceof ApiError && error.daemonRejected && error.message === "refused");
+  }
+  for (const status of [502, 504]) {
+    stubFetchResponse({ ok: false, status, json: async () => { throw new SyntaxError("truncated gateway response"); } });
+    await assert.rejects(createSession(createInput(), "tok"), error =>
+      error instanceof ApiError && !error.daemonRejected);
+  }
+  (globalThis as { fetch: unknown }).fetch = async () => { throw new TypeError("response lost"); };
+  await assert.rejects(createSession(createInput(), "tok"), error =>
+    error instanceof ApiError && !error.daemonRejected && isMutationOutcomeUncertain(error));
+});
+
+
+test("JSON gateway error envelopes cannot establish rejection or committed mutation outcomes", async () => {
+  for (const status of [502, 504]) {
+    for (const code of [undefined, "mutation_committed"]) {
+      stubFetchResponse({ ok: false, status, json: async () => ({
+        data: null, error: { message: "Upstream response unavailable", code, daemon_rejected: true },
+      }) });
+      await assert.rejects(archiveSession("stable-id", "session", "tok"), error => {
+        assert.ok(error instanceof ApiError);
+        assert.equal(error.daemonRejected, false);
+        assert.equal(error.message, "Upstream response unavailable");
+        assert.equal(isMutationOutcomeUncertain(error), true);
+        assert.equal(isMutationCommittedError(error), false);
+        return true;
+      });
+    }
+  }
+});
+
+test("structured daemon lifecycle refusals remain definitive and retryable", async () => {
+  for (const status of [400, 500, 503]) {
+    stubFetchResponse({ ok: false, status, json: async () => ({
+      data: null, error: { message: "The daemon refused the operation", daemon_rejected: true },
+    }) });
+    await assert.rejects(killSession("stable-id", "session", "tok"), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.daemonRejected, true);
+      assert.equal(isMutationOutcomeUncertain(error), false);
+      return true;
+    });
+  }
+});
+
+for (const status of [500, 503]) {
+  test(`an unmarked JSON ${status} proxy reply leaves the mutation outcome uncertain`, async () => {
+    stubFetchResponse({ ok: false, status, json: async () => ({
+      data: null, error: { message: "Upstream response unavailable" },
+    }) });
+    await assert.rejects(createSession(createInput(), "tok"), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.daemonRejected, false);
+      assert.equal(isMutationOutcomeUncertain(error), true);
+      return true;
+    });
+  });
+}
+
+test("only a boolean daemon marker establishes rejection, and committed outcomes still win", async () => {
+  for (const daemon_rejected of [false, "true", 1]) {
+    stubFetchResponse({ ok: false, status: 503, json: async () => ({
+      data: null, error: { message: "unknown origin", daemon_rejected },
+    }) });
+    await assert.rejects(archiveSession("stable-id", "session", "tok"), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.daemonRejected, false);
+      assert.equal(isMutationOutcomeUncertain(error), true);
+      return true;
+    });
+  }
+  for (const status of [500, 502, 504]) {
+    stubFetchResponse({ ok: false, status, json: async () => ({
+      data: null, error: { message: "committed", daemon_rejected: true, code: "mutation_committed" },
+    }) });
+    await assert.rejects(archiveSession("stable-id", "session", "tok"), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.daemonRejected, false);
+      assert.equal(isMutationOutcomeUncertain(error), true);
+      return true;
+    });
+  }
+});
+
+test("handoffSession sends an operator-selected account with optional agent", async () => {
+ const cap = stubFetch();
+ await handoffSession("id", "feature", "", "tok", "personal");
+ assert.equal(cap.body.account, "personal");
+ assert.equal(cap.body.to, "");
 });

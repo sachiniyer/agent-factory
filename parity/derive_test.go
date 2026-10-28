@@ -195,10 +195,6 @@ func deriveTUI(t *testing.T) map[string]binding {
 // daemon also keeps out of HTTPRoutes() (registered directly on the mux like the
 // stream routes), so the audit stays consistent.
 //
-// Matches both `af<T>("Name", {...})` and the un-generic `af("Name", {...})`,
-// with the literal on the same line or the next.
-var webCallRe = regexp.MustCompile(`(?s)\baf(?:<[^>]*>)?\(\s*"([A-Za-z0-9_]+)"\s*,`)
-
 // webSrcDir is scanned WHOLE rather than just api.ts: af<T>() is exported
 // (web/src/api.ts:130), so any module can import it and reach a new daemon RPC
 // directly. Parsing only api.ts would leave that call invisible while the
@@ -222,8 +218,14 @@ func deriveWebRPCs(t *testing.T) map[string]bool {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		for _, m := range webCallRe.FindAllStringSubmatch(string(b), -1) {
-			out[m[1]] = true
+		calls, unresolved := webRPCCalls(string(b))
+		if len(unresolved) > 0 {
+			t.Fatalf("%s has af() call(s) whose method cannot be resolved to a string literal or "+
+				"module-level const: %v; the web RPC inventory would be incomplete",
+				relSite(t, path), unresolved)
+		}
+		for _, call := range calls {
+			out[call.method] = true
 		}
 	}
 	if len(out) < minWebCalls {
@@ -288,7 +290,6 @@ func webSourceFiles(t *testing.T) []string {
 func webCallBodyChecked(t *testing.T, method string) (fields []string, unanalyzable []string) {
 	t.Helper()
 	seen := map[string]bool{}
-	callRe := regexp.MustCompile(`\baf(?:<[^>]*>)?\(\s*"` + regexp.QuoteMeta(method) + `"\s*,`)
 	identRe := regexp.MustCompile(`^[A-Za-z_]\w*$`)
 
 	for _, path := range webSourceFiles(t) {
@@ -297,16 +298,24 @@ func webCallBodyChecked(t *testing.T, method string) (fields []string, unanalyza
 			t.Fatalf("read %s: %v", path, err)
 		}
 		src := string(b)
-		for _, loc := range callRe.FindAllStringIndex(src, -1) {
-			callPos, argStart := loc[0], loc[1]
-			arg := strings.TrimSpace(readOneArg(src[argStart:]))
+		calls, unresolved := webRPCCalls(src)
+		for _, identifier := range unresolved {
+			unanalyzable = append(unanalyzable,
+				fmt.Sprintf("af(%s, …) in %s: method is not a module-level string constant",
+					identifier, relSite(t, path)))
+		}
+		for _, call := range calls {
+			if call.method != method {
+				continue
+			}
+			arg := strings.TrimSpace(readOneArg(src[call.argStart:]))
 			switch {
 			case strings.HasPrefix(arg, "{"):
 				for _, f := range objectKeys(balancedFrom(arg)) {
 					seen[f] = true
 				}
 			case identRe.MatchString(arg):
-				keys, ok := resolveWebBodyVar(src, callPos, arg)
+				keys, ok := resolveWebBodyVar(src, call.callPos, arg)
 				if !ok {
 					unanalyzable = append(unanalyzable,
 						fmt.Sprintf("%s(%s) in %s: body variable not resolvable to a literal",

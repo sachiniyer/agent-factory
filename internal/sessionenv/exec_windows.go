@@ -16,4 +16,8 @@ func WrapAccountEnvironmentCommand(string, string, string, []string, string) (st
 	return "", fmt.Errorf("tmux session environments are unsupported on windows")
 }
 
+func WrapAgentServerCommand(string, []string, []string) (string, error) {
+	return "", fmt.Errorf("agent-server session environments are unsupported on windows")
+}
+
 func HandleInternalExec() {}

@@ -169,7 +169,7 @@ func TestWatcherDrainRecoversAfterLoadFailureWithoutNewEvents(t *testing.T) {
 	// First daemon lifetime: deliveries fail, three events queue, then stop.
 	s1, _ := newTestSupervisor(t, staticTasks(watchTask("ab324205", `echo e1; echo e2; echo e3; sleep 60`, dir)))
 	fd1 := &flakyDeliver{}
-	s1.deliver = fd1.deliver
+	s1.deliver = adaptWatchDelivery(fd1.deliver)
 	queueDir, _ := s1.queueDir()
 	if err := s1.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -188,7 +188,7 @@ func TestWatcherDrainRecoversAfterLoadFailureWithoutNewEvents(t *testing.T) {
 	s2, _ := newTestSupervisor(t, staticTasks(watchTask("ab324205", `touch "`+dir+`/started"; sleep 60`, dir)))
 	fd2 := &flakyDeliver{}
 	fd2.healed.Store(true)
-	s2.deliver = fd2.deliver
+	s2.deliver = adaptWatchDelivery(fd2.deliver)
 	s2.queueDir = func() (string, error) { return queueDir, nil }
 	if err := s2.Reload(); err != nil {
 		t.Fatalf("Reload second lifetime: %v", err)
@@ -323,7 +323,7 @@ func TestDeliveryAlarms_UnreadableQueueRaisesAlarmWithoutDeliveries(t *testing.T
 	// First lifetime: three events queue behind failing deliveries, then stop.
 	s1, _ := newTestSupervisor(t, staticTasks(watchTask("ab324207", `echo e1; echo e2; echo e3; sleep 60`, dir)))
 	fd1 := &flakyDeliver{}
-	s1.deliver = fd1.deliver
+	s1.deliver = adaptWatchDelivery(fd1.deliver)
 	queueDir, _ := s1.queueDir()
 	if err := s1.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -340,7 +340,7 @@ func TestDeliveryAlarms_UnreadableQueueRaisesAlarmWithoutDeliveries(t *testing.T
 	s2, _ := newTestSupervisor(t, staticTasks(watchTask("ab324207", `touch "`+dir+`/started"; sleep 60`, dir)))
 	fd2 := &flakyDeliver{}
 	fd2.healed.Store(true)
-	s2.deliver = fd2.deliver
+	s2.deliver = adaptWatchDelivery(fd2.deliver)
 	s2.queueDir = func() (string, error) { return queueDir, nil }
 	if err := s2.Reload(); err != nil {
 		t.Fatalf("Reload second lifetime: %v", err)

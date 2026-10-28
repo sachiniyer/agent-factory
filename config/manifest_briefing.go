@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -146,14 +147,11 @@ func renderBriefingEntry(cfg *Config, e ManifestEntry) string {
 // The settable FORM is derived from settableKeySpecs, not restated here, so the
 // hint cannot promise a command shape the CLI does not accept. Since #3345 a
 // structured row's compact JSON is accepted at the bare key; dynamic families
-// additionally retain their leaf convenience form.
+// and tables with fixed scalar subkeys additionally retain their leaf forms.
 func briefingSetHint(e ManifestEntry) string {
 	spec, ok := settableKeySpecs[e.Key]
 	if !ok || !e.Settable {
 		hint := "edit `" + e.Key + "` in `config.toml` by hand"
-		if len(e.AcceptedTypes) > 1 {
-			return hint + " · accepts a " + e.typeLabel()
-		}
 		// Name the actual shape — calling the cors_allowed_origins list a
 		// "table" would be a small lie in the one sentence telling a reader
 		// what to go and do.
@@ -165,6 +163,18 @@ func briefingSetHint(e ManifestEntry) string {
 	}
 	if spec.dynamic && !spec.structured {
 		return "`af config set " + e.Key + ".<name> <value>`"
+	}
+	if len(spec.subkeys) > 0 {
+		leaves := make([]string, 0, len(spec.subkeys))
+		for leaf := range spec.subkeys {
+			leaves = append(leaves, leaf)
+		}
+		sort.Strings(leaves)
+		forms := []string{"`af config set " + e.Key + " <value>`"}
+		for _, leaf := range leaves {
+			forms = append(forms, "`af config set "+e.Key+"."+leaf+" <value>`")
+		}
+		return strings.Join(forms, " · ")
 	}
 	return "`af config set " + e.Key + " <value>`"
 }

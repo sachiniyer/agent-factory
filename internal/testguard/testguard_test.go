@@ -6,14 +6,20 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sandbox points the tripwire's ambient resolution at a temp dir and returns
-// the config.json path inside it.
+// the config.json path inside it. HOME and the agent root overrides move too,
+// because ConfigTripwire also snapshots the agent config roots (#4469). A unit
+// test must not hash the developer's real skill files.
 func sandbox(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", dir)
+	t.Setenv("HOME", dir)
+	unsetForTest(t, "CODEX_HOME")
+	unsetForTest(t, "GEMINI_CLI_HOME")
 	return filepath.Join(dir, "config.json")
 }
 
@@ -201,15 +207,14 @@ func TestSandboxHome_SetsAndRestores(t *testing.T) {
 	}
 }
 
-// TestSandboxHome_ScrubsAndRestoresMarkers pins the #1120 marker contract:
-// SandboxHome scrubs AF_SESSION/AF_SESSION_GEN/AF_HOME for the package run, and
-// restore puts each marker back to its exact pre-sandbox state — including unsetting a
-// marker that was absent before but got set during the run, so nothing set
-// mid-package leaks past restore.
+// TestSandboxHome_ScrubsAndRestoresMarkers pins the #1120/#4194 marker contract:
+// SandboxHome scrubs AF_SESSION/AF_SESSION_GEN/AF_HOME, installs a fresh stable
+// test-run identity, and restores every marker to its exact pre-sandbox state.
 func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	// Present before: must be scrubbed during the run and restored after.
 	t.Setenv("AF_SESSION", "pre-sandbox-session")
 	t.Setenv("AF_SESSION_GEN", "pre-sandbox-generation")
+	t.Setenv(envMarkerTestRun, "pre-sandbox-run")
 	// Absent before: t.Setenv registers restoration of the original value,
 	// then Unsetenv makes it genuinely absent for SandboxHome to observe.
 	t.Setenv("AF_HOME", "placeholder")
@@ -227,6 +232,9 @@ func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	if v, ok := os.LookupEnv("AF_HOME"); ok {
 		t.Fatalf("SandboxHome must scrub AF_HOME; still set to %q", v)
 	}
+	if got, want := os.Getenv(envMarkerTestRun), os.Getenv("AGENT_FACTORY_HOME"); got != want {
+		t.Fatalf("test-run marker = %q, want stable sandbox identity %q", got, want)
+	}
 
 	// Simulate a test (or child-env plumbing) setting a marker mid-run.
 	if err := os.Setenv("AF_HOME", "set-during-run"); err != nil {
@@ -242,6 +250,9 @@ func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	}
 	if v, ok := os.LookupEnv("AF_HOME"); ok {
 		t.Fatalf("restore must unset AF_HOME (absent pre-sandbox); still set to %q", v)
+	}
+	if got := os.Getenv(envMarkerTestRun); got != "pre-sandbox-run" {
+		t.Fatalf("restore did not put %s back; got %q", envMarkerTestRun, got)
 	}
 }
 
@@ -286,35 +297,160 @@ func TestSandboxTmux_SetsAndRestores(t *testing.T) {
 	}
 }
 
-// TestTmuxTripwire_FiresOnLeakedSession exercises the tripwire against the
-// private server IsolateTmux provides, so the test itself is hermetic: the
-// "ambient" server the tripwire snapshots is the throwaway one.
-func TestTmuxTripwire_FiresOnLeakedSession(t *testing.T) {
-	IsolateTmux(t) // skips when tmux is unavailable
+// fakeTripwireTmux installs a hermetic tmux command that exposes one preexisting
+// foreign-owned session and four sessions after markReady. It performs no tmux
+// operation and never contacts the ambient server.
+func fakeTripwireTmux(t *testing.T) (markReady func(), ownerFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	readyFile := filepath.Join(dir, "ready")
+	ownerFile = filepath.Join(dir, "owner")
+	script := `#!/bin/sh
+case "$1" in
+list-sessions)
+  if [ "${AF_TRIPWIRE_WEDGE_LIST:-}" = 1 ]; then
+    exec /bin/sleep 1
+  fi
+  printf '%s\n' af_preexisting
+  if [ -f "$AF_TRIPWIRE_READY_FILE" ]; then
+    printf '%s\n' af_owned af_overridden af_foreign af_unmarked af_unreadable
+  fi
+  ;;
+show-environment)
+  case "$3:$4" in
+  =af_preexisting:AF_HOME)
+    printf '%s\n' 'AF_HOME=/real/agent-factory-home'
+    ;;
+  =af_preexisting:AF_TESTGUARD_RUN)
+    printf '%s\n' 'AF_TESTGUARD_RUN=another-run'
+    ;;
+  =af_owned:AF_HOME)
+    IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
+    printf 'AF_HOME=%s\n' "$owner"
+    ;;
+  =af_owned:AF_TESTGUARD_RUN)
+    IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
+    printf 'AF_TESTGUARD_RUN=%s\n' "$owner"
+    ;;
+  =af_overridden:AF_HOME)
+    printf '%s\n' 'AF_HOME=/per-test/overridden-home'
+    ;;
+  =af_overridden:AF_TESTGUARD_RUN)
+    IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
+    printf 'AF_TESTGUARD_RUN=%s\n' "$owner"
+    ;;
+  =af_foreign:AF_HOME)
+    printf '%s\n' 'AF_HOME=/real/agent-factory-home'
+    ;;
+  =af_foreign:AF_TESTGUARD_RUN)
+    printf '%s\n' 'AF_TESTGUARD_RUN=another-run'
+    ;;
+  =af_unmarked:*)
+    printf 'unknown variable: %s\n' "$4" >&2
+    exit 1
+    ;;
+  =af_unreadable:*)
+    printf '%s\n' 'server became unreachable' >&2
+    exit 1
+    ;;
+  =af_wedged:*)
+    exec /bin/sleep 60
+    ;;
+  *) exit 2 ;;
+  esac
+  ;;
+*) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TRIPWIRE_READY_FILE", readyFile)
+	t.Setenv("AF_TRIPWIRE_OWNER_FILE", ownerFile)
+	return func() {
+		if err := os.WriteFile(readyFile, nil, 0644); err != nil {
+			t.Fatalf("mark fake tmux ready: %v", err)
+		}
+	}, ownerFile
+}
 
+// TestAmbientAFSessions_BoundsUnreadableList keeps the first command on the
+// verification path from wedging TestMain after the package suite finishes.
+// An unreadable session list means there is nothing the tripwire can safely
+// attribute, so it returns no sessions after the local deadline.
+func TestAmbientAFSessions_BoundsUnreadableList(t *testing.T) {
+	fakeTripwireTmux(t)
+	t.Setenv("AF_TRIPWIRE_WEDGE_LIST", "1")
+	previous := tmuxTripwireTimeout
+	tmuxTripwireTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { tmuxTripwireTimeout = previous })
+
+	started := time.Now()
+	sessions := ambientAFSessions()
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("wedged session list returned after %s, want the local deadline", elapsed)
+	}
+	if sessions != nil {
+		t.Fatalf("wedged session list returned sessions %v", sessions)
+	}
+}
+
+// TestAmbientAFSessionMarker_BoundsUnreadableQuery keeps the tripwire from
+// wedging TestMain after the package suite has already finished. A timeout is
+// ownership-unknown, never evidence that this run owns the session.
+func TestAmbientAFSessionMarker_BoundsUnreadableQuery(t *testing.T) {
+	fakeTripwireTmux(t)
+	previous := tmuxTripwireTimeout
+	tmuxTripwireTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { tmuxTripwireTimeout = previous })
+
+	started := time.Now()
+	if value, readable := ambientAFSessionMarker("af_wedged", envMarkerHome); readable {
+		t.Fatalf("wedged ownership query returned readable marker %q", value)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("wedged ownership query returned after %s, want the local deadline", elapsed)
+	}
+}
+
+// TestTmuxTripwire_AttributesNewSessionsBySandboxHome pins both sides of the
+// ownership boundary. Arrival during the package window is not attribution: an
+// AF_HOME matching this run is reported, as is a per-test home carrying the
+// run marker. A different, absent, or unreadable identity is not proof that the
+// run owns the session (#4194).
+func TestTmuxTripwire_AttributesNewSessionsBySandboxHome(t *testing.T) {
+	markReady, ownerFile := fakeTripwireTmux(t)
 	verify := TmuxTripwire()
-	if err := verify(); err != nil {
-		t.Fatalf("tripwire fired with no sessions created: %v", err)
+	restoreHome := SandboxHome()
+	sandboxHome := os.Getenv("AGENT_FACTORY_HOME")
+	if err := os.WriteFile(ownerFile, []byte(sandboxHome+"\n"), 0644); err != nil {
+		restoreHome()
+		t.Fatalf("record sandbox home: %v", err)
 	}
-
-	const leak = "af_testguard_tripwire_leak"
-	if out, err := exec.Command("tmux", "new-session", "-d", "-s", leak, "sleep", "60").CombinedOutput(); err != nil {
-		t.Skipf("cannot start tmux session on private server: %v: %s", err, out)
-	}
+	markReady()
+	// Mirror TestMain: the sandbox is restored before the tripwire verifies.
+	restoreHome()
 
 	err := verify()
 	if err == nil {
-		t.Fatal("tripwire did not fire on a leaked af_ session")
+		t.Fatal("tripwire did not report the new session owned by this test run")
 	}
-	if !strings.Contains(err.Error(), leak) {
-		t.Fatalf("tripwire error should name the leaked session %q; got: %v", leak, err)
+	if !strings.Contains(err.Error(), "af_owned") {
+		t.Fatalf("tripwire did not name the session carrying this run's AF_HOME marker: %v", err)
 	}
-
-	if err := exec.Command("tmux", "kill-session", "-t", "="+leak).Run(); err != nil {
-		t.Fatalf("kill leaked session: %v", err)
+	if !strings.Contains(err.Error(), "af_overridden") {
+		t.Fatalf("tripwire lost ownership when the test overrode AGENT_FACTORY_HOME: %v", err)
 	}
-	if err := verify(); err != nil {
-		t.Fatalf("tripwire fired after the session was cleaned up: %v", err)
+	for _, notOwned := range []string{"af_preexisting", "af_foreign", "af_unmarked", "af_unreadable"} {
+		if strings.Contains(err.Error(), notOwned) {
+			t.Fatalf("tripwire attributed %s without proof that this run owns it: %v", notOwned, err)
+		}
+	}
+	for _, safeText := range []string{"live Agent Factory install or another concurrent run", "DO NOT KILL IT", "AF_DISABLE_TMUX_TRIPWIRE=1"} {
+		if !strings.Contains(err.Error(), safeText) {
+			t.Fatalf("tripwire diagnostic must contain %q, got: %v", safeText, err)
+		}
 	}
 }
 
@@ -330,5 +466,78 @@ func TestTmuxTripwire_IgnoresNonAFSessions(t *testing.T) {
 
 	if err := verify(); err != nil {
 		t.Fatalf("tripwire must ignore sessions without the af_ prefix; got: %v", err)
+	}
+}
+
+// tmuxServerPID returns the private tmux server's own PID, which is stable for
+// the life of one server and therefore identifies it across commands. On
+// failure it returns an empty PID plus tmux's own diagnostic, so a caller can
+// report WHY the server was unreachable rather than only that a read failed.
+func tmuxServerPID() (pid, diagnostic string) {
+	out, err := exec.Command("tmux", "display-message", "-p", "#{pid}").CombinedOutput()
+	if err != nil {
+		return "", strings.TrimSpace(string(out))
+	}
+	return strings.TrimSpace(string(out)), ""
+}
+
+// TestKeepTmuxServerOnEmptySurvivesGoingEmpty is the #3559 regression.
+//
+// tmux defaults exit-empty to ON, so a private server exits the moment its last
+// session is killed. Several reap tests kill their only session to model a
+// vanished one and then stage another on the SAME private server, and that
+// second new-session lands on a server already shutting down:
+//
+//	tmux new-session: server exited unexpectedly
+//
+// The failure is in the harness's own staging step, before the code under test
+// runs, so it reads as a defect in the reaper. KeepTmuxServerOnEmpty pins
+// exit-empty off at staging time; this asserts the server survives going empty.
+//
+// Deterministic in both directions, unlike the flake it prevents: measured 40/40
+// servers gone with the default and 40/40 alive with the pin. The server-PID
+// check is what makes it so — an unpinned run either finds no server at all or
+// finds a REPLACEMENT started by this very command, and a replacement is caught
+// on identity no matter how the shutdown raced.
+func TestKeepTmuxServerOnEmptySurvivesGoingEmpty(t *testing.T) {
+	IsolateTmux(t)
+
+	// Stage first, then read the identity. Mirroring the reap tests, which start
+	// the private server implicitly with their first new-session, keeps the
+	// failure below on the SURVIVAL property rather than on "a server exists" —
+	// otherwise an unpinned run fails before it reaches the interesting step.
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", "tg_empty_probe", "sleep 300").CombinedOutput(); err != nil {
+		t.Fatalf("stage first session: %v: %s", err, out)
+	}
+	KeepTmuxServerOnEmpty(t)
+	before, diag := tmuxServerPID()
+	if before == "" {
+		t.Fatalf("private tmux server unreachable while a session exists: %s", diag)
+	}
+	if out, err := exec.Command("tmux", "kill-session", "-t", "=tg_empty_probe:").CombinedOutput(); err != nil {
+		t.Fatalf("kill the only session: %v: %s", err, out)
+	}
+
+	// Zero sessions from here. Unpinned, the server exits at this point.
+	after, diag := tmuxServerPID()
+	switch {
+	case after == "":
+		t.Fatalf("the private tmux server did not survive going empty (pid %s is gone): %s", before, diag)
+	case after != before:
+		t.Fatalf("the private tmux server was REPLACED when it went empty: pid %s became %s; "+
+			"anything staged on the old server is silently gone", before, after)
+	}
+	out, err := exec.Command("tmux", "show-options", "-g", "exit-empty").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read exit-empty: %v: %s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "exit-empty off" {
+		t.Fatalf("private tmux server is not pinned against going empty: %q", got)
+	}
+
+	// The step that actually failed in #3559: staging another session on the
+	// same private server after it went empty.
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", "tg_empty_probe_2", "sleep 300").CombinedOutput(); err != nil {
+		t.Fatalf("stage a second session after the server went empty: %v: %s", err, out)
 	}
 }

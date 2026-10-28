@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/sachiniyer/agent-factory/internal/afhome"
 )
 
 // Log-rotation defaults (#1059). The log is rotated when it exceeds
@@ -127,7 +129,12 @@ func resolveLogPath() string {
 	if p == "" {
 		return filepath.Join(os.TempDir(), "agent-factory.log")
 	}
-	os.MkdirAll(filepath.Dir(p), 0700)
+	// Through the home guard: the historical default log path lives INSIDE the
+	// default AF home, so a bare MkdirAll here re-creates it (#3850). Initialize
+	// runs once, before the daemon arms the latch, so this is an exact
+	// os.MkdirAll in every process that exists today — routed anyway so the
+	// property stays checkable rather than argued from call ordering.
+	_ = afhome.MkdirAll(filepath.Dir(p), 0700)
 	return p
 }
 
@@ -158,7 +165,8 @@ func homeLogPath(create bool) string {
 		return ""
 	}
 	if create {
-		if os.MkdirAll(dir, 0700) != nil {
+		// Through the home guard: dir IS $AGENT_FACTORY_HOME (#3850).
+		if afhome.MkdirAll(dir, 0700) != nil {
 			return ""
 		}
 	} else if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {

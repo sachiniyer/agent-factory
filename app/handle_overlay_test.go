@@ -308,11 +308,9 @@ func TestHandleStateTasks_PendingCreateFlushesDirtyTaskState(t *testing.T) {
 // state while the sidebar showed disk state (divergence), and dirty was
 // cleared so the user couldn't tell anything went wrong.
 //
-// The fix's chosen recovery semantics (documented on saveContentPaneState):
-// reload BOTH panes from disk so they can never diverge, and surface the
-// persist failure via handleError so the dropped edit is never silent. We do
-// NOT keep dirty=true — after reloading from disk the in-memory edit is gone,
-// so a lingering dirty flag would point at nothing.
+// P4 recovery preserves the failed editor draft and dirty patch for retry,
+// while the sidebar reloads committed disk state. The recovery screen makes
+// the rejected save visible.
 //
 // We inject a real UpdateTask failure by making the config dir unwritable
 // after seeding: the file-lock/atomic-write both need to create files in that
@@ -378,24 +376,22 @@ func TestHandleStateTasks_ValidationFailureLeavesTaskPaneStale(t *testing.T) {
 	assert.NotEmpty(t, h.errBox.String(),
 		"BUG: save failure must be surfaced to the user, not silently swallowed")
 
-	// (b) TaskPane and sidebar agree, and both reflect committed disk state.
+	// (b) The sidebar reflects committed disk state; the editor retains its draft.
 	disk, err := task.LoadTasksForCurrentRepo()
 	require.NoError(t, err)
 	require.Len(t, disk, 1)
 	assert.True(t, disk[0].Enabled,
 		"the failed write must not have changed disk: it still holds the pre-toggle value")
 	require.Len(t, tp.GetTasks(), 1)
-	assert.True(t, tp.GetTasks()[0].Enabled,
-		"BUG: TaskPane must reload from disk after a failed save, not keep its stale toggle")
+	assert.False(t, tp.GetTasks()[0].Enabled,
+		"the failed draft value remains available for retry")
 	require.Len(t, h.store.GetTasks(), 1)
 	assert.True(t, h.store.GetTasks()[0].Enabled,
-		"sidebar must agree with the TaskPane (both reflect disk)")
+		"sidebar reflects committed disk state")
 
-	// (c) State is not left silently "saved": reloading cleared dirty, but the
-	// error surfaced above means the user knows the edit was dropped. A
-	// lingering dirty flag would point at edits the reload already discarded.
-	assert.False(t, tp.IsDirty(),
-		"reloading from disk clears dirty; the dropped edit is communicated via the error, not a dangling dirty flag")
+	// (c) The retained edit stays dirty so the next save can retry it.
+	assert.True(t, tp.IsDirty(),
+		"the failed patch stays dirty and retryable")
 }
 
 // TestHandleStateTasks_PendingTriggerSurvivesDeleteFailureReloadByID covers
@@ -432,6 +428,7 @@ func TestHandleStateTasks_PendingTriggerSurvivesDeleteFailureReloadByID(t *testi
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	require.Len(t, tp.GetTasks(), 1)
 	require.Equal(t, "task-b-1474", tp.GetTasks()[0].ID)
 
@@ -535,7 +532,8 @@ func TestHandleStateTasks_FailedCreateDoesNotDuplicateOnReopen(t *testing.T) {
 	// The transient failure clears; a later flush would succeed.
 	restoreUpdater()
 
-	// Esc closes the overlay.
+	// Esc first leaves the retained create form, then the task manager.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 	require.Equal(t, stateDefault, h.state, "Esc must close the tasks overlay")
 
@@ -679,6 +677,7 @@ func TestSaveContentPaneState_CommittedRemovalRefreshesAndWarns(t *testing.T) {
 	_, _ = h.showTasksOverlay()
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 
 	t.Cleanup(SetTaskRemoverForTest(func(id string, expect task.ProjectExpectation) error {
 		require.NoError(t, task.RemoveTask(id, expect))
@@ -753,6 +752,7 @@ func TestSaveContentPaneState_RoutesThroughDaemonRPC(t *testing.T) {
 	// Move to the second task (gone) and delete it.
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	require.True(t, tp.IsDirty(), "toggle + delete must mark the pane dirty")
 
 	// Esc releases focus → the overlay closes and saveContentPaneState runs.
@@ -1034,4 +1034,100 @@ func TestSaveContentPaneState_HooksAndTaskFailuresBothSurfaced(t *testing.T) {
 	assert.ErrorIs(t, err, wantHooksErr, "the hooks error must not be dropped")
 	assert.Contains(t, err.Error(), "failed to save task",
 		"the task error must not be dropped when hooks also fail")
+}
+
+// TestHandleStateTasks_PendingTriggerLeakOnEscCloseReopen covers the esc-close
+// half of the #1531 contract. SetTasks (ui/task_pane_state.go:96-101) defers
+// dropping a pending run-now to the overlay-close path: it deliberately keeps
+// pendingTrigger across saveContentPaneState's mid-flush reload so the run-now
+// can still resolve by task ID after a failed-save reconcile (#1474), and
+// relies on SetFocus(false) to clear pendingTrigger/pendingTriggerID when the
+// overlay closes. The list-mode esc handler in ui/task_pane.go wrote hasFocus
+// directly, bypassing SetFocus(false), so a run-now whose pre-trigger flush
+// failed survived the close and fired on the first keypress after reopen —
+// the unsolicited-run class #1531 exists to prevent. Routing the esc close
+// through SetFocus(false) makes the documented drop actually run.
+func TestHandleStateTasks_PendingTriggerLeakOnEscCloseReopen(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(500, 1)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	runner := task.Task{
+		ID: "trigger-1531", Name: "trigger task", Prompt: "p",
+		CronExpr: "* * * * *", ProjectPath: repo.Root, Program: "claude",
+		Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(runner))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+
+	// Record every "run now" routed through the daemon trigger seam. Installed
+	// before `r` so a stray fire on the run-press itself is caught too.
+	var triggered []string
+	t.Cleanup(SetTaskTriggerForTest(func(taskID string, _ task.ProjectExpectation) error {
+		triggered = append(triggered, taskID)
+		return nil
+	}))
+
+	// showTasksOverlay drops into the selected task's edit form (#1249); one
+	// Esc steps back to the list where `x` toggles and `r` runs.
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// A dirty edit is a leak precondition: with nothing dirty the pre-trigger
+	// flush early-returns, handleTaskTrigger fires on the same keypress, and
+	// ConsumePendingTrigger clears the flag — so no leak window is left open.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	require.True(t, tp.IsDirty(), "toggle must mark the pane dirty")
+
+	// Force the pre-trigger flush to fail so pendingTrigger is stranded: the
+	// toggle update fails, the toggle stays dirty (#4487), handleTaskTrigger is
+	// never reached, and the flag survives the failed flush.
+	restoreUpdater := SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
+		return fmt.Errorf("daemon RPC failure")
+	})
+
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	require.True(t, tp.HasPendingTrigger(),
+		"the pending trigger must survive a failed pre-trigger flush")
+	assert.Empty(t, triggered,
+		"the failed flush must not fire the trigger (handleTaskTrigger is skipped)")
+
+	// Restore the seam so the esc-close flush succeeds and the close actually
+	// lands; otherwise the dirty toggle keeps failing and re-arming recovery.
+	restoreUpdater()
+
+	// Esc closes the overlay from list mode — the bypass. Pre-fix it wrote
+	// hasFocus=false directly, skipping the SetFocus(false) clear of
+	// pendingTrigger/pendingTriggerID that the SetTasks contract relies on.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "Esc must close the tasks overlay")
+	assert.False(t, tp.HasPendingTrigger(),
+		"Esc close must drop a pending trigger (#1531 contract, task_pane_state.go:96-101)")
+
+	// Reopen (drops into the selected task's edit form) and press any key.
+	// Pre-fix the surviving flag short-circuited handleStateTasks to the
+	// trigger branch on that next keypress, firing the originally-pressed task
+	// the user never re-requested. The key's own handling is irrelevant:
+	// HasPendingTrigger() gates the branch regardless of whether it consumed.
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	_, cmd := h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	drainCmd(t, cmd, 500*time.Millisecond)
+
+	assert.Empty(t, triggered,
+		"reopening after an esc-close must NOT fire the stale pending trigger")
+	assert.False(t, tp.HasPendingTrigger(),
+		"no pending trigger must remain after the reopen keypress")
 }

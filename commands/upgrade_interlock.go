@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -75,6 +74,11 @@ type activeUpgrade struct {
 	// unknown, but the staged binary proves it exists and names it for a user
 	// who needs to clear a leftover.
 	artifact string
+	// reason is what the artifact scan could establish — "still active in
+	// /home/x/.agent-factory", "its home cannot be read". A
+	// refusal that only says "something is staged here" is the one a user cannot
+	// act on, which is how a leftover became permanent in the first place.
+	reason string
 }
 
 // blockedInPlaceInstallError is returned when an in-place swap is refused. It
@@ -94,8 +98,8 @@ func (e *blockedInPlaceInstallError) Error() string {
 	)
 	if e.active.artifact != "" {
 		msg = fmt.Sprintf(
-			"a daemon upgrade is staging over this executable (transaction %s, preserved binary %s); it belongs to another agent-factory home, and installing over it would destroy the rollback that upgrade depends on",
-			e.active.ID, e.active.artifact,
+			"a daemon upgrade is staging over this executable (transaction %s, preserved binary %s): %s, and installing over it would destroy the rollback that upgrade depends on",
+			e.active.ID, e.active.artifact, e.active.reason,
 		)
 	}
 	if e.flag == "" {
@@ -205,43 +209,38 @@ func isTerminalUpgradePhase(phase upgradetxn.Phase) bool {
 // (binaryArtifactPaths), so the executable's own directory is the one place
 // every home's transaction is visible.
 //
-// Read with ReadDir and a literal prefix rather than filepath.Glob: an
-// executable whose name contains a glob metacharacter would otherwise silently
-// match the wrong set, and this decides whether to overwrite a binary.
-func foreignUpgradeStagingOver(resolvedPath, ownID string) *activeUpgrade {
-	dir := filepath.Dir(resolvedPath)
-	prefix := "." + filepath.Base(resolvedPath) + ".af-upgrade-"
-	entries, err := os.ReadDir(dir)
+// The decision itself is upgradetxn's, deliberately (#3864). Both installers
+// look at the same directory, and a second implementation of "is this artifact
+// live" would drift from the engine's — with the disagreement showing up as one
+// of them saying "proceed" over a rollback the other was protecting. This
+// function is now only the in-place path's POLICY: whether it may clear, and
+// how to phrase the refusal.
+func foreignUpgradeStagingOver(resolvedPath, ownID string, opts upgradetxn.ArtifactScanOptions) *activeUpgrade {
+	blocking, err := upgradetxn.BlockingStagedArtifact(resolvedPath, ownID, opts)
 	if err != nil {
 		// Cannot enumerate: inconclusive, and inconclusive never blocks.
+		log.WarningLog.Printf("upgrade interlock: cannot inspect the executable's directory for other upgrade transactions; proceeding: %v", err)
 		return nil
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".previous") {
-			continue
-		}
-		id := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".previous")
-		if id == "" || id == ownID {
-			// Ours, and the journal policy above already decided this home may
-			// proceed — a committed transaction whose Cleanup has not yet removed
-			// the preserved binary must not re-block the install it just allowed.
-			continue
-		}
-		return &activeUpgrade{ID: id, artifact: filepath.Join(dir, name)}
+	if blocking == nil {
+		return nil
 	}
-	return nil
+	return &activeUpgrade{ID: blocking.ID, artifact: blocking.PreviousPath, reason: blocking.Reason}
 }
 
-// writeExecutableInPlace is the ONE guarded in-place binary swap. Both installers
-// go through it, so the interlock cannot be bypassed by adding a call site — the
-// entrypoint checks elsewhere exist to give a better message and to skip a
-// pointless download, not to be the guard.
+// clearUnverifiableStagedArtifacts is the operator's opt-in to clearing a staged
+// artifact whose owning home af cannot read.
 //
-// override is the caller's explicit "install anyway"; it is honoured, and logged,
-// because an unoverridable auto-upgrade safeguard is its own hazard.
-func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, flag string) error {
-	return writeExecutableInPlaceAllowing(resolvedPath, binary, override, flag, false)
+// Read from disk on each swap rather than captured once: the operator sets it
+// precisely BECAUSE an upgrade is refusing, and a value cached at process start
+// would make them restart something to be heard. A config that cannot be read is
+// not consent — the safe answer to "I could not tell" is the conservative one.
+func clearUnverifiableStagedArtifacts() bool {
+	loaded, err := config.LoadConfigReadOnly()
+	if err != nil || loaded.Config == nil {
+		return false
+	}
+	return loaded.Config.UpgradeClearUnverifiableArtifacts
 }
 
 // writeExecutableInPlaceAllowing is the guarded swap with the REJECTED-CANDIDATE
@@ -299,7 +298,14 @@ func writeExecutableInPlaceWaiting(
 			// Nothing blocking in THIS home. The executable is shared across
 			// homes, so ask the executable itself — skipping our own artifacts,
 			// which the decision above already accounted for.
-			active = foreignUpgradeStagingOver(resolvedPath, ownID)
+			//
+			// Clearing is allowed HERE and nowhere else on this path: this runs
+			// inside the preparation and executable locks, so a sweep cannot race
+			// a transaction that is mid-stage.
+			active = foreignUpgradeStagingOver(resolvedPath, ownID, upgradetxn.ArtifactScanOptions{
+				Clear:             true,
+				ClearUnverifiable: clearUnverifiableStagedArtifacts(),
+			})
 		}
 		if active != nil {
 			if !override {
@@ -310,7 +316,14 @@ func writeExecutableInPlaceWaiting(
 				active.ID, active.Phase,
 			)
 		}
-		return config.AtomicWriteFile(resolvedPath, binary, 0755)
+		// Refuses a symlinked destination (#3672). Both production callers hand
+		// this an already-EvalSymlinks'd path, so a link here means the final
+		// component became one between that resolution and this write — exactly
+		// the state where swapping the binary is least safe. Refusing keeps the
+		// in-place installer from writing an executable to a path nobody
+		// resolved, and it is the same fail-closed polarity as the rest of this
+		// interlock.
+		return config.AtomicWriteFileRefusingLink(resolvedPath, binary, 0755)
 	}
 
 	// Check and write under the transaction preparation lock, so the two cannot
@@ -399,5 +412,22 @@ func upgradeOwningThisExecutable() *activeUpgrade {
 	if err != nil {
 		return nil
 	}
-	return foreignUpgradeStagingOver(resolved, ownID)
+	// No clearing: this probe runs before the locks, and setting a file aside
+	// while another process may be staging one is exactly the race the locks
+	// exist for. Debris still does not BLOCK here — it simply stays until a
+	// locked path sweeps it.
+	//
+	// ClearUnverifiable IS read here, however: this probe's verdict is the one
+	// that opens or holds the throttle window, and an operator who set
+	// upgrade_clear_unverifiable_artifacts = true did so precisely because a
+	// stale unverifiable artifact is refusing the install. The locked swap
+	// honours the same config; a probe that blocks where the swap would clear
+	// is the over-block this gate exists to prevent — it suppresses the
+	// launch-time install until someone runs `af upgrade` once. Honoring the
+	// config does not let this probe write: clearable returns false when Clear
+	// is false, so setting ClearUnverifiable here only stops it from
+	// suppressing an install the locked swap will allow.
+	return foreignUpgradeStagingOver(resolved, ownID, upgradetxn.ArtifactScanOptions{
+		ClearUnverifiable: clearUnverifiableStagedArtifacts(),
+	})
 }

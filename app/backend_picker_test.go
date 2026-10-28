@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -13,14 +12,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
-	"github.com/sachiniyer/agent-factory/session"
 )
 
-// #1933: no surface but the CLI could choose a session's backend. The web half
-// landed in #1968 (a picker over the daemon's ListBackends catalog); the TUI was
-// the surface left out — `N` forces the hook backend and nothing else, so a docker
-// or ssh session could not be started from the primary interface at all.
-//
 // These tests drive the REAL key path (handleKeyPress plus the async catalog
 // message), because every interesting failure in this flow lives in the hops: a
 // key swallowed on the way to handleStateNew, a picker opened over a form that
@@ -71,7 +64,7 @@ func openBackendField(t *testing.T, h *home) []tea.Msg {
 // submits it.
 //
 // The submit goes through handleKeyPress but its cmd is discarded rather than
-// drained: a modal state takes no highlight re-emit hop, and a REFUSED choice
+// drained: a modal state takes no menu highlight, and a REFUSED choice
 // answers with a transient notice whose cmd is the clear TIMER — draining that
 // would just wait out a deadline.
 func pickBackend(t *testing.T, h *home, label string) {
@@ -90,16 +83,11 @@ func pickBackend(t *testing.T, h *home, label string) {
 }
 
 // pressExpectingNotice presses a naming-form key that answers with a transient
-// notice. It replays the highlight re-emit hop like pressFormKey — the hop is
-// where a swallowed key would hide — but never waits on the notice's own cmd.
+// notice. Unlike pressFormKey it never waits on the notice's own cmd, whose
+// clear timer would only run out a deadline.
 func pressExpectingNotice(t *testing.T, h *home, msg tea.KeyMsg) {
 	t.Helper()
-	_, cmd := h.handleKeyPress(msg)
-	for _, produced := range drainCmd(t, cmd, time.Second) {
-		if km, ok := produced.(tea.KeyMsg); ok {
-			_, _ = h.handleKeyPress(km)
-		}
-	}
+	_, _ = h.handleKeyPress(msg)
 }
 
 // TestNamingFormBackendReachesSessionStartRequest is the #1933 regression guard
@@ -470,9 +458,9 @@ func TestStartNewInstanceResetsTheBackendField(t *testing.T) {
 	h.errBox.SetSize(120, 1)
 	h.pendingBackend = config.BackendDocker
 
-	model, cmd := h.startNewInstance(false)
+	model, _ := h.startNewInstance()
 	require.Same(t, h, model)
-	require.Nil(t, cmd)
+	requireNamingFormOpened(t, h)
 	require.Equal(t, stateNew, h.state)
 
 	assert.Empty(t, h.pendingBackend, "beginning a create must start from the repo default")
@@ -514,44 +502,6 @@ func TestBackendHintClickOpensTheField(t *testing.T) {
 	_, cmd := h.handleHintClick("ctrl+r")
 	require.NotNil(t, cmd, "clicking the hint must start the catalog fetch")
 	require.Equal(t, tea.KeyCtrlR, msg.Type)
-}
-
-// TestNamingFormBackendAndForceRemoteAgree pins the interaction with `N`, the
-// legacy hook selector. Both can be set on one request; the daemon's precedence is
-// explicit-backend-first (session/instance_factory.go resolveBackendKind), so the
-// field must win over ForceRemote rather than being masked by it.
-func TestNamingFormBackendAndForceRemoteAgree(t *testing.T) {
-	h := newTestHome(t)
-	h.errBox.SetSize(120, 1)
-	got := recordStartRequest(t)
-	stubBackends(t, twoUsableBackends(), nil)
-
-	// `N` is now recorded on the model, not inferred from the naming row's
-	// provisioned runtime (#2599 — the row provisions nothing at all any more), so
-	// this is what startNewInstance(true) leaves behind. The end-to-end wiring from
-	// the keypress to this field is covered by
-	// TestStartNewRemoteThreadsForceRemoteFromTheKeypress; here it is set directly
-	// so the assertion stays about the request, not about how the flag got set.
-	remote, err := session.NewInstance(session.InstanceOptions{
-		Title:   "forced-remote",
-		Path:    t.TempDir(),
-		Program: "claude",
-		Backend: session.BackendLocal,
-	})
-	require.NoError(t, err)
-	h.store.AddInstance(remote)
-	h.namingInstance = remote
-	h.pendingProgram = "claude"
-	h.pendingForceRemote = true
-	h.state = stateNew
-
-	openBackendField(t, h)
-	pickBackend(t, h, "docker")
-	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
-
-	assert.Equal(t, config.BackendDocker, got.Backend, "the picked backend must be sent")
-	assert.True(t, got.ForceRemote,
-		"N's selector is still reported; the daemon resolves the explicit backend first")
 }
 
 // TestBackendChoicesFromDescribesTheDefaultHonestly covers the pure mapping,
@@ -597,4 +547,95 @@ func TestBackendChoicesFromDescribesTheDefaultHonestly(t *testing.T) {
 		assert.Equal(t, label, choices[1].label, "the hook row must read as the launcher the repo configured")
 		assert.Equal(t, config.BackendHook, choices[1].value, "…while still sending the literal wire key")
 	})
+}
+
+// TestBackendPickerCallbacklessBackendStaysSelectable is the W3.1 advisory
+// contract (#5571): a backend the daemon says will create WITHOUT an af
+// callback is neither refused nor silent — the row is flagged before the
+// keypress, the select proceeds and attaches the backend, and the answer lands
+// as a NOTICE (advisory), not an error, because the create succeeds.
+func TestBackendPickerCallbacklessBackendStaysSelectable(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(200, 1)
+	info, errorLogs := captureHomeMessageLogs(t)
+	const refusal = "refusing to give this sandbox a callback credential: require_token is false"
+	stubBackends(t, daemon.ListBackendsResponse{
+		Backends: []daemon.BackendOption{
+			{Name: config.BackendLocal, Label: "local", Status: daemon.BackendAvailable},
+			{Name: config.BackendSSH, Label: "ssh", Status: daemon.BackendAvailable,
+				CallbackUnavailableReason: refusal},
+		},
+		Default:       config.BackendLocal,
+		DefaultStatus: daemon.BackendAvailable,
+	}, nil)
+	startNaming(t, h, "callbackless")
+
+	openBackendField(t, h)
+	require.Contains(t, h.backendPickerChoices[2].item(), "no af callback",
+		"the row itself must flag the advisory before any keypress")
+	pickBackend(t, h, "ssh")
+
+	assert.Equal(t, config.BackendSSH, h.pendingBackend,
+		"an advisory must not block the select — a callback-less session beats no session")
+	assert.Contains(t, h.errBox.FullError(), "af callback unavailable: "+refusal,
+		"the notice repeats the same refusal the create will degrade with")
+	assert.Contains(t, info.String(), refusal,
+		"the advisory is ordinary user feedback — it filed at notice severity")
+	assert.Empty(t, errorLogs.String(),
+		"nothing failed; the advisory must not reach ERROR monitoring")
+}
+
+// TestBackendChoicesFromKeepsRefusalsOverAdvisories: an unavailable backend
+// keeps its OWN precondition reason even when the daemon also reports a
+// callback refusal — the advisory describes a create that would succeed, which
+// this backend cannot do yet.
+func TestBackendChoicesFromKeepsRefusalsOverAdvisories(t *testing.T) {
+	const refusal = "no control-plane listener is accepting"
+	choices := backendChoicesFrom(daemon.ListBackendsResponse{
+		Backends: []daemon.BackendOption{
+			{Name: config.BackendLocal, Label: "local", Status: daemon.BackendAvailable},
+			{Name: config.BackendSSH, Label: "ssh", Status: daemon.BackendUnavailable,
+				Reason:                    "backend=ssh requires ssh.host",
+				CallbackUnavailableReason: refusal},
+		},
+		Default:       config.BackendLocal,
+		DefaultStatus: daemon.BackendAvailable,
+	})
+
+	var ssh *backendChoice
+	for i := range choices {
+		if choices[i].value == config.BackendSSH {
+			ssh = &choices[i]
+		}
+	}
+	require.NotNil(t, ssh)
+	assert.Equal(t, daemon.BackendUnavailable, ssh.status)
+	assert.Equal(t, "backend=ssh requires ssh.host", ssh.reason,
+		"the precondition names what to fix; the advisory would say what would also be missing")
+	assert.False(t, ssh.callbackless, "a create that cannot run has no 'will lack callback' to flag")
+}
+
+// TestBackendChoicesFromCarriesHostReadinessNote is #5785: the web renders the
+// readiness note of an unprobed or stale host beside the available backend; the
+// TUI must too, still selectable, joined to any callback advisory.
+func TestBackendChoicesFromCarriesHostReadinessNote(t *testing.T) {
+	const note = "not probed yet — the host is checked when a session is created"
+	choices := backendChoicesFrom(daemon.ListBackendsResponse{
+		Backends: []daemon.BackendOption{
+			{Name: config.BackendSandbox, Label: "sandbox", Status: daemon.BackendAvailable, Note: note},
+			{Name: config.BackendSSH, Label: "ssh", Status: daemon.BackendAvailable, Note: note, CallbackUnavailableReason: "no listener"},
+		},
+		Default:       config.BackendSandbox,
+		DefaultStatus: daemon.BackendAvailable,
+	})
+	byValue := map[string]backendChoice{}
+	for _, c := range choices {
+		byValue[c.value] = c
+	}
+	assert.Equal(t, "Host "+note, byValue[config.BackendSandbox].reason)
+	assert.Equal(t, daemon.BackendAvailable, byValue[config.BackendSandbox].status)
+	assert.Equal(t, "Host "+note, byValue[repoDefaultBackend].reason, "the repo-default row resolves to the same backend")
+	assert.False(t, byValue[config.BackendSandbox].callbackless)
+	assert.Equal(t, "Host "+note+" · "+"af callback unavailable: no listener", byValue[config.BackendSSH].reason)
+	assert.True(t, byValue[config.BackendSSH].callbackless)
 }

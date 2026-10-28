@@ -1,0 +1,10 @@
+Command (before implementation):
+cd web && node --import tsx --test src/terminal-keybar.test.ts
+
+Observed exit status: 1
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'web/src/terminal-keybar.js'
+imported from web/src/terminal-keybar.test.ts
+
+The five new mapping, one-shot, lock, sequence-preservation and pointerdown
+cases were authored before the module existed. After implementation, all five
+passed; the full suite passed 737 tests.

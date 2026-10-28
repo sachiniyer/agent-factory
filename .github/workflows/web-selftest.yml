@@ -1,6 +1,6 @@
 name: Web selftest
 
-# The Playwright web-driver selftest (#1592 Phase 5 PR6, docs/web-selftest.md):
+# The Playwright web-driver selftest (#1592 Phase 5 PR6, docs/dev/web-selftest.md):
 # a real af daemon on a throwaway home, two seeded sessions behind a fake agent,
 # and the embedded SPA driven in a headless Chromium. It is the acceptance proof
 # for the web client and, until #2069, it ran only when someone typed `make
@@ -82,16 +82,18 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: web-selftest-${{ github.event.pull_request.number || github.ref }}
-  # Superseding a PR run is free — a newer head replaces the question being asked.
-  # NOTHING else is superseded, and the condition names the one event that may be
-  # rather than excluding the one that may not: a master run is its own verdict for
-  # its own commit, and cancelling it is how the per-commit attribution that is the
-  # entire reason for the push trigger gets lost. A `workflow_dispatch` shares this
-  # group with the master run (both key off github.ref), so an exclusionary
-  # condition would also let a manual "did master recover?" kill the push run it was
-  # asked about. Volume is bounded by the `paths:` filter above.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Three kinds of run share the ref refs/heads/master and must not cancel each
+  # other (#5660): this workflow's own push run, a pr.yml reusable call
+  # (schedule, merge_group, dispatch), and a manual dispatch of this workflow.
+  # In a called workflow `github.workflow` is the CALLER's name, so it tells the
+  # first two apart without a second input; the event adds the nightly and
+  # dispatch lanes. Within one lane a newer master push supersedes a stale run
+  # (the tip is the question; a burst of merges verifies the last one), and a
+  # superseded run is always replaced by a newer run of the same lane — a push
+  # that matches no `paths:` filter starts no run and so cancels none. merge_group
+  # refs are unique per queue entry, so entries never cancel each other.
+  group: web-selftest-${{ github.workflow == 'Web selftest' && 'standalone' || 'called' }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-nightly' || '' }}${{ github.event_name == 'workflow_dispatch' && '-dispatch' || '' }}
+  cancel-in-progress: true
 
 # Read-only: checks out source and runs the harness in a container. It never
 # comments on or modifies the PR. pr.yml grants the same, which is what lets it
@@ -111,7 +113,7 @@ jobs:
       - uses: actions/checkout@v6
 
       # `make web-selftest-container` is the ONLY sanctioned entry point
-      # (docs/web-selftest.md), and CI uses it verbatim rather than reimplementing
+      # (docs/dev/web-selftest.md), and CI uses it verbatim rather than reimplementing
       # the steps — a CI-only copy of the harness is how the thing CI runs stops
       # being the thing developers run. The ubuntu runner ships Docker, which is
       # all the target needs; pr.yml's macOS job cannot host it for exactly this

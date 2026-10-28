@@ -12,8 +12,8 @@ import (
 // ambient key on that host must not reach either.
 
 func TestAccountMountAndEnv_TwoAccountsGetDifferentRoots(t *testing.T) {
-	a, aEnv, aErr := accountMountAndEnv(sessionenv.Account{Agent: "codex", Name: "work", Dir: "/home/op/.agent-factory/accounts/codex/work"})
-	b, bEnv, bErr := accountMountAndEnv(sessionenv.Account{Agent: "codex", Name: "personal", Dir: "/home/op/.agent-factory/accounts/codex/personal"})
+	a, aEnv, aErr := accountMountAndEnv(sessionenv.Account{Agent: "codex", Name: "work", Dir: "/home/op/.agent-factory/accounts/codex/work"}, true)
+	b, bEnv, bErr := accountMountAndEnv(sessionenv.Account{Agent: "codex", Name: "personal", Dir: "/home/op/.agent-factory/accounts/codex/personal"}, true)
 
 	if aErr != nil || bErr != nil {
 		t.Fatalf("an absolute account dir must resolve: %v %v", aErr, bErr)
@@ -45,7 +45,7 @@ func TestAccountMountAndEnv_TwoAccountsGetDifferentRoots(t *testing.T) {
 func TestAccountMountAndEnv_RelabelsOrdinaryPathsForSELinux(t *testing.T) {
 	mount, _, err := accountMountAndEnv(sessionenv.Account{
 		Agent: "codex", Name: "work", Dir: "/acct/codex/work",
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("ordinary account mount failed: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestAccountMountAndEnv_RelabelsOrdinaryPathsForSELinux(t *testing.T) {
 
 func TestDockerAccountMount_RefusesColonPathOnSELinux(t *testing.T) {
 	_, err := dockerAccountMount("work", "/srv/af:work/accounts/codex/work", true)
-	if err == nil || !strings.Contains(err.Error(), "SELinux-enforcing") {
+	if err == nil || !strings.Contains(err.Error(), "SELinux relabel") {
 		t.Fatalf("colon path on enforcing host must refuse with a workaround, got %v", err)
 	}
 }
@@ -65,18 +65,18 @@ func TestDockerAccountMount_RefusesColonPathOnSELinux(t *testing.T) {
 // claude uses a different variable, and getting it wrong would silently leave the
 // agent on the container's default home — present, wrong, and quiet.
 func TestAccountMountAndEnv_UsesTheAgentsOwnConfigVar(t *testing.T) {
-	_, env, _ := accountMountAndEnv(sessionenv.Account{Agent: "claude", Name: "work", Dir: "/acct/claude/work"})
+	_, env, _ := accountMountAndEnv(sessionenv.Account{Agent: "claude", Name: "work", Dir: "/acct/claude/work"}, true)
 	want := "CLAUDE_CONFIG_DIR=" + dockerAccountHome
 	if got, found := dockerEnvArg(env, "CLAUDE_CONFIG_DIR"); !found || got != want {
 		t.Fatalf("want %q, got %v", want, env)
 	}
 	// An agent with no account support produces nothing rather than a mount the
 	// agent would never read.
-	if mount, env, _ := accountMountAndEnv(sessionenv.Account{Agent: "aider", Name: "work", Dir: "/acct/aider/work"}); mount != nil || env != nil {
+	if mount, env, _ := accountMountAndEnv(sessionenv.Account{Agent: "aider", Name: "work", Dir: "/acct/aider/work"}, true); mount != nil || env != nil {
 		t.Errorf("an agent without account support must produce no mount; got %v %v", mount, env)
 	}
 	// A zero account is unscoped, not an empty mount spec.
-	if mount, env, _ := accountMountAndEnv(sessionenv.Account{}); mount != nil || env != nil {
+	if mount, env, _ := accountMountAndEnv(sessionenv.Account{}, true); mount != nil || env != nil {
 		t.Errorf("an unscoped session must produce nothing; got %v %v", mount, env)
 	}
 }
@@ -136,7 +136,7 @@ func TestRefuseOffBoxAccount_AllowsDockerRefusesTheRest(t *testing.T) {
 func TestAccountMountAndEnv_UnresolvablePathRefuses(t *testing.T) {
 	// An empty Dir is "unscoped" and must stay a clean no-op — the refusal is for a
 	// path that was requested and could not be resolved, not for the absence of one.
-	mount, env, err := accountMountAndEnv(sessionenv.Account{})
+	mount, env, err := accountMountAndEnv(sessionenv.Account{}, true)
 	if mount != nil || env != nil || err != nil {
 		t.Fatalf("an unscoped session must be a silent no-op; got %v %v %v", mount, env, err)
 	}

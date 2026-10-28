@@ -13,11 +13,8 @@ import (
 // engine's hard minimum (RFC §2.6): no regions are laid out, so the whole
 // window renders this centered notice instead. Exactly width×height cells.
 func TerminalTooSmall(width, height int) string {
-	msg := fmt.Sprintf("Terminal too small\nneed at least %d×%d",
-		layout.HardMinWidth, layout.HardMinHeight)
-	return layout.ClampToRect(
-		renderCenteredFallback(lipgloss.NewStyle(), msg, width, height),
-		layout.Rect{W: width, H: height})
+	return RecoveryScreen(layout.Rect{W: width, H: height}, "Terminal too small", "",
+		fmt.Sprintf("Resize to at least %d×%d.", layout.HardMinWidth, layout.HardMinHeight), false)
 }
 
 // renderCenteredFallback renders fallback text horizontally and vertically

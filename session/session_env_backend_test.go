@@ -9,12 +9,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestDockerEnvironmentDoesNotTrustRepoSelectedImageWithResolvedCredentials(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the pre-run locality guard passes without a docker call;
+	// this test captures `docker run`, which a remote engine never reaches.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	t.Setenv("OPENAI_API_KEY", "test-value")
 	t.Setenv("ANTHROPIC_API_KEY", "test-value")
 	repoRoot := initTempGitRepo(t)
@@ -303,7 +308,7 @@ func TestSandboxAgentServersCarryPassThroughNamesIntoFilteredExec(t *testing.T) 
 		t.Fatal(err)
 	}
 	for backend, command := range map[string]string{"docker": dockerCommand, "ssh": sshCommand} {
-		for _, want := range []string{"__af-session-env-exec", "agent-server", "--session-env", customName} {
+		for _, want := range []string{sessionenv.AgentServerExecMarker, "agent-server", "--session-env", customName} {
 			if !strings.Contains(command, want) {
 				t.Fatalf("%s agent-server command omitted %q", backend, want)
 			}
@@ -315,21 +320,27 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 	spec := ProvisionSpec{Title: "override", Program: tmux.ProgramClaude}
 	tests := map[string]struct {
 		executable    string
-		inner         string
+		extras        []string
+		args          []string
 		commandResult func() (string, error)
 	}{
 		"docker": {
 			executable: dockerAfBinaryPath,
-			inner: fmt.Sprintf("%s agent-server --listen :%s --repo %s --title %s --program %s --program-resolved",
-				shellQuote(dockerAfBinaryPath), dockerAgentPort, shellQuote(dockerWorkspaceDir), shellQuote(spec.Title), shellQuote(tmux.ProgramCodex)),
+			args: []string{"agent-server", "--listen", ":" + dockerAgentPort, "--repo", dockerWorkspaceDir,
+				"--title", spec.Title, "--program", tmux.ProgramCodex, "--program-resolved"},
 			commandResult: func() (string, error) {
 				return (&dockerProvisioner{spec: spec, program: tmux.ProgramCodex}).agentServerCommand()
 			},
 		},
 		"ssh": {
 			executable: "/srv/af-session/af",
-			inner: fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s --program-resolved",
-				shellQuote("/srv/af-session/af"), shellQuote("/srv/af-session/workspace"), shellQuote(spec.Title), shellQuote(tmux.ProgramCodex)),
+			// The ssh handoff carries the runtime-identity ref NAME in extras
+			// (#5571 W1.1) so it lands in this one process's exec-time
+			// environment; docker's in-container launch has no remote /proc
+			// identity probe and carries none.
+			extras: []string{runtimetoken.RefEnvName},
+			args: []string{"agent-server", "--listen", "127.0.0.1:0", "--repo", "/srv/af-session/workspace",
+				"--title", spec.Title, "--program", tmux.ProgramCodex, "--program-resolved"},
 			commandResult: func() (string, error) {
 				return (&sandboxWorkspace{spec: spec, program: tmux.ProgramCodex, SessionDir: "/srv/af-session"}).agentServerCommand()
 			},
@@ -340,13 +351,53 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		want, err := sessionenv.WrapCommand(test.executable, tmux.ProgramCodex, nil, test.inner)
+		want, err := sessionenv.WrapAgentServerCommand(test.executable, test.extras, test.args)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if command != want {
 			t.Fatalf("%s agent-server command = %q, want the resolved Codex command inside the Codex filter %q", backend, command, want)
 		}
+	}
+}
+
+// The backend-owned af path and structured agent-server args are produced
+// together here. This pins the real seam: the generated marker derives policy
+// from the command it must exec instead of accepting an agent claim or treating
+// a discoverable path as proof. `cat` is deliberate: a valid non-agent program
+// selects no credential allowlist and must still launch. The empty program is
+// the other generated grammar and derives agent-server's Claude default.
+func TestSandboxAgentServerBuildsEffectBoundWrapperVariants(t *testing.T) {
+	for name, program := range map[string]string{"non-agent": "cat", "default": ""} {
+		t.Run(name, func(t *testing.T) {
+			spec := ProvisionSpec{Title: "authenticated", Program: program}
+			tests := map[string]struct {
+				wrapper string
+				build   func() (string, error)
+			}{
+				"docker": {
+					wrapper: dockerAfBinaryPath,
+					build: func() (string, error) {
+						return (&dockerProvisioner{spec: spec, program: spec.Program}).agentServerCommand()
+					},
+				},
+				"ssh": {
+					wrapper: "/srv/af-session/af",
+					build: func() (string, error) {
+						return (&sandboxWorkspace{spec: spec, program: spec.Program, SessionDir: "/srv/af-session"}).agentServerCommand()
+					},
+				},
+			}
+			for backend, test := range tests {
+				command, err := test.build()
+				if err != nil {
+					t.Fatalf("%s handoff did not authenticate its backend-owned wrapper %q: %v", backend, test.wrapper, err)
+				}
+				if !strings.Contains(command, test.wrapper) {
+					t.Fatalf("%s handoff omitted its backend-owned wrapper %q: %q", backend, test.wrapper, command)
+				}
+			}
+		})
 	}
 }
 
@@ -378,39 +429,17 @@ func TestSSHAgentServerCommandExecsAtRecordedPID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inner := fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s --program-resolved",
-		shellQuote(w.AfPath()), shellQuote(w.WorkspacePath()), shellQuote(spec.Title), shellQuote(spec.Program))
-	want, err := sessionenv.WrapCommand(w.AfPath(), tmux.ProgramCodex, nil, inner)
+	args := []string{"agent-server", "--listen", "127.0.0.1:0", "--repo", w.WorkspacePath(),
+		"--title", spec.Title, "--program", spec.Program, "--program-resolved"}
+	// Extras carries exactly the token-ref NAME (#5571 W1.1): the channel that
+	// reaches this process's exec-time environment — and the value that name
+	// resolves to lives only in the sourced af-identity.env, never in argv.
+	want, err := sessionenv.WrapAgentServerCommand(w.AfPath(), []string{runtimetoken.RefEnvName}, args)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if command != want {
 		t.Fatalf("SSH agent-server launch does not exec af at the PID recorded for teardown: %q", command)
-	}
-}
-
-func TestPreResolvedSandboxProgramBypassesSecondOverrideLookup(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	repoRoot := initTempGitRepo(t)
-	writeInRepoConfig(t, repoRoot, map[string]any{
-		"program_overrides": map[string]any{
-			tmux.ProgramCodex: "codex --model second-lookup",
-		},
-	})
-
-	resolved := &Instance{
-		Title:              "resolved",
-		Path:               repoRoot,
-		Program:            tmux.ProgramCodex,
-		preResolvedProgram: tmux.ProgramCodex,
-	}
-	if got := resolveProgramForInstance(resolved); got != tmux.ProgramCodex {
-		t.Fatalf("pre-resolved program = %q, want %q without a second override lookup", got, tmux.ProgramCodex)
-	}
-
-	ordinary := &Instance{Title: "ordinary", Path: repoRoot, Program: tmux.ProgramCodex}
-	if got := resolveProgramForInstance(ordinary); got != "codex --model second-lookup" {
-		t.Fatalf("ordinary program = %q, want one override lookup", got)
 	}
 }
 
@@ -427,8 +456,10 @@ func TestHookScriptRejectsAgentNameUsedAsDataAndGetsConfiguredEnvironment(t *tes
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv | cut -d= -f1\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	out, _, err := runHookScriptWithEnvironment(
-		hookDeleteTimeout, script, "./collect codex", []string{customName},
+	p := &hookProvisioner{program: "./collect codex"}
+	p.resolveAuthSelectors()
+	out, _, err := runHookScriptWithResolvedEnvironment(
+		hookDeleteTimeout, script, p.environmentAgent(), p.authSelectors, []string{customName},
 	)
 	if err != nil {
 		t.Fatal(err)

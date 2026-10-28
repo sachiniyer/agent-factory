@@ -1,0 +1,141 @@
+# Interface style guide
+
+The [interface design](interface-design.md) prescribes one treatment for each component.
+There are **23 design tokens: 12 colour roles, five type steps, four spacing steps and
+two radii**. The six liveness bindings are fixed semantics, including the empty running
+glyph. The only user-facing theme choice is **Light / Dark / System**. These are internal
+product constants, not user-editable tokens, presets or a custom-palette API.
+
+## Rules applied
+
+Read the rule, then compare its light/dark web and TUI specimens with the current screen.
+The specimens consume the generated CSS. TUI examples show the prescribed cell layout
+and colours in HTML; they are not a running Bubble Tea app. Example controls are inert,
+except native disclosure menus. System selects one of these same two themes.
+
+The web stills show the redesigned product after P2, recorded with the repository's
+[container recorder](../dev/demo-assets.md). TUI stills are real app-model Update/View
+frames after P5, with deterministic fixtures in both themes; they are not live agent
+recordings. The [TUI appearance gallery](tui-design-c-stills.md) covers the complete
+matrix, including Light · Dark · System. Empty/error web specimens link to the
+[P4 recovery matrix](recovery-stills.md). Click a still for the full screen.
+
+{{range .Components}}{{$c := .}}
+<h3>{{.Name}}</h3>
+<p>{{.Spec}}</p>
+{{range $.Themes}}{{$mode := .}}
+<div class="sg-pair">
+<section class="sg-theme" data-af-theme="{{.}}"><h4>Web · {{themeLabel .}}</h4>{{$c.Web}}</section>
+<figure><a href="../../assets/web/{{$c.WebStill}}{{if eq . "dark"}}-dark{{end}}.png"><img loading="lazy" src="../../assets/web/{{$c.WebStill}}{{if eq . "dark"}}-dark{{end}}.png" alt="Current web {{$c.WebStill}} screen in {{.}} theme"></a><figcaption>Rules applied · Real web screen · {{$c.WebStill}} · {{.}}{{if or (eq $c.Name "Empty states") (eq $c.Name "Errors and notices")}} · Context only; see the P4 recovery matrix{{end}}</figcaption></figure>
+</div>
+<div class="sg-pair">
+<section class="sg-theme sg-tui" data-af-theme="{{.}}"><h4>TUI · {{themeLabel .}}</h4><pre>{{tuiSample $c.TUI}}</pre></section>
+<figure>{{if $c.TUIStill}}<a href="../../assets/design/tui-c/{{$c.TUIStill}}-{{.}}.svg"><img loading="lazy" src="../../assets/tui/{{$c.TUIStill}}-{{.}}.png" alt="{{$c.TUINote}} · {{.}}"></a>{{end}}<figcaption>{{$c.TUINote}}{{if $c.TUIStill}} {{themeLabel .}} · Regenerated after P2/P5.{{end}}</figcaption></figure>
+</div>
+{{end}}{{end}}
+
+## Phone layout
+
+At widths up to 768px, a selected terminal is the screen. Keep this composition
+active while the drawer overlays it, without moving or resizing the terminal.
+Use one 48px top row: drawer toggle, truncating session title, static Keyboard
+ownership label and one … disclosure. Preserve the full title in title and aria
+text. The disclosure holds project choices, Sessions · Tasks · Config, install,
+Light · Dark · System, Disconnect, pane actions and the session tab switcher.
+Project choices and new-tab types are inline inside it, without nested disclosures.
+For a split session, show the focused pane and keep Hide pane in the menu; restore
+the split when returning to desktop.
+Escape closes the disclosure and returns focus to its trigger. The drawer, Tasks,
+Config and nonterminal content retain their existing phone layouts.
+
+While a terminal owns the keyboard, show one 44px keybar above the soft keyboard,
+following the visual viewport and safe-area insets. Ctrl, Alt, Esc, Tab, ^C,
+Paste and Arrows share the row. Arrows replaces it with More keys, ← ↑ ↓ →, and
+the A−/A+ terminal text size pair — display controls that send no input; More keys restores the
+primary row. At 360px, seven targets fit with 4px gaps and 8px horizontal insets;
+below 348px the keys narrow to a 40px floor so the row still fits a 320px phone,
+while the 44px height never changes. Hide the bar when ownership leaves the
+terminal or the viewport exceeds 768px. Refit the terminal so its last row
+remains above the bar.
+
+With the soft keyboard closed, the terminal element must occupy at least 85% of
+the visual viewport at 360, 390 and 430px. Browser assertions enforce this in both
+themes. Preserve the pane padding so the inset focus border cannot paint over
+column one; the screen must stay inside the host with no horizontal scroll.
+Keep all targets at least 44px, truncate instead of wrapping, use existing
+tokens and static glyphs, and do not animate.
+
+Ctrl and Alt apply once to the next key, including the bar’s own keys. Paste is
+exempt: a paste sends the clipboard verbatim and leaves any armed modifier
+armed, because a paste is not a keystroke. IME composition is sent unchanged
+and leaves the modifier armed.
+Double tap within 350ms to lock; tap again to release. An armed modifier has the
+selected-row surface, bold ink and accent edge. A locked modifier also has an
+accent outline and static ▸ marker. Buttons retain terminal focus on pointerdown;
+there is no animation. ^C always interrupts, even with a modifier armed.
+
+![Session-first phone terminal](../assets/design/3981/after-phone-session-390.png)
+
+## Implementation reference
+
+The examples above are the specification; this compact reference is for implementers,
+not a palette picker. Every value below comes from `design/tokens.json`. Adding a role
+or step fails validation: revise a component rule before enlarging this contract.
+
+<details><summary>Exact internal values · 23 tokens</summary>
+<table><thead><tr><th>Colour role</th><th>Light</th><th>Dark</th><th>Required use</th></tr></thead><tbody>
+{{range colorKeys}}{{$c := index $.Tokens.Colors .}}<tr><td>{{.}}</td><td>{{$c.Light}}</td><td>{{$c.Dark}}</td><td>{{$c.Role}}</td></tr>
+{{end}}</tbody></table>
+<table><thead><tr><th>Metric</th><th>Web</th><th>TUI</th><th>Required use</th></tr></thead><tbody>
+{{range valueKeys}}{{$v := index $.Tokens.Values .}}<tr><td>{{.}}</td><td>{{$v.CSS}}</td><td>{{$v.TUI}}</td><td>{{$v.Role}}</td></tr>
+{{end}}</tbody></table>
+</details>
+
+Body and state text meet 4.5:1 on both surfaces; body ink meets 7:1 on surface.
+Light control outlines meet 3:1 on both surfaces; dark outlines meet 1.5:1 on surface. Primary
+buttons use accent with surface text at 4.5:1. No extra selection, on-accent, danger,
+hover, shadow or preview colour exists. Selected rows use surface-raised and an accent
+marker; failed-operation text reuses dead. Ink-muted is secondary metadata only.
+Ink-muted must differ from ink by at least 1.5:1 luminance contrast in both themes
+and remain lower-contrast than ink on both planes. A matching liveness colour needs
+a per-theme `sharesMuted` rationale in the source; running and archived share it
+intentionally in light only.
+Fonts, 400/600 weight, 1.5 web line height, 44px touch height and a 2px focus ring are
+fixed component rules, not more tokens. Indicators never animate. User-caused web
+disclosures may take at most 120ms; reduced motion and all TUI changes are immediate.
+
+## Capture coverage
+
+The [Sessions still](../assets/tui/tui-sessions.svg) and
+[Tasks still](../assets/tui/tui-tasks.svg) use the same refreshed app-model driver
+as the light/dark matrix. The [TUI video](../assets/tui/demo.mp4) uses the separate
+real-agent recorder. Stand-in and model fixtures are identified at their source.
+
+## Regeneration
+
+Run `make docs`, then `go run ./scripts/gen-design --check` and `mkdocs build --strict`.
+The docs drift gate checks the web CSS, Go theme, docs CSS copy and this page together.
+Edit the token source and specimen sources, never these generated outputs.
+Every web UI PR must verify a focused session at phone widths (360, 390 and 430px)
+in both themes, including title truncation, overflow keyboard access and 44px
+controls. Regenerate affected container goldens and keep pixel-exact checks and
+performance budgets passing.
+
+## Recovery screens · P4
+
+The [recovery capture matrix](recovery-stills.md) shows the application’s empty,
+unavailable and failed-operation states in both themes. These captures come from
+asserted container selftest scenes; the surrounding chrome remains owned by P2.
+
+The [TUI recovery matrix](tui-recovery-stills.md) contains app-model driver
+captures in both themes, supplemented by an isolated real tmux onboarding run.
+
+## TUI roles · P5 slice A
+
+The [TUI role gallery](tui-design-a-stills.md) applies the generated roles to
+96 app-model driver stills. Slice A replaces the configurable TUI palette and
+private ANSI colours; the common overlay recipe and density cuts follow in B,
+and the Light/Dark/System selector and migration in C.
+
+The [TUI overlay and density gallery](tui-design-b-stills.md) applies the shared dialog frame and TUI cut list.
+The [TUI appearance gallery](tui-design-c-stills.md) shows Light / Dark / System and the retired-key migration.

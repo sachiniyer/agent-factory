@@ -85,6 +85,9 @@ SESSION_WEB_RESTORED=probe-restored
 # of proxying, and its tab is not deletable. Same substring caveat as above.
 SESSION_WEB_SHELVED=probe-shelved
 SEEDED_TASK=probe-task
+# The already-overdue task (#3626), seeded with a creation time a month back so the
+# web list has schedule health to render on load.
+OVERDUE_TASK=probe-overdue
 # The task-only project's task name (MOCK3), kept distinct from SEEDED_TASK so the
 # scoped Tasks assertions never collide on a substring match.
 TASK3_NAME=mock3-task
@@ -162,8 +165,11 @@ go build -buildvcs=false -o "$BIN" .
 # The fake agent prints a deterministic ready marker (the "live output" the
 # terminal flow asserts on) then execs `cat`, so typed input echoes back — the
 # same shape the WS PTY broker round-trip uses. Because the override is a custom
-# script (not literally "claude"), af appends no agent flags and counts the pane
-# ready as soon as it shows output (#1116/#1131).
+# script (not literally "claude"), af appends no agent flags; locally it counts
+# the pane ready as soon as it shows output (#1116/#1131), and for REMOTE
+# sessions the script also prints claude's ❯ glyph — the daemon cannot inspect
+# the remote pane's real command, so resolvedAgent falls back to the config
+# name and waits for claude's composer (see the printf inside).
 cat >"$HOME_DIR/fake-agent.sh" <<EOF
 #!/bin/sh
 # Creation-state probes deliberately hold the REAL backend path open. The web test
@@ -176,6 +182,13 @@ case "\$PWD" in
     *probe-create-fail*) sleep 4; exit 42 ;;
 esac
 printf '%s\n' "$READY_MARKER"
+# Print claude's composer glyph as the prompt line. Local sessions need no glyph
+# (the tmux binding exposes this script as the pane program, so readiness is the
+# generic any-output arm), but a REMOTE session has no local tmux binding and
+# resolvedAgent falls back to the config name "claude" — whose ready arm requires
+# "❯". Without it a remote create spins the full 60s waitForReady and dies.
+# (Same shape every integration fixture uses: printf '❯ ' then exec cat.)
+printf '❯ '
 exec cat
 EOF
 chmod +x "$HOME_DIR/fake-agent.sh"
@@ -223,11 +236,17 @@ if [ ! -d "$BROWSE/$BROWSE_L1/$BROWSE_L2/$BROWSE_REPO/.git" ]; then
     )
 fi
 
-# #2189: the primary repo has a real, versioned remote-hook configuration. The
-# commands only need to be discoverable for ListBackends' side-effect-free
-# availability check; the browser test never provisions a remote workspace.
+# #2189: the primary repo has a real, versioned remote-hook configuration.
 # Keeping the executable's real name in launch_cmd is what lets the daemon turn
 # af's internal "hook" key into the intent-bearing picker label.
+#
+# These are REAL provisioners, not availability stubs: the web-driver spec
+# submits a backend=hook create through the + New modal and expects a working
+# remote session (the browser-level half of the session.create.opt.backend /
+# .remote parity evidence; the wire-level half is integration's
+# TestWebCreateSessionOnHookBackend). The scripts below are a shell port of
+# integration's writeMockHookLaunch/writeMockHookDelete — clone origin, spawn a
+# real `af agent-server`, answer {"url","token"} — so keep the two in lockstep.
 mkdir -p "$MOCK/.agent-factory"
 cat >"$MOCK/.agent-factory/config.json" <<'EOF'
 {
@@ -240,14 +259,93 @@ EOF
 git -C "$MOCK" add .agent-factory/config.json
 git -C "$MOCK" commit -qm "configure mock remote sandbox"
 
-for hook in coder-launch.sh coder-delete.sh; do
-    cat >"/usr/local/bin/$hook" <<'EOF'
+# The hook backend refuses a repo with no CloneURL before launch_cmd runs, and
+# hands the script that URL as --repo. A local bare clone stands in for GitHub
+# (self-contained, no network) — the same trick integration's fixture uses.
+git clone -q --bare "$MOCK" "$MOCK.git"
+git -C "$MOCK" remote add origin "$MOCK.git"
+
+HOOK_STATE=/work/hook-sandboxes
+mkdir -p "$HOOK_STATE"
+
+# launch_cmd contract (docs/remote-hooks.md): flags --name/--title/--repo, with
+# --program + --program-resolved when the daemon resolved an override; clone the
+# workspace, run `af agent-server` detached on a private AGENT_FACTORY_HOME, and
+# print its {addr, token} banner as {"url","token"}. Paths are baked in — the
+# hook's environment is filtered, so ambient exports may not survive.
+cat >"/usr/local/bin/coder-launch.sh" <<EOF
 #!/bin/sh
-# The web selftest only probes availability; provisioning would be a fixture bug.
-exit 99
-EOF
-    chmod +x "/usr/local/bin/$hook"
+AF_BIN="$BIN"
+STATE="$HOOK_STATE"
+NAME="" TITLE="" REPO="" PROGRAM="" PROGRAM_RESOLVED=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --name) NAME="\$2"; shift 2;;
+    --title) TITLE="\$2"; shift 2;;
+    --repo) REPO="\$2"; shift 2;;
+    --program) PROGRAM="\$2"; shift 2;;
+    --program-resolved) PROGRAM_RESOLVED="--program-resolved"; shift;;
+    --branch) shift 2;;
+    --session-env) shift 2;;
+    *) shift;;
+  esac
 done
+[ -n "\$NAME" ] || { echo "launch: --name required" >&2; exit 64; }
+DIR="\$STATE/\$NAME"
+mkdir -p "\$DIR/home"
+git clone -q "\$REPO" "\$DIR/workspace"
+BANNER="\$DIR/banner.json"
+LOG="\$DIR/agent-server.log"
+: > "\$BANNER"
+ARGS="agent-server --listen 127.0.0.1:0 --repo \$DIR/workspace --title \$TITLE"
+[ -n "\$PROGRAM" ] && ARGS="\$ARGS --program \$PROGRAM"
+[ -n "\$PROGRAM_RESOLVED" ] && ARGS="\$ARGS \$PROGRAM_RESOLVED"
+AGENT_FACTORY_HOME="\$DIR/home" TERM=xterm nohup "\$AF_BIN" \$ARGS >"\$BANNER" 2>"\$LOG" &
+echo \$! > "\$DIR/pid"
+i=0
+while [ \$i -lt 200 ]; do
+  grep -q '"addr"' "\$BANNER" 2>/dev/null && break
+  i=\$((i + 1)); sleep 0.1
+done
+ADDR=\$(sed -n 's/.*"addr":"\([^"]*\)".*/\1/p' "\$BANNER")
+TOKEN=\$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "\$BANNER")
+[ -n "\$ADDR" ] || { echo "launch: af agent-server printed no banner:" >&2; cat "\$LOG" >&2; exit 1; }
+printf '{"url":"http://%s","token":"%s"}\n' "\$ADDR" "\$TOKEN"
+EOF
+chmod +x "/usr/local/bin/coder-launch.sh"
+
+cat >"/usr/local/bin/coder-delete.sh" <<EOF
+#!/bin/sh
+STATE="$HOOK_STATE"
+NAME=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --name) NAME="\$2"; shift 2;;
+    *) shift;;
+  esac
+done
+[ -n "\$NAME" ] || { echo "delete: --name required" >&2; exit 64; }
+PIDFILE="\$STATE/\$NAME/pid"
+if [ -f "\$PIDFILE" ]; then
+  PID="\$(cat "\$PIDFILE")"
+  kill "\$PID" 2>/dev/null || true
+  # Keep the pidfile until the process is confirmed gone — removing it on
+  # SIGTERM alone would report a SIGTERM-ignoring server as reaped.
+  tries=0
+  while [ \$tries -lt 100 ]; do
+    kill -0 "\$PID" 2>/dev/null || break
+    sleep 0.1
+    tries=\$((tries + 1))
+  done
+  if kill -0 "\$PID" 2>/dev/null; then
+    echo "delete: agent-server pid \$PID still alive after SIGTERM" >&2
+    exit 1
+  fi
+  rm -f "\$PIDFILE"
+fi
+printf '{"deleted":true}\n'
+EOF
+chmod +x "/usr/local/bin/coder-delete.sh"
 
 # --- start the daemon + wait for the HTTP listener --------------------------
 # Both are functions because the harness restarts the daemon once, to seed a record
@@ -277,6 +375,20 @@ wait_for_listener() {
     exit 1
 }
 
+# --- credential accounts for the create form's account picker (#3844) -------
+# Registered BEFORE the daemon starts, because they are a directory tree under the
+# throwaway home and `af accounts add` reads that home directly — no daemon
+# involved. Two states, so the picker has both to render: one with the artifact
+# claude's own login would leave and one without.
+#
+# NOTHING HERE IS CREDENTIAL MATERIAL. An account is a directory af creates and
+# hands to the agent; `logged_in` is a stat of a path af never opens, so an
+# empty-of-secrets `{}` is exactly as much as this fixture needs to make one row
+# report "logged in" and the other "not logged in".
+"$BIN" accounts add claude web-signed-in >/dev/null
+"$BIN" accounts add claude web-registered >/dev/null
+printf '{}\n' >"$HOME_DIR/accounts/claude/web-signed-in/.credentials.json"
+
 echo ">>> starting af daemon (listen_addr=$LISTEN) ..."
 start_daemon
 WEBTAB_SERVER_PID=""
@@ -295,6 +407,17 @@ cleanup() {
     "$BIN" sessions kill "$SESSION_MIS" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_DEAD" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_ORDER" >/dev/null 2>&1 || true
+    # Sweep hook-provisioned sessions the named list cannot know: the serial
+    # create test submits through the modal, so if an assertion fails the row
+    # outlives its test and its detached agent-server contaminates every later
+    # test's rail. launch_cmd namespaces each session under $HOOK_STATE, so the
+    # directory names ARE the session names — kill them through the daemon first
+    # (proper delete_cmd teardown), then reap any pid that survived anyway.
+    for d in "$HOOK_STATE"/*/; do
+        [ -d "$d" ] || continue
+        "$BIN" sessions kill "$(basename "$d")" >/dev/null 2>&1 || true
+        [ -f "$d/pid" ] && kill "$(cat "$d/pid")" >/dev/null 2>&1 || true
+    done
     kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
     kill "$VITE_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
@@ -369,17 +492,51 @@ for i in $(seq 1 30); do
 done
 
 # --- seed a scheduled task (#1592 Phase 5 PR8) ------------------------------
+# These tasks are armed on the daemon's real scheduler, so quietness has to be a
+# property of their schedule rather than an assumption about when CI starts. The
+# top of the hour twelve clock-hours ahead is always 11-12 hours away, well past
+# the far end of this ~35-minute suite. One shared expression covers every seeded
+# daily task below so a new fixture cannot quietly fall back to a fixed wall-clock
+# hour. It remains an ordinary enabled daily schedule: the deliberately old task
+# below is still overdue now and will still fire at its next occurrence (#4213).
+FIXTURE_HOUR="$(( ( $(date +%-H) + 12 ) % 24 ))"
+FIXTURE_CRON="0 $FIXTURE_HOUR * * *"
+
 # So the tasks view is non-empty on load. A cron task needs a prompt (there is no
-# event line to fall back to); the schedule never actually fires in the test window,
-# it just has to exist for the list + the enable/disable/trigger/remove flows.
+# event line to fall back to); it just has to exist for the list + the
+# enable/disable/trigger/remove flows.
 echo ">>> seeding task $SEEDED_TASK ..."
-"$BIN" tasks add --repo "$MOCK" --name "$SEEDED_TASK" --prompt "echo scheduled" --cron "0 9 * * *" >/dev/null
+"$BIN" tasks add --repo "$MOCK" --name "$SEEDED_TASK" --prompt "echo scheduled" --cron "$FIXTURE_CRON" >/dev/null
+
+# A task that is already OVERDUE on arrival (#3626), so the web's schedule-health
+# rendering has something to render without the test waiting out a cron window.
+#
+# It goes in over the daemon's own AddTask route rather than through `af tasks
+# add`, because the CLI has no way to say "created a month ago" — and the store
+# deliberately KEEPS an earlier created_at while clamping a future one, exactly so
+# a migration can import real history (task.resetStoreOwnedFields). With no
+# last_run_at, the derivation measures lateness from that creation time, so a
+# daily task created 30 days ago is overdue the moment the daemon reads it — about
+# thirty missed occurrences. No clock manipulation, no hand-edited tasks.json, and
+# no waiting.
+#
+# The shared cron above is load-bearing here too. A next occurrence inside the run
+# would actually FIRE: the daemon would stamp last_run_at, the task would stop being
+# overdue, and the assertion would fail while also launching an agent run nobody
+# asked for. Local hour, not UTC: a schedule with no zone is evaluated in the
+# location of the clock handed to it, and that is the daemon's (#3626 review).
+echo ">>> seeding overdue task $OVERDUE_TASK ..."
+OVERDUE_CREATED="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+curl -sS -X POST "$BASE_URL/v1/AddTask" \
+  -H 'Content-Type: application/json' \
+  -d "{\"task\":{\"id\":\"3626dead\",\"name\":\"$OVERDUE_TASK\",\"prompt\":\"echo overdue\",\"cron_expr\":\"$FIXTURE_CRON\",\"project_path\":\"$MOCK\",\"program\":\"claude\",\"enabled\":true,\"created_at\":\"$OVERDUE_CREATED\"},\"actor\":\"api\"}" \
+  >/dev/null
 
 # A task in the THIRD repo, which has NO session (redesign PR2, Greptile Fix 1): this
 # makes MOCK3 a TASK-ONLY project so the harness can prove it lists in the switcher
 # and its tasks scope correctly.
 echo ">>> seeding task-only project $MOCK3 (task $TASK3_NAME, no session) ..."
-"$BIN" tasks add --repo "$MOCK3" --name "$TASK3_NAME" --prompt "echo mock3" --cron "0 9 * * *" >/dev/null
+"$BIN" tasks add --repo "$MOCK3" --name "$TASK3_NAME" --prompt "echo mock3" --cron "$FIXTURE_CRON" >/dev/null
 
 # --- seed a web-tab session (feat: web/iframe tabs) -------------------------
 # A tiny loopback HTTP server serves a deterministic marker; a LOCAL web tab
@@ -758,6 +915,8 @@ export AF_WEB_SESSION_WEB_RESTORED="$SESSION_WEB_RESTORED"
 export AF_WEB_SESSION_WEB_SHELVED="$SESSION_WEB_SHELVED"
 export AF_WEB_READY_MARKER="$READY_MARKER"
 export AF_WEB_TASK_NAME="$SEEDED_TASK"
+export AF_WEB_TASK_CRON="$FIXTURE_CRON"
+export AF_WEB_OVERDUE_TASK="$OVERDUE_TASK"
 export AF_WEB_TASK3_NAME="$TASK3_NAME"
 export AF_WEBTAB_LOCAL_MARKER="$WEBTAB_LOCAL_MARKER"
 export AF_WEBTAB_EXTERNAL_URL="$WEBTAB_EXTERNAL_URL"

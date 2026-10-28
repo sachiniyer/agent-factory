@@ -1,0 +1,36 @@
+                       ╭────────────────────────────────────────────────────────────────────────╮
+ Agent Factory         │                                                                        │
+ ▼ Sessions (0)        │  Agent Factory v1.0.280                                                │
+                       │                                                                        │
+                       │  A terminal UI that manages multiple Claude Code (and other local      │
+                       │  agents) in separate workspaces.                                       │
+                       │                                                                        │
+                       │  Page: pgup/pgdn · ctrl+u/ctrl+d                                       │
+                       │  Line: ↑/k, ↓/j · home/end jump                                        │
+                       │  Close: esc · ? toggles help                                           │
+                       │                                                                        │
+                       │  Managing:                                                             │
+                       │  n              - Create a new session                                 │
+                       │  N              - Create a new remote session (requires remote_hooks   │
+                       │                   config)                                              │
+                       │  tab/shift+tab  - While naming a new session: pick its agent /         │
+                       │  ctrl+r/ctrl+o    initial prompt / backend / account                   │
+                       │  ctrl+p         - Switch to another project (repo) in place            │
+                       │  m              - Manage tasks (n inside the manager creates one, r    │
+                       │                   runs one)                                            │
+                       │  D              - Kill (delete) the selected session                   │
+                       │  a              - Archive the selected live session                    │
+                       │  r              - Restore the selected archived / lost / dead session  │
+                       │  c              - Retry a session blocked at a usage limit (re-spawn   │
+                       │                   + resume)                                            │
+                       │  ↑/k, ↓/j       - Navigate between sessions                            │
+                       │  ↵              - Interact with the session in its pane (all keys go   │
+                       │                   to it)                                               │
+                       │  ctrl+]         - Leave interactive mode (back to navigation)          │
+                       │  o              - Attach to the selected session full-screen           │
+                       │  ctrl-w         - Detach from a full-screen session                    │
+                       │                                 ↓ more                                 │
+                       │                                                                        │
+                       ╰────────────────────────────────────────────────────────────────────────╯
+                                   n new · N new remote · / search · ? help · q quit
+

@@ -47,8 +47,16 @@ import {
   type Route,
   test,
 } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { decode, Op } from "../src/frame.js";
 import { openAfterInitialResync } from "./initial-resync.js";
+import { stopPolledRoutes } from "./polled-route.js";
+
+const surfaceTokens: { light: string; dark: string } = JSON.parse(
+  readFileSync(new URL("../../design/tokens.json", import.meta.url), "utf8"),
+).colors.surface;
+const surfaceRGB = (mode: "light" | "dark") =>
+  `rgb(${[1, 3, 5].map(i => parseInt(surfaceTokens[mode].slice(i, i + 2), 16)).join(", ")})`;
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 const SESSION_B = process.env.AF_WEB_SESSION_B ?? "probe-b";
@@ -60,6 +68,10 @@ const SESSION_C = process.env.AF_WEB_SESSION_C ?? "probe-c";
 // The name of the task the harness seeds (web-selftest-entry.sh) so the tasks list
 // is non-empty on load.
 const SEEDED_TASK = process.env.AF_WEB_TASK_NAME ?? "probe-task";
+const SEEDED_TASK_CRON = process.env.AF_WEB_TASK_CRON ?? "0 9 * * *";
+// The task the harness seeds ALREADY OVERDUE (#3626): created a month back with an
+// daily schedule and no run, so the daemon derives it as overdue on first read.
+const OVERDUE_TASK = process.env.AF_WEB_OVERDUE_TASK ?? "probe-overdue";
 // The task in the TASK-ONLY project (a third repo with a task but no session,
 // redesign PR2): proves a task-only repo lists in the switcher and its tasks scope.
 const TASK3_NAME = process.env.AF_WEB_TASK3_NAME ?? "mock3-task";
@@ -377,8 +389,22 @@ async function distanceFromBottom(viewport: Locator): Promise<number> {
 }
 
 /** One of the quiet lifecycle glyphs revealed on the selected rail row (#2186). */
-function railAction(page: Page, title: string, name: "Archive session" | "Restore session" | "Kill session"): Locator {
-  return row(page, title).getByRole("button", { name: `${name} “${title}”`, exact: true });
+function railAction(page: Page, title: string, name: "Archive session" | "Restore session" | "Delete session"): Locator {
+  return row(page, title).getByRole("button", { name: `${name} “${title}”`, exact: true, includeHidden: true });
+}
+
+async function openRailActions(p: Page, title: string): Promise<void> {
+  const trigger = row(p, title).getByRole("button", { name: `Actions for ${title}`, exact: true });
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+}
+async function clickRailAction(p: Page, title: string, name: "Archive session" | "Restore session" | "Delete session"): Promise<void> {
+  await openRailActions(p, title);
+  await railAction(p, title, name).click();
+}
+async function taskAction(target: Locator, label: string): Promise<void> {
+  if (label === "Enable" || label === "Disable") await target.getByRole("switch").click();
+  else await target.getByRole("button", { name: label, exact: true }).click();
+  if (label === "Remove") await target.page().getByRole("dialog").getByRole("button", { name: "Remove", exact: true }).click();
 }
 
 /** One state's checkbox in the rail's filter menu (feat: hide archived by default). */
@@ -501,10 +527,19 @@ async function resetToAgentTab(page: Page): Promise<void> {
       break;
     }
     const before = await tabbar.locator(".af-tab").count();
+    if (!(await tabbar.isVisible())) await openSessionActions(page);
     await closable.first().click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
     await expect(tabbar.locator(".af-tab")).toHaveCount(before - 1, { timeout: 30_000 });
   }
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+}
+
+/** Secondary session operations live in the same keyboard/pointer disclosure. */
+async function openSessionActions(page: Page): Promise<void> {
+  const trigger = page.getByRole("button", { name: /^(More app controls|Session actions)$/ }).filter({ visible: true });
+  await expect(trigger).toBeVisible();
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
 }
 
 /** Creates the menu's Terminal choice. The labelled New tab control deliberately
@@ -518,8 +553,10 @@ async function createTerminalTab(page: Page): Promise<void> {
   const boundBefore = await pane.getAttribute("data-tab-id");
   const tabsBefore = await tabbar.locator(".af-tab").count();
 
-  await tabbar.locator(".af-tab-new").click();
-  const menu = tabbar.locator(".af-tab-menu");
+  await openSessionActions(page);
+  const newTab = tabbar.locator("..").locator(".af-tab-new");
+  if (await newTab.isVisible()) await newTab.click();
+  const menu = tabbar.locator("..").locator(".af-tab-menu");
   await expect(menu).toBeVisible();
   await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
   await expect(menu).toBeHidden();
@@ -582,6 +619,36 @@ async function typeableShellTab(p: Page): Promise<Locator> {
   }).toPass({ timeout: 45_000, intervals: [500, 1_000, 2_000] });
   return host;
 }
+
+/**
+ * The terminal row a command's OUTPUT begins on: a row whose text STARTS with
+ * `text`, the newest such row.
+ *
+ * Not "a row containing it", and not `toContainText` on the host, because the shell
+ * echoes the command line before it runs it — and the command line carries the same
+ * text, after the prompt. A wait on the text alone passes on that echo, the output
+ * has not arrived, and the row it picks is the command line, so a gesture aimed at
+ * its left edge lands on the prompt (#4585: the long press copied `#`). Output
+ * printed at column 0 is the one row whose text begins with it; the echo begins with
+ * the prompt. Waiting for THIS row to be visible is waiting for the output itself.
+ *
+ * Pair it with {@link LATE_OUTPUT}, which makes the race this guards against happen
+ * on every run instead of on an unlucky one.
+ */
+function outputRowStartingWith(host: Locator, text: string): Locator {
+  const anchored = new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`);
+  return host.locator(".xterm-rows > div", { hasText: anchored }).last();
+}
+
+/**
+ * Appended to a command whose output a test then locates and presses on: the output
+ * arrives a second AFTER the shell has echoed the command line, instead of usually
+ * in the same frame. This is not a wait — the test never sleeps on it — it is the
+ * late-output condition #4585 flaked on, staged deliberately, so a wait that is
+ * satisfied by the echo fails every run rather than one run in a hundred. The output
+ * itself is byte-for-byte what printf wrote.
+ */
+const LATE_OUTPUT = " | { sleep 1; cat; }";
 
 interface ElementBox {
   x: number;
@@ -761,6 +828,71 @@ async function touchDrag(cdp: CDPSession, x: number, fromY: number, toY: number,
 }
 
 /**
+ * touchDrag at a measured cadence (#5020): `steps` moves paced `stepMs` apart on
+ * the wall clock, so the gesture's release velocity — and therefore its momentum —
+ * is a parameter of the test rather than an accident of CDP round-trip time. The
+ * final `tail` moves go back-to-back so the velocity window always ends on fresh,
+ * fast samples: a real finger accelerates into the lift, and a lone stalled send
+ * before touchEnd would otherwise empty the ~100ms estimator window. `tailShare`
+ * (default: the tail's even share) gives the tail a bigger slice of the travel —
+ * the whip at the end of a hard flick. Whipped tails (tailStepMs 0) pipeline their
+ * sends into ~one flight; `tailStepMs > 0` still QUEUES sends rather than awaiting
+ * them, so the tail lands at a real wall-clock cadence instead of one CDP
+ * round-trip per move, and the lift rides in the final move's flight — an awaited
+ * round-trip between last move and touchEnd would register as a stationary hold
+ * and dilute the measured velocity.
+ */
+async function touchDragTimed(
+  cdp: CDPSession,
+  x: number,
+  fromY: number,
+  toY: number,
+  steps: number,
+  stepMs: number,
+  tail = 2,
+  holdBeforeEndMs = 0,
+  tailShare?: number,
+  tailStepMs = 0,
+): Promise<void> {
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: fromY }] });
+  const span = toY - fromY;
+  const share = tailShare ?? tail / (steps + tail);
+  const piped: Promise<unknown>[] = [];
+  for (let step = 1; step <= steps + tail; step++) {
+    const pos =
+      step <= steps
+        ? fromY + (span * (1 - share) * step) / steps
+        : fromY + span * (1 - share) + (span * share * (step - steps)) / tail;
+    const sent = cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: pos }] });
+    if (step <= steps) {
+      await sent;
+      await new Promise((resolve) => setTimeout(resolve, stepMs));
+    } else if (tailShare !== undefined && tailStepMs === 0) {
+      piped.push(sent); // the whip: everything in one flight, lands inside ~1 RTT
+    } else if (tailStepMs > 0) {
+      // A paced tail queues instead of awaiting: sends go out at wall-clock
+      // cadence, so arrival spacing holds on a slow runner instead of stretching
+      // to one round-trip per move.
+      piped.push(sent);
+      if (step < steps + tail) {
+        await new Promise((resolve) => setTimeout(resolve, tailStepMs));
+      }
+    } else {
+      await sent;
+    }
+  }
+  if (holdBeforeEndMs > 0) {
+    await Promise.all(piped);
+    await new Promise((resolve) => setTimeout(resolve, holdBeforeEndMs));
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return;
+  }
+  // The lift queues behind the last move in the same flight — see the note above.
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await Promise.all(piped);
+}
+
+/**
  * Taps once at a point — the gesture that must keep reaching a mouse-aware
  * application even when the drag above no longer does.
  *
@@ -796,6 +928,64 @@ async function touchTap(cdp: CDPSession, x: number, y: number): Promise<void> {
     await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + step }] });
   }
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+/** Polls a scroll offset until it has been still for `quietMs` wall time — i.e. a
+ *  momentum coast has run out — then returns the settled value (#5020). One equal
+ *  sample is NOT enough: near the decay floor a coast emits a whole row only every
+ *  ~400ms, so a single quiet interval can fall mid-coast. */
+async function settledScrollTop(viewport: Locator, quietMs = 600, timeoutMs = 15_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let prev = await viewport.evaluate((el) => el.scrollTop);
+  let quietSince = Date.now();
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const next = await viewport.evaluate((el) => el.scrollTop);
+    if (next !== prev) {
+      prev = next;
+      quietSince = Date.now();
+    } else if (Date.now() - quietSince >= quietMs) {
+      return next;
+    }
+  }
+  return prev;
+}
+
+/** The same settle, for the wheel-report stream on the alternate-screen path. */
+async function settledReportCount(reports: readonly unknown[], quietMs = 600, timeoutMs = 15_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let prev = reports.length;
+  let quietSince = Date.now();
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const next = reports.length;
+    if (next !== prev) {
+      prev = next;
+      quietSince = Date.now();
+    } else if (Date.now() - quietSince >= quietMs) {
+      return next;
+    }
+  }
+  return prev;
+}
+
+/** One decoded SGR (1006) mouse report inside the PTY input the page sent. */
+interface SgrReport {
+  button: number;
+  release: boolean;
+}
+
+/**
+ * Every SGR mouse report in the captured OpInput stream, in order.
+ *
+ * Wheel reports arrive as `\x1b[<64;col;rowM` (up) and `\x1b[<65;col;rowM`
+ * (down); a click is a press/release pair `\x1b[<0;col;rowM` then `...m`. The
+ * button field is read raw rather than masked, so a direction leak (the wrong
+ * button) is as visible as a missing report.
+ */
+function sgrReportButtons(payloads: number[][]): SgrReport[] {
+  const text = payloads.map((bytes) => String.fromCharCode(...bytes)).join("");
+  return [...text.matchAll(/\x1b\[<(\d+);\d+;\d+([Mm])/g)].map((m) => ({ button: Number(m[1]), release: m[2] === "m" }));
 }
 
 /** Points the task modal's schedule picker (#2057) at the "every N minutes" preset.
@@ -996,6 +1186,9 @@ let page: Page;
 // module state, so a worker restart resets it — which is exactly why the two flows
 // that share it live in one serial describe rather than at the top level.
 let createdTitle = "";
+// The hook-backend twin of createdTitle, handed between the remote create and
+// remote kill pair below — module state for the same worker-restart reason.
+let remoteCreatedTitle = "";
 let realRailUnavailable = "";
 // Keep the tagged details at each declaration (instead of registering through a
 // wrapper) so a failure still reports its real source line; beforeEach uses the tag
@@ -1077,6 +1270,7 @@ test("#2276: a fresh shell with no seeded real row reports rail-plane diagnostic
     expect(snapshotDiagnostic).toContain(JSON.stringify(SESSION_A));
     expect(failure).toContain("real events: open");
   } finally {
+    await stopPolledRoutes(ctx);
     await ctx.close();
   }
 });
@@ -1090,7 +1284,7 @@ function authInfoBody(required: boolean): string {
 // string (apiproto.EnvelopeError). This is the shape that used to render as the
 // literal text "[object Object]" on every error surface.
 function failureBody(message: string): string {
-  return JSON.stringify({ data: null, error: { message } });
+  return JSON.stringify({ data: null, error: { message, daemon_rejected: true } });
 }
 
 test("the tokenless path follows the daemon's answer, not loopback detection (#1696)", async ({ browser }) => {
@@ -1113,12 +1307,12 @@ test("the tokenless path follows the daemon's answer, not loopback detection (#1
   await ctx.close();
 
   // The same decision can change while a tokenless client is already open: a
-  // live config apply may begin requiring tokens and publish theme.changed. The
-  // resulting palette 401 must return to a paste-token form, not preserve the
+  // live config apply may begin requiring tokens. A subsequent snapshot 401
+  // must return to a paste-token form, not preserve the
   // stale auth_required=false choice and offer an empty-credential retry loop.
   const transitionCtx = await browser.newContext();
   const live = await transitionCtx.newPage();
-  let rejectTheme = false;
+  let rejectSnapshot = false;
   await live.addInitScript(() => {
     const NativeWebSocket = window.WebSocket;
     window.WebSocket = new Proxy(NativeWebSocket, {
@@ -1131,8 +1325,8 @@ test("the tokenless path follows the daemon's answer, not loopback detection (#1
       },
     });
   });
-  await live.route("**/v1/GetTheme", (route) => {
-    if (!rejectTheme) return route.continue();
+  await live.route("**/v1/Snapshot", (route) => {
+    if (!rejectSnapshot) return route.continue();
     return route.fulfill({
       status: 401,
       contentType: "application/json",
@@ -1140,7 +1334,7 @@ test("the tokenless path follows the daemon's answer, not loopback detection (#1
     });
   });
   await openTokenless(live);
-  rejectTheme = true;
+  rejectSnapshot = true;
   await live.evaluate(() => {
     const socket = (window as unknown as { __afAuthTransitionSocket?: WebSocket }).__afAuthTransitionSocket;
     if (!socket) throw new Error("events WebSocket was not captured");
@@ -1201,7 +1395,7 @@ test("an unreachable daemon reports a real transport message, not [object Object
   await p.locator("#af-token").fill("some-token");
   await p.locator(".af-login-form button[type=submit]").click();
 
-  const err = p.locator(".af-error");
+  const err = p.locator(".af-recovery");
   await expect(err).toBeVisible();
   await expect(err).toContainText("Couldn't reach the daemon");
   await expect(err).not.toContainText("[object Object]");
@@ -1285,7 +1479,7 @@ test("token persistence: the login screen says the token will be saved", async (
   const ctx = await tokenRequiredContext(browser);
   const p = await ctx.newPage();
   await p.goto("/");
-  await expect(p.locator(".af-login-note")).toContainText("stays saved in this browser until you disconnect");
+  await expect(p.locator(".af-login-note")).toContainText("Saved here until you log out");
   await ctx.close();
 });
 
@@ -1296,7 +1490,8 @@ test("token persistence: Disconnect forgets the token, so the next visit prompts
 
   // The logout affordance: on a shared machine or after a rotation, this is the way
   // back to the prompt. It must clear the STORE, not just the in-memory credential.
-  await p.locator(".af-appbar button", { hasText: "Disconnect" }).click();
+  await p.locator('.af-viewtab[data-view="config"]').click();
+  await p.locator(".af-config-disconnect").click();
   await expect(p.locator("#af-token")).toBeVisible();
   expect(await storedToken(p)).toBeNull();
 
@@ -1353,7 +1548,7 @@ test("token persistence: an unreachable daemon KEEPS the stored token", async ({
 
   await ctx.route("**/v1/Snapshot", (route) => route.abort("connectionrefused"));
   await p.reload();
-  await expect(p.locator(".af-error")).toContainText("Couldn't reach the daemon");
+  await expect(p.locator(".af-recovery")).toContainText("Couldn't reach the daemon");
   expect(await storedToken(p)).toBe("still-good");
 
   // Daemon back: the very next load resumes silently, with no paste in between.
@@ -1439,10 +1634,19 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
     list.push(
       synth("probe-working", 1), // Running → working → no dot
       synth("probe-needs-you", 2, "settled-after-pane-change"),
+      { ...synth("probe-no-branch", 2, "settled-after-pane-change"), branch: "" },
       synth("probe-broken-prompt", 2, "prompt-not-delivered"),
       synth("probe-lost", 3, "process-exited"),
       synth("probe-dead", 4, "process-exited"),
       synth("probe-limit", 6, "usage-limit"),
+      {
+        ...synth("probe-handoff-retry", 1),
+        pending_account_swap: {
+          manual: true,
+          replacement_panes_started: true,
+          mission_delivery_status: "could-not-confirm",
+        },
+      },
     );
     if (snap) {
       snap.instances = list;
@@ -1466,12 +1670,20 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(readyDot).not.toHaveClass(/af-dot-spin/);
   await expect(row(p, "probe-needs-you")).toHaveClass(/af-row-operator-needs-you/);
   await expect(row(p, "probe-needs-you").locator(".af-operator-state")).toHaveText("Needs you");
+  await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
+  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("Needs you · synth-probe-needs-you");
+  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("Needs you");
+  await expect(row(p, "probe-no-branch").locator(".af-row-branch-name")).toHaveCount(0);
+  await row(p, "probe-needs-you").click();
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toContainText("pane changed");
   // Positive non-delivery is Broken even though the underlying process is Ready.
   const promptBroken = row(p, "probe-broken-prompt");
   await expect(promptBroken).toHaveClass(/af-row-operator-broken/);
   await expect(promptBroken.locator(".af-operator-state")).toHaveText("Broken");
+  await expect(promptBroken.locator(".af-idle-reason")).toHaveCount(0);
+  await promptBroken.click();
   await expect(promptBroken.locator(".af-idle-reason")).toContainText("prompt not delivered");
+  await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
   // Error/terminal states keep distinct STATIC shapes.
   await expect(row(p, "probe-lost").locator('.af-icon[data-icon="circle-dashed"]')).toHaveCount(1);
   await expect(row(p, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
@@ -1484,11 +1696,17 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(p.locator(".af-dot-spin")).toHaveCount(0);
   await expect(p.locator(".af-dot-working")).toHaveCount(0);
 
-  // Retry remains the conditional pane-header escape from a usage-limit wall
+  // Retry limit remains the conditional pane-header escape from a usage-limit wall
   // (#1934): selecting the synthetic limit row reveals it, while selecting an
   // ordinary waiting row withdraws it. The rail move must not displace this path.
   await row(p, "probe-limit").click();
-  const retry = p.locator(".af-term-head button", { hasText: "Retry" });
+  const retry = p.locator(".af-term-head").getByRole("button", { name: "Retry limit", exact: true });
+  await expect(retry).toBeVisible();
+  await row(p, "probe-handoff-retry").click();
+  const handoffRetry = p.locator(".af-term-head").getByRole("button", { name: "Retry handoff", exact: true });
+  await expect(handoffRetry).toBeVisible();
+  await expect(handoffRetry).toHaveAttribute("title", "Retry the handoff after inspecting the pane");
+  await row(p, "probe-limit").click();
   await expect(retry).toBeVisible();
   const selectedActions = row(p, "probe-limit").locator(".af-row-actions");
   const waitingActions = row(p, "probe-needs-you").locator(".af-row-actions");
@@ -1518,9 +1736,9 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   // Put focus on the preceding button in DOM order, then use a real Tab keystroke to
   // enter this row. The opacity-zero action remains tabbable and :focus-within makes
   // it visible as soon as focus arrives.
-  const keyboardTarget = railAction(p, "probe-needs-you", "Archive session");
+  const keyboardTarget = row(p, "probe-needs-you").getByRole("button", { name: "Actions for probe-needs-you", exact: true });
   await keyboardTarget.evaluate((target) => {
-    const buttons = [...document.querySelectorAll<HTMLButtonElement>('button:not([disabled])')];
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('button:not([disabled])')].filter((button) => button.getClientRects().length > 0);
     const before = buttons[buttons.indexOf(target as HTMLButtonElement) - 1];
     if (!before) {
       throw new Error("archive action has no preceding tab stop");
@@ -1534,90 +1752,10 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await row(p, "probe-needs-you").click();
   await expect(retry).toBeHidden();
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
-test("pane header PR badge (#3285): the daemon-discovered PR is a safe link, absent when unknown", REAL_FIXTURE, async ({
-  browser,
-}) => {
-  // Synthetic rows again, and for the same reason as the status probes above:
-  // pr_info is a pure projection of the snapshot, no daemon can be coerced into
-  // discovering a PR on demand inside the sandbox, and a synthetic id receives no
-  // deltas, so the pinned state is the only state there will ever be. This drives
-  // the REAL render path — prBadgeContent → renderMain/patchMainHead — end to end.
-  const ctx = await browser.newContext();
-  const p = await ctx.newPage();
-  await p.route("**/v1/Snapshot", async (route) => {
-    const resp = await route.fetch();
-    const body = await resp.json();
-    const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
-    const list = snap?.instances ?? [];
-    const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
-    list.push(
-      {
-        ...proto,
-        id: "synth-probe-pr",
-        title: "probe-pr",
-        branch: "synth-probe-pr",
-        liveness: 2,
-        in_flight_op: 0,
-        pr_info: {
-          number: 77,
-          state: "OPEN",
-          url: "https://github.com/example/repo/pull/77",
-          title: "Teach the rail to sing",
-        },
-      },
-      // The wire spells "no PR discovered" as pr_info: {} — Go's omitempty cannot
-      // drop a struct field — so the fail-closed side is asserted against that
-      // exact spelling, not against a conveniently absent field.
-      {
-        ...proto,
-        id: "synth-probe-no-pr",
-        title: "probe-no-pr",
-        branch: "synth-probe-no-pr",
-        liveness: 2,
-        in_flight_op: 0,
-        pr_info: {},
-      },
-    );
-    if (snap) {
-      snap.instances = list;
-    }
-    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
-  });
-  await p.goto("/");
-  await expect(p.locator(".af-app")).toBeVisible();
-
-  await expect(row(p, "probe-pr")).toBeVisible({ timeout: 15_000 });
-  await row(p, "probe-pr").click();
-  const badge = p.locator(".af-pr-badge");
-  await expect(badge).toBeVisible();
-  // Number + lowercased state, sentence case, the repo's ` · ` separator — and the
-  // chip IS the link, carrying the projected URL.
-  await expect(badge).toHaveText("PR #77 · open");
-  await expect(badge).toHaveAttribute("href", "https://github.com/example/repo/pull/77");
-  // Both halves of the safe-link contract (#3300 delta): _blank alone hands the
-  // opened page a window reference; noopener/noreferrer is what revokes it.
-  await expect(badge).toHaveAttribute("target", "_blank");
-  await expect(badge).toHaveAttribute("rel", "noopener noreferrer");
-  await expect(badge).toHaveAttribute("title", /Teach the rail to sing/);
-
-  // The selected-session mobile shell deliberately hides the repeated title
-  // wrapper to reclaim the only control row (#2354). The PR link is an action,
-  // not repeated chrome, so it must remain reachable when that wrapper vanishes.
-  await p.setViewportSize({ width: 390, height: 844 });
-  await expect(badge, "the PR link remains reachable at phone width").toBeVisible();
-  await p.setViewportSize({ width: 1280, height: 720 });
-
-  // Fail closed: moving the selection to a row whose projection is the empty
-  // struct must withdraw the badge — not leave a stale chip pointing at the
-  // previous session's PR.
-  await row(p, "probe-no-pr").click();
-  await expect(badge).toBeHidden();
-
-  await ctx.close();
-});
 
 test("#2234: creating and id-less rows expose no lifecycle actions; the shared projection chooses the verb", REAL_FIXTURE, async ({
   browser,
@@ -1672,13 +1810,13 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   const uncertain = row(p, "probe-startup-unknown");
   await expect(uncertain).toBeVisible();
   await uncertain.hover();
-  await expect(railAction(p, "probe-startup-unknown", "Kill session")).toHaveCount(1);
+  await expect(railAction(p, "probe-startup-unknown", "Delete session")).toHaveCount(1);
   await expect(railAction(p, "probe-startup-unknown", "Archive session")).toHaveCount(0);
   await expect(railAction(p, "probe-startup-unknown", "Restore session")).toHaveCount(0);
 
   // Keyboard navigation must apply the same runtime-entry fence as row clicks.
   // Walk the entire visible rail in both directions: a kill-only retained row may
-  // own its explicit Kill button, but j/k must never make it the terminal target.
+  // own its explicit Delete session button, but j/k must never make it the terminal target.
   // The walk WAITS for each press to land instead of sampling for it (#2893). The old
   // shape read aria-selected with a non-waiting getAttribute straight after the press
   // and OR-ed it into a `toBe(false)` assertion, so every read that arrived before the
@@ -1713,10 +1851,11 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   // The same server-owned value selects Archive vs Restore, and every accessible
   // name carries its target now that unselected rows can own controls.
   await expect(railAction(p, "probe-actionable", "Archive session")).toHaveCount(1);
-  await expect(railAction(p, "probe-actionable", "Kill session")).toHaveCount(1);
+  await expect(railAction(p, "probe-actionable", "Delete session")).toHaveCount(1);
   await expect(railAction(p, "probe-restorable", "Restore session")).toHaveCount(1);
   await expect(railAction(p, "probe-restorable", "Archive session")).toHaveCount(0);
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
@@ -1748,37 +1887,27 @@ test("#2458: no live indicator by the project selector, no live/branch meta by t
   await expect(page.locator(".af-term-head")).not.toContainText("Live");
 
   // The branch went with it: "Live · master" was one unit, and the head now carries
-  // the session title alone.
+  // the session title and its separator before the tab labels.
   const head = await page.locator(".af-term-head-main").textContent();
-  expect(head?.trim()).toBe(SESSION_A);
+  expect(head?.trim()).toBe(`${SESSION_A} ·`);
 });
 
 // The phone path is checked separately because the indicator was not merely
 // narrower there — below the breakpoint it moved INTO the More popover and carried
 // its own sizing rule, so a desktop-only check would miss a copy still rendering
 // behind a disclosure the user has to open to see.
-test("#2458 mobile (375px): the More popover carries no live indicator", REAL_FIXTURE, async ({ browser }) => {
+test("#2458 mobile (375px): the phone appbar carries no live indicator", REAL_FIXTURE, async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: { width: 375, height: 667 } });
   try {
     const p = await ctx.newPage();
     await openTokenless(p);
     await expect(p.locator(".af-app")).toHaveAttribute("data-live", "open");
 
-    const more = p.locator(".af-appbar-more");
-    await expect(more).toBeVisible();
-    await more.click();
-    const tools = p.locator(".af-appbar-tools");
-    await expect(tools).toBeVisible();
-
-    // Opened, so this is a real look inside rather than a pass earned by the
-    // popover being collapsed.
-    await expect(tools.locator(".af-live")).toHaveCount(0);
-    await expect(tools).not.toContainText("Live");
-    await expect(tools).not.toContainText("Connecting…");
-    // The controls that DO belong there survived the removal — the popover lost one
-    // child, not its contents.
-    await expect(tools.getByRole("button", { name: "Disconnect" })).toBeVisible();
-    await expect(tools.locator(".af-theme-opt").first()).toBeVisible();
+    // With no session open the More menu has nothing to hold, so it is not offered.
+    await expect(p.locator(".af-appbar-more")).toBeHidden();
+    await expect(p.locator(".af-appbar .af-live")).toHaveCount(0);
+    await expect(p.locator(".af-appbar")).not.toContainText("Live");
+    await expect(p.locator(".af-appbar")).not.toContainText("Connecting…");
   } finally {
     await ctx.close();
   }
@@ -1802,7 +1931,7 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
   await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
 
   // Every actionable instance reserves the quiet action slot, but only the selected
-  // row shows it at rest. Kill remains muted; af-danger is reserved for confirmation.
+  // row shows it at rest. Delete session remains muted; af-danger is reserved for confirmation.
   // Every row reserves the slot — asserted WITHOUT sampling a count (#2893). The old
   // shape passed `await rows.count()` as the EXPECTED value: one non-waiting sample,
   // frozen, while Playwright retried the left side against it. Any roster change in
@@ -1817,12 +1946,12 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
   await row(page, SESSION_A).hover();
   await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCSS("opacity", "1");
-  await expect(railAction(page, SESSION_A, "Archive session").locator('.af-icon[data-icon="archive"]')).toHaveCount(1);
-  await expect(railAction(page, SESSION_A, "Kill session").locator('.af-icon[data-icon="octagon-x"]')).toHaveCount(1);
-  await expect(railAction(page, SESSION_A, "Kill session")).not.toHaveClass(/af-danger/);
+  await expect(railAction(page, SESSION_A, "Archive session")).toHaveCount(1);
+  await expect(railAction(page, SESSION_A, "Delete session")).toHaveCount(1);
+  await expect(railAction(page, SESSION_A, "Delete session")).not.toHaveClass(/af-danger/);
   await expect(page.locator(".af-term-head button", { hasText: "Prompt" })).toHaveCount(0);
   await expect(page.locator(".af-term-head button", { hasText: "Archive" })).toHaveCount(0);
-  await expect(page.locator(".af-term-head button", { hasText: "Kill" })).toHaveCount(0);
+  await expect(page.locator(".af-term-head button", { hasText: "Delete session" })).toHaveCount(0);
 });
 
 test("#2681/#2787: application mouse mode selects on a plain drag and keeps a modifier escape", REAL_FIXTURE, async ({
@@ -1934,15 +2063,17 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
     await expect
       .poll(
         async () => {
-          const top = await viewport.evaluate((el) => el.scrollTop);
+          const { top, distance } = await viewport.evaluate((el) => ({
+            top: el.scrollTop,
+            distance: el.scrollHeight - el.clientHeight - el.scrollTop,
+          }));
           const stable = top === previousTop;
           previousTop = top;
-          return stable;
+          return { stable, pinned: distance <= 1 };
         },
-        { message: "output must settle before the wheel baseline is sampled", timeout: 10_000 },
+        { message: "output must settle while the terminal is pinned to the bottom", timeout: 10_000 },
       )
-      .toBe(true);
-    expect(await distanceFromBottom(viewport), "the terminal must start pinned to the bottom").toBeLessThanOrEqual(1);
+      .toEqual({ stable: true, pinned: true });
     inputPayloads.length = 0;
     await host.hover();
     await p.mouse.wheel(0, -900);
@@ -2292,6 +2423,117 @@ test("#3024: a partially typed line takes the daemon's delivery-hold lease", REA
   }
 });
 
+test("#3025: a queued editing key after queued Enter keeps the delivery-hold lease across reconnect", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The live-path #3024 test above proves the browser takes the lease on a half-typed
+  // agent line and stops renewing once it is committed. This one pins the queued path
+  // that #3024 deliberately does not reach: input typed against a DOWN stream is
+  // queued (noteQueued), whose commit tracking `noteQueued` owns separately from the
+  // live `noteInput` path.
+  //
+  // The bug: a queued Enter stamped `queuedEndsLine=true`, and a subsequent queued
+  // editing key (history recall via arrow-up ESC[A) skipped the `queuedEndsLine`
+  // update because it is ESC-prefixed. The stale true survived into `noteFlushed`,
+  // which released the hold over a line the flush had just populated with the recalled
+  // draft. The renew timer then stopped, the daemon's pause lease lapsed, and the
+  // next automated delivery could paste+Enter into the same PTY (#1586/#1638).
+  //
+  // Observed through the PauseStatusPoll RPC, exactly as #3024: a hold that survives
+  // the flush keeps renewing the lease; one that was false-released stops. The live
+  // path treats ESC[A as a draft-starting edit, so the queued path must agree and the
+  // renewals must continue past the reconnect.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  let forwardStream = false;
+
+  try {
+    await p.routeWebSocket(
+      (url) => url.pathname.includes("/stream"),
+      (ws) => {
+        if (forwardStream) {
+          ws.connectToServer();
+          return;
+        }
+        // Refuse this attempt. onclose → scheduleReconnect, so the agent terminal
+        // stays "reconnecting" and every keystroke takes the queued path.
+        ws.close();
+      },
+    );
+
+    let pauses = 0;
+    await p.route("**/v1/PauseStatusPoll", async (route) => {
+      pauses += 1;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: {} }) });
+    });
+
+    await openTokenless(p);
+    await row(p, SESSION_B).click();
+    await resetToAgentTab(p);
+
+    const main = p.locator(".af-main");
+    const host = p.locator(".af-term-host .af-pane").first();
+    // Deterministic precondition, and the whole point of this test: the agent stream
+    // is NOT open before a single key is typed. A duration would only make this
+    // likely; the status seam makes it certain, so every keystroke takes the queued
+    // path the bug lives in rather than the live one #3024 covers.
+    await expect(main, "the stream must be down before typing, or the queued path is untested").toHaveAttribute(
+      "data-term-status",
+      "reconnecting",
+      { timeout: 30_000 },
+    );
+
+    await host.click();
+    pauses = 0;
+    // The exact failing sequence: a draft, a queued Enter, then a queued history-recall
+    // (arrow-up). All three are queued while the stream is down, so none reaches the
+    // PTY until the flush on reconnect.
+    await p.keyboard.type("ls");
+    await p.keyboard.press("Enter");
+    await p.keyboard.press("ArrowUp");
+
+    // Let one through and the flush lands — this is where the bug fired. onopen calls
+    // onStatus("open") BEFORE flushPendingInput, so once the attribute reads "open"
+    // the flush has run and the hold's post-flush state is settled.
+    forwardStream = true;
+    await expect(main, "the stream must come back so the queued input can be flushed").toHaveAttribute(
+      "data-term-status",
+      "open",
+      { timeout: 45_000 },
+    );
+
+    // The renew timer fires every 500ms and tick re-pauses every ~1s. Over this
+    // window a hold that survived the flush adds several renewals; one that was
+    // false-released (the bug) stops the timer during the flush and adds none. The
+    // +2 floor absorbs a single residual renewal in flight at the flush boundary.
+    await p.waitForTimeout(500);
+    const pausesAtOpen = pauses;
+    await expect
+      .poll(() => pauses, {
+        message: "the hold must survive the flush of [Enter, arrow-up]: renewals keep the daemon lease alive",
+        timeout: 10_000,
+      })
+      .toBeGreaterThanOrEqual(pausesAtOpen + 2);
+
+    // Liveness: a REAL Enter on the now-open stream commits the recalled line and
+    // must stop the renewals, so the lease lapses and a held delivery can land —
+    // the fix bounds the hold, it does not pin it. Same contract as #3024 above.
+    const afterSurvived = pauses;
+    await p.keyboard.press("Enter");
+    await p.waitForTimeout(2_000);
+    expect(pauses, "a real Enter on the open stream must stop renewing the lease").toBe(afterSurvived);
+  } finally {
+    forwardStream = true;
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+    await row(page, SESSION_A).click();
+    await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  }
+});
+
 test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_FIXTURE, async ({ browser }) => {
   // The defect this pins is invisible to a unit test, which is how it shipped: the
   // old unit test asserted only that our handler declined Cmd+C, under a NAME that
@@ -2325,12 +2567,11 @@ test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_
     await createTerminalTab(p);
 
     const host = await typeableShellTab(p);
-    await p.keyboard.type("printf 'af-2787-copy-me\\n'");
+    await p.keyboard.type(`printf 'af-2787-copy-me\\n'${LATE_OUTPUT}`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("af-2787-copy-me", { timeout: 15_000 });
 
-    const outputRow = host.locator(".xterm-rows > div", { hasText: "af-2787-copy-me" }).last();
-    await expect(outputRow).toBeVisible();
+    const outputRow = outputRowStartingWith(host, "af-2787-copy-me");
+    await expect(outputRow).toBeVisible({ timeout: 15_000 });
     const rowBox = await outputRow.boundingBox();
     expect(rowBox, "the visible output row must have selectable geometry").toBeTruthy();
     const { x, y, width, height } = rowBox as { x: number; y: number; width: number; height: number };
@@ -2353,14 +2594,16 @@ test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_
     // asserted is that the SELECTED TEXT reached the clipboard, not the pixel the
     // drag began on.
     await expect
-      .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
+      .poll(async () => {
+        const text = await p.evaluate(() => navigator.clipboard.readText());
+        return {
+          copiedSelection: text.includes("2787-copy-me"),
+          replacedSentinel: !text.includes("untouched"),
+        };
+      }, {
         message: "Cmd+C must put the xterm selection on the system clipboard",
       })
-      .toContain("2787-copy-me");
-    expect(
-      await p.evaluate(() => navigator.clipboard.readText()),
-      "the seeded sentinel must be GONE — an unclaimed Cmd+C leaves it in place",
-    ).not.toContain("untouched");
+      .toEqual({ copiedSelection: true, replacedSentinel: true });
     await expect(selection, "Cmd+C keeps the selection — it has no interrupt to fall through to").not.toHaveCount(0);
     expect(inputPayloads, "Cmd+C is a copy, never an interrupt: nothing may reach the PTY").toHaveLength(0);
 
@@ -2377,8 +2620,13 @@ test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_
     inputPayloads.length = 0;
     await p.keyboard.press("Meta+c");
     await p.keyboard.press("x");
-    await expect.poll(() => inputPayloads.length, { message: "the marker keystroke must reach the PTY" }).toBeGreaterThan(0);
-    expect(inputPayloads.flat(), "Cmd+C with no selection sends nothing — least of all \\x03").toEqual([0x78]);
+    await expect.poll(() => ({
+      received: inputPayloads.length > 0,
+      bytes: inputPayloads.flat(),
+    }), { message: "Cmd+C with no selection sends nothing before the marker keystroke" }).toEqual({
+      received: true,
+      bytes: [0x78],
+    });
 
     // Ctrl+C keeps BOTH of its meanings on every platform (the reflex the interrupt
     // path exists for): nothing selected, so this one really does interrupt.
@@ -2426,12 +2674,22 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
     await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
     await p.keyboard.press("Shift+Enter");
-    await expect.poll(() => inputPayloads.length, { message: "Shift+Enter must emit one OpInput" }).toBe(1);
-    expect(inputPayloads[0], "Shift+Enter reaches the PTY as LF / Ctrl+J, never xterm's default CR").toEqual([0x0a]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[0] ?? [],
+    }), { message: "Shift+Enter must emit one OpInput carrying LF / Ctrl+J" }).toEqual({
+      count: 1,
+      bytes: [0x0a],
+    });
 
     await p.keyboard.press("Enter");
-    await expect.poll(() => inputPayloads.length, { message: "plain Enter must emit one more OpInput" }).toBe(2);
-    expect(inputPayloads[1], "plain Enter keeps xterm's submitting CR path").toEqual([0x0d]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[1] ?? [],
+    }), { message: "plain Enter must emit one more OpInput carrying CR" }).toEqual({
+      count: 2,
+      bytes: [0x0d],
+    });
 
     // A direct websocket write can produce the right LF while bypassing xterm's
     // user-input effects. Build real agent scrollback, park at the oldest line,
@@ -2466,8 +2724,13 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
 
     inputPayloads.length = 0;
     await p.keyboard.press("Shift+Enter");
-    await expect.poll(() => inputPayloads.length, { message: "the selected agent still receives one LF" }).toBe(1);
-    expect(inputPayloads[0]).toEqual([0x0a]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[0] ?? [],
+    }), { message: "the selected agent still receives one LF" }).toEqual({
+      count: 1,
+      bytes: [0x0a],
+    });
     await expect(host, "genuine user input must reveal the newest line at the prompt").toContainText(
       "shift-enter-scroll-40",
     );
@@ -2481,8 +2744,13 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
     // Ctrl+C immediately after the newline is the behavioral discriminator: if
     // the selection survived, the clipboard branch would copy and send no ETX.
     await p.keyboard.press("Control+c");
-    await expect.poll(() => inputPayloads.length, { message: "Ctrl+C after Shift+Enter must interrupt" }).toBe(2);
-    expect(inputPayloads[1], "the cleared selection leaves Ctrl+C on the interrupt path").toEqual([0x03]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[1] ?? [],
+    }), { message: "the cleared selection leaves Ctrl+C on the interrupt path" }).toEqual({
+      count: 2,
+      bytes: [0x03],
+    });
 
     // The same terminal component owns non-agent tabs, where raw-mode programs
     // may distinguish CR from LF. Preserve xterm's historical Shift+Enter CR and
@@ -2560,9 +2828,17 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
     const xterm = host.locator(".xterm");
     const viewport = host.locator(".xterm-viewport");
     const mouseHint = host.locator(".af-mouse-capture-hint");
-    await p.keyboard.type("for i in $(seq 1 200); do printf 'touch-scroll-%s\\n' \"$i\"; done");
+    // Seed off the live grid, not a constant: #5492 halves the phone font, so a
+    // count sized for the 13px grid underflows the doubled row count. Five lines
+    // per visible row also keeps the scrollback deeper in PIXELS than the flick
+    // plus its coast can cross — the margin 200 lines bought on ~15px cells.
+    const hostRows = host.locator(".xterm-rows > div");
+    await expect.poll(() => hostRows.count()).toBeGreaterThan(0);
+    const lineCount = (await hostRows.count()) * 5;
+    const lastLine = `touch-scroll-${lineCount}`;
+    await p.keyboard.type(`for i in $(seq 1 ${lineCount}); do printf 'touch-scroll-%s\\n' "$i"; done`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("touch-scroll-200", { timeout: 20_000 });
+    await expect(host).toContainText(lastLine, { timeout: 20_000 });
 
     // Aim at the screen — the element a finger actually lands on. The scrollable
     // .xterm-viewport is its SIBLING, which is the whole reason a browser has nothing
@@ -2587,7 +2863,7 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
       /enable-mouse-events/,
     );
     const bottom = await viewport.evaluate((el) => el.scrollTop);
-    expect(bottom, "200 lines of fresh output must leave real scrollback above the view").toBeGreaterThan(0);
+    expect(bottom, `${lineCount} lines of fresh output must leave real scrollback above the view`).toBeGreaterThan(0);
     await dragIntoHistory();
     await expect
       .poll(() => viewport.evaluate((el) => el.scrollTop), { message: "a one-finger drag must reach scrollback in a plain shell" })
@@ -2680,6 +2956,645 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
   }
 });
 
+test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel input", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The same really-touch-emulated phone context as #2682 — the property under
+  // test is a gesture the browser itself routes, so only trusted touch input can
+  // prove it. This is the codex-cli 0.159 failure: a full-screen app on the
+  // alternate buffer WITH mouse tracking, where a drag used to scroll a local
+  // scrollback that does not exist and reached the application never.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+  });
+  const p = await ctx.newPage();
+  const cdp = await ctx.newCDPSession(p);
+  const inputPayloads: number[][] = [];
+
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op === Op.Input) {
+        inputPayloads.push(Array.from(frame.data));
+      }
+    });
+  });
+
+  try {
+    await openTokenless(p);
+    await p.locator(".af-nav-toggle").click();
+    await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app.af-nav-open"), "opening a session must close the drawer over it").toHaveCount(0);
+    await resetToAgentTab(p);
+
+    await createTerminalTab(p);
+    const host = await typeableShellTab(p);
+    const xterm = host.locator(".xterm");
+    const viewport = host.locator(".xterm-viewport");
+    const mouseHint = host.locator(".af-mouse-capture-hint");
+
+    // Fill the NORMAL buffer's scrollback first — the drag's other half still
+    // scrolls it — then switch to the alternate screen under SGR mouse reporting,
+    // the minimal stand-in for a full-screen mouse app. `cat` swallows the
+    // reports the shell would otherwise echo back onto its own command line, so
+    // the escape sequence typed to leave the screen later still parses.
+    await p.keyboard.type("for i in $(seq 1 200); do printf 'alt-scroll-%s\\n' \"$i\"; done");
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText("alt-scroll-200", { timeout: 20_000 });
+    await p.keyboard.type("printf '\\033[?1049h\\033[?1000h\\033[?1006h\\033[H'");
+    await p.keyboard.press("Enter");
+    // A real mouse-mode app runs the PTY raw: echoing the reports back onto the
+    // grid makes the DOM renderer recycle row nodes mid-gesture, which detaches
+    // the touch target and eats the rest of the stream (#5020).
+    await p.keyboard.type("stty -echo -icanon && cat > /dev/null");
+    await p.keyboard.press("Enter");
+    await expect(xterm).toHaveClass(/enable-mouse-events/);
+    // Prove the state the bug lived in, not just the mode flag: the scrollback
+    // is gone from view and the viewport has nothing local left to scroll.
+    await expect(host).not.toContainText("alt-scroll-200");
+    expect(
+      await viewport.evaluate((el) => el.scrollHeight <= el.clientHeight + 1),
+      "the alternate buffer exposes no local scrollback for a drag to move",
+    ).toBe(true);
+
+    const screen = host.locator(".xterm-screen");
+    const screenBox = await screen.boundingBox();
+    expect(screenBox, "the terminal screen must have geometry to drag on").toBeTruthy();
+    const { x, y, width, height } = screenBox as ElementBox;
+    const column = x + width / 2;
+
+    // A TAP still belongs to the application — the reason mouse mode exists, and
+    // the gesture whose compatibility click the drag must never be mistaken for.
+    inputPayloads.length = 0;
+    await touchTap(cdp, column, y + height * 0.5);
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).some((r) => r.button === 0 && !r.release), {
+        message: "a tap must still report a button press to the mouse-aware application",
+      })
+      .toBe(true);
+    // The release is a second report of its own — a mousedown frame can land here
+    // while the mouseup frame is still in flight (the #4217 sighting), so it is
+    // polled the same way rather than read off the array the press filled.
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).some((r) => r.button === 0 && r.release), {
+        message: "a tap must report the button's release as well",
+      })
+      .toBe(true);
+
+    // A finger travelling DOWN the screen pulls older content into view — what a
+    // desktop wheel-up does here. One report per line of travel, button 64.
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.3, y + height * 0.8);
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).length, {
+        message: "a claimed drag must reach a wheel-owning application on the alternate screen",
+      })
+      .toBeGreaterThanOrEqual(4);
+    expect(
+      sgrReportButtons(inputPayloads).every((r) => r.button === 64),
+      "the downward drag must report wheel-up only — no click, no wrong direction",
+    ).toBe(true);
+    await expect(mouseHint, "synthesized wheel reports must not flash the desktop escape hint").not.toHaveClass(
+      /af-visible/,
+    );
+    // A flick-ended drag keeps reporting while it coasts (#5020) — let that wind
+    // down so its wheel-ups can't bleed into the upward drag's purity window.
+    await settledReportCount(inputPayloads);
+
+    // …and a finger travelling UP is wheel-down — button 65.
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.8, y + height * 0.3);
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).length, {
+        message: "the upward drag must report wheel-down",
+      })
+      .toBeGreaterThanOrEqual(4);
+    expect(
+      sgrReportButtons(inputPayloads).every((r) => r.button === 65),
+      "the upward drag must report wheel-down only",
+    ).toBe(true);
+    await expect(mouseHint).not.toHaveClass(/af-visible/);
+    // The coast's reports outlive the lift (#5020); spend them before the
+    // encoding flips, where leftover wheel-downs would arrive as \x1b[Ma and
+    // pollute the default-encoding purity assertion below.
+    await settledReportCount(inputPayloads);
+
+    // DEFAULT encoding next: SGR off but DECSET 1000 still on. The reports now
+    // leave xterm on the BINARY channel — \x1b[M then three byte-coded fields —
+    // which reached the PTY never until the review fix this regression pins.
+    // The toggle line is typed at a shell that may have flushed pending input
+    // around the Ctrl+C, so probe drags retry it until a binary report lands;
+    // when the line lands, SGR is off and `cat` is swallowing again together.
+    const defaultReports = () =>
+      inputPayloads.filter((pl) => pl[0] === 0x1b && pl[1] === 0x5b && pl[2] === 0x4d);
+    await p.keyboard.press("Control+c");
+    inputPayloads.length = 0;
+    await expect(async () => {
+      await p.keyboard.press("Control+c");
+      await p.keyboard.type("printf '\\033[?1006l'; stty -echo -icanon; cat > /dev/null");
+      await p.keyboard.press("Enter");
+      // The probe holds its lift: a flicked drag's coast (#5020) would keep
+      // emitting reports while the NEXT retry types the toggle line, injecting
+      // them into the command it is trying to land.
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.5, 8, 25, 0, 300);
+      expect(
+        defaultReports().length,
+        "default-encoded wheel reports must reach the PTY byte-for-byte",
+      ).toBeGreaterThanOrEqual(3);
+      expect(
+        defaultReports().every((pl) => pl[3] === 0x60),
+        "the downward drag must report wheel-up (\\x1b[M`) in DEFAULT encoding",
+      ).toBe(true);
+    }).toPass({ timeout: 15_000 });
+    // Same coast drain as above: the probe drag's wheel-ups must be spent before
+    // the upward drag's window opens.
+    await settledReportCount(inputPayloads);
+
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.8, y + height * 0.3);
+    await expect
+      .poll(() => defaultReports().length, {
+        message: "the upward drag must report wheel-down in DEFAULT encoding too",
+      })
+      .toBeGreaterThanOrEqual(4);
+    expect(
+      defaultReports().every((pl) => pl[3] === 0x61),
+      "the upward drag must report wheel-down only (\\x1b[Ma)",
+    ).toBe(true);
+    // And its own coast must be spent before the normal-buffer section asserts
+    // a clean inputPayloads after its clear.
+    await settledReportCount(inputPayloads);
+
+    // Back on the normal buffer — mouse tracking STILL on — the same drag keeps
+    // its #2682 meaning: it scrolls local history and reports nothing.
+    //
+    // Killing `cat` is the one place the typed setup can be lost: bash flushes
+    // pending input as it resumes after SIGINT, so the printf is retried until
+    // the normal buffer is actually back — "alt-scroll-200" reappearing is the
+    // honest signal, since it only renders while the normal buffer is active.
+    await p.keyboard.press("Control+c");
+    await expect(async () => {
+      await p.keyboard.type("printf '\\033[?1049l'");
+      await p.keyboard.press("Enter");
+      await expect(host).toContainText("alt-scroll-200", { timeout: 3_000 });
+    }).toPass({ timeout: 15_000 });
+    const normalBottom = await viewport.evaluate((el) => el.scrollTop);
+    expect(normalBottom, "returning to the normal buffer must expose its scrollback again").toBeGreaterThan(0);
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.3, y + height * 0.8);
+    await expect
+      .poll(() => viewport.evaluate((el) => el.scrollTop), {
+        message: "the same drag on the normal buffer must still scroll history",
+      })
+      .toBeLessThan(normalBottom);
+    expect(inputPayloads, "history scrolling must not leak reports to the application").toHaveLength(0);
+  } finally {
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+  }
+});
+
+test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momentum", REAL_FIXTURE, async ({
+  browser,
+}, testInfo) => {
+  // The same really-touch context as #2682/#4982: every gesture below is a trusted
+  // touch Chromium routes itself — the only routing that proves anything about a
+  // phone. What this test adds is MEASUREMENT: lines moved per drag and per flick,
+  // on both scroll paths, so the PR can compare them against the same run on
+  // master instead of asserting the feel is faster.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+  });
+  const p = await ctx.newPage();
+  const cdp = await ctx.newCDPSession(p);
+  // Timestamped SGR reports — the momentum split on the wheel path is "arrived
+  // after the lift".
+  const reports: { button: number; release: boolean; t: number }[] = [];
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op !== Op.Input) {
+        return;
+      }
+      const t = Date.now();
+      const text = String.fromCharCode(...frame.data);
+      for (const m of text.matchAll(/\x1b\[<(\d+);\d+;\d+([Mm])/g)) {
+        reports.push({ button: Number(m[1]), release: m[2] === "m", t });
+      }
+    });
+  });
+
+  const metrics: Record<string, number> = {};
+  const failures: string[] = [];
+  // A measured step records its numbers into the artifact FIRST and only then
+  // asserts — and its failure lands in the artifact too rather than ending the
+  // test, so the same spec run against a pre-#5020 build yields the before-column
+  // the PR body needs.
+  const step = async (name: string, fn: () => Promise<void>): Promise<void> => {
+    try {
+      await fn();
+    } catch (err) {
+      failures.push(`${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    }
+  };
+  const wheels = (since = 0): { button: number; release: boolean; t: number }[] =>
+    reports.filter((r) => (r.button === 64 || r.button === 65) && r.t >= since);
+
+  try {
+    await openTokenless(p);
+    await p.locator(".af-nav-toggle").click();
+    await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app.af-nav-open")).toHaveCount(0);
+    await resetToAgentTab(p);
+    await createTerminalTab(p);
+    const host = await typeableShellTab(p);
+    const xterm = host.locator(".xterm");
+    const viewport = host.locator(".xterm-viewport");
+    const scrollTop = (): Promise<number> => viewport.evaluate((el) => el.scrollTop);
+    // The coast's own ledger, mirrored onto the pane host by terminal.ts:
+    // `applied` counts every coast tick that emitted scroll px, and `stopped`
+    // freezes that count at the moment the coast last stopped. Proving a press
+    // stopped the coast needs THIS, not scrollTop — xterm flushes scrollLines to
+    // the DOM a painted frame after the buffer moved, so a press-time scrollTop
+    // read can sit a whole coast tick stale (the master sighting at run
+    // 36816835160 measured 68px — exactly one tick — with nothing applied after
+    // the stop).
+    const coastCounters = (): Promise<{ applied: number; stopped: number; liveStops: number }> =>
+      host
+        .locator(".af-pane-host")
+        .first()
+        .evaluate((el) => ({
+          applied: Number(el.getAttribute("data-af-coast-applied") ?? 0),
+          stopped: Number(el.getAttribute("data-af-coast-stop-count") ?? 0),
+          liveStops: Number(el.getAttribute("data-af-coast-live-stops") ?? 0),
+        }));
+    // Deep scrollback: a clamped flick coasts hundreds of lines, and a coast cut
+    // short by the top of history would read as less momentum than there is.
+    await p.keyboard.type("for i in $(seq 1 1200); do printf 'fast-scroll-%s\\n' \"$i\"; done");
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText("fast-scroll-1200", { timeout: 20_000 });
+
+    const screen = host.locator(".xterm-screen");
+    const screenBox = await screen.boundingBox();
+    expect(screenBox, "the terminal screen must have geometry to drag on").toBeTruthy();
+    const { x, y, width, height } = screenBox as ElementBox;
+    const column = x + width / 2;
+    const rowHeight = await host
+      .locator(".xterm-rows > div")
+      .first()
+      .evaluate((el) => el.getBoundingClientRect().height);
+    metrics.screenHeightPx = height;
+    metrics.rowHeightPx = rowHeight;
+    metrics.viewportRows = height / rowHeight;
+
+    // PART A — the normal buffer UNDER application mouse reporting, where af owns
+    // the drag (#2682). cat swallows the reports the gestures send to the PTY, so
+    // click bytes never land on a command line the next Enter would run.
+    await p.keyboard.type("printf '\\033[?1000h\\033[?1006h'");
+    await p.keyboard.press("Enter");
+    await expect(xterm).toHaveClass(/enable-mouse-events/);
+    await p.keyboard.type("cat > /dev/null");
+    await p.keyboard.press("Enter");
+    const bottom = await scrollTop();
+    expect(bottom, "1200 lines of output must leave real scrollback above the view").toBeGreaterThan(0);
+
+    await step("normal drag", async () => {
+      // Half a screen at ~0.3 px/ms: a deliberate scroll, too slow to fling. The
+      // finger travels DOWN — into history, like #2682's drag — and it is the gain
+      // that's being measured: 1:1 would move half a viewport of history.
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 20, 45, 0);
+      const parked = await scrollTop();
+      metrics.normalDragLines = (bottom - parked) / rowHeight;
+      metrics.normalDragGain = metrics.normalDragLines / ((height * 0.5) / rowHeight);
+      // …and a drag this slow must stop DEAD at the lift: any later movement is
+      // momentum a careful finger never earned.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await scrollTop(), "a slow drag must not acquire momentum").toBe(parked);
+      expect(metrics.normalDragGain, "touch scrolling must move ≥ ~3x the finger's travel").toBeGreaterThanOrEqual(2.8);
+    });
+
+    await step("normal flick", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop, { message: "typing must return the viewport to the newest output" }).toBeGreaterThan(
+        bottom - rowHeight,
+      );
+      const beforeFlick = await scrollTop();
+      // An accelerating flick — a real finger gathers then whips: a slow first
+      // half, then a fast tail covering most of the travel, so the release
+      // window reads whip speed and not send round-trip time.
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      const atRelease = await scrollTop();
+      const settled = await settledScrollTop(viewport);
+      metrics.normalFlickDragLines = (beforeFlick - atRelease) / rowHeight;
+      metrics.normalFlickCoastLines = (atRelease - settled) / rowHeight;
+      metrics.normalFlickTotalLines = (beforeFlick - settled) / rowHeight;
+      expect(
+        metrics.normalFlickCoastLines,
+        "a quick flick must KEEP scrolling after the lift — through at least a viewport",
+      ).toBeGreaterThanOrEqual(metrics.viewportRows);
+      expect(
+        metrics.normalFlickCoastLines,
+        "a GENTLE flick stays gentle — a few viewports, not the whole buffer",
+      ).toBeLessThanOrEqual(6 * metrics.viewportRows);
+      expect(
+        metrics.normalFlickTotalLines,
+        "a quick flick across long history must travel several screenfuls in all",
+      ).toBeGreaterThanOrEqual(3 * metrics.viewportRows);
+    });
+
+    // Page-side touch counters: a browser-stolen pan shows up as touchcancel with
+    // the move stream cut short, which the metrics alone cannot distinguish from
+    // a gesture that arrived but produced no scroll.
+    const armTouchProbe = (): Promise<void> =>
+      p.evaluate(() => {
+        const w = window as unknown as {
+          __touchProbe?: { moves: number; cancels: number; ends: number };
+          __touchProbeArmed?: boolean;
+        };
+        w.__touchProbe = { moves: 0, cancels: 0, ends: 0 };
+        if (w.__touchProbeArmed) return;
+        w.__touchProbeArmed = true;
+        const probe = () => w.__touchProbe!;
+        document.addEventListener("touchmove", () => (probe().moves += 1), { capture: true, passive: true });
+        document.addEventListener("touchcancel", () => (probe().cancels += 1), { capture: true, passive: true });
+        document.addEventListener("touchend", () => (probe().ends += 1), { capture: true, passive: true });
+      });
+    const readTouchProbe = async (prefix: string): Promise<void> => {
+      const probe = await p.evaluate(
+        () => (window as unknown as { __touchProbe?: { moves: number; cancels: number; ends: number } }).__touchProbe,
+      );
+      metrics[`${prefix}MovesSeen`] = probe?.moves ?? -1;
+      metrics[`${prefix}CancelsSeen`] = probe?.cancels ?? -1;
+      metrics[`${prefix}EndsSeen`] = probe?.ends ?? -1;
+    };
+
+    await step("normal hard flick", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
+      const beforeFlick = await scrollTop();
+      await armTouchProbe();
+      // A whip over most of the screen: four small paced moves claim the gesture
+      // at deliberate speed, then five pipelined ~104px moves whip the release
+      // window to ~4+ px/ms — the review's >=10-viewport requirement.
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 30, 5, 0, 0.9);
+      await readTouchProbe("normalHardFlick");
+      const atRelease = await scrollTop();
+      const settled = await settledScrollTop(viewport);
+      metrics.normalHardFlickDragLines = (beforeFlick - atRelease) / rowHeight;
+      metrics.normalHardFlickCoastLines = (atRelease - settled) / rowHeight;
+      metrics.normalHardFlickTotalLines = (beforeFlick - settled) / rowHeight;
+      expect(
+        metrics.normalHardFlickTotalLines,
+        "a hard flick must travel >= 10 viewports — momentum scales with release velocity",
+      ).toBeGreaterThanOrEqual(10 * metrics.viewportRows);
+      expect(metrics.normalHardFlickCoastLines).toBeGreaterThan(metrics.normalFlickCoastLines);
+    });
+
+    await step("normal tap-to-stop", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      // The press lands mid-coast: from touchstart the view must hold still for as
+      // long as the finger stays down.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await touchPressAndHold(cdp, column, y + height * 0.5, 200);
+      const held = await scrollTop();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const heldLater = await scrollTop();
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      metrics.normalTapToStopDriftPx = Math.abs(heldLater - held);
+      expect(heldLater, "a finger landing on a coasting view must stop it").toBe(held);
+    });
+
+    await step("normal pause-then-lift", async () => {
+      // A real drag that then RESTS — finger down, motionless — must not fling:
+      // the lift is sampled after 300ms of stillness, so no recent velocity exists.
+      await touchDragTimed(cdp, column, y + height * 0.35, y + height * 0.6, 6, 14, 0, 300);
+      const atLift = await scrollTop();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const settled = await scrollTop();
+      metrics.normalPausedLiftDriftPx = Math.abs(atLift - settled);
+      expect(settled, "a drag that paused before the lift must not coast").toBe(atLift);
+    });
+
+    await step("normal tap", async () => {
+      reports.length = 0;
+      await touchTap(cdp, column, y + height * 0.5);
+      await expect
+        .poll(
+          () =>
+            reports.some((r) => r.button === 0 && !r.release) && reports.some((r) => r.button === 0 && r.release),
+          { message: "a tap must still report a click to the mouse-aware application" },
+        )
+        .toBe(true);
+      metrics.normalTapReports = reports.length;
+    });
+
+    await step("normal pointerdown mid-coast", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      const atLift = (await coastCounters()).applied;
+      // On a hybrid device a mouse or pen press while the flick still coasts is
+      // fresh scroll intent — the coast must die at pointerdown, not fight it.
+      // Asserted on the coast's own ledger, not on scrollTop drift: the DOM's
+      // scrollTop trails the buffer by a painted frame, so a DOM read at the
+      // press can sit a whole tick stale — comparing counts is immune to when
+      // either sample lands relative to the in-flight flush.
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await p.mouse.move(column, y + height * 0.55);
+      // Sampled immediately before the press: a stop that lands while momentum
+      // is live bumps data-af-coast-live-stops, which is the proof this press
+      // interrupted a running coast rather than arriving after natural decay —
+      // ticks accumulated earlier could pass the count check either way.
+      const prePress = await coastCounters();
+      await p.mouse.down();
+      // Two painted frames give every rAF queued at the press — the stopped
+      // coast's last-scheduled tick and xterm's pending scrollTop flush alike —
+      // their one legal run before the counts are read.
+      await p.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const afterPress = await coastCounters();
+      await p.mouse.up();
+      metrics.normalPointerStopMidCoastTicks = afterPress.stopped - atLift;
+      metrics.normalPointerStopPostStopApplied = afterPress.applied - afterPress.stopped;
+      metrics.normalPointerStopLiveStops = afterPress.liveStops - prePress.liveStops;
+      expect(
+        metrics.normalPointerStopMidCoastTicks,
+        "the press must land while the coast is still applying ticks",
+      ).toBeGreaterThan(0);
+      expect(
+        metrics.normalPointerStopLiveStops,
+        "the press must be the stop that landed while momentum was still live",
+      ).toBe(1);
+      expect(
+        metrics.normalPointerStopPostStopApplied,
+        "a mouse press mid-coast must stop momentum — no coast tick applies after it",
+      ).toBe(0);
+    });
+
+    // PART B — the alternate screen under an application that owns the wheel
+    // (#4982): the same gestures must become wheel reports, with the same gain and
+    // the same momentum, coalesced at most one batch per frame.
+    await p.keyboard.press("Control+c");
+    await expect(async () => {
+      await p.keyboard.type("printf '\\033[?1049h\\033[H'");
+      await p.keyboard.press("Enter");
+      await expect(host, "entering the alternate screen must clear the seeded history").not.toContainText(
+        "fast-scroll-1200",
+        { timeout: 3_000 },
+      );
+    }).toPass({ timeout: 15_000 });
+    // No echo, byte-at-a-time reads: a real mouse-mode application puts the PTY
+    // in raw mode. Left on, each wheel report echoes back as output and xterm's
+    // DOM renderer recycles row nodes — the touch sequence's capture target dies
+    // mid-gesture and the browser drops the rest of the stream without even a
+    // touchcancel (probe: a few moves, zero ends).
+    await p.keyboard.type("stty -echo -icanon && cat > /dev/null");
+    await p.keyboard.press("Enter");
+    await expect
+      .poll(async () => viewport.evaluate((el) => el.scrollHeight <= el.clientHeight + 1), {
+        message: "the alternate buffer must be the unscrollable one",
+      })
+      .toBe(true);
+
+    await step("alternate drag", async () => {
+      reports.length = 0;
+      const t0 = Date.now();
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 20, 45, 0);
+      await settledReportCount(reports);
+      metrics.altDragLines = wheels(t0).length;
+      metrics.altDragGain = metrics.altDragLines / ((height * 0.5) / rowHeight);
+      expect(wheels(t0).every((r) => r.button === 64), "a drag toward history must report wheel-up").toBe(true);
+      expect(metrics.altDragGain, "the wheel path must carry the same ≥ ~3x gain").toBeGreaterThanOrEqual(2.8);
+    });
+
+    await step("alternate flick", async () => {
+      reports.length = 0;
+      const t0 = Date.now();
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      const releaseAt = Date.now();
+      await settledReportCount(reports);
+      metrics.altFlickTotalLines = wheels(t0).length;
+      metrics.altFlickCoastLines = wheels(releaseAt + 40).length;
+      expect(
+        metrics.altFlickCoastLines,
+        "the lift must not end the gesture — wheel reports must keep arriving",
+      ).toBeGreaterThanOrEqual(metrics.viewportRows);
+      expect(metrics.altFlickCoastLines, "a gentle flick stays gentle on the wheel path too").toBeLessThanOrEqual(
+        6 * metrics.viewportRows,
+      );
+      expect(metrics.altFlickTotalLines).toBeGreaterThanOrEqual(3 * metrics.viewportRows);
+      expect(wheels(t0).every((r) => r.button === 64)).toBe(true);
+    });
+
+    await step("alternate hard flick", async () => {
+      reports.length = 0;
+      const t0 = Date.now();
+      await armTouchProbe();
+      // Same whip as the normal path — downward into history = wheel-up reports.
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 30, 5, 0, 0.9);
+      await readTouchProbe("altHardFlick");
+      const releaseAt = Date.now();
+      await settledReportCount(reports);
+      metrics.altHardFlickTotalLines = wheels(t0).length;
+      metrics.altHardFlickCoastLines = wheels(releaseAt + 40).length;
+      expect(
+        metrics.altHardFlickTotalLines,
+        "the wheel path must carry the same scaled momentum — >= 10 viewports of reports",
+      ).toBeGreaterThanOrEqual(10 * metrics.viewportRows);
+      expect(metrics.altHardFlickCoastLines).toBeGreaterThan(metrics.altFlickCoastLines);
+      expect(wheels(t0).every((r) => r.button === 64)).toBe(true);
+    });
+
+    await step("alternate tap-to-stop", async () => {
+      reports.length = 0;
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await touchPressAndHold(cdp, column, y + height * 0.5, 200);
+      const held = wheels().length;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const heldLater = wheels().length;
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      metrics.altTapToStopReportsDuringHold = heldLater - held;
+      expect(heldLater, "a finger landing mid-coast must stop the report stream").toBe(held);
+    });
+
+    await step("alternate tap", async () => {
+      reports.length = 0;
+      await touchTap(cdp, column, y + height * 0.5);
+      await expect
+        .poll(
+          () =>
+            reports.some((r) => r.button === 0 && !r.release) && reports.some((r) => r.button === 0 && r.release),
+          { message: "a tap on the alternate screen must still click through" },
+        )
+        .toBe(true);
+      metrics.altTapReports = reports.length;
+    });
+
+    await step("alternate app exit mid-coast", async () => {
+      // The app can leave the alternate screen mid-coast — e.g. in response to
+      // one of our own reports: its ?1049l rides an ordinary PTY frame, and the
+      // buffer the gesture was emitting wheel events into is suddenly gone. The
+      // momentum must die with it, not pour into the restored normal buffer.
+      await p.keyboard.press("Control+c");
+      await p.keyboard.type("(sleep 1.2; printf '\\033[?1049l') & stty -echo -icanon; cat > /dev/null");
+      await p.keyboard.press("Enter");
+      reports.length = 0;
+      const t0 = Date.now();
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 30, 5, 0, 0.9);
+      await expect(host, "the timed rmcup lands mid-coast and restores the seeded screen").toContainText(
+        "fast-scroll-",
+        { timeout: 6_000 },
+      );
+      metrics.altExitMidCoastReports = wheels(t0).length;
+      // The restored buffer re-renders once as the shell prompt returns; after
+      // that only a still-running coast could move the view — history-ward, the
+      // direction this flick drove. A drop means momentum outlived its buffer.
+      const afterSwitch = await scrollTop();
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const later = await scrollTop();
+      metrics.altExitMidCoastDriftPx = afterSwitch - later;
+      expect(metrics.altExitMidCoastDriftPx, "momentum must die with the alternate buffer").toBeLessThanOrEqual(0);
+    });
+  } finally {
+    await testInfo.attach("scroll-metrics", {
+      body: JSON.stringify({ metrics, failures }, null, 2),
+      contentType: "application/json",
+    });
+    console.log(`#5020 metrics: ${JSON.stringify(metrics)}`);
+    if (failures.length > 0) {
+      console.log(`#5020 step failures: ${failures.join(" | ")}`);
+    }
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+  }
+  expect(failures, "every measured step above must hold").toEqual([]);
+});
+
 test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTURE, async ({ browser }) => {
   // The same phone-shaped, really-touch-emulated context as #2682 — and the same
   // reason for it. Nothing here can be proved from a desktop window: what is being
@@ -2712,6 +3627,7 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     await openTokenless(p);
     await p.locator(".af-nav-toggle").click();
     await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
     await resetToAgentTab(p);
     await createTerminalTab(p);
     await expect(p.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal", { timeout: 30_000 });
@@ -2725,14 +3641,13 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     // word-vs-line assertions below actually discriminate.
     const TOKEN = "/srv/af-2849.log";
     const TRAILER = "ready";
-    await p.keyboard.type(`printf '%s %s\\n' ${TOKEN} ${TRAILER}`);
+    await p.keyboard.type(`printf '%s %s\\n' ${TOKEN} ${TRAILER}${LATE_OUTPUT}`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText(`${TOKEN} ${TRAILER}`, { timeout: 20_000 });
 
-    // The LAST row showing it is the printf output; the row above is the echoed
-    // command line, which would copy the same token from the wrong place.
-    const tokenRow = host.locator(".xterm-rows > div", { hasText: TOKEN }).last();
-    await expect(tokenRow).toBeVisible();
+    // The printf output's row, NOT the echoed command line above it, which holds the
+    // same text after the prompt and exists before the command has even run.
+    const tokenRow = outputRowStartingWith(host, `${TOKEN} ${TRAILER}`);
+    await expect(tokenRow).toBeVisible({ timeout: 20_000 });
     const rowBox = await tokenRow.boundingBox();
     expect(rowBox, "the token's row must have geometry to press on").toBeTruthy();
     const { x, y, width, height } = rowBox as ElementBox;
@@ -2766,16 +3681,16 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
 
     // THE assertion: a finger, no keyboard, and the token is on the system clipboard.
     await expect
-      .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
+      .poll(async () => {
+        const text = await p.evaluate(() => navigator.clipboard.readText());
+        return {
+          copiedToken: text.includes(TOKEN),
+          excludedTrailer: !text.includes(TRAILER),
+        };
+      }, {
         message: `a long press must put the token under the finger on the system clipboard [delivered: ${delivered}]`,
       })
-      .toContain(TOKEN);
-    // …the TOKEN, not its line. That is the difference between copying what the
-    // finger was on and copying everything near it.
-    expect(
-      await p.evaluate(() => navigator.clipboard.readText()),
-      "the press copies the token under the finger, not the whole line",
-    ).not.toContain(TRAILER);
+      .toEqual({ copiedToken: true, excludedTrailer: true });
     // The selection xterm paints is the only feedback this gesture has, so it must
     // survive the press rather than being cleared by the click that follows it.
     await expect(selection, "the copied token must stay visibly selected").not.toHaveCount(0);
@@ -2796,11 +3711,20 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     // buffer row, and a scan that stopped at the row edge would copy a fragment and
     // look like it had worked.
     const LONG = `/srv/af-2849/${"wrapped-".repeat(6)}end`;
-    await p.keyboard.type(`printf '%s\\n' ${LONG}`);
+    await p.keyboard.type(`printf '%s\\n' ${LONG}${LATE_OUTPUT}`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("wrapped-end", { timeout: 20_000 });
-    const wrappedRow = host.locator(".xterm-rows > div", { hasText: "/srv/af-2849/wrapped-" }).last();
-    await expect(wrappedRow).toBeVisible();
+    const wrappedRow = outputRowStartingWith(host, "/srv/af-2849/wrapped-");
+    await expect(wrappedRow).toBeVisible({ timeout: 20_000 });
+    // …and ALL of it, both rows. The first row can paint before the PTY delivers the
+    // rest, and a press then reads a token that really does end at the screen edge —
+    // correctly, since nothing more exists yet. The echo already holds LONG once, so the
+    // output is the second occurrence.
+    await expect
+      .poll(async () => ((await host.textContent()) ?? "").split(LONG).length - 1, {
+        message: "the wrapped token's output must have arrived whole before it is pressed",
+        timeout: 20_000,
+      })
+      .toBeGreaterThanOrEqual(2);
     const wrappedBox = (await wrappedRow.boundingBox()) as ElementBox;
     await p.evaluate(() => navigator.clipboard.writeText("af-2849-clipboard-untouched").catch(() => {}));
     await touchLongPress(cdp, wrappedBox.x + 2, wrappedBox.y + wrappedBox.height / 2);
@@ -2913,6 +3837,7 @@ test("#2899 mobile: a finger long-presses a tab and drags it to REORDER — and 
    *  new-tab control overflow the bar, so an off-screen tab's box is a coordinate no
    *  finger could ever land on. */
   const centerOf = async (name: string): Promise<{ x: number; y: number }> => {
+    await openSessionActions(p);
     const tab = p.locator(".af-tabbar .af-tab", { hasText: name });
     await tab.scrollIntoViewIfNeeded();
     const box = await tab.boundingBox();
@@ -2927,6 +3852,7 @@ test("#2899 mobile: a finger long-presses a tab and drags it to REORDER — and 
     // (Codex on #2901). The hamburger is the same control the mobile tests use.
     await p.locator(".af-nav-toggle").click();
     await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
     await resetToAgentTab(p);
 
     af("sessions", "tab-create", SESSION_B, "--command", "bash", "--name", first);
@@ -3091,9 +4017,10 @@ test("#2517: Escape interrupts the agent (forwards down the PTY) and never detac
     inputPayloads.length = 0;
     await p.keyboard.press("Escape");
     await expect
-      .poll(() => inputPayloads.length, { message: "Escape must reach the agent — it is the interrupt key" })
-      .toBe(1);
-    expect(inputPayloads[0], "Escape forwards the ESC byte (0x1b) down the PTY").toEqual([0x1b]);
+      .poll(() => ({ count: inputPayloads.length, bytes: inputPayloads[0] ?? [] }), {
+        message: "Escape must reach the agent as the ESC byte (0x1b)",
+      })
+      .toEqual({ count: 1, bytes: [0x1b] });
     await expect(
       p.locator(".af-app.af-kb-terminal"),
       "Escape must NOT detach — focus stays in the terminal so the user can keep driving the agent",
@@ -3109,6 +4036,55 @@ test("#2517: Escape interrupts the agent (forwards down the PTY) and never detac
   } finally {
     await ctx.close();
   }
+});
+
+test("#3626: the tasks list marks a task that has stopped firing, and says how far behind", REAL_FIXTURE, async () => {
+  // The web is the surface the #2212 owner — a box whose owner never opens the
+  // TUI — actually opens, and before this it was the one showing none of #3623:
+  // an enabled task dark for a month read exactly like a healthy one.
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const tasks = page.locator(".af-tasks");
+  await expect(tasks).toBeVisible();
+
+  const overdue = tasks.locator(".af-task-row", { hasText: OVERDUE_TASK });
+  await expect(overdue).toHaveCount(1);
+
+  // The MARK, on the row you are not scrolling to — the enabled tick is replaced
+  // rather than a column added, as the rail does it.
+  const mark = overdue.locator(".af-task-enabled.af-task-warn");
+  await expect(mark).toHaveCount(1);
+  // Hidden from assistive tech: the glyph is there to survive visual clipping,
+  // and CSS ellipsis does not clip the accessibility tree — labelling it with the
+  // same summary the row already shows announced the verdict twice (#3626
+  // review). The words below are what a screen reader gets.
+  await expect(mark).toHaveAttribute("aria-hidden", "true");
+
+  // The DETAIL, in the row, in the rail's own words. The count is whatever the
+  // daemon derived from a month of a daily schedule, so the assertion is on the
+  // shape rather than on a number the harness would have to keep in step. (Daily,
+  // and at an hour computed half a day out from setup: a fixture armed on a real
+  // daemon for the whole suite would otherwise FIRE mid-run, clear its own overdue
+  // verdict, and fail this by wall-clock luck — see the seeding script.)
+  await expect(overdue.locator(".af-task-health")).toHaveText(/^overdue · missed \d+\+?$/);
+
+  // A static glyph and nothing else: no animation anywhere on the marked row
+  // (#1766 — state reads from a glyph in this app).
+  const animated = await overdue.evaluate((row) =>
+    Array.from(row.querySelectorAll("*")).filter((el) => {
+      const s = getComputedStyle(el);
+      return s.animationName !== "none" || (s.transitionDuration !== "0s" && s.transitionProperty !== "none");
+    }).length,
+  );
+  expect(animated).toBe(0);
+
+  // And the healthy seeded task in the same list carries neither, which is what
+  // makes the mark mean something.
+  const healthy = tasks.locator(".af-task-row", { hasText: SEEDED_TASK });
+  await expect(healthy).toHaveCount(1);
+  await expect(healthy.locator(".af-task-enabled.af-task-warn")).toHaveCount(0);
+  await expect(healthy.locator(".af-task-health")).toHaveCount(0);
+
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
 });
 
 test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → tasks → config)", REAL_FIXTURE, async () => {
@@ -3242,7 +4218,7 @@ test("config: the editor renders from the manifest and writes through the real p
       .toEqual(next);
   };
 
-  await editJSON("theme", (value) => ({ ...value, accent: "#123456" }));
+  await expect(pane.locator('.af-config-row[data-key="theme"]')).toHaveCount(0);
   await editJSON("program_overrides", (value) => ({ ...value, devin: "devin --web-config-selftest" }));
   await editJSON("session_env_passthrough", (value) => [...value, "AF_WEB_CONFIG_SELFTEST"]);
   await editJSON("limit_patterns", (value) => ({ ...value, devin: "AF_WEB_CONFIG_LIMIT" }));
@@ -3258,6 +4234,509 @@ test("config: the editor renders from the manifest and writes through the real p
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
+test("config: a refresh landing mid-edit preserves focus, caret, and later typing (#4244)", REAL_FIXTURE, async ({ browser }) => {
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the delayed checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // Hold an unrelated save response so its rebuild lands only after this field
+    // has become the active edit. The daemon is not mutated: the intercepted reply
+    // is enough to drive configStatus and the same ConfigPane.update/render path.
+    await pane.locator('.af-config-row[data-key="auto_update"] input').click();
+    await saveStarted;
+
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "abcdef";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "abcdef", inputType: "insertText" }));
+      input.setSelectionRange(3, 3);
+    });
+
+    releaseSave!();
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    await expect(field).toBeFocused();
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.selectionStart)).toBe(3);
+
+    // This is the user-visible contract: after the rebuild, typing still reaches
+    // the replacement input at the preserved caret instead of falling onto body
+    // and being discarded (or interpreted as a view shortcut).
+    await p.keyboard.type("Z");
+    await expect(field).toHaveValue("abcZdef");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXTURE, async ({ browser }) => {
+  // The sibling of #4244. #4244 pins the UNRELATED-rebuild case: a different key's
+  // save landing while a field is mid-edit. This pins the SAME-key case: the user
+  // commits the field they are editing with Enter. Enter does not blur (config.ts
+  // preventDefault()s it), so the input genuinely holds focus through the whole
+  // save round-trip, and rerenderKeepingUserState's `wasEditing` is true coming in.
+  // But update()'s close-on-save clears `this.editing` BEFORE the rerender, so the
+  // `if (this.editing === e.key)` gate in renderControl no longer re-points
+  // `editingInput` at the rebuilt input — `editingInput` stays null, the
+  // `if (wasEditing && this.editingInput)` restoration branch no-ops, and focus
+  // falls to <body>. The user's next keystrokes then become document shortcuts
+  // (`[`/`]` cycle the view) or, for any other printable key, are silently
+  // swallowed (decideKey returns {kind:"none"} without preventDefault for a
+  // body-focused key in config view). The fix re-points editingInput for the
+  // just-saved row so the existing restoration branch keeps focus on the rebuilt
+  // input — without re-opening the edit.
+  //
+  // The route is intercepted, so the daemon is NOT mutated: network.listen_addr
+  // applies live and would otherwise rebind this very daemon's listener. Only the
+  // canned reply drives configStatus + ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // network.listen_addr — a text row. Mark it dirty with a nonce the daemon does
+    // not hold, set the caret at offset 3, then commit with Enter so the save is
+    // for the SAME key the field is editing.
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "abcdef";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "abcdef", inputType: "insertText" }));
+      input.setSelectionRange(3, 3);
+    });
+    await field.press("Enter");
+    await saveStarted;
+    releaseSave!();
+
+    // The echo proves configStatus drove ConfigPane.update (the close-on-save
+    // clear + the rebuild ran), which is the exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    // RED without the fix: focus fell to <body> when the rebuilt input replaced the
+    // focused one and the restoration gate no-oped on `this.editingInput === null`.
+    await expect(field).toBeFocused();
+    // The caret survived the rebuild — direct evidence the restoration branch
+    // (the only site that re-applies setSelectionRange) drove the rebuilt input.
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.selectionStart)).toBe(3);
+
+    // Typing reaches the rebuilt input at the restored caret instead of falling
+    // onto <body> (where it would be discarded or interpreted as a view shortcut).
+    // The rebuilt input's value is the daemon's freshly re-read value, not the
+    // nonce: the intercepted save did not mutate the daemon, so refreshConfig
+    // repopulates the field from e.value and Z is inserted at the restored caret.
+    await p.keyboard.type("Z");
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.value)).toContain("Z");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a checkbox save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
+  // The checkbox sibling of the same-key Enter-save test above. A bool row commits
+  // on `change` — toggling IS the edit — and the save round-trip rebuilds the whole
+  // pane, so the focused checkbox is destroyed and replaced. The restoration
+  // ladder only knew about `editingInput` (text rows), `advancedToggle`, and the
+  // account fields, so a checkbox save dropped focus to <body>: the app's
+  // document-level keydown gate then ran, and in config view the user's next
+  // `[`/`]` cycled the top-level view (other keystrokes were silently swallowed) —
+  // the exact body-focus hazard rerenderKeepingUserState's own comments describe.
+  // The fix captures the focused checkbox's `aria-label` (the config key) before
+  // the rebuild and re-locates its replacement afterward.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the held checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // auto_update is a core-tier bool row, visible without expanding advanced.
+    // Clicking it focuses it and fires `change` → save.
+    const box = pane.locator('.af-config-row[data-key="auto_update"] input');
+    await box.click();
+    await saveStarted;
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran) — the
+    // exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt checkbox replaced the focused one and the
+    // restoration ladder had no branch for it, so focus fell to <body>.
+    await expect(box).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native INPUT the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix:
+    // focus on <body> let `[` cycle the view out from under the user.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a select save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
+  // The select sibling of the checkbox test above. An enumerated row commits on
+  // `change` and the save round-trip rebuilds the pane, so the focused select is
+  // destroyed and replaced. The restoration ladder had a branch for the
+  // account-agent select but none for a per-key config select, so a select save
+  // dropped focus to <body> and the user's next `[`/`]` cycled the view. The fix
+  // captures the focused select's `aria-label` (the config key) before the rebuild
+  // and re-locates its replacement afterward.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // update_channel is a core-tier enum row (stable | preview). Pick the option
+    // the select does not already hold so `change` actually fires.
+    const channel = pane.locator('.af-config-row[data-key="update_channel"] select');
+    const current = await channel.evaluate((sel: HTMLSelectElement) => sel.value);
+    const target = current === "stable" ? "preview" : "stable";
+    // Focus the select first, mirroring the real gesture the bug report
+    // reproduced ("clicking a config-row <select>, changing the option"): a mouse
+    // click on the select focuses it and opens the dropdown, and Tabbing to it
+    // focuses it the same way. Playwright's `selectOption` from a NON-focused
+    // state dispatches the change event without transferring focus to the
+    // select, so the element never holds DOM focus and the bug's "rebuild
+    // destroys the focused select" scenario never materializes. Focus() first
+    // makes the select genuinely hold focus at change time, exactly as a user's
+    // own click-to-open or Tab would — so the assertion below proves the fix
+    // catches the same focus loss the bug report observed.
+    await channel.focus();
+    await channel.selectOption(target);
+    await saveStarted;
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran).
+    await expect(pane.locator('.af-config-row[data-key="update_channel"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt select replaced the focused one and the
+    // restoration ladder had no branch for it, so focus fell to <body>.
+    await expect(channel).toBeFocused();
+
+    // Downstream contract: with focus on a native SELECT the document-level keydown
+    // gate (isNativeControl) returns early, so a bare `[` is NOT a view-cycle
+    // shortcut. RED without the fix: focus on <body> let `[` cycle the view.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a click-focused-but-untyped text field keeps focus across an unrelated rebuild", REAL_FIXTURE, async ({ browser }) => {
+  // The text-input sibling of the #4244/checkbox/select family. #4244 types into
+  // the field first, so the `input` event assigns `this.editingInput` and the
+  // `wasEditing` branch (caret-preserving) restores focus. This test deliberately
+  // SKIPS the `input` event: the user has only CLICKED into the field.
+  // `editingInput` is therefore null (it is set only on the `input` event in
+  // renderControl, i.e. once the user has typed), so `wasEditing` is false, and
+  // before the fix the restoration ladder had no branch for a click-focused text
+  // input — `focusedConfigControlKey` matched only checkbox/select — so the
+  // rebuild detached the focused input and focus fell to <body>. The user's next
+  // `[` then cycled the view out of config mid-edit, and any other printable key
+  // was silently swallowed. The fix extends `focusedConfigControlKey` to
+  // `type === "text"`, and because render() already sets `aria-label = e.key` on
+  // every text input, the unchanged querySelector restore re-locates the rebuilt
+  // input — exactly the path already used for checkbox/select. The `wasEditing`
+  // check is first in the ladder, so a TYPED text row keeps the caret-preserving
+  // branch; this branch only fires for the untyped, click-focused case.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the held checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // Hold an unrelated save response so its rebuild lands only after this field
+    // has been click-focused. The daemon is not mutated: the intercepted reply is
+    // enough to drive configStatus and the same ConfigPane.update/render path.
+    await pane.locator('.af-config-row[data-key="auto_update"] input').click();
+    await saveStarted;
+
+    // Click-focus the text field WITHOUT typing. The #4244 sibling dispatches an
+    // `input` event here (setting `editingInput`); this test deliberately does not,
+    // so `wasEditing` is false and only the `focusedConfigControlKey` branch can
+    // restore focus.
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.click();
+    // Place the caret at a NON-default position (the middle of the value) before
+    // the rebuild lands. The `focusedConfigControlKey` branch must restore not only
+    // focus but the caret, so the user's first keystroke lands where they clicked
+    // rather than at the field's default selection. RED without the caret
+    // preservation: focus comes back but at position 0 (the input's default), so
+    // the next keystroke inserts at the start instead of where the user aimed.
+    const fieldValue = await field.inputValue();
+    const caretStart = Math.max(1, Math.floor(fieldValue.length / 2));
+    await field.focus();
+    await field.evaluate((el, start) => {
+      const input = el as HTMLInputElement;
+      input.setSelectionRange(start, start);
+    }, caretStart);
+    expect(await field.evaluate((el) => (el as HTMLInputElement).selectionStart)).toBe(caretStart);
+
+    releaseSave!();
+    // The echo proves configStatus drove ConfigPane.update (the rebuild ran) — the
+    // exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt input replaced the focused one and the
+    // restoration ladder had no branch for a click-focused text field, so focus
+    // fell to <body>.
+    await expect(field).toBeFocused();
+    // The caret survived the rebuild and is still where the user placed it — not
+    // reset to the input's default. RED without the caret-preservation fix.
+    expect(await field.evaluate((el) => (el as HTMLInputElement).selectionStart)).toBe(caretStart);
+    expect(await field.evaluate((el) => (el as HTMLInputElement).selectionEnd)).toBe(caretStart);
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native INPUT the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix:
+    // focus on <body> let `[` cycle the view out from under the user mid-edit.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a later save's status does not pull focus out of the field the user is in", REAL_FIXTURE, async ({ browser }) => {
+  // The third case in this family, and the only one that moves focus to the WRONG
+  // ROW rather than to <body>. Saves are serialized PER KEY (createKeyedQueue), and
+  // config.test.ts pins that two keys have no ordering relationship — so key A's
+  // response can land after key B's. By then the user is in B: B's own save closed
+  // its field and handed focus back to the rebuilt input. A's status then drives
+  // another ConfigPane.update/render, and a restoration that picked its row from
+  // `status.key` would re-point `editingInput` at A and move focus — plus the caret
+  // captured from B — into a field the user never opened, so the next keystroke
+  // edits the wrong setting silently. Restoration reads the key that actually HELD
+  // focus instead, so A's late status rebuilds the list without moving the user.
+  //
+  // Every SetConfigValue is intercepted, so the daemon is NOT mutated:
+  // network.listen_addr applies live and would otherwise rebind this very daemon's
+  // listener. Only the canned replies drive configStatus + ConfigPane.update.
+  const ctx = await browser.newContext();
+  const startResolvers = new Map<string, () => void>();
+  const releaseResolvers = new Map<string, () => void>();
+  const started = (key: string) => new Promise<void>((resolve) => startResolvers.set(key, resolve));
+  const held = (key: string) => new Promise<void>((resolve) => releaseResolvers.set(key, resolve));
+  const addrStarted = started("network.listen_addr");
+  const prefixStarted = started("branch_prefix");
+  const holds: Record<string, Promise<void>> = {
+    "network.listen_addr": held("network.listen_addr"),
+    branch_prefix: held("branch_prefix"),
+  };
+  const releaseAll = () => { for (const resolve of releaseResolvers.values()) resolve(); };
+  try {
+    const p = await ctx.newPage();
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      startResolvers.get(body.key)?.();
+      await holds[body.key];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+    // branch_prefix is the only other text row without an enum, and it is advanced:
+    // network.listen_addr is the single core-tier free-text key.
+    await pane.locator(".af-config-toggle").click();
+    const addr = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    const prefix = pane.locator('.af-config-row[data-key="branch_prefix"] input');
+    await expect(prefix).toBeVisible();
+
+    // A is committed first and its response is held, so it is still in flight when
+    // B is committed — the overlap the per-key queue permits by design.
+    await addr.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "127.0.0.1:9443";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "3", inputType: "insertText" }));
+    });
+    await addr.press("Enter");
+    await addrStarted;
+
+    await prefix.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "af-web-selftest/";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "/", inputType: "insertText" }));
+    });
+    await prefix.press("Enter");
+    await prefixStarted;
+
+    // B answers first: its save closes its own field and focus comes back to the
+    // rebuilt input — the same-key behavior the sibling test above pins.
+    releaseResolvers.get("branch_prefix")!();
+    await expect(pane.locator('.af-config-row[data-key="branch_prefix"] .af-config-echo')).toBeVisible();
+    await expect(prefix).toBeFocused();
+
+    // A answers second. RED without the fix: `status.key` now names
+    // network.listen_addr, so the restoration re-pointed editingInput at THAT row
+    // and focus left branch_prefix for a field the user never opened.
+    releaseResolvers.get("network.listen_addr")!();
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    await expect(prefix).toBeFocused();
+    await expect(addr).not.toBeFocused();
+
+    // The user-visible contract behind the focus assertion: the next keystroke
+    // edits the field they are in, and leaves the other one alone.
+    const addrBefore = await addr.inputValue();
+    await p.keyboard.type("x");
+    await expect.poll(() => prefix.inputValue()).toMatch(/x$/);
+    await expect(addr).toHaveValue(addrBefore);
+  } finally {
+    releaseAll();
+    await ctx.close().catch(() => {});
+  }
+});
+
 // typeIntoAssistantAndExpectEcho is the config assistant's live-output proof. The
 // assistant runs the fake agent (`cat`), so a keystroke makes the full round trip —
 // OpInput → daemon → tmux PTY → `cat` echo → /v1/config-assistant/stream → xterm — and
@@ -3270,6 +4749,35 @@ async function typeIntoAssistantAndExpectEcho(page: Page, nonce: string): Promis
   await page.keyboard.type(nonce);
   await expect(term).toContainText(nonce, { timeout: 30_000 });
 }
+
+test("accounts: one Add account disclosure preserves a refused name and keyboard focus", REAL_FIXTURE, async ({ browser }) => {
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const add = p.locator(".af-account-disclosure summary");
+    await expect(add).toHaveCount(1);
+    await expect(p.locator(".af-accounts-register:visible")).toHaveCount(0);
+    await add.focus();
+    await p.keyboard.press("Enter");
+    await p.getByLabel("Account agent", { exact: true }).selectOption("claude");
+    const name = p.getByLabel("New claude account name", { exact: true });
+    await name.fill("invalid/name");
+    await name.press("Enter");
+    await expect(p.locator(".af-accounts-register:visible [role=alert]")).toBeVisible();
+    await expect(name).toHaveValue("invalid/name");
+    await expect(name).toBeFocused();
+    await name.fill("design-review-account");
+    await name.press("Enter");
+    await expect(name).toHaveValue("");
+    await name.fill("next-account-draft");
+    await p.locator(".af-config-toggle").click();
+    await expect(name).toHaveValue("next-account-draft");
+    await add.click();
+    await expect(p.locator(".af-accounts-register:visible")).toHaveCount(0);
+  } finally { await ctx.close(); }
+});
 
 test("config assistant (#2467): open → live stream → close reaps → reopen spawns fresh", REAL_FIXTURE, async () => {
   // The web counterpart of the TUI's config-agent takeover, over the bare-session PTY
@@ -3348,7 +4856,7 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
         // (apiproto.EnvelopeError). This mock used to send a bare string, mirroring
         // the client's old (wrong) type — so the two agreed with each other and
         // disagreed with the daemon, which is how "[object Object]" survived.
-        body: JSON.stringify({ data: null, error: { message: "simulated tab-close failure" } }),
+        body: JSON.stringify({ data: null, error: { message: "simulated tab-close failure", daemon_rejected: true } }),
       });
       return;
     }
@@ -3402,6 +4910,7 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   // the next CloseTab to error, click ×, and assert the toast — the tab stays.
   failClose = true;
   await shellTab.locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(page.locator(".af-toast.af-toast-show")).toContainText("simulated tab-close failure");
   // A failed close leaves the tab in place.
   await expect(tabbar.locator(".af-tab")).toHaveCount(2);
@@ -3415,6 +4924,7 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   // shrinks; the agent pane's ready marker is back on screen).
   failClose = false;
   await shellTab.locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
   await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
   await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
@@ -3423,205 +4933,369 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   await page.unroute("**/v1/CloseTab");
 });
 
-test("split panes (feat): drag a tab to a pane edge splits into two live panes; close collapses back", REAL_FIXTURE, async () => {
-  // Attach to A and give it a second tab, so there is a distinct tab to drag into a
-  // split (dragging the only tab onto itself just moves it — no split).
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
-
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
-
-  // A single pane so far — today's zero-config default.
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-
-  // Drag the Agent tab (index 0) onto the RIGHT edge → the pane splits into two, the
-  // new right pane bound to the agent tab with its OWN live WS stream.
-  await dragTabToPane(page, "Agent", "right");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
-  // Two concurrent xterm instances now render side by side, each with per-pane chrome.
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
-  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
-
-  // BOTH panes show live output. The new agent pane streams the ready marker over its
-  // own stream — identify it by that marker.
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
-  const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
-  const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
-  await expect(agentPane).toHaveCount(1);
-  await expect(shellPane).toHaveCount(1);
-  // The other pane (the shell tab) is an independent live PTY — focus it and type, and
-  // its echo comes back over its own stream, proving both panes are live at once.
-  await shellPane.locator(".af-pane-host").click();
-  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
-  await page.keyboard.type("echo AF_SPLIT_OK");
-  await page.keyboard.press("Enter");
-  await expect(shellPane).toContainText("AF_SPLIT_OK", { timeout: 15_000 });
-
-  // Close the agent pane via its × — the split collapses and the shell pane fills the
-  // whole area (one pane again), without closing the underlying tab.
-  await agentPane.locator(".af-pane-close").click();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
-  // The tab list is unchanged — only the pane closed, not the underlying tab.
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
-
-  // Restore A to a single tab for the later create/kill/archive flows.
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
-});
-
-test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag the new tab splits (#1737 follow-up)", REAL_FIXTURE, async () => {
-  // The regression: only tabs present at first render were drag sources; a tab created
-  // AFTER load (a new terminal tab) could not be dragged into a split. Create a new
-  // terminal tab, then drag THAT tab (not an initial one) onto a pane edge and prove it
-  // splits into two live panes — the drag wiring must cover tabs created after render.
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
-
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  const shellTab = tabbar.locator(".af-tab", { hasText: "Terminal" });
-  await expect(shellTab).toHaveClass(/af-tab-active/);
-
-  // The freshly-created tab is a real HTML5 drag source: draggable is set on it just
-  // like an initial tab. A real mouse drag needs this attribute (a synthetic dispatch
-  // would fire regardless), so assert it directly — a missing draggable is exactly the
-  // "the new tab isn't a drag source" framing of the bug.
-  await expect(shellTab).toHaveJSProperty("draggable", true);
-
-  // Show the AGENT tab in the single pane, so dragging the new Terminal tab produces a
-  // split with two DISTINCT tabs (agent + the freshly-created shell), not a self-split.
-  await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
-  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-
-  // Drag the NEWLY-CREATED Terminal tab (index 1) onto the RIGHT edge → the pane splits,
-  // the new right pane bound to the shell tab with its OWN live WS stream.
-  await dragTabToPane(page, "Terminal", "right");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
-  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
-
-  // BOTH panes are live: the agent pane still streams the ready marker, and the other
-  // pane is the shell tab the freshly-created drag source bound. Type into the shell
-  // pane and its echo returns over its own stream — proving the split from the NEW tab
-  // is a real, independent PTY, not a dead pane.
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
-  const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
-  const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
-  await expect(agentPane).toHaveCount(1);
-  await expect(shellPane).toHaveCount(1);
-  await shellPane.locator(".af-pane-host").click();
-  await page.keyboard.type("echo AF_NEWTAB_DRAG_OK");
-  await page.keyboard.press("Enter");
-  await expect(shellPane).toContainText("AF_NEWTAB_DRAG_OK", { timeout: 15_000 });
-
-  // Collapse the split and restore A to a single tab for the later flows.
-  await shellPane.locator(".af-pane-close").click();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
-});
-
-test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", REAL_FIXTURE, async () => {
-  // If the source tab button is REPLACED mid-drag (a concurrent tab change rebuilds the
-  // bar), no dragend can fire on the now-detached source — the global "dragging" state
-  // would otherwise stick, leaving the pane hints + drop overlay on screen forever. The
-  // bar rebuild must reconcile-clear that state.
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-
-  // Begin a real drag on the Terminal tab and drive a dragover so a pane shows its drop
-  // overlay — the exact on-screen state a drop/dragend would normally clear. The single
-  // shared DataTransfer carries the tab MIME, so split.ts recognises the drag.
-  await page.evaluate(() => {
-    const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes("Terminal"));
-    const pane = document.querySelector(".af-term-host .af-pane");
-    if (!tab || !pane) {
-      throw new Error("drag source or pane not found");
+/**
+ * The five split-pane flows below drive one shared roster — `SESSION_A` — and each ends
+ * by restoring it to a single tab "for the later flows". That tail is precisely what does
+ * NOT run when a test aborts mid-body, and #3663 is what that costs: a rebind race redded
+ * out :3531's setup, SESSION_A kept the Terminal tab it had just created, and the next
+ * test in the block — which asserts an ABSOLUTE count of 2 — then failed at 3. One race,
+ * two reds, the second pointing at the wrong subject (#1897). Playwright restarts the
+ * worker after a failure and hands the next test a fresh page, but the roster lives in
+ * the daemon, so the stray tab outlives that reset.
+ *
+ * The hook normalizes the roster regardless of outcome, so a failure costs one red that
+ * names its own cause. A describe-scoped afterEach rather than a `resetToAgentTab` at
+ * each entry, deliberately: an entry call only covers the test someone remembered to
+ * annotate, and this block is where the next split-pane flow will be written. The entry
+ * calls already in the file stay — asserting the state you need is still cheaper than
+ * inheriting it, and they read as each test's own precondition rather than as cleanup.
+ *
+ * NOT `mode: "serial"`. That is #2816's remedy for a different defect — a test consuming
+ * state it never established — and it would SKIP the rest of the block on the first
+ * failure, trading a misattributed red for lost coverage. These tests each do establish
+ * their own precondition; the gap is the state a FAILING one leaves behind.
+ */
+test.describe("split panes (SESSION_A roster)", () => {
+  test.afterEach(async ({}, testInfo) => {
+    // A test skipped because the seeded rail is unavailable (the #2276 beforeEach) still
+    // runs this hook, and there is no live app to normalize. Asserting against it would
+    // turn one honest diagnostic failure into a red for every test in the block.
+    if (realRailUnavailable !== "") {
+      return;
     }
-    const dt = new DataTransfer();
-    tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
-    const r = pane.getBoundingClientRect();
-    const init = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.right - 6, clientY: r.top + r.height / 2 };
-    pane.dispatchEvent(new DragEvent("dragenter", init));
-    pane.dispatchEvent(new DragEvent("dragover", init));
+    // Hook time is spent from the TEST's budget, so a flow that used most of its 60s
+    // would starve the cleanup and red out here instead of where it actually went wrong.
+    // Buy the cleanup its own headroom (the documented shape for a slow hook).
+    testInfo.setTimeout(testInfo.timeout + 60_000);
+
+    // Re-select A rather than assume the aborted test left it selected — re-selecting the
+    // session already showing is a supported no-op (#1855), so the healthy path pays one
+    // click and two settled assertions.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await resetToAgentTab(page);
+    // The layout follows the roster: layout.ts's validate() clamps every leaf into the
+    // surviving tab range and drops the duplicates it produces, so dropping to one tab
+    // collapses a stray split back to one pane. Assert that rather than assume it — a
+    // leftover split reds the next test's entry `toHaveCount(1)` on `.af-pane` exactly as
+    // surely as a stray tab reds its tab count.
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
   });
-  // The drag is visibly in progress: body flag set, a drop overlay shown.
-  await expect(page.locator("body.af-dragging-tab")).toHaveCount(1);
-  await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).toBeVisible();
 
-  // Force a bar rebuild that REPLACES the drag's source button, with NO dragend on it —
-  // add another tab (a concurrent tab change would do the same).
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+  test("split panes (feat): drag a tab to a pane edge splits into two live panes; close collapses back", REAL_FIXTURE, async () => {
+    // Attach to A and give it a second tab, so there is a distinct tab to drag into a
+    // split (dragging the only tab onto itself just moves it — no split).
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
 
-  // The drag ended cleanly: no stuck flag, and the overlay is no longer shown (its
-  // visibility is gated on the now-cleared flag).
-  await expect(page.locator("body.af-dragging-tab")).toHaveCount(0);
-  await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).not.toBeVisible();
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
-  // Restore A to a single tab for the later flows.
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
-});
+    // A single pane so far — today's zero-config default.
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
 
-test("split panes (feat): an out-of-range dropped tab is ignored — no broken pane", REAL_FIXTURE, async () => {
-  // Attach to A (a single agent tab, so tab index 1+ does not exist).
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    // Drag the Agent tab (index 0) onto the RIGHT edge → the pane splits into two, the
+    // new right pane bound to the agent tab with its OWN live WS stream.
+    await dragTabToPane(page, "Agent", "right");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+    // Two concurrent xterm instances now render side by side, each with per-pane chrome.
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
+    await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
 
-  // Drop an out-of-range tab index (99) on the pane's edge. The drop handler validates
-  // it against the live tab count and no-ops it — no split is created, so no pane can
-  // bind to a nonexistent tab and break its stream.
-  await dropSnapshotOnPane(page, { index: 99, tabs: ["0:x"] });
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
-  // The one pane still shows the live agent output — it was never disturbed.
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
-});
+    // BOTH panes show live output. The new agent pane streams the ready marker over its
+    // own stream — identify it by that marker.
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+    const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
+    const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+    await expect(agentPane).toHaveCount(1);
+    await expect(shellPane).toHaveCount(1);
+    // The other pane (the shell tab) is an independent live PTY — focus it and type, and
+    // its echo comes back over its own stream, proving both panes are live at once.
+    await shellPane.locator(".af-pane-host").click();
+    await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
+    await page.keyboard.type("echo AF_SPLIT_OK");
+    await page.keyboard.press("Enter");
+    await expect(shellPane).toContainText("AF_SPLIT_OK", { timeout: 15_000 });
 
-test("split panes (feat): a mid-drag tab-set change cancels the drop — no misbinding (#1738 repro)", REAL_FIXTURE, async () => {
-  // Attach to A and give it a second tab, so a drop index of 1 is IN RANGE (2 tabs).
-  // This is the T-Rex reproduction: the index is valid, but the tab set changed since
-  // the drag began, so binding by index alone would attach the new pane to the WRONG
-  // live tab.
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    // Close the agent pane via its × — the split collapses and the shell pane fills the
+    // whole area (one pane again), without closing the underlying tab.
+    await agentPane.locator(".af-pane-close").click();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+    // The tab list is unchanged — only the pane closed, not the underlying tab.
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2);
 
-  // Drop an IN-RANGE index (1) whose drag-time snapshot (2 entries — count matches the
-  // live 2 tabs, so neither the range nor a count check would catch it) does NOT match
-  // the live tab identities. Only the snapshot-vs-live comparison can reject this, and
-  // it must: the layout stays a single pane, no split bound to the wrong tab.
-  await dropSnapshotOnPane(page, { index: 1, tabs: ["0:stale-agent", "1:stale-shell"] });
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+    // Restore A to a single tab for the later create/kill/archive flows.
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
 
-  // A well-formed drag with the LIVE snapshot still splits (the happy path is intact) —
-  // proven here to show the cancel above was the stale check, not a broken drop path.
-  await dragTabToPane(page, "Agent", "right");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag the new tab splits (#1737 follow-up)", REAL_FIXTURE, async () => {
+    // The regression: only tabs present at first render were drag sources; a tab created
+    // AFTER load (a new terminal tab) could not be dragged into a split. Create a new
+    // terminal tab, then drag THAT tab (not an initial one) onto a pane edge and prove it
+    // splits into two live panes — the drag wiring must cover tabs created after render.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
 
-  // Clean up: collapse back to one pane and restore A to a single tab.
-  await page.locator(".af-term-host .af-pane", { hasText: READY_MARKER }).locator(".af-pane-close").click();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    const shellTab = tabbar.locator(".af-tab", { hasText: "Terminal" });
+    await expect(shellTab).toHaveClass(/af-tab-active/);
+
+    // The freshly-created tab is a real HTML5 drag source: draggable is set on it just
+    // like an initial tab. A real mouse drag needs this attribute (a synthetic dispatch
+    // would fire regardless), so assert it directly — a missing draggable is exactly the
+    // "the new tab isn't a drag source" framing of the bug.
+    await expect(shellTab).toHaveJSProperty("draggable", true);
+
+    // Show the AGENT tab in the single pane, so dragging the new Terminal tab produces a
+    // split with two DISTINCT tabs (agent + the freshly-created shell), not a self-split.
+    await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+    // Drag the NEWLY-CREATED Terminal tab (index 1) onto the RIGHT edge → the pane splits,
+    // the new right pane bound to the shell tab with its OWN live WS stream.
+    await dragTabToPane(page, "Terminal", "right");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
+    await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
+
+    // BOTH panes are live: the agent pane still streams the ready marker, and the other
+    // pane is the shell tab the freshly-created drag source bound. Type into the shell
+    // pane and its echo returns over its own stream — proving the split from the NEW tab
+    // is a real, independent PTY, not a dead pane.
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+    const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
+    const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+    await expect(agentPane).toHaveCount(1);
+    await expect(shellPane).toHaveCount(1);
+    await shellPane.locator(".af-pane-host").click();
+    await page.keyboard.type("echo AF_NEWTAB_DRAG_OK");
+    await page.keyboard.press("Enter");
+    await expect(shellPane).toContainText("AF_NEWTAB_DRAG_OK", { timeout: 15_000 });
+
+    // Collapse the split and restore A to a single tab for the later flows.
+    await shellPane.locator(".af-pane-close").click();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
+
+  test("split panes (feat): a create pinned while an earlier close is still settling still rebinds the pane (#5061)", REAL_FIXTURE, async () => {
+    // The intermittent failure this blocks: an earlier tab mutation's post-await
+    // apply used to bump layoutGeneration like a USER intent write, so a
+    // createSessionTab pinned while it was still in flight read the landing as
+    // "the layout moved" and refused its own rebind — the bar grew past
+    // toHaveCount while the pane kept the old data-tab-id for the full 15s
+    // ("the pane must be bound to the new tab before anyone types into it"; the
+    // failing trace even rendered "Tab created · the layout changed meanwhile").
+    // Sightings: PR #4466 job 105416978093 and PR #5045 job 110276144061 — both
+    // Go-only changes that could not have moved this code.
+    //
+    // Here the losing order is scripted rather than raced: __afTabRebindHold
+    // (index.ts's test seam) parks each gesture's post-await step until released,
+    // so the earlier gesture's apply lands inside the later one's window on EVERY
+    // run. Before the fix this test times out on the final data-tab-id assertion.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await resetToAgentTab(page);
+
+    const tabbar = page.locator(".af-tabbar");
+    const pane = page.locator(".af-term-host .af-pane").first();
+    // The agent tab's stable id, read while the pane is bound to it — the value the
+    // create's apply must move the pane OFF of.
+    const agentTabId = await pane.getAttribute("data-tab-id");
+
+    // Give A a closable tab to close slowly (below), bound to the pane.
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+
+    // Arm the seam: every guarded tab mutation's post-await step now parks until
+    // its verb is released, so the apply order is scripted.
+    await page.evaluate(() => {
+      const parked = new Map<string, () => void>();
+      const w = window as unknown as {
+        __afTabRebindHold?: (verb: string) => Promise<void>;
+        __afTabRebindParked?: (verb: string) => boolean;
+        __afTabRebindRelease?: (verb: string) => void;
+      };
+      w.__afTabRebindHold = (verb) => new Promise<void>((resolve) => parked.set(verb, resolve));
+      w.__afTabRebindParked = (verb) => parked.has(verb);
+      w.__afTabRebindRelease = (verb) => parked.get(verb)?.();
+    });
+    const parked = (verb: string) =>
+      page.waitForFunction(
+        (v) => (window as unknown as { __afTabRebindParked?: (x: string) => boolean }).__afTabRebindParked?.(v),
+        verb,
+      );
+    const release = (verb: string) =>
+      page.evaluate(
+        (v) => (window as unknown as { __afTabRebindRelease?: (x: string) => void }).__afTabRebindRelease?.(v),
+        verb,
+      );
+    // A released hold's post-await step is synchronous once resumed, so one task
+    // turn guarantees it has run to completion before the next scripted step.
+    const flush = () => page.evaluate(() => new Promise((r) => setTimeout(r, 0)));
+
+    try {
+      // Close the shell tab and park its post-await apply. Its seq pin precedes the
+      // create's — that is what makes it the EARLIER gesture.
+      await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+      await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+      await parked("close");
+
+      // Issue the create while the close is parked — its pin is taken now, inside
+      // the earlier gesture's window: the ordering the flake hit.
+      await openSessionActions(page);
+      const newTab = tabbar.locator("..").locator(".af-tab-new");
+      if (await newTab.isVisible()) await newTab.click();
+      const menu = tabbar.locator("..").locator(".af-tab-menu");
+      await expect(menu).toBeVisible();
+      await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
+      await parked("create");
+
+      // Land the close first — exactly what used to veto the create's rebind.
+      await release("close");
+      await flush();
+      await expect(pane).toHaveAttribute("data-tab-id", agentTabId ?? "");
+
+      // Then let the create land: its pin was never newer-intent'd — the only write
+      // in its window was the earlier gesture's own landing, which is not intent.
+      await release("create");
+      await flush();
+
+      await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+      await expect(
+        pane,
+        "the pane must be bound to the new tab once its own gesture lands, regardless of an earlier gesture settling meanwhile",
+      ).not.toHaveAttribute("data-tab-id", agentTabId ?? "");
+      await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+    } finally {
+      // Never leave the seam or a parked gesture behind for the next test: the
+      // suite shares one page and one roster, and a hold left armed would park the
+      // afterEach's own close gestures mid-flight.
+      await page.evaluate(() => {
+        const w = window as unknown as {
+          __afTabRebindHold?: unknown;
+          __afTabRebindParked?: unknown;
+          __afTabRebindRelease?: (verb: string) => void;
+        };
+        delete w.__afTabRebindHold;
+        w.__afTabRebindRelease?.("close");
+        w.__afTabRebindRelease?.("create");
+        delete w.__afTabRebindParked;
+        delete w.__afTabRebindRelease;
+      });
+      await flush();
+    }
+  });
+
+  test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", REAL_FIXTURE, async () => {
+    // If the source tab button is REPLACED mid-drag (a concurrent tab change rebuilds the
+    // bar), no dragend can fire on the now-detached source — the global "dragging" state
+    // would otherwise stick, leaving the pane hints + drop overlay on screen forever. The
+    // bar rebuild must reconcile-clear that state.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+
+    // Begin a real drag on the Terminal tab and drive a dragover so a pane shows its drop
+    // overlay — the exact on-screen state a drop/dragend would normally clear. The single
+    // shared DataTransfer carries the tab MIME, so split.ts recognises the drag.
+    await page.evaluate(() => {
+      const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes("Terminal"));
+      const pane = document.querySelector(".af-term-host .af-pane");
+      if (!tab || !pane) {
+        throw new Error("drag source or pane not found");
+      }
+      const dt = new DataTransfer();
+      tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const r = pane.getBoundingClientRect();
+      const init = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.right - 6, clientY: r.top + r.height / 2 };
+      pane.dispatchEvent(new DragEvent("dragenter", init));
+      pane.dispatchEvent(new DragEvent("dragover", init));
+    });
+    // The drag is visibly in progress: body flag set, a drop overlay shown.
+    await expect(page.locator("body.af-dragging-tab")).toHaveCount(1);
+    await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).toBeVisible();
+
+    // Force a bar rebuild that REPLACES the drag's source button, with NO dragend on it —
+    // add another tab (a concurrent tab change would do the same).
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+
+    // The drag ended cleanly: no stuck flag, and the overlay is no longer shown (its
+    // visibility is gated on the now-cleared flag).
+    await expect(page.locator("body.af-dragging-tab")).toHaveCount(0);
+    await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).not.toBeVisible();
+
+    // Restore A to a single tab for the later flows.
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
+
+  test("split panes (feat): an out-of-range dropped tab is ignored — no broken pane", REAL_FIXTURE, async () => {
+    // Attach to A (a single agent tab, so tab index 1+ does not exist).
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+    // Drop an out-of-range tab index (99) on the pane's edge. The drop handler validates
+    // it against the live tab count and no-ops it — no split is created, so no pane can
+    // bind to a nonexistent tab and break its stream.
+    await dropSnapshotOnPane(page, { index: 99, tabs: ["0:x"] });
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+    // The one pane still shows the live agent output — it was never disturbed.
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+  });
+
+  test("split panes (feat): a mid-drag tab-set change cancels the drop — no misbinding (#1738 repro)", REAL_FIXTURE, async () => {
+    // Attach to A and give it a second tab, so a drop index of 1 is IN RANGE (2 tabs).
+    // This is the T-Rex reproduction: the index is valid, but the tab set changed since
+    // the drag began, so binding by index alone would attach the new pane to the WRONG
+    // live tab.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+    // Drop an IN-RANGE index (1) whose drag-time snapshot (2 entries — count matches the
+    // live 2 tabs, so neither the range nor a count check would catch it) does NOT match
+    // the live tab identities. Only the snapshot-vs-live comparison can reject this, and
+    // it must: the layout stays a single pane, no split bound to the wrong tab.
+    await dropSnapshotOnPane(page, { index: 1, tabs: ["0:stale-agent", "1:stale-shell"] });
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+
+    // A well-formed drag with the LIVE snapshot still splits (the happy path is intact) —
+    // proven here to show the cancel above was the stale check, not a broken drop path.
+    await dragTabToPane(page, "Agent", "right");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+
+    // Clean up: collapse back to one pane and restore A to a single tab.
+    await page.locator(".af-term-host .af-pane", { hasText: READY_MARKER }).locator(".af-pane-close").click();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
 });
 
 test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT tab beside it", REAL_FIXTURE, async () => {
@@ -3683,6 +5357,7 @@ test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT 
   await agentPane.locator(".af-pane-close").click();
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
   await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
@@ -3961,6 +5636,97 @@ test("web tab (#1856): a per-tab preview origin loads absolute-path assets and s
   }
 });
 
+test("per-tab preview origin (#1856): ↻ recovers from a STICKY reachability success when the browser path to the preview port drops", REAL_FIXTURE, async () => {
+  // Bug: `previewOriginReachable` cached a successful probe in the module-scope
+  // `previewReachable` map for the whole SPA lifetime (only a failure evicted). If a
+  // per-tab origin became browser-UNREACHABLE later (same port, daemon still bound,
+  // but the browser-to-port path broken — e.g. the preview-port ssh forward dropped
+  // while the main forward stayed up) it kept returning the stale `true`, so the
+  // iframe was navigated to the dead origin with no fallback. ↻/Retry nulls the
+  // per-mount origin memo but did NOT clear the reachability cache — until the fix
+  // threaded `fresh` into `previewOriginReachable` so an explicit re-probe bypasses
+  // the cache the same way it bypasses `previewSrcOnce`.
+  //
+  // The "browser path broken while daemon bound" condition is reproduced at the
+  // browser boundary exactly where the bug lives: Playwright route interception
+  // aborts navigations to the per-tab origin's port (the probe frame AND the pane
+  // frame). The daemon keeps vending the same origin (its listener stays bound), so
+  // `previewOriginReachable` is the only signal that can notice.
+  //
+  // Ordering note: this reuses probe-web's "preview" tab, which the #1810 test
+  // below closes. This test must stay BEFORE it, exactly as the #1856 test above
+  // stays before it.
+  const afBin = process.env.AF_BIN;
+  const previewPort = process.env.AF_WEB_PREVIEW_PORT;
+  test.skip(!afBin || !previewPort, "AF_BIN/AF_WEB_PREVIEW_PORT are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const setPreview = (value: string): void => {
+    execFileSync(afBin as string, ["config", "set", "preview_listen_addr", value], { stdio: "pipe" });
+  };
+
+  // The probe frame hostname the daemon answers from on the preview port.
+  const PREVIEW_PROBE_HOST = "afprobe.localhost";
+  const originRe = new RegExp(`^http://af[a-z2-7]{32}\\.localhost:${previewPort}`);
+
+  setPreview(`127.0.0.1:${previewPort}`);
+  let previewOrigin = "";
+  try {
+    // Now that preview_listen_addr is bound, the live config has changed; reload so
+    // the SPA re-reads /v1/preview-auth and the per-tab origin path is eligible.
+    await page.reload();
+
+    await row(page, SESSION_WEB).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible({ timeout: 15_000 });
+    const tabbar = page.locator(".af-tabbar");
+    const previewTab = tabbar.locator(".af-tab", { hasText: "preview" });
+    await expect(previewTab).toHaveCount(1, { timeout: 15_000 });
+    await previewTab.click();
+    const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe").first();
+
+    // PHASE 1 — prime the reachability cache with a SUCCESS. The probe frame hits
+    // the real preview listener (NOT intercepted yet), the daemon answers, and the
+    // pane moves onto the per-tab origin. This is the cached-true state.
+    await expect(frame).toHaveAttribute("src", originRe, { timeout: 15_000 });
+    previewOrigin = new URL((await frame.getAttribute("src")) ?? "").origin;
+    expect(previewOrigin, "the pane landed on the per-tab preview origin").toMatch(originRe);
+    // Wait until the frame has actually loaded against the live listener, so the
+    // later fallback assertion is a real transition rather than the initial load.
+    await expect.poll(async () => {
+      const f = page.frames().find((x) => x.url().startsWith(previewOrigin));
+      return f !== undefined && f.url() !== "about:blank";
+    }, { timeout: 15_000 }).toBe(true);
+
+    // PHASE 2 — drop the browser's path to the preview port, modeling the ssh
+    // forward being removed while the daemon stays bound. Block EVERY navigation
+    // to the preview port (the probe frame's afprobe.localhost:<port> AND the pane's
+    // af<label>.localhost:<port>). The daemon's own listener stays up and keeps
+    // vending the same brand: exactly the surviving trigger in the report.
+    await page.route(`http://${PREVIEW_PROBE_HOST}:${previewPort}/**`, (route) => route.abort("connectionrefused"));
+    await page.route(`${previewOrigin}/**`, (route) => route.abort("connectionrefused"));
+
+    // PHASE 3 — click ↻ / Retry. BEFORE the fix `previewOriginReachable` returned
+    // the cached `true` WITHOUT re-probing and the frame was set to the dead origin
+    // (no fallback, no recovery). AFTER the fix the `fresh` flag deletes the cached
+    // entry; the re-probe's frame is aborted (connectionrefused) → times out →
+    // `false` → `resolvePreviewSrc` returns "" → the pane falls back to the
+    // same-origin mirror, which is served from the main control port (still up).
+    const reload = page.locator(".af-term-host .af-pane-host").locator("button.af-webpane-reload").first();
+    await expect(reload).toBeVisible({ timeout: 15_000 });
+    await reload.click();
+
+    // The mirror fallback: the frame's src is the same-origin /v1/webtab/ mirror,
+    // NOT the dead per-tab origin.
+    await expect.poll(async () => (await frame.getAttribute("src")) ?? "", { timeout: 15_000 }).toMatch(/\/v1\/webtab\//);
+    const afterSrc = (await frame.getAttribute("src")) ?? "";
+    expect(afterSrc, "↻ must not re-navigate to the dead per-tab origin").not.toMatch(originRe);
+  } finally {
+    await page.unroute(`http://${PREVIEW_PROBE_HOST}:${previewPort}/**`).catch(() => {});
+    await page.unroute(`${previewOrigin}/**`).catch(() => {});
+    setPreview("");
+    await page.reload();
+  }
+});
+
 test("web tab (#1810): closing a LOWER tab leaves an open preview on its OWN dev server", REAL_FIXTURE, async () => {
   // The #1810 misroute, end to end. This session's tabs are [agent, lower, mis,
   // after]; a pane opens on "mis" (index 2, the vite-shaped server). Closing "lower"
@@ -3992,6 +5758,7 @@ test("web tab (#1810): closing a LOWER tab leaves an open preview on its OWN dev
 
   // The developer closes an UNRELATED, LOWER tab.
   await tabbar.locator(".af-tab", { hasText: "lower" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(tabbar.locator(".af-tab", { hasText: "lower" })).toHaveCount(0, { timeout: 30_000 });
   // The shift really happened — without this the assertion below proves nothing.
   await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
@@ -4063,8 +5830,8 @@ test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is iner
   await expect(shelvedTab.locator(".af-tab-close")).toHaveCount(0);
   // Creation does not vanish: the bar names the restore step instead of looking
   // indistinguishable from a product with no tab-create feature (#2077).
-  await expect(tabbar.locator(".af-tab-new")).toHaveCount(0);
-  await expect(tabbar.locator(".af-tab-new-unavailable")).toHaveText("Restore this session to create tabs");
+  await expect(tabbar.locator("..").locator(".af-tab-new")).toHaveCount(0);
+  await expect(tabbar.locator("..").locator(".af-tab-new-unavailable")).toHaveText("Restore this session to create tabs");
 
   await shelvedTab.click();
 
@@ -4303,6 +6070,111 @@ test("split panes (#1817 follow-up): Alt+j onto a WEB pane returns the keyboard 
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
 });
 
+test("split panes (#1737 a11y): Enter on the keyboard-focused pane-close × closes the pane (Space parity)", REAL_FIXTURE, async () => {
+  // The bug: onKeydown's native-control exemption used `!inTerminal`, so the per-pane close
+  // <button> (rendered INSIDE termHost by SplitView, unlike af-term-head's buttons which are
+  // a SIBLING of termHost) was NOT exempted. Enter on the focused × flowed to decideKey,
+  // which in rail mode with a selection returned {kind:"attach"}, so onKeydown preventDefault'd
+  // the button's native Enter→click and focusTerminal()'d instead — the pane stayed open while
+  // Space still activated it. The fix keys the exemption on the xterm <textarea> tag, not on
+  // "anything in termHost", so every native control EXCEPT the xterm textarea keeps its keys.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await resetToAgentTab(page);
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  // Give A a second tab, so there is a distinct tab to drag into a split (dragging the only
+  // tab onto itself just moves it — no split).
+  const tabbar = page.locator(".af-tabbar");
+  await createTerminalTab(page);
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+  // Drag the Agent tab (index 0) onto the RIGHT edge → the pane splits into two.
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
+
+  // The × is inside termHost (the bug's root cause): prove the containment the guard saw, so
+  // this test stays readable as "the exemption must cover a button inside termHost too".
+  const inTermHost = await page.evaluate(() => {
+    const btn = document.querySelector(".af-pane-close");
+    return btn ? document.querySelector(".af-term-host")!.contains(btn) : false;
+  });
+  expect(inTermHost, "the pane-close button lives inside .af-term-host").toBe(true);
+
+  // Detach to the rail so state.focus is "rail" — the exact mode that resolves Enter→attach,
+  // i.e. the path that used to hijack the ×'s Enter before the fix.
+  await page.keyboard.press("Control+]");
+  await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
+
+  // Keyboard-focus the × of one pane (NOT a click). Tabbing from outside termHost lands on it
+  // because paneChrome's head precedes .af-pane-host in DOM order (split.ts:979).
+  const pane = page.locator(".af-term-host .af-pane").first();
+  const closeBtn = pane.locator(".af-pane-close");
+  await closeBtn.focus();
+  await expect(closeBtn).toBeFocused();
+
+  // G1/G5: Enter must activate the button (native button activation) and close the pane —
+  // exactly as Space already did. The pane count drops 2 → 1…
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  // …and the underlying tab is NOT closed (closing a pane is NOT closing a tab).
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
+
+  // Restore A to a single tab for the flows that follow.
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
+test("split panes (#1737 a11y): Space still closes the focused ×; Escape does NOT close the pane", REAL_FIXTURE, async () => {
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await resetToAgentTab(page);
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  const tabbar = page.locator(".af-tabbar");
+  await createTerminalTab(page);
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await page.keyboard.press("Control+]");
+  await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
+
+  // G5 (no regression): Space still closes the focused × (decideKey returns {kind:"none"} for
+  // Space, so onKeydown never preventDefaults, and the button's native Space→click fires).
+  const pane = page.locator(".af-term-host .af-pane").first();
+  await pane.locator(".af-pane-close").focus();
+  await expect(pane.locator(".af-pane-close")).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
+
+  // Re-split for the Escape assertion. The two original tabs (Agent + Terminal) are still
+  // present — closing a pane does NOT close a tab — so re-drag the Agent tab into a split
+  // without creating a third tab.
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await page.keyboard.press("Control+]");
+
+  // G6: Escape on the focused × must NOT close the pane. decideKey returns {kind:"none"} for
+  // Escape in rail mode (no modal, not terminal mode), so onKeydown does not preventDefault;
+  // a <button>'s native Escape is a no-op. The pane count stays at 2.
+  const pane2 = page.locator(".af-term-host .af-pane").first();
+  await pane2.locator(".af-pane-close").focus();
+  await expect(pane2.locator(".af-pane-close")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
+
+  // Cleanup: collapse back to a single tab for the flows that follow.
+  await pane2.locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
 test("split panes (fix): a pane iframe is inert ONLY while dragging — normal interaction is untouched", REAL_FIXTURE, async () => {
   // The fix must not cost the web tab its interactivity: the frame is inert for the drag
   // and immediately usable again afterwards. Both states are asserted on the live frame.
@@ -4379,6 +6251,7 @@ test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, 
 
   // Close the LOWER "preview" tab: the shown external tab shifts from index 2 to 1.
   await tabbar.locator(".af-tab", { hasText: "preview" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(tabbar.locator(".af-tab", { hasText: "preview" })).toHaveCount(0, { timeout: 30_000 });
   // The shift really happened — without this the assertion below would prove nothing.
   // Asserted as "external now sits at ordinal 1", not as a roster total (#1863): probe-web
@@ -4491,6 +6364,7 @@ test("tabs (#1855): switching away and back keeps activeTab on the visible pane 
   // (The bar always renders the SELECTED session, and probe-web is selected here, so
   // `throwaway` resolves against probe-web's Terminal — not the one probe-b grew above.)
   await throwaway.locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   // Again by name (#1863): the disappearance of THIS tab is the event being waited on,
   // and the seeded nourl tab means the surviving total is 3, not 2.
   await expect(throwaway).toHaveCount(0, { timeout: 30_000 });
@@ -4501,6 +6375,7 @@ test("tabs (#1855): switching away and back keeps activeTab on the visible pane 
   await row(page, SESSION_B).click();
   await expect(tabbar.locator(".af-tab", { hasText: "Terminal" })).toHaveCount(1);
   await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
@@ -4516,7 +6391,8 @@ test("split panes (feat): logout clears retained trees — a fresh login shows t
 
   // Log out, then reconnect (tokenless loopback: the no-auth login offers a single
   // Connect button, no token to paste).
-  await page.locator(".af-appbar button", { hasText: "Disconnect" }).click();
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  await page.locator(".af-config-disconnect").click();
   await expect(page.locator(".af-login")).toBeVisible();
   await page.locator(".af-login button.af-primary").click();
   await expect(page.locator(".af-app")).toBeVisible();
@@ -4534,6 +6410,7 @@ test("split panes (feat): logout clears retained trees — a fresh login shows t
   const shellTab = bar.locator(".af-tab", { hasText: "Terminal" });
   if ((await shellTab.count()) > 0) {
     await shellTab.locator(".af-tab-close").click();
+    await page.getByRole("button", { name: "Delete tab", exact: true }).click();
     await expect(bar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
   }
 });
@@ -4620,14 +6497,10 @@ test("task-only project (redesign PR2, Fix 1): a repo with a task but no session
   await projectItem(page, "mock-repo-3").click();
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-3");
 
-  // Its rail is the clean empty state (no sessions), not a blank rail. It has no
-  // archived sessions either, so the empty state stays a bare one-liner — no
-  // "N archived hidden" hint to explain something that isn't there.
-  const empty = page.locator(".af-rail-empty-project");
-  await expect(empty).toContainText("No active sessions in");
-  await expect(empty).toContainText("mock-repo-3");
-  await expect(empty.locator(".af-rail-empty-new")).toBeVisible();
-  await expect(empty).not.toContainText("archived hidden");
+  // P4: the pane owns the condition/action; the rail keeps only its count.
+  await expect(page.locator(".af-rail-empty-project")).toHaveCount(0);
+  await expect(page.locator(".af-main .af-recovery h1")).toHaveText("No sessions");
+  await expect(page.locator(".af-main .af-recovery button")).toHaveText("New session");
 
   // The delete-project action is DISABLED here — there are no live sessions to archive,
   // so it can never be a silent no-op (Greptile Fix 2). An archived-only repo, by the
@@ -4786,7 +6659,7 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   await expect(tasks).toBeVisible();
   const seeded = tasks.locator(".af-task-row", { hasText: SEEDED_TASK });
   await expect(seeded).toHaveCount(1);
-  await expect(seeded.locator(".af-task-trigger")).toContainText("0 9 * * *");
+  await expect(seeded.locator(".af-task-trigger")).toContainText(SEEDED_TASK_CRON);
 
   // Add a cron task via the + Add modal. The project picker defaults to the scoped
   // project (redesign PR2), so the task lands in it; a cron task requires a prompt
@@ -4809,24 +6682,26 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   // Enable/disable round-trips via UpdateTask: the new task is enabled (Disable
   // shown). Disabling flips it, and re-enabling flips it back — proof the toggle
   // rides UpdateTask keyed by the task's id.
-  await addedRow.locator("button", { hasText: "Disable" }).click();
-  await expect(addedRow.locator("button", { hasText: "Enable" })).toBeVisible({ timeout: 30_000 });
-  await addedRow.locator("button", { hasText: "Enable" }).click();
-  await expect(addedRow.locator("button", { hasText: "Disable" })).toBeVisible({ timeout: 30_000 });
+  const enabled = addedRow.getByRole("switch");
+  await expect(enabled).toHaveAttribute("aria-checked", "true");
+  await taskAction(addedRow, "Disable");
+  await expect(enabled).toHaveAttribute("aria-checked", "false", { timeout: 30_000 });
+  await taskAction(addedRow, "Enable");
+  await expect(enabled).toHaveAttribute("aria-checked", "true", { timeout: 30_000 });
 
   // Trigger-now round-trips via TriggerTask (enabled cron tasks only). Await the RPC
   // response and assert the envelope carries no error — the daemon fired it — and the
   // id sent matches the one AddTask minted (id-stability, not the name).
   const [triggerResp] = await Promise.all([
     page.waitForResponse("**/v1/TriggerTask"),
-    addedRow.locator("button", { hasText: "Trigger" }).click(),
+    taskAction(addedRow, "Trigger"),
   ]);
   expect((await triggerResp.json()).error, "TriggerTask must succeed (no envelope error)").toBeNull();
   expect(triggerId, "TriggerTask must send the same stable id AddTask minted").toBe(addedTaskId);
 
   // Remove round-trips via RemoveTask: the row disappears, and the id sent is again
   // the stable one (never the name).
-  await addedRow.locator("button", { hasText: "Remove" }).click();
+  await taskAction(addedRow, "Remove");
   await expect(tasks.locator(".af-task-row", { hasText: added })).toHaveCount(0, { timeout: 30_000 });
   expect(removeId, "RemoveTask must send the same stable id").toBe(addedTaskId);
 
@@ -4882,7 +6757,7 @@ test("tasks view edit (#1935): the Edit form is seeded from the task, and a chan
 
   // Open the Edit form. It reuses the add-task modal in edit mode, SEEDED from the
   // task's current values — proof the form is not a blank re-entry.
-  await editedRow.locator("button", { hasText: "Edit" }).click();
+  await editedRow.getByRole("button", { name: "Edit", exact: true }).click();
   const editModal = page.locator(".af-modal-card");
   await expect(editModal).toBeVisible();
   await expect(editModal.locator(".af-modal-title")).toHaveText("Edit task");
@@ -4929,7 +6804,7 @@ test("tasks view edit (#1935): the Edit form is seeded from the task, and a chan
 
   // Clean up our task and return to the sessions view for the following flows.
   await page.route("**/v1/RemoveTask", (route) => route.continue());
-  await reloadedRow.locator("button", { hasText: "Remove" }).click();
+  await taskAction(reloadedRow, "Remove");
   await expect(page.locator(".af-tasks .af-task-row", { hasText: named })).toHaveCount(0, { timeout: 30_000 });
 
   await page.unroute("**/v1/AddTask");
@@ -5016,7 +6891,7 @@ test("schedule picker (#2057): a preset generates the cron, an edit re-opens as 
 
   // Re-open it: the stored cron round-trips back through ParseCron into the WEEKLY
   // preset with its cells restored — not a raw string in a text box.
-  await row.locator("button", { hasText: "Edit" }).click();
+  await row.getByRole("button", { name: "Edit", exact: true }).click();
   const editModal = page.locator(".af-modal-card");
   await expect(editModal).toBeVisible();
   await expect(editModal.locator('select[aria-label="Schedule type"]')).toHaveValue("weekly");
@@ -5048,7 +6923,7 @@ test("schedule picker (#2057): a preset generates the cron, an edit re-opens as 
   const reloadedRow = page.locator(".af-tasks .af-task-row", { hasText: named });
   await expect(reloadedRow).toBeVisible({ timeout: 30_000 });
   await expect(reloadedRow.locator(".af-task-trigger")).toContainText("0 */6 * * *");
-  await reloadedRow.locator("button", { hasText: "Edit" }).click();
+  await reloadedRow.getByRole("button", { name: "Edit", exact: true }).click();
   const reopened = page.locator(".af-modal-card");
   await expect(reopened.locator('select[aria-label="Schedule type"]')).toHaveValue("everyNHours");
   await expect(reopened.locator('input[aria-label="Interval"]')).toHaveValue("6");
@@ -5056,7 +6931,7 @@ test("schedule picker (#2057): a preset generates the cron, an edit re-opens as 
   await expect(reopened).toBeHidden();
 
   // Clean up and return to the sessions view for the following flows.
-  await reloadedRow.locator("button", { hasText: "Remove" }).click();
+  await taskAction(reloadedRow, "Remove");
   await expect(page.locator(".af-tasks .af-task-row", { hasText: named })).toHaveCount(0, { timeout: 30_000 });
 
   await page.unroute("**/v1/AddTask");
@@ -5104,10 +6979,10 @@ test("#2218: slow create closes immediately, shows daemon state, then opens atta
   await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 30_000 });
 
   // Leave no successful probe behind for later shared-page tests.
-  await railAction(page, created, "Kill session").click();
+  await clickRailAction(page, created, "Delete session");
   const killModal = page.locator(".af-modal-card");
   await expect(killModal).toBeVisible();
-  await killModal.locator("button.af-danger").click();
+  await killModal.getByRole("button", { name: "Delete session", exact: true }).click();
   await expect(row(page, created)).toHaveCount(0, { timeout: 30_000 });
 });
 
@@ -5130,7 +7005,8 @@ test("#2218: failing slow create shows the daemon error and leaves no phantom ro
   const envelope = (await failed.json()) as { error?: { message?: string } };
   const daemonMessage = envelope.error?.message ?? "";
   expect(daemonMessage).toContain("failed to start instance");
-  await expect(page.locator(".af-toast"), "the web must render the daemon's exact failure").toHaveText(daemonMessage);
+  await expect(page.locator(".af-modal-error"), "the retained form must explain the failure").toContainText(daemonMessage);
+  await expect(page.locator('input[aria-label="Session title"]')).toHaveValue(created);
   await expect(creating, "the failed provisional id must be removed").toHaveCount(0, { timeout: 30_000 });
 
   // A fresh authoritative Snapshot must agree: reload cannot resurrect a phantom.
@@ -5180,7 +7056,9 @@ test.describe("create → kill (one session, two flows)", () => {
     // against the picked project), not by a list in the web. This is the only test
     // that proves the whole chain — enum → RPC → rendered options — through a real
     // daemon; the unit tests either side of it both stub their counterpart.
+    if (!await modal.locator(".af-defaults").evaluate((el) => (el as HTMLDetailsElement).open)) await modal.locator(".af-defaults summary").click();
     const backendSelect = modal.locator('select[aria-label="Backend"]');
+    const programSelect = modal.locator('select[aria-label="Program"]');
     await expect(backendSelect).toBeVisible();
     // Populated asynchronously, so wait for the daemon's answer rather than the
     // "repo default"-only placeholder the field is built with.
@@ -5205,19 +7083,68 @@ test.describe("create → kill (one session, two flows)", () => {
     // failure this issue is about. The reason is the daemon's own text, so this also
     // proves the CLI and the web say the same thing.
     await backendSelect.selectOption("docker");
-    await expect(modal.locator(".af-modal-hint")).toHaveText(/docker\.image/);
+    // Hints are associated with their operation even when Account is disclosed separately.
+    await expect(modal.locator(".af-backend-hint")).toHaveText(/docker\.image/);
     await expect(modal.locator("button.af-primary")).toBeDisabled();
 
     // The repo's versioned remote_hooks config is available, and the option names
     // its launcher while retaining "hook" as the submitted CLI/config key.
     await backendSelect.selectOption("hook");
-    await expect(modal.locator(".af-modal-hint")).toHaveText("");
+    await expect(modal.locator(".af-backend-hint")).toHaveText("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
 
     // Back to the repo default: the notice clears, Create is live again, and the
     // submit below sends NO backend — so this create stays local.
     await backendSelect.selectOption("");
-    await expect(modal.locator(".af-modal-hint")).toHaveText("");
+    await expect(modal.locator(".af-backend-hint")).toHaveText("");
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
+
+    // #3844 end-to-end: the account picker is populated by the DAEMON (ListAccounts
+    // against its own home), not by a list in the web. Like the backend block above,
+    // this is the only test that proves the whole chain — registry → RPC → rendered
+    // options — through a real daemon; the unit tests either side of it stub their
+    // counterpart.
+    const accountSelect = modal.locator('select[aria-label="Account"]');
+    const accountHint = modal.locator(".af-account-hint");
+    await expect(accountSelect).toBeVisible();
+    // Populated asynchronously, so wait for the daemon's answer rather than the
+    // ambient-identity-only placeholder the field is built with. The entry script
+    // registered two claude accounts; the registration test added a third.
+    // Only web-signed-in holds the artifact claude's login would leave.
+    await expect(accountSelect.locator("option")).toHaveText(
+      [
+        "Use agent login (no default)",
+        "design-review-account — not logged in",
+        "web-registered — not logged in",
+        "web-signed-in",
+      ],
+      { timeout: 30_000 },
+    );
+    // A registered-but-not-logged-in account is a legitimate choice — it is the one
+    // someone picks right after creating it in the Config view — so it says what is
+    // missing and leaves Create live. Hiding it, or blocking on it, would both be
+    // wrong.
+    await accountSelect.selectOption("web-registered");
+    await expect(accountHint).toHaveText(/no claude credential yet/);
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
+
+    // An account belongs to ONE agent, so changing the program drops the pick rather
+    // than carrying a claude account name into another agent's registry, where the
+    // same spelling is a different identity. codex has no registered accounts here,
+    // so the honest list is the ambient row alone.
+    await programSelect.selectOption("codex");
+    await expect(accountSelect.locator("option")).toHaveText(["Use agent login (no default)"]);
+    await expect(accountSelect).toHaveValue("");
+    await expect(accountHint).toHaveText("");
+
+    // Back to "Repo default", which the daemon reported resolves to claude: the
+    // accounts return, so the repo-default program resolves its agent through the
+    // catalog rather than being treated as no agent at all. The submit below leaves
+    // the field on the ambient identity, so `account` is omitted entirely and this
+    // create runs on the fake agent's own environment.
+    await programSelect.selectOption("");
+    await expect(accountSelect.locator("option")).toHaveCount(4, { timeout: 30_000 });
+    await expect(accountSelect).toHaveValue("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
 
     // Title is required; the project picker defaults to the scoped project (redesign
@@ -5253,17 +7180,143 @@ test.describe("create → kill (one session, two flows)", () => {
   test("kill: the kill confirm removes the session's row", REAL_FIXTURE, async () => {
     expect(createdTitle).not.toBe("");
     // The created session is the current selection, so its rail row reveals the
-    // quiet actions. Kill it and confirm.
+    // quiet actions. Delete session it and confirm.
     await row(page, createdTitle).click();
     await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-    await railAction(page, createdTitle, "Kill session").click();
+    await clickRailAction(page, createdTitle, "Delete session");
 
     const modal = page.locator(".af-modal-card");
     await expect(modal).toBeVisible();
-    await modal.locator("button.af-danger").click();
+    await modal.getByRole("button", { name: "Delete session", exact: true }).click();
 
     // The killed row disappears from the rail (the killed event removes it).
     await expect(row(page, createdTitle)).toHaveCount(0, { timeout: 30_000 });
+  });
+});
+
+test.describe("remote create → kill (one hook session, two flows)", () => {
+  // The hook-backend twin of the pair above: its create hands a title to its
+  // kill through module state, so the same serial binding applies — scoped to
+  // its own two tests for the same #1898 blast-radius reason, so a local-create
+  // failure cannot also blind the remote proof (or vice versa).
+  test.describe.configure({ mode: "serial" });
+
+  test("create remote: the + New modal provisions a hook session and its row appears", REAL_FIXTURE, async () => {
+    // This submit picks backend=hook, so the daemon provisions a real remote
+    // sandbox (clone + agent-server + remote readiness) — seconds warm, tens of
+    // seconds cold in this container. The default test budget leaves no margin
+    // for the asserting half on a cold box; triple it like the slow-create tests.
+    test.setTimeout(180_000);
+    const created = `probe-remote-${Date.now().toString(36)}`;
+
+    // Same regression guard as the local create (#1592 PR7 review): move the
+    // CURRENT session onto a NON-agent tab first, so a create path that wrongly
+    // preserved activeTab would build a ?tab=1 stream URL for the brand-new
+    // session (which has only the agent tab). SESSION_B carries the guard so the
+    // pair does not stack a second terminal on SESSION_A's bar.
+    await row(page, SESSION_B).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await createTerminalTab(page);
+    await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+
+    // Capture every PTY stream WebSocket opened from here on, so we can assert the
+    // new session's stream carries NO stale tab= selector — the remote pane
+    // arrives over the daemon's remote-pane proxy, and this URL is the seam a
+    // wrong selector would hide in.
+    const streamUrls: string[] = [];
+    page.on("websocket", (ws) => {
+      if (ws.url().includes("/stream")) {
+        streamUrls.push(ws.url());
+      }
+    });
+
+    await page.locator("button.af-rail-new").click();
+    const modal = page.locator(".af-modal-card");
+    await expect(modal).toBeVisible();
+
+    // Capture the submit's request body: a session that comes up locally
+    // satisfies every assertion below while proving nothing about the remote
+    // path, so the picked backend must be read off the wire, not inferred.
+    let createBody: { backend?: string } | undefined;
+    await page.route("**/v1/CreateSession", async (route) => {
+      createBody = route.request().postDataJSON() as { backend?: string };
+      await route.continue();
+    });
+
+    // The picker chain — daemon ListBackends → rendered options → reasoned
+    // hints — is already proven by the local create above; here the field only
+    // has to carry hook to the submit, the seam this pair exists to cover.
+    if (!await modal.locator(".af-defaults").evaluate((el) => (el as HTMLDetailsElement).open)) await modal.locator(".af-defaults summary").click();
+    const backendSelect = modal.locator('select[aria-label="Backend"]');
+    await expect(backendSelect.locator("option")).not.toHaveCount(1, { timeout: 30_000 });
+    await backendSelect.selectOption("hook");
+    await expect(modal.locator(".af-backend-hint")).toHaveText("");
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
+
+    // Title is required; project and program stay at the same defaults the
+    // local create leaves them on, so the ONLY thing this submit changes is
+    // the backend.
+    await modal.locator('input[aria-label="Session title"]').fill(created);
+
+    // The submit goes out with backend=hook (#1933/#5107): the picker already
+    // proved the option exists and enables Create; sending it is the seam a
+    // regression could silently break — daemon-side remote create is covered by
+    // integration's TestWebCreateSessionOnHookBackend, so the browser half must
+    // carry the modal-to-createSession propagation all the way to a WORKING
+    // remote session. The fixture's coder-launch.sh is a real provisioner, so
+    // everything asserted below — row ready, Agent tab attached, ready marker —
+    // arrives over the daemon's remote-pane proxy, not a local PTY.
+    await modal.locator("button.af-primary").click();
+    expect(createBody?.backend, "the modal must send the picked backend — a dropped " +
+      "field would create locally and pass every later assertion without touching " +
+      "the remote path").toBe("hook");
+
+    // The remote create crosses OpCreating for real: the row lands as an inert
+    // creating row while launch_cmd provisions, and only the completed
+    // projection selects it — so the waits below are sized for remote
+    // provisioning, not the local fast path.
+    await expect(modal).toBeHidden();
+    await expect(row(page, created)).toBeVisible({ timeout: 30_000 });
+
+    // The new session is auto-selected AND attached at its AGENT tab (index 0):
+    // its tab bar has just the agent tab, and its terminal shows the fake
+    // agent's ready marker — which could only arrive over the remote proxy if
+    // the stream bound to the right session's right tab.
+    await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(1, { timeout: 90_000 });
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 60_000 });
+
+    // And the new session's stream URL carries no stale tab= selector (the agent tab
+    // is the default, sent only for a non-agent tab).
+    const lastStream = streamUrls[streamUrls.length - 1];
+    expect(lastStream, "a PTY stream WS should have opened for the new session").toBeTruthy();
+    expect(lastStream).not.toContain("tab=");
+
+    await page.unroute("**/v1/CreateSession");
+
+    // Stash it for the kill flow.
+    remoteCreatedTitle = created;
+  });
+
+  test("kill remote: the kill confirm removes the remote session's row", REAL_FIXTURE, async () => {
+    // The session it kills is the remote hook one from the serial pair above —
+    // KillSession tears down the agent-server transport and runs delete_cmd,
+    // slower than a local tmux teardown but well inside this budget.
+    test.setTimeout(90_000);
+    expect(remoteCreatedTitle).not.toBe("");
+    // The created session is the current selection, so its rail row reveals the
+    // quiet actions. Delete session it and confirm.
+    await row(page, remoteCreatedTitle).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await clickRailAction(page, remoteCreatedTitle, "Delete session");
+
+    const modal = page.locator(".af-modal-card");
+    await expect(modal).toBeVisible();
+    await modal.getByRole("button", { name: "Delete session", exact: true }).click();
+
+    // The killed row disappears from the rail (the killed event removes it).
+    await expect(row(page, remoteCreatedTitle)).toHaveCount(0, { timeout: 30_000 });
   });
 });
 
@@ -5277,7 +7330,7 @@ test("#2680: archive retires an unselected row even when the follow-up Snapshot 
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
   await row(page, SESSION_B).hover();
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "1");
-  await railAction(page, SESSION_B, "Archive session").click();
+  await clickRailAction(page, SESSION_B, "Archive session");
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
   await expect(modal).toContainText(SESSION_B);
@@ -5333,7 +7386,7 @@ test("#2680: archive retires an unselected row even when the follow-up Snapshot 
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
   await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
   await expect(
-    railAction(page, SESSION_B, "Restore session").locator('.af-icon[data-icon="archive-restore"]'),
+    railAction(page, SESSION_B, "Restore session"),
   ).toHaveCount(1);
   await row(page, SESSION_B).hover();
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "1");
@@ -5364,16 +7417,11 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
   // slot whose accessible verb and static glyph both reverse.
   await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
   await expect(
-    railAction(page, SESSION_B, "Restore session").locator('.af-icon[data-icon="archive-restore"]'),
+    railAction(page, SESSION_B, "Restore session"),
   ).toHaveCount(1);
-  await railAction(page, SESSION_B, "Restore session").click();
+  await clickRailAction(page, SESSION_B, "Restore session");
 
-  // Restore is a confirm (mirroring kill/archive), so it inherits their busy/error
-  // surface; the primary button POSTs RestoreSession.
-  const restoreModal = page.locator(".af-modal-card");
-  await expect(restoreModal).toBeVisible();
-  await expect(restoreModal).toContainText("Restore");
-  await restoreModal.locator("button.af-primary").click();
+  // A safe local restore starts immediately; the modal only reports progress/errors.
 
   // The daemon's session.restored event resyncs the rail: B rejoins the LIVE group,
   // no longer archived — the end-to-end proof the archived session returned to active.
@@ -5381,19 +7429,19 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
   // ...and its rail row — STILL selected, never reselected — flips its verb back to
   // Archive in place: the patchMainHead path remains load-bearing after the move.
   await expect(railAction(page, SESSION_B, "Restore session")).toHaveCount(0, { timeout: 30_000 });
-  await expect(railAction(page, SESSION_B, "Archive session").locator('.af-icon[data-icon="archive"]')).toHaveCount(1);
+  await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(1);
 
   // Re-archive from that same live-flipped button (NO reselect): restores the fixture
   // the downstream filter tests need (B archived) and re-proves both the archive leg
   // and the reverse (Archive→Restore) live flip in one flow.
-  await railAction(page, SESSION_B, "Archive session").click();
+  await clickRailAction(page, SESSION_B, "Archive session");
   const archiveModal = page.locator(".af-modal-card");
   await expect(archiveModal).toBeVisible();
   await archiveModal.locator("button.af-primary").click();
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
   await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
   await expect(
-    railAction(page, SESSION_B, "Restore session").locator('.af-icon[data-icon="archive-restore"]'),
+    railAction(page, SESSION_B, "Restore session"),
   ).toHaveCount(1);
 
   // Back to the default filter (archived hidden): B drops from the rail, exactly as
@@ -5468,7 +7516,9 @@ test("filter (feat): the choice persists across a reload", REAL_FIXTURE, async (
   await page.locator(".af-rail-title").click();
 
   // ...and so does the default, once restored: the persistence is a round trip, not a
-  // one-way write that can only ever add rows.
+  // one-way write that can only ever add rows. Select a live row first: reloading
+  // an archived session's deep link deliberately reveals Archived (#3909).
+  await row(page, SESSION_A).click();
   await resetFilter(page);
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
@@ -5584,6 +7634,7 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
     }
   }
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
@@ -5605,8 +7656,9 @@ test("#2188: a filtered selected session keeps one visible management surface", 
 
     // While the selected row is visible, its rail controls are the one action
     // surface; the pane header must not duplicate them.
+    await openRailActions(p, title);
     await expect(railAction(p, title, "Archive session")).toBeVisible();
-    await expect(railAction(p, title, "Kill session")).toBeVisible();
+    await expect(railAction(p, title, "Delete session")).toBeVisible();
     await expect(p.locator(".af-term-actions")).toBeHidden();
 
     // Hide every non-archived state. Selection and the terminal pane intentionally
@@ -5619,9 +7671,9 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     await expect(p.locator(".af-term-title")).toHaveText(title);
     await expect(p.locator(".af-main.af-main-term .xterm")).toBeVisible();
     const headActions = p.locator(".af-term-actions");
-    await expect(headActions).toBeVisible();
+    await p.getByRole("button", { name: "Session actions", exact: true }).click();
     await expect(headActions.getByRole("button", { name: `Archive session “${title}”`, exact: true })).toBeVisible();
-    await expect(headActions.getByRole("button", { name: `Kill session “${title}”`, exact: true })).toBeVisible();
+    await expect(headActions.getByRole("button", { name: `Delete session “${title}”`, exact: true })).toBeVisible();
 
     // The fallback is the same action path, not decorative recovery copy: both
     // buttons open the existing target-qualified confirmations. Cancelling keeps the
@@ -5631,8 +7683,9 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     await expect(modal).toContainText(`Archive ${title}?`);
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(modal).toBeHidden();
-    await headActions.getByRole("button", { name: `Kill session “${title}”`, exact: true }).click();
-    await expect(modal).toContainText(`Kill ${title}?`);
+    await p.getByRole("button", { name: "Session actions", exact: true }).click();
+    await headActions.getByRole("button", { name: `Delete session “${title}”`, exact: true }).click();
+    await expect(modal).toContainText(`Delete session ${title}?`);
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
   } finally {
     await ctx.close();
@@ -5743,8 +7796,8 @@ test("add + delete a registered empty project (#2456): appears while another is 
   await del.click();
   const delModal = page.locator(".af-modal-card");
   await expect(delModal).toBeVisible();
-  await expect(delModal).toContainText("no sessions to archive");
-  await delModal.locator("button.af-danger").click();
+  await expect(delModal).toContainText("No live sessions to archive.");
+  await delModal.locator("button.af-primary").click();
   await expect(delModal).toBeHidden();
 
   // It actually goes away (not a lingering row whose delete silently no-ops, the
@@ -5885,7 +7938,7 @@ test("add-project directory picker (#2788): descend, ascend, pick a repo — and
     await route.fulfill({
       status: 500,
       contentType: "application/json",
-      body: JSON.stringify({ data: null, error: { message: `cannot read ${browseRoot}/${level1}/${level2}/${plainDir}: permission denied` } }),
+      body: JSON.stringify({ data: null, error: { message: `cannot read ${browseRoot}/${level1}/${level2}/${plainDir}: permission denied`, daemon_rejected: true } }),
     });
   });
   await dirRow(plainDir).locator(".af-dirpicker-item").click();
@@ -5914,7 +7967,7 @@ test("add-project directory picker (#2788): descend, ascend, pick a repo — and
   await page.locator(".af-project-menu .af-project-delete").click();
   const delModal = page.locator(".af-modal-card");
   await expect(delModal).toBeVisible();
-  await delModal.locator("button.af-danger").click();
+  await delModal.locator("button.af-primary").click();
   await expect(delModal).toBeHidden();
   await expect(page.locator(".af-project-switch-name")).not.toHaveText(browseRepo, { timeout: 30_000 });
   await page.locator(".af-project-switch").click();
@@ -5941,8 +7994,8 @@ test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bou
   await del.click();
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
-  await expect(modal).toContainText("restorable");
-  await modal.locator("button.af-danger").click();
+  await expect(modal).toContainText("restore sessions anytime");
+  await modal.locator("button.af-primary").click();
 
   // The project ACTUALLY GOES AWAY: SESSION_C is archived, the repo now has no live
   // session and no task, so it drops from the derivation and selection reconciles to
@@ -6012,7 +8065,7 @@ test("#2549: deleting a registered project whose session is still STARTING is RE
   await del.click();
   const delModal = page.locator(".af-modal-card");
   await expect(delModal).toBeVisible();
-  await delModal.locator("button.af-danger").click();
+  await delModal.locator("button.af-primary").click();
   // REFUSED (fail closed): the modal stays OPEN with an inline error naming the
   // still-starting session, and nothing was changed — no half-delete, no orphan.
   await expect(delModal.locator(".af-modal-error")).toContainText("still starting", { timeout: 15_000 });
@@ -6035,7 +8088,7 @@ test("#2549: deleting a registered project whose session is still STARTING is RE
   // delete that CONVERGED, reported as a hang. Gating the click keeps every attempt
   // idempotent AND terminating, so the loop still observes the close on a later pass.
   // The contract is unchanged — a delete that genuinely never converges still fails here.
-  const dangerBtn = delModal.locator("button.af-danger");
+  const dangerBtn = delModal.locator("button.af-primary");
   await expect(async () => {
     if ((await dangerBtn.isVisible().catch(() => false)) && (await dangerBtn.isEnabled().catch(() => false))) {
       await dangerBtn.click({ timeout: 2500 });
@@ -6106,17 +8159,17 @@ test("empty state (#1592 PR9, #2456): an empty Snapshot + registry renders the z
   // state renders as designed rather than a broken/blank shell. Post-#2456 the copy
   // points at the switcher's add action, not the TUI.
   await expect(page.locator(".af-app")).toBeVisible();
-  await expect(page.locator(".af-rail-empty")).toContainText("No projects yet");
+  await expect(page.locator(".af-rail-empty")).toHaveCount(0);
+  await expect(page.locator(".af-main .af-recovery h1")).toHaveText("No project registered");
   // #2479: the zero-projects rail names no shell command AND offers no button that
   // cannot act — with no projects the New-session modal's Create is disabled, so a
   // New button here would dead-end. The coherent action is the switcher's
   // "+ Add project" (asserted just below, #2456/#2546), not a rail button.
-  await expect(page.locator(".af-rail-empty")).not.toContainText("af sessions create");
-  await expect(page.locator(".af-rail-empty")).not.toContainText("in the TUI");
+  await expect(page.locator(".af-main .af-recovery button")).toHaveText("Add project");
   await expect(page.locator(".af-rail-empty .af-rail-empty-new")).toHaveCount(0);
   await expect(page.locator(".af-rail-count")).toHaveText("0");
-  // With nothing selected the main pane is the "Select a session" placeholder.
-  await expect(page.locator(".af-main-empty")).toContainText("Select a session");
+  // With no project registered the recovery pane offers registration.
+  await expect(page.locator(".af-main-empty")).toContainText("No project registered");
 
   // #2456: the zero-projects switcher is still OPENABLE (the dead end lane-detail-backlog
   // removed its dead-end "+ New" for), and its ONE coherent action is the "+ Add project"
@@ -6225,6 +8278,7 @@ test("filter (feat): a project whose sessions are ALL archived reads as empty, a
   await expect(empty).toBeVisible();
   await expect(empty).not.toContainText("archived hidden");
 
+  await stopPolledRoutes(ctx);
   await ctx.close();
 });
 
@@ -6254,7 +8308,7 @@ async function tokenContrast(p: Page, foreground: string): Promise<number> {
   return p.evaluate((fg) => {
     const probe = document.createElement("span");
     probe.style.color = `var(${fg})`;
-    probe.style.backgroundColor = "var(--af-bg-surface)";
+    probe.style.backgroundColor = "var(--af-surface)";
     document.body.append(probe);
     const parse = (value: string): number[] => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
     const [fr = 0, fgChannel = 0, fb = 0] = parse(getComputedStyle(probe).color);
@@ -6273,15 +8327,7 @@ async function tokenContrast(p: Page, foreground: string): Promise<number> {
   }, foreground);
 }
 
-const CONTRAST_TOKENS = [
-  "--af-text-muted",
-  "--af-status-needs-you",
-  "--af-status-working",
-  "--af-status-waiting",
-  "--af-status-broken",
-  "--af-status-inactive",
-  "--af-focus-ring",
-] as const;
+const CONTRAST_TOKENS = ["--af-ink", "--af-ink-muted", "--af-ready", "--af-running", "--af-dead", "--af-accent"] as const;
 
 test("theme (redesign PR1): a saved dark choice is stamped before the app mounts — no flash", async () => {
   // Persist a dark choice, then install a document-start trap on #app.replaceChildren
@@ -6315,32 +8361,34 @@ test("theme (redesign PR1): a saved dark choice is stamped before the app mounts
   expect(atMount).toBe("dark");
   // And it stuck: <html data-theme="dark"> after the app is up.
   expect(await page.evaluate(() => document.documentElement.getAttribute("data-theme"))).toBe("dark");
-  // The dark theme option reads active in the appbar toggle.
-  await expect(page.locator('.af-theme-opt[data-theme-opt="dark"]')).toHaveClass(/af-theme-opt-active/);
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  await expect(page.locator(".af-theme-select")).toHaveValue("dark");
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
 });
 
 test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors live", async () => {
   // Force Dark and capture a token-driven color (the rail surface).
-  await page.locator('.af-theme-opt[data-theme-opt="dark"]').click();
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  await page.locator(".af-theme-select").selectOption("dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   const darkRail = await bgColor(page, ".af-rail");
   const darkBody = await bgColor(page, "body");
   // The web/iframe-pane tokens (fixed in this PR to match the terminal pane) resolve
   // to their dark values.
-  const darkTerm = await cssVar(page, "--af-bg-term");
-  const darkBorderSubtle = await cssVar(page, "--af-border-subtle");
+  const darkTerm = await cssVar(page, "--af-surface");
+  const darkBorderSubtle = await cssVar(page, "--af-border");
   for (const token of CONTRAST_TOKENS) {
     expect(await tokenContrast(page, token), `${token} must hold contrast in dark mode`).toBeGreaterThanOrEqual(4.5);
   }
 
   // Toggle to Light: the SAME selectors resolve to different token values, proving the
   // chrome is driven by the CSS custom properties, not hardcoded colors.
-  await page.locator('.af-theme-opt[data-theme-opt="light"]').click();
+  await page.locator(".af-theme-select").selectOption("light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   const lightRail = await bgColor(page, ".af-rail");
   const lightBody = await bgColor(page, "body");
-  const lightTerm = await cssVar(page, "--af-bg-term");
-  const lightBorderSubtle = await cssVar(page, "--af-border-subtle");
+  const lightTerm = await cssVar(page, "--af-surface");
+  const lightBorderSubtle = await cssVar(page, "--af-border");
   for (const token of CONTRAST_TOKENS) {
     expect(await tokenContrast(page, token), `${token} must hold contrast in light mode`).toBeGreaterThanOrEqual(4.5);
   }
@@ -6351,164 +8399,30 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // correctly in both themes (the dark-mode regression this PR fixes).
   expect(lightTerm).not.toBe(darkTerm);
   expect(lightBorderSubtle).not.toBe(darkBorderSubtle);
-  // The light rail surface is the Snow Storm-derived token.
-  expect(lightRail).toBe("rgb(227, 231, 239)");
-  await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
+  // Slice A uses the fixed generated surface in both modes.
+  expect(lightRail).toBe(surfaceRGB("light"));
+  expect(darkRail).toBe(surfaceRGB("dark"));
+  expect(await bgColor(page, ".af-appbar")).toBe(lightRail);
+  await expect(page.locator(".af-theme-select")).toHaveValue("light");
 
-  // The palette comes from the daemon, not this toggle. Replace GetTheme with the
-  // named legacy palette, reload, and prove the same web tokens now follow it.
-  let servedPalette: "zenburn" | "nord" = "zenburn";
-  let themeRequestCount = 0;
-  let themeFailuresRemaining = 0;
-  let holdNextTheme = false;
-  let heldTheme: { route: Route; palette: "zenburn" | "nord" } | null = null;
-  await page.addInitScript(() => {
-    const NativeWebSocket = window.WebSocket;
-    const TrackingWebSocket = new Proxy(NativeWebSocket, {
-      construct(target, args) {
-        const socket = Reflect.construct(target, args) as WebSocket;
-        if (String(args[0]).includes("/v1/events")) {
-          (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket = socket;
-        }
-        return socket;
-      },
-    });
-    window.WebSocket = TrackingWebSocket;
-  });
-  const fulfillTheme = (route: Route, palette: "zenburn" | "nord"): Promise<void> => {
-    const theme =
-      palette === "zenburn"
-        ? {
-            name: "zenburn",
-            foreground: "#DCDCCC",
-            foreground_strong: "#FFFFEF",
-            foreground_muted: "#989890",
-            foreground_dim: "#656555",
-            background: "#3F3F3F",
-            background_subtle: "#494949",
-            background_panel: "#4F4F4F",
-            accent: "#8CD0D3",
-          }
-        : {
-            name: "nord",
-            foreground: "#D8DEE9",
-            foreground_strong: "#ECEFF4",
-            foreground_muted: "#C3CBD6",
-            foreground_dim: "#A7B0BE",
-            background: "#2E3440",
-            background_subtle: "#3B4252",
-            background_panel: "#434C5E",
-            accent: "#88C0D0",
-          };
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ data: { theme }, error: null }),
-    });
-  };
-  await page.route("**/v1/GetTheme", (route) => {
-    themeRequestCount += 1;
-    const palette = servedPalette;
-    if (themeFailuresRemaining > 0) {
-      themeFailuresRemaining -= 1;
-      return route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({ data: null, error: { message: "temporary palette read failure" } }),
-      });
-    }
-    if (holdNextTheme) {
-      holdNextTheme = false;
-      heldTheme = { route, palette };
-      return;
-    }
-    return fulfillTheme(route, palette);
-  });
+  // Palette responses from old daemons cannot change fixed browser appearance.
+  let paletteReads = 0;
+  await page.route("**/v1/GetTheme", (route) => { paletteReads++; return route.fulfill({status: 500}); });
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
-  await page.locator('.af-theme-opt[data-theme-opt="dark"]').click();
-  expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
-  expect(await cssVar(page, "--af-accent")).toBe("#8CD0D3");
-
-  // A daemon restart can change config without reloading this page. Force the
-  // self-healing events socket through its real reconnect path, switch the mocked
-  // daemon palette meanwhile, and require both chrome and open xterms to be
-  // refreshed by the reconnect's resync callback.
-  const requestsBeforeReconnect = themeRequestCount;
-  servedPalette = "nord";
-  await page.evaluate(() => {
-    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
-    if (!socket) throw new Error("events WebSocket was not captured");
-    socket.close();
-  });
-  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeReconnect);
-  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
-  // Frost cyan is lifted just enough to stay AA on every Nord elevation.
-  await expect.poll(() => cssVar(page, "--af-accent")).toBe("#90C4D3");
-
-  // Two quick reconnects can overlap GetTheme reads under the same credential.
-  // Hold the older Zenburn response, let a newer Nord response win, then release
-  // the stale response and prove it cannot rewind the palette generation.
-  holdNextTheme = true;
-  servedPalette = "zenburn";
-  await page.evaluate(() => {
-    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
-    if (!socket) throw new Error("events WebSocket was not captured");
-    socket.close();
-  });
-  await expect.poll(() => heldTheme !== null).toBe(true);
-  const requestsBeforeNewerRefresh = themeRequestCount;
-  servedPalette = "nord";
-  await page.evaluate(() => {
-    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
-    if (!socket) throw new Error("reconnected events WebSocket was not captured");
-    socket.close();
-  });
-  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeNewerRefresh);
-  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
-  const staleTheme = heldTheme;
-  if (!staleTheme) throw new Error("older GetTheme request was not held");
-  await fulfillTheme(staleTheme.route, staleTheme.palette);
-  await page.waitForTimeout(100);
-  expect(await cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
-
-  // Establish Zenburn as the last good palette, then prove a healthy socket can
-  // outlive one failed additive HTTP read. The failure must not reset to Nord;
-  // retry without another socket reconnect and apply Nord only on real success.
-  servedPalette = "zenburn";
-  const requestsBeforeZenburn = themeRequestCount;
-  await page.evaluate(() => {
-    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
-    if (!socket) throw new Error("events WebSocket was not captured before the retry setup");
-    socket.close();
-  });
-  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeZenburn);
-  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
-
-  themeFailuresRemaining = 1;
-  servedPalette = "nord";
-  const requestsBeforeTransientFailure = themeRequestCount;
-  await page.evaluate(() => {
-    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
-    if (!socket) throw new Error("events WebSocket was not captured before the retry check");
-    socket.close();
-  });
-  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeTransientFailure);
-  await page.waitForTimeout(100);
-  expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
-  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeTransientFailure + 1);
-  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+  expect(await bgColor(page, "body")).toBe(surfaceRGB("light"));
+  expect(paletteReads).toBe(0);
   await page.unroute("**/v1/GetTheme");
-
-  // Reset to Auto and clear the saved choice so the page is left in its default theme.
-  // Auto removes data-theme entirely (follow prefers-color-scheme).
-  await page.locator('.af-theme-opt[data-theme-opt="auto"]').click();
-  await expect
-    .poll(() => page.evaluate(() => document.documentElement.hasAttribute("data-theme")))
-    .toBe(false);
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  await page.locator(".af-theme-select").selectOption("system");
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator("html")).toHaveAttribute("data-af-theme", "dark");
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(page.locator("html")).toHaveAttribute("data-af-theme", "light");
   await page.evaluate(() => localStorage.removeItem("af-theme"));
-  await page.reload();
-  await expect(page.locator(".af-app")).toBeVisible();
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+
 });
 
 interface TerminalGeometry {
@@ -6645,16 +8559,13 @@ async function assertActiveTerminalReclaimsPeerGeometry(
     .toBeLessThan(repaired.scrollTop);
 }
 
-test("#2933: session churn rebuilds the rail without taking the reader back to the top", REAL_FIXTURE, async ({
+test("#2933: session churn patches the rail without taking the reader back to the top", REAL_FIXTURE, async ({
   browser,
 }) => {
-  // The rail rebuilds with replaceChildren whenever the sessions array reference
-  // changes — which is on STATUS CHURN, not on anything the user did. replaceChildren
-  // clamps a scroll container to 0 (#1894), so a reader scrolled down the rail was
-  // being returned to the top by other people's sessions.
-  //
-  // Asserted at the mechanism, not the symptom: a MutationObserver proves the rebuild
-  // really happened, so a run where no event arrived cannot pass by accident.
+  // Churn must preserve scroll whether the client rebuilds or patches rows.
+  // Observe descendants: keyed snapshots retain the list children (#3914), so
+  // requiring their replacement would reject the intended optimization.
+  // An actual row mutation still proves the out-of-band event arrived.
   const afBin = process.env.AF_BIN;
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
@@ -6684,12 +8595,12 @@ test("#2933: session churn rebuilds the rail without taking the reader back to t
 
     await p.evaluate(() => {
       const el = document.querySelector(".af-rail-list");
-      const w = window as unknown as { __railRebuilds: number };
-      w.__railRebuilds = 0;
+      const w = window as unknown as { __railPatches: number };
+      w.__railPatches = 0;
       if (el) {
         new MutationObserver(() => {
-          w.__railRebuilds += 1;
-        }).observe(el, { childList: true });
+          w.__railPatches += 1;
+        }).observe(el, { childList: true, subtree: true });
       }
     });
 
@@ -6704,15 +8615,15 @@ test("#2933: session churn rebuilds the rail without taking the reader back to t
     created = true;
 
     await expect
-      .poll(() => p.evaluate(() => (window as unknown as { __railRebuilds: number }).__railRebuilds), {
-        message: "the out-of-band change must actually rebuild the rail",
+      .poll(() => p.evaluate(() => (window as unknown as { __railPatches: number }).__railPatches), {
+        message: "the out-of-band change must actually patch a rail row",
         timeout: 20_000,
       })
       .toBeGreaterThan(0);
 
     expect(
       await list.evaluate((el) => el.scrollTop),
-      "a rebuild driven by churn must keep the reader's place",
+      "a patch driven by churn must keep the reader's place",
     ).toBe(parked);
   } finally {
     if (created) {
@@ -6859,8 +8770,6 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
   };
   const sessionName = "peer-agent-2347";
-  const lineCount = 40;
-  const lastLine = `peer-agent-line-${lineCount}`;
   af("sessions", "create", "--name", sessionName, "--program", "claude");
 
   const firstCtx = await browser.newContext({ viewport: { width: 375, height: 667 } });
@@ -6875,6 +8784,23 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     const firstHost = first.locator(".af-term-host");
     const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
     await expect.poll(firstRows).toBeGreaterThan(0);
+    // lineCount has to sit between the two grids this test drives: above the live
+    // local rows so the seeded output overflows them, yet under HALF the tall
+    // peer's — every typed line emits two rows (the PTY echo plus cat's copy),
+    // and the peer check only proves its point while the tall grid swallows all
+    // of them. Size it from the settled grid, not a constant: #5492's font
+    // halving roughly doubled the phone row count a fixed count was sized for.
+    let localRows = 0;
+    await expect
+      .poll(async () => {
+        const next = await firstRows();
+        const settled = next > 0 && next === localRows;
+        localRows = next;
+        return settled;
+      }, { message: "the phone grid must finish its attach fit before it is measured" })
+      .toBe(true);
+    const lineCount = Math.floor((localRows * 3) / 2);
+    const lastLine = `peer-agent-line-${lineCount}`;
     await expect.poll(firstRows).toBeLessThan(lineCount);
 
     // The fixture's `claude` is the real agent-tab PTY path with a deterministic
@@ -7131,7 +9057,7 @@ test("#2330: an older reconnect Snapshot cannot overwrite a newer session event"
     if (staleResponseCaptured) {
       await staleFinished;
     }
-    await p.unroute("**/v1/Snapshot");
+    await stopPolledRoutes(ctx);
     if (created) {
       af("tab-delete", SESSION_A, "--name", tabName);
     }
@@ -7425,6 +9351,7 @@ test("#1812 review: a close held in flight must not clobber a tab the user picks
   });
 
   await doomed.locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect.poll(() => closeInFlight, { timeout: 15_000 }).toBe(true);
 
   // Mid-flight: the user picks the agent tab. This is the intent the close must respect.
@@ -7499,6 +9426,7 @@ test("#1815 review: a concurrent out-of-band close cannot re-point the pane to a
   });
 
   await tabbar.locator(".af-tab", { hasText: "t3" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect.poll(() => closeInFlight, { timeout: 15_000 }).toBe(true);
 
   // The other client closes a LOWER tab mid-flight. Waiting for it to leave the bar
@@ -7578,6 +9506,7 @@ test("#1815 review: a pane focused mid-close keeps its own tab", REAL_FIXTURE, a
   });
 
   await tabbar.locator(".af-tab", { hasText: "k1" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect.poll(() => closeInFlight, { timeout: 15_000 }).toBe(true);
 
   // Mid-flight the user clicks the OTHER pane. That is a deliberate move of focus, and
@@ -7647,6 +9576,162 @@ test("#1815 review: a retained layout follows its tab when the roster changes wh
     af("tab-delete", SESSION_A, "--name", name);
     await expect(tabbar.locator(".af-tab", { hasText: name })).toHaveCount(0, { timeout: 15_000 });
   }
+  await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
+});
+
+// The focus-desync regression that #1815 made reachable: an out-of-band roster close
+// of the identity bound to the FOCUSED pane rebuilds that pane's AttachTerminal while
+// the keyboard is attached to it. reconcile() disposes the DOM-focused terminal and
+// constructs a new one, but the disposed terminal's blur is suppressed (terminal.ts
+// sets stopped before xterm tears the textarea down), so no onFocusChange(false)
+// corrects store.focus — it stays "terminal" while DOM focus falls back to
+// document.body, and rail-mode keys (j/k, digits, t, w, Enter, Escape-as-interrupt)
+// are silently swallowed by decideKey's `ctx.focus === "terminal"` → kind:"none"
+// branch. The three #1815 review tests above cover the UNAFFECTED paths (the focused
+// leaf's identity survives); this one stages the affected one — the closed identity
+// IS the focused pane's — and asserts the keyboard model stays in sync with the DOM.
+test("#1815 focus: an out-of-band close of the focused pane's bound identity keeps the keyboard attached (no desync)", REAL_FIXTURE, async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, "sessions", ...args], { stdio: "pipe" });
+  };
+
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const active = page.locator(".af-tab.af-tab-active .af-tab-label");
+
+  // Reset SESSION_A to its single unclosable Agent tab first. The suite is serial and
+  // earlier flows leave their own tabs on this session, so the pane clamps onto an
+  // UNPREDICTABLE surviving tab when f1 closes — and with it the focus outcome
+  // (terminal if the survivor is a PTY tab, rail if it is a web tab). Starting from
+  // just Agent makes arithmetic deterministic: create f1 → [Agent, f1]; close f1 and
+  // the leaf clamps onto Agent (a terminal), which is the case this test pins.
+  await resetToAgentTab(page);
+  const baseline = 1;
+
+  // A PROCESS tab so the focused pane can bind a closable terminal identity. (A web
+  // tab's pane is an iframe that swallows the mousedown the pane focus handler listens
+  // for, so it cannot be the attach target that establishes the terminal-mode precondition.)
+  af("tab-create", SESSION_A, "--command", "sleep 300", "--name", "f1");
+  await expect(tabbar.locator(".af-tab", { hasText: "f1" })).toHaveCount(1, { timeout: 30_000 });
+
+  // Rebind the FOCUSED pane to f1 by selecting its tab, then attach the keyboard to
+  // f1's terminal by clicking into the pane. Clicking the tab blurs the prior terminal
+  // (→ rail); the pane click re-focuses f1's textarea (→ terminal), which is exactly
+  // the keyboard-attached state the bug bites in.
+  await tabbar.locator(".af-tab", { hasText: "f1" }).locator(".af-tab-label").click();
+  await expect(active).toHaveText("f1");
+  const pane = page.locator(".af-term-host .af-pane");
+  await pane.locator(".af-pane-host").click();
+  await expect(page.locator(".af-app.af-kb-terminal"), "the keyboard must be attached to f1's terminal").toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.className ?? ""), {
+      message: "f1's xterm textarea must hold DOM focus going into the out-of-band close",
+      timeout: 10_000,
+    })
+    .toContain("xterm-helper-textarea");
+
+  // Another client closes f1 out-of-band. #1815 delivers the roster change LIVE, so
+  // reconcile rebuilds the focused pane (f1 → Agent, the only remaining tab) while the
+  // keyboard is attached — the exact silent window the bug report describes.
+  af("tab-delete", SESSION_A, "--name", "f1");
+  await expect(tabbar.locator(".af-tab", { hasText: "f1" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(active, "the focused pane follows the roster onto Agent").toHaveText("Agent");
+
+  // THE FIX: the rebuilt terminal re-takes DOM focus, so store.focus="terminal" is
+  // TRUE against the new textarea rather than pinned against document.body. Pre-fix
+  // this was the desync — af-kb-terminal visible while document.activeElement was BODY
+  // — and every rail key was swallowed. The active element must be the focused pane's
+  // xterm textarea (the keyboard model matches reality).
+  await expect(page.locator(".af-app.af-kb-terminal"), "terminal mode is real, not stale").toBeVisible();
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const el = document.activeElement;
+          // The focused pane's textarea, not body: the rebuilt terminal holds the keyboard.
+          return el && el.classList.contains("xterm-helper-textarea")
+            ? "xterm"
+            : el?.tagName ?? "";
+        }),
+      {
+        message:
+          "the rebuilt terminal's textarea must hold DOM focus — pre-fix this was BODY (store.focus=\"terminal\" with no focused terminal)",
+        timeout: 15_000,
+      },
+    )
+    .toBe("xterm");
+
+  // The bar is back to its baseline (f1 was the only tab this test created).
+  await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
+});
+
+// The symmetric web-pane outcome: when the focused pane rebuilds onto a WEB tab (no
+// terminal to hand the keyboard to), the fix reports the focus loss itself so
+// store.focus lands on "rail" — the right mode when the focused pane ceases to be a
+// terminal — rather than staying pinned on a dead "terminal" that swallows rail keys.
+test("#1815 focus: an out-of-band close that turns the focused pane into a web tab corrects to rail mode", REAL_FIXTURE, async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, "sessions", ...args], { stdio: "pipe" });
+  };
+
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const active = page.locator(".af-tab.af-tab-active .af-tab-label");
+
+  // Reset SESSION_A to just Agent so the ordinal arithmetic is deterministic (serial
+  // suite; earlier flows leave their own tabs). [Agent, w1, p1]: focus lands on p1
+  // (a process terminal the keyboard can attach to). Closing p1 out-of-band leaves
+  // [Agent, w1]; the focused leaf's ordinal 2 clamps to 1, which is w1 — a WEB tab —
+  // so reconcile rebuilds the focused pane from a terminal into an iframe.
+  await resetToAgentTab(page);
+  const baseline = 1;
+  af("tab-create", SESSION_A, "--kind", "web", "--url", WEBTAB_EXTERNAL_URL, "--name", "w1");
+  await expect(tabbar.locator(".af-tab", { hasText: "w1" })).toHaveCount(1, { timeout: 15_000 });
+  af("tab-create", SESSION_A, "--command", "sleep 300", "--name", "p1");
+  await expect(tabbar.locator(".af-tab", { hasText: "p1" })).toHaveCount(1, { timeout: 30_000 });
+
+  await tabbar.locator(".af-tab", { hasText: "p1" }).locator(".af-tab-label").click();
+  await expect(active).toHaveText("p1");
+  const pane = page.locator(".af-term-host .af-pane");
+  await pane.locator(".af-pane-host").click();
+  await expect(page.locator(".af-app.af-kb-terminal"), "the keyboard must be attached to p1's terminal").toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.className ?? ""), {
+      message: "p1's xterm textarea must hold DOM focus going into the out-of-band close",
+      timeout: 10_000,
+    })
+    .toContain("xterm-helper-textarea");
+
+  // Close p1 out-of-band; the focused pane's ordinal clamps onto w1 (a web tab).
+  af("tab-delete", SESSION_A, "--name", "p1");
+  await expect(tabbar.locator(".af-tab", { hasText: "p1" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(active, "the focused pane follows the roster onto w1").toHaveText("w1");
+
+  // THE FIX: the focused pane is now a web pane (no terminal), so the fix reports the
+  // focus loss and store.focus lands on "rail". DOM focus fell back to document.body
+  // (the disposed terminal's blur was suppressed), and rail mode is the correct match —
+  // rail keys now work, instead of being swallowed by a stale "terminal" claim.
+  await expect(page.locator(".af-app.af-kb-rail"), "a focused web pane must land in rail mode, not a stale terminal").toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.tagName ?? ""), {
+      message: "DOM focus fell back to body, and rail mode is the honest match for it",
+      timeout: 15_000,
+    })
+    .toBe("BODY");
+
+  // Restore the bar to its baseline.
+  af("tab-delete", SESSION_A, "--name", "w1");
+  await expect(tabbar.locator(".af-tab", { hasText: "w1" })).toHaveCount(0, { timeout: 15_000 });
   await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
 });
 
@@ -7740,7 +9825,7 @@ test("the shell links an SVG favicon, PNG fallbacks, an apple-touch icon, and th
   await ctx.close();
 });
 
-test("theme-color is declared per scheme, and an explicit theme choice repoints the chrome (#1826)", async ({
+test("post-boot theme-color rewrite follows system and explicit choices (#1826, #3978)", async ({
   browser,
 }) => {
   const ctx = await browser.newContext();
@@ -7748,27 +9833,30 @@ test("theme-color is declared per scheme, and an explicit theme choice repoints 
   await p.goto("/");
   await expect(p.locator(".af-app")).toBeVisible();
 
+  // Served literals are checked without a browser by TestDesignWebChromeServedBytes.
+  // This test deliberately exercises theme.ts after boot.
   const metas = p.locator('meta[name="theme-color"]');
   await expect(metas).toHaveCount(2);
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#E3E7EF");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", surfaceTokens.light);
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.dark);
 
   // The audit item is "the chrome matches the app theme", and per-scheme metas alone
   // don't deliver that: they follow the OS, so an explicit Dark on a light OS would
   // leave a white chrome over a dark app. Picking Dark must collapse BOTH metas.
-  await p.locator('.af-theme-opt[data-theme-opt="dark"]').click();
+  await p.locator('.af-viewtab[data-view="config"]').click();
+  await p.locator(".af-theme-select").selectOption("dark");
   await expect(p.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#3B4252");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", surfaceTokens.dark);
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.dark);
 
-  await p.locator('.af-theme-opt[data-theme-opt="light"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#E3E7EF");
+  await p.locator(".af-theme-select").selectOption("light");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.light);
 
   // Back to Auto and the metas go per-scheme again, handing the decision back to the
   // media queries.
-  await p.locator('.af-theme-opt[data-theme-opt="auto"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#E3E7EF");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
+  await p.locator(".af-theme-select").selectOption("system");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", surfaceTokens.light);
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", surfaceTokens.dark);
   await ctx.close();
 });
 
@@ -7795,8 +9883,8 @@ test("the manifest is fetched by the browser, typed application/manifest+json, a
     display: "standalone",
   });
   expect(manifest.body.description).toBeTruthy();
-  expect(manifest.body.theme_color).toBeTruthy();
-  expect(manifest.body.background_color).toBeTruthy();
+  expect(manifest.body.theme_color).toBe(surfaceTokens.light);
+  expect(manifest.body.background_color).toBe(surfaceTokens.light);
 
   // Every icon the manifest promises must actually be served — Chrome silently drops
   // an install offer over a manifest whose icons 404.
@@ -8027,53 +10115,34 @@ test("dismissing the install affordance sticks across reloads — it must never 
   await ctx.close();
 });
 
-test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the tab bar scrolls", REAL_FIXTURE, async () => {
-  // The seeded reorder session has enough real tabs to overflow a phone-width bar.
-  // Select its project explicitly: after a worker restart the daemon's most-recent
-  // project can be the task-only fixture, and this regression must not inherit that.
+// This phone replacement does not exercise the desktop caret anchoring path;
+// the desktop fixture does not overflow at 1280px.
+test("#2219/#3981: phone tab scrolling keeps new-tab choices in the single disclosure", REAL_FIXTURE, async () => {
   await page.setViewportSize({ width: 1280, height: 720 });
+  await expect(page.locator(".af-app")).not.toHaveClass(/af-session-first/);
   if ((await page.locator(".af-project-switch-name").textContent()) !== "mock-repo") {
     await page.locator(".af-project-switch").click();
     await projectItem(page, "mock-repo").click();
   }
-  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
   await row(page, SESSION_ORDER).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
   await page.setViewportSize({ width: 375, height: 700 });
-
+  await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
+  await openSessionActions(page);
   const tabbar = page.locator(".af-tabbar");
-  await expect
-    .poll(() => tabbar.evaluate((bar) => bar.scrollWidth > bar.clientWidth), {
-      message: "the real four-tab roster must overflow the narrow tab bar",
-    })
-    .toBe(true);
-  const trigger = tabbar.locator(".af-tab-new");
-  await trigger.click();
-  const menu = tabbar.locator(".af-tab-menu");
-  await expect(menu).toBeVisible();
-  const before = await settledHitTestableTabMenu(page, menu, trigger);
-
-  // Playwright scrolls the end-of-row trigger fully into view before clicking it.
-  // Move the bar back a few pixels with the menu OPEN: both the caret and its fixed
-  // menu should move together, while the menu remains clickable and in the viewport.
-  const scroll = await tabbar.evaluate((bar) => {
-    const before = bar.scrollLeft;
-    bar.scrollLeft = Math.max(0, before - 4);
-    return { before, after: bar.scrollLeft };
-  });
-  expect(scroll.after, "the overflow fixture must permit a real horizontal scroll").toBeLessThan(scroll.before);
-  const after = await settledHitTestableTabMenu(page, menu, trigger);
-  const triggerShift = after.trigger.x - before.trigger.x;
-  const menuShift = after.menu.x - before.menu.x;
-  expect(Math.abs(menuShift - triggerShift), "the menu must track the caret's horizontal scroll").toBeLessThan(1);
-  expect(Math.abs(after.menu.x + after.menu.width - (after.trigger.x + after.trigger.width))).toBeLessThan(1);
-
+  expect(await tabbar.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+  const choice = page.locator(".af-appbar-tools .af-tab-menu-item").first();
+  await expect(choice).toBeVisible();
+  const before = await choice.boundingBox();
+  await tabbar.evaluate(el => { el.scrollLeft = el.scrollWidth; });
+  expect(await choice.boundingBox()).toEqual(before);
   await page.keyboard.press("Escape");
-  await expect(menu).toBeHidden();
+  await expect(page.locator(".af-appbar-more")).toBeFocused();
+  await expect(choice).toBeHidden();
   await page.setViewportSize({ width: 1280, height: 720 });
+  await expect(page.locator(".af-app")).not.toHaveClass(/af-session-first/);
 });
 
-test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tabs", REAL_FIXTURE, async ({ browser }, testInfo) => {
+test("#2224/#3981: desktop keeps title + tabs; phone consolidates session controls", REAL_FIXTURE, async ({ browser }, testInfo) => {
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!mockRepo, "AF_MOCK_REPO is set only by web-selftest-entry.sh");
 
@@ -8140,20 +10209,49 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
             await row(p, title).click();
             await expect(p.locator(".af-main.af-main-term")).toBeVisible();
 
+            if (width <= 768) {
+              const titleNode = p.locator(".af-appbar > .af-term-title");
+              await expect(titleNode).toHaveText(title);
+              await expect(titleNode).toHaveAttribute("title", title);
+              await expect(titleNode).toHaveAttribute("aria-label", title);
+              expect(await titleNode.evaluate(el => el.scrollWidth > el.clientWidth && getComputedStyle(el).textOverflow === "ellipsis")).toBe(true);
+              const more = p.locator(".af-appbar-more");
+              await more.focus(); await p.keyboard.press("Enter");
+              const panel = p.locator(".af-appbar-tools");
+              await expect(panel.locator(".af-project-menu")).toBeVisible();
+              await expect(panel.locator(".af-viewnav")).toBeVisible();
+              await expect(panel.locator(".af-tab-menu")).toBeVisible();
+              if (roster === "overflow") {
+                await expect(panel.getByRole("button", { name: "Retry limit", exact: true })).toBeVisible();
+                const bar = panel.locator(".af-tabbar");
+                await expect(bar).toBeVisible();
+                expect(await bar.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+              } else await expect(panel.locator(".af-tabbar")).toBeHidden();
+              await p.keyboard.press("Escape");
+              await expect(more).toBeFocused();
+              await expect(panel).toBeHidden();
+              await p.setViewportSize({ width: 1280, height: 720 });
+              await expect(p.locator(".af-app")).not.toHaveClass(/af-session-first/);
+              await expect(p.locator(".af-term-head .af-term-title")).toBeVisible();
+              await expect(p.locator(".af-term-head .af-tabbar")).toBeVisible();
+              await expect(p.locator(".af-appbar > .af-viewnav")).toBeVisible();
+              return;
+            }
+
             const head = p.locator(".af-term-head");
             const titleBox = head.locator(":scope > .af-term-head-main");
             const titleNode = titleBox.locator(".af-term-title");
             const tabbar = head.locator(":scope > .af-tabbar");
-            const retry = head.getByRole("button", { name: "Retry", exact: true });
+            const retry = head.getByRole("button", { name: "Retry limit", exact: true });
             const navToggle = p.locator(".af-nav-toggle");
-            await expect(tabbar, "the strip belongs to the title row, not a second row").toHaveCount(1);
+            await expect(tabbar, "the strip belongs to the pane header").toHaveCount(1);
             await expect(titleNode).toHaveText(title);
             if (width <= 768) {
-              await expect(titleBox, "mobile spends no row or width on a repeated session title").toBeHidden();
+              await expect(titleBox, "mobile keeps the session title on its own row").toBeVisible();
               await expect(navToggle, "the static hamburger remains the first mobile control").toBeVisible();
-              await expect(p.locator(".af-viewnav"), "top-level navigation moves into the open drawer").toBeHidden();
-              await expect(p.locator(".af-project-switch"), "project chrome moves into the open drawer").toBeHidden();
-              await expect(p.locator(".af-appbar-more"), "app chrome moves into the open drawer").toBeHidden();
+              await expect(p.locator(".af-viewnav"), "navigation remains available on a phone").toBeVisible();
+              await expect(p.locator(".af-project-switch"), "navigation remains available on a phone").toBeVisible();
+              await expect(p.locator(".af-appbar-more"), "navigation remains available on a phone").toBeVisible();
             } else {
               await expect(titleBox, "desktop keeps its identifying pane title").toBeVisible();
               await expect(navToggle).toBeHidden();
@@ -8179,7 +10277,9 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
               };
               const titleEl = document.querySelector<HTMLElement>(".af-term-title")!;
               const bar = document.querySelector<HTMLElement>(".af-tabbar")!;
-              const retryEl = document.querySelector<HTMLElement>(".af-term-action:not([hidden])");
+              // Copy link is also a header action (#3909); measure Retry itself.
+              const retrySelector = ".af-term-action[title='Retry after the usage limit']:not([hidden])";
+              const retryEl = document.querySelector<HTMLElement>(retrySelector);
               const titleStyle = getComputedStyle(titleEl);
               const barStyle = getComputedStyle(bar);
               return {
@@ -8188,7 +10288,7 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
                 title: rect(".af-term-title"),
                 bar: rect(".af-tabbar"),
                 nav: rect(".af-nav-toggle"),
-                retry: retryEl ? rect(".af-term-action:not([hidden])") : null,
+                retry: retryEl ? rect(retrySelector) : null,
                 host: rect(".af-term-host"),
                 titleClientWidth: titleEl.clientWidth,
                 titleScrollWidth: titleEl.scrollWidth,
@@ -8205,14 +10305,16 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
             });
             expect(layout.barParent).toContain("af-term-head");
             expect(layout.hostPrevious).toContain("af-term-head");
-            expect(layout.head.height, "one row reclaims the old stacked chrome height").toBeLessThan(64);
+            expect(layout.head.height, "phone separates title and tabs; desktop keeps one row").toBeLessThan(width <= 768 ? 170 : 64);
             expect(layout.bar.top).toBeGreaterThanOrEqual(layout.head.top);
             expect(layout.bar.bottom).toBeLessThanOrEqual(layout.head.bottom);
             expect(layout.host.top).toBeGreaterThanOrEqual(layout.head.bottom - 1);
             if (width <= 768) {
-              expect(Math.abs(layout.nav.centerY - layout.bar.centerY), "hamburger and tabs share the sole mobile row").toBeLessThanOrEqual(1);
-              expect(layout.titleBox.width, "the repeated mobile title consumes no horizontal space").toBe(0);
-              expect(layout.host.top, "only the slim hamburger/tab row precedes mobile content").toBeLessThan(64);
+              expect(layout.bar.top, "tabs have their own scrolling row").toBeGreaterThanOrEqual(layout.titleBox.bottom);
+              expect(layout.titleClientWidth, "the session title remains readable").toBeGreaterThan(80);
+              expect(layout.titleScrollWidth).toBeGreaterThan(layout.titleClientWidth);
+              expect(layout.titleTextOverflow).toBe("ellipsis");
+              expect(layout.host.top, "navigation and pane controls leave room for output").toBeLessThan(300);
             } else {
               expect(Math.abs(layout.titleBox.centerY - layout.bar.centerY), "desktop title and tabs share a baseline row").toBeLessThanOrEqual(1);
               expect(layout.titleBox.width, "the desktop title keeps a useful allocation").toBeGreaterThanOrEqual(120);
@@ -8229,10 +10331,29 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
             expect(layout.barPosition, "#1813 marker keeps the tab bar as its containing block").toBe("relative");
             expect(await horizontalOverflow(p), "the combined row never widens the page").toBeLessThanOrEqual(1);
             if (layout.retry) {
-              expect(Math.abs(layout.retry.centerY - layout.bar.centerY), "Retry stays aligned with the tab strip").toBeLessThanOrEqual(1);
+              if (width > 768) expect(Math.abs(layout.retry.centerY - layout.bar.centerY), "desktop Retry stays aligned with the tab strip").toBeLessThanOrEqual(1);
               expect(layout.retry.width, "Retry is fixed-size rather than squeezed").toBeGreaterThan(40);
               expect(layout.retry.right).toBeLessThanOrEqual(layout.head.right);
             }
+
+            const sessionMenu = head.locator(".af-term-menu");
+            await expect(sessionMenu).toBeHidden();
+            const sessionActions = head.getByRole("button", { name: "Session actions", exact: true });
+            await sessionActions.focus();
+            await p.keyboard.press("Enter");
+            await expect(sessionMenu).toBeVisible();
+            const copyLink = head.getByRole("button", { name: "Copy link", exact: true });
+            await expect(copyLink).toHaveCount(1);
+            await expect(copyLink).toHaveAttribute("title", "Copy link");
+            if (width <= 768) {
+              await expect(sessionMenu.getByRole("button", { name: "Copy link", exact: true })).toBeVisible();
+            } else {
+              await expect(head.locator(".af-copy-link-desktop")).toBeVisible();
+              await expect(copyLink).toHaveText("");
+            }
+            await p.keyboard.press("Escape");
+            await expect(sessionMenu).toBeHidden();
+            await expect(sessionActions).toBeFocused();
 
             if (roster === "one") {
               expect(layout.barScrollWidth, "one tab fits without a vestigial second row").toBeLessThanOrEqual(
@@ -8240,9 +10361,11 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
               );
             } else {
               expect(layout.barScrollWidth, "the long roster genuinely overflows").toBeGreaterThan(layout.barClientWidth);
-              const trigger = tabbar.locator(".af-tab-new");
+              await tabbar.evaluate((bar) => { bar.scrollLeft = bar.scrollWidth; });
+              await openSessionActions(p);
+              const trigger = tabbar.locator("..").locator(".af-tab-new");
               await trigger.click();
-              const menu = tabbar.locator(".af-tab-menu");
+              const menu = tabbar.locator("..").locator(".af-tab-menu");
               await expect(menu).toBeVisible();
               const before = await settledHitTestableTabMenu(p, menu, trigger);
               const scroll = await tabbar.evaluate((bar) => {
@@ -8255,6 +10378,10 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
               expect(Math.abs(after.menu.x - before.menu.x - (after.trigger.x - before.trigger.x))).toBeLessThan(1);
               await p.keyboard.press("Escape");
               await expect(menu).toBeHidden();
+              // Escape closes the nested kind picker first; close Actions as well
+              // before clicking the tab row underneath its phone popover.
+              await p.keyboard.press("Escape");
+              await expect(sessionMenu).toBeHidden();
 
               // Activating a tab rebuilds every button. The stable strip must retain
               // its viewport across that rebuild instead of snapping back to Agent —
@@ -8302,6 +10429,7 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
               contentType: "image/png",
             });
           } finally {
+            await stopPolledRoutes(ctx);
             await ctx.close();
           }
         });
@@ -8309,6 +10437,298 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
     }
   }
 });
+
+// --- the icon audit's measurement (#3681) -----------------------------------
+//
+// The audit reads geometry off a LIVE shell. On the master re-run at 11f91a24 it
+// measured 4 of 40 icons as having a box, 28 ms after a screencast frame in which
+// every one of them is painted, with the rail's 8 rows reporting innerText
+// byte-identical to the passing run one step earlier.
+//
+// The four survivors are exactly the icons built once at shell construction (the
+// appbar project glyph and caret, the rail head funnel and New plus, ui.ts:1040-1076).
+// The 36 that measured zero are exactly the ones inside the two containers the shell
+// replaces wholesale on every render — the filter menu items (ui.ts:1600) and the rail
+// rows (ui.ts:1444).
+//
+// The trace cannot say which of those two readings is right, and that is the defect
+// fixed here. It holds no record of whether a render happened: the DOM snapshots
+// around the audit are back-references, but a replaceChildren rebuild that produces
+// identical markup is invisible to a snapshot differ, and snapshot SIZE carries no
+// signal either — the passing run's own screenshot snapshot is 29081 bytes against the
+// failing audit's 29084. What the trace does show is a busier main thread in exactly
+// that window: the identical in-page callback took 11.65 ms against 5.71 ms in the
+// passing run, and the click before it 48.7 ms against 27.7 ms.
+//
+// So the measurement records the answer instead of leaving it to be excavated. This
+// file already states the rule, three thousand lines down in
+// settledMobileDrawerGeometry: "Live session events rebuild the rail with
+// replaceChildren(); resolving action locators and later measuring a row in separate
+// browser calls can otherwise inspect different row generations." The icon audit is
+// the one measurement that never applied it.
+
+/** One `.af-icon` as the audit measured it, with everything needed to say WHY it was
+ *  rejected. The old audit collapsed display, visibility and the box into a single
+ *  boolean, so a zero count cost a trace excavation and still could not name the
+ *  clause that dropped it (#3681). */
+interface MeasuredIcon {
+  icon: string;
+  className: string;
+  display: string;
+  visibility: string;
+  fontSize: string;
+  width: number;
+  height: number;
+  ariaHidden: string | null;
+  focusable: string | null;
+  stroke: string;
+  color: string;
+}
+
+/** One reading of every icon, taken inside a single animation frame, plus how many
+ *  times the shell rebuilt itself between arming the watch and that frame — and which
+ *  of the audit's bounded attempts it came from, so a reading that cost four voided
+ *  windows carries that fact itself rather than only in the caller's message (#3690).
+ */
+interface IconReading {
+  attempt: number;
+  icons: MeasuredIcon[];
+  rebuilds: number;
+  quiesced: boolean;
+  rows: { className: string; text: string }[];
+  unnamedIconControls: string[];
+  fontFaces: number;
+  fontRequests: string[];
+}
+
+/** The containers the shell replaces wholesale on every render — the two the #3681
+ *  survivor pattern implicates, and the only ones whose rebuild can swap the nodes a
+ *  reading is about. */
+const REBUILT_ICON_CONTAINERS = [".af-rail-list", ".af-filter-menu"];
+
+/** Starts counting rebuilds of those containers, so a later reading can say whether
+ *  one moved underneath it.
+ *
+ *  Armed before the audit's PRECONDITIONS, not merely before the measurement. The
+ *  reading itself is one page task and nothing can interleave inside it; the window
+ *  that needs watching is the one made of several round trips — in the failing trace,
+ *  43 ms between the `toHaveCount(4)` gate and the geometry, which is ample for a
+ *  session.updated to rebuild both containers. */
+async function armIconRebuildWatch(p: Page): Promise<void> {
+  await p.evaluate((selectors) => {
+    const w = window as unknown as { __afIconWatch?: { observer: MutationObserver; rebuilds: number } };
+    w.__afIconWatch?.observer.disconnect();
+    const state: { observer: MutationObserver; rebuilds: number } = {
+      observer: null as unknown as MutationObserver,
+      rebuilds: 0,
+    };
+    state.observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.addedNodes.length > 0 || record.removedNodes.length > 0) {
+          state.rebuilds += 1;
+        }
+      }
+    });
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (el) {
+        state.observer.observe(el, { childList: true, subtree: true });
+      }
+    }
+    w.__afIconWatch = state;
+  }, REBUILT_ICON_CONTAINERS);
+}
+
+/** Reads every icon's geometry in ONE animation frame, after that frame's layout.
+ *
+ *  Three properties the old audit lacked:
+ *
+ *   - it waits for the watched containers to go quiet for two consecutive frames, so
+ *     the reading is not taken mid-rebuild;
+ *   - every icon is measured inside a single page task, so the first and the last
+ *     describe the same DOM generation;
+ *   - it returns the rebuild count and each rejected icon's display, visibility,
+ *     font-size and rect, so a zero box can be attributed rather than guessed at.
+ *
+ *  A rail that never goes quiet is reported through `quiesced` rather than waited on
+ *  forever: silence about it would be the same unfalsifiable reading again. */
+async function readIconGeometry(p: Page, attempt: number): Promise<IconReading> {
+  return p.evaluate(async (attemptNumber) => {
+    const w = window as unknown as { __afIconWatch?: { observer: MutationObserver; rebuilds: number } };
+    const watch = w.__afIconWatch;
+    const drain = (): void => {
+      if (!watch) return;
+      for (const record of watch.observer.takeRecords()) {
+        if (record.addedNodes.length > 0 || record.removedNodes.length > 0) {
+          watch.rebuilds += 1;
+        }
+      }
+    };
+    const frame = (): Promise<void> => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+    let quiesced = false;
+    let quiet = 0;
+    for (let i = 0; i < 60 && !quiesced; i += 1) {
+      const before = watch?.rebuilds ?? 0;
+      await frame();
+      drain();
+      quiet = (watch?.rebuilds ?? 0) === before ? quiet + 1 : 0;
+      quiesced = quiet >= 2;
+    }
+
+    // Everything below is one task. No render can interleave between the first icon
+    // measured and the last, so the reading describes a single DOM generation.
+    drain();
+    const measure = (node: Element): MeasuredIcon => {
+      const style = getComputedStyle(node);
+      const box = node.getBoundingClientRect();
+      return {
+        icon: node.getAttribute("data-icon") ?? "?",
+        className: node.getAttribute("class") ?? "",
+        display: style.display,
+        visibility: style.visibility,
+        fontSize: style.fontSize,
+        width: box.width,
+        height: box.height,
+        ariaHidden: node.getAttribute("aria-hidden"),
+        focusable: node.getAttribute("focusable"),
+        stroke: style.stroke,
+        color: style.color,
+      };
+    };
+    const icons = Array.from(document.querySelectorAll(".af-icon")).map(measure);
+    const unnamedIconControls = Array.from(
+      document.querySelectorAll<HTMLElement>("button:has(.af-icon), a:has(.af-icon)"),
+    )
+      .filter((control) => {
+        const style = getComputedStyle(control);
+        const box = control.getBoundingClientRect();
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          box.width > 0 &&
+          box.height > 0 &&
+          (control.innerText ?? "").trim() === ""
+        );
+      })
+      .filter((control) => (control.getAttribute("aria-label") ?? "").trim() === "")
+      .map((control) => control.className);
+    const fontFaces = Array.from(document.styleSheets).flatMap((sheet) => {
+      try {
+        return Array.from(sheet.cssRules).filter((rule) => rule instanceof CSSFontFaceRule);
+      } catch {
+        return [];
+      }
+    }).length;
+    return {
+      attempt: attemptNumber,
+      icons,
+      rebuilds: watch?.rebuilds ?? -1,
+      quiesced,
+      rows: Array.from(document.querySelectorAll<HTMLElement>(".af-rail-list .af-row")).map((row) => ({
+        className: row.className,
+        text: (row.innerText ?? "").trim(),
+      })),
+      unnamedIconControls,
+      fontFaces,
+      fontRequests: performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
+    };
+  }, attempt);
+}
+
+/** How many windows the audit will buy before it stops asking. Five, because the shell
+ *  it measures rebuilds on ordinary roster churn: one voided window is routine, two in
+ *  a row is a slow runner (#3690), and five consecutive dirty windows is not timing —
+ *  it is a shell that never goes quiet, which is a finding of its own and is reported
+ *  as one, with the count. */
+const ICON_AUDIT_ATTEMPTS = 5;
+
+/** The reading the assertions consume: windows are bought until one of them is clean,
+ *  bounded at ICON_AUDIT_ATTEMPTS.
+ *
+ *  #3683 bought exactly one retry, reasoning that a second dirty window is itself
+ *  worth reporting. It is — but reporting is not the same as failing, and failing on
+ *  it made the audit's own recovery path the flake (#3690): the test that injects ONE
+ *  rebuild went red on a runner where ordinary churn happened to land in the
+ *  replacement window too, which is a property of the runner rather than of the code
+ *  under test. So the count is DATA now — every attempt is kept and the winning
+ *  reading carries its own `attempt` — and the failure is reserved for the shell that
+ *  yields no quiet window at all inside the bound.
+ *
+ *  Reporting is still the CALLER's job, and still not optional. The returned reading
+ *  can be dirty (all ICON_AUDIT_ATTEMPTS windows straddled a rebuild) or unquiesced,
+ *  and its geometry is then void — so a caller that consumes it without checking
+ *  `rebuilds` and `quiesced` silently accepts exactly the sustained race this exists
+ *  to surface (#3683 Codex). */
+async function settledIconAudit(p: Page): Promise<{ reading: IconReading; attempts: IconReading[] }> {
+  const attempts: IconReading[] = [];
+  for (let attempt = 1; attempt <= ICON_AUDIT_ATTEMPTS; attempt += 1) {
+    // Attempt 1 measures the window the CALLER armed, which spans the audit's
+    // preconditions — the 43 ms of round trips #3681's rebuild landed in. Every retry
+    // arms a window of its own.
+    if (attempt > 1) {
+      await armIconRebuildWatch(p);
+    }
+    const reading = await readIconGeometry(p, attempt);
+    attempts.push(reading);
+    if (reading.rebuilds === 0) {
+      break;
+    }
+  }
+  return { reading: attempts[attempts.length - 1], attempts };
+}
+
+/** Whether an icon presented a real box to the user. */
+function iconIsVisible(icon: MeasuredIcon): boolean {
+  return icon.display !== "none" && icon.visibility !== "hidden" && icon.width > 0 && icon.height > 0;
+}
+
+/** Why one icon was rejected, in the terms the audit filters on — the three clauses the
+ *  old boolean collapsed into one. */
+function iconRejection(icon: MeasuredIcon): string {
+  if (icon.display === "none") return "display:none";
+  if (icon.visibility === "hidden") return "visibility:hidden";
+  return `zero box ${icon.width}x${icon.height} (font-size ${icon.fontSize}, display ${icon.display})`;
+}
+
+/** The rejected icons, named and grouped, so 36 identical rejections read as four
+ *  lines rather than a wall. */
+function describeRejectedIcons(icons: MeasuredIcon[]): string {
+  const groups = new Map<string, number>();
+  for (const icon of icons.filter((candidate) => !iconIsVisible(candidate))) {
+    const key = `${icon.icon}:${icon.className} — ${iconRejection(icon)}`;
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+  }
+  return groups.size === 0 ? "none" : Array.from(groups, ([key, n]) => `${key} x${n}`).join("; ");
+}
+
+/** The one-line diagnosis a failing audit leaves behind: whether the shell moved under
+ *  the reading, how many windows it cost, what each attempt saw, and — named — the
+ *  icons that had no box. */
+function iconAuditMessage(reading: IconReading, attempts: IconReading[]): string {
+  const verdict =
+    reading.rebuilds === 0
+      ? `no rebuild in the window this reading was taken over (attempt ${reading.attempt} of ` +
+        `${ICON_AUDIT_ATTEMPTS}), so a zero box is a real collapse and these icons are the defect`
+      : `the shell rebuilt inside all ${attempts.length} windows the audit bought — the last one ` +
+        `${reading.rebuilds}x — so a shell that never yields a quiet window is the finding here, ` +
+        `not the icons; this reading is void, not evidence`;
+  const seen = attempts
+    .map(
+      (attempt) =>
+        `#${attempt.attempt} ${attempt.icons.filter(iconIsVisible).length}/${attempt.icons.length}` +
+        `@${attempt.rebuilds}rebuilds${attempt.quiesced ? "" : ",never quiesced"}`,
+    )
+    .join(" then ");
+  return (
+    `the live shell must exercise several real icon placements — ${verdict}` +
+    `; attempts=${seen}; zero-box=${describeRejectedIcons(reading.icons)}` +
+    `; rows=${JSON.stringify(reading.rows)}`
+  );
+}
 
 test("icons: the Lucide subset is inline, accessible, and currentColor-themed at desktop and 375px", REAL_FIXTURE, async ({
   browser,
@@ -8333,6 +10753,10 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
           // floor. The default filter always exposes four checked semantic groups.
           await p.getByRole("button", { name: "Filter sessions" }).click();
           await expect(p.locator(".af-filter-menu")).toBeVisible();
+          // Armed here, before the gate below rather than just before the geometry: the
+          // window that went wrong in the #3681 trace is the 43 ms of round trips
+          // BETWEEN this gate and the measurement, not the measurement itself.
+          await armIconRebuildWatch(p);
           await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
 
           const projectIcon = p.locator(".af-project-glyph");
@@ -8352,64 +10776,36 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
           expect(projectPaint.height).toBe(projectPaint.width);
           accentByTheme.set(theme, projectPaint.color);
 
-          const audit = await p.locator(".af-icon").evaluateAll((nodes) => {
-            const visible = nodes.filter((node) => {
-              const style = getComputedStyle(node);
-              const box = node.getBoundingClientRect();
-              return style.display !== "none" && style.visibility !== "hidden" && box.width > 0 && box.height > 0;
-            });
-            const unnamedIconControls = Array.from(document.querySelectorAll<HTMLElement>("button:has(.af-icon), a:has(.af-icon)"))
-              .filter((control) => {
-                const style = getComputedStyle(control);
-                const box = control.getBoundingClientRect();
-                return (
-                  style.display !== "none" &&
-                  style.visibility !== "hidden" &&
-                  box.width > 0 &&
-                  box.height > 0 &&
-                  (control.innerText ?? "").trim() === ""
-                );
-              })
-              .filter((control) => (control.getAttribute("aria-label") ?? "").trim() === "")
-              .map((control) => control.className);
-            const fontFaces = Array.from(document.styleSheets).flatMap((sheet) => {
-              try {
-                return Array.from(sheet.cssRules).filter((rule) => rule instanceof CSSFontFaceRule);
-              } catch {
-                return [];
-              }
-            }).length;
-            return {
-              count: visible.length,
-              placements: visible.map(
-                (node) => `${node.getAttribute("data-icon") ?? "?"}:${node.getAttribute("class") ?? ""}`,
-              ),
-              rows: Array.from(document.querySelectorAll<HTMLElement>(".af-rail-list .af-row")).map((row) => ({
-                className: row.className,
-                text: (row.innerText ?? "").trim(),
-              })),
-              allHiddenFromAT: visible.every(
-                (node) => node.getAttribute("aria-hidden") === "true" && node.getAttribute("focusable") === "false",
-              ),
-              allCurrentColor: visible.every((node) => getComputedStyle(node).stroke === getComputedStyle(node).color),
-              unnamedIconControls,
-              fontFaces,
-              fontRequests: performance
-                .getEntriesByType("resource")
-                .map((entry) => entry.name)
-                .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
-            };
-          });
+          const { reading, attempts } = await settledIconAudit(p);
+          // A SUSTAINED race is the one condition this instrumentation exists to name,
+          // and it has to be asserted rather than merely described: a dirty reading
+          // that happens to look healthy would otherwise pass silently, and the "void,
+          // not evidence" verdict in the message would never be read by anyone (#3683
+          // Codex). Since #3690 "sustained" means all ICON_AUDIT_ATTEMPTS windows came
+          // back dirty, not two — a second dirty window is ordinary churn on a slow
+          // runner, and the audit buys another rather than failing on its own recovery
+          // path. Checked before the geometry so a void reading fails as a void
+          // reading, never as an icon defect.
+          expect(reading.rebuilds, iconAuditMessage(reading, attempts)).toBe(0);
+          expect(reading.quiesced, iconAuditMessage(reading, attempts)).toBe(true);
+          const visible = reading.icons.filter(iconIsVisible);
+          // The assertion stays. With the rebuild count beside it, a zero box over a
+          // quiet window is a product defect — the shell would be painting icons the
+          // user cannot see, and this audit is the only thing in the suite that would
+          // ever notice — while a reading straddling a rebuild says so in its own
+          // message instead of being read as one.
+          expect(visible.length, iconAuditMessage(reading, attempts)).toBeGreaterThan(5);
           expect(
-            audit.count,
-            `the live shell must exercise several real icon placements; ` +
-              `placements=${JSON.stringify(audit.placements)} rows=${JSON.stringify(audit.rows)}`,
-          ).toBeGreaterThan(5);
-          expect(audit.allHiddenFromAT, "decorative SVGs stay out of the accessibility tree").toBe(true);
-          expect(audit.allCurrentColor, "every visible icon inherits the active theme color").toBe(true);
-          expect(audit.unnamedIconControls, "icon-only controls need an explicit accessible name").toEqual([]);
-          expect(audit.fontFaces, "the SVG subset must not smuggle in an icon font").toBe(0);
-          expect(audit.fontRequests, "the icon surface must make no font/network request").toEqual([]);
+            visible.every((icon) => icon.ariaHidden === "true" && icon.focusable === "false"),
+            "decorative SVGs stay out of the accessibility tree",
+          ).toBe(true);
+          expect(
+            visible.every((icon) => icon.stroke === icon.color),
+            "every visible icon inherits the active theme color",
+          ).toBe(true);
+          expect(reading.unnamedIconControls, "icon-only controls need an explicit accessible name").toEqual([]);
+          expect(reading.fontFaces, "the SVG subset must not smuggle in an icon font").toBe(0);
+          expect(reading.fontRequests, "the icon surface must make no font/network request").toEqual([]);
           expect(await horizontalOverflow(p), "icons must not widen the desktop or phone layout").toBeLessThanOrEqual(1);
 
           await testInfo.attach(`icons-${width}-${theme}`, {
@@ -8425,6 +10821,273 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
   expect(accentByTheme.get("light"), "light and dark tokens must paint distinct icon colors").not.toBe(
     accentByTheme.get("dark"),
   );
+});
+
+// Both of these FORCE the condition rather than wait for it. The reading that took
+// master red is 1 in 100+ runs, and `retries: 0` means waiting for it is not a test —
+// it is a lottery whose losing ticket is a red nobody can diagnose (#3681).
+
+test("#3681 a rebuild scheduled mid-audit voids the reading and buys another, rather than reading as collapsed icons", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The rebuild the survivor pattern implicates, scheduled inside the audit's own
+  // window. It replaces the rail's children with the SAME nodes, so the markup is
+  // byte-identical afterwards — which is exactly why the trace could not settle the
+  // question from its DOM snapshots, and why the watch has to live in the page.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+
+    await armIconRebuildWatch(p);
+    await p.evaluate(() => {
+      const list = document.querySelector(".af-rail-list");
+      if (list) {
+        setTimeout(() => list.replaceChildren(...Array.from(list.childNodes)), 0);
+      }
+    });
+
+    const { reading, attempts } = await settledIconAudit(p);
+    // What this pins is the VOID-AND-RETRY, not how many windows it took. Asserting
+    // "exactly two, and the second was quiet" made ordinary churn landing in the
+    // REPLACEMENT window a red — the audit's own recovery path failing as if it were
+    // the behaviour under test, which is #3690.
+    expect(attempts.length, "a rebuild inside the window must void the reading and buy another").toBeGreaterThanOrEqual(
+      2,
+    );
+    expect(attempts.length, "…without exceeding the bound").toBeLessThanOrEqual(ICON_AUDIT_ATTEMPTS);
+    expect(attempts[0]?.rebuilds ?? 0, "the watch must see the rebuild the DOM snapshots cannot").toBeGreaterThan(0);
+    expect(reading, "the LAST attempt is the one the assertions consume").toBe(attempts[attempts.length - 1]);
+    expect(reading.attempt, "and it says which window it was finally taken over").toBe(attempts.length);
+    expect(reading.rebuilds, "windows are bought until one of them is clean").toBe(0);
+    expect(reading.quiesced, "the shell must go quiet for two consecutive frames before it is measured").toBe(true);
+    // And the recovered reading is a real one: the icons were never the problem here,
+    // so the audit must not report them as collapsed.
+    expect(reading.icons.filter(iconIsVisible).length, iconAuditMessage(reading, attempts)).toBeGreaterThan(5);
+  } finally {
+    await ctx.close();
+  }
+});
+
+/** Dirties the icon audit's window from inside the page — once per armed watch, up to
+ *  `windows` times — so a test can FORCE the condition #3690 is about instead of
+ *  waiting for a slow runner to produce it.
+ *
+ *  It has to be driven by the ARMING rather than by a timer, because the audit's
+ *  windows have no fixed length: each one runs until the watched containers go quiet
+ *  for two consecutive frames. Hooking `window.__afIconWatch` — the handle
+ *  `armIconRebuildWatch` installs, and the last thing it does — puts exactly one
+ *  rebuild inside each window by construction, whatever the runner's timing. The first
+ *  window is already armed by the caller when this runs, so it is dirtied directly.
+ *
+ *  The rebuild is the shell's own: a self-`replaceChildren`, byte-identical markup
+ *  afterwards, visible only to the watch. */
+async function injectIconRebuildChurn(p: Page, windows: number): Promise<void> {
+  await p.evaluate((limit) => {
+    const w = window as unknown as { __afIconWatch?: unknown; __afIconChurn?: { performed: number } };
+    const churn = { scheduled: 0, performed: 0 };
+    w.__afIconChurn = churn;
+    const dirty = (): void => {
+      if (churn.scheduled >= limit) return;
+      churn.scheduled += 1;
+      // Next frame, not this task: the arming evaluate has to return first, so the
+      // rebuild lands inside the window the reading is taken over. Re-queried rather
+      // than captured, because a real render can replace the list element itself and
+      // the fresh watch observes whichever one is in the document by then.
+      requestAnimationFrame(() => {
+        const list = document.querySelector(".af-rail-list");
+        if (!list) return;
+        list.replaceChildren(...Array.from(list.childNodes));
+        churn.performed += 1;
+      });
+    };
+    let armed = w.__afIconWatch;
+    Object.defineProperty(window, "__afIconWatch", {
+      configurable: true,
+      get: () => armed,
+      set: (next: unknown) => {
+        armed = next;
+        dirty();
+      },
+    });
+    dirty();
+  }, windows);
+}
+
+/** How many injected rebuilds actually reached the DOM, so a green test cannot be one
+ *  whose injection quietly did nothing. */
+async function injectedIconChurn(p: Page): Promise<number> {
+  return p.evaluate(
+    () => (window as unknown as { __afIconChurn?: { performed: number } }).__afIconChurn?.performed ?? -1,
+  );
+}
+
+test("#3690 two rebuilds in consecutive windows still yield a clean reading, inside the bound", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The flake, forced. #3683 bought exactly ONE retry, so a rebuild in the first
+  // window and another in the replacement window left the audit handing back a void
+  // reading and the caller failing on it — a red about the runner's timing, never
+  // about the icons. Two consecutive dirty windows must now cost more windows, not a
+  // failure.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+    // The injected rebuild is a self-replaceChildren, so it only records a mutation if
+    // the list has children to replace. Pinned, rather than left to make an empty rail
+    // look like a quiet one.
+    await expect(p.locator(".af-rail-list .af-row").first()).toBeVisible();
+
+    await armIconRebuildWatch(p);
+    await injectIconRebuildChurn(p, 2);
+
+    const { reading, attempts } = await settledIconAudit(p);
+    expect(await injectedIconChurn(p), "both injected rebuilds must actually have landed").toBe(2);
+    expect(attempts[0]?.rebuilds ?? 0, "the first window is dirtied").toBeGreaterThan(0);
+    expect(
+      attempts[1]?.rebuilds ?? 0,
+      "and so is the replacement — the case #3683's single retry could not survive",
+    ).toBeGreaterThan(0);
+    expect(attempts.length, "so a third window is bought rather than the second being consumed").toBeGreaterThanOrEqual(
+      3,
+    );
+    expect(attempts.length, "and the buying stays inside the bound").toBeLessThanOrEqual(ICON_AUDIT_ATTEMPTS);
+    expect(reading, "the reading consumed is the last attempt").toBe(attempts[attempts.length - 1]);
+    expect(reading.rebuilds, iconAuditMessage(reading, attempts)).toBe(0);
+    expect(reading.quiesced, iconAuditMessage(reading, attempts)).toBe(true);
+    // #3683's point survives as DATA: what the recovery cost is recorded in the
+    // reading, and is not the reason for a failure.
+    expect(reading.attempt, "what it cost is recorded, not failed on").toBeGreaterThanOrEqual(3);
+    expect(reading.icons.filter(iconIsVisible).length, iconAuditMessage(reading, attempts)).toBeGreaterThan(5);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("#3690 a shell that rebuilds in EVERY window is refused at the bound, and named with the count", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The other end of the bound. Buying windows until one is clean has to TERMINATE,
+  // and what it terminates with has to be the finding rather than silence: a shell
+  // that never goes quiet is not an icon defect and must not be reported as one.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+    await expect(p.locator(".af-rail-list .af-row").first()).toBeVisible();
+
+    await armIconRebuildWatch(p);
+    await injectIconRebuildChurn(p, ICON_AUDIT_ATTEMPTS);
+
+    const { reading, attempts } = await settledIconAudit(p);
+    expect(await injectedIconChurn(p), "every window the audit armed must have been dirtied").toBe(
+      ICON_AUDIT_ATTEMPTS,
+    );
+    expect(attempts.length, "the loop stops at the bound rather than spinning on a shell that never settles").toBe(
+      ICON_AUDIT_ATTEMPTS,
+    );
+    expect(
+      attempts.every((attempt) => attempt.rebuilds > 0),
+      "…having found no quiet window anywhere inside it",
+    ).toBe(true);
+    expect(reading, "the reading handed back is still the last attempt").toBe(attempts[ICON_AUDIT_ATTEMPTS - 1]);
+    expect(reading.attempt, "which names itself as the last one").toBe(ICON_AUDIT_ATTEMPTS);
+    expect(reading.rebuilds, "and is void — the caller's rebuilds===0 assertion is what refuses it").toBeGreaterThan(0);
+
+    const message = iconAuditMessage(reading, attempts);
+    expect(message, "the refusal names the shell, not the icons").toContain("void, not evidence");
+    expect(message, "and says how many windows it bought before giving up").toContain(
+      `all ${ICON_AUDIT_ATTEMPTS} windows`,
+    );
+    expect(message, "with every attempt numbered beside its own count").toContain(`#${ICON_AUDIT_ATTEMPTS} `);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("#3681 a zero box over a QUIET window is reported as a product defect, naming the icons", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The other half: with the measurement sound, a real collapse must still be caught
+  // and must say WHICH icons and WHY. The box is zeroed directly, and the two routes
+  // that did NOT work are worth recording, because both narrow #3681's product
+  // reading — the one the issue framed as "every .af-icon is width: 1em, so the box is
+  // font-relative and inherited, and if that resolves to zero the user sees the rail
+  // flicker its icons out":
+  //
+  //   - `font-size: 0` on `.af-rail-list` / `.af-filter-menu` leaves all 40 icons
+  //     measuring a full box. Intermediate elements re-declare their own size
+  //     (`.af-row-title` in rem; the action `<button>`s take the UA default rather
+  //     than inheriting), so an inherited zero never reaches the icons.
+  //   - `font-size: 0` on the icons themselves collapses 32 of the 36 — but not the 8
+  //     `git-branch` glyphs, because `.af-branch-icon` is sized in REM
+  //     (styles.css:1271-1274) and no font-size anywhere can touch it.
+  //
+  // In the failing master reading those 8 measured zero along with the rest. So the
+  // observed collapse cannot have been a font-size collapse at all: it would have had
+  // to leave the rem-sized glyphs standing, and it did not. Measured here rather than
+  // reasoned about, which is the whole point of the exercise.
+  //
+  // No rebuild is involved: a stylesheet mutates no childList, so the window stays
+  // quiet and the reading is evidence rather than void.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+    await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
+
+    await armIconRebuildWatch(p);
+    await p.addStyleTag({
+      content: ".af-rail-list .af-icon, .af-filter-menu .af-icon { width: 0; height: 0 }",
+    });
+
+    const { reading, attempts } = await settledIconAudit(p);
+    expect(reading.rebuilds, "a stylesheet mutates no childList, so the window stays quiet").toBe(0);
+    const survivors = reading.icons.filter(iconIsVisible).map((icon) => icon.icon);
+    expect(survivors, "only the icons built outside the replaced containers keep a box").toEqual([
+      "folder-git",
+      "chevron-down",
+      "funnel",
+      "plus",
+    ]);
+    // 4 is the count master reported. The audit must still refuse it…
+    expect(survivors.length).toBeLessThanOrEqual(5);
+    // …and the message must name the icons and the clause, so the next occurrence
+    // costs a glance rather than a trace excavation.
+    const message = iconAuditMessage(reading, attempts);
+    expect(message, "a quiet window makes a zero box the product's defect, not the reading's").toContain(
+      "no rebuild in the window",
+    );
+    for (const named of ["check:af-icon", "circle:af-icon", "git-branch:af-icon", "plus:af-icon", "ellipsis:af-icon"]) {
+      expect(message, `the failure must name ${named}`).toContain(named);
+    }
+    expect(message, "and say which of the three clauses rejected it").toContain("zero box 0x0");
+    // Not merely "no box": every rejected icon carries the resolved font-size and
+    // display behind it, which is the reading the old single boolean threw away and
+    // the trace therefore could not reconstruct.
+    const collapsed = reading.icons.filter((icon) => !iconIsVisible(icon));
+    // Not a fixed count: this file is serial, and by here earlier flows have added
+    // tabs and rows, so the rail carries more icons than the 40 the master reading
+    // saw. What must hold is that the injection emptied enough of the replaced
+    // containers to take the audit below its own floor, which the survivors assertion
+    // above already pins from the other side.
+    expect(collapsed.length, "the injection must actually empty the replaced containers").toBeGreaterThan(5);
+    expect(
+      collapsed.every((icon) => icon.fontSize !== "" && icon.display !== ""),
+      "each rejected icon carries the computed values that name its cause",
+    ).toBe(true);
+  } finally {
+    await ctx.close();
+  }
 });
 
 test("vscode tab (#2743): one session's editor state is readable in another's on the shared origin, and is NOT once each session has its own", REAL_FIXTURE, async () => {
@@ -8567,7 +11230,7 @@ test("vscode tab (#2743): one session's editor state is readable in another's on
     expect(kept, "and its state must still be there").toBe(PROBE_VALUE + "_ON_A");
   } finally {
     setPreview("");
-    // Kill rather than archive: these sessions exist only for this test, and killing
+    // Delete session rather than archive: these sessions exist only for this test, and killing
     // prunes their worktrees and branches so nothing is left for later tests to trip
     // over. Best-effort — a cleanup failure must not mask the assertion that ran.
     for (const s of [SA, SB]) {
@@ -8596,6 +11259,7 @@ test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and se
   const tabbar = page.locator(".af-tabbar");
   // The choice is named on the tab bar itself. The pre-#2077 split control exposed
   // only `+` and an unlabeled caret, so a user had to know the hidden menu existed.
+  await openSessionActions(page);
   const newTab = page.locator(".af-tab-new");
   await expect(newTab).toHaveCount(1);
   await expect(newTab).toContainText("New tab");
@@ -8611,7 +11275,9 @@ test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and se
   await menu.locator(".af-tab-menu-item", { hasText: "VS Code" }).click();
   await expect(menu).toBeHidden();
 
-  const editorTab = tabbar.locator(".af-tab", { hasText: "vscode" });
+  const editorTab = tabbar.locator(".af-tab").filter({
+    has: page.locator(".af-tab-label", { hasText: /^VS Code$/ }),
+  });
   await expect(editorTab).toHaveCount(1, { timeout: 30_000 });
 
   // Creating the tab must NOT strand the keyboard in terminal mode. createSessionTab
@@ -8663,6 +11329,7 @@ test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and se
 
   // Escape closes the menu without creating anything (checked after, so a stray
   // tab from a mis-click can't be mistaken for the one above).
+  await openSessionActions(page);
   await newTab.click();
   await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
@@ -9095,34 +11762,47 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
   const ctx = await browser.newContext();
   const win = await ctx.newPage();
   try {
-    // A handle on the SPA's event socket, so the test can drop it. Recording only — the
-    // constructor is not otherwise altered, so the app connects exactly as it always
-    // does. Needed because closing the LIVE socket is the one thing network emulation
-    // will not do for us: going offline blocks new traffic but leaves an established
-    // WebSocket open, so the client never notices, never reconnects, and never
-    // re-Snapshots (measured — the first cut of this test timed out waiting for it).
+    // The SPA's event socket, held by its CONSTRUCTOR: a handle on each one so the test
+    // can drop it, and a switch that refuses every new one for as long as the gap is
+    // held. Together they reproduce a real outage: the socket drops, retries fail, and
+    // the events published meanwhile are dropped by the daemon's hub rather than queued
+    // (events.ts) — which is exactly why the reconnect must re-Snapshot, and why that
+    // one Snapshot carries a close and a recreate FUSED into a single roster change.
+    //
+    // The constructor is the only layer that does both. Going offline leaves an
+    // established WebSocket open, so the client never notices, never reconnects, and
+    // never re-Snapshots (measured — the first cut of this test timed out waiting for
+    // it). And CDP's Network.setBlockedURLs, which held the retries off before #4584,
+    // refuses matching HTTP requests but NOT WebSocket handshakes (measured: 20 of 20
+    // handshakes opened under the block). That made the "outage" one 500 ms reconnect
+    // backoff long (events.ts), and the spec raced it — whenever the two CLI mutations
+    // below outran the backoff, the recreate arrived as a LIVE event and rebound the
+    // pane before the offline assertion read it.
+    //
+    // A refused attempt is closed while still CONNECTING, which fails it without ever
+    // firing `open`. The close is a microtask so the app has attached its handlers, and
+    // it lands before any task could deliver an open. To the client that is a refused
+    // connection — error, close, schedule the next retry — so it keeps reporting
+    // "reconnecting". An allowed attempt is not altered, so the app connects exactly as
+    // it always does.
     await win.addInitScript(() => {
-      const w = window as unknown as { __afEventSockets: WebSocket[] };
+      const w = window as unknown as { __afEventSockets: WebSocket[]; __afRefuseEvents: boolean };
       w.__afEventSockets = [];
+      w.__afRefuseEvents = false;
       const Native = WebSocket;
       window.WebSocket = new Proxy(Native, {
         construct(target, args: [string, (string | string[])?]) {
           const ws = new target(...args);
           if (String(args[0]).includes("/v1/events")) {
             w.__afEventSockets.push(ws);
+            if (w.__afRefuseEvents) {
+              queueMicrotask(() => ws.close());
+            }
           }
           return ws;
         },
       });
     });
-    // Block the events endpoint at the NETWORK layer, so every reconnect ATTEMPT fails
-    // for as long as the flag is set. Together with the close below this reproduces a
-    // real outage: the socket drops, retries fail, and the events published meanwhile
-    // are dropped by the daemon's hub rather than queued (events.ts) — which is exactly
-    // why the reconnect must re-Snapshot, and why that one Snapshot carries a close and
-    // a recreate FUSED into a single roster change.
-    const cdp = await ctx.newCDPSession(win);
-    await cdp.send("Network.enable");
 
     // Wait for the startup resync CHAIN to be accepted before manufacturing the
     // outage. openTokenless proves the seed Snapshot rendered the rail, but the event
@@ -9139,6 +11819,13 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     // it also keeps this test independent of whatever the specs above renamed.
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
     await expect(tabByLabel(win, VICTIM)).toHaveCount(1, { timeout: 15_000 });
+    // Start the outage from a fresh, accepted roster containing the victim.
+    // Its create event can paint the tab before an older startup Snapshot has
+    // drained; that old four-tab roster would clamp this pane to its neighbour
+    // during the gap and stop exercising an atomic close+recreate altogether.
+    await openAfterInitialResync(win, () => win.reload().then(() => {}));
+    await row(win, SESSION_ORDER).click();
+    await expect(tabByLabel(win, VICTIM)).toHaveCount(1);
     const roster = await tabLabels(win);
     // The bar WHILE the edit is open: the input REPLACES the edited tab's button, so
     // that tab draws no label until the edit is settled.
@@ -9157,10 +11844,11 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     // The gap: retries are refused, then the live socket is dropped. Neither the close
     // nor the recreate below is delivered as an event — delivered live they would each
     // repaint the bar and settle the edit early, which is the (already-covered) path
-    // above, not this one.
-    await cdp.send("Network.setBlockedURLs", { urls: ["*/v1/events*"] });
+    // above, not this one. Refused BEFORE the drop, in the same evaluate: the drop's
+    // reconnect is scheduled by its close handler, which cannot run first.
     const eventSocketClose = await win.evaluate(async () => {
-      const w = window as unknown as { __afEventSockets: WebSocket[] };
+      const w = window as unknown as { __afEventSockets: WebSocket[]; __afRefuseEvents: boolean };
+      w.__afRefuseEvents = true;
       await Promise.all(
         w.__afEventSockets.map(
           (ws) =>
@@ -9192,6 +11880,17 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     ).toHaveAttribute("data-live", "reconnecting");
     af("sessions", "tab-delete", SESSION_ORDER, "--name", VICTIM);
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
+    // Still in the gap once both mutations have landed — asserted, because a reconnect
+    // that got through is exactly how this spec used to flake (#4584): the client read
+    // "open" here and had the recreate as a live event before the binding below was
+    // read. Checked first so a leak in the staging fails under its own name, not as a
+    // lost binding.
+    await expect(
+      win.locator(".af-app"),
+      "no events socket may open while the gap is held — it would deliver the mutations live",
+    ).toHaveAttribute("data-live", "reconnecting");
+    await expect(editedPane, "the offline fixture must retain the old binding until reconnect")
+      .toHaveAttribute("data-tab-id", editedPaneID!);
 
     // Unblocked: the next retry opens, and an open re-Snapshots. THAT single roster change
     // carries both. Waited on explicitly, because committing before it lands would make
@@ -9201,7 +11900,9 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     const resync = win.waitForResponse((r) => r.url().includes("/v1/Snapshot") && r.status() === 200, {
       timeout: 30_000,
     });
-    await cdp.send("Network.setBlockedURLs", { urls: [] });
+    await win.evaluate(() => {
+      (window as unknown as { __afRefuseEvents: boolean }).__afRefuseEvents = false;
+    });
     const resyncResponse = await resync;
     const resyncEnvelope = (await resyncResponse.json()) as {
       data?: {
@@ -9477,7 +12178,7 @@ test("#1813: a refused rename surfaces the daemon's OWN message, verbatim, in th
     route.fulfill({
       status: 400,
       contentType: "application/json",
-      body: JSON.stringify({ data: null, error: { message: REFUSAL } }),
+      body: JSON.stringify({ data: null, error: { message: REFUSAL, daemon_rejected: true } }),
     }),
   );
 
@@ -9891,6 +12592,7 @@ test("#1929/#1971: a rename, a reorder and a close from the web carry the tab's 
     await route.continue(); // the REAL daemon must resolve the id, not just receive it
   });
   await tabByLabel(page, doomed).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   // It really closed — and only it. A close that resolved the wrong tab would still
   // shrink the bar by one, so assert the surviving ROSTER, not just the count.
   await expect
@@ -10002,7 +12704,7 @@ async function settledMobileDrawerGeometry(p: Page, title: string) {
                 opacity: getComputedStyle(actions).opacity,
                 visibility: getComputedStyle(actions).visibility,
               },
-              buttons: Array.from(actions.querySelectorAll<HTMLButtonElement>("button")).map((button) => ({
+              buttons: Array.from(actions.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.getClientRects().length > 0).map((button) => ({
                 label: button.getAttribute("aria-label"),
                 rect: rect(button),
               })),
@@ -10014,10 +12716,10 @@ async function settledMobileDrawerGeometry(p: Page, title: string) {
   }, title);
 }
 
-test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer stays an overlay", REAL_FIXTURE, async ({
+test("#3981 mobile: session-first budget and drawer navigation survive viewport changes", REAL_FIXTURE, async ({
   browser,
 }) => {
-  for (const width of [320, 375]) {
+  for (const width of [360, 390, 430]) {
     await test.step(`${width}px`, async () => {
       const height = 812;
       const { ctx, p } = await openAt(browser, width, height);
@@ -10033,12 +12735,11 @@ test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer 
         await expect(app).toHaveClass(/af-nav-open/);
         await row(p, SESSION_ORDER).click();
         await expect(app).not.toHaveClass(/af-nav-open/);
-        await expect(app, "a real selected session enables the condensed mobile shell").toHaveClass(/af-session-selected/);
         await expect(p.locator(".af-main.af-main-term")).toBeVisible();
-        await expect(p.locator(".af-term-head-main"), "the title is not a redundant mobile row").toBeHidden();
-        await expect(viewNav, "top-level navigation reserves no closed-state row").toBeHidden();
-        await expect(project, "project chrome reserves no closed-state row").toBeHidden();
-        await expect(more, "secondary app chrome reserves no closed-state row").toBeHidden();
+        await expect(p.locator(".af-term-title"), "the title identifies the focused session").toBeVisible();
+        await expect(viewNav, "navigation is in the session disclosure").toBeHidden();
+        await expect(project).toBeHidden();
+        await expect(more, "navigation remains visible with a focused session").toBeVisible();
 
         const geometry = () =>
           p.evaluate(() => {
@@ -10063,32 +12764,28 @@ test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer 
             };
           });
         const closed = await geometry();
-        expect(Math.abs(closed.toggle.centerY - closed.tabs.centerY), "hamburger and tabs share one row").toBeLessThanOrEqual(1);
-        expect(closed.head.height, "the mobile control row stays slim").toBeLessThan(64);
-        expect(closed.host.y - closed.app.y, "session content begins immediately after that one row").toBeLessThan(64);
-        expect(closed.host.bottom, "the pane reaches the mobile viewport bottom").toBeCloseTo(closed.app.bottom, 0);
+        expect(closed.host.y - closed.app.y).toBeLessThanOrEqual(50);
+        expect(closed.head.height).toBe(0);
+        await expect.poll(() => p.locator(".af-pane-host .xterm").first().evaluate(el => el.getBoundingClientRect().height / visualViewport!.height)).toBeGreaterThanOrEqual(0.85);
 
-        // The hamburger reveals navigation as an overlay. The app/project controls
-        // become reachable only inside that transient state, while the pane keeps the
-        // exact same usable rectangle underneath it.
+        // The drawer overlays the pane without changing its usable rectangle.
         await toggle.click();
         await expect(app).toHaveClass(/af-nav-open/);
         await expect(rail).toBeVisible();
-        await expect(viewNav).toBeVisible();
-        await expect(project).toBeVisible();
+        await expect(app).toHaveClass(/af-session-first/);
+        await expect(viewNav).toBeHidden();
+        await expect(project).toBeHidden();
         await expect(more).toBeVisible();
         const opened = await geometry();
         expect(opened.host, "opening the overlay must not resize or displace the pane").toEqual(closed.host);
 
-        // A drawer-only view control is genuinely operable, and leaving Sessions
-        // dismisses the drawer. Returning keeps the selected terminal and restores
-        // the condensed row rather than stacking the old appbar back above it.
+        // The single disclosure reaches view switching even with the drawer open.
+        await more.click();
         await viewNav.getByRole("tab", { name: "Tasks", exact: true }).click();
         await expect(app).not.toHaveClass(/af-nav-open/);
         await expect(p.locator(".af-tasks")).toBeVisible();
         await p.getByRole("tab", { name: "Sessions", exact: true }).click();
         await expect(p.locator(".af-main.af-main-term")).toBeVisible();
-        await expect(app).toHaveClass(/af-session-selected/);
         await expect(viewNav).toBeHidden();
 
         // Outside tap is the other drawer exit. Aim at the scrim's exposed right
@@ -10104,6 +12801,7 @@ test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer 
         // Switch to a real process terminal from the strip, then change the usable
         // height. ResizeObserver owns orientation/viewport changes; the row count is
         // the product signal that FitAddon actually consumed the new geometry.
+        await more.click();
         const processTab = p.locator('.af-tabbar .af-tab:has([data-icon="terminal"])').first();
         await expect(processTab, "the seeded session keeps a real terminal tab for the mobile strip").toBeVisible();
         await processTab.click();
@@ -10112,10 +12810,11 @@ test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer 
         await expect.poll(rows, { message: "the selected mobile tab has fitted terminal rows" }).toBeGreaterThan(0);
         const beforeResizeRows = await rows();
         await p.setViewportSize({ width, height: height + 120 });
+        await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
         await expect
           .poll(rows, { message: "a taller mobile viewport refits the active terminal without manual recovery" })
           .toBeGreaterThan(beforeResizeRows);
-        expect(await horizontalOverflow(p), "the condensed shell never widens the phone").toBeLessThanOrEqual(1);
+        expect(await horizontalOverflow(p), "the phone shell never widens the page").toBeLessThanOrEqual(1);
       } finally {
         await ctx.close();
       }
@@ -10202,7 +12901,7 @@ test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals
   expect(
     fit.target.buttons.map((button) => button.label),
     diagnostic,
-  ).toEqual([`Archive session “${SESSION_A}”`, `Kill session “${SESSION_A}”`]);
+  ).toEqual([`Actions for ${SESSION_A}`]);
   expect(fit.target.buttons.every((button) => button.rect.width > 0 && button.rect.height > 0), diagnostic).toBe(true);
   expect(fit.target.actionStyle, diagnostic).toMatchObject({ display: "flex", opacity: "1", visibility: "visible" });
   expect(fit.target.main.width, diagnostic).toBeGreaterThan(80);
@@ -10272,18 +12971,18 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expect(p.locator(".af-main.af-main-term")).toBeVisible();
 
   // Row actions MUST keep stopPropagation (otherwise they also select the row), so
-  // Kill and Archive have to dismiss by intent before opening their own confirms.
+  // Delete session and Archive have to dismiss by intent before opening their own confirms.
   await openDrawer();
-  await railAction(p, SESSION_A, "Kill session").click();
+  await clickRailAction(p, SESSION_A, "Delete session");
   await expectDrawerClosed();
-  await expect(modal).toContainText(`Kill ${SESSION_A}?`);
+  await expect(modal).toContainText(`Delete session ${SESSION_A}?`);
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(modal).toBeHidden();
-  expect(lifecyclePosts, "cancelling Kill must not post a lifecycle mutation").toEqual([]);
+  expect(lifecyclePosts, "cancelling Delete session must not post a lifecycle mutation").toEqual([]);
   await expect(row(p, SESSION_A)).toHaveCount(1);
 
   await openDrawer();
-  await railAction(p, SESSION_A, "Archive session").click();
+  await clickRailAction(p, SESSION_A, "Archive session");
   await expectDrawerClosed();
   await expect(modal).toContainText(`Archive ${SESSION_A}?`);
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -10311,14 +13010,19 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expectDrawerClosed();
   await expect(row(p, SESSION_B)).toHaveClass(/af-row-selected/);
   await openDrawer();
+  await openRailActions(p, SESSION_B);
+  // Observe immediate local restore intent without changing the shared archived
+  // fixture; the earlier restore round-trip test exercises the real daemon.
+  await p.route("**/v1/RestoreSession", route => route.fulfill({ json: { data: {} } }));
   const restore = railAction(p, SESSION_B, "Restore session");
   await expect(restore).toBeVisible();
   await restore.click();
   await expectDrawerClosed();
-  await expect(modal).toContainText(`Restore ${SESSION_B}?`);
-  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect.poll(() => ({
+    count: lifecyclePosts.length,
+    isRestore: /\/v1\/RestoreSession$/.test(lifecyclePosts[0] ?? ""),
+  })).toEqual({ count: 1, isRestore: true });
   await expect(modal).toBeHidden();
-  expect(lifecyclePosts, "cancelling Restore must not post a lifecycle mutation").toEqual([]);
 
   // The escape hatch remains location-based by design: the scrim's action IS drawer
   // dismissal. Tap its exposed right edge (the left side sits behind the drawer).
@@ -10384,7 +13088,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         await expect(brand, "decoration yields before project context").toBeHidden();
         await expect(toggle).toBeVisible();
         await expect(project).toBeVisible();
-        await expect(more, "secondary appbar tools collapse behind one touch target").toBeVisible();
+        await expect(more, "an empty More menu is not offered").toBeHidden();
         await expect(tools).toBeHidden();
 
         const primary = await p.evaluate(() => {
@@ -10396,7 +13100,6 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
             toggle: rect(".af-nav-toggle"),
             views: rect(".af-viewnav"),
             project: rect(".af-project-switch"),
-            more: rect(".af-appbar-more"),
           };
         });
         for (const [name, box] of Object.entries(primary)) {
@@ -10406,7 +13109,6 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         }
         expect(primary.project.width, "project context owns nearly the whole second row").toBeGreaterThan(200);
         expect(Math.abs(primary.toggle.top - primary.views.top), "top-level navigation shares one top edge").toBeLessThanOrEqual(1);
-        expect(Math.abs(primary.more.top - primary.project.top), "project and More share one top edge").toBeLessThanOrEqual(1);
         expect(primary.project.top, "the project row follows the top-level navigation row").toBeGreaterThan(
           primary.toggle.top + primary.toggle.height,
         );
@@ -10421,8 +13123,6 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         }
         await p.keyboard.press("Tab");
         await expect(project, "project follows the view row in DOM and pixels").toBeFocused();
-        await p.keyboard.press("Tab");
-        await expect(more, "More follows the project in DOM and pixels").toBeFocused();
 
         const truncation = await projectName.evaluate((el) => {
           const css = getComputedStyle(el);
@@ -10454,41 +13154,8 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         expect(menuBox!.x).toBeGreaterThanOrEqual(0);
         expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(width);
 
-        // Disclosure exclusivity belongs to the actions, not pointer bubbling. The
-        // More click stops propagation and keyboard activation has no mousedown, so
-        // both directions would otherwise leave overlapping panels open (#2226's
-        // event-path gotcha in miniature).
-        await more.click();
-        await expect(projectMenu).toBeHidden();
-        await expect(tools).toBeVisible();
-        await expect(more).toHaveAttribute("aria-expanded", "true");
-        await project.focus();
-        await p.keyboard.press("Enter");
-        await expect(tools).toBeHidden();
-        await expect(more).toHaveAttribute("aria-expanded", "false");
-        await expect(projectMenu).toBeVisible();
         await projectItem(p, LONG_PROJECT).click();
         await expect(projectMenu).toBeHidden();
-
-        // Rare chrome remains operable rather than consuming the project row.
-        await more.click();
-        await expect(tools).toBeVisible();
-        await expect(tools.locator(`.af-theme-opt[data-theme-opt="${theme}"]`)).toHaveClass(/af-theme-opt-active/);
-        const disconnect = tools.getByRole("button", { name: "Disconnect" });
-        await expect(disconnect).toBeVisible();
-        const toolsBox = await tools.boundingBox();
-        expect(toolsBox, "More popover has phone geometry").not.toBeNull();
-        expect(toolsBox!.x).toBeGreaterThanOrEqual(0);
-        expect(toolsBox!.x + toolsBox!.width).toBeLessThanOrEqual(width);
-        for (const control of [disconnect, ...(await tools.locator(".af-theme-opt").all())]) {
-          const box = await control.boundingBox();
-          expect(box, "every More action has geometry").not.toBeNull();
-          expect(box!.height, "More actions keep comfortable tap heights").toBeGreaterThanOrEqual(40);
-        }
-        await p.keyboard.press("Escape");
-        await expect(tools).toBeHidden();
-        await expect(more).toHaveAttribute("aria-expanded", "false");
-        await expect(more).toBeFocused();
 
         await testInfo.attach(`2227-${width}-${theme}-drawer-closed`, {
           body: await p.screenshot(),
@@ -10513,6 +13180,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
           body: await p.screenshot(),
           contentType: "image/png",
         });
+        await stopPolledRoutes(ctx);
         await ctx.close();
       });
     }
@@ -10548,7 +13216,128 @@ test("desktop (1280px): the mobile drawer never engages — the rail stays in vi
   await expect(p.locator(".af-nav-toggle")).toBeHidden();
   await expect(p.locator(".af-brand")).toBeVisible();
   await expect(p.locator(".af-appbar-more")).toBeHidden();
-  await expect(p.locator(".af-appbar-tools")).toBeVisible();
+  await expect(p.locator(".af-appbar-tools")).toBeAttached();
   await expect(p.locator(".af-app")).not.toHaveClass(/af-nav-open/);
   await ctx.close();
 });
+
+
+test("#3981: a split terminal fills the phone and restores both panes on desktop", REAL_FIXTURE, async ({ browser }) => {
+  const { ctx, p } = await openAt(browser, 1280, 812);
+  try {
+    await row(p, SESSION_ORDER).click();
+    const tabs = p.locator(".af-tabbar .af-tab");
+    await tabs.nth(1).click();
+    await dragTabToPane(p, "Agent", "bottom");
+    await expect(p.locator(".af-pane")).toHaveCount(2);
+    for (const width of [360, 390, 430]) {
+      await p.setViewportSize({ width, height: 812 });
+      await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
+      await expect(p.locator(".af-pane:visible")).toHaveCount(1);
+      await expect(p.locator(".af-pane-head:visible")).toHaveCount(0);
+      await expect.poll(() => p.locator(".af-pane-focused .xterm").evaluate(el => el.getBoundingClientRect().height / visualViewport!.height)).toBeGreaterThanOrEqual(0.85);
+    }
+    await p.setViewportSize({ width: 1280, height: 812 });
+    await expect(p.locator(".af-app")).not.toHaveClass(/af-session-first/);
+    await expect(p.locator(".af-pane:visible")).toHaveCount(2);
+    await p.setViewportSize({ width: 360, height: 812 });
+    await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
+    await openSessionActions(p);
+    await p.getByRole("button", { name: "Hide pane", exact: true }).click();
+    await expect(p.locator(".af-pane")).toHaveCount(1);
+  } finally { await ctx.close(); }
+});
+
+for (const external of [true, false]) {
+  test(`project deletion discloses in-place teardown: ${external}`, async ({ browser }) => {
+    const ctx = await browser.newContext();
+    try {
+      const p = await ctx.newPage();
+      await p.routeWebSocket(url => url.pathname === "/v1/events", () => {});
+      await p.route("**/v1/Snapshot", async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        for (const session of body.data.instances) {
+          if (session.worktree) session.worktree.external_worktree = external;
+        }
+        await route.fulfill({ json: body });
+      });
+      await openTokenless(p);
+      await p.locator(".af-project-switch").click();
+      await p.locator(".af-project-menu .af-project-delete").click();
+      const modal = p.getByRole("dialog");
+      if (external) {
+        await expect(modal).toContainText("ended permanently and cannot be restored");
+        await expect(modal).not.toContainText("restore sessions anytime");
+      } else {
+        await expect(modal).toContainText("restore sessions anytime");
+        await expect(modal).not.toContainText("ended permanently");
+      }
+      await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+    } finally {
+      await stopPolledRoutes(ctx);
+      await ctx.close();
+    }
+  });
+}
+
+test("320px focused keybar keeps its last button inside the viewport", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await row(p, SESSION_A).click();
+    await p.setViewportSize({ width: 320, height: 812 });
+    await p.locator(".af-pane-host .xterm").first().click();
+    const arrows = p.locator(".af-terminal-keybar:visible").getByRole("button", { name: "Arrows", exact: true });
+    await expect(arrows).toBeVisible();
+    expect(await arrows.evaluate(el => el.getBoundingClientRect().right <= innerWidth)).toBe(true);
+  } finally {
+    await ctx.close();
+  }
+});
+
+for (const [external, branchCreated] of [[true, true], [false, false], [false, true], [false, undefined]]) {
+  test(`session deletion ownership disclosure: external=${external}, branchCreated=${branchCreated}`, async ({ browser }) => {
+    const ctx = await browser.newContext();
+    try {
+      const p = await ctx.newPage();
+      await p.routeWebSocket(url => url.pathname === "/v1/events", () => {});
+      await p.route("**/v1/Snapshot", async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        for (const session of body.data.instances) {
+          if (session.worktree) {
+            session.worktree.external_worktree = external;
+            session.worktree.branch_created_by_us = branchCreated;
+          }
+        }
+        await route.fulfill({ json: body });
+      });
+      await openTokenless(p);
+      const target = row(p, SESSION_A);
+      await target.hover();
+      await target.getByRole("button", { name: /^Actions for / }).click();
+      await target.getByRole("button", { name: /^Delete session / }).click();
+      const modal = p.getByRole("dialog");
+      if (external) {
+        await expect(modal).toContainText("session record and runtime");
+        await expect(modal).toContainText("checkout and branch stay");
+        await expect(modal).not.toContainText("Archive");
+        await expect(modal).not.toContainText("are lost");
+      } else if (!branchCreated) {
+        await expect(modal).toContainText("worktree");
+        await expect(modal).toContainText("branch and its commits stay");
+        await expect(modal).toContainText("Uncommitted changes are lost");
+        await expect(modal).not.toContainText("unpushed commits are lost");
+      } else {
+        await expect(modal).toContainText("Uncommitted changes and unpushed commits are lost.");
+        await expect(modal).toContainText("Archive to keep them.");
+      }
+      await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+    } finally {
+      await stopPolledRoutes(ctx);
+      await ctx.close();
+    }
+  });
+}

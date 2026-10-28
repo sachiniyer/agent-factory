@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // Every test here is hermetic by construction (#1104 hard rules): the AF
@@ -32,6 +34,7 @@ import (
 // daemon, the real ~/.agent-factory, or the developer's tmux server.
 
 func TestMain(m *testing.M) {
+	playtestEngineOutput = func(context.Context, ...string) ([]byte, error) { return nil, exec.ErrNotFound }
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux
 	// server (doctor tests drive real tmux via IsolateTmux).
@@ -92,10 +95,17 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 		// opt back into the production grace period explicitly.
 		minProcessLeakAge: time.Nanosecond,
 		snapshot:          snapshotOf(t, pids...),
+		// No tasks by default, for the same reason: the automations check (#3623)
+		// would otherwise read whatever task store answers on the box. The tasks
+		// tests inject their own inventory.
+		taskInventory: func() ([]task.Task, error) { return nil, nil },
 		// Default to "no remote configured" so the non-remote suite stays
 		// hermetic (no git shell-out, no reading the real repo's in-repo
 		// config). The remote tests below inject their own resolver.
 		remoteConfig: func() (*config.RemoteHooks, string, error) { return nil, "", nil },
+		// Likewise no in-repo config: the unknown-leaf check (#4599) would
+		// otherwise load the real repo's .agent-factory config.
+		inRepoUnknownLeaves: func() []config.InRepoUnknownLeaf { return nil },
 		// The skew checks (#1044) all reach for real machine state, so they
 		// are defaulted here to inert fakes: "nothing answered, no unit
 		// installed, no af binaries to compare". Without this the suite would
@@ -377,12 +387,38 @@ func TestLiveSessionTransientChildIsNotReportedAsEscaped(t *testing.T) {
 		return scanErr == nil && transientPID > 1
 	}, 5*time.Second, 10*time.Millisecond, "tmux pane never published its transient child pid")
 
+	// Wait for the child to become READABLE before asserting anything about it.
+	//
+	// The pane shell publishes the pid the instant fork(2) returns, so the pid
+	// in that file can name a process still inside execve(2), whose environment
+	// is not yet reliably readable — on darwin especially, where the read is a
+	// KERN_PROCARGS2 copy out of the target's user stack, which is the very
+	// thing an exec is in the middle of replacing.
+	//
+	// spawnWithEnv already waits for exactly this on every other child in this
+	// suite ("the fork-exec window would otherwise race the scan"). This is the
+	// one child staged by hand — it has to be a pane GRANDCHILD, which
+	// spawnWithEnv cannot produce — so it is the one child that has to wait for
+	// itself. Without the wait, the marker assertion below fails as a
+	// PRECONDITION on macOS CI and reports an escaped-process classification
+	// that the test never reached (#3515).
+	require.Eventually(t, func() bool {
+		_, st := proctree.LookupEnv(transientPID, tmux.EnvMarkerSession)
+		return st == proctree.EnvFound
+	}, 10*time.Second, 10*time.Millisecond,
+		"transient pane child %d never published a readable %s marker", transientPID, tmux.EnvMarkerSession)
+
 	full, err := proctree.Snapshot()
 	require.NoError(t, err)
 	transient, ok := full[transientPID]
 	require.True(t, ok, "transient pane child %d missing from snapshot", transientPID)
+	// Staging, not the property under test: this pins that the scenario really
+	// is a marked child of the live session, so the escaped-process assertion at
+	// the bottom is about the classification and not about an unreadable pid.
 	marker, markerStatus := proctree.LookupEnv(transientPID, tmux.EnvMarkerSession)
-	require.Equal(t, proctree.EnvFound, markerStatus)
+	require.Equal(t, proctree.EnvFound, markerStatus,
+		"precondition, NOT the classification this test is named for: the staged child's marker "+
+			"must be readable before doctor is asked to classify it")
 	require.Equal(t, name, marker)
 
 	realExec := cmd.MakeExecutor()
@@ -1170,115 +1206,4 @@ func TestSummarizedMoreCountIsAnchoredNotOpportunistic(t *testing.T) {
 	}
 	require.Equal(t, 46, rollup.UnresolvedCount(),
 		"the real roll-up must still stand for every process it folded")
-}
-
-// TestDaemonUnauthenticatedListenerWarnsWithoutFailing is the #2168 Phase 0
-// doctor contract, and it flips the #2090 assertion that stood here.
-//
-// #2090 read a tokenless network bind as a daemon that could not start, so the
-// `daemon` row FAILED with "not running, and it cannot start". The daemon starts
-// now, by owner decision, so that row would be a fabricated negative — doctor
-// would be asserting a refusal that no longer happens. What remains true is the
-// exposure, and doctor is one of the few places a user will actually read it.
-//
-// Two properties, and the second is the one with teeth: the exposure gets its own
-// WARN row, and it is not a `problem` — `af doctor` must exit 0 on a posture the
-// owner decided users may choose. A Warn that still failed the run would be the
-// refusal wearing a different hat.
-func TestDaemonUnauthenticatedListenerWarnsWithoutFailing(t *testing.T) {
-	testguard.IsolateTmux(t)
-	opts := testOptions(t, false)
-
-	require.NoError(t, os.WriteFile(
-		filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
-		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = false\n"), 0600))
-
-	opts.daemonHealth = func() daemon.HealthStatus {
-		return daemon.HealthStatus{
-			SocketPath:    filepath.Join(opts.ConfigDir, "daemon.sock"),
-			SocketExists:  false, // simply not started yet
-			PingErr:       errNoDaemon,
-			HTTPListening: daemon.Undetermined(errNoDaemon),
-		}
-	}
-
-	report, err := Run(opts)
-	require.NoError(t, err)
-
-	// The daemon row is back to the plain truth: nothing is running, and it will
-	// start when asked. Under #2090 this row was a Fail.
-	daemonRows := findCheckRows(report, "daemon")
-	require.Len(t, daemonRows, 1)
-	require.Equal(t, StatusPass, daemonRows[0].Status,
-		"the daemon starts fine on this config now — doctor must not report a refusal that cannot happen")
-
-	// The exposure is still reported, on its own row, with the fix.
-	listenerRows := findCheckRows(report, "listener")
-	require.Len(t, listenerRows, 1)
-	require.Equal(t, StatusWarn, listenerRows[0].Status,
-		"an unauthenticated network listener is worth saying — as a warning, not a failure")
-	require.False(t, listenerRows[0].Problem,
-		"this posture is allowed since #2168 Phase 0, so it must not drive a nonzero `af doctor` exit")
-	require.Contains(t, listenerRows[0].Detail, "0.0.0.0:8443")
-	require.Contains(t, listenerRows[0].Detail, "DeliverPrompt",
-		"say what an unauthenticated peer can actually do, not just that auth is off")
-	require.Contains(t, listenerRows[0].Remediation, "network.require_token true")
-}
-
-// TestDaemonNotRunningStillPassesOnASafeConfig guards the other direction: the
-// exposure row must fire on the unsafe posture ONLY. An ordinary user who has just
-// not started a daemon yet gets the on-demand pass and no listener row at all.
-func TestDaemonNotRunningStillPassesOnASafeConfig(t *testing.T) {
-	testguard.IsolateTmux(t)
-	opts := testOptions(t, false)
-
-	require.NoError(t, os.WriteFile(
-		filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
-		[]byte("listen_addr = '127.0.0.1:8443'\nrequire_token = false\n"), 0600))
-
-	opts.daemonHealth = func() daemon.HealthStatus {
-		return daemon.HealthStatus{
-			SocketPath:    filepath.Join(opts.ConfigDir, "daemon.sock"),
-			SocketExists:  false,
-			PingErr:       errNoDaemon,
-			HTTPListening: daemon.Undetermined(errNoDaemon),
-		}
-	}
-
-	report, err := Run(opts)
-	require.NoError(t, err)
-
-	rows := findCheckRows(report, "daemon")
-	require.Len(t, rows, 1)
-	require.Equal(t, StatusPass, rows[0].Status,
-		"the loopback default is safe — it must keep the on-demand pass")
-	require.Empty(t, findCheckRows(report, "listener"),
-		"nothing is exposed on the shipped default, so there is nothing to warn about")
-}
-
-// TestAuthenticatedNetworkListenerIsNotWarned pins that require_token = true is
-// untouched by #2168 Phase 0. A network bind that authenticates its peers is the
-// posture the docs recommend; warning about it would train users to ignore the
-// row that matters.
-func TestAuthenticatedNetworkListenerIsNotWarned(t *testing.T) {
-	testguard.IsolateTmux(t)
-	opts := testOptions(t, false)
-
-	require.NoError(t, os.WriteFile(
-		filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
-		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = true\n"), 0600))
-
-	opts.daemonHealth = func() daemon.HealthStatus {
-		return daemon.HealthStatus{
-			SocketPath:    filepath.Join(opts.ConfigDir, "daemon.sock"),
-			SocketExists:  false,
-			PingErr:       errNoDaemon,
-			HTTPListening: daemon.Undetermined(errNoDaemon),
-		}
-	}
-
-	report, err := Run(opts)
-	require.NoError(t, err)
-	require.Empty(t, findCheckRows(report, "listener"),
-		"a network bind with the token on is authenticated — no exposure to report")
 }

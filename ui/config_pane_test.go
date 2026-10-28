@@ -66,6 +66,9 @@ func TestConfigPaneRendersEveryManifestKey(t *testing.T) {
 	view := c.String()
 
 	for _, e := range config.Manifest() {
+		if e.Key == "theme" { // Retired palette; separately tested as hidden.
+			continue
+		}
 		if !strings.Contains(view, e.Key) {
 			t.Errorf("config key %q is in the manifest but the TUI editor does not render it — "+
 				"a user cannot see or set a key that exists", e.Key)
@@ -163,7 +166,6 @@ func TestConfigPaneEditWritesThroughTheRealPathAndEchoes(t *testing.T) {
 // open a field, save, survive a real load, and refresh to the saved value.
 func TestConfigPaneFormerlyImmutableKeysRoundTrip(t *testing.T) {
 	want := config.DefaultConfig()
-	want.Theme.Accent = "#112233"
 	if want.ProgramOverrides == nil {
 		want.ProgramOverrides = map[string]string{}
 	}
@@ -175,7 +177,6 @@ func TestConfigPaneFormerlyImmutableKeysRoundTrip(t *testing.T) {
 	want.Keys = map[string]any{"quit": "Q"}
 
 	for _, key := range []string{
-		"theme",
 		"program_overrides",
 		"session_env_passthrough",
 		"limit_patterns",
@@ -235,7 +236,7 @@ func TestConfigPaneSurfacesRestartNoticeAtTheMomentOfTheEdit(t *testing.T) {
 	// hands back, so this pins that the pane renders THAT, not a hardcoded string.
 	c.save = func(key, value string) (*config.SetResult, string, error) {
 		return &config.SetResult{Key: key, Value: value, Path: "/tmp/config.toml", RequiresRestart: true},
-			config.EffectNotice(key, true), nil
+			config.EffectNotice(key, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}), nil
 	}
 
 	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
@@ -485,7 +486,7 @@ func TestConfigPaneClosingClearsTheLastWritesStatus(t *testing.T) {
 	selectKey(t, c, "default_program")
 	c.save = func(k, v string) (*config.SetResult, string, error) {
 		return &config.SetResult{Key: k, Value: v, Path: "/tmp/config.toml", RequiresRestart: true},
-			config.EffectNotice(k, true), nil
+			config.EffectNotice(k, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}), nil
 	}
 
 	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
@@ -692,7 +693,7 @@ func TestSavingAnUntouchedFieldWritesNothing(t *testing.T) {
 	c.save = func(k, v string) (*config.SetResult, string, error) {
 		writes++
 		return &config.SetResult{Key: k, Value: v, Path: path, RequiresRestart: true},
-			config.EffectNotice(k, true), nil
+			config.EffectNotice(k, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}), nil
 	}
 
 	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
@@ -764,6 +765,9 @@ func TestConfigPaneUnsizedRendersEverything(t *testing.T) {
 
 	view := c.String() // must not panic
 	for _, e := range config.Manifest() {
+		if e.Key == "theme" { // Retired palette; separately tested as hidden.
+			continue
+		}
 		if !strings.Contains(view, e.Key) {
 			t.Errorf("unsized, the pane must render everything; %q is missing", e.Key)
 		}

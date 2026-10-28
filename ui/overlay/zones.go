@@ -2,10 +2,8 @@ package overlay
 
 import (
 	"strings"
-	"unicode/utf8"
 
 	xansi "github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
@@ -23,7 +21,11 @@ import (
 // ANSI-stripped line (border glyphs are multibyte but one cell wide, so byte
 // offsets are not columns).
 func cellColumn(plain string, idx int) int {
-	return runewidth.StringWidth(plain[:idx])
+	// layout.Cells, not runewidth: this is the horizontal offset a mouse zone is
+	// registered at, so it has to count the same cells the compositor draws. A
+	// message carrying clustered text before the needle measured narrower here than
+	// it rendered, and the y/n zones landed left of the words (#3585).
+	return layout.Cells(plain[:idx])
 }
 
 // RegisterZones registers the confirmation dialog's clickable y/n words. The
@@ -34,13 +36,13 @@ func (c *ConfirmationOverlay) RegisterZones(reg *zones.Registry, origin layout.P
 	if reg == nil {
 		return
 	}
-	yesNeedle := c.ConfirmKey + " to confirm"
+	yesNeedle := c.ConfirmKey + " confirm"
 	if c.enterConfirms() {
 		// The full hint advertises enter as a confirm alias (#2405); the zone must
 		// cover the same words the renderer wrote, or the click target goes stale.
-		yesNeedle = c.ConfirmKey + "/enter to confirm"
+		yesNeedle = c.ConfirmKey + "/enter confirm"
 	}
-	noNeedle := c.CancelKey + " or esc to cancel"
+	noNeedle := c.CancelKey + "/esc cancel"
 	compactYesNeedle := c.ConfirmKey + " confirm"
 	compactNoNeedle := c.CancelKey + "/esc cancel"
 	lines := strings.Split(c.Render(), "\n")
@@ -66,13 +68,13 @@ func (c *ConfirmationOverlay) RegisterZones(reg *zones.Registry, origin layout.P
 		if yi >= 0 {
 			reg.Register(zones.OverlayConfirmYes, layout.Rect{
 				X: origin.X + cellColumn(plain, yi), Y: origin.Y + i,
-				W: runewidth.StringWidth(yesNeedle), H: 1,
+				W: layout.Cells(yesNeedle), H: 1,
 			})
 		}
 		if ni >= 0 {
 			reg.Register(zones.OverlayConfirmNo, layout.Rect{
 				X: origin.X + cellColumn(plain, ni), Y: origin.Y + i,
-				W: runewidth.StringWidth(noNeedle), H: 1,
+				W: layout.Cells(noNeedle), H: 1,
 			})
 		}
 		return
@@ -86,7 +88,7 @@ func (s *SelectionOverlay) RegisterZones(reg *zones.Registry, origin layout.Poin
 		return
 	}
 	rendered := s.Render()
-	width := lipglossWidth(rendered)
+	width := renderedWidth(rendered)
 	lines := strings.Split(rendered, "\n")
 	style := selectionOverlayStyle()
 	fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)
@@ -98,7 +100,10 @@ func (s *SelectionOverlay) RegisterZones(reg *zones.Registry, origin layout.Poin
 			break
 		}
 		t := strings.Trim(xansi.Strip(line), "│ ")
-		if t == "▸ "+s.items[next] || t == s.items[next] {
+		if t == "" {
+			continue
+		}
+		if rowRendersItem(strings.TrimPrefix(t, "▸ "), s.items[next]) {
 			reg.Register(zones.OverlaySelectRow(next), layout.Rect{
 				X: origin.X, Y: origin.Y + i, W: width, H: 1,
 			})
@@ -107,55 +112,43 @@ func (s *SelectionOverlay) RegisterZones(reg *zones.Registry, origin layout.Poin
 	}
 }
 
+// rowRendersItem reports whether a rendered row is this item — including the
+// TRUNCATED form the overlay draws when the item does not fit its box
+// (truncateOverlayLine cuts it and appends "…").
+//
+// Matching the full text alone registered no zone at all for such a row, so a
+// long entry answered the keyboard and silently swallowed the mouse — the
+// #1819 class, reached through the renderer rather than through a missing
+// click route (#4528). Every picker with labels longer than its box was
+// affected; the resolve picker is simply the one whose labels are a sentence.
+//
+// The caller walks rows and items in lockstep, advancing only on a match, so
+// prefix matching cannot bind a row to the wrong item. A blank line is
+// rejected by the caller before it gets here, since every item has it as a
+// prefix.
+func rowRendersItem(row, item string) bool {
+	if row == item {
+		return true
+	}
+	head, truncated := strings.CutSuffix(row, "…")
+	return truncated && head != "" && strings.HasPrefix(item, head)
+}
+
 // RegisterZones registers one full-width clickable zone per visible search
 // result, keyed by the result's index in the full result list; clicking a
-// row selects and submits it. The scan walks the same window Render shows
-// (Render slides a maxVisible-row window to keep the selection visible), so
-// a scrolled list registers exactly the rows on screen — matching the first
-// visible row against results[0] instead used to register nothing once the
-// selection moved past the first page (Greptile P1 on the original PR).
+// row selects and submits it. Geometry comes from the same render pass as the
+// frame, so user titles cannot masquerade as chrome or shift pointer targets.
 func (s *SearchOverlay) RegisterZones(reg *zones.Registry, origin layout.Point) {
 	if reg == nil {
 		return
 	}
-	rendered := s.Render()
-	width := lipglossWidth(rendered)
-	lines := strings.Split(rendered, "\n")
-	plan := s.renderPlan(searchOverlayStyle())
-	startIdx, endIdx := plan.startIdx, plan.endIdx
-	next := startIdx
-	for i, line := range lines {
-		if next >= endIdx {
-			break
-		}
-		title, ok := searchRowTitle(line)
-		if !ok {
-			continue
-		}
-		want := s.results[next].Instance.Title
-		if title == want || strings.HasPrefix(title, want+" (") {
-			reg.Register(zones.OverlaySearchRow(next), layout.Rect{
-				X: origin.X, Y: origin.Y + i, W: width, H: 1,
-			})
-			next++
-		}
+	rendered, firstRow, plan := s.renderFrame()
+	width := renderedWidth(rendered)
+	for idx := plan.startIdx; idx < plan.endIdx; idx++ {
+		reg.Register(zones.OverlaySearchRow(idx), layout.Rect{
+			X: origin.X, Y: origin.Y + firstRow + idx - plan.startIdx, W: width, H: 1,
+		})
 	}
-}
-
-// searchRowTitle parses a rendered search-result line down to its title text
-// (plus the optional " (branch)" suffix the caller strips by prefix match).
-// Result rows are the only lines that begin with a status glyph after the
-// border/padding, which is what distinguishes them from the query and hint
-// lines.
-func searchRowTitle(line string) (string, bool) {
-	t := strings.Trim(xansi.Strip(line), "│ ")
-	r, size := utf8.DecodeRuneInString(t)
-	if r != '●' && r != '○' && r != '◌' && r != '◆' {
-		return "", false
-	}
-	t = strings.TrimLeft(t[size:], " ")
-	t = strings.TrimPrefix(t, "▸ ")
-	return t, true
 }
 
 // SetSelectedIndex moves the search selection onto the given result index
@@ -166,8 +159,10 @@ func (s *SearchOverlay) SetSelectedIndex(idx int) {
 	}
 }
 
-// lipglossWidth is the widest printable line width of a rendered block.
-func lipglossWidth(rendered string) int {
+// renderedWidth is the widest row of a rendered overlay, measured with the same
+// helper the compositor places it by. Named for what it does: it stopped being
+// lipgloss.Width when the measures were unified (#3585).
+func renderedWidth(rendered string) int {
 	_, w := getLines(rendered)
 	return w
 }

@@ -225,35 +225,79 @@ const (
 )
 
 var controlMethodPolicies = map[string]probationPolicy{
-	"AddTask":          blockedDuringProbation,
-	"ArchiveSession":   blockedDuringProbation,
-	"CloseTab":         blockedDuringProbation,
-	"CreateSession":    blockedDuringProbation,
-	"CreateTab":        blockedDuringProbation,
-	"DeleteProject":    blockedDuringProbation,
-	"DeliverPrompt":    blockedDuringProbation,
-	"HandoffSession":   blockedDuringProbation,
-	"KillSession":      blockedDuringProbation,
-	"PauseStatusPoll":  blockedDuringProbation,
-	"ReapConfigAgent":  blockedDuringProbation,
-	"RegisterProject":  blockedDuringProbation,
-	"ReloadTasks":      blockedDuringProbation,
-	"RefreshPRInfo":    blockedDuringProbation,
-	"RemoveTask":       blockedDuringProbation,
-	"RestartTask":      blockedDuringProbation,
-	"RenameTab":        blockedDuringProbation,
-	"ReorderTab":       blockedDuringProbation,
-	"RestoreArchived":  blockedDuringProbation,
-	"RestoreSession":   blockedDuringProbation,
-	"ResumeFromLimit":  blockedDuringProbation,
-	"ResumeStatusPoll": blockedDuringProbation,
-	"SendPrompt":       blockedDuringProbation,
-	"SetConfigValue":   blockedDuringProbation,
-	"UnsetConfigValue": blockedDuringProbation,
-	"SetPRInfo":        blockedDuringProbation,
-	"SpawnConfigAgent": blockedDuringProbation,
-	"TriggerTask":      blockedDuringProbation,
-	"UpdateTask":       blockedDuringProbation,
+	"AddTask":        blockedDuringProbation,
+	"ArchiveSession": blockedDuringProbation,
+	"CloseTab":       blockedDuringProbation,
+	// Settles the replacement fence, lifts startup-unknown, and retires the
+	// durable mission in one commit (#4429) — a mutation of the candidate under
+	// validation like every other write.
+	"ConfirmHandoffDelivery": blockedDuringProbation,
+	"CreateSession":          blockedDuringProbation,
+	// CheckHost looks read-only (it creates nothing on the host) and is NOT
+	// admitted, unlike ListBackends and the other lookups. A lookup answers from
+	// state the daemon already holds; this one acts on the outside world as the
+	// operator: it opens ssh connections to their hosts, and under the accept-new
+	// posture it appends the host's key to the af-owned known_hosts in the shared
+	// home (prepareSSHHostKeyStore). A candidate under validation may be rolled
+	// back, and a rolled-back daemon must not leave behind trust decisions or
+	// readiness verdicts it learned while unproven. A refusal here costs a retry
+	// once probation releases; the readiness cache is only advisory until then,
+	// and the supervisor's refresh timer stands down for the same window.
+	"CheckHost":            blockedDuringProbation,
+	"CreateTab":            blockedDuringProbation,
+	"DeleteProject":        blockedDuringProbation,
+	"DeliverPrompt":        blockedDuringProbation,
+	"HandoffSession":       blockedDuringProbation,
+	"HandoffSessionV2":     blockedDuringProbation,
+	"KillSession":          blockedDuringProbation,
+	"PauseStatusPoll":      blockedDuringProbation,
+	"ReapConfigAgent":      blockedDuringProbation,
+	"RegisterProject":      blockedDuringProbation,
+	"ReloadTasks":          blockedDuringProbation,
+	"RemoveTask":           blockedDuringProbation,
+	"RestartTask":          blockedDuringProbation,
+	"RenameTab":            blockedDuringProbation,
+	"ReorderTab":           blockedDuringProbation,
+	"RestoreArchived":      blockedDuringProbation,
+	"RestoreSession":       blockedDuringProbation,
+	"ResumeFromLimit":      blockedDuringProbation,
+	"ResumeStatusPoll":     blockedDuringProbation,
+	"SendPrompt":           blockedDuringProbation,
+	"SetConfigValue":       blockedDuringProbation,
+	"UnsetConfigValue":     blockedDuringProbation,
+	"SpawnConfigAgent":     blockedDuringProbation,
+	"RebindProject":        blockedDuringProbation,
+	"SetProjectColor":      blockedDuringProbation,
+	"RebindProjectGuarded": blockedDuringProbation,
+	// AccountLogin registers a credential directory in the daemon host's
+	// agent-factory home and starts a process on it (#3384). Both halves are
+	// mutations of the very candidate an upgrade supervisor is mid-validation on,
+	// and the second one is a process that outlives the RPC — so it is blocked
+	// during probation like every other write, rather than admitted on the
+	// reasoning that a login is "the user's own business". A refusal here costs a
+	// retry; an admitted one leaves an interactive pane attached to a daemon that
+	// may be about to be rolled back.
+	"AccountLogin": blockedDuringProbation,
+	// RegisterAccount writes a directory into the daemon host's agent-factory home
+	// (#3385), which is a mutation of the candidate under validation like any other
+	// write.
+	"RegisterAccount": blockedDuringProbation,
+	// ListAccounts is a read: a directory listing plus a stat per account, no
+	// manager state and nothing an upgrade window is protecting. It sits with
+	// ListProjects and ListDirectory for the same reason — the accounts section a
+	// client builds out of it must not have to wait on a probation it has no stake
+	// in, and a section that cannot read reports "af could not look", which is a
+	// worse answer than the true one.
+	"ListAccounts": allowedDuringProbation,
+	// QuotaReport is a read of the daemon host's session records (#2983): no
+	// manager state, nothing an upgrade window is protecting. It sits with
+	// ListAccounts for the same reason — the usage section a client builds out
+	// of it must not have to wait on a probation it has no stake in, and a
+	// section that cannot read reports "af could not look", which is a worse
+	// answer than the true one.
+	"QuotaReport": allowedDuringProbation,
+	"TriggerTask": blockedDuringProbation,
+	"UpdateTask":  blockedDuringProbation,
 	// ApplyConfig was allowed during probation on the reasoning that a blocked
 	// SetConfigValue kept the file from changing, so an apply could only re-read
 	// unchanged bytes. #3231 disproved the premise: pre-#3231 CLIs and hand-edits
@@ -261,29 +305,49 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// live config, rebinds listeners, and changes auth posture, mutating the very
 	// daemon the supervisor is mid-validation on. Blocked, like the write itself.
 	"ApplyConfig": blockedDuringProbation,
-	// ApplyTheme also swaps the live config and publishes a repaint event. It is
-	// narrower than ApplyConfig, but it is still a mutation of the candidate the
-	// upgrade supervisor is validating, so it follows the same admission rule.
-	"ApplyTheme":   blockedDuringProbation,
-	"GetConfig":    allowedDuringProbation,
-	"GetTheme":     allowedDuringProbation,
-	"ListBackends": allowedDuringProbation,
+	"GetConfig":   allowedDuringProbation,
+	// A read of the daemon host's on-disk config provenance (#4803): no
+	// manager, no daemon state, nothing an upgrade window is protecting —
+	// same class as GetConfig, whose rows it explains.
+	"ExplainConfig": allowedDuringProbation,
+	"ListBackends":  allowedDuringProbation,
 	// A read of the daemon host's directory names (#2788): no manager, no daemon
 	// state, nothing an upgrade window is protecting. It sits with ListProjects
 	// for the same reason — the Add-project view a client builds out of the two
 	// must not have to wait on a probation it has no stake in.
-	"ListDirectory":           allowedDuringProbation,
-	"ListProjects":            allowedDuringProbation,
-	"ListPrograms":            allowedDuringProbation,
-	"ListTasks":               allowedDuringProbation,
-	"Ping":                    allowedDuringProbation,
-	"Preview":                 allowedDuringProbation,
+	"ListDirectory":  allowedDuringProbation,
+	"ListOnComplete": allowedDuringProbation, // Pure task constants; no manager or protected daemon state.
+	"ListPrograms":   allowedDuringProbation,
+	"ListProjects":   allowedDuringProbation,
+	"ListTasks":      allowedDuringProbation,
+	"Ping":           allowedDuringProbation,
+	"Preview":        allowedDuringProbation,
+	// Slice 1 (#5136) is a strictly read-only listing — the same admission
+	// class as Snapshot and ListTasks; the mutating --apply lands in the
+	// follow-up and must move this back.
+	"PruneSessions":           allowedDuringProbation,
 	"ReleaseUpgradeProbation": allowedDuringProbation,
 	"Shutdown":                allowedDuringProbation,
 	"Snapshot":                allowedDuringProbation,
 	// A name suggestion is a best-effort read (no readiness gate), so it answers
 	// during probation like the other read-only lookups (#2470).
 	"SuggestSessionName": allowedDuringProbation,
+	// Proposal reads answer during probation; every route that can commit to the
+	// proposal store or change a tab waits like the other mutations.
+	"ListProposals":       allowedDuringProbation,
+	"GetProposal":         allowedDuringProbation,
+	"StartProposal":       blockedDuringProbation,
+	"AttachProposal":      blockedDuringProbation,
+	"DetachProposal":      blockedDuringProbation,
+	"AddProposalDoc":      blockedDuringProbation,
+	"ReadProposalDoc":     blockedDuringProbation,
+	"SaveProposalDoc":     blockedDuringProbation,
+	"WriteProposalDoc":    blockedDuringProbation,
+	"PullProposalChanges": blockedDuringProbation,
+	"CheckpointProposal":  blockedDuringProbation,
+	"SetProposalPushMode": blockedDuringProbation,
+	"HoldProposalPush":    blockedDuringProbation,
+	"SendProposalChanges": blockedDuringProbation,
 }
 
 func TestControlServerProbationAdmissionLedger(t *testing.T) {
@@ -347,6 +411,18 @@ func TestHTTPMutationAndInteractiveStreamReturnRetryableProbation(t *testing.T) 
 
 	request = httptest.NewRequest(http.MethodPost, "/v1/SetConfigValue",
 		strings.NewReader(`{"key":"auto_update","value":"false"}`))
+	recorder = httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), daemonUpgradeProbationErrText)
+
+	// Its unset counterpart, served over HTTP since #3679 so a CLI pointed at a
+	// REMOTE daemon can clear a key there. 503 rather than 404 is the whole
+	// assertion: 404 would say the route is not registered, and 200 would say the
+	// new surface reached config.UnsetGlobalConfigValue around the admission gate
+	// the RPC twin sits behind (see the probation ledger above).
+	request = httptest.NewRequest(http.MethodPost, "/v1/UnsetConfigValue",
+		strings.NewReader(`{"key":"sandbox.ssh"}`))
 	recorder = httptest.NewRecorder()
 	mux.ServeHTTP(recorder, request)
 	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)

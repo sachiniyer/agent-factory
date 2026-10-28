@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/ui/theme"
 )
 
 // writeVSCodeNoticePage renders a human-readable notice INTO the pane: the web
@@ -37,17 +39,18 @@ func writeTabNoticePage(w http.ResponseWriter, title, message string, retry bool
 	if retry {
 		refresh = `<meta http-equiv="refresh" content="2">`
 	}
+	colors := theme.Roles()
 	body := fmt.Sprintf(`<!doctype html>
 <html><head><meta charset="utf-8"><title>%s</title>%s
 <style>
  html,body{margin:0;height:100%%}
  body{display:flex;align-items:center;justify-content:center;
       font:14px/1.6 ui-sans-serif,system-ui,sans-serif;
-      background:#1f1f1f;color:#cccccc;padding:2rem;text-align:center}
+      background:%s;color:%s;padding:2rem;text-align:center}
  .m{max-width:46rem}
- a{color:#4daafc}
+ a{color:%s}
 </style></head>
-<body><div class="m">%s</div></body></html>`, html.EscapeString(title), refresh, htmlLinkify(message))
+<body><div class="m">%s</div></body></html>`, html.EscapeString(title), refresh, colors.Surface.Dark, colors.Ink.Dark, colors.Accent.Dark, htmlLinkify(message))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Never cache a notice: the very next request may be the running editor.
 	w.Header().Set("Cache-Control", "no-store")

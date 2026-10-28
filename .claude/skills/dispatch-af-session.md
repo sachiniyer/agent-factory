@@ -27,9 +27,15 @@ green PR into a week-old PR.
    Local gates (cheap only, before opening the PR):
    - gofmt -l .
    - go build ./...
+   - go vet ./...
    - golangci-lint run --timeout=3m --fast
    - scripts/lint-file-length.sh
    - go test ./<only the package you changed>/...  (skip if it is daemon/ or app/)
+   - scripts/gen-docs.sh + clean `git status --porcelain` on the generated
+     paths — only when the diff touched a generator input (commands/ or api/
+     Cobra defs, daemon/httproutes.go, session/ usage text, design/, web/src
+     shells, app/testdata/recovery goldens, or the generators). The path list
+     is in CLAUDE.md's Lint section and mirrors docs.yml.
    - <any task-specific gate>
 
    NOT deadcode. It is whole-program reachability analysis, not a lint, and a

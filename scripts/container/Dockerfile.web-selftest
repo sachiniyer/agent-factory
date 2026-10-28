@@ -58,4 +58,18 @@ ENV PATH=/usr/local/go/bin:/root/go/bin:$PATH \
     GOMODCACHE=/cache/gomod \
     GOCACHE=/cache/gobuild
 
+# ffmpeg, for the demo recorder only (#3855, scripts/container/web-demo-entry.sh
+# / `make demo-assets`). Playwright writes a VP8 webm; docs/ ships an mp4, a
+# smaller webm, a GIF fallback and a poster, and the conversion has to happen
+# where the recording happens — the host is a shared box and this repo does not
+# ask maintainers to install a media toolchain to update a README.
+#
+# It is a SEPARATE, LAST layer on purpose: appended to the apt line above it
+# would invalidate the Go tarball download for every web-selftest build, and the
+# gate runs far more often than the recorder does. The gate itself never invokes
+# ffmpeg — this only makes the image able to.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src

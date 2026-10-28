@@ -4,18 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/sachiniyer/agent-factory/api"
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/app"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/configagent"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
@@ -23,6 +26,8 @@ import (
 )
 
 var (
+	runLaunchApp               = app.Run
+	launchEnsureDaemonForTasks = ensureDaemonForTasks
 	// version is supplied by root main.go so release -ldflags keep stamping
 	// main.version. The fallback only covers direct package tests.
 	version     = "dev"
@@ -49,8 +54,18 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 		// keeps the usage/flag help on flag-PARSE errors (which fail before this
 		// hook runs) while suppressing it for genuine runtime errors across every
 		// subcommand, since cobra checks the root command's SilenceUsage (#1749).
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			cmd.Root().SilenceUsage = true
+			// Before anything else runs: a verb that can only act on THIS machine
+			// refuses a remote target here, rather than answering about the wrong
+			// host (W9.4). See targetclass.go for the table.
+			if err := refuseLocalOnlyUnderRemoteTarget(cmd); err != nil {
+				return err
+			}
+			if configWarningsToStderr(cmd) {
+				config.SetInteractiveWarningWriter(os.Stderr)
+			}
+			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -94,12 +109,21 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			if err != nil {
 				return fmt.Errorf("failed to get current directory: %w", err)
 			}
-			if err := git.EnsureGitInstalled(); err != nil {
-				return err
+			// A remote target (--daemon-url / AF_DAEMON_URL / a saved target, W9.7)
+			// owns the projects, tasks and sessions this TUI shows, so THIS
+			// machine's cwd and git are irrelevant: it launches in registry mode
+			// and the project comes from the target's registry. Resolving the cwd
+			// repo here would scope the TUI to a local checkout the daemon has
+			// never heard of.
+			remote := apiclient.IsRemoteTarget()
+			if !remote {
+				if err := git.EnsureGitInstalled(); err != nil {
+					return err
+				}
 			}
 
 			var repo *config.RepoContext
-			if git.IsGitRepo(currentDir) {
+			if !remote && git.IsGitRepo(currentDir) {
 				repo, err = config.CurrentRepo()
 				if err != nil {
 					return fmt.Errorf("failed to determine project context: %w", err)
@@ -118,18 +142,8 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			if err != nil {
 				return err
 			}
-			// A direct config.toml edit has no save surface to notify the daemon.
-			// This launch is the advertised apply boundary for TUI-owned config, so
-			// ask an already-running daemon to advance ONLY its live palette before
-			// either renderer mounts. Non-spawning: no daemon (or an older one without
-			// the narrow RPC) means a later daemon start reads the file. A reachable
-			// daemon's refusal is different — mounting would split the TUI's palette
-			// from the one its web clients still receive, so surface that answer. A full
-			// ApplyConfig here could silently apply unrelated auth/listener edits and
-			// hide a failed listener rebind.
-			if _, err := daemon.RequestApplyTheme(); err != nil {
-				return fmt.Errorf("apply theme to running daemon: %w", err)
-			}
+			// Appearance is client-local. Launch never applies daemon config; pending
+			// listener/auth edits require the explicit config save/apply boundary.
 			// Bring the binary up to date as soon as the configured channel
 			// and opt-out are known, and before anything owns the terminal.
 			// Throttled to one check every few hours, so the common launch
@@ -147,21 +161,35 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 
 			// Program flag overrides config. Both are restricted to bare
 			// agent names from tmux.SupportedPrograms; per-invocation path
-			// or flag overrides belong in program_overrides.
-			program := cfg.DefaultProgram
+			// or flag overrides belong in program_overrides. The TUI is handed
+			// the flag AND the just-resolved default_program: with no flag it
+			// re-reads default_program each time a session is created, so a
+			// live `af config set default_program` reaches it without a
+			// restart (#4889), while the resolved value seeds the fallback a
+			// failed re-read keeps — repo-scoped here, so a transient
+			// project-config failure cannot swap the bare global default in
+			// for the project's own.
 			if programFlag != "" {
 				if err := config.ValidateProgramEnum("--program flag", "--program flag", programFlag, ""); err != nil {
 					return err
 				}
-				program = programFlag
 			}
 			// The daemon hosts the task scheduler (#782), so make sure
 			// it is up whenever an enabled task exists. In the background:
 			// daemon launch can take a few seconds and must not delay the TUI.
-			go ensureDaemonForTasks()
+			// Never against a remote target: the daemon there is not ours to
+			// start, and ensureDaemonForTasks would spawn a LOCAL one for a
+			// local task list the remote TUI does not show.
+			if !remote {
+				go launchEnsureDaemonForTasks()
+			}
+
+			// From here bubbletea owns the terminal; a stderr write would
+			// tear the screen, so later config warnings are log-only.
+			config.SetInteractiveWarningWriter(nil)
 
 			app.Version = version
-			return app.Run(ctx, program, repo)
+			return runLaunchApp(ctx, programFlag, cfg.DefaultProgram, repo)
 		},
 	}
 
@@ -211,25 +239,46 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			"or the rebind from the [keys] table in config.toml (#1026). Fixed bindings —\n" +
 			"structural keys config cannot touch — are listed last. Contextual pane\n" +
 			"actions such as pane_prev/pane_next are included; their default arrow keys\n" +
-			"apply only while a workspace pane has focus.",
+			"apply only while a workspace pane has focus.\n\n" +
+			"Every default key removed by a user rebind is named in SOURCE with its taker.\n" +
+			"The affected row keeps any remaining keys; when none remain, it shows an em\n" +
+			"dash instead. JSON appends the same key/taker pairs in suppressed_by.\n\n" +
+			"Key values use config spellings you can paste into [keys]. With --json,\n" +
+			"bindings are wrapped in {data,error}; keys/default keep those spellings.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			asJSON, err := cmd.Flags().GetBool("json")
+			if err != nil {
+				return err
+			}
 			log.Initialize(false)
-			defer log.Close()
+			if asJSON {
+				defer log.CloseQuiet()
+			} else {
+				defer log.Close()
+			}
 
 			// The keymap is a global-only setting, so LoadConfig (not
 			// ResolveConfig) is deliberate: the output is identical inside
 			// and outside a repository.
 			cfg, err := config.LoadConfig()
 			if err != nil {
-				return err
+				return jsonWrapError(cmd, asJSON, err)
 			}
 			infos, err := keys.EffectiveBindings(cfg.KeymapOverrides())
 			if err != nil {
-				return err
+				return jsonWrapError(cmd, asJSON, err)
+			}
+			if asJSON {
+				rows := make([]keysJSONBinding, len(infos))
+				for i, info := range infos {
+					rows[i] = keysJSONBinding{BindingInfo: info}
+				}
+				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(rows))
 			}
 
 			// SOURCE only annotates the rows that carry information: fixed
-			// (structural, un-rebindable) and rebound (with the default shown).
+			// (structural, un-rebindable), rebound (with the default shown), and
+			// suppressed (with each lost key attributed to its taker).
 			// The old DESCRIPTION column restated ACTION, and a SOURCE of
 			// "default" on every plain binding said nothing — both dropped so
 			// the table reads at a glance (#1749). A blank SOURCE means the
@@ -237,19 +286,64 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 0, 3, ' ', 0)
 			fmt.Fprintln(w, "ACTION\tKEYS\tSOURCE")
 			for _, info := range infos {
-				action, source := info.Action, ""
+				action, keyList, source := info.Action, strings.Join(info.Keys, ", "), ""
+				if info.Action == "" {
+					action = "-"
+					if len(info.SuppressedBy) > 0 {
+						action = info.Desc
+					}
+				}
 				switch {
+				case len(info.SuppressedBy) > 0:
+					// This is one invariant, not separate full/partial cases: every
+					// suppressed key is always attributed to every override that took
+					// it. Whether any active keys remain affects only the KEYS cell.
+					source = fmt.Sprintf("(%s)", strings.Join(suppressedKeyDetails(info.SuppressedBy), "; "))
 				case info.Action == "":
-					action, source = "-", "fixed"
+					source = "fixed"
 				case info.Rebound:
 					source = fmt.Sprintf("rebound (default: %s)", strings.Join(info.Default, ", "))
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\n", action, strings.Join(info.Keys, ", "), source)
+				if keyList == "" && len(info.SuppressedBy) > 0 {
+					keyList = "—"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\n", action, keyList, source)
 			}
 			return w.Flush()
 		},
 	}
 )
+
+// keysJSONBinding preserves the five established BindingInfo members exactly
+// as encoded, then appends the suppressed key/taker pairs only for a row whose
+// defaults yielded to user bindings. Re-encoding through a map would
+// alphabetize the existing public fields (#4221).
+type keysJSONBinding struct {
+	keys.BindingInfo
+}
+
+func suppressedKeyDetails(suppressed []keys.SuppressedKey) []string {
+	details := make([]string, 0, len(suppressed))
+	for _, lost := range suppressed {
+		details = append(details, fmt.Sprintf("%s taken by %s", lost.Key, strings.Join(lost.TakenBy, ", ")))
+	}
+	return details
+}
+
+func (b keysJSONBinding) MarshalJSON() ([]byte, error) {
+	object, err := json.Marshal(b.BindingInfo)
+	if err != nil {
+		return nil, err
+	}
+	if len(b.SuppressedBy) == 0 {
+		return object, nil
+	}
+	suppressedBy, err := json.Marshal(b.SuppressedBy)
+	if err != nil {
+		return nil, err
+	}
+	return session.AppendJSONMember(object, "suppressed_by", suppressedBy)
+}
 
 type Options struct {
 	Version string
@@ -269,6 +363,10 @@ func NewRootCommand(opts Options) *cobra.Command {
 	// above tells the daemon who is calling, this one lets a caller learn who
 	// answered.
 	daemon.SetVersion(version)
+	// session needs the same build version to pick and verify the remote `af`
+	// binary a sandbox host runs (#5571 W2.2); it cannot import daemon (a
+	// cycle), so the version is planted a second time.
+	session.SetDaemonVersion(version)
 	// Setting Version makes cobra provide `af --version` (and -v) for free,
 	// instead of erroring with a usage dump (#1749). The `version` subcommand is
 	// kept; both share this format so they never drift.
@@ -313,11 +411,12 @@ func init() {
 	// Persistent so they apply to the bare TUI and every `af sessions ...`/`af
 	// tasks ...` subcommand. Unset ⇒ the local unix socket (unchanged); each has
 	// an AF_DAEMON_* env fallback resolved in apiclient. The remote listener is
-	// plain HTTP (no TLS), so --daemon-url is an http:///ws:// URL; a wss:///https://
-	// URL is rejected with an HTTP-only error pointing at http://.
+	// plain HTTP; a client reaches it over http:///ws:// directly, or over
+	// https:///wss:// through a TLS front (tailscale serve, a proxy), verified
+	// against the system CAs (W9.5).
 	rootCmd.PersistentFlags().StringVar(&apiclient.FlagDaemonURL, "daemon-url", "",
-		"Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket "+
-			"(env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed.")
+		"Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket "+
+			"(env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve.")
 	// NOTE: no backticks in these usage strings. pflag's UnquoteUsage treats the
 	// first backticked span as the flag's arg-name placeholder, so `af token
 	// show` would render "--token af token show" instead of "--token string" on
@@ -327,6 +426,7 @@ func init() {
 			"Get it with 'af token show' on the daemon host.")
 
 	rootCmd.AddCommand(debugCmd)
+	keysCmd.Flags().Bool("json", false, "Wrap output in the {data,error} JSON envelope")
 	rootCmd.AddCommand(keysCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(resetCmd)
@@ -335,11 +435,14 @@ func init() {
 	rootCmd.AddCommand(agentServerCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(tokenCmd)
+	rootCmd.AddCommand(targetCmd)
+	rootCmd.AddCommand(hostsCmd)
 	rootCmd.AddCommand(accountsCmd)
 	rootCmd.AddCommand(quotaCmd)
 	rootCmd.AddCommand(api.SessionsCmd)
 	rootCmd.AddCommand(api.TasksCmd)
 	rootCmd.AddCommand(api.ProjectsCmd)
+	rootCmd.AddCommand(api.ProposalCmd)
 	rootCmd.AddCommand(api.APICmd)
 }
 
@@ -351,4 +454,20 @@ func removedAutoYesFlagError(_ *cobra.Command, err error) error {
 		return config.RemovedAutoYesError()
 	}
 	return err
+}
+
+// configWarningsToStderr reports whether config warnings a person must act on
+// (an unknown in-repo [docker]/[ssh] key, #4599) should reach stderr as well as
+// the log for this invocation. Not for the daemon — its stderr is not a person —
+// and not under --json, whose contract is that stderr carries only the
+// {data,error} envelope (#3169). The TUI turns the writer off again before it
+// takes the terminal (see rootCmd's RunE).
+func configWarningsToStderr(cmd *cobra.Command) bool {
+	if daemonFlag {
+		return false
+	}
+	if f := cmd.Flags().Lookup("json"); f != nil && f.Value.String() == "true" {
+		return false
+	}
+	return true
 }

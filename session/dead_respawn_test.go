@@ -85,7 +85,7 @@ func deadInstanceData(t *testing.T, status Status, agentName, shellName string) 
 		},
 		Worktree: GitWorktreeData{
 			RepoPath:     repoPath,
-			WorktreePath: filepath.Join(t.TempDir(), "wt"), // non-empty: enables re-spawn
+			WorktreePath: existingDir(t, filepath.Join(t.TempDir(), "wt")), // non-empty: enables re-spawn
 			SessionName:  "dead-respawn",
 			BranchName:   "dead-branch",
 		},
@@ -270,8 +270,6 @@ func (p failFirstNewSessionPty) Start(cmd *exec.Cmd) (*os.File, error) {
 	return f, err
 }
 
-func (p failFirstNewSessionPty) Close() {}
-
 // TestRunningInstance_DeadShellTabReplacedWithFreshShellOnLoad is the #991
 // regression, exercised through the production path (FromInstanceData ->
 // Start(false) -> setupTabs). A Running instance restores with a live agent tab
@@ -425,8 +423,6 @@ func (p failNFirstNewSessionsPty) Start(cmd *exec.Cmd) (*os.File, error) {
 	}
 	return f, err
 }
-
-func (p failNFirstNewSessionsPty) Close() {}
 
 func TestRunningInstance_DeadNonDefaultShellTabKeepsTmuxNameOnLoad(t *testing.T) {
 	log.Initialize(false)

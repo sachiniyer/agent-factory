@@ -1,18 +1,17 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
@@ -24,9 +23,25 @@ import (
 // registering a new repo on the fly. The picker navigates like the instances
 // rail (up/k, down/j over the full list); there is no search.
 func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
-	projects, registryDegraded := m.buildProjectList()
+	projects, registryDegraded, snapshotDegraded := m.buildProjectListWithSnapshotStatus()
 	m.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, m.repoRoot)
 	m.projectPickerOverlay.SetDegraded(registryDegraded)
+	// Surface the snapshot-fetch failure as a first-class degraded state so
+	// the destructive D path can gate on it: a fetch failure zeros every
+	// project's live count, and the consent copy reads those counts, so the
+	// dialog could otherwise claim "no live sessions" for a project whose
+	// live sessions the daemon will still archive and tear down (#1973/#1985).
+	m.projectPickerOverlay.SetSnapshotDegraded(snapshotDegraded)
+	if isRemoteTarget() {
+		// The picker's registry rows come from the LOCAL config.ListProjects
+		// and its path input resolves on THIS filesystem, but a rebind would
+		// land on the REMOTE daemon's registry — where the prj_ id likely
+		// does not exist, or worse, names a different record. Observation and
+		// mutation must come from the same daemon (#3626's rule); until the
+		// switcher reads the remote registry too, rebind stays local-only and
+		// the remote repair is `af projects rebind` on the daemon host.
+		m.projectPickerOverlay.SetRebindDenied("local registry — `af projects rebind` on daemon host")
+	}
 	m.projectPickerOverlay.SetWidth(60)
 	m.layoutProjectPickerOverlay()
 	m.state = stateSwitchProject
@@ -38,14 +53,34 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 // session counts, then unions in the root_agents opt-ins and the active project.
 // Used by the on-demand ctrl+p picker, which fetches synchronously; the always-
 // visible Projects section rebuilds from buildProjectListFrom on the background
-// poll instead (no second on-loop RPC).
+// poll instead (no second on-loop RPC). The returned degraded flag covers only
+// the registry read; the picker's own snapshot-fetch failure is reported by
+// buildProjectListWithSnapshotStatus.
 func (m *home) buildProjectList() ([]overlay.Project, bool) {
-	data, err := allReposSnapshotFetcher()
+	projects, registryDegraded, _ := m.buildProjectListWithSnapshotStatus()
+	return projects, registryDegraded
+}
+
+// buildProjectListWithSnapshotStatus is buildProjectList, also reporting whether
+// the picker's cross-repo session snapshot fetch FAILED. The failure is a
+// first-class degraded state, distinct from the registry read's: the union
+// still renders (registry, active root, root_agents), but every project's
+// SessionCount/InPlaceCount in it is silently zeroed, so a confirm dialog built
+// from those counts can claim "It has no live sessions" for a project whose
+// live sessions the daemon will still archive and tear down (#1973/#1985). The
+// picker's destructive D path gates on this third return; callers that are not
+// destructive consumers of the counts (refreshSidebarProjects) drop it via
+// buildProjectList.
+func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bool) {
+	data, err := allReposSnapshotFetcher(context.Background())
+	snapshotDegraded := false
 	if err != nil {
 		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
+		snapshotDegraded = true
 		data = nil
 	}
-	return m.buildProjectListFrom(data)
+	projects, registryDegraded := m.buildProjectListFrom(data)
+	return projects, registryDegraded, snapshotDegraded
 }
 
 // buildProjectListFrom derives the project list from an already-fetched cross-repo
@@ -59,6 +94,21 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 // a failed read shown as an empty result — every registered sessionless
 // project silently vanishes from the picker. Callers surface the degradation.
 func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Project, bool) {
+	projects, registryDegraded, _ := m.buildProjectListFromCounted(data)
+	return projects, registryDegraded
+}
+
+// buildProjectListFromCounted is buildProjectListFrom, also reporting the
+// resolution budgets the poll opened — one per uncached path, in the order they
+// were opened (#3710).
+//
+// The ledger is here rather than at resolveProjectPaths because the budgets are
+// a property of the POLL: this is what reads the durable registry before it
+// resolves anything, so that every candidate the registry names is uncached and
+// budgeted in the same round as the snapshot's own paths. A test asserting that
+// one stalled path did not spend a healthy one's opportunity has to see the
+// round the poll actually opened, not one it assembled for itself.
+func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overlay.Project, bool, []projectPathProbeBudget) {
 	type projectAggregate struct {
 		root         string
 		rootPriority int
@@ -71,6 +121,10 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	// candidate can start its bounded Git probe together. A single stalled path
 	// must not consume the entire opportunity of an inactive worktree that comes
 	// later in the snapshot or registry.
+	if isRemoteTarget() {
+		projects, degraded := m.buildRemoteProjectList(data)
+		return projects, degraded, nil
+	}
 	registryDegraded := false
 	registeredProjects, err := config.ListProjects()
 	if err != nil {
@@ -98,7 +152,7 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		}
 	}
 	paths = append(paths, m.repoRoot)
-	resolvedPaths := m.resolveProjectPaths(paths)
+	resolvedPaths, probeBudgets := m.resolveProjectPaths(paths)
 	resolvePath := func(path string) projectPathResolution { return resolvedPaths[path] }
 	ensure := func(resolved projectPathResolution, priority int) *projectAggregate {
 		if resolved.id == "" || resolved.root == "" {
@@ -141,7 +195,7 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		// by an enclosing, unrelated repository merely because its old parent
 		// path now resolves there.
 		identity := projectPathResolution{
-			id: config.RepoIDForRecordedRoot(identityPath), root: filepath.Clean(identityPath),
+			id: config.RepoIDFromRoot(filepath.Clean(identityPath)), root: filepath.Clean(identityPath),
 		}
 		// Path is the requested operational workspace. Prefer it only when Git
 		// proves it belongs to the session's recorded identity; this collapses a
@@ -180,25 +234,99 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	// so a registered project on a stalled or missing checkout keeps its own
 	// row instead of vanishing or borrowing an ancestor's.
 	provenRegistryIDs := m.resolveRegisteredProjectIdentities(registeredProjects)
+	// registryRecordByRow maps each registry record to the row id the union
+	// below assigns it — the resolved repo id when Git proves the recorded
+	// root, else the reconciled recorded identity (the same split the union
+	// makes). It is what lets a row carry the record's prj_… id — what `b`
+	// rebinds — and its path_exists flag, so the picker can offer rebind only
+	// where there is a registration to move and flag a checkout that is gone.
+	registryRecordByRow := make(map[string]config.Project, len(registeredProjects))
+	// recordedIdentities remembers which identity each registry row lent to a
+	// path, so the root_agents union below can ask rather than re-hash.
+	recordedIdentities := make(map[string]string, len(registeredProjects))
 	for _, project := range registeredProjects {
 		if project.Root == "" {
 			continue
 		}
 		resolved := resolvePath(project.Root)
 		provenID, proven := provenRegistryIDs[project.Root]
+		rootPriority := 2
 		switch {
 		case proven:
 			resolved.id = provenID
-		case resolved.id != config.RepoIDForRecordedRoot(project.Root):
+		default:
+			// IDENTITY and ROOT SPELLING are separate decisions here, and an
+			// unproven row answers them differently.
+			//
+			// Its identity is the one it RECORDED, never a hash of its path
+			// (#3530 review id 3914971730): hashing splits the row from
+			// sessions stored under the real id — most visibly once a bare
+			// repository's linked worktree disappears — and for a legacy row
+			// with nothing recorded it recreates the real/invented collision
+			// this change removes.
+			//
+			// Its path, though, is exactly what could not be verified, so it
+			// must not outrank a live workspace for the spelling the user is
+			// shown: a vanished or replaced registry root would otherwise
+			// relabel a project with a directory that is no longer there.
+			// Below session priority, but still above nothing — a registered
+			// project with no sessions is still named by its recorded root.
 			resolved = projectPathResolution{
-				id: config.RepoIDForRecordedRoot(project.Root), root: filepath.Clean(project.Root),
+				id: config.ReconciledRepoIDForProject(project), root: filepath.Clean(project.Root),
 			}
+			rootPriority = 0
 		}
-		ensure(resolved, 2)
+		// Keyed by the CANONICAL spelling: a root_agents key is written by a
+		// human, through whatever symlink they had, while a record stores the
+		// path registration resolved (#2110's rule — macOS `/var` ->
+		// `/private/var` makes the two unequal every time).
+		recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(project.Root))] = resolved.id
+		registryRecordByRow[resolved.id] = project
+		ensure(resolved, rootPriority)
 	}
 	if m.appConfig != nil {
 		for path := range m.appConfig.RootAgents {
-			ensure(resolvePath(config.ExpandTilde(path)), 2)
+			expanded := config.ExpandTilde(path)
+			resolved := resolvePath(expanded)
+			// A root_agents key is a PATH, and an unresolvable one falls back
+			// to its own hash — which is no longer any project's identity now
+			// that a registered project is addressed by the identity it
+			// RECORDED (#3530 review id 3916912933). Unioned under that hash it
+			// becomes a second row for one project: zero sessions, nothing to
+			// open, and a delete that is refused because delete-project
+			// normalizes the same path back to the recorded identity.
+			//
+			// Only the FALLBACK defers to the record. A key whose path Git
+			// still resolves belongs to the repository actually there, exactly
+			// as rootAgentKeyMatchesRepo reads it — availability is not
+			// identity, and a stale row must not claim a live checkout.
+			//
+			// The active workspace is excluded explicitly: its resolution is
+			// pre-seeded from the identity opening the home already
+			// established, so it carries no probe timestamp and would
+			// otherwise look like a fallback.
+			priority := 2
+			// Only a probe that ANSWERED "not a repository" may hand this key
+			// to a registry row (#3530 review id 3918120760). A timed-out probe
+			// leaves resolvedAt zero exactly as a genuinely absent path does,
+			// and the daemon will apply this key to whatever repository is
+			// actually there — so deferring on an unanswered probe hides a live
+			// occupant behind a stale row and sends delete-project an
+			// inconsistent id/path pair.
+			if resolved.answeredNotARepo && expanded != m.repoRoot {
+				if recorded, ok := recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(expanded))]; ok && recorded != "" {
+					resolved.id = recorded
+					// Identity and root SPELLING are separate decisions, the
+					// same split an unproven registry row makes above (#3530
+					// review id 3917445677). This key's path is the one that
+					// could not be resolved, so it must not outrank a live
+					// session's workspace for what the user is shown and
+					// switched to — the row would collapse correctly and then
+					// name a directory that is not there.
+					priority = 0
+				}
+			}
+			ensure(resolved, priority)
 		}
 	}
 	// The active workspace is the best selectable spelling and wins over a
@@ -221,7 +349,15 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		}
 		return projects[i].Root < projects[j].Root
 	})
-	return projects, registryDegraded
+	for i := range projects {
+		if rec, ok := registryRecordByRow[projects[i].RepoID]; ok {
+			projects[i].RegistryID = rec.ID
+			projects[i].RegistryRoot = rec.Root
+			projects[i].RegistryCheckoutID = rec.CheckoutID
+			projects[i].MissingPath = !rec.PathExists
+		}
+	}
+	return projects, registryDegraded, probeBudgets
 }
 
 // projectRows maps the discovered project list into Projects-section rows,
@@ -241,11 +377,59 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 	return rows
 }
 
+// sidebarProjectRows is projectRows' inverse for the merge fallback in
+// applySidebarProjects: a pane row has no registry fields, so the converted row
+// is session-derived — the merge preserves it unconditionally, and the coalesce
+// grafts a fresh registration's identity back onto it when the RepoID matches.
+func sidebarProjectRows(rows []ui.SidebarProject) []overlay.Project {
+	projects := make([]overlay.Project, 0, len(rows))
+	for _, r := range rows {
+		projects = append(projects, overlay.Project{
+			RepoID:       r.RepoID,
+			Name:         r.Name,
+			Root:         r.Root,
+			SessionCount: r.SessionCount,
+			InPlaceCount: r.InPlaceCount,
+		})
+	}
+	return projects
+}
+
+// registryBackedRows filters a row set to the registry-backed half — the rows
+// a degraded registry read cannot prove absent, for a merge where the session
+// snapshot is live truth and the old session rows would only shadow it.
+func registryBackedRows(rows []overlay.Project) []overlay.Project {
+	registry := make([]overlay.Project, 0, len(rows))
+	for _, r := range rows {
+		if r.RegistryID != "" {
+			// Both callers run this only when the session snapshot landed and
+			// the REGISTRY read degraded, so the snapshot is the authority on
+			// counts: a repo it does not count has none. A preserved row that
+			// a fresh session row later claims gets the live counts grafted on
+			// (#4888 review); carrying the stale tallies instead would keep
+			// dead sessions on screen for as long as the registry stays
+			// degraded.
+			r.SessionCount = 0
+			r.InPlaceCount = 0
+			registry = append(registry, r)
+		}
+	}
+	return registry
+}
+
 // refreshSidebarProjects rebuilds the bottom Projects section from the same
 // cross-repo discovery the ctrl+p picker uses (buildProjectList). Pushed at
 // launch and on project switch (paths that fetch synchronously).
 func (m *home) refreshSidebarProjects() {
 	projects, registryDegraded := m.buildProjectList()
+	m.setSidebarProjects(projects, registryDegraded)
+}
+
+// setSidebarProjects is the funnel every Projects-section update flows
+// through: it records the applied row set in sidebarProjects (the merge
+// source a session-snapshot failure reads) before rendering it.
+func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded bool) {
+	m.sidebarProjects = projects
 	m.projects.SetProjects(m.projectRows(projects))
 	m.projects.SetDegraded(registryDegraded)
 	m.syncProjectsHint()
@@ -257,12 +441,43 @@ func (m *home) refreshSidebarProjects() {
 // second on-loop daemon RPC. A fetch error leaves the last-known rows intact
 // (like handleSnapshot/refreshTasks). Returns whether the visible rows changed.
 func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, fetchErr error) bool {
-	if fetchErr != nil {
-		log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
-		return false
-	}
 	projects, registryDegraded := m.buildProjectListFrom(data)
+	return m.applySidebarProjects(projects, registryDegraded, fetchErr)
+}
+
+// applySidebarProjects pushes an already-built project list into the Projects
+// section, for callers that built the list for another consumer too — the
+// section and that consumer must describe the SAME registry read (#4888
+// review). A fetch error means the SESSION half never answered; the registry
+// half may still have read fine, so the section merges the fresh registry
+// rows into its last-known set rather than discarding them — a rebind that
+// moved a record between polls would otherwise leave the old root on screen
+// indefinitely while the poll stays unhealthy (#4888 review). Returns whether
+// the visible rows changed.
+func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, fetchErr error) bool {
+	if fetchErr != nil || registryDegraded {
+		if fetchErr != nil {
+			log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
+		}
+		old := m.sidebarProjects
+		if len(old) == 0 {
+			// The pane can already hold rows the shadow never recorded —
+			// installed before the field existed, or by a direct SetProjects.
+			// An unseeded shadow would merge from nil and empty the visible
+			// list behind a warning it cannot confirm (#4888 review); the
+			// pane's current rows are the last-known set either way.
+			old = sidebarProjectRows(m.projects.Projects())
+		}
+		if fetchErr == nil {
+			// The session snapshot landed — only the registry read degraded.
+			// Old session rows are stale duplicates of the fresh live ones;
+			// only registry-backed rows have absence left unproven.
+			old = registryBackedRows(old)
+		}
+		projects = overlay.MergePreservingSessionRows(old, projects, registryDegraded)
+	}
 	changed := m.projects.SetProjects(m.projectRows(projects))
+	m.sidebarProjects = projects
 	if m.projects.SetDegraded(registryDegraded) {
 		changed = true
 	}
@@ -276,7 +491,7 @@ func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, f
 // nothing. Switching to the already-active project is a no-op inside
 // switchProject.
 func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
-	repo, err := config.RepoFromPath(root)
+	repo, err := m.repoContextForSelection(root, "")
 	if err != nil {
 		return m, m.handleError(fmt.Errorf("cannot open project %q: %w", filepath.Base(root), err))
 	}
@@ -287,6 +502,40 @@ func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
 // consumes its outcomes: an add request (validate + register + switch), a chosen
 // existing project (switch), or a cancel (close).
 func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A pending rebind makes the picker's form consume every key so nothing can
+	// race a second mutation — which would include the always-on Ctrl+C hard
+	// exit, leaving a TUI whose daemon call has stalled impossible to quit.
+	// Quitting is safe mid-flight: the daemon owns the write, not this process.
+	if msg.String() == "ctrl+c" && m.projectPickerOverlay.RebindPending() {
+		return m.handleQuit()
+	}
+	if msg.String() == "D" {
+		if proj, ok := m.projectPickerOverlay.HighlightedProject(); ok {
+			// The picker's session counts come from the cross-repo snapshot
+			// buildProjectList fetches on Ctrl+P; a fetch failure zeros every
+			// project's count, and deleteProjectConfirmMessage's "total == 0"
+			// consent branch is "It has no live sessions — it just leaves the
+			// projects list" — a destructive action consented to on copy the
+			// data behind it never confirmed while the daemon still archives
+			// and tears down whatever live sessions actually exist (#1973/#1985).
+			// Fail closed like switchProject does on its own snapshot fetch:
+			// refuse the verb with a notice and keep the picker open. The user
+			// re-opens it (a fresh Ctrl+P triggers a fresh fetch) to retry once
+			// the daemon is healthy.
+			if m.projectPickerOverlay.SnapshotDegraded() {
+				return m, m.handleNotice(fmt.Errorf(
+					"cannot delete project %q: live-session counts are unavailable (the cross-repo snapshot fetch failed); "+
+						"close the picker (Esc) and reopen it (Ctrl+P) to retry",
+					proj.Name))
+			}
+			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount})
+			if m.state == stateConfirm && m.confirmationOverlay != nil {
+				m.confirmationOverlay.OnCancel = func() { m.state = stateSwitchProject }
+			}
+			return model, cmd
+		}
+	}
+
 	shouldClose := m.projectPickerOverlay.HandleKeyPress(msg)
 
 	// Add-project submit: validate app-side (the overlay must not shell out to
@@ -296,13 +545,19 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleAddProject(path)
 	}
 
+	// Rebind submit: the overlay stays open while the daemon answers so a
+	// rejection is corrected inline, mirroring the add flow's error handling.
+	if req, ok := m.projectPickerOverlay.TakeRebindRequest(); ok {
+		return m.handleRebindProject(req)
+	}
+
 	if !shouldClose {
 		return m, nil
 	}
 
 	var target *config.RepoContext
 	if proj, ok := m.projectPickerOverlay.SelectedProject(); ok {
-		repo, err := config.RepoFromPath(proj.Root)
+		repo, err := m.repoContextForSelection(proj.Root, proj.RepoID)
 		if err != nil {
 			m.closeProjectPicker()
 			return m, m.handleError(fmt.Errorf("cannot open project %q: %w", proj.Name, err))
@@ -321,8 +576,21 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // loop. A path that is not a git repository keeps the overlay open with an inline
 // error rather than dismissing the user's typing.
 func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
+	if isRemoteTarget() {
+		return m.handleRemoteAddProject(path)
+	}
 	repo, err := config.RepoFromPath(config.ExpandTilde(path))
 	if err != nil {
+		// A probe that never answered says nothing about what the user typed
+		// (#3504): tell them it is worth retrying instead of rejecting the path.
+		if config.RepoProbeUnanswered(err) {
+			// The path the user typed is rendered on the line directly above
+			// this one, and the overlay is narrow: repeating it here pushes the
+			// actionable half off the end (play-tested — "try again" was the
+			// part that truncated).
+			m.projectPickerOverlay.SetAddError("could not check — git did not answer; try again")
+			return m, nil
+		}
 		m.projectPickerOverlay.SetAddError(fmt.Sprintf("not a git repository: %s", path))
 		return m, nil
 	}
@@ -357,151 +625,26 @@ func (m *home) addProjectCmd(root string) tea.Cmd {
 // as a warning rather than an error box, matching the pre-#2456 best-effort write.
 func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
+		// A registration that may have landed is re-read rather than assumed
+		// either way (#4824): the Projects section shows it if the daemon
+		// recorded it, and the message says the outcome is unknown instead of
+		// staying silent the way a definite failure does.
+		if mutationMayHaveLanded(msg.err) {
+			log.WarningLog.Printf("project %s registration outcome unknown: %v", msg.root, msg.err)
+			m.refreshSidebarProjects()
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("adding project %s", msg.root), "the projects list", msg.err))
+		}
 		log.WarningLog.Printf("failed to register project %s in the registry: %v", msg.root, msg.err)
+		if isRemoteTarget() {
+			// Nothing else happened for the user to see: the remote add does not
+			// switch first, so a quiet log line would read as success.
+			return m, m.handleError(fmt.Errorf("could not add project %s on the daemon: %w", msg.root, msg.err))
+		}
 		return m, nil
 	}
 	m.refreshSidebarProjects()
 	return m, nil
-}
-
-// sessionWord pluralizes "session" for the delete-project copy.
-func sessionWord(n int) string {
-	if n == 1 {
-		return "session"
-	}
-	return "sessions"
-}
-
-// deleteProjectConfirmMessage builds the delete-project confirmation (#1735,
-// corrected in #1973). It returns the copy in two parts, because the overlay
-// clips from the bottom and this dialog's tail was the half that mattered:
-//
-//   - critical — the consequences the user is consenting to, one count per
-//     outcome. The overlay guarantees this renders in full or refuses the
-//     action outright, so it must stay short enough to fit the declared 40x10
-//     floor (ui/layout/grid.go HardMinWidth/HardMinHeight): a ~34-column text
-//     rect leaves four body lines. That budget is why these lines are headlines
-//     rather than prose.
-//   - detail — the elaboration, which may be clipped (and says when it is).
-//
-// The destructive count LEADS. A user who reads exactly one line must read the
-// one that cannot be undone; the reassuring half is what gives ground first.
-//
-// The split is honest in both directions. Tearing down an in-place session does
-// NOT destroy the user's work — the worktree is theirs, and GitWorktree.Cleanup()
-// no-ops for an external worktree, so the branch and uncommitted changes survive.
-// What does not survive is the session: af deletes its record, so `af sessions
-// restore` cannot bring it back. Saying "you lose your work" would be false;
-// saying "restorable" is the bug.
-func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey string) (critical, detail string) {
-	archived := total - inPlace
-	title := fmt.Sprintf("[!] Delete project '%s'?", name)
-
-	killedLine := fmt.Sprintf("%d in-place %s torn down — not restorable.", inPlace, sessionWord(inPlace))
-	archivedLine := fmt.Sprintf("%d %s archived — restorable.", archived, sessionWord(archived))
-	gone := "Its worktree is yours — the branch and uncommitted changes stay exactly where they are, but the session and its agent are gone."
-	restore := fmt.Sprintf("Restore an archived session (%s) to bring the project back.", restoreKey)
-	repoSafe := "Your real git repository is untouched."
-
-	switch {
-	case total == 0:
-		return title + "\nIt has no live sessions — it just leaves the projects list.", repoSafe
-	case inPlace == 0:
-		return title + "\n" + archivedLine,
-			"tmux torn down, worktrees moved out — branches and uncommitted work preserved.\n\n" + restore + " " + repoSafe
-	case archived == 0:
-		return title + "\n" + killedLine, gone + " " + repoSafe
-	default:
-		return title + "\n" + killedLine + "\n" + archivedLine,
-			gone + "\n\n" + restore + " " + repoSafe
-	}
-}
-
-// deleteProjectResultMessage reports what delete-project ACTUALLY did, using the
-// daemon's own counts rather than the pre-confirm estimate (#1973), so the split
-// the user consented to is the split they are told about afterward.
-//
-// The torn-down fragment leads on a mixed delete, deliberately. This lands in
-// the one-line transient notice, which the error box clips to the pane width —
-// play-testing an 80-col-ish sidebar cut a killed-last message at "tore down 1
-// in-place se…", losing exactly the half the user needs. The clipped tail must
-// be the reassuring half (what survived), never the consequential one (what did
-// not). The full string stays reachable via the notice's details view.
-func deleteProjectResultMessage(name string, archived, killed int) string {
-	switch {
-	case archived == 0 && killed == 0:
-		return fmt.Sprintf("Deleted project '%s' — no live sessions to remove", name)
-	case killed == 0:
-		return fmt.Sprintf("Deleted project '%s' — archived %d %s (restorable)", name, archived, sessionWord(archived))
-	case archived == 0:
-		return fmt.Sprintf("Deleted project '%s' — tore down %d in-place %s (not restorable, worktree and branch untouched)", name, killed, sessionWord(killed))
-	default:
-		return fmt.Sprintf(
-			"Deleted project '%s' — tore down %d in-place %s (not restorable, worktree and branch untouched) · archived %d %s (restorable)",
-			name, killed, sessionWord(killed), archived, sessionWord(archived),
-		)
-	}
-}
-
-// handleDeleteProject opens the delete-project confirmation for the cursor's
-// project in the Projects section (#1735). The copy states the real split — what
-// is archived and restorable, and what is torn down and is not (#1973) — because
-// this message is the entire basis on which the user consents to a destructive
-// action. On confirm it dispatches the async daemon archive-then-remove.
-func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) {
-	if proj.RepoID == "" {
-		return m, m.handleError(fmt.Errorf("cannot delete project %q: repository identity is unavailable", proj.Name))
-	}
-	restoreKey := keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
-	message, detail := deleteProjectConfirmMessage(proj.Name, proj.SessionCount, proj.InPlaceCount, restoreKey)
-	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
-		return startDeleteProjectMsg{root: proj.Root, repoID: proj.RepoID, name: proj.Name}
-	})
-}
-
-// deleteProjectCmd runs the daemon archive-then-remove off the event loop
-// (#1735), mirroring archiveInstanceCmd, and reports completion.
-func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
-	return func() tea.Msg {
-		resp, err := deleteProjectThroughDaemon(msg.root, msg.repoID)
-		return projectDeletedMsg{
-			root:     msg.root,
-			repoID:   msg.repoID,
-			name:     msg.name,
-			archived: resp.ArchivedCount,
-			// KilledCount is the in-place sessions the daemon tore down. Carrying
-			// it is what lets the completion report the same archived-vs-torn-down
-			// split the confirmation promised (#1973); dropping it is how the TUI
-			// came to claim everything was restorable.
-			killed: resp.KilledCount,
-			err:    err,
-		}
-	}
-}
-
-// handleProjectDeleted finalizes an async delete-project (#1735). On success it
-// drops the local root_agents opt-in mirror (the daemon removed it on disk; a
-// separate attached TUI reflects it on its next launch, matching how every other
-// daemon-side config and registry write is picked up) and refreshes the Projects
-// section so the now-empty project leaves the list immediately.
-func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) {
-	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
-	if msg.err != nil && !committedWarning {
-		return m, m.handleError(fmt.Errorf("failed to delete project '%s': %w", msg.name, msg.err))
-	}
-	if m.appConfig != nil {
-		for path := range m.appConfig.RootAgents {
-			if repo, err := config.RepoFromPath(config.ExpandTilde(path)); err == nil && repo.ID == msg.repoID {
-				delete(m.appConfig.RootAgents, path)
-			}
-		}
-	}
-	m.refreshSidebarProjects()
-	success := m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.killed))
-	if committedWarning {
-		return m, tea.Batch(success, m.handleError(msg.err))
-	}
-	return m, success
 }
 
 func (m *home) closeProjectPicker() {
@@ -562,7 +705,22 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// carried-over value silently runs this project's tasks under the previous
 	// project's agent (#2138). Session creation is separately covered:
 	// preflightSessionCreate re-resolves and blocks.
-	if resolved, err := config.ResolveConfigForRepo(repo); err == nil {
+	//
+	// Every branch below derives the value from config, so it follows config from
+	// here on (#4889): a launch --program flag scoped the launch project and is
+	// replaced by the incoming project's resolution, exactly as it always was.
+	m.programFollowsConfig = true
+	if isRemoteTarget() {
+		// The project's in-repo config is on the daemon's host. Resolving it
+		// from THIS machine would read an unrelated (or absent) file, so the
+		// program falls back to the global default and the hooks pane is empty
+		// (a hooks save is refused in remote mode).
+		if m.appConfig != nil {
+			m.program = m.appConfig.DefaultProgram
+		}
+		m.store.SetHookCount(0)
+		m.hooksPane.SetCommands(nil)
+	} else if resolved, err := config.ResolveConfigForRepo(repo); err == nil {
 		// A project that sets no default_program already arrives here as the
 		// global default: ResolveConfig seeds DefaultProgram from the global
 		// config and only overwrites it with a non-empty in-repo value, and a
@@ -603,13 +761,15 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// unrestorable record is skipped, so the switch is committed from here on.
 	m.materializeSnapshot(data)
 
-	if tasks, err := task.LoadTasksForKnownRepo(repo.Root, repo.ID); err != nil {
+	if tasks, err := m.activeTasks(repo.Root, repo.ID); err != nil {
 		log.WarningLog.Printf("switch project: failed to load tasks for %s: %v", repo.Root, err)
 		m.store.SetTasks(nil)
-		m.automations.TaskPane().SetTasks(nil)
+		m.automations.TaskPane().ResetTasks(nil)
 	} else {
 		m.store.SetTasks(tasks)
-		m.automations.TaskPane().SetTasks(tasks)
+		// Reset, not reconcile: an edit held against the outgoing project's
+		// list must not follow the user into this one.
+		m.automations.TaskPane().ResetTasks(tasks)
 	}
 
 	m.restoreTUIViewStateOnLaunch()
@@ -619,4 +779,19 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	m.focusTreeForNav()
 	m.relayout()
 	return m, tea.Sequence(tea.WindowSize(), m.selectionChanged())
+}
+
+// handleRemoteAddProject registers a project on the target daemon. The path is a
+// path ON THE DAEMON'S HOST, so nothing here probes it with this machine's git
+// or filesystem: it is validated only for shape (absolute, or ~/…, never
+// relative) and sent as typed — the daemon expands ~ against its own home and
+// owns every other check. Unlike the local add there is no optimistic switch, so
+// handleProjectAdded reports a refusal instead of logging it.
+func (m *home) handleRemoteAddProject(path string) (tea.Model, tea.Cmd) {
+	if _, err := config.ResolveDaemonHostPath(path); err != nil {
+		m.projectPickerOverlay.SetAddError(err.Error())
+		return m, nil
+	}
+	m.closeProjectPicker()
+	return m, m.addProjectCmd(path)
 }

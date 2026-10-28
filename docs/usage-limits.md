@@ -1,4 +1,265 @@
-# Usage limits
+# Accounts and usage limits
+
+For anyone running agents on a subscription plan. After this page you will know
+how to give a session its own credential identity, what happens when an agent
+hits its plan's ceiling, and the three ways out of that wall — retry, hand off,
+or resume automatically.
+
+## Accounts
+
+An **account** is one of an agent's logged-in identities, held as a directory
+the agent CLI treats as its home. `af` never reads, stores, or forwards the
+credential itself: it decides which directory a session sees, and the agent's
+own login flow puts the material there.
+
+### Credential directories
+
+Accounts are registered separately for Claude, Codex, and Gemini. The directory
+is under `accounts/<agent>/<name>` in the AF home; the same name for two agents
+does not share a login. `af accounts add <agent> <name>` prints the directory
+path, which has these per-agent meanings:
+
+| Agent | Environment variable | Directory shape |
+|---|---|---|
+| Claude | `CLAUDE_CONFIG_DIR` | The config directory itself |
+| Codex | `CODEX_HOME` | The config directory itself |
+| Gemini | `GEMINI_CLI_HOME` | A home-like root; Gemini appends `.gemini/` |
+
+Point Gemini at the printed root, never its nested `.gemini` directory. af
+recognizes either `<root>/.gemini/oauth_creds.json` or
+`<root>/.gemini/gemini-credentials.json` as a credential artifact.
+
+### Log in
+
+Install each agent you want to log into on the machine running the daemon
+first. For example, Codex login needs `codex` on the **daemon's `PATH`**, even if
+your sessions normally use another agent. Finding it in your current shell is
+not enough if that shell's `PATH` changed after the daemon started. From a shell with the corrected `PATH`, run
+`af daemon restart`. If you use an installed autostart service, first rerun
+`af daemon install` from that shell to replace the service's captured `PATH`;
+restarting alone reuses that snapshot. Run the login command in an interactive
+terminal.
+
+```bash
+af accounts login claude work
+af accounts login codex work
+af accounts login gemini work
+af accounts list
+```
+
+Each login registers the account if needed and opens the agent's own login in
+a tmux pane on the daemon host. Complete sign-in in a browser on the device you
+are using. The flows differ:
+
+| Agent | What af launches | What you do |
+|---|---|---|
+| Claude | `claude auth login` with `BROWSER=true`, a no-op browser opener | Open the printed URL and paste the authorization code into the pane if prompted |
+| Codex | `codex login --device-auth` | Open the verification URL and enter the device code there while the CLI polls |
+| Gemini | `gemini` with `NO_BROWSER=true` | Open the URL, sign in, then paste the authorization code at the terminal prompt |
+
+Afterwards, af reports whether a credential file exists. It checks presence,
+never reads the secret; presence is not proof that a token is still valid.
+`af accounts login codex work --no-attach` starts the flow and prints how to
+attach instead of taking your terminal.
+
+To stop before signing in, press `ctrl+c` in the login pane: the account stays
+registered but `af accounts list` reports `not logged in`, and the login command
+reports that no credential was created. Re-run the login command when ready to
+finish. A named Codex account has separate credentials, history, and skills.
+
+Codex registration seeds missing `approval_policy` · `sandbox_mode` · `model`
+from the operator's `~/.codex/config.toml`, with the selected profile overriding
+root values; existing account settings, including selected-profile values, stand.
+For effective `workspace-write` mode it also seeds missing workspace options
+(`network_access` · `writable_roots` · `exclude_tmpdir_env_var` · `exclude_slash_tmp`).
+It skips `model` if either config selects `model_provider` at root or in its
+selected profile, and seeds nothing if the ambient config has neither approval
+policy nor sandbox mode. Credentials, provider configuration, profiles, and
+project trust are never copied. An unresolved ambient profile or an ambient
+approval, sandbox, or active workspace option that fails schema validation prevents all
+seeding; unreadable or unparseable ambient files also leave settings alone.
+Both `af accounts add` and `af accounts login` print a notice explaining the
+seeding policy and any refusal.
+
+Gemini's registration pre-answers folder trust for the account directory and
+selects Google OAuth in that account's non-secret settings. Existing choices
+are preserved, so an account with a different authentication method can still
+show the picker. This touches only the account's own `.gemini` settings; it
+neither authenticates you nor writes a credential. Claude and Codex need no
+such settings to reach sign-in.
+
+The equivalent manual setup is:
+
+```bash
+CODEX_HOME=$(af accounts add codex work) codex login --device-auth
+CLAUDE_CONFIG_DIR=$(af accounts add claude work) BROWSER=true claude auth login
+GEMINI_CLI_HOME=$(af accounts add gemini work) NO_BROWSER=true gemini
+```
+
+Use the managed login to get af's identity environment isolation too: it
+removes competing identity variables while preserving proxy and certificate
+settings. Explicit `BROWSER` or `NO_BROWSER` entries in
+`session_env_passthrough` override the browser-free defaults.
+
+### Pick an account
+
+After completing sign-in, pin a session to that account and its agent (a Codex
+account cannot be used by the default Claude agent):
+
+```bash
+af sessions create --name spike --program codex --account work
+```
+
+In the TUI, press `n` to open the naming form, then `ctrl+o` to pick an
+account for the selected agent. In the web client, use **New session** ·
+**Program** · **Account**. The picker lists that agent's accounts and shows the
+project default; changing the program changes the account list. Register and
+log in from the web config view's **Accounts** section using **Log in**.
+See the [TUI guide](tui.md#accounts) and [web guide](web.md#config-view).
+
+`af` refuses an unproved fallback — a session either
+runs as the account you named or does not start — and by default never rotates
+accounts on its own. Rotating after a usage limit is opt-in and needs an
+explicit candidate list — see [Opt-in auto-resume](#opt-in-auto-resume). A
+session created with `--account` is pinned and automatic switching never rotates it. The full
+command surface is in [`af accounts`](reference/cli.md#af-accounts).
+
+### Scoping an account to a project
+
+Typing `--account` on every create is the wrong unit of work when the answer is
+always the same for a whole repository. `default_accounts` says it once — per
+agent, and most usefully per project:
+
+```bash
+af projects add ~/work/monorepo                                 # once
+af config set default_accounts.codex work --project ~/work/monorepo
+af config set default_accounts.codex personal --project ~/side/hobby
+```
+
+Now a session created in that project — from the CLI, the TUI, the web client or
+a scheduled task — runs as `work` with nothing typed. The resolution order is
+**explicit `--account` (or a picker choice) → the project's default → the global
+default → the agent's ambient login**, and it is applied by the background
+service on the create, so every surface gets the same answer.
+
+The default has these properties:
+
+- **It is keyed by agent, because an account belongs to one.** claude's `work`
+  and codex's `work` are different identities in different registries, so
+  `default_accounts.codex` never applies to a claude session — that session keeps
+  the ambient identity until you scope it too.
+- **The pickers show it.** The TUI's `ctrl+o` field and the web's Account select
+  preselect the project default and mark its row `project default`, so a scoped
+  create is visible before you press Enter rather than discovered afterwards.
+- **A default `af` cannot honour refuses the create**, naming the key, the file
+  it is set in, and how to clear it. It never falls back to the ambient identity:
+  a session quietly running as someone else is the failure the whole feature
+  exists to prevent.
+- **A project's always-on `root` agent is deliberately not scoped by it.** Its
+  command comes from `[root_agent]` rather than an agent name, and a preference
+  set about ordinary creates must not be able to stop a project's guaranteed
+  session from starting. Scoping a root belongs beside the program it already
+  names.
+
+Set it globally (`af config set default_accounts.codex work`, no `--project`) for
+a default everywhere. It is rejected from a repository's checked-in
+`.agent-factory/config.toml`: identity policy is never checked in, and a
+committed account name means nothing to anyone else who clones the repository.
+
+To clear one:
+
+```bash
+af config unset default_accounts.codex --project ~/work/monorepo  # drop the project's override
+af config set default_accounts.codex ""                           # clear the global default
+af config set default_accounts.codex "" --project ~/work/monorepo # opt this project out of the global default
+```
+
+An **empty value is meaningful**, and the three lines differ. `unset` removes the
+project's entry so the global default applies again; an empty value at either
+layer means "no default", and because the key merges per agent, an empty entry in
+a project's config wins for that agent and keeps its sessions on the ambient
+identity even when the global layer names an account.
+
+### What the account reaches
+
+A pinned account applies to every process `af` starts for that session: the
+agent pane, each helper tab, and the VS Code tab's editor — its integrated
+terminals and anything an extension shells out to included. Each one gets the
+account's credential home injected and the agent's other identity variables
+removed, so an `ANTHROPIC_API_KEY` left in your shell cannot quietly outrank the
+account you selected. If the account cannot be resolved when a VS Code tab opens
+— it was removed or renamed since the session was created — `af` refuses to
+start the editor and the pane names the `af accounts add` that repairs it,
+rather than opening one on your ambient login.
+
+One boundary `af` cannot hold for you: an **interactive shell you open inside
+the editor** reads your `~/.bashrc` and `/etc/bash.bashrc`, and a line there
+exporting the agent's credential variable wins over the account — exactly as it
+would in any other terminal. `af`'s own panes escape that because `af` chooses
+their command; a terminal profile inside the editor is yours, and it lives in
+the editor's own settings, which the editor can rewrite. If you pin sessions to
+accounts, keep agent credential variables out of your shell startup files.
+
+### Docker and backend boundaries
+
+Account selection supports local and Docker sessions and requires tmux 3.2 or
+newer. Docker bind-mounts the selected credential directory read-write so token
+refreshes reach the real account. This differs from
+`docker.mount_agent_credentials`, which opts into mounting an ambient agent
+credential read-only. Account selection must establish the selected identity
+or refuse the create; it never silently uses an ambient login.
+
+SSH, sandbox, and hook backends refuse account selection because af cannot
+ensure refreshed credentials are written back. Automatic account replacement
+also excludes Docker; see [Opt-in auto-resume](#opt-in-auto-resume).
+
+### Account-scoped handoff
+
+Local account-scoped sessions support both same-agent and cross-agent handoffs.
+Use `af sessions handoff <session> --account <name>` to choose another registered
+account of the current agent. Add `--to <agent>` to change agent and account
+together. The target account must belong to the incoming agent and must not be
+currently walled in the daemon's limit ledger.
+
+An explicit `--account` selects a pinned identity: an existing pin moves to the
+chosen account, and an ambient session becomes pinned to that account. For an
+ambient session, `--to <agent>` without `--account` keeps the replacement ambient.
+A session already scoped to an account must specify a target account when
+changing to an agent whose resolved command supports accounts (claude, codex,
+gemini as shipped); omitting it does not bypass the pin. Handing it to a target
+whose resolved command has no account support drops the scope instead, and the
+response reports the drop on `from_account`. Capability follows the resolved
+command rather than the enum, so `program_overrides` moves a target between the
+two cases: `aider` redirected to `codex` requires a codex account, and `codex`
+redirected to `aider` drops the scope. A third case refuses outright: a target
+whose resolved command af cannot classify as an agent at all (a wrapper such
+as `npx codex` may launch an account-capable agent underneath) can neither be
+proven to carry the scope nor proven safe to drop it, so the handoff refuses
+rather than destroy a durable pin on an unproven answer — point the override
+at a literal agent command to make it classifiable. Because a scope drop
+restarts only the agent pane, a session with shell, process, or VS Code
+sibling tabs is refused until those tabs are closed — they would keep running
+under the dropped account's environment.
+
+A scope drop is one-way: the session records the dropped name on the handoff's
+`from_account` and runs ambient from there, but a later handoff back to an
+account-capable agent does not restore it — name the account again with
+`--account`.
+
+The session keeps its worktree and branch. See [Hand off to another account](#hand-off-to-another-account)
+for the conversation outcome, examples, admission checks, and the TUI and web pickers.
+
+### Bug report redaction
+
+Bug report bundles replace session account fields and registered account labels
+with a redaction marker, including labels embedded in collected config and log
+text. Credential directories and their secrets are not collected. The local
+operator log retains account names so login and switching remain diagnosable;
+label redaction happens when the bundle is assembled. If the registry cannot
+be read, collection still produces a bundle but reports that account labels
+could not be redacted. Review that collection error before sharing it.
+
+## Usage limits
 
 Subscription-plan agents (`claude`, `codex`, `devin`) can hit a **plan
 usage-limit wall**: the CLI stops working and prints a banner like *"Claude usage
@@ -34,6 +295,18 @@ Detection runs on captured pane content, so it needs no agent cooperation. You
 can tune the detection regex per agent with
 [`limit_patterns`](#custom-detection-patterns).
 
+Claude reset times honor a parenthesized timezone accepted by Go's
+`time.LoadLocation`, including single-component names such as `(UTC)` and
+`(Japan)` and slash names such as `(America/New_York)` or `(Etc/GMT+5)`.
+When several parenthesized groups appear, the first loadable zone wins. If the
+clock parses but no zone loads, one warning names the banner and all rejected
+candidates, and parsing falls back to the daemon's timezone. An unparseable
+clock does not warn or suppress a later warning. Repeated warnings are
+suppressed by a process-local cache of the last 64 distinct banner-and-candidate keys; an
+evicted banner can warn again. A banner without a zone also uses the
+daemon's timezone. The sidebar displays the resulting instant in your local
+timezone; auto-resume uses that same instant plus its grace buffer.
+
 ## The `[limit]` badge
 
 When the daemon's status poll sees a usage-limit banner for a `claude`, `codex`,
@@ -50,12 +323,30 @@ shows a `[limit]` badge, and — when the banner carried a parseable reset time 
 (whether you resume it, the daemon auto-resumes it, or the banner scrolls away
 on its own).
 
+## The usage report
+
+`af quota` prints a per-agent report of the same signal, answered on all three
+surfaces identically — the TUI and web render it as the **Usage** section of
+the config view, the CLI as a table:
+
+- **TUI**: open the config overlay (`,`) and scroll to **Usage**.
+- **Web**: open the **Config** view; Usage sits under Accounts.
+- **CLI**: `af quota` — and `af quota --daemon-url <url>` reports on the
+  remote daemon's host, not yours.
+
+Each row keeps two things apart on purpose: **quota** is what the provider
+reports about the account's ceiling — `not reported` everywhere today, because
+no supported agent exposes a quota API and af does not guess one — while
+**observed** is what af's own sessions show (running counts, a session parked
+at a wall, and the earliest recorded reset). A record file af could not read
+makes the report say so rather than look complete.
+
 ## Manual retry
 
 Resume a limit-blocked session immediately from any surface:
 
 - TUI: select it and press **`c`**.
-- Web: select it and click **Retry**.
+- Web: select it and click **Retry limit**.
 - CLI: run `af sessions retry-limit <title>` (with `--repo` when needed).
 
 Every surface calls the same daemon recovery action. It:
@@ -83,6 +374,7 @@ reset-less banner — including every `devin` limit — resumes on the
 
 ```toml
 limit_auto_resume = true
+limit_account_candidates = ["work", "personal"] # optional account-switch order
 limit_retry_interval = "30m"   # fallback cadence when a banner states no reset time
 ```
 
@@ -96,12 +388,121 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   the daemon backs off exponentially (settling at one attempt every 5 minutes)
   rather than hammering an exhausted plan. Killing the session is always the
   off-ramp.
-- **Global-only.** `limit_auto_resume` and `limit_retry_interval` are rejected
+- **Optional account switch** → before waiting for the old identity's reset, an
+  unpinned local session may restart on the first registered account
+  in `limit_account_candidates` that has no current limit observation. The
+  ordered list is the opt-in; af never chooses from every registered account.
+  If every listed account is limited or absent, the existing wait remains.
+  Docker account-scoped creates remain supported, but automatic Docker
+  replacement stays disabled until its complete provision plan and container
+  cleanup identity can survive a daemon crash.
+- **An explicit `--account` is pinned.** It is a pin, so automatic switching
+  never overrides it. Accounts selected by the scheduler may move again after
+  they later hit their own limit.
+- **No invented quota claim.** Providers expose no quota API af can read. The
+  scheduler uses the same honest evidence as `af quota`: a candidate is rejected
+  when af currently observes one of its sessions at a limit; absence of that
+  observation is not presented as a provider guarantee.
+- **Visible in the session.** The first prompt after replacement names the old
+  and new identities before repeating the stored task prompt.
+- **One credential boundary.** A local swap stops every agent, shell, and process
+  pane before committing the new identity, then restores the agent and shell
+  panes with the selected account environment. A claude or codex agent keeps
+  its conversation: af copies the transcript into the new account's home before
+  committing the new identity, and the replacement resumes it. The copy stays in
+  the new account's home, and the provider replays that history under the new
+  account, so an automatic rotation moves the conversation's content to the
+  candidate account as well as the work. If the conversation cannot be carried,
+  the agent starts a fresh conversation, and the notice it receives says why.
+  Other agents start a fresh provider conversation. New
+  account-scoped terminal tabs remain interactive but skip shell startup files,
+  because an rc file can otherwise replace the selected identity after af has
+  established it. A resolved command that explicitly pins `--continue`,
+  `--resume`, `--session-id`,
+  or `codex resume` would take away af's choice of which conversation the
+  replacement opens, so af names those arguments and keeps the existing wait
+  instead.
+- **Operator-only.** `limit_auto_resume`, `limit_retry_interval`, and
+  `limit_account_candidates` are rejected
   in in-repo configs. A save through `af config set` applies them to the running
-  daemon at once — no restart; a raw hand-edit of `config.toml` takes effect on
-  the next daemon start.
+  daemon at once — no restart. The candidate list may also be replaced in a
+  machine-local personal-project config, so one project can use a narrower set
+  without trusting checked-in repository config with identity policy.
+
+Set the global ordered list with:
+
+```sh
+af config set limit_account_candidates work,personal
+```
+
+Or add `--project <id-or-path>` for a personal per-project override.
 
 Full config reference: [configuration.md](configuration.md#usage-limit-auto-resume).
+
+## Hand off to another account
+
+To continue under another registered account of the same agent:
+
+```sh
+af sessions handoff fix-auth --account personal
+```
+
+The session keeps its identity, worktree, branch tip, and stored prompt. For
+claude and codex it also keeps the conversation. Each account has its own
+provider home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so after stopping the
+outgoing agent af copies that conversation's file into the new account's home:
+the transcript for claude, the rollout for codex. The new account then resumes
+the same conversation id. The copy only ever adds to the new account's home;
+nothing in the previous account's home changes.
+
+The copied transcript is kept in the new account's home, and from then on the
+provider replays that history under the new account, whose credentials send
+it. Treat a handoff, manual or automatic, as moving the conversation's content
+to that account.
+
+The new account starts a fresh conversation instead, and its brief says af
+tried to carry the conversation and why it could not, when:
+
+- the file is missing, or reached through a symbolic link;
+- the new account already holds a different version of it;
+- the conversation af recorded is no longer the newest one in this worktree,
+  because a new one was started with `/clear` or `/new`;
+- a replacement already launched on the carried conversation stopped before it
+  was confirmed working.
+
+Other agents always start fresh with a brief. Use `--brief` to replace the prompt, or combine
+`--to claude --account work` to change both agent and account; changing the
+agent always starts a fresh conversation. The recorded handoff includes the
+outgoing and incoming accounts and branch tip.
+
+If an agent or account handoff starts its replacement but cannot confirm whether
+the mission was submitted, af suppresses automatic redelivery because the first
+submission may already have landed. Inspect the replacement pane, then choose
+the explicit override when it is needed: if the agent is already acting on the
+mission, mark it delivered (no resend) — **Mark delivered** in the TUI's
+**`c`** picker, **Mark delivered** in the web pane header, or
+`af sessions retry-limit <title> --delivered`; otherwise resend it — **Try
+send** in the **`c`** picker, **Retry handoff** in the web pane header, or run
+`af sessions retry-limit <title>`. The retry verdict is attached to that pending
+handoff mission; sending another prompt does not make the daemon resend it.
+If that explicit retry delivers the mission but cannot persist its final
+settlement, every client reports the retry as completed with a warning. The TUI
+shows the warning as a completion message, the web keeps it in the confirmed
+mutation notice, and CLI JSON includes a `warning` field; do not retry the
+already-delivered mission.
+
+This is an operator-chosen account swap: the target must be registered for the
+incoming agent and have no current limit observation in the daemon's ledger.
+An unregistered or currently limited target is refused before stopping the old
+runtime. No `limit_auto_resume` or `limit_account_candidates` setting is needed.
+An explicit pin moves to the chosen account and remains pinned against automatic
+rotation. The same local account-swap path replaces all credential-bearing panes;
+its launch checks and restrictions, including VS Code tabs, still apply.
+
+In the TUI, press **F** on the `[limit]` session and choose another account.
+The project default is preselected when it is another registered, logged-in
+account. In the web, use **Handoff** beside **Retry**, then choose the agent and account. Both
+pickers list accounts belonging to the selected agent.
 
 ## Hand off to another agent
 
@@ -123,7 +524,7 @@ What a handoff does, and does not do:
   same task binding, same name. Only the agent process is replaced. Nothing is
   archived, nothing is re-cloned, and uncommitted work is untouched — it is
   simply still there, because the worktree never moved.
-- **The new agent starts fresh, with a brief.** Agent conversations are not
+- **A different agent starts fresh, with a brief.** Agent conversations are not
   portable between providers: claude cannot read codex's transcript and vice
   versa. So instead of a transcript, the incoming agent is told the session's
   goal, that it is continuing someone else's work, and where to look
@@ -155,7 +556,12 @@ blocked on:
 
 Handing off is **reversible**. Each agent's conversation history is stored per
 directory, so the outgoing agent's thread is still in the worktree — hand back
-to it once its limit resets and it picks up its own conversation.
+to it once its limit resets and it picks up its own conversation. A scope drop
+is one-way, so name the dropped account again with `--account` on the way back —
+without it the returned agent runs ambient. Returning to the account re-pins
+its credentials, but the return is still a cross-agent handoff, so the
+incoming agent starts a fresh conversation rather than resuming the dropped
+thread (see [Account-scoped handoff](#account-scoped-handoff)).
 
 There is no automatic handoff. A swap changes which agent is editing your
 branch, so it is always something you ask for.
@@ -163,18 +569,37 @@ branch, so it is always something you ask for.
 ## Task runs: park, don't fail
 
 A **task** (cron or watch) can fire while your plan is already exhausted. When a
-task-driven session hits a usage-limit wall as it starts up — before its prompt
-is even delivered — Agent Factory **parks** the run instead of failing it:
+task-driven session hits a usage-limit wall as it starts up, or a task targets a
+session already marked `[limit]`, Agent Factory **parks** the run instead of
+typing into the limited pane or reporting a false success:
 
 - The session is **kept**, not torn down, and marked `[limit]` (with its reset
   time) so the badge, the manual `c` retry, and auto-resume all apply to it.
 - The task's run status is recorded as **`parked: usage limit`** — *not* an
   errored/failed run. It shows in the task manager as waiting for the limit
   window, and no failure side-effects fire.
-- Once the window resets, the **same resume machinery** takes over: auto-resume
-  (if `limit_auto_resume` is on) or your manual `c` retry re-delivers the
-  session's stored task prompt, and the run proceeds to completion. A parked run
-  becomes a completed one — never a failed one.
+- For a newly created task session, once the window resets the **same resume
+  machinery** takes over: auto-resume (if `limit_auto_resume` is on) or your
+  manual `c` retry re-delivers the session's stored task prompt, and the run
+  proceeds to completion. A parked run becomes a completed one — never a failed
+  one.
+
+For a task with `target_session`, trigger kind determines what parking retains.
+A cron occurrence is skipped and recorded `parked: usage limit`; the first cron
+fire after reset runs normally, without replaying a burst of identical prompts.
+A watch event is distinct data, so it enters the durable FIFO and replays after
+the target leaves `[limit]`. Limit-held watch backlogs are not expired at the
+ordinary 72-hour outage boundary. Once the bounded queue reaches 500 events or
+256KB, Agent Factory stops reading the watch command's stdout and lets pipe
+backpressure hold the producer until replay makes room, rather than dropping an
+event or growing managed queue storage without limit.
+
+This automatic park is deliberately task-only. A manual `af sessions
+send-prompt` still delivers to a `[limit]` session, because typing may be needed
+to answer a credits or limit **picker**. Do not type into a timed auto-continue
+banner: Claude explicitly treats any typing as cancellation. In a Codex numbered
+picker, use the arrow keys to select the intended choice before sending Enter;
+digits are ignored and Enter accepts whichever choice is already highlighted.
 
 Before this behavior, such a run spun a readiness timeout and was recorded as a
 failure even though nothing was actually wrong — you'd just hit your plan limit.
@@ -213,7 +638,7 @@ If an agent reworded its banner, override the detection regex per agent with
 ```toml
 [limit_patterns]
 claude = "Claude usage limit reached\\."
-codex  = "You've hit your usage limit"
+codex  = "You['’]ve hit your usage limit"
 ```
 
 Keys must be a supported agent (`claude`, `codex`, `aider`, `gemini`, `amp`,

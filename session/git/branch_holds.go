@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -18,10 +19,20 @@ import (
 // A var (not a const) only so tests can shorten it; production never reassigns.
 var worktreeListTimeout = 10 * time.Second
 
+// WorktreeBranchBinding is one registered worktree's branch observation.
+// Detached is structural because "(detached)" is also a legal branch name.
+type WorktreeBranchBinding struct {
+	Path     string
+	Branch   string
+	HeadSHA  string
+	Detached bool
+}
+
 // BranchesHeldByWorktrees returns every local branch that a registered worktree
-// of the repo at repoRoot currently has CHECKED OUT, mapped to the path of the
-// worktree holding it. Branches with no worktree — and worktrees on a detached
-// HEAD — are absent.
+// of the repo at repoRoot currently has CHECKED OUT, mapped to every worktree
+// path holding it. Branches with no worktree — and worktrees on a detached HEAD
+// — are absent. The slice is normally singular, but preserves multiplicity when
+// an override or older Git has allowed the same branch into several worktrees.
 //
 // This is the authority the session-name resolver was missing (#2091). A
 // branch's mere existence says nothing about whether AF can use it: AF
@@ -40,7 +51,23 @@ var worktreeListTimeout = 10 * time.Second
 // An unreadable repo returns an error and a nil map, never an empty one: "I
 // could not ask" and "nothing is held" are different answers, and a caller that
 // cannot tell them apart would treat a failed probe as a confident all-clear.
-func BranchesHeldByWorktrees(repoRoot string) (map[string]string, error) {
+func BranchesHeldByWorktrees(repoRoot string) (map[string][]string, error) {
+	bindings, err := WorktreeBranchBindings(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	holds := make(map[string][]string)
+	for _, binding := range bindings {
+		if binding.Branch != "" {
+			holds[binding.Branch] = append(holds[binding.Branch], binding.Path)
+		}
+	}
+	return holds, nil
+}
+
+// WorktreeBranchBindings reads path, branch, HEAD, and detached state for every
+// registered worktree in one bounded Git invocation.
+func WorktreeBranchBindings(repoRoot string) ([]WorktreeBranchBinding, error) {
 	if strings.TrimSpace(repoRoot) == "" {
 		return nil, fmt.Errorf("cannot list worktrees: repo path is empty")
 	}
@@ -52,6 +79,8 @@ func BranchesHeldByWorktrees(repoRoot string) (map[string]string, error) {
 	// indistinguishable from a record terminator. Same fix as worktreeListed
 	// (#3423) and worktreeListedBranchBounded (#3278); no new git floor.
 	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "list", "--porcelain", "-z")
+	// Keep repository selection bound to -C without changing runtime settings.
+	cmd.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	// Bound the post-exit wait so a child that inherited the capture pipe cannot
 	// hold Output() open past the deadline (#856).
 	cmd.WaitDelay = gitWaitDelay
@@ -66,66 +95,50 @@ func BranchesHeldByWorktrees(repoRoot string) (map[string]string, error) {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("git worktree list in %s timed out after %s: %w", repoRoot, worktreeListTimeout, ctx.Err())
 		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("git worktree list in %s failed: %s (%w)", repoRoot, strings.TrimSpace(string(exitErr.Stderr)), err)
+		if detail := commandFailureDetail(err); detail != "" {
+			return nil, fmt.Errorf("git worktree list in %s failed: %s (%w)", repoRoot, detail, err)
 		}
 		return nil, fmt.Errorf("git worktree list in %s failed: %w", repoRoot, err)
 	}
-	holds, parseErr := parseWorktreeBranchHolds(string(output))
+	bindings, parseErr := parseWorktreeBranchBindings(string(output))
 	if parseErr != nil {
 		return nil, fmt.Errorf("git worktree list in %s could not be read: %w", repoRoot, parseErr)
 	}
-	return holds, nil
+	return bindings, nil
 }
 
-// parseWorktreeBranchHolds reads `git worktree list --porcelain -z` output into
-// branch -> holding worktree path. Each record is a NUL-terminated
-// `worktree <path>` line followed by attribute records and terminated by an
-// EMPTY record; a record carries a `branch refs/heads/<name>` only when that
-// worktree has a branch checked out (detached and bare worktrees do not).
-//
-// Paths are taken verbatim to the end of the record, which is what git emits —
-// every archived worktree path contains spaces, so any whitespace-splitting
-// parse would truncate exactly the paths this exists to report. The same is true
-// of NEWLINES, which is why this reads -z and not the newline-delimited form
-// (#3524): a path ending in a newline left an empty trailing fragment that read
-// as a record separator, so the record's branch line was dropped and a branch
-// that WAS checked out came back reported as free.
-//
-// It returns an ERROR for a listing it could not read, and that is the half that
-// generalises. A bare map has no way to say "I could not read that", so a
-// partially-parsed listing arrived looking exactly like one that genuinely held
-// nothing, and every read failure resolved to the permissive answer. The caller
-// already has a deliberate, safe response to an unanswerable probe — log it and
-// proceed, letting `git worktree add` refuse loudly if the name really is held
-// (#2127) — it simply could never be reached. Nil map with the error, never a
-// partial one: a caller that ranges over what arrived would be reading a
-// truncated listing as the complete set.
-//
-// No \r trimming: that only ever made sense for line-delimited output, and under
-// -z a trailing \r is part of the path.
-func parseWorktreeBranchHolds(porcelain string) (map[string]string, error) {
+func parseWorktreeBranchBindings(porcelain string) ([]WorktreeBranchBinding, error) {
 	if err := requireCompleteWorktreeListing(porcelain); err != nil {
 		return nil, err
 	}
-	holds := make(map[string]string)
-	worktreePath := ""
+	var bindings []WorktreeBranchBinding
+	var current *WorktreeBranchBinding
+	finish := func() {
+		if current != nil && current.Path != "" {
+			bindings = append(bindings, *current)
+		}
+		current = nil
+	}
 	// TrimSuffix first so the final terminator does not yield a trailing empty
 	// record; the empty records that remain are the real entry separators.
 	for _, field := range strings.Split(strings.TrimSuffix(porcelain, "\x00"), "\x00") {
 		switch {
 		case field == "":
-			// Record separator: nothing after it belongs to the previous path.
-			worktreePath = ""
+			finish()
 		case strings.HasPrefix(field, "worktree "):
-			worktreePath = strings.TrimPrefix(field, "worktree ")
-		case strings.HasPrefix(field, "branch "):
+			finish()
+			current = &WorktreeBranchBinding{Path: strings.TrimPrefix(field, "worktree ")}
+		case strings.HasPrefix(field, "HEAD ") && current != nil:
+			current.HeadSHA = strings.TrimSpace(strings.TrimPrefix(field, "HEAD "))
+		case field == "detached" && current != nil:
+			current.Detached = true
+		case strings.HasPrefix(field, "branch ") && current != nil:
 			branch := strings.TrimPrefix(strings.TrimPrefix(field, "branch "), "refs/heads/")
-			if branch != "" && worktreePath != "" {
-				holds[branch] = worktreePath
+			if branch != "" {
+				current.Branch = branch
 			}
 		}
 	}
-	return holds, nil
+	finish()
+	return bindings, nil
 }

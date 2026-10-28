@@ -59,6 +59,10 @@ type Capabilities struct {
 	// InteractiveInput: raw key / prompt injection works — SendKeys/
 	// SendPrompt drive a live PTY rather than returning "not supported".
 	InteractiveInput bool
+	// LoopbackRelay: the daemon can reach a loopback port INSIDE the workspace
+	// through the agent-server's port relay (W5.1, #5571), so a web tab pointing
+	// at 127.0.0.1:N is served from the workspace rather than the daemon host.
+	LoopbackRelay bool
 	// Handoff: the session's agent program can be swapped in place, keeping the
 	// same workspace and branch (#2013). Local-worktree only for now — a sandbox
 	// backend would have to re-launch the agent inside the provisioned sandbox
@@ -82,6 +86,11 @@ type Capabilities struct {
 // Each refusal names the requirement that is actually unmet, because a user told
 // "not supported on this backend" cannot tell that from a kind that could work.
 func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
+	// A docs tab edits a proposal in the daemon's own store, so where the
+	// workspace runs does not matter.
+	if kind == TabKindDocs {
+		return nil
+	}
 	switch TabKindRequires(kind) {
 	case TabNeedsMetadataOnly:
 		// A web tab spawns nothing and reads nothing, so the KIND needs nothing
@@ -100,6 +109,15 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		// own endpoint, not the per-tab PTY frame stream, whose lifetime is a
 		// terminal subscription and which a large web response would head-of-line
 		// block.
+		//
+		// A runtime with the agent-server port relay (W5.1) lifts exactly this
+		// blocker: the daemon's proxy dials the workspace's own loopback through
+		// the relay, never its own TCP stack, so a loopback target is admitted as
+		// it is locally. The refusals below are about what a BROWSER can frame and
+		// stay in force.
+		if IsLoopbackWebTarget(target) && c.LoopbackRelay {
+			return nil
+		}
 		if IsLoopbackWebTarget(target) {
 			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, so it would serve the daemon's own %s — see #3062", target, target)
 		}
@@ -185,7 +203,20 @@ type Backend interface {
 	Launch(instance *Instance, firstTimeSetup bool) error
 
 	// Kill terminates the session and cleans up all associated resources.
-	Kill(instance *Instance) error
+	//
+	// trustLiveGeneration is true only when the caller holds this instance's
+	// exclusive lifecycle lock for its ENTIRE call (#3413) — only the local tmux
+	// backend's generation-cohort guard cares about the distinction; every other
+	// backend ignores it. It is a parameter on this ONE method rather than a
+	// second method name on purpose: a second name is a promise every override
+	// must remember to also provide, and Go embedding does not enforce that — a
+	// test double that embeds a base Backend and overrides only Kill would have
+	// silently kept the base's un-overridden second method, running the base's
+	// behavior instead of the override's (measured: this is exactly how the
+	// first cut of #3413 deadlocked TestKillSession_RejectsConcurrentDuplicate).
+	// A parameter on the existing method makes the compiler catch every
+	// override's signature instead.
+	Kill(instance *Instance, trustLiveGeneration bool) error
 
 	// CloseAttachOnly releases resources this Instance opened to view or drive the
 	// session WITHOUT destroying the underlying session, worktree, or off-box
@@ -290,6 +321,8 @@ type Backend interface {
 	// would launch. It runs before the outgoing process is touched; SwapAgent must
 	// consume this plan rather than resolving configuration again after teardown.
 	PrepareAgentSwap(instance *Instance, target string) (AgentSwapPlan, error)
+	// SwapAgent must call plan.CaptureAfterStop after confirmed teardown and
+	// before starting the replacement, so its work cannot enter the ledger tip.
 	SwapAgent(instance *Instance, plan AgentSwapPlan) error
 
 	// Type returns the persisted backend identifier (local, docker, ssh, or
@@ -317,9 +350,11 @@ type promptDeliveryStatusBackend interface {
 // from the one that was checked while the outgoing agent was still alive.
 type AgentSwapPlan struct {
 	target              string
+	baseProgram         string
 	program             string
 	conversation        AgentConversationData
 	conversationCapture ConversationCaptureSnapshot
+	afterStop           func() error
 }
 
 // ConversationCapture returns the provider-store before-image frozen by

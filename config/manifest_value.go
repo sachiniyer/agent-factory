@@ -58,13 +58,6 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	// Preserve a user's named theme choice as the string shape they wrote. The
-	// normalized ThemeConfig still carries the complete palette for consumers,
-	// but turning "zenburn" into a large custom table in an editor would erase
-	// the preset choice on the next save.
-	if key == "theme" && cfg.Theme.explicitPreset && cfg.Theme.matchesPreset() {
-		return cfg.Theme.Preset(), true
-	}
 	// An empty program override is the on-disk tombstone for removing an
 	// auto-detected built-in command. ResolveProgram already treats it as no
 	// override; hide that storage detail so both panes refresh to the map the
@@ -78,6 +71,38 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 			}
 		}
 		return editorValue(reflect.ValueOf(visible)), true
+	}
+	// root_agent is the only STRUCTURED global manifest key backed by a struct
+	// rather than a map or slice. editorValue's struct branch marshals the field
+	// value directly, and RootAgent.Enabled deliberately carries no omitempty
+	// (an explicit enabled = false must survive a full serialization), so an
+	// ABSENT [root_agent] table would render indistinguishably from an explicit
+	// {"enabled":false} — unlike every sibling structured key, whose map/slice
+	// branches honestly render {} / [] when empty.
+	//
+	// Render field-wise from the on-disk shape — the same form the writer's
+	// rootAgentConfigJSON uses (pointer fields with omitempty): an absent table
+	// renders {}, and only the fields actually present on disk appear, so an
+	// explicit enabled = false still renders {"enabled":false}. This needs a
+	// loaded source shape; a config with no source (DefaultConfig and in-memory
+	// stand-ins) has no on-disk presence to consult, so it falls through to the
+	// structural render below.
+	if key == "root_agent" && cfg.source.shape != nil {
+		shape, _ := cfg.source.topLevel("root_agent")
+		table, present := shape.(map[string]any)
+		if !present {
+			return "{}", true
+		}
+		var value rootAgentConfigJSON
+		if _, p := table["enabled"]; p {
+			enabled := field.FieldByName("Enabled").Bool()
+			value.Enabled = &enabled
+		}
+		if _, p := table["program"]; p {
+			program := field.FieldByName("Program").String()
+			value.Program = &program
+		}
+		return editorValue(reflect.ValueOf(value)), true
 	}
 	// The comma-list form is per-key opt-in (isCommaListKey), never inferred from
 	// the []string type: a future list whose elements can contain a comma keeps the
@@ -145,7 +170,7 @@ type ConfigEntry struct {
 	//
 	// It no longer answers WHEN the change takes effect: #2480 made that per-key and
 	// honest (config.EffectClass / EffectNotice in effect.go), because the answer is
-	// not uniform — a running daemon applies most keys (including theme) in place,
+	// not uniform — a running daemon applies most keys in place,
 	// root_agents and branch_prefix wait for the next daemon start, and client-only
 	// keys such as update_channel are picked up by af's own next launch. The old
 	// per-key boolean could not express those outcomes; the notice does.
@@ -165,17 +190,16 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 	for _, e := range entries {
 		value, _ := CurrentValue(cfg, e.Key)
 		out = append(out, ConfigEntry{
-			Key:           e.Key,
-			Type:          e.Type,
-			AcceptedTypes: e.AcceptedTypes,
-			Default:       e.Default,
-			Purpose:       e.Purpose,
-			Tier:          int(e.Tier),
-			TierName:      TierName(e.Tier),
-			Editable:      true,
-			Settable:      e.Settable,
-			Enum:          e.Enum,
-			Value:         value,
+			Key:      e.Key,
+			Type:     e.Type,
+			Default:  e.Default,
+			Purpose:  e.Purpose,
+			Tier:     int(e.Tier),
+			TierName: TierName(e.Tier),
+			Editable: true,
+			Settable: e.Settable,
+			Enum:     e.Enum,
+			Value:    value,
 			// Uniformly true — see the field's comment.
 			RequiresRestart: true,
 		})
@@ -188,8 +212,7 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 // effect.go), because the honest answer differs by key — a running daemon applies
 // some in place (the network listener keys among them since #2480 PR2), root_agents
 // and branch_prefix wait for the next daemon start, and client-only keys such as
-// update_channel are picked up by af's own next launch. Theme is applied live to
-// the daemon palette projection so browser and TUI renderers do not diverge. It
+// update_channel and appearance are picked up by af's own next launch. It
 // deliberately never tells the user to run a command (#2479).
 
 // editorValue renders one config field in the editor form. It deliberately does

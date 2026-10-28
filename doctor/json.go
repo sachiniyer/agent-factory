@@ -12,9 +12,9 @@ import (
 // the field a script should branch on. It means doctor established a specific
 // unhealthy condition that must be corrected before the run is healthy. Doctor
 // deliberately emits advisory WARNs and UNKNOWN observations with useful
-// inspection guidance while leaving the exit code 0. Conversely, a proven
+// inspection guidance without increasing the unresolved count. Conversely, a proven
 // condition can be actionable even when its exact remedy is manual. Actionable
-// is derived from the same rule as the exit code, so the two cannot disagree.
+// is derived from the same rule as the unresolved count.
 type JSONCheck struct {
 	Name    string `json:"name"`
 	Section string `json:"section"`
@@ -29,8 +29,8 @@ type JSONCheck struct {
 	Actionable bool `json:"actionable"`
 }
 
-// JSONSummary counts the run by status. Unresolved is the count that drives the
-// exit code, so a script can branch on it without re-deriving the rules.
+// JSONSummary counts the run by status. The command exits 1 when Unresolved is
+// positive or Incomplete is non-empty.
 //
 // Unresolved counts underlying ACTIONABLE ISSUES, which is not always the
 // number of actionable rows: without --verbose, many process findings collapse
@@ -39,10 +39,20 @@ type JSONCheck struct {
 // rows".
 type JSONSummary struct {
 	Pass       int `json:"pass"`
+	Info       int `json:"info"`
 	Warn       int `json:"warn"`
 	Fail       int `json:"fail"`
 	Fixed      int `json:"fixed"`
 	Unresolved int `json:"unresolved"`
+	// Incomplete names the checks that stopped before seeing everything, and is
+	// the field a probe needs to tell "doctor found nothing" from "doctor did
+	// not finish looking" (#3466). Unresolved cannot carry that: a truncated
+	// sweep legitimately establishes no unhealthy condition, so it reports 0
+	// but the run still exits 1 because this list is non-empty.
+	//
+	// Empty on a complete run. Exit 0 requires both Unresolved == 0 and an
+	// empty Incomplete list.
+	Incomplete []string `json:"incomplete,omitempty"`
 }
 
 // JSONReport is the `af doctor --json` payload carried in the envelope's data
@@ -75,6 +85,8 @@ func BuildJSONReport(r *Report, fixMode, verbose bool) JSONReport {
 		switch row.status {
 		case StatusPass:
 			out.Summary.Pass++
+		case StatusInfo:
+			out.Summary.Info++
 		case StatusWarn:
 			out.Summary.Warn++
 		case StatusFail:
@@ -84,6 +96,7 @@ func BuildJSONReport(r *Report, fixMode, verbose bool) JSONReport {
 		}
 	}
 	out.Summary.Unresolved = r.UnresolvedCount()
+	out.Summary.Incomplete = append([]string(nil), r.Incomplete...)
 	return out
 }
 

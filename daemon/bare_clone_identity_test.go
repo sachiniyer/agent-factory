@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -76,10 +74,7 @@ func TestCreateSessionPreservesAndNamesLegacyBareCloneRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	warnings := captureWarnings(t)
 	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title: "new-identity", RepoPath: worktree, Program: "claude", InPlace: true,
 	}); err != nil {
@@ -179,7 +174,7 @@ func TestCreateSessionCheckpointKeepsFirstWriteBareIdentity(t *testing.T) {
 		t.Fatalf("fixture did not change identity after removing linked worktree: %s", identityID)
 	}
 
-	if err := manager.SaveInstances(); err != nil {
+	if err := manager.storage.SaveInstances(manager.InstancesSnapshot()); err != nil {
 		t.Fatalf("SaveInstances: %v", err)
 	}
 	identityRows, err := loadRepoInstanceData(identityID)
@@ -198,9 +193,12 @@ func TestCreateSessionCheckpointKeepsFirstWriteBareIdentity(t *testing.T) {
 	}
 }
 
-// TestEnsureRootAgentsCreatesRootAtBareCloneWorktree flips PR #3334's parity
-// anchor: the registered checkout remains the root agent's in-place workspace,
-// while its row and daemon key use the bare repository's identity.
+// TestEnsureRootAgentsCreatesRootAtBareCloneWorktree is the BOOT-time half of
+// the #3361 identity rule: the registered checkout remains the root agent's
+// in-place workspace, while its row and daemon key use the bare repository's
+// identity. TestEnsureRootAgentsReattributesBareCloneWorktreeCreate
+// (rootagent_reattribution_test.go) is its ensure-cadence twin; the two must
+// agree on both halves, which is the parity #3299 owns.
 func TestEnsureRootAgentsCreatesRootAtBareCloneWorktree(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
@@ -212,7 +210,7 @@ func TestEnsureRootAgentsCreatesRootAtBareCloneWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	manager.EnsureRootAgents()
+	manager.ensureRootAgentsAndWait()
 
 	if len(*seen) != 1 {
 		t.Fatalf("enabled bare-clone worktree project got %d creates, want 1", len(*seen))
@@ -296,10 +294,7 @@ func TestWarnLegacyBareCloneTasksNamesStrandedAutomation(t *testing.T) {
 		t.Fatalf("fixture: the corrected identity must differ from the legacy parent identity %s", legacyID)
 	}
 
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	warnings := captureWarnings(t)
 
 	warnLegacyBareCloneTasks(repo)
 
@@ -337,10 +332,7 @@ func TestWarnLegacyBareCloneTasksSilentWithoutStrandedTasks(t *testing.T) {
 		t.Fatalf("seed current task: %v", err)
 	}
 
-	var warnings bytes.Buffer
-	previous := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	warnings := captureWarnings(t)
 
 	warnLegacyBareCloneTasks(repo)
 

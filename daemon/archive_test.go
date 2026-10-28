@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/hooklog"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
@@ -229,10 +231,10 @@ func TestArchiveSessionRevalidatesInterruptedMoveBeforeOperatorHook(t *testing.T
 	writeOnArchiveCommand(t, `printf ran > "$AF_WORKTREE_PATH/foreign-hook-ran"`)
 	movedAside := srcPath + "-identity-owner"
 	originalTeardown := archiveTeardown
-	archiveTeardown = func(target *session.Instance, archiveDest string, claim sessiongit.RelocationClaim, beforeMove func() error) (error, error) {
+	archiveTeardown = func(target *session.Instance, archiveDest string, claim sessiongit.RelocationClaim, beforeMove func() error, _ bool) (error, error) {
 		require.NoError(t, os.Rename(srcPath, movedAside))
 		require.NoError(t, os.Mkdir(srcPath, 0o755))
-		return originalTeardown(target, archiveDest, claim, beforeMove)
+		return originalTeardown(target, archiveDest, claim, beforeMove, true)
 	}
 	t.Cleanup(func() { archiveTeardown = originalTeardown })
 
@@ -316,7 +318,12 @@ func TestArchiveSessionMoveFailureAlsoSurfacesHookFailure(t *testing.T) {
 	writeOnArchiveCommand(t, "printf 'prune failed loudly\\n'; exit 23")
 	dest, err := archivedWorktreePath(repoID, "worker")
 	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(dest, 0755))
+	prev := archiveTeardown
+	archiveTeardown = func(i *session.Instance, dest string, claim sessiongit.RelocationClaim, hook func() error, trust bool) (error, error) {
+		require.NoError(t, os.MkdirAll(dest, 0755))
+		return prev(i, dest, claim, hook, trust)
+	}
+	t.Cleanup(func() { archiveTeardown = prev })
 
 	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 
@@ -333,18 +340,57 @@ func TestArchiveSessionMoveFailureAlsoSurfacesHookFailure(t *testing.T) {
 	assert.Equal(t, session.Lost, inst.GetStatus(), "the session must be left recoverable in place")
 }
 
+// A hook that floods its output must not flood the surfaced error or the daemon
+// log. Since #4853 the report is one line naming the full-output file, then at
+// most hooklog.ExcerptLines quoted lines of hooklog.ExcerptLineBytes each —
+// the 64 KiB tail it used to carry is only in that file now. The payload is
+// one 256 KiB line with no newline, so the reason the hook printed last sits at
+// the END of an overlong line; the excerpt has to keep that end.
 func TestArchiveSessionHookFailureBoundsCapturedOutputToATail(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	_, _ = registerArchivable(t, manager, repoID, repoPath, "worker")
 	writeOnArchiveCommand(t,
 		`head -c 262144 /dev/zero | tr '\0' x; printf 'tail-marker'; exit 29`)
 
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "tail-marker",
-		"the bounded capture must retain the diagnostically useful end of output")
-	assert.Less(t, len(err.Error()), 70*1024,
-		"a noisy hook must not make daemon memory and the surfaced error grow without bound")
+	surfaced := err.Error()
+
+	hookLogs, globErr := filepath.Glob(filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "logs", "hooks", "on-archive-*.log"))
+	require.NoError(t, globErr)
+	require.Len(t, hookLogs, 1)
+	assert.Contains(t, surfaced, "(full output: "+hookLogs[0]+")",
+		"the report must name the file that holds what the excerpt leaves out")
+	full, readErr := os.ReadFile(hookLogs[0])
+	require.NoError(t, readErr)
+	assert.Len(t, full, 262144+len("tail-marker"), "the full output is kept on disk, whole")
+
+	quoted := 0
+	for _, line := range strings.Split(surfaced, "\n") {
+		if !strings.HasPrefix(line, hooklog.ExcerptPrefix) {
+			continue
+		}
+		quoted++
+		assert.LessOrEqual(t, len(strings.TrimPrefix(line, hooklog.ExcerptPrefix)), hooklog.ExcerptLineBytes,
+			"each quoted line is bounded, however long the hook's line was")
+	}
+	assert.Equal(t, 1, quoted, "one unbroken line of output quotes as exactly one line:\n%s", surfaced)
+	assert.Contains(t, surfaced, hooklog.ExcerptPrefix+"…",
+		"an overlong line says it was cut")
+	assert.Contains(t, surfaced, "tail-marker",
+		"the bounded excerpt must retain the diagnostically useful end of output")
+	// 4 KiB leaves room for the header's paths and wrapping clauses; the old
+	// contract allowed 70 KiB and a regression to it is 64 KiB.
+	assert.Less(t, len(surfaced), 4*1024,
+		"a noisy hook must not make the surfaced error grow with its output")
+	assert.NotContains(t, surfaced, strings.Repeat("x", hooklog.ExcerptLineBytes+1))
+
+	for level, capture := range map[string]*logCapture{"warning": logs.warnings, "info": logs.info, "error": logs.errors} {
+		text := capture.String()
+		assert.NotContains(t, text, strings.Repeat("x", hooklog.ExcerptLineBytes+1),
+			"the %s log must not carry the hook's output beyond the excerpt", level)
+		assert.Less(t, len(text), 16*1024, "the %s log must stay bounded", level)
+	}
 }
 
 func TestArchiveSessionRejectsCheckedInHookWithoutExecutingRepoCode(t *testing.T) {
@@ -379,7 +425,7 @@ func TestControlArchiveHookFailurePublishesCommittedArchiveAndReturnsWarning(t *
 	server := &controlServer{manager: manager}
 
 	var resp ArchiveSessionResponse
-	err := server.ArchiveSession(ArchiveSessionRequest{ID: inst.ID, Title: "worker", RepoID: repoID}, &resp)
+	err := server.ArchiveSession(&ArchiveSessionRequest{ID: inst.ID, Title: "worker", RepoID: repoID}, &resp)
 	require.NoError(t, err, "a nonfatal hook warning must remain a successful control response")
 	assert.True(t, resp.OK)
 	assert.NotEmpty(t, resp.ArchivedPath)
@@ -423,13 +469,16 @@ func TestArchiveSession_MoveFailureMarksLost(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
 
-	// Force the move to fail by pre-creating the destination (MoveWorktree
-	// refuses to clobber an existing dest), before any bytes are moved.
-	dest, err := archivedWorktreePath(repoID, "worker")
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(dest, 0755))
+	// Introduce an obstacle after destination admission to exercise a failure
+	// at the move boundary rather than the pre-teardown occupancy refusal.
+	prev := archiveTeardown
+	archiveTeardown = func(i *session.Instance, dest string, claim sessiongit.RelocationClaim, hook func() error, trust bool) (error, error) {
+		require.NoError(t, os.MkdirAll(dest, 0755))
+		return prev(i, dest, claim, hook, trust)
+	}
+	t.Cleanup(func() { archiveTeardown = prev })
 
-	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err, "a failed move must surface an error")
 
 	assert.Equal(t, session.Lost, inst.GetStatus(), "a failed archive marks the session Lost for self-heal")
@@ -589,10 +638,13 @@ func TestArchiveSession_RejectsWhenOperationInFlight(t *testing.T) {
 }
 
 // TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely is the
-// #2641 regression across every archive/restore path that registers in
-// killsInFlight before acquiring the per-session operation lock. A wedged peer
-// may delay these operations, but it must not make the session undeletable for
-// the daemon's lifetime.
+// #2641 regression across every archive/restore path that waits for the
+// per-session operation lock. A wedged peer may delay these operations, but it
+// must not make the session undeletable for the daemon's lifetime.
+//
+// All three used to register in killsInFlight BEFORE that wait; since #3600
+// (restore) and #3715 (archive) none of them do, which is why the helper below
+// asks the stronger question.
 //
 // PRE-FIX: each case misses the deadline below because it waits in opLock.Lock.
 func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *testing.T) {
@@ -605,7 +657,7 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 		inst, _ := registerArchivable(t, manager, repoID, repoPath, "archive-wait")
 		key := daemonInstanceKey(repoID, inst.Title)
 
-		assertGuardedOperationLockWaitBounded(t, manager, key, func() error {
+		assertOperationLockWaitBounded(t, manager, key, func() error {
 			_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: inst.Title, RepoID: repoID})
 			return err
 		})
@@ -620,7 +672,7 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 		require.NoError(t, err)
 		key := daemonInstanceKey(repoID, inst.Title)
 
-		assertGuardedOperationLockWaitBounded(t, manager, key, func() error {
+		assertOperationLockWaitBounded(t, manager, key, func() error {
 			_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: inst.Title, RepoID: repoID})
 			return err
 		})
@@ -633,7 +685,7 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 		inst := registerStarted(t, manager, repoID, repoPath, "lost-restore-wait", backend, true, session.Lost)
 		key := daemonInstanceKey(repoID, inst.Title)
 
-		assertGuardedOperationLockWaitBounded(t, manager, key, func() error {
+		assertOperationLockWaitBounded(t, manager, key, func() error {
 			_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: inst.Title, RepoID: repoID})
 			return err
 		})
@@ -641,7 +693,18 @@ func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *t
 	})
 }
 
-func assertGuardedOperationLockWaitBounded(t *testing.T, manager *Manager, key string, operation func() error) {
+// assertOperationLockWaitBounded is #2641's property, now asked in its stronger
+// form for every caller. The original question was "a wedged peer must not leave
+// killsInFlight stranded, making the session undeletable"; archive and both
+// restore paths answered it by registering the guard before the wait and
+// releasing it on timeout.
+//
+// Since #3600 (restore) and #3715 (archive) every one of them takes the op-lock
+// BEFORE it claims, so the wait holds nothing at all — there is no guard left to
+// strand, and the row the wait still advertises Kill for would genuinely admit
+// one. That subsumes the old assertion: a claim that is never registered cannot
+// be leaked, and this catches a reorder that quietly reintroduces one.
+func assertOperationLockWaitBounded(t *testing.T, manager *Manager, key string, operation func() error) {
 	t.Helper()
 	opLock := manager.opLockFor(key)
 	opLock.Lock()
@@ -656,8 +719,11 @@ func assertGuardedOperationLockWaitBounded(t *testing.T, manager *Manager, key s
 	go func() {
 		done <- operation()
 	}()
-	require.Eventually(t, func() bool { return killGuardHeld(manager, key) }, time.Second, 5*time.Millisecond,
-		"operation never registered its killsInFlight guard")
+	// Sampled inside the wait: opLockTimeout is 200ms here and the peer never lets
+	// go, so the operation cannot get past the lock during this window.
+	require.Never(t, func() bool { return killGuardHeld(manager, key) }, 100*time.Millisecond, 5*time.Millisecond,
+		"an operation merely QUEUED behind a peer registered an exclusive-operation claim: the row goes on "+
+			"advertising a Kill that the admission gate would then refuse (#3600, #3715)")
 
 	select {
 	case err := <-done:
@@ -933,7 +999,7 @@ func TestArchiveRemoteSession_FailedArchiveKeepsTheCallbackCredential(t *testing
 
 	// No remote client is wired, so ArchiveSandbox refuses before anything is
 	// pushed or reaped — the archive never commits.
-	_, aerr := manager.archiveRemoteSession(repoID, inst, "faraway")
+	_, aerr := manager.archiveRemoteSession(repoID, inst, "faraway", true)
 	require.Error(t, aerr, "an archive with no live client must fail rather than commit")
 
 	owner, ok := manager.sandboxTokens.sessionFor(callback)

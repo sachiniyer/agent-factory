@@ -52,6 +52,17 @@ const webTabName = "web"
 // TabLabel).
 const vscodeTabName = "vscode"
 
+// docsTabName is the default canonical name of a proposal Docs tab ('docs',
+// then 'docs-2', … on collision).
+const docsTabName = "docs"
+
+// processTabName is the fallback canonical name of a CLI-spawned Process tab —
+// used when neither --name nor the command's first word yields a usable token
+// (see processTabBaseName). It is also the kind's wire spelling in `kind_name`;
+// unlike shell/web/vscode it is NOT a `--kind` value, because a process tab is
+// what the default request makes when given a command (see tabKindVocabulary).
+const processTabName = "process"
+
 // tmuxTabSeparator joins an instance's agent tmux session name to a tab's name
 // to derive that tab's own tmux session name (af_<repoHash>_<title>__<tab>).
 // Deterministic so a tab's session is collision-free across instances and
@@ -112,6 +123,10 @@ const (
 	// the web UI's + New tab flow — never a TUI hotkey. The target is ALWAYS the
 	// session's worktree, so unlike a web tab it takes no --url/--port.
 	TabKindVSCode
+	// TabKindDocs is a proposal's Docs tab: the web UI's markdown editor for the
+	// proposal named by Tab.Proposal. It has no tmux PTY and no URL, and the TUI
+	// shows a placeholder, because the editor is web only.
+	TabKindDocs
 )
 
 // HasTmux reports whether a tab of this kind owns a tmux PTY session — i.e.
@@ -131,7 +146,7 @@ const (
 // doesn't show) rather than materializing a terminal tab with no PTY behind it.
 func (k TabKind) HasTmux() bool {
 	switch k {
-	case TabKindWeb, TabKindVSCode:
+	case TabKindWeb, TabKindVSCode, TabKindDocs:
 		return false
 	default:
 		return true
@@ -171,13 +186,61 @@ const (
 // not have fails later and further from the cause.
 func TabKindRequires(kind TabKind) TabKindNeed {
 	switch kind {
-	case TabKindWeb:
+	case TabKindWeb, TabKindDocs:
 		return TabNeedsMetadataOnly
 	case TabKindVSCode:
 		return TabNeedsLocalWorktreeRead
 	default:
 		return TabNeedsLocalProcess
 	}
+}
+
+// TabExit records how a process tab's command ended (#4479). Either af saw the
+// pane dead and stamped the exit status and death time tmux reported, or af
+// stopped the command itself and StoppedBy says why. It is never inferred from
+// the session's absence. Status is meaningful only when StatusKnown: a signal
+// death, or a tmux too old to report the code, still proves the command
+// finished.
+type TabExit struct {
+	Status      int
+	StatusKnown bool
+	At          time.Time
+	// StoppedBy is empty when the command exited on its own. Otherwise it is one
+	// of the TabStoppedBy* values, and At is when af stopped it.
+	StoppedBy string
+}
+
+// Why af stopped a process tab's still-running command (#4506 review). A
+// process command is never re-run, so the row has to say why it went inert.
+const (
+	// TabStoppedByAccountScope: the pane was started before the session's
+	// account scope, or under another account, so restore stopped it rather
+	// than leave it running on the wrong identity.
+	TabStoppedByAccountScope = "account-scope"
+	// TabStoppedByAccountSwap: an account swap stopped it with the rest of the
+	// session's panes.
+	TabStoppedByAccountSwap = "account-swap"
+	// TabStoppedByWorktreeRebuild: a worktree rebuild made the pane's cwd a
+	// deleted inode, so recovery stopped it rather than leave a running
+	// command bound to a checkout it can never be inside (#5370).
+	TabStoppedByWorktreeRebuild = "worktree-rebuild"
+)
+
+// tabExitFromData and data convert between Tab.Exit and its wire form; nil
+// maps to nil both ways. Every roster rebuild — load, reconcile, the root
+// heal's carry — goes through them, so none can drop the field (#4506 review).
+func tabExitFromData(d *TabExitData) *TabExit {
+	if d == nil {
+		return nil
+	}
+	return &TabExit{Status: d.Status, StatusKnown: d.StatusKnown, At: d.At, StoppedBy: d.StoppedBy}
+}
+
+func (e *TabExit) data() *TabExitData {
+	if e == nil {
+		return nil
+	}
+	return &TabExitData{Status: e.Status, StatusKnown: e.StatusKnown, At: e.At, StoppedBy: e.StoppedBy}
 }
 
 // Tab is one slot in an instance's tab roster (#930): the Agent tab at Tabs[0]
@@ -199,11 +262,13 @@ type Tab struct {
 	// (`--name`, via TabMatches), alongside the stable ID above.
 	//
 	// It is NOT the display label. What the UI renders is TabLabel, a
-	// presentation-only string that is never resolved against — the two
-	// deliberately differ for agent/shell tabs (named `agent`/`shell`, shown as
-	// "Agent"/"Terminal"). This field's doc once claimed to be "the display
-	// label"; that confusion was #1986, and the split into Name (the one handle)
-	// and TabLabel (the one display string) is its resolution.
+	// presentation-only string that name-based CLI and wire operations never
+	// resolve against — the two deliberately differ for agent/shell tabs (named
+	// `agent`/`shell`, shown as "Agent"/"Terminal"). The TUI jump prompt also
+	// accepts that visible label as a local convenience, without changing this
+	// canonical handle. This field's doc once claimed to be "the display label";
+	// that confusion was #1986, and the split into Name (the one handle) and
+	// TabLabel (the one display string) is its resolution.
 	Name string
 	// Kind selects the tab's process behavior.
 	Kind TabKind
@@ -215,6 +280,11 @@ type Tab struct {
 	// reverse-proxies, or an external absolute URL the web UI iframes directly.
 	// Empty for every other kind.
 	URL string
+	// Proposal is the slug a TabKindDocs tab edits. Empty for every other kind.
+	Proposal string
+	// PushMode is a TabKindDocs tab's proposal push mode, "auto" or "manual".
+	// Empty means auto.
+	PushMode string
 	// Conversation is the provider-specific id that resumes this tab's agent
 	// conversation exactly. Empty means recovery falls back to the provider's
 	// existing latest-session behavior.
@@ -230,15 +300,40 @@ type Tab struct {
 	// pins the branch tip at swap time, which is what makes per-agent attribution
 	// a checkable git range.
 	Handoffs []AgentHandoff
+	// Exit is the recorded finish of a process tab's command (#4479): the
+	// status and time af observed the pane dead. nil while the command is
+	// running, was never observed to exit, or the tab is not a process tab —
+	// a nil Exit never claims the command is still live, it claims nothing.
+	// It is what lets restore treat "session gone" as finished evidence
+	// instead of a command to re-execute.
+	Exit *TabExit
 	// tmux is the tab's tmux session. nil until the instance is started, and
 	// always nil for remote/hook-backed instances, which drive their agent
 	// session through hook commands rather than a local tmux session.
 	tmux *tmux.TmuxSession
+	// accountScope is the account af launched this tab's pane under, or "" when
+	// af launched it on the ambient identity or never recorded one (a row
+	// written before #4506). It is the persisted provenance that decides
+	// accountScopeProvenanceUnknown at load.
+	accountScope string
 	// accountScopeProvenanceUnknown marks a tmux-backed sibling reconstructed
-	// from disk. Its still-live pane may predate account scoping, so the first
-	// restore must replace it before the handle can be treated as scoped. Tabs
-	// created by this daemon leave it false and survive an agent-only respawn.
+	// from disk whose recorded launch account is not the session's account. Its
+	// still-live pane may predate account scoping, so the first restore must stop
+	// it before the handle can be treated as scoped. A tab af launched under the
+	// session's account leaves it false and survives restarts (#4506 review).
 	accountScopeProvenanceUnknown bool
+	// inert marks a process tab whose session restore found definitively
+	// absent. Nothing respawns a process tab, so it stays that way for this
+	// daemon's lifetime, and an account swap has no pane of it to observe
+	// (#4506 review).
+	inert bool
+}
+
+// siblingScopeUnknown decides accountScopeProvenanceUnknown for a sibling
+// rebuilt from its record: only a pane af did not record launching under the
+// session's current account needs the stop.
+func siblingScopeUnknown(sessionAccount, recordedScope string) bool {
+	return sessionAccount != "" && recordedScope != sessionAccount
 }
 
 // newAgentTab returns the single Agent-kind tab that wraps an instance's tmux
@@ -279,9 +374,49 @@ func newVSCodeTab() *Tab {
 	return &Tab{ID: newTabID(), Name: vscodeTabName, Kind: TabKindVSCode}
 }
 
+// newDocsTab returns a TabKindDocs tab for proposal slug. The caller sets a
+// unique name.
+func newDocsTab(slug string) *Tab {
+	return &Tab{ID: newTabID(), Name: docsTabName, Kind: TabKindDocs, Proposal: slug}
+}
+
+// tabKindVocabulary is the canonical TabKind ↔ name table, in enum order. It is
+// the SINGLE source of truth for those words: `tabs[].kind_name`
+// (session/state_names.go), `tab_kinds[].kind`, the `--kind` flag, and
+// CreateTabRequest.Kind all resolve through it, so the payload cannot spell a
+// kind one way in one array and another way eleven lines below (#3631).
+//
+// creatable marks the subset a client may NAME in a create request. Agent is not
+// creatable — a session's agent tab is made with the session — so offering it
+// would invite a control with no call behind it. Process has no `--kind`
+// spelling either: a process tab is what the default request makes when given a
+// command. Both still have a NAME, because both still appear in `tabs[].kind`
+// and a payload that refuses to spell a value it emits is the defect this table
+// closes.
+var tabKindVocabulary = []struct {
+	kind      TabKind
+	name      string
+	creatable bool
+}{
+	{TabKindAgent, agentTabName, false},
+	{TabKindShell, shellTabName, true},
+	{TabKindProcess, processTabName, false},
+	{TabKindWeb, webTabName, true},
+	{TabKindVSCode, vscodeTabName, true},
+	{TabKindDocs, docsTabName, true},
+}
+
+var tabKindNameByKind = func() map[TabKind]string {
+	out := make(map[TabKind]string, len(tabKindVocabulary))
+	for _, entry := range tabKindVocabulary {
+		out[entry.kind] = entry.name
+	}
+	return out
+}()
+
 // tabKindNames maps the CreateTabRequest.Kind / `--kind` wire value to the
-// TabKind it selects. It is the SINGLE source of truth for that vocabulary: the
-// CLI (api/sessions_tabs.go) validates against it and the daemon
+// TabKind it selects: the creatable half of tabKindVocabulary, inverted. The CLI
+// (api/sessions_tabs.go) validates against it and the daemon
 // (daemon/manager_tabs.go) dispatches on it, so the two can no longer drift into
 // the state where a kind the CLI accepts is one the daemon rejects.
 //
@@ -290,10 +425,23 @@ func newVSCodeTab() *Tab {
 // its own before consulting this map. "shell" is the canonical explicit spelling
 // for the same shell path Shell=true selects; "Terminal" remains its
 // presentation-only label (TabLabel), not a second wire identifier.
-var tabKindNames = map[string]TabKind{
-	"shell":  TabKindShell,
-	"web":    TabKindWeb,
-	"vscode": TabKindVSCode,
+var tabKindNames = func() map[string]TabKind {
+	out := make(map[string]TabKind, len(tabKindVocabulary))
+	for _, entry := range tabKindVocabulary {
+		if entry.creatable {
+			out[entry.name] = entry.kind
+		}
+	}
+	return out
+}()
+
+// TabKindName returns the wire name of a TabKind — the same word
+// `tab_kinds[].kind` and `--kind` use, for the kinds that have one there, and
+// the honest spelling of the two that do not (agent, process). It returns "" for
+// a value this binary does not recognize, so a record written by a newer af
+// reports no name rather than a wrong one.
+func TabKindName(k TabKind) string {
+	return tabKindNameByKind[k]
 }
 
 // ParseTabKindName resolves a `--kind` / CreateTabRequest.Kind wire value to its
@@ -321,7 +469,7 @@ func TabKindNameList() []string {
 // incompatible record degrades to a plain shell tab rather than an agent tab.
 func tabKindForData(k TabKind) TabKind {
 	switch k {
-	case TabKindAgent, TabKindShell, TabKindProcess, TabKindWeb, TabKindVSCode:
+	case TabKindAgent, TabKindShell, TabKindProcess, TabKindWeb, TabKindVSCode, TabKindDocs:
 		return k
 	default:
 		return TabKindShell
@@ -329,15 +477,18 @@ func tabKindForData(k TabKind) TabKind {
 }
 
 // TabLabel returns the presentation-only string a user SEES for a tab — its
-// display label. It is NEVER an identifier: no surface resolves a tab by it
-// (TabMatches keys on Name alone), which is exactly what frees it to be a
-// prettier, non-unique string than the canonical Name. Agent and shell tabs
+// display label. It is NEVER a persisted or wire identifier: TabMatches and the
+// name-based CLI verbs key on Name alone, which is exactly what frees the label
+// to be a prettier, non-unique string than the canonical Name. The TUI's
+// jump-to-tab prompt accepts the visible label as a UI-local alias. Agent and shell tabs
 // render fixed labels ("Agent", "Terminal") that are deliberately not their
-// names (`agent`/`shell`); every other kind shows its Name.
+// names (`agent`/`shell`). Web and VS Code tabs likewise use their proper display
+// labels when Name is empty or still carries the kind-string default written by
+// creation; an explicit custom name wins.
 //
-// This is the #1986 split: Name is the one handle a user types, the label is the
-// one string a user reads, and they are allowed to differ because the label
-// carries no identity. It lives beside the Tab type — not in the TUI — so the
+// This is the #1986 split: Name is the canonical handle, the label is the one
+// string a user reads, and they are allowed to differ because the label carries
+// no persisted identity. It lives beside the Tab type — not in the TUI — so the
 // definition of "what a user reads" sits next to Name, the definition of "what a
 // user types": whenever the two differ, TabIdentifiers surfaces the label in a
 // "no tab named …" error, so a user who read "Terminal" off the bar is told the
@@ -354,15 +505,20 @@ func TabLabel(t *Tab) string {
 	case TabKindShell:
 		return "Terminal"
 	case TabKindWeb:
-		if t.Name != "" {
+		if t.Name != "" && t.Name != webTabName {
 			return t.Name
 		}
 		return "Web"
 	case TabKindVSCode:
-		if t.Name != "" {
+		if t.Name != "" && t.Name != vscodeTabName {
 			return t.Name
 		}
 		return "VS Code"
+	case TabKindDocs:
+		if t.Name != "" && t.Name != docsTabName {
+			return t.Name
+		}
+		return "Docs"
 	default:
 		if t.Name != "" {
 			return t.Name
@@ -372,12 +528,12 @@ func TabLabel(t *Tab) string {
 }
 
 // TabMatches reports whether token identifies this tab. It keys on the canonical
-// Name ONLY: the display label (TabLabel) is presentation and is never an
-// identifier (#1986). A person who typed a label they read off the screen is not
-// matched here — accepting it would make two strings address one tab, the
-// ambiguity #1929/#1904 removed from the tab surface. The label is not a dead
-// end either: TabIdentifiers names it in the resulting "no tab named …" error,
-// so the user learns the real name to type (the discoverability half of #1984).
+// Name ONLY: the display label (TabLabel) is presentation and is never a CLI or
+// wire identifier (#1986). The TUI jump prompt deliberately offers the one
+// UI-local exception, resolving the visible label without changing TabMatches or
+// the public name contract. For name-based callers, TabIdentifiers includes a
+// differing label in the resulting "no tab named …" error so the user learns the
+// real name to type (the discoverability half of #1984).
 func TabMatches(t *Tab, token string) bool {
 	if t == nil || token == "" {
 		return false
@@ -460,11 +616,11 @@ func (i *Instance) tabIndexByIDLocked(id string) (int, bool) {
 
 // TabIdentifiers renders a tab as the strings that help a user address it in an
 // error: its canonical Name, plus the label the UI shows when that differs.
-// Because the label is presentation-only and never accepted (TabMatches keys on
-// Name), naming it here is what lets a user who read "Terminal" off the bar find
-// the `shell` they must type — the discoverability the #1986 split relies on in
-// place of the label alias. Used to make "no tab named X" list the valid options
-// instead of asserting an absence the user can see is false.
+// Because name-based CLI and wire callers accept only Name (TabMatches keys on
+// it), naming the label here lets a user who read "Terminal" off the bar find the
+// `shell` those callers require. The TUI jump prompt separately accepts the label
+// as a local alias. Used to make "no tab named X" list the valid options instead
+// of asserting an absence the user can see is false.
 func TabIdentifiers(t *Tab) string {
 	if t == nil {
 		return ""
@@ -573,6 +729,7 @@ func (i *Instance) appendPendingMetadataTabsLocked() {
 			// no id and must be addressable by a stable one from this load forward.
 			id = newTabID()
 		}
-		i.Tabs = append(i.Tabs, &Tab{ID: id, Name: td.Name, Kind: tabKindForData(td.Kind), URL: td.URL})
+		i.Tabs = append(i.Tabs, &Tab{ID: id, Name: td.Name, Kind: tabKindForData(td.Kind), URL: td.URL, Proposal: td.Proposal, PushMode: td.PushMode})
+		i.touchLocked()
 	}
 }

@@ -1,0 +1,106 @@
+# The daemon
+
+For anyone wondering what keeps running after they close the window. After this
+page you will know what the daemon owns, why there is exactly one writer of that
+state, and the few commands that manage its lifecycle.
+
+Behind the TUI is a long-lived background process: the **Agent Factory daemon**.
+It is the piece that keeps sessions running across restarts (local sessions are re-adopted, ssh and sandbox sessions reattach to their agent-server, and docker and hook sessions recover by re-provisioning from their pushed branch), keeps automations firing,
+and guarantees the TUI, the CLI, and the HTTP API never disagree about what
+exists. You rarely interact with it directly, but understanding it explains a lot
+about how `af` behaves.
+
+## The single-writer model
+
+The daemon is the **single writer and owner of all state**. Session records,
+task definitions, the worktrees on disk — the daemon performs every mutation.
+The TUI and the `af` CLI are pure clients: they render a read-only projection of
+the daemon's state and send it RPCs to *request* changes; they never write state
+files themselves.
+
+This is a deliberate design (the "#960 single-writer model"), and it's worth the
+paragraph because it's why `af` doesn't corrupt itself:
+
+- **One writer, no clobbering.** When two front-ends could both write the same
+  state file, the last writer silently wins and the other's change vanishes.
+  With a single writer, that entire class of bug cannot occur — every change is
+  serialized through the daemon.
+- **One source of truth.** The sidebar you see, the JSON `af sessions list`
+  prints, and the HTTP API's `Snapshot` all read the *same* in-memory state. They
+  can't drift, because there is only one authority.
+- **Clients can come and go.** Close the TUI and your sessions keep running.
+  Reopen it and it reconnects to the daemon's live state — nothing was lost,
+  because the TUI was never holding the state in the first place.
+
+## What the daemon does
+
+- **Keeps sessions alive.** If a local session's process dies unexpectedly, the
+  daemon re-spawns it in place — the worktree and record are preserved, so the
+  agent comes back where it was. An off-box (docker/ssh/sandbox/hook) session that
+  dies is re-provisioned from its pushed branch instead, as a fresh agent. The always-on [root agent](configuration.md#root-agents-always-ensured)
+  is re-created rather than re-spawned — its record is replaced, but its recorded
+  conversation and its tabs are carried across, so it comes back on the same
+  context with the same tab strip. When that conversation cannot be resumed the
+  root still comes back, on a fresh context — an always-on root that exists
+  outranks one that keeps its history — and every rail marks the replacement's
+  row with a one-shot note (`fresh context`, or `context unknown` when af cannot
+  tell) that clears the first time you open the pane; the application log says
+  which happened.
+- **Runs the scheduler.** All [tasks](tasks.md) — cron schedules and
+  watch-script triggers — are hosted by the daemon. It arms the timers, watches
+  the scripts, and delivers prompts on time, whether or not a TUI is open.
+- **Handles usage limits.** With auto-resume enabled, the daemon parks a session
+  that hit a `claude`, `codex`, or `devin` usage limit and resumes it — when the
+  banner's reset window elapses, or on the `limit_retry_interval` cadence for a
+  banner that states no reset time (every `devin` limit) —
+  see [Usage limits](usage-limits.md).
+- **Serves the HTTP/JSON API.** The daemon exposes every session and task
+  operation over a local Unix socket — see the
+  [HTTP API reference](reference/api.md).
+
+## Lifecycle
+
+The daemon starts **on demand** on the default local target: a bare `af`
+launch starts it — the launch kicks a background ensure when an enabled task
+exists so cron schedules are evaluated promptly, and the TUI ensures it on
+its first control call. `af` commands that need a live daemon ensure one when
+they execute, while read-only listings like `af sessions list` deliberately
+do not spawn one — they fall back to disk. With `--daemon-url`/`AF_DAEMON_URL`,
+nearly every verb dials the remote daemon, which must already be running:
+`af sessions` (with a few per-verb exceptions), `af tasks`,
+`af projects add`/`rebind`/`delete`/`list`, `af quota`, and global `config`
+writes all follow the target and never fall back to the local socket (see
+[remote daemons](cli.md#remote-daemons)).
+For interactive use you usually don't have to think about it at all.
+
+To keep tasks and sessions running across logouts and reboots, install the
+daemon's autostart unit once:
+
+```bash
+af daemon install     # systemd user service on Linux, launchd agent on macOS
+af daemon status      # liveness, supervision ownership, and config freshness
+af daemon restart     # restart the daemon process; local sessions are re-adopted
+af daemon uninstall   # remove the autostart unit
+```
+
+Because the daemon owns live state, you don't stop it by force while sessions
+are running; let `af` manage its lifecycle. `af daemon restart` restarts only
+the daemon process and re-adopts existing local tmux sessions from persisted
+state; ssh and sandbox sessions reattach to their running agent-server, and docker
+and hook sessions recover by re-provisioning.
+`af daemon status` is the right tool when you want to know whether it's up,
+whether the installed unit actually owns the responder, whether config edits
+have reached it, and where its sockets are. Those checks are read-only; an
+unavailable manager or older daemon is reported as unknown rather than guessed.
+
+## Sockets
+
+The daemon listens on two local Unix sockets under `$AGENT_FACTORY_HOME`
+(default `~/.agent-factory`): an internal control socket the TUI and CLI use, and
+the HTTP/JSON socket (`daemon-http.sock`) for the public API. Both are
+owner-only (`0600`). It also binds TCP listeners: the web listener on
+`network.listen_addr` (default `127.0.0.1:8443`) serves the bundled web client
+and the same HTTP API — set the key to `""` to turn it off — and, when
+`network.preview_listen_addr` is set (empty by default), a per-tab preview
+listener that hosts web-tab previews only. See the
+[HTTP API guide](http-api.md) for the transport and auth details.

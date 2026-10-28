@@ -5,12 +5,12 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 )
 
 // SidebarProject is one row of the Projects section: a repo af has seen, with
@@ -34,18 +34,18 @@ type SidebarProject struct {
 }
 
 // projectsTitleStyle / projectsTitleDimStyle paint the section header — the
-// accent when the section holds focus, the muted foreground when it does not —
+// underline when the section holds focus, plain ink when it does not —
 // mirroring the Automations header so the two bottom sections read as peers.
 var projectsTitleStyle = lipgloss.NewStyle().
-	Bold(true).
-	Foreground(AccentColor)
+	Bold(true).Underline(true).
+	Foreground(activeTheme.Ink)
 
 var projectsTitleDimStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(activeTheme.ForegroundMuted)
+	Foreground(activeTheme.Ink)
 
 var projectsHintStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundDim)
+	Foreground(activeTheme.InkMuted)
 
 // projectRowStyle / projectRowActiveStyle / projectRowSelectedStyle render the
 // Projects rows: the plain row, the active (scoped-to) project's accent marker,
@@ -149,6 +149,9 @@ func (p *ProjectsPane) SetProjects(projects []SidebarProject) bool {
 // Projects returns the current row list (test/inspection helper).
 func (p *ProjectsPane) Projects() []SidebarProject { return p.projects }
 
+// Degraded reports an unavailable registry, not an empty one.
+func (p *ProjectsPane) Degraded() bool { return p.degraded }
+
 // SetDegraded records whether the project registry read failed (#3298), so
 // the section says the list may be incomplete instead of presenting the
 // remaining discovery sources as the whole world. Reports whether the flag
@@ -239,34 +242,40 @@ func (p *ProjectsPane) ScrollDown() {
 
 // projectsSwitchHint is the affordance suffix on the section header: the key
 // that switches to the cursor row, kept visible down to the rail minimum.
-func projectsSwitchHint() string { return "· enter switch" }
+//
+// It reads KeySwitchProjectRow — "the Projects-section display alias of Enter",
+// which exists for exactly this — off the generated binding table rather than
+// spelling the key out, so a [keys] rebind surfaces here as it does everywhere
+// else (#1026). The literal "enter switch" it used to render disagreed with the
+// bottom menu, which has always drawn the same action from the same binding as
+// "↵ switch" (ui/menu.go projectsMenuOptions) — the header and the footer named
+// one action two ways in one frame, which is the #2580 failure mode.
+func projectsSwitchHint() string { return railActionHint(keys.KeySwitchProjectRow, "switch") }
 
-// titleLine renders the section header width-aware: the switch affordance is the
-// last thing cut, so the key to switch stays visible even at the 22-col rail
-// minimum, exactly as the Automations header keeps its manage affordance.
-func (p *ProjectsPane) titleLine(name string, nameStyle lipgloss.Style) string {
-	w := p.rect.W
-	const shortName = " Projects "
-	// No leading pad: every `name` passed in already ends with a space, exactly
-	// as the Automations header's does, and adding another produced the double
-	// space the two headers showed side by side in one frame (#2580).
-	hint := projectsSwitchHint() + " "
-	if runewidth.StringWidth(name+hint) <= w {
-		return nameStyle.Render(name) + projectsHintStyle.Render(hint)
-	}
-	if runewidth.StringWidth(shortName+hint) <= w {
-		return nameStyle.Render(shortName) + projectsHintStyle.Render(hint)
-	}
-	return nameStyle.Render(fitLine(name, w))
+// titleLine renders the section header through the shared rail ladder
+// (ui/rail_header.go). The switch affordance is hints[0], so it is the last
+// thing cut — which is what this comment has always claimed and what the code
+// did not do (#3642).
+//
+// The old ladder swapped in a count-free `" Projects "` short name at 25-28
+// columns and then, below that, kept the whole name and dropped the hint
+// instead. So the count was shown at 22-24, gone at 25-28, and back at 29+: a
+// wider rail said LESS. The shared ladder shrinks the noun beside an intact
+// count rather than swapping in a shorter name, which is what makes it
+// monotonic.
+func (p *ProjectsPane) titleLine(header railHeader, nameStyle lipgloss.Style) string {
+	return railTitleLine(header, p.rect.W, nameStyle, projectsHintStyle,
+		railHintSeparator+projectsSwitchHint(),
+	)
 }
 
-// projectRow renders one project row: "● name (N)" for the active project (the
-// "●" marker in the accent color), "  name (N)" for the rest. The focused
+// projectRow renders one project row: "▹ name (N)" for the active project (the
+// "▹" marker in the accent color), "  name (N)" for the rest. The focused
 // cursor row paints on the selection background so the current pick stands out.
 func (p *ProjectsPane) projectRow(proj SidebarProject, selected bool) string {
 	marker := "  "
 	if proj.Active {
-		marker = projectRowActiveStyle.Render("●") + " "
+		marker = projectRowActiveStyle.Render("▹") + " "
 	}
 	name := proj.Name
 	if name == "" {
@@ -276,10 +285,14 @@ func (p *ProjectsPane) projectRow(proj SidebarProject, selected bool) string {
 	// The marker occupies 2 cells; fit the label into the rest of the row.
 	label = fitLine(label, p.rect.W-2)
 	if selected {
-		return marker + projectRowSelectedStyle.Render(label)
+		cursor := "▸ "
+		if proj.Active {
+			cursor = "▹ "
+		}
+		return SelectionMarker(cursor) + projectRowSelectedStyle.Render(label)
 	}
 	if proj.Active {
-		return marker + projectRowActiveStyle.Render(label)
+		return marker + projectRowStyle.Bold(true).Render(label)
 	}
 	return marker + projectRowStyle.Render(label)
 }
@@ -317,24 +330,27 @@ func (p *ProjectsPane) String() string {
 			count += "?"
 		}
 		return layout.ClampToRect(
-			p.titleLine(fmt.Sprintf(" Projects: %s ", count), style), p.rect)
+			p.titleLine(railHeader{noun: "Projects:", counts: count}, style), p.rect)
 	}
 
 	nameStyle := projectsTitleDimStyle
 	if p.focused {
 		nameStyle = projectsTitleStyle
 	}
-	title := p.titleLine(fmt.Sprintf(" Projects (%d) ", len(p.projects)), nameStyle)
+	title := p.titleLine(railHeader{
+		noun:   "Projects",
+		counts: fmt.Sprintf("(%d)", len(p.projects)),
+	}, nameStyle)
 	lines := []string{title}
 	if p.degraded {
 		// The registry read failed, so the rows below may be missing every
 		// registered sessionless project — say so instead of rendering the
 		// remaining sources as a complete list (#3298). This row also stands
-		// in for the empty-state line: "no other projects yet" would be a
+		// in for the empty-state line: "No other projects yet" would be a
 		// claim the failed read cannot support.
-		lines = append(lines, projectsHintStyle.Render(fitLine("  registry unreadable · list may be incomplete", p.rect.W)))
+		lines = append(lines, projectsHintStyle.Foreground(activeTheme.Dead).Render(fitLine("  registry unreadable · list may be incomplete", p.rect.W)))
 	} else if len(p.projects) == 0 {
-		lines = append(lines, projectRowStyle.Render(fitLine("  no other projects yet", p.rect.W)))
+		lines = append(lines, projectRowStyle.Render(fitLine("  No other projects yet", p.rect.W)))
 	}
 
 	// Reserve the last rail row as a blank bottom margin so the workspace frame's

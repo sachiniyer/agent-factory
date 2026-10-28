@@ -209,10 +209,49 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 	}
 }
 
-func TestConfigSetHelpListsEveryProjectStructuredForm(t *testing.T) {
-	want := "(default_program, program_overrides, program_overrides.<agent>, root_agent, branch_prefix, on_archive_command)"
+func TestConfigSetHelpListsEveryProjectAdmittedKey(t *testing.T) {
+	want := "(default_program, program_overrides, program_overrides.<agent>, default_accounts, " +
+		"default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, " +
+		"limit_account_candidates)"
 	if !strings.Contains(configSetCmd.Long, want) {
-		t.Fatalf("config set help omits a valid per-project structured form; want %q in:\n%s", want, configSetCmd.Long)
+		t.Fatalf("config set help omits a valid per-project key form; want %q in:\n%s", want, configSetCmd.Long)
+	}
+	// The parenthetical enumerates every key the manifest admits to the personal
+	// per-project layer — the same set resolveProjectSettable enforces. Check the
+	// parenthetical itself, not the whole Long (an admitted key already appears in
+	// the global "Settable keys" list, so a Long-wide search can never catch one
+	// missing here), and compare both directions at top-level-key granularity so a
+	// key that loses the layer cannot linger in help (#3869 added
+	// limit_account_candidates to the layer and this list lagged).
+	start := strings.Index(configSetCmd.Long, "are accepted there\n(")
+	if start < 0 {
+		t.Fatalf("config set help lost its per-project admission parenthetical:\n%s", configSetCmd.Long)
+	}
+	rest := configSetCmd.Long[start+len("are accepted there\n("):]
+	end := strings.Index(rest, ")")
+	if end < 0 {
+		t.Fatalf("config set help lost its per-project admission parenthetical:\n%s", configSetCmd.Long)
+	}
+	listed := map[string]bool{}
+	for _, tok := range strings.Split(rest[:end], ", ") {
+		top, _, _ := strings.Cut(tok, ".")
+		listed[top] = true
+	}
+	admitted := map[string]bool{}
+	for _, entry := range config.Manifest() {
+		if entry.Sources.Has(config.SourceProjectPersonal) {
+			admitted[entry.Key] = true
+		}
+	}
+	for key := range admitted {
+		if !listed[key] {
+			t.Errorf("config set help's per-project list omits admitted key %q", key)
+		}
+	}
+	for key := range listed {
+		if !admitted[key] {
+			t.Errorf("config set help's per-project list claims key %q the manifest does not admit per project", key)
+		}
 	}
 }
 
@@ -222,6 +261,17 @@ func TestConfigSetHelpQualifiesStructuredCommentPreservation(t *testing.T) {
 	}
 	if strings.Contains(configSetCmd.Long, "every comment, blank line, section header, and key ordering is preserved") {
 		t.Fatalf("config set help still promises to preserve comments inside the replaced value:\n%s", configSetCmd.Long)
+	}
+}
+
+func TestConfigSetHelpUsesSentenceCaseSecurityWarning(t *testing.T) {
+	if !strings.Contains(configSetCmd.Long, "warning: a non-loopback address") {
+		t.Errorf("config set help must use the established lowercase warning marker:\n%s", configSetCmd.Long)
+	}
+	for _, shouted := range []string{"DANGER:", "defaults to FALSE"} {
+		if strings.Contains(configSetCmd.Long, shouted) {
+			t.Errorf("config set help contains caps-shouting %q:\n%s", shouted, configSetCmd.Long)
+		}
 	}
 }
 
@@ -713,7 +763,7 @@ func TestConfigSetEchoesKeyValueAndRoundTrips(t *testing.T) {
 	}
 
 	// The atomic write must not strand its temp file next to the real one.
-	// AtomicWriteFile stages through "<name>.tmp.*" (config/filelock.go) and
+	// AtomicWriteFile stages through "<name>.tmp.*" (config/atomicwrite.go) and
 	// renames; a surviving stage file means the rename never happened. The
 	// config lock file and the relocated application log are expected
 	// neighbours in an AGENT_FACTORY_HOME, so only the stage pattern is checked.
@@ -801,5 +851,41 @@ func TestConfigListJSONEnvelope(t *testing.T) {
 	}
 	if !haveEmptyString || !haveNilList {
 		t.Fatalf("config list --json changed typed empty values: %s", out.String())
+	}
+}
+
+// TestPrintListenerAddrNamesWhereTheDaemonIsListening pins the one line #3722
+// adds to `af config set` / `af config unset`: after a write that moved a
+// listener, the operator is told where the daemon is now serving instead of being
+// left to rediscover it — most sharply when that write cost them the connection
+// they were talking over.
+//
+// The address is the daemon's, verbatim. This surface computes nothing: a client
+// that inferred "the connection dropped on a listener key, so it probably moved
+// to what I typed" would be asserting a daemon state it cannot observe, which is
+// exactly why the address rides on the reply.
+func TestPrintListenerAddrNamesWhereTheDaemonIsListening(t *testing.T) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	printListenerAddr(cmd, "127.0.0.1:9443")
+	if got := out.String(); got != "daemon now listening at 127.0.0.1:9443\n" {
+		t.Fatalf("unexpected line: %q", got)
+	}
+}
+
+// TestPrintListenerAddrSaysNothingWithoutAnAddress: every non-listener key, and a
+// listener that is not accepting at all (network.listen_addr = ""), report no
+// address — there is none to name, and the effect notice has already said what
+// happened. An older daemon that does not send the field lands here too.
+func TestPrintListenerAddrSaysNothingWithoutAnAddress(t *testing.T) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	printListenerAddr(cmd, "")
+	if got := out.String(); got != "" {
+		t.Fatalf("expected no output, got %q", got)
 	}
 }

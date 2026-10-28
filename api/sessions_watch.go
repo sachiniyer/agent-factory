@@ -47,7 +47,7 @@ func classifyWatch(d *session.InstanceData) (watchOutcome, string) {
 	activity, reason := session.ClassifyActivity(*d)
 	switch activity {
 	case session.ActivityIdle:
-		return watchReady, reason
+		return watchReady, "idle · awaiting input"
 	case session.ActivityTerminal:
 		return watchTerminal, reason
 	}
@@ -100,7 +100,17 @@ func watchForReady(d watchDeps, title string) (*session.InstanceData, error) {
 			return data, fmt.Errorf("timed out after %s waiting for session %q to become idle (still %s)",
 				d.timeout, title, describeWatchState(data))
 		}
-		d.sleep(d.interval)
+		// Never sleep past the deadline. --interval and --timeout are validated
+		// independently, so `--timeout 5s --interval 1h` is accepted — and an
+		// unconditional sleep would poll once, block for an hour, and then report a
+		// five-second timeout, making the advertised bound a fiction.
+		wait := d.interval
+		if d.timeout > 0 {
+			if remaining := start.Add(d.timeout).Sub(d.now()); remaining < wait {
+				wait = remaining
+			}
+		}
+		d.sleep(wait)
 	}
 }
 
@@ -172,38 +182,57 @@ func validateWatchFlags(interval, timeout time.Duration) error {
 // same-titled session in a different repo is never watched by mistake. It
 // prefers the daemon's live snapshot and falls back to a scoped disk scan when
 // no daemon is reachable, mirroring getSessionByTitle (#1029 PR 2).
-func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, error) {
+//
+// The second return is getSessionByTitle's ambiguity-widening notice, passed
+// through unchanged; a scoped lookup never runs that check (a single repo
+// cannot be cross-project ambiguous), so it always returns empty.
+//
+// When the daemon dropped THIS repo at startup due to a corrupted instances.json
+// (#603), a miss refuses naming the repo rather than reporting a clean
+// not-found, mirroring the scoped disk path (loadRepoInstanceData's parse-error
+// refusal) — a session hidden behind the corrupted file is not reported absent.
+func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, string, error) {
 	if repoID == "" {
 		return getSessionByTitle(title)
 	}
-	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{RepoID: repoID})
+	data, skipped, fallBack, err := snapshotRead(daemon.SnapshotRequest{RepoID: repoID})
+	if err == nil {
+		for i := range data {
+			if data[i].Title == title {
+				return &data[i], "", nil
+			}
+		}
+		// Miss within the scope. The daemon reports only this repo's drop
+		// (SkippedRepos is scoped to RepoID), so a non-empty set means THIS repo
+		// was dropped at startup and may be hiding the title.
+		if len(skipped) > 0 {
+			return nil, "", skippedReposError(skipped)
+		}
+		return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
+	}
+	// Remote target: no local disk fallback; surface the daemon error (e.g. a
+	// 401 from a bad token) instead of masking it as "instance not found" via a
+	// same-machine disk scan (#1679).
+	if !fallBack {
+		return nil, "", err
+	}
+	data, err = diskListSessions(repoID)
 	if err != nil {
-		// Remote target: no local disk fallback; surface the daemon error (e.g. a
-		// 401 from a bad token) instead of masking it as "instance not found" via a
-		// same-machine disk scan (#1679).
-		if !fallBack {
-			return nil, err
-		}
-		data, err = diskListSessions(repoID)
-		if err != nil {
-			return nil, err
-		}
+		return nil, "", err
 	}
 	for i := range data {
 		if data[i].Title == title {
-			return &data[i], nil
+			return &data[i], "", nil
 		}
 	}
-	return nil, fmt.Errorf("session %q %w", title, errTitleNotFound)
+	return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 }
 
 var sessionsWatchCmd = &cobra.Command{
 	Use:   "watch [title]",
-	Short: "Block until a session goes idle, or until any session in the fleet changes state",
-	Long: `Watch a session and return when its agent finishes working: exit 0 the moment
-the session goes IDLE (the agent stopped working and is awaiting input), so an
-operator or root agent can dispatch a session and be notified on completion
-instead of polling 'af sessions preview'.
+	Short: "Wait for idle, or a fleet stop-state change or disappearance",
+	Long: `Watch a session and exit 0 when its agent is idle and awaiting input.
+Idle does not mean the work is complete.
 
 Polls the daemon's snapshot (the same read path as 'af sessions get') every
 --interval (default 2s). Exits non-zero if the session reaches a terminal state
@@ -215,8 +244,8 @@ keep the watch waiting.
 By default prints a concise line on transition; with --json emits the final
 session record. Honors --repo to scope the title lookup to one repository.
 
-With NO title (or --all) it watches every session in scope and returns when the
-first one CHANGES STATE, printing which and why. That form is edge-triggered: the
+With NO title (or --all) it watches every session in scope and returns on the
+first stop-state change or disappearance, printing which session and why. It is edge-triggered: the
 first poll establishes a baseline and reports nothing, so a session that was
 already idle before you called does not fire. Pass --include-current to report
 those too, for a driver that wants a starting snapshot; that snapshot omits
@@ -257,7 +286,15 @@ idle, because an idle report tells a driver to act.`,
 		}
 
 		data, err := watchForReady(watchDeps{
-			get:      func(t string) (*session.InstanceData, error) { return getSessionByTitleInScope(repoID, t) },
+			// The ambiguity-widening notice is discarded here on purpose: #3511
+			// closed this hole for `sessions get`'s payload, not `watch`'s — an
+			// unscoped watch re-resolves the title every poll (up to ~900 times at
+			// the default timeout), and folding a per-poll notice into a single
+			// final JSON record needs its own design, not a drive-by here.
+			get: func(t string) (*session.InstanceData, error) {
+				data, _, err := getSessionByTitleInScope(repoID, t)
+				return data, err
+			},
 			interval: watchIntervalFlag,
 			timeout:  watchTimeoutFlag,
 			now:      time.Now,
@@ -270,7 +307,7 @@ idle, because an idle report tells a driver to act.`,
 		if envelopeOutput {
 			return jsonOut(data)
 		}
-		fmt.Printf("session %q is idle (ready for review)\n", title)
+		fmt.Printf("session %q is idle · awaiting input\n", title)
 		return nil
 	},
 }

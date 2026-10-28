@@ -282,6 +282,7 @@ func TestTaskPaneWatchTaskListFooterOmitsRunNow(t *testing.T) {
 		Enabled:  true,
 	}})
 
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
 	lines := strings.Split(tp.String(), "\n")
 	footer := lines[len(lines)-1]
 	assert.NotContains(t, footer, "run now",
@@ -309,11 +310,20 @@ func TestTaskPaneWatchTaskEditFooterOmitsRunNow(t *testing.T) {
 	assert.NotContains(t, out, "r run",
 		"watch-task editor must not advertise a manual run that always fails")
 
-	// Pressing r inside the editor surfaces the reason inline rather than
-	// queuing a doomed run.
+	// At the focused Name field r TYPES (a watch task's run is unreachable
+	// from a text field, and the footer already omits "r run"); it neither
+	// queues a doomed run nor surfaces the refusal.
 	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}))
 	assert.False(t, tp.HasPendingTrigger())
-	assert.Contains(t, tp.String(), "not on manual trigger",
+	assert.Contains(t, tp.editName.Value(), "r")
+
+	// r as a verb — at a selector stop — refuses the doomed manual run
+	// inline rather than queuing it.
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // Name -> Trigger
+	assert.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}))
+	assert.False(t, tp.HasPendingTrigger(),
+		"watch tasks must not queue a manual run")
+	assert.Contains(t, tp.String(), "not manually",
 		"r on a watch task must explain why manual run is unavailable")
 }
 
@@ -432,7 +442,7 @@ func TestTaskPaneCreateModeSelectorDefaultsToConfigDefault(t *testing.T) {
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.True(t, tp.HasPendingCreate(), "submit should mark a pending create")
-	_, _, _, _, _, _, program := tp.ConsumePendingCreate()
+	program := tp.ConsumePendingCreate().Program
 	assert.Equal(t, "", program, "default selector option must persist an empty Program")
 }
 
@@ -453,7 +463,7 @@ func TestTaskPaneCreateModeSelectorPicksCanonicalAgent(t *testing.T) {
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.True(t, tp.HasPendingCreate(), "submit should mark a pending create")
-	_, _, _, _, _, _, program := tp.ConsumePendingCreate()
+	program := tp.ConsumePendingCreate().Program
 	assert.Equal(t, "claude", program, "selector must persist the canonical agent name")
 }
 
@@ -580,47 +590,8 @@ func TestTaskPaneEnterEditSelectedThenEscLeavesNoDirty(t *testing.T) {
 	assert.Empty(t, tp.ConsumeDirty(), "no task should be persisted after a no-op open")
 }
 
-// TestTaskPaneEditModeKeepsListActionsReachable is the #1288 guard: the
-// #1249 one-step edit flow must not hide the documented list verbs. Opening a
-// selected task directly into edit mode still lets the user run, toggle, or
-// delete that selected task without first knowing to press Esc.
-func TestTaskPaneEditModeKeepsListActionsReachable(t *testing.T) {
-	tp := NewTaskPane()
-	tp.SetTasks([]task.Task{{
-		ID:          "abc",
-		Name:        "nightly",
-		Prompt:      "do it",
-		CronExpr:    "* * * * *",
-		ProjectPath: newGitRepo(t),
-		Program:     "claude",
-		Enabled:     true,
-	}})
-	tp.SetFocus(true)
-	tp.EnterEditSelected()
-	require.True(t, tp.IsEditing())
-
-	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
-	require.True(t, tp.HasPendingTrigger(), "r must remain reachable from edit mode")
-	pending := tp.ConsumePendingTrigger()
-	require.NotNil(t, pending)
-	assert.Equal(t, "abc", pending.ID)
-	assert.True(t, tp.IsEditing(), "run-now leaves the edit form in place until the app consumes it")
-
-	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	require.True(t, tp.IsEditing(), "toggle should not kick the user out of edit")
-	require.True(t, tp.IsDirty(), "toggle from edit mode marks the task dirty")
-	assert.False(t, tp.GetTasks()[0].Enabled)
-	dirty := tp.ConsumeDirty()
-	require.Len(t, dirty, 1)
-	assert.Equal(t, "abc", dirty[0].ID)
-
-	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
-	assert.False(t, tp.IsEditing(), "deleting the task being edited returns to list mode")
-	assert.Empty(t, tp.GetTasks())
-	deleted := tp.ConsumeDeleted()
-	require.Len(t, deleted, 1)
-	assert.Equal(t, "abc", deleted[0].ID)
-}
+// TestTaskPaneEditModeKeepsListActionsReachable moved to
+// task_pane_edit_verbs_test.go alongside the edit-mode verb/typing coverage.
 
 // TestTaskPaneEditModeCtrlCCancels is the regression guard for #526: Ctrl+C
 // inside the edit form must cancel the edit (matching Esc) instead of being
@@ -883,7 +854,8 @@ func TestTaskPaneCreateModeInactiveTriggerNotSaved(t *testing.T) {
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.True(t, tp.HasPendingCreate(), "a valid watch task must submit")
-	_, _, cron, watchCmd, _, _, _ := tp.ConsumePendingCreate()
+	draft := tp.ConsumePendingCreate()
+	cron, watchCmd := draft.Cron, draft.WatchCmd
 	assert.Equal(t, "", cron, "the inactive cron buffer must not be saved")
 	assert.Equal(t, "tail -F log", watchCmd)
 }
@@ -952,7 +924,8 @@ func TestTaskPaneCreateModeWatchTask(t *testing.T) {
 
 	assert.True(t, tp.HasPendingCreate(), "a watch task with an empty prompt is valid")
 	assert.Equal(t, "", tp.editError)
-	_, prompt, cron, watchCmd, targetSession, _, _ := tp.ConsumePendingCreate()
+	draft := tp.ConsumePendingCreate()
+	prompt, cron, watchCmd, targetSession := draft.Prompt, draft.Cron, draft.WatchCmd, draft.TargetSession
 	assert.Equal(t, "", prompt)
 	assert.Equal(t, "", cron)
 	assert.Equal(t, "gh-issue-watch.sh", watchCmd)
@@ -1131,11 +1104,11 @@ func TestTaskPaneListRendersWatchStatus(t *testing.T) {
 		wantDetail    string // short status on the selected row's detail line
 	}{
 		{"enabled fresh", true, "", "[watching]", ""},
-		{"enabled delivering", true, "sent", "[watching]", "(sent)"},
-		{"crash loop", true, "errored", "[errored]", "(errored)"},
-		{"crash loop with summary", true, "errored: exit status 1: WARN lock held", "[errored]", "(errored)"},
-		{"clean exit", true, "stopped", "[stopped]", "(stopped)"},
-		{"disabled", false, "sent", "[stopped]", "(sent)"},
+		{"enabled delivering", true, "sent", "[watching]", "· sent"},
+		{"crash loop", true, "errored", "[errored]", "· errored"},
+		{"crash loop with summary", true, "errored: exit status 1: WARN lock held", "[errored]", "· errored"},
+		{"clean exit", true, "stopped", "[stopped]", "· stopped"},
+		{"disabled", false, "sent", "[stopped]", "· sent"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1359,12 +1332,19 @@ func TestTaskPaneListCompactFooterShowsRunNow(t *testing.T) {
 		Enabled:  true,
 	}})
 
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
 	lines := strings.Split(tp.String(), "\n")
 	assert.Contains(t, lines[len(lines)-1], "r run now",
 		"compact task-list footer must keep the documented run-now affordance discoverable")
 }
 
-func TestTaskPaneEditModeCompactActionFooterShowsQuitKey(t *testing.T) {
+// TestTaskPaneEditModeCompactActionFooterKeepsLiveKeys pins the compact edit
+// footer to the keys that actually fire there (#5538): a text stop names the
+// verb path behind "tab →" — the glyphs type into the field (#4838), so the
+// run-now path stays discoverable (#1288) without reading as a live key, and
+// the quit key is gated on !IsEditing (#1961) — while a selector stop
+// advertises the abbreviated verbs directly.
+func TestTaskPaneEditModeCompactActionFooterKeepsLiveKeys(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
 
@@ -1382,9 +1362,17 @@ func TestTaskPaneEditModeCompactActionFooterShowsQuitKey(t *testing.T) {
 	tp.SetFocus(true)
 	tp.EnterEditSelected()
 
-	lines := strings.Split(tp.String(), "\n")
-	assert.Contains(t, lines[len(lines)-1], "esc", "list escape remains visible")
-	assert.Contains(t, lines[len(lines)-1], "q quit", "quit key stays visible on the pinned edit action footer")
+	lastLine := func() string {
+		lines := strings.Split(stripANSI(tp.String()), "\n")
+		return lines[len(lines)-1]
+	}
+	assert.Equal(t, "tab → r/x/D · esc list", strings.TrimSpace(lastLine()),
+		"a text stop names the verb path behind tab, keeping esc's label")
+	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // Name -> Trigger selector
+	row := lastLine()
+	assert.Contains(t, row, "esc list", "list escape remains visible on the compact verb row")
+	assert.Contains(t, row, "x toggle", "live verbs stay advertised where they fire")
+	assert.NotContains(t, row, "quit", "the quit key never fires inside the form (#1961)")
 }
 
 // TestTaskPaneEditFormClampsToHeightWithFocusInView pins #1098 finding 1: at
@@ -1426,10 +1414,17 @@ func TestTaskPaneEditFormClampsToHeightWithFocusInView(t *testing.T) {
 
 // TestTaskPaneEditFormUnclampedWhenItFits: at normal sizes the form renders
 // unchanged — no window, no more-markers.
+//
+// 25, measured, not guessed: the On-done row (#2595) added a line to the form,
+// which moved the unclamped floor for this pane from 23 to 25. The two-row jump
+// is the prompt textarea, sized at height/4, crossing its own step at the same
+// time. A pane 25 tall is the task pane's share of a ~42-row terminal, and every
+// height below it still renders — clamped and scrolled, which is what #1098
+// built the window for.
 func TestTaskPaneEditFormUnclampedWhenItFits(t *testing.T) {
 	repo := newGitRepo(t)
 	tp := NewTaskPane()
-	tp.SetSize(80, 24)
+	tp.SetSize(80, 25)
 	tp.EnterCreateMode(repo)
 
 	out := tp.String()

@@ -2,8 +2,8 @@ package daemon
 
 import (
 	"fmt"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -96,7 +96,7 @@ func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance
 	}
 	repoStartLock.Unlock()
 	if err != nil {
-		log.WarningLog.Printf("failed to persist kill tombstone for %q: %v", d.Title, err)
+		m.warn().Printf("failed to persist kill tombstone for %q: %v", d.Title, err)
 		return err
 	}
 	return nil
@@ -134,16 +134,16 @@ func (m *Manager) noteKillRetryFailure(key, title string, err error) {
 
 	switch {
 	case retired && escalate:
-		log.ErrorLog.Printf("finishing kill of %q: this cleanup cannot be completed by retrying it, so af has stopped trying "+
+		m.err().Printf("finishing kill of %q: this cleanup cannot be completed by retrying it, so af has stopped trying "+
 			"after %d attempt(s). The record is KEPT so nothing is silently orphaned — resolve the cause and restart the daemon, "+
 			"or kill the session again to retry: %v", title, failures, err)
 	case retired:
 		// Already reported; stay silent rather than repeat it.
 	case escalate:
-		log.ErrorLog.Printf("finishing kill of %q failed %d consecutive times; the cause looks persistent — "+
+		m.err().Printf("finishing kill of %q failed %d consecutive times; the cause looks persistent — "+
 			"retrying every %s: %v", title, failures, session.CleanupRetrySettledInterval(), err)
 	default:
-		log.WarningLog.Printf("finishing kill of %q: not deleting the record yet (retrying): %v", title, err)
+		m.warn().Printf("finishing kill of %q: not deleting the record yet (retrying): %v", title, err)
 	}
 }
 
@@ -212,7 +212,7 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		return
 	}
 
-	log.WarningLog.Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
+	m.warn().Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
 	// Re-establish missing repo-gone cleanup authorization before retrying the
 	// teardown (#3278 review). The tombstone may have committed while the
 	// origin was present and the origin deleted before this retry; the
@@ -240,7 +240,15 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	restoreCheckpoint := instance.SetRepoGoneFinalizationCheckpoint(func() error {
 		return m.persistInstanceErr(repoID, instance)
 	})
-	teardownErr := instance.Kill()
+	// Trusting: this retry sits inside killsInFlight + the per-session op-lock
+	// acquired above for the whole call, which rules out a same-name
+	// replacement appearing mid-teardown (#3413) — same guarantee as
+	// killSessionRequestedBy. Without this, a tombstoned kill whose survivor
+	// carries a newer generation than any captured predecessor would take the
+	// empty-cohort refusal on every automatic retry and never converge,
+	// leaving the tombstone stranded until the user manually kills again
+	// (Codex on #3583).
+	teardownErr := instance.KillTrustingOwnLifecycleLock()
 	restoreCheckpoint()
 	if !session.TeardownStateUnknown(teardownErr) {
 		// A settled live teardown may have consumed the only in-memory copy of a
@@ -261,13 +269,14 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
 	// is unknown, so this loop keeps the record and retries instead of orphaning the
 	// workspace. This loop IS the retry.
-	deleted, err := m.deleteSessionRecord(repoID, instance.Title, instance.ID, teardownErr)
+	deleted, err := m.deleteSessionRecord(repoID, instance.Title, instance.ID, teardownErr,
+		instance.ToInstanceData())
 	if err != nil {
 		m.noteKillRetryFailure(key, instance.Title, err)
 		return
 	}
 	if !deleted {
-		log.InfoLog.Printf("finishing kill of %q skipped storage delete: current record has a different instance identity", instance.Title)
+		m.info().Printf("finishing kill of %q skipped storage delete: current record has a different instance identity", instance.Title)
 		return
 	}
 	m.forgetKillRetry(key)
@@ -288,7 +297,7 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		// and re-arming here is what the surviving intent is owed. Still only a
 		// delay — the loop self-heals a configured root afterwards (#1223).
 		m.rootKilledAt[repoID] = nowFunc()
-		log.InfoLog.Printf("root agent for repo %s: finished an interrupted user kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
+		m.info().Printf("root agent for repo %s: finished an interrupted user kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
 	}
 	m.mu.Unlock()
 	if removed {

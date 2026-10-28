@@ -1,0 +1,40 @@
+/* Opinionated component recipes, scoped to the guide. Fonts, weight, focus width,
+ * touch targets and motion are fixed rules, not additional theme knobs. */
+.md-typeset .sg-theme { background:var(--af-surface); color:var(--af-ink); font-family:system-ui,sans-serif; font-size:var(--af-type-body); line-height:1.5; padding:var(--af-space-3); margin-block:var(--af-space-4); min-width:0; overflow:auto; }
+.md-typeset .sg-theme h4 { color:var(--af-ink); font-size:var(--af-type-heading); font-weight:600; }
+.md-typeset .sg-theme strong { color:var(--af-ink); font-weight:600; }
+.md-typeset .sg-theme small { color:var(--af-ink-muted); font-size:var(--af-type-caption); }
+.md-typeset .sg-theme pre,.md-typeset .sg-theme code,.md-typeset .sg-theme kbd { background:var(--af-surface); color:var(--af-ink); font-family:ui-monospace,monospace; }
+.md-typeset .sg-theme pre { padding:var(--af-space-2); overflow:auto; }
+.sg-pair { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1rem; align-items:start; }
+.sg-pair figure { margin:1rem 0; min-width:0; }
+.sg-pair img { width:100%; height:auto; }
+.sg-pair figcaption { font-size:.75rem; }
+.md-typeset .sg-theme label { display:block; margin-block:var(--af-space-2); }
+.md-typeset .sg-theme label small { display:block; }
+.md-typeset .sg-theme input,.md-typeset .sg-theme textarea,.md-typeset .sg-theme select,.md-typeset .sg-theme button { font:inherit; background:var(--af-surface-raised); color:var(--af-ink); border:1px solid var(--af-border); border-radius:var(--af-radius-control); padding:var(--af-space-2); min-height:44px; }
+.md-typeset .sg-theme input,.md-typeset .sg-theme textarea,.md-typeset .sg-theme select { display:block; width:100%; }
+.md-typeset .sg-theme button { cursor:default; }
+.md-typeset .sg-theme button:disabled { border-style:dashed; }
+.md-typeset .sg-theme .sg-primary { background:var(--af-accent); color:var(--af-surface); }
+.md-typeset .sg-theme .sg-error,.md-typeset .sg-theme .sg-error strong { color:var(--af-dead); }
+.md-typeset .sg-theme .sg-selected { background:var(--af-surface-raised); padding:var(--af-space-2); font-weight:600; border-left:2px solid var(--af-accent); }
+.md-typeset .sg-theme .sg-active { border-bottom:2px solid var(--af-accent); }
+.md-typeset .sg-theme .sg-focus,.md-typeset .sg-theme :focus-visible { outline:2px solid var(--af-accent); outline-offset:2px; }
+.md-typeset .sg-theme .sg-dialog { background:var(--af-surface-raised); border:1px solid var(--af-border); border-radius:var(--af-radius-dialog); padding:var(--af-space-3); }
+.md-typeset .sg-theme .sg-dialog > strong { font-size:var(--af-type-title); }
+.md-typeset .sg-theme .sg-empty-title { font-size:var(--af-type-display); }
+.md-typeset .sg-theme details { background:var(--af-surface-raised); border:1px solid var(--af-border); border-radius:var(--af-radius-dialog); padding:var(--af-space-2); }
+.md-typeset .sg-theme .sg-bar { display:flex; flex-wrap:wrap; gap:var(--af-space-2); align-items:center; margin-block:var(--af-space-2); }
+.md-typeset .sg-theme .sg-state-row { display:grid; grid-template-columns:1em 1fr; column-gap:var(--af-space-1); padding:var(--af-space-2); }
+.md-typeset .sg-theme .sg-state-name,.md-typeset .sg-theme .sg-state-label { grid-column:2; }
+.md-typeset .sg-theme.sg-tui { font-family:ui-monospace,monospace; }
+.md-typeset .sg-tui pre { border:0; }
+.md-typeset .sg-tui pre .sg-selected { display:inline-block; padding:0; min-width:100%; border:0; }
+@media(max-width:55rem) { .sg-pair { grid-template-columns:minmax(0,1fr); } }
+
+.md-typeset .sg-theme .sg-dialog > .sg-bar { margin-top:var(--af-space-4); }
+
+.md-typeset .sg-theme label > span { display:block; }
+
+.md-typeset .sg-theme .sg-state-row:not(.sg-selected) { border-left:2px solid transparent; }

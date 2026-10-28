@@ -347,20 +347,24 @@ func TestGenerateAccountLaunchProof_ExecPrefixWithAbsolutePath(t *testing.T) {
 		GeneratedArgs:     proof.GeneratedArgs,
 	}), "validation strips exec the same way, so the producer/conducer pair must agree")
 
-	// `exec --` separates the builtin's options from the executable; the
-	// consumer strips both, so the proof must too.
+	// The `--` separator is the one exec form that declares nothing. It was
+	// accepted here at first, on the reasoning that the consumer stripped it too —
+	// but agreeing about a command neither side can launch is not agreement. dash
+	// gives its exec builtin no options and takes `--` as the command name, so
+	// /bin/sh -c on Debian and Ubuntu exits 127 with `exec: --: not found`: the
+	// very failure this proof exists to prevent (#3557).
 	dashBase := "exec -- " + executable + " --dangerously-skip-permissions"
 	dashFinal := dashBase + " --session-id " + genSessionID
-	dashProof, ok := GenerateAccountLaunchProof(dashBase, dashFinal, []string{"--dangerously-skip-permissions"})
-	require.True(t, ok)
-	require.Equal(t, executable, dashProof.TrustedExecutable,
-		"exec -- must also be stripped before extracting TrustedExecutable")
-	require.NoError(t, ValidateAccountCommand(dashFinal, Account{
+	_, ok = GenerateAccountLaunchProof(dashBase, dashFinal, []string{"--dangerously-skip-permissions"})
+	require.False(t, ok, "an exec -- base declares nothing: no /bin/sh answer is portable")
+	err := ValidateAccountCommand(dashFinal, Account{
 		Agent:             "claude",
 		Name:              "work",
-		TrustedExecutable: dashProof.TrustedExecutable,
-		GeneratedArgs:     dashProof.GeneratedArgs,
-	}), "exec -- must tokenize the same way on both sides")
+		TrustedExecutable: executable,
+		GeneratedArgs:     []string{"--dangerously-skip-permissions", "--session-id", genSessionID},
+	})
+	require.Error(t, err, "exec -- must be refused on both sides, not accepted on both")
+	require.Contains(t, err.Error(), "dash", "the refusal names the shell that refuses the command")
 }
 
 // Stripping the prefix widens executable provenance only for an ABSOLUTE path,
@@ -381,4 +385,367 @@ func TestGenerateAccountLaunchProof_ExecPrefixDoesNotTrustRelativeExecutable(t *
 		GeneratedArgs: proof.GeneratedArgs,
 	})
 	require.Error(t, err, "the relative executable must still fail closed")
+}
+
+// The codex resume splice lands `resume --last` after any global -c options
+// (an extension the positional diff describes), but rewrites that DO insert
+// mid-command — this shape, or anything a future splice produces ahead of a
+// declared word — must still merge the declaration rather than clearing it and
+// refusing every account-scoped codex restore at the launch boundary (#5238
+// review; same pane-exits-127 defect #3083 closed for claude's append). The
+// merge must keep the proof.
+func TestGeneratedArgsByInsertion_ResumeSpliceKeepsTheProof(t *testing.T) {
+	base := "codex -c check_for_update_on_startup=false"
+	declared := []string{"-c", "check_for_update_on_startup=false"}
+	final := "codex resume --last -c check_for_update_on_startup=false"
+
+	merged, ok := GeneratedArgsByInsertion(base, final, declared)
+	require.True(t, ok)
+	require.Equal(t, []string{"resume", "--last", "-c", "check_for_update_on_startup=false"}, merged,
+		"the splice lands where the words landed: resume --last before the injected flag")
+
+	_, err := ApplyAccount([]string{"PATH=/usr/bin"}, final, Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: merged,
+	})
+	require.NoError(t, err, "the launcher's own description of the splice must satisfy the guard")
+}
+
+// The account boundary proves `exec codex` and `env codex` wrappers — so a
+// launch through one must keep its declaration across the resume splice too,
+// or every account-scoped restore through an accepted wrapper is refused
+// (#5238 review). The executable is the codex operand, not the command's
+// first word: the wrapper prefix is the operator's and only has to be
+// identical between base and final.
+func TestGeneratedArgsByInsertion_WrapperSpliceKeepsTheProof(t *testing.T) {
+	for _, test := range []struct {
+		name, base, final string
+		// scopeable reports whether the account boundary itself accepts the
+		// shape — an env MUTATION is refused there regardless of how well the
+		// diff describes it, so the merge alone is asserted for that row.
+		scopeable bool
+	}{
+		{"exec wrapper",
+			"exec codex -c check_for_update_on_startup=false",
+			"exec codex resume --last -c check_for_update_on_startup=false",
+			true},
+		{"env wrapper",
+			"env codex -c check_for_update_on_startup=false",
+			"env codex resume --last -c check_for_update_on_startup=false",
+			true},
+		{
+			// env's own operand sits between `env` and codex — the executable
+			// is still the codex word, located through the same envcommand
+			// model the boundary uses. FOO=1 is a mutation the boundary
+			// refuses on its own rule; the merge is what this fixes.
+			"env assignment wrapper",
+			"env FOO=1 codex -c check_for_update_on_startup=false",
+			"env FOO=1 codex resume --last -c check_for_update_on_startup=false",
+			false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			declared := []string{"-c", "check_for_update_on_startup=false"}
+			merged, ok := GeneratedArgsByInsertion(test.base, test.final, declared)
+			require.True(t, ok)
+			require.Equal(t,
+				[]string{"resume", "--last", "-c", "check_for_update_on_startup=false"}, merged)
+
+			if !test.scopeable {
+				return
+			}
+			_, err := ApplyAccount([]string{"PATH=/usr/bin"}, test.final, Account{
+				Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: merged,
+			})
+			require.NoError(t, err, "the wrapper's proof must satisfy the same boundary")
+		})
+	}
+}
+
+// Wrapper refusals stay refusals: `exec --` (dash cannot run it) and an env
+// with no command to execute have no executable to anchor the splice on.
+func TestGeneratedArgsByInsertion_RefusesUnplaceableWrappers(t *testing.T) {
+	for _, test := range []struct{ name, base, final string }{
+		{"exec separator", "exec -- codex -c k=v", "exec -- codex resume --last -c k=v"},
+		{"env with no command", "env FOO=1 -c k=v", "env FOO=1 resume --last -c k=v"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, ok := GeneratedArgsByInsertion(test.base, test.final, []string{"-c", "k=v"})
+			require.False(t, ok)
+		})
+	}
+}
+
+// Insertion lands wherever the words landed — not only at index 1.
+func TestGeneratedArgsByInsertion_SplicesAtTheDivergence(t *testing.T) {
+	base := "codex -c a=1 -c b=2"
+	declared := []string{"-c", "a=1", "-c", "b=2"}
+	final := "codex -c a=1 --middle -c b=2"
+
+	merged, ok := GeneratedArgsByInsertion(base, final, declared)
+	require.True(t, ok)
+	require.Equal(t, []string{"-c", "a=1", "--middle", "-c", "b=2"}, merged)
+}
+
+func TestGeneratedArgsByInsertion_FailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name, base, final string
+		declared          []string
+		why               string
+	}{
+		{"an undeclared base word", "codex --full-auto -c k=v", "codex resume --last --full-auto -c k=v",
+			[]string{"-c", "k=v"},
+			"the operator's --full-auto is not af-authored; a command with undeclared words was never provable"},
+		{"no declared words at all", "codex exec --json", "codex exec resume --last --json",
+			nil, "exec is the operator's word, not af's"},
+		{"a dropped base word", "codex -c k=v", "codex resume --last",
+			[]string{"-c", "k=v"}, "insertion keeps every base word"},
+		{"a replaced base word", "codex -c k=v", "codex resume --last -c k=w",
+			[]string{"-c", "k=v"}, "the tail no longer spells base's tail"},
+		{"a changed executable", "codex -c k=v", "codex-next resume --last -c k=v",
+			[]string{"-c", "k=v"}, "the first word moved"},
+		{"an assignment prefix", "codex -c k=v", "FOO=1 codex resume --last -c k=v",
+			[]string{"-c", "k=v"}, "an assignment is not an argument word"},
+		{"same-length commands", "codex -c k=v", "codex -c k=w",
+			[]string{"-c", "k=v"}, "nothing was inserted"},
+		{"a shorter final", "codex -c k=v", "codex",
+			[]string{"-c", "k=v"}, "words were removed, not inserted"},
+		{"two commands", "codex", "codex resume --last; rm -rf /",
+			nil, "not a single simple command"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, ok := GeneratedArgsByInsertion(test.base, test.final, test.declared)
+			require.False(t, ok, test.why)
+		})
+	}
+}
+
+// A bare `codex` needs no extension check to be described: its entire tail is
+// the insertion point.
+func TestGeneratedArgsByInsertion_BareCommand(t *testing.T) {
+	merged, ok := GeneratedArgsByInsertion("codex", "codex resume --last", nil)
+	require.True(t, ok)
+	require.Equal(t, []string{"resume", "--last"}, merged)
+}
+
+// GenerateAccountLaunchProof seeds the launch proof from a recorded base
+// declaration when the base already carries af's own words — the #5433 pane
+// fallback. Two shapes that GeneratedArgsBetween alone cannot describe must
+// still produce a proof round-trippable through the account boundary.
+
+// The fresh-plan shape: base equals final (af's inject re-injects nothing
+// because the flag is already present). GeneratedArgsBetween reports nothing
+// was appended, but trustedBaseArgs declares the flag the pane recorded, so
+// the proof vouches for af's own trailing words against the command that
+// already carries them. ApplyAccount must then accept it.
+func TestGenerateAccountLaunchProof_PaneFallbackFreshPlanSeedsFromRecordedDeclaration(t *testing.T) {
+	const flagged = "codex -c check_for_update_on_startup=false"
+	declared := []string{"-c", "check_for_update_on_startup=false"}
+
+	proof, ok := GenerateAccountLaunchProof(flagged, flagged, declared)
+	require.True(t, ok, "a fresh plan whose base already carries af's flag declares that flag from the recording")
+	require.Empty(t, proof.TrustedExecutable, "a bare codex name carries no path provenance")
+	require.Equal(t, declared, proof.GeneratedArgs,
+		"the recorded declaration is the proof when nothing was appended")
+
+	require.NoError(t, ValidateAccountCommand(flagged, Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: proof.GeneratedArgs,
+	}), "the seed declaration satisfies the account boundary as af's own arguments")
+
+	// Without the recording the fresh plan declares nothing and the
+	// account boundary keeps refusing af's own flag — the regression.
+	empty, ok := GenerateAccountLaunchProof(flagged, flagged, nil)
+	require.True(t, ok)
+	require.Empty(t, empty.GeneratedArgs)
+	require.Error(t, ValidateAccountCommand(flagged, Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: empty.GeneratedArgs,
+	}), "an empty declaration cannot vouch for af's own flag the pane carries")
+}
+
+// The carry insertion shape: a codex resume splice lands ahead of the recorded
+// flag, producing `codex resume <id> -c k=v`. GeneratedArgsBetween refuses the
+// mid-command insertion; the proof must merge via the
+// GeneratedArgsByInsertion fallback instead of returning zero, the way the
+// tmux-level rewrite path (rewriteProgramCmdByAf) keeps its declaration.
+func TestGenerateAccountLaunchProof_PaneFallbackCarryInsertionMergesFromRecordedDeclaration(t *testing.T) {
+	const flagged = "codex -c check_for_update_on_startup=false"
+	declared := []string{"-c", "check_for_update_on_startup=false"}
+	final := "codex resume abc123 -c check_for_update_on_startup=false"
+
+	proof, ok := GenerateAccountLaunchProof(flagged, final, declared)
+	require.True(t, ok, "the carry insertion merges the recorded declaration instead of refusing the splice")
+	require.Empty(t, proof.TrustedExecutable,
+		"a bare codex executable carries no path provenance across the merge")
+	require.Equal(t,
+		[]string{"resume", "abc123", "-c", "check_for_update_on_startup=false"}, proof.GeneratedArgs,
+		"the splice inserts the resume words ahead of the recorded flag the base carried")
+
+	require.NoError(t, ValidateAccountCommand(final, Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: proof.GeneratedArgs,
+	}), "the merged declaration round-trips through the account boundary")
+
+	// Without the recording the insertion is unprovable and the proof stays
+	// empty — the regression behaviour the swap fallback must beat.
+	empty, ok := GenerateAccountLaunchProof(flagged, final, nil)
+	require.False(t, ok, "no recorded declaration means the insertion cannot be described")
+	require.Empty(t, empty.GeneratedArgs)
+}
+
+// A recorded declaration that does not actually describe the base's trailing
+// words fails closed rather than laundering a user argument as af-authored:
+// the proof never vouches for words af did not record.
+func TestGenerateAccountLaunchProof_PaneFallbackFailsClosedWhenRecordedDeclarationMismatchesBase(t *testing.T) {
+	for _, test := range []struct {
+		name, base, final string
+		declared          []string
+	}{
+		{
+			name:     "a wrong recorded flag value",
+			base:     "codex -c check_for_update_on_startup=true",
+			final:    "codex resume abc -c check_for_update_on_startup=true",
+			declared: []string{"-c", "check_for_update_on_startup=false"},
+		},
+		{
+			name:     "the base carries an undeclared user argument",
+			base:     "codex --full-auto -c check_for_update_on_startup=false",
+			final:    "codex resume abc --full-auto -c check_for_update_on_startup=false",
+			declared: []string{"-c", "check_for_update_on_startup=false"},
+		},
+		{
+			name:     "an exec -- base declares nothing",
+			base:     "exec -- codex -c check_for_update_on_startup=false",
+			final:    "exec -- codex resume abc -c check_for_update_on_startup=false",
+			declared: []string{"-c", "check_for_update_on_startup=false"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			proof, ok := GenerateAccountLaunchProof(test.base, test.final, test.declared)
+			require.False(t, ok, "the proof refuses to vouch for words the recording does not describe")
+			require.Empty(t, proof.GeneratedArgs)
+		})
+	}
+}
+
+// An insertion whose base executable is an absolute path does NOT infer that
+// path as TrustedExecutable: the insertion branch is reached only with a
+// pane-recorded declaration (trustedBaseArgs from the pane fallback), and the
+// pane's recorded proof is the provenance the caller seeds — an untrusted
+// absolute override records an empty TrustedExecutable deliberately, so inferring
+// the base's first word would launder a repository-controlled executable into
+// the account boundary's trust. GenerateAccountLaunchProof leaves
+// TrustedExecutable empty here; accountLaunchProof seeds the pane's recorded
+// value. The same fail-closed applies to a relative spelling, whose path can
+// never be provenance.
+func TestGenerateAccountLaunchProof_PaneFallbackInsertionDoesNotInferExecutableProvenance(t *testing.T) {
+	const executable = "/opt/codex"
+	base := executable + " -c check_for_update_on_startup=false"
+	final := executable + " resume abc -c check_for_update_on_startup=false"
+	declared := []string{"-c", "check_for_update_on_startup=false"}
+
+	proof, ok := GenerateAccountLaunchProof(base, final, declared)
+	require.True(t, ok)
+	require.Empty(t, proof.TrustedExecutable,
+		"an absolute base executable's provenance is the pane's recording, not the base string; the insertion merge must not infer it")
+	require.Equal(t,
+		[]string{"resume", "abc", "-c", "check_for_update_on_startup=false"}, proof.GeneratedArgs)
+
+	// Without the pane's recorded TrustedExecutable, an absolute path is not
+	// trusted: the account boundary rejects a path-qualified executable whose
+	// exact path did not come from af's built-in detection.
+	require.Error(t, ValidateAccountCommand(final, Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work",
+		TrustedExecutable: proof.TrustedExecutable, GeneratedArgs: proof.GeneratedArgs,
+	}), "an absolute executable is not trusted without the pane's recorded provenance")
+
+	// The caller seeds the pane's recorded provenance: an untrusted absolute
+	// override records an empty TrustedExecutable (refused above), while a
+	// built-in detection records the exact path (trusted). accountLaunchProof
+	// replaces the proof's TrustedExecutable with the pane's recording, so the
+	// boundary accepts a detected path and refuses an untrusted one.
+	require.NoError(t, ValidateAccountCommand(final, Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work",
+		TrustedExecutable: executable, GeneratedArgs: proof.GeneratedArgs,
+	}), "the pane's recorded detected path is the provenance the boundary trusts")
+
+	// A relative executable spelling keeps the same fail-closed on identity
+	// the extension path keeps: its arguments can be declared, its path
+	// cannot.
+	relBase := "./bin/codex -c check_for_update_on_startup=false"
+	relFinal := "./bin/codex resume abc -c check_for_update_on_startup=false"
+	relProof, ok := GenerateAccountLaunchProof(relBase, relFinal, declared)
+	require.True(t, ok)
+	require.Empty(t, relProof.TrustedExecutable,
+		"a relative executable is resolved again from the pane workdir and keeps no path provenance")
+	require.Equal(t,
+		[]string{"resume", "abc", "-c", "check_for_update_on_startup=false"}, relProof.GeneratedArgs)
+	require.Error(t, ValidateAccountCommand(relFinal, Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: relProof.GeneratedArgs,
+	}), "a relative executable must still fail closed before receiving the account directory")
+}
+
+// An insertion merge through a wrapper prefix keeps the same proof the tmux
+// rewrite path (rewriteProgramCmdByAf) produces, so swap and restore agree
+// about an `exec codex` or `env codex` launched pane. Mirrors the existing
+// TestGeneratedArgsByInsertion_WrapperSpliceKeepsTheProof assertions through
+// the full GenerateAccountLaunchProof + ValidateAccountCommand round trip.
+func TestGenerateAccountLaunchProof_PaneFallbackInsertionHandlesWrappers(t *testing.T) {
+	for _, test := range []struct {
+		name, base, final string
+		scopeable         bool
+	}{
+		{"exec wrapper",
+			"exec codex -c check_for_update_on_startup=false",
+			"exec codex resume --last -c check_for_update_on_startup=false",
+			true},
+		{"env wrapper",
+			"env codex -c check_for_update_on_startup=false",
+			"env codex resume --last -c check_for_update_on_startup=false",
+			true},
+		{"env assignment wrapper",
+			"env FOO=1 codex -c check_for_update_on_startup=false",
+			"env FOO=1 codex resume --last -c check_for_update_on_startup=false",
+			false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			declared := []string{"-c", "check_for_update_on_startup=false"}
+			proof, ok := GenerateAccountLaunchProof(test.base, test.final, declared)
+			require.True(t, ok)
+			require.Equal(t,
+				[]string{"resume", "--last", "-c", "check_for_update_on_startup=false"}, proof.GeneratedArgs)
+			if !test.scopeable {
+				return
+			}
+			require.NoError(t, ValidateAccountCommand(test.final, Account{
+				Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: proof.GeneratedArgs,
+			}), "the wrapper proof satisfies the same boundary")
+		})
+	}
+}
+
+// The extension path is unaffected by the new fallback: a clean base af's
+// launch appends to keeps proving its additions exactly as before, with and
+// without a built-in trusted base arg.
+func TestGenerateAccountLaunchProof_PaneFallbackDoesNotRegressTheExtensionPath(t *testing.T) {
+	// No trusted base args: a clean codex base af appends the flag to.
+	proof, ok := GenerateAccountLaunchProof("codex",
+		"codex -c check_for_update_on_startup=false", nil)
+	require.True(t, ok)
+	require.Empty(t, proof.TrustedExecutable)
+	require.Equal(t, []string{"-c", "check_for_update_on_startup=false"}, proof.GeneratedArgs)
+	require.NoError(t, ValidateAccountCommand("codex -c check_for_update_on_startup=false", Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work", GeneratedArgs: proof.GeneratedArgs,
+	}))
+
+	// The built-in claude base (trustedBaseArgs) keeps its exact declared
+	// word and executable identity through the extension path.
+	const executable = "/opt/af-detected/claude"
+	base := executable + " --dangerously-skip-permissions"
+	final := base + " --session-id " + genSessionID
+	builtIn, ok := GenerateAccountLaunchProof(base, final, []string{"--dangerously-skip-permissions"})
+	require.True(t, ok)
+	require.Equal(t, executable, builtIn.TrustedExecutable)
+	require.Equal(t,
+		[]string{"--dangerously-skip-permissions", "--session-id", genSessionID}, builtIn.GeneratedArgs)
+	require.NoError(t, ValidateAccountCommand(final, Account{
+		Agent: "claude", Name: "work", Dir: "/afhome/accounts/claude/work",
+		TrustedExecutable: builtIn.TrustedExecutable, GeneratedArgs: builtIn.GeneratedArgs,
+	}))
 }

@@ -91,6 +91,11 @@ var (
 	// line in the transcript forever, and "Build ·" also sits inside the live
 	// composer — keying on either would pin an idle session at Running permanently.
 	opencodeWorkingIndicator = regexp.MustCompile(`esc +interrupt`)
+	// escToInterruptHint matches the "esc to interrupt" chrome several supported
+	// agents draw only while a turn is in flight. It is matched on the
+	// ANSI-stripped pane and always scoped per agent in submittedTurnContent —
+	// never trusted whole-pane, where transcript prose could quote it.
+	escToInterruptHint = regexp.MustCompile(`esc +to +interrupt`)
 )
 
 // postWorktreeHooksDoneForWait resolves the instance's post-worktree hook
@@ -159,9 +164,11 @@ func defaultLimitDetectorForWait() LimitDetector {
 // full 60s timeout for anything that never prints "❯". This is the single
 // copy: the daemon reaches it via task.StartAndSendPromptWithConversationCapture
 // (daemon imports task since #782 inverted the old task→daemon dependency).
-// hasLineLeadingGlyph reports whether any line's first non-blank character is
-// needle — the composer is drawn at the START of its line, and a glyph anywhere
-// else on a line is something else (#3085).
+// hasCodexComposerLine reports whether any line's first non-blank character
+// is a Codex composer glyph — the composer is drawn at the START of its line,
+// and a glyph anywhere else on a line is something else (#3085). The glyph
+// set itself lives in tmux.IsCodexComposerLine ("›" at every effort, "»"
+// under the Ultra tier — #5383).
 //
 // Deliberately NOT "on the last non-empty line", which was the first attempt and
 // is false: real Codex draws a hint row BELOW the composer ("› [Pasted Content]"
@@ -174,7 +181,7 @@ func defaultLimitDetectorForWait() LimitDetector {
 // glyph left in scrollback, and claiming otherwise would be the same overreach in
 // a new place: position answers "is this drawn as a prompt", not "is this prompt
 // current".
-func hasLineLeadingGlyph(content, needle string) bool {
+func hasCodexComposerLine(content string) bool {
 	// Strip ANSI first, with the same regex amp and opencode match on. A raw
 	// capture carries escapes INSIDE the line — real Codex emits
 	// "\x1b[2J\x1b[H› [Pasted Content]" — so a positional check against the raw
@@ -182,7 +189,7 @@ func hasLineLeadingGlyph(content, needle string) bool {
 	// This was caught by running the real fixtures, not by reading them.
 	plain := paneAnsiEscape.ReplaceAllString(strings.ReplaceAll(content, "\r\n", "\n"), "")
 	for _, line := range strings.Split(plain, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), needle) {
+		if tmux.IsCodexComposerLine(line) {
 			return true
 		}
 	}
@@ -193,7 +200,10 @@ func isReadyContent(content, agent string) bool {
 	switch agent {
 	case tmux.ProgramCodex:
 		// codex renders "›" (U+203A — distinct from claude's "❯" U+276F) as
-		// its input-prompt glyph after the banner (#714).
+		// its input-prompt glyph after the banner (#714), and "»" (U+00BB)
+		// for the same prompt while the Ultra reasoning tier is active — the
+		// only place Codex draws "»" upstream, so it adds no new
+		// false-positive class (#5383).
 		//
 		// The older workspace-trust dialog ("Do you trust this folder") is
 		// deliberately NOT a ready signal (#729): af has no observed, anchored
@@ -217,13 +227,13 @@ func isReadyContent(content, agent string) bool {
 		// The composer is drawn at the START of a line, so its POSITION is the
 		// invariant, and position is load-independent in the way #3050's tick
 		// count was: a slow box changes WHEN the prompt is drawn, never WHETHER a
-		// matched line is drawn as one. See hasLineLeadingGlyph for what this
+		// matched line is drawn as one. See hasCodexComposerLine for what this
 		// deliberately does NOT claim.
 		//
 		// CodexTrustPromptPresent still runs FIRST and is unchanged: it positively
 		// identifies the handled modal, whose selected option is line-leading too,
 		// so the glyph alone must never be asked to distinguish the two.
-		return tmux.CodexTrustPromptPresent(content) || hasLineLeadingGlyph(content, "›")
+		return tmux.CodexTrustPromptPresent(content) || hasCodexComposerLine(content)
 	case tmux.ProgramAider:
 		// aider prints an "Aider v…" banner, then a line-start "> " prompt.
 		return strings.Contains(content, "\n> ") ||
@@ -404,9 +414,10 @@ func ampFrameBottomRule(content string) (string, bool) {
 // It exists because the daemon's liveness poll infers "working" from pane CHURN:
 // content changed since the last tick → LiveRunning, unchanged → idle → LiveReady
 // (the green dot). That inference silently assumes an agent REPAINTS CONTINUOUSLY
-// while it works, which claude and codex do (an animated spinner plus an elapsed
-// timer, so their pane can never hold still for a whole poll interval) — and amp
-// does not. amp draws a static frame and repaints only when output actually
+// while it works. codex animates a spinner plus an elapsed timer; claude does too,
+// but live claude sessions still held a byte-identical pane for a full poll
+// mid-turn and read Ready, so claude has a case here. amp does not repaint at
+// all between bursts: it draws a static frame and repaints only when output actually
 // arrives, so every quiet gap in a turn (between token bursts, during a tool call,
 // while the model thinks) holds the pane byte-identical past the 1s poll and reads
 // as idle. The dot then flips green mid-turn and back on the next burst: the #1766
@@ -468,6 +479,11 @@ func IsWorkingContent(content, agent string) bool {
 			}
 		}
 		return false
+	case tmux.ProgramClaude:
+		// Claude Code does not always repaint while it works: live sessions
+		// held a byte-identical pane for a full poll mid-turn and read Ready.
+		// See isClaudeWorkingContent for how the read stays on the live frame.
+		return isClaudeWorkingContent(content)
 	default:
 		return false
 	}
@@ -605,6 +621,57 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 	ticker, stopTicker := clock.newTicker(waitForReadyPollInterval)
 	defer stopTicker()
 
+	// probe is one look at the pane, and done reports whether that look settled
+	// the wait. It is the SAME function at both sites that look before the
+	// deadline — once before the first tick and then on every tick — so the
+	// ErrSessionGone and usage-limit handling cannot diverge between them the way
+	// the ticker and timeout branches once did (#989).
+	probe := func() (done bool, err error) {
+		content, err := target.PreviewContent(ctx)
+		if err != nil {
+			// A cancelled/timed-out create surfaces here as context.Canceled /
+			// DeadlineExceeded: return at once (the top-of-loop check would
+			// catch it next hop, but returning here frees the lock a poll
+			// sooner).
+			if ctx.Err() != nil {
+				return true, ctx.Err()
+			}
+			// ErrSessionGone is a definitive, non-retryable failure: the
+			// tmux session no longer exists, so it can never become ready.
+			// Fail fast with a clear cause instead of polling the full
+			// timeout and returning a misleading "timed out" error (#976).
+			// Other errors (incl. a capture that hit waitForReadyCaptureTimeout)
+			// are transient — keep polling.
+			if errors.Is(err, tmux.ErrSessionGone) {
+				return true, fmt.Errorf("session died while waiting for agent to start: %w", err)
+			}
+			return false, nil
+		}
+		// Check the usage-limit banner BEFORE readiness: a limit-blocked pane
+		// never shows the ready glyph, but checking limit first keeps the
+		// intent explicit and future-proofs against a banner that also carried
+		// one. On a hit, stop waiting and return the park sentinel (#1146).
+		if perr := limitParkError(detector, content, agent); perr != nil {
+			return true, perr
+		}
+		return isReadyContent(content, agent), nil
+	}
+
+	// Look once before waiting for the first tick (#4464). The ticker's first
+	// fire is a full poll interval away, and the loop used to look ONLY when it
+	// fired — so a pane that was already ready (a reattached live agent, the
+	// composer back after a trust dialog was dismissed, any ready test fake) still
+	// waited out the interval. A freshly launched pane is blank here, which reads
+	// as not ready, so a normal agent start polls exactly as before. The
+	// cancellation check comes first, as at the top of every iteration below, so
+	// an abandoned wait starts no capture at all.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if done, err := probe(); done {
+		return err
+	}
+
 	for {
 		// Observe cancellation at the top of every iteration, before starting
 		// another capture: if the create was abandoned/cancelled while the
@@ -667,35 +734,8 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
 			return formatWaitForReadyTimeoutError(waitForReadyTimeout, content)
 		case <-ticker:
-			content, err := target.PreviewContent(ctx)
-			if err != nil {
-				// A cancelled/timed-out create surfaces here as context.Canceled /
-				// DeadlineExceeded: return at once (the top-of-loop check would
-				// catch it next hop, but returning here frees the lock a poll
-				// sooner).
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				// ErrSessionGone is a definitive, non-retryable failure: the
-				// tmux session no longer exists, so it can never become ready.
-				// Fail fast with a clear cause instead of polling the full
-				// timeout and returning a misleading "timed out" error (#976).
-				// Other errors (incl. a capture that hit waitForReadyCaptureTimeout)
-				// are transient — keep polling.
-				if errors.Is(err, tmux.ErrSessionGone) {
-					return fmt.Errorf("session died while waiting for agent to start: %w", err)
-				}
-				continue
-			}
-			// Check the usage-limit banner BEFORE readiness: a limit-blocked pane
-			// never shows the ready glyph, but checking limit first keeps the
-			// intent explicit and future-proofs against a banner that also carried
-			// one. On a hit, stop waiting and return the park sentinel (#1146).
-			if perr := limitParkError(detector, content, agent); perr != nil {
-				return perr
-			}
-			if isReadyContent(content, agent) {
-				return nil
+			if done, err := probe(); done {
+				return err
 			}
 		}
 	}

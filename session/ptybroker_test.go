@@ -50,11 +50,85 @@ type fakeClientlessChannel struct {
 	// stopDone, when non-nil, is signaled AFTER StopCapture has closed the writer,
 	// so a test can order an assertion strictly after the teardown's effect.
 	stopDone chan struct{}
+	// resizeErr, when non-nil, is what Resize returns instead of nil — the test
+	// stand-in for a `tmux resize-window` that failed. The call is still RECORDED,
+	// because a failing apply is still ATTEMPTED every frame and still returns its
+	// error to the caller; only the broker's logging of it changes (#3862).
+	resizeErr error
+	// snapshotErr, when non-nil, is what Snapshot returns instead of a screen — the
+	// test stand-in for a `tmux capture-pane` that fails (a pane that vanished under
+	// the exec). subscribe()'s repaint is BEST-EFFORT against exactly this: it queues
+	// no repaint when the snapshot cannot be taken, so the ring replay is the only
+	// thing left to render the pane.
+	snapshotErr error
+	// snapshotRows/snapshotCols/snapshotHasSize are the canned pane dimensions
+	// Snapshot reports — the test stand-in for tmux's #{pane_height}/#{pane_width}
+	// on a pane nobody ever resized (#4480). hasSize false means the channel
+	// cannot report dimensions (the remote preview shape).
+	snapshotRows    uint16
+	snapshotCols    uint16
+	snapshotHasSize bool
 	// snapshotHook, when non-nil, runs at the START of each Snapshot with f.mu NOT
 	// held. The real Snapshot is a `tmux capture-pane` exec taking milliseconds, and
 	// the pane keeps producing the whole time; the hook is how a test drives output
 	// into that window (the #1975 recovery-flicker race).
 	snapshotHook func()
+	// paneDead is what PaneDead reports — set by a test to make the broker take
+	// the held-dead-pane path (#5330): subscribe serves a repaint-only stream
+	// instead of failing, and recovery/re-dial stops treating it as an outage.
+	paneDead bool
+}
+
+// parkedCaptureChannel models a capture whose teardown has signaled its reader
+// but whose in-flight blocking Read has not returned yet. This is the ordering
+// Darwin exposed in #4319; the broker-level ordering is platform-independent.
+type parkedCaptureChannel struct {
+	reader     *parkedCaptureReader
+	stopCalled chan struct{}
+	stopOnce   sync.Once
+}
+
+type parkedCaptureReader struct {
+	readEntered chan struct{}
+	closeCalled chan struct{}
+	readDone    chan struct{}
+	releaseRead chan struct{}
+	readOnce    sync.Once
+	closeOnce   sync.Once
+}
+
+func newParkedCaptureChannel() *parkedCaptureChannel {
+	return &parkedCaptureChannel{
+		reader: &parkedCaptureReader{
+			readEntered: make(chan struct{}),
+			closeCalled: make(chan struct{}),
+			readDone:    make(chan struct{}),
+			releaseRead: make(chan struct{}),
+		},
+		stopCalled: make(chan struct{}),
+	}
+}
+
+func (c *parkedCaptureChannel) StartCapture() (io.ReadCloser, error) { return c.reader, nil }
+func (c *parkedCaptureChannel) StopCapture() error {
+	c.stopOnce.Do(func() { close(c.stopCalled) })
+	return nil
+}
+func (*parkedCaptureChannel) SendRaw([]byte) error            { return nil }
+func (*parkedCaptureChannel) Resize(uint16, uint16) error     { return nil }
+func (*parkedCaptureChannel) Snapshot() (PaneSnapshot, error) { return PaneSnapshot{}, nil }
+func (*parkedCaptureChannel) PaneDead() bool                  { return false }
+
+func (r *parkedCaptureReader) Read([]byte) (int, error) {
+	r.readOnce.Do(func() { close(r.readEntered) })
+	<-r.releaseRead
+	close(r.readDone)
+	return 0, io.EOF
+}
+
+func (r *parkedCaptureReader) Close() error {
+	r.closeOnce.Do(func() { close(r.closeCalled) })
+	return nil
 }
 
 func (f *fakeClientlessChannel) StartCapture() (io.ReadCloser, error) {
@@ -89,6 +163,12 @@ func (f *fakeClientlessChannel) StopCapture() error {
 	return nil
 }
 
+func (f *fakeClientlessChannel) counts() (starts, stops int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.starts, f.stops
+}
+
 func (f *fakeClientlessChannel) SendRaw(b []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -100,7 +180,13 @@ func (f *fakeClientlessChannel) Resize(rows, cols uint16) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resizes = append(f.resizes, [2]uint16{rows, cols})
-	return nil
+	return f.resizeErr
+}
+
+func (f *fakeClientlessChannel) PaneDead() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.paneDead
 }
 
 func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {
@@ -113,6 +199,9 @@ func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshots++
+	if f.snapshotErr != nil {
+		return PaneSnapshot{}, f.snapshotErr
+	}
 	return PaneSnapshot{
 		Screen:    append([]byte(nil), f.snapshot...),
 		CursorRow: f.cursorRow,
@@ -120,6 +209,9 @@ func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {
 		HasCursor: f.hasCursor,
 		Modes:     f.modes,
 		HasModes:  f.hasModes,
+		Rows:      f.snapshotRows,
+		Cols:      f.snapshotCols,
+		HasSize:   f.snapshotHasSize,
 	}, nil
 }
 
@@ -215,13 +307,158 @@ func TestPTYBrokerInitialRepaint(t *testing.T) {
 	mustData(t, sub, "live-after-resize")
 
 	// A reconnecting subscriber (since > 0) gets NO repaint — it resumes seamlessly
-	// via replay. A since past the head clamps to the live tail.
+	// via replay. A since past the head clamps to the live tail. Because a size is
+	// already established, its FIRST event is the authoritative resize echo (#4480):
+	// the emulator must be at the pane's real size before any content lands.
 	re, err := br.subscribe(1 << 40)
 	if err != nil {
 		t.Fatalf("reconnect subscribe: %v", err)
 	}
+	ev, err = nextWithin(t, re, 2*time.Second)
+	if err != nil {
+		t.Fatalf("reconnect NextEvent: %v", err)
+	}
+	if ev.Kind != PTYResize || ev.Rows != 40 || ev.Cols != 100 {
+		t.Fatalf("reconnect first event = %+v, want the authoritative size echo", ev)
+	}
 	ch.emit(t, []byte("live"))
 	mustData(t, re, "live")
+}
+
+// A pane nobody ever drove still has a real size: tmux spawns it at the
+// server's default-size, which is user-configurable (e.g. `default-size
+// 200x60`). The capture path measures #{pane_width}/#{pane_height}, so a fresh
+// subscriber's FIRST event must be the authoritative echo of the pane's actual
+// dimensions — ahead of the repaint. Without it a viewer's emulator stays at
+// whatever geometry it happened to start with for as long as the session lives
+// (#4480 review).
+func TestPTYBrokerFreshSubscriberLearnsThePaneSize(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		snapshot:        []byte("prompt$ "),
+		snapshotRows:    60,
+		snapshotCols:    200,
+		snapshotHasSize: true,
+	}
+	br := newPTYBroker(ch)
+
+	sub, err := br.subscribe(0) // fresh live-tail subscriber
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("initial NextEvent: %v", err)
+	}
+	if ev.Kind != PTYResize || ev.Rows != 60 || ev.Cols != 200 {
+		t.Fatalf("initial event = %+v, want the pane's measured 60x200 size echo before any content", ev)
+	}
+	ev, err = nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("second NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("second event = %+v, want the repaint after the size echo", ev)
+	}
+	// The pane was OBSERVED, not resized: learning the spawn size must not write
+	// a resize-window — adoption is the broker's belief catching up to tmux, not
+	// another driving surface.
+	if len(ch.resizes) != 0 {
+		t.Fatalf("adopting the measured pane size wrote %v to the pane, want no resize-window", ch.resizes)
+	}
+}
+
+// The snapshot exec runs without b.mu held, so a RESIZE frame can land while
+// tmux is being queried. That frame is NEWER authority than dims captured
+// before it — the stale observation must be dropped, not recorded over the
+// winning size (the stale-dimensions family this issue is about).
+func TestPTYBrokerResizeDuringSnapshotBeatsTheMeasuredSize(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		snapshot:        []byte("prompt$ "),
+		snapshotRows:    60,
+		snapshotCols:    200,
+		snapshotHasSize: true,
+	}
+	br := newPTYBroker(ch)
+	// A driving surface asserts its size WHILE the subscribe snapshot is in
+	// flight — the tmux read already returned the pre-resize 60x200.
+	ch.snapshotHook = func() { _ = br.resize(40, 100) }
+
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("initial NextEvent: %v", err)
+	}
+	if ev.Kind != PTYResize || ev.Rows != 40 || ev.Cols != 100 {
+		t.Fatalf("initial event = %+v, want the mid-capture resize frame's 40x100 — not the stale 60x200 it superseded", ev)
+	}
+}
+
+// TestPTYBrokerFreshSubscriberGetsSizeBeforeRepaint pins the #4480 ordering: a
+// subscriber that joins AFTER a size is established must receive the
+// authoritative resize echo BEFORE its initial repaint — the repaint's reflowed
+// rows only land correctly in an emulator already at the pane's real size.
+func TestPTYBrokerFreshSubscriberGetsSizeBeforeRepaint(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-80")}
+	br := newPTYBroker(ch)
+	if err := br.resize(30, 100); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("first NextEvent: %v", err)
+	}
+	if ev.Kind != PTYResize || ev.Rows != 30 || ev.Cols != 100 {
+		t.Fatalf("first event = %+v, want the authoritative resize echo before the repaint", ev)
+	}
+	ev, err = nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("second NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("second event = %+v, want the initial repaint after the size echo", ev)
+	}
+}
+
+// TestPTYBrokerRecoveryClearsStaleSize pins the #4480 recovery half: a
+// pane-replacing resetCapture (kill-session + new-session — every
+// onlyIfNoHealthyCapture=false path) brings the pane back at the server's
+// default-size, so the broker's recorded size no longer describes it. A fresh
+// subscriber must NOT be sized to the dead pane's geometry; the driving surface
+// re-asserts the real one.
+func TestPTYBrokerRecoveryClearsStaleSize(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("RECOVERED")}
+	br := newPTYBroker(ch)
+	if _, err := br.subscribe(0); err != nil { // bring the capture up
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := br.resize(30, 100); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+
+	br.resetCapture() // pane replaced: the recorded size died with it
+
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe after recovery: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("NextEvent: %v", err)
+	}
+	if ev.Kind == PTYResize {
+		t.Fatalf("first event after pane-replacing recovery = %+v — the dead pane's size must not be echoed", ev)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("first event after recovery = %+v, want the repaint", ev)
+	}
 }
 
 func TestPTYBrokerRepaintCarriesTerminalModes(t *testing.T) {
@@ -702,23 +939,88 @@ func TestPTYBrokerTeardownDoesNotClobberReconnect(t *testing.T) {
 }
 
 func TestPTYBrokerStopsCaptureWhenLastSubscriberLeaves(t *testing.T) {
-	ch := &fakeClientlessChannel{}
+	ch := &fakeClientlessChannel{stopDone: make(chan struct{}, 1)}
 	br := newPTYBroker(ch)
 	a, _ := br.subscribe(0)
 	b, _ := br.subscribe(0)
 	_ = a.Close()
-	if ch.stops != 0 {
-		t.Fatalf("StopCapture after 1 of 2 leaves = %d, want 0 (capture stays up)", ch.stops)
+	if _, stops := ch.counts(); stops != 0 {
+		t.Fatalf("StopCapture after 1 of 2 leaves = %d, want 0 (capture stays up)", stops)
 	}
 	_ = b.Close()
-	if ch.stops != 1 {
-		t.Fatalf("StopCapture after last leaves = %d, want 1", ch.stops)
+	select {
+	case <-ch.stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopCapture did not run after the last subscriber left")
+	}
+	if _, stops := ch.counts(); stops != 1 {
+		t.Fatalf("StopCapture after last leaves = %d, want 1", stops)
 	}
 	// A later subscribe restarts the capture (lazy, again).
 	if _, err := br.subscribe(0); err != nil {
 		t.Fatalf("re-subscribe: %v", err)
 	}
-	if ch.starts != 2 {
-		t.Fatalf("StartCapture calls = %d, want 2 (restarted)", ch.starts)
+	if starts, _ := ch.counts(); starts != 2 {
+		t.Fatalf("StartCapture calls = %d, want 2 (restarted)", starts)
+	}
+}
+
+// TestPTYSubscriptionCloseDoesNotJoinCaptureReader pins #4319's close ordering:
+// stopping the last subscriber must request capture teardown without waiting for
+// the capture read loop to finish. A FIFO reader may be parked indefinitely in a
+// blocking syscall while the pane is idle; joining it makes an ordinary
+// subscription Close hang with it.
+func TestPTYSubscriptionCloseDoesNotJoinCaptureReader(t *testing.T) {
+	ch := newParkedCaptureChannel()
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	select {
+	case <-ch.reader.readEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture reader never entered its blocking read")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- sub.Close() }()
+
+	select {
+	case <-ch.stopCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture teardown never started")
+	}
+	select {
+	case <-ch.reader.closeCalled:
+		// Teardown has signaled the reader, but the pinned Read has not returned.
+		// Subscription Close must not join that read loop.
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture reader was not signaled")
+	}
+
+	var closeBlocked bool
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close subscription: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		closeBlocked = true
+	}
+
+	close(ch.reader.releaseRead)
+	select {
+	case <-ch.reader.readDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture reader did not return after release")
+	}
+	if closeBlocked {
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("subscription Close did not return even after capture teardown was released")
+		}
+		t.Fatal("subscription Close waited for the capture reader teardown")
 	}
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# record-demo.sh — regenerate docs/assets/demo.* from real Agent Factory use.
+# record-demo.sh — regenerate docs/assets/tui/demo.* from real Agent Factory use.
+# (The WEB client's demo media is a different recorder: `make demo-assets`,
+# scripts/container/web-demo-entry.sh, writing docs/assets/web/.)
 #
 # The recording runs in the same isolated sandbox as `make
 # playtest-container`: a disposable mock repository, throwaway AF home, and
@@ -19,7 +21,15 @@ set -euo pipefail
 COLS="${DEMO_COLS:-168}"
 ROWS="${DEMO_ROWS:-32}"
 AGG_FONT_SIZE="${DEMO_FONT_SIZE:-14}"
-AGG_THEME="${DEMO_THEME:-dracula}"
+# Read the fixed roles rather than retaining a second recorder palette.
+AGG_THEME="${DEMO_THEME:-$(python3 - "$(dirname "${BASH_SOURCE[0]}")/../../design/tokens.json" <<'PYTOKENS'
+import json, sys
+with open(sys.argv[1]) as source:
+    colors = json.load(source)["colors"]
+roles = ["surface", "ink", "surface", "dead", "ready", "lost", "accent", "limit-reached", "accent", "ink"]
+print(",".join(colors[role]["dark"].removeprefix("#") for role in roles))
+PYTOKENS
+)}"
 AGG_FPS="${DEMO_FPS:-12}"
 AGG_IDLE="${DEMO_IDLE:-3.0}"
 AGG_SPEED="${DEMO_SPEED:-1.8}"
@@ -34,6 +44,8 @@ MAX_GIF_BYTES="${DEMO_MAX_GIF_BYTES:-2000000}"
 if [ "${AF_DEMO_INNER:-}" = 1 ]; then
     export AF_DRIVER_COLS="$COLS" AF_DRIVER_ROWS="$ROWS"
     export AF_DRIVER_BIN=/home/dev/bin/af
+    export COLORTERM=truecolor
+    export AF_DRIVER_LAUNCH_ENV="COLORTERM=truecolor TERM=xterm-256color"
     export AGENT_FACTORY_HOME="$HOME/sandbox/home"
 
     sandbox="$HOME/sandbox"
@@ -72,6 +84,7 @@ if [ "${AF_DEMO_INNER:-}" = 1 ]; then
     source /src/scripts/tui-driver.sh
     af_reset_sandbox
     af_boot
+    tmux set-environment -g COLORTERM truecolor
     tmux set-option -g status off
 
     create_session() {
@@ -214,7 +227,7 @@ if [ "${AF_DEMO_INNER:-}" = 1 ]; then
         ffmpeg -y -loglevel error -ss "$timestamp" -i "$out_gif" -frames:v 1 \
             "$(printf '%s/frames/frame-%02d.png' "$out" "$i")"
     done
-    cp "$out/frames/frame-05.png" "$out_poster"
+    cp "$out/frames/frame-03.png" "$out_poster"
 
     ls -lh "$out_gif" "$out_webm" "$out_mp4" "$out_poster"
     printf 'record-demo: %.2fs · %s-byte GIF · real Codex in three AF worktrees\n' \
@@ -283,18 +296,18 @@ docker exec \
     "$container_name" bash /src/scripts/container/record-demo.sh
 
 printf '>>> copying generated media …\n'
-docker cp "$container_name:/home/dev/out/demo.gif" "$repo_root/docs/assets/demo.gif"
-docker cp "$container_name:/home/dev/out/demo.webm" "$repo_root/docs/assets/demo.webm"
-docker cp "$container_name:/home/dev/out/demo.mp4" "$repo_root/docs/assets/demo.mp4"
-docker cp "$container_name:/home/dev/out/demo-poster.png" "$repo_root/docs/assets/demo-poster.png"
+docker cp "$container_name:/home/dev/out/demo.gif" "$repo_root/docs/assets/tui/demo.gif"
+docker cp "$container_name:/home/dev/out/demo.webm" "$repo_root/docs/assets/tui/demo.webm"
+docker cp "$container_name:/home/dev/out/demo.mp4" "$repo_root/docs/assets/tui/demo.mp4"
+docker cp "$container_name:/home/dev/out/demo-poster.png" "$repo_root/docs/assets/tui/demo-poster.png"
 if [ -n "$frames_dir" ]; then
     mkdir -p "$frames_dir"
     docker cp "$container_name:/home/dev/out/frames/." "$frames_dir/"
 fi
 
 ls -lh \
-    "$repo_root/docs/assets/demo.gif" \
-    "$repo_root/docs/assets/demo.webm" \
-    "$repo_root/docs/assets/demo.mp4" \
-    "$repo_root/docs/assets/demo-poster.png"
+    "$repo_root/docs/assets/tui/demo.gif" \
+    "$repo_root/docs/assets/tui/demo.webm" \
+    "$repo_root/docs/assets/tui/demo.mp4" \
+    "$repo_root/docs/assets/tui/demo-poster.png"
 printf '>>> done · container teardown removes the copied auth and sandbox\n'

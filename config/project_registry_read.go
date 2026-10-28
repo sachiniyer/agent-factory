@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,10 +11,10 @@ import (
 	"strings"
 )
 
-// The registry READ side (#1145 split): listings in their three strictness
-// forms — strict all-or-nothing, presence-explicit, and the #3297 partial
-// read — plus the record loaders and per-record validation they share. The
-// mutation and identity halves stay in project_registry.go.
+// The registry READ side (#1145 split): listings in their two strictness
+// forms — strict all-or-nothing and the #3297 partial read — plus the
+// record loaders and per-record validation they share. The mutation and
+// identity halves stay in project_registry.go.
 
 // ListProjects reads every durable binding without creating the AF home, the
 // projects directory, or a lock file. Initial registration uses an atomic
@@ -33,44 +34,6 @@ func ListProjects() ([]Project, error) {
 		projects = append(projects, projectFromRecord(record))
 	}
 	return projects, nil
-}
-
-// ListProjectsIfPresent is ListProjects with absence made explicit: present
-// is false — with a nil error — when the registry directory does not exist.
-// The daemon's fail-closed recovery needs the distinction (#3315 review): a
-// registry that is ABSENT mid-repair or mid-mount-outage must read as a
-// transition to wait out, never as an empty registry to freeze, and
-// ListProjects deliberately hides that difference for ordinary callers. An
-// empty result is bound to a present registry by a post-read check, so a
-// directory that vanishes during the read cannot masquerade as empty; a
-// registry recreated empty within that window reports present-and-empty,
-// which by then is simply the truth.
-func ListProjectsIfPresent() ([]Project, bool, error) {
-	dir, err := projectRegistryDir()
-	if err != nil {
-		return nil, false, err
-	}
-	present, err := projectRegistryDirPresent(dir)
-	if err != nil {
-		return nil, present, err
-	}
-	if !present {
-		return nil, false, nil
-	}
-	projects, err := ListProjects()
-	if err != nil {
-		return nil, true, err
-	}
-	if len(projects) == 0 {
-		present, err = projectRegistryDirPresent(dir)
-		if err != nil {
-			return nil, present, err
-		}
-		if !present {
-			return nil, false, nil
-		}
-	}
-	return projects, true, nil
 }
 
 // projectRegistryDirPresent follows the registry path so a dangling symlink is
@@ -230,10 +193,10 @@ func loadProjectRecordsDetailed(dir string) (records []projectRecord, failures [
 }
 
 func validateProjectRecord(directoryID string, record projectRecord) error {
-	if record.SchemaVersion != projectRegistrySchemaVersion {
-		if record.SchemaVersion > projectRegistrySchemaVersion {
-			return fmt.Errorf("project %s uses schema version %d, but this af supports up to %d — upgrade af", directoryID, record.SchemaVersion, projectRegistrySchemaVersion)
-		}
+	if record.SchemaVersion > projectRegistrySchemaVersion {
+		return fmt.Errorf("project %s uses schema version %d, but this af supports up to %d — upgrade af", directoryID, record.SchemaVersion, projectRegistrySchemaVersion)
+	}
+	if record.SchemaVersion < projectRegistryMinSchemaVersion {
 		return fmt.Errorf("project %s has unsupported schema version %d", directoryID, record.SchemaVersion)
 	}
 	if err := ValidateProjectID(record.ID); err != nil {
@@ -251,6 +214,20 @@ func validateProjectRecord(directoryID string, record projectRecord) error {
 	if err := validateStoredProjectPath("checkout root", record.CheckoutRoot); err != nil {
 		return fmt.Errorf("project %s: %w", record.ID, err)
 	}
+	if record.RepoID != "" {
+		// It is the authoritative key for personal policy, deletion and UI
+		// requests, so a malformed value would attribute a project's layer to
+		// an arbitrary identity. And an INVENTED value must never be stored:
+		// the one-way writer refuses to replace a non-empty field, so a
+		// persisted d-… id would be immune to reconciliation forever — only a
+		// resolved identity is legal here (#3530 review id 3914971883).
+		if err := ValidateRepoID(record.RepoID); err != nil {
+			return fmt.Errorf("project %s: repo id: %w", record.ID, err)
+		}
+		if IsDerivedRepoID(record.RepoID) {
+			return fmt.Errorf("project %s has a provisional repo id %q recorded; only a resolved repository identity may be stored", record.ID, record.RepoID)
+		}
+	}
 	if record.RelativeRoot == "" || filepath.IsAbs(record.RelativeRoot) {
 		return fmt.Errorf("project %s has invalid relative root %q", record.ID, record.RelativeRoot)
 	}
@@ -266,4 +243,141 @@ func validateProjectRecord(directoryID string, record projectRecord) error {
 		return fmt.Errorf("project %s root %s does not match checkout root %s plus relative root %s", record.ID, record.Root, record.CheckoutRoot, record.RelativeRoot)
 	}
 	return nil
+}
+
+// ProjectCheckoutMatches reports whether the checkout now at root carries the
+// registry's checkout marker for checkoutID — the identity proof that this is
+// the SAME clone the project was registered from, not a different checkout
+// reusing the path (#3299 review). Path availability is never identity:
+// Project.PathExists and a successful git resolution say a repo is THERE, and
+// only the marker says it is the recorded one.
+func ProjectCheckoutMatches(root, checkoutID string) (bool, error) {
+	return projectRootHasCheckoutID(root, checkoutID)
+}
+
+// ReconciledRepoIDForProject is the identity to address a project by when its
+// recorded root may not resolve — the one place that decision is made (#3530).
+//
+// A project that has been seen to resolve carries its repository's real id, so
+// an absent path still reaches the state its sessions were keyed under at
+// creation. That is what makes a delete by an unresolvable recorded path
+// address the recorded project rather than whatever repository now occupies
+// that path (#3363), and it is why the id has to be written down: at the moment
+// it is needed it can no longer be computed.
+//
+// A record predating that field gets an INVENTED id instead, which by
+// construction no repository can hold. It therefore reaches nothing rather than
+// something wrong, until the first successful resolution writes the real one.
+func ReconciledRepoIDForProject(p Project) string {
+	if p.RepoID != "" {
+		return p.RepoID
+	}
+	return DerivedRepoIDForUnresolvedRoot(p.Root)
+}
+
+// ErrIdentityWriteDeclined reports that a caller's own stillWanted predicate
+// refused the write under the registry lock — the identity is spoken for right
+// now, typically by a delete. It is deliberately NOT an error about the
+// registry: nothing failed, and nothing was written, so a caller keeps its work
+// and tries again rather than reporting a failure to a user.
+var ErrIdentityWriteDeclined = errors.New("recording this identity was declined by the caller's own check")
+
+// ReconcileProjectRepoID writes down the repository identity a project has been
+// seen to resolve to, once. It is the ONE-WAY move #3530 requires: a record
+// keyed by an invented id learns its real one and never goes back.
+//
+// Idempotent and non-destructive by design — an already-recorded identity is
+// left alone, so this can run on every successful resolution without racing
+// itself, and it never overwrites what a rebind deliberately set. Reports
+// whether it wrote.
+//
+// stillWanted, when non-nil, is re-asked under the registry lock, immediately
+// before the write. It is how a caller whose answer can change — a daemon
+// whose delete fences an identity — gets a decision that is ordered against
+// this write rather than merely earlier than it.
+func ReconcileProjectRepoID(projectID, repoID string, stillWanted func() bool) (bool, error) {
+	if projectID == "" || repoID == "" || IsDerivedRepoID(repoID) {
+		return false, nil
+	}
+	dir, err := projectRegistryDir()
+	if err != nil {
+		return false, err
+	}
+	wrote := false
+	declined := false
+	err = WithFileLock(projectRegistryLockPath(dir), func() error {
+		records, err := loadProjectRecords(dir)
+		if err != nil {
+			return err
+		}
+		// Asked HERE, under the registry lock, and not only by the caller before
+		// it (#3530 review id 3920131413). A delete for this identity that took
+		// the lock first found a row with nothing recorded and could not match
+		// it — it has no evidence connecting the two — so the write must be the
+		// side that yields: landing it afterwards leaves a durable row the
+		// delete has already reported removing nothing about, and the project
+		// returns. Nil means "no reason not to", which is what a startup
+		// backfill passes.
+		if stillWanted != nil && !stillWanted() {
+			declined = true
+			if identityWriteDeclinedHookForTest != nil {
+				identityWriteDeclinedHookForTest()
+			}
+			return nil
+		}
+		for _, record := range records {
+			if record.ID != projectID || record.RepoID != "" {
+				continue
+			}
+			record.RepoID = repoID
+			// The v2 stamp this migration needs is applied by
+			// writeProjectRecord, which carries it for every writer that adds
+			// repo_id rather than for this one alone (#3530 review id
+			// 3915722471).
+			if err := writeProjectRecord(dir, record); err != nil {
+				return err
+			}
+			wrote = true
+			return nil
+		}
+		return nil
+	})
+	if err == nil && declined {
+		// A DECLINE is not "already recorded" (#3530 review id 3920258558).
+		// Both return wrote=false, and a caller that cannot tell them apart
+		// goes on to publish an identity transition whose durable half never
+		// happened. The sentinel makes the difference testable with errors.Is
+		// while staying out of the success path.
+		return false, ErrIdentityWriteDeclined
+	}
+	return wrote, err
+}
+
+// identityWriteDeclinedHookForTest, when non-nil, runs the moment a write is
+// declined under the registry lock. It exists for one interleaving: a caller
+// whose predicate said no can have its reason disappear before the caller acts
+// on the decline (#3530 review id 3920258558), and that window is a few
+// instructions wide in a real daemon.
+var identityWriteDeclinedHookForTest func()
+
+// SetIdentityWriteDeclinedHookForTest installs hook for the duration of a test
+// in another package, and clears it afterwards.
+func SetIdentityWriteDeclinedHookForTest(t interface{ Cleanup(func()) }, hook func()) {
+	identityWriteDeclinedHookForTest = hook
+	t.Cleanup(func() { identityWriteDeclinedHookForTest = nil })
+}
+
+// ProjectCheckoutMatchesContext is ProjectCheckoutMatches with caller-owned
+// cancellation (#3599). Finding the marker means resolving the path's binding
+// first, which forks git; a caller that runs this against a path that may be
+// wedged — the daemon's re-attribution probe, which has already published one
+// repository as gated and cannot rebind that gate until this returns — must be
+// able to bound it.
+//
+// A read the deadline kills is NOT a verdict about the checkout: it comes back
+// as an error carrying ErrRepoProbeUnanswered, never as a clean "does not
+// match", so the caller holds the identity unknowable instead of settling a
+// mismatch that would release what it contradicts (#3500).
+func ProjectCheckoutMatchesContext(ctx context.Context, root, checkoutID string) (bool, error) {
+	return projectRootHasCheckoutIDContext(ctx, root, checkoutID)
 }
