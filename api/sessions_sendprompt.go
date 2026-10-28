@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -118,6 +119,11 @@ gets one more Enter only when it is exactly the single paste chip bound to this
 delivery and nothing in the composer changed; every other staged shape is
 reported sent-unverified. It is never re-pasted.
 
+If --create made the session but could not confirm its start, the command still
+exits 0: the JSON carries a warning, the status stays could-not-confirm, and
+stderr says the session was created. Do not retry; inspect it with
+'af sessions list'.
+
 With --all, broadcast a single prompt to every live session in scope:
 
     af sessions send-prompt --all "<prompt>"
@@ -225,10 +231,24 @@ can inspect per-session results.`,
 				Program:  program,
 				Prompt:   prompt,
 			})
-			if err != nil {
+			// A committed auto-create (the sandbox provisioned but start or
+			// teardown is unconfirmed, #3357) durably made the session. Report
+			// it the way kill/archive/restore report a committed mutation —
+			// exit 0 with a warning — so a script does not retry and send the
+			// prompt twice into the retained session. The status stays the
+			// delivery observation; an unconfirmed one reads could-not-confirm,
+			// the same non-claim plain send-prompt makes for sent-unverified.
+			warning := ""
+			if err != nil && apiclient.IsMutationCommitted(err) {
+				warning = err.Error()
+				if !status.Valid() {
+					status = session.PromptCouldNotConfirm
+				}
+				fmt.Fprintf(os.Stderr, "warning: %v; session %q was created and must not be retried — inspect it with 'af sessions list' before sending again\n", err, title)
+			} else if err != nil {
 				return jsonError(err)
 			}
-			return jsonOut(sendPromptResult{OK: true, Status: status})
+			return jsonOut(sendPromptResult{OK: true, Status: status, Warning: warning})
 		}
 
 		// Against a remote target the existence check would read THIS machine's
@@ -257,6 +277,9 @@ can inspect per-session results.`,
 type sendPromptResult struct {
 	OK     bool                         `json:"ok"`
 	Status session.PromptDeliveryStatus `json:"status"`
+	// Warning is set when the command committed (the session was created) but
+	// a follow-up could not be confirmed; the command still exits 0.
+	Warning string `json:"warning,omitempty"`
 }
 
 // broadcastResult is the JSON summary `send-prompt --all` prints: aggregate
