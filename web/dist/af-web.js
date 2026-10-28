@@ -6922,6 +6922,10 @@ async function listAccounts(token2, repoPath = "") {
   const resp = await af("ListAccounts", body, token2);
   return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
 }
+async function quotaReport(token2) {
+  const resp = await af("QuotaReport", {}, token2);
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
+}
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
 }
@@ -7735,6 +7739,59 @@ function appendStatus(row, status, agent, name) {
   row.append(h("div", { class: "af-accounts-echo" }, status.message));
 }
 
+// src/quota.ts
+function emptyQuotaState() {
+  return { agents: [], warnings: [], loaded: false, error: "" };
+}
+var QUOTA_NOTE = "Quota is what the provider reports \u2014 today \u201Cnot reported\u201D everywhere, af declining to guess a ceiling. Observed is what af\u2019s own sessions show. af quota prints the same report.";
+function renderQuotaSection(state) {
+  const section = h("section", { class: "af-quota" });
+  section.setAttribute("aria-label", "Usage");
+  if (state.loaded === false && !state.error) {
+    section.append(h("p", {}, "Connecting\u2026"));
+    return section;
+  }
+  const head = h(
+    "div",
+    { class: "af-quota-head" },
+    h("span", { class: "af-quota-title" }, "Usage"),
+    h("span", { class: "af-view-count" }, String(state.agents.length))
+  );
+  section.append(head, h("p", { class: "af-quota-note" }, QUOTA_NOTE));
+  if (state.error !== "") {
+    section.append(
+      h("p", { class: "af-quota-error", role: "alert" }, `Usage limits could not be read: ${state.error}`)
+    );
+    return section;
+  }
+  for (const warning of state.warnings) {
+    section.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
+  }
+  if (state.agents.length === 0) {
+    section.append(
+      h("p", { class: "af-quota-empty" }, "No agent CLIs are configured, so there is nothing to report.")
+    );
+    return section;
+  }
+  const list = h("div", { class: "af-quota-list" });
+  for (const agent of state.agents) {
+    const row = h(
+      "div",
+      { class: "af-quota-row" },
+      h("span", { class: "af-quota-agent" }, agent.program),
+      h("span", { class: "af-quota-cell" }, agent.quota),
+      h(
+        "span",
+        { class: agent.limited_sessions > 0 ? "af-quota-cell af-quota-limited" : "af-quota-cell" },
+        agent.observed
+      )
+    );
+    list.append(row, h("p", { class: "af-quota-detail" }, agent.detail));
+  }
+  section.append(list);
+  return section;
+}
+
 // src/scrollkeep.ts
 function listToken(parts) {
   return parts.map((p) => p ?? "none").join("\0");
@@ -7849,6 +7906,9 @@ var ConfigPane = class {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   accounts = emptyAccountsState();
+  /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
+   *  Accounts. Same "not config" rule: see quota.ts. */
+  quota = emptyQuotaState();
   theme = "system";
   showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
@@ -7877,11 +7937,12 @@ var ConfigPane = class {
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
+  lastQuota = null;
   lastTheme = null;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status, accounts, theme = this.theme) {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastTheme === theme) {
+  update(entries, path, status, accounts, quota, theme = this.theme) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastQuota === quota && this.lastTheme === theme) {
       return;
     }
     const statusIsNew = status !== this.lastStatus;
@@ -7894,12 +7955,14 @@ var ConfigPane = class {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastQuota = quota;
     this.lastTheme = theme;
     this.theme = theme;
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    this.quota = quota;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
@@ -8060,7 +8123,8 @@ var ConfigPane = class {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
-      renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
+      renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
+      renderQuotaSection(this.quota)
     );
   }
   /** Theme and the saved token live in this browser's localStorage, not in
@@ -17719,7 +17783,7 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.themeChoice);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -19346,6 +19410,7 @@ var store = new Store({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  quota: emptyQuotaState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -19693,6 +19758,7 @@ function switchView(view) {
   if (view === "config") {
     refreshConfig();
     refreshAccounts();
+    refreshQuota();
   }
 }
 function setStatusFilter(kind, on) {
@@ -20559,6 +20625,21 @@ var accountsRefetcher = createFencedRefetcher({
 function refreshAccounts() {
   accountsRefetcher.refresh();
 }
+var quotaRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], error: "", loaded: true }
+    });
+  },
+  onError: (err) => {
+    store.set({ quota: { ...store.get().quota, error: errorText(err) } });
+  }
+});
+function refreshQuota() {
+  quotaRefetcher.refresh();
+}
 function setAccountStatus(agent, name, message, error) {
   store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
 }
@@ -21110,6 +21191,7 @@ function stopStream() {
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
   accountsRefetcher.invalidate();
+  quotaRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

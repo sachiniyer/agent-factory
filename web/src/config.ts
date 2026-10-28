@@ -33,6 +33,11 @@ import {
   emptyAccountsState,
   renderAccountsSection,
 } from "./accounts.js";
+import {
+  type QuotaState,
+  emptyQuotaState,
+  renderQuotaSection,
+} from "./quota.js";
 import { h } from "./dom.js";
 import type {
   ConfigEntry,
@@ -319,6 +324,9 @@ export class ConfigPane {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   private accounts: AccountsState = emptyAccountsState();
+  /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
+   *  Accounts. Same "not config" rule: see quota.ts. */
+  private quota: QuotaState = emptyQuotaState();
   private theme: ThemeChoice = "system";
   private showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
@@ -349,6 +357,7 @@ export class ConfigPane {
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
   private lastAccounts: AccountsState | null = null;
+  private lastQuota: QuotaState | null = null;
   private lastTheme: ThemeChoice | null = null;
 
   constructor(private readonly actions: ConfigActions) {
@@ -363,10 +372,11 @@ export class ConfigPane {
     path: string,
     status: ConfigStatus | null,
     accounts: AccountsState,
+    quota: QuotaState,
     theme: ThemeChoice = this.theme,
   ): void {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts
-      && this.lastTheme === theme) {
+      && this.lastQuota === quota && this.lastTheme === theme) {
       return;
     }
     // Captured before `lastStatus`/`lastEntries` are overwritten below: the
@@ -384,6 +394,7 @@ export class ConfigPane {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastQuota = quota;
     this.lastTheme = theme;
     this.theme = theme;
     // Retired web appearance keys from older daemons are never editable here.
@@ -391,6 +402,7 @@ export class ConfigPane {
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    this.quota = quota;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
@@ -659,12 +671,13 @@ export class ConfigPane {
               "No settings available. Try Configure with assistant.",
             ),
           ];
-    // Accounts LAST: the config keys are what this view is for, and a credential
-    // section above them would push them below the fold.
+    // Accounts LAST, then Usage (#2983): the config keys are what this view is
+    // for, and daemon-reported sections above them would push them below the fold.
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
+      renderQuotaSection(this.quota),
     );
   }
 
