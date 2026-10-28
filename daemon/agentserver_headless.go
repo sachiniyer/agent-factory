@@ -223,6 +223,11 @@ type AgentServerOptions struct {
 	// Branch is the exact branch the daemon named for this session (#5571 W2.4).
 	// Empty derives it from this host's own branch_prefix, as before.
 	Branch string
+	// PolicyFile is the daemon-resolved operator policy (config.AgentPolicy).
+	// When set, this process answers every config read from it and never reads
+	// or creates anything under its own host's af home (#5571 W2.5); a file it
+	// cannot read or parse fails the start rather than falling back to the host.
+	PolicyFile string
 	// Version is this binary's own build stamp, echoed in the startup banner so
 	// the provisioning daemon can persist which agent-server generation the
 	// session runs (#5571 W1.1 — reattach keys off it). Empty means the banner
@@ -271,6 +276,14 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	}
 	if opts.RepoPath == "" {
 		return fmt.Errorf("agent-server requires a repository path (--repo)")
+	}
+
+	if opts.PolicyFile != "" {
+		policy, perr := config.LoadAgentPolicyFile(opts.PolicyFile)
+		if perr != nil {
+			return fmt.Errorf("af agent-server: %w", perr)
+		}
+		config.InstallAgentPolicy(policy)
 	}
 
 	// LoadConfig honors cors_allowed_origins/default_program for a configured

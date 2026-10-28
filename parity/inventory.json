@@ -1943,6 +1943,7 @@
       "af agent-server --branch": "meta.internal",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
+      "af agent-server --policy-file": "meta.internal",
       "af agent-server --program": "meta.internal",
       "af agent-server --program-resolved": "meta.internal",
       "af agent-server --repo": "meta.internal",

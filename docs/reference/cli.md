@@ -396,6 +396,7 @@ af agent-server [flags]
 |------|------|-------------|
 | `--branch` | `string` | Exact git branch for the workspace's worktree (default: derived from branch_prefix and the title) |
 | `--listen` | `string` | HTTP TCP bind address (host:port); :0 lets the kernel pick a free port (default `127.0.0.1:0`) |
+| `--policy-file` | `string` | Operator policy file written by the provisioning daemon; when set, this server reads no config from the host's af home |
 | `--program` | `string` | Agent program to run (default: the configured default_program) |
 | `--program-resolved` |  | Treat --program as an already-resolved runtime command |
 | `--repo` | `string` | Repository path the workspace runs against (default: current directory) |

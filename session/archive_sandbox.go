@@ -254,6 +254,11 @@ func (i *Instance) reprovisionRemote() error {
 	if backend == nil {
 		return fmt.Errorf("cannot re-provision session %q: no backend on record", i.Title)
 	}
+	policy, perr := agentPolicyFor(spec.RepoRoot, nil)
+	if perr != nil {
+		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, perr)
+	}
+	spec.AgentPolicy = policy
 	kind, err := backendKindForType(backend.Type())
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
