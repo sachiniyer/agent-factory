@@ -1,10 +1,12 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -149,7 +151,17 @@ func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 // with absence.
 func probeSessionContext(ctx context.Context, cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	// Using "-t name" does a prefix match, which is wrong. `-t=` does an exact match.
-	err := runTmuxBoundedWith(ctx, cmdExec, "has-session", fmt.Sprintf("-t=%s", name))
+	// Capture stderr: it is the only place tmux's reason lives, and a Run-based
+	// probe otherwise sees a bare "exit status 1" (an executor that does not run
+	// the command leaves it empty, which classifies as before).
+	c := boundedTmuxCommand(ctx, "has-session", fmt.Sprintf("-t=%s", name))
+	var stderr bytes.Buffer
+	if c.Stderr == nil {
+		c.Stderr = &stderr
+	}
+	err := cmdExec.Run(c)
+	reapTmuxGroup(c)
+	err = normalizeWaitDelay(err)
 	if err == nil {
 		return true, true
 	}
@@ -157,7 +169,21 @@ func probeSessionContext(ctx context.Context, cmdExec cmd.Executor, name string)
 		return false, false
 	}
 	// tmux answered: the usual `has-session` exit 1 for "no such session", or any
-	// other error, which this probe has always conflated with absence.
+	// other error, which this probe has always conflated with absence — EXCEPT the
+	// one answer that is not about the session at all (#4135): ENOENT on the
+	// socket while a live server may still own it (tmux(1): a socket removed by
+	// accident is recreated by signalling the server). Its panes and agents keep
+	// running, so reading it as "gone" has the daemon respawn a second agent into
+	// the same worktree. That shape goes through the same corroboration the strict
+	// probes use (NoServerRunning signals live servers and watches the socket); an
+	// unclaimed socket is still a determinate absence.
+	if exitErr := (*exec.ExitError)(nil); errors.As(err, &exitErr) && len(exitErr.Stderr) == 0 && stderr.Len() > 0 {
+		exitErr.Stderr = stderr.Bytes()
+	}
+	if diagnostic, exitOne := tmuxExitOneDiagnostic(err); exitOne &&
+		classifyNoServerDiagnostic(diagnostic) == socketAbsent && !NoServerRunning(err) {
+		return false, false
+	}
 	return false, true
 }
 
