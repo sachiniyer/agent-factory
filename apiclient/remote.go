@@ -78,6 +78,11 @@ var (
 // equivalent; both select the same plaintext transport and only the authority is
 // used). A `wss://`/`https://` URL is rejected with an actionable HTTP-only error.
 func NewRemote(daemonURL, token string) (*Client, error) {
+	if socket, ok, err := parseUnixDaemonURL(daemonURL); err != nil {
+		return nil, err
+	} else if ok {
+		return newRemoteUnix(socket, token), nil
+	}
 	httpBase, wsBase, err := parseDaemonURL(daemonURL)
 	if err != nil {
 		return nil, err

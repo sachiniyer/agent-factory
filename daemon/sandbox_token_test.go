@@ -204,8 +204,6 @@ func TestMintSandboxCallbackFenced_NeedsOnlyTheEndpoint(t *testing.T) {
 	grant, err := m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), "sess-a")
 	require.NoError(t, err)
 	assert.Equal(t, "/tmp/af-home/sandbox-callback.sock", grant.Socket)
-	assert.Regexp(t, `^http://127\.0\.0\.1:[0-9]{5}$`, grant.URL,
-		"the URL names a loopback port on the SANDBOX, never the client listener")
 	assert.NotEmpty(t, grant.Token)
 	owner, ok := m.sandboxTokens.sessionFor(grant.Token)
 	require.True(t, ok)

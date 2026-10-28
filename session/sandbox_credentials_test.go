@@ -2,7 +2,10 @@ package session
 
 import (
 	"errors"
+	"io"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -250,18 +253,26 @@ func TestMintForProvision_WiresTheRevalidateHook(t *testing.T) {
 	assert.Nil(t, spec2.CallbackRevalidate)
 }
 
-// The -R spec is built only from the daemon's own mint: a loopback sandbox port
-// carried to the daemon's endpoint socket. Anything else clears the grant and
-// says why, so the agent is never handed a URL that nothing answers (W3.4).
+// The -R spec is built only from af's own values: a unix socket inside the
+// session's 0700 directory, carried to the daemon's endpoint socket. No TCP port
+// exists on the sandbox host for another uid to bind (#5799). Anything unusable
+// clears the grant and says why, so the agent is never handed a URL that nothing
+// answers.
 func TestCallbackReverseForward(t *testing.T) {
-	granted := func(url, sock string) *sandboxWorkspace {
-		return &sandboxWorkspace{spec: ProvisionSpec{CallbackURL: url, CallbackToken: "secret", CallbackSocket: sock}}
+	const sessionDir = "/home/u/.af-sessions/s.AbC123"
+	granted := func(dir, sock string) *sandboxWorkspace {
+		return &sandboxWorkspace{SessionDir: dir, spec: ProvisionSpec{CallbackToken: "secret", CallbackSocket: sock}}
 	}
 
-	w := granted("http://127.0.0.1:34567", "/home/u/.agent-factory/sandbox-callback.sock")
+	w := granted(sessionDir, "/home/d/.agent-factory/sandbox-callback.sock")
 	fwd, lost := w.callbackReverseForward()
-	assert.Equal(t, "127.0.0.1:34567:/home/u/.agent-factory/sandbox-callback.sock", fwd)
+	assert.Equal(t, sessionDir+"/af-callback.sock:/home/d/.agent-factory/sandbox-callback.sock", fwd)
 	assert.Empty(t, lost)
+	assert.Equal(t, "unix://"+sessionDir+"/af-callback.sock", w.spec.CallbackURL,
+		"the in-sandbox client dials the session-dir socket, not a TCP address")
+	assert.NotContains(t, fwd, "127.0.0.1", "no TCP bind address anywhere in the carrier")
+	assert.True(t, strings.HasPrefix(w.CallbackSocketPath(), sessionDir+"/"),
+		"the socket must live inside the session's own directory, which mktemp -d makes 0700")
 	assert.Equal(t, "secret", w.spec.CallbackToken)
 
 	// No credential: no forward and no reason (a local-style spec).
@@ -269,19 +280,36 @@ func TestCallbackReverseForward(t *testing.T) {
 	assert.Empty(t, fwd)
 	assert.Empty(t, lost)
 
-	for name, c := range map[string]struct{ url, sock string }{
-		"routable host":     {"http://10.0.0.5:8443", "/af/cb.sock"},
-		"localhost name":    {"http://localhost:34567", "/af/cb.sock"},
-		"no port":           {"http://127.0.0.1", "/af/cb.sock"},
-		"port out of range": {"http://127.0.0.1:70000", "/af/cb.sock"},
-		"no socket":         {"http://127.0.0.1:34567", ""},
-		"relative socket":   {"http://127.0.0.1:34567", "cb.sock"},
-		"colon in socket":   {"http://127.0.0.1:34567", "/af/a:b/cb.sock"},
+	for name, c := range map[string]struct{ dir, sock string }{
+		"no session dir":       {"", "/af/cb.sock"},
+		"relative session dir": {"rel/dir", "/af/cb.sock"},
+		"colon in session dir": {"/h/a:b", "/af/cb.sock"},
+		"path too long":        {"/" + strings.Repeat("d", 120), "/af/cb.sock"},
+		"no daemon socket":     {sessionDir, ""},
+		"relative daemon sock": {sessionDir, "cb.sock"},
+		"colon in daemon sock": {sessionDir, "/af/a:b/cb.sock"},
 	} {
-		w := granted(c.url, c.sock)
+		w := granted(c.dir, c.sock)
 		fwd, lost := w.callbackReverseForward()
 		assert.Emptyf(t, fwd, "%s: no forward may be built", name)
 		assert.NotEmptyf(t, lost, "%s: the loss must be reported", name)
 		assert.Emptyf(t, w.spec.CallbackToken, "%s: a grant with no carrier must not be committed to the host", name)
+		assert.Emptyf(t, w.spec.CallbackURL, "%s: and no URL either", name)
 	}
+}
+
+// A re-dial removes the stale carrier first so it binds the SAME path (the
+// in-sandbox URL never changes), and only that session's own socket.
+func TestClearStaleCallbackSocket(t *testing.T) {
+	p := &sandboxProvisioner{}
+	var ran []string
+	p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		ran = append(ran, script)
+		return nil, nil
+	}
+	p.clearStaleCallbackSocket()
+	assert.Empty(t, ran, "no carrier, nothing to clear")
+	p.callbackSocket = "/home/u/.af-sessions/s.X/af-callback.sock"
+	p.clearStaleCallbackSocket()
+	assert.Equal(t, []string{"rm -f -- '/home/u/.af-sessions/s.X/af-callback.sock'"}, ran)
 }
