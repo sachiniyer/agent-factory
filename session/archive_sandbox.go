@@ -233,11 +233,15 @@ func (i *Instance) reprovisionRemote() error {
 	backend := i.backend
 	accountName := i.Account
 	spec := ProvisionSpec{
-		RepoRoot:              i.Path,
-		Title:                 i.Title,
-		Program:               i.Program,
-		CloneURL:              originRemoteURL(i.Path),
-		RestoreBranch:         i.Branch,
+		RepoRoot:      i.Path,
+		Title:         i.Title,
+		Program:       i.Program,
+		CloneURL:      originRemoteURL(i.Path),
+		RestoreBranch: i.Branch,
+		// The replacement agent-server must land on the SAME branch the fetch
+		// just materialized, not re-derive one from its own branch_prefix
+		// (#5571 W2.4).
+		Branch:                i.Branch,
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 	}
 	i.mu.RUnlock()
