@@ -71,6 +71,11 @@ type ProvisionSpec struct {
 	// Host is the listed host the session was placed on (W6.3); empty means the
 	// repo's own ssh settings, or the default_host where the runtime allows it.
 	Host string
+	// WorkspaceRoot is the absolute directory on the target under which the
+	// per-session dir is created (a listed host's workspace_root, #5742). Empty
+	// means the default, "$HOME/.af-sessions". Only the ssh runtime sets it, from
+	// the host it resolved — never from the repo.
+	WorkspaceRoot string
 	// CallbackURL and CallbackToken let the agent INSIDE a sandbox call back into
 	// the daemon (#2999) — the reverse of the daemon-drives-sandbox direction. They
 	// are AF_DAEMON_URL / AF_DAEMON_TOKEN, which apiclient already reads, so no new
@@ -115,6 +120,12 @@ type ProvisionSpec struct {
 	// (#5571 W2.7). Empty falls back to a placeholder identity.
 	GitUserName  string
 	GitUserEmail string
+	// Branch is the git branch the daemon named for this session (its frozen
+	// branch_prefix over the title). Off-box runtimes hand it to the
+	// agent-server so the in-sandbox worktree uses exactly this name instead of
+	// re-deriving it from the host's own config, and the instance records it at
+	// create (#5571 W2.4). Empty leaves the agent-server to derive it.
+	Branch string
 	// SeedBundlePath, when set, seeds the sandbox workspace from a local git
 	// bundle (a W7.9 session move) instead of only a fresh clone: after cloning,
 	// the bundle is streamed to the sandbox and SeedRefs are fetched from it as
@@ -160,6 +171,10 @@ type ProvisionResult struct {
 	// serialized by the runtime; docker/SSH latch answered outcomes and leave
 	// unknown outcomes retryable, while hook runs its idempotent delete once.
 	Teardown func() error
+	// Branch is the branch name the daemon passed the runtime (ProvisionSpec.Branch),
+	// recorded on the new Instance so surfaces show it from the first frame.
+	Branch string
+
 	// CallbackUnavailable carries the reason no callback credential was
 	// delivered to this sandbox (#5571 W3.1): the mint refused, or the grant
 	// died while provisioning. A non-empty value means the runtime deliberately

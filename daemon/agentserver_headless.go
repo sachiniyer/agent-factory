@@ -220,6 +220,9 @@ type AgentServerOptions struct {
 	// SessionEnvPassthrough carries exact operator-approved variable names from
 	// the outer runtime. Values remain in this host's environment.
 	SessionEnvPassthrough []string
+	// Branch is the exact branch the daemon named for this session (#5571 W2.4).
+	// Empty derives it from this host's own branch_prefix, as before.
+	Branch string
 	// Version is this binary's own build stamp, echoed in the startup banner so
 	// the provisioning daemon can persist which agent-server generation the
 	// session runs (#5571 W1.1 — reattach keys off it). Empty means the banner
@@ -327,6 +330,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,
+		BranchName:   opts.Branch,
 		// The in-sandbox agent-server ALWAYS runs the local runtime (tmux + git
 		// worktree against RepoPath) — it IS the sandbox (§1.2). Force it explicitly
 		// so a workspace whose repo config declares backend=docker/ssh/hook does

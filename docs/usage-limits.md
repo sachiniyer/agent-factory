@@ -323,6 +323,24 @@ shows a `[limit]` badge, and — when the banner carried a parseable reset time 
 (whether you resume it, the daemon auto-resumes it, or the banner scrolls away
 on its own).
 
+## The usage report
+
+`af quota` prints a per-agent report of the same signal, answered on all three
+surfaces identically — the TUI and web render it as the **Usage** section of
+the config view, the CLI as a table:
+
+- **TUI**: open the config overlay (`,`) and scroll to **Usage**.
+- **Web**: open the **Config** view; Usage sits under Accounts.
+- **CLI**: `af quota` — and `af quota --daemon-url <url>` reports on the
+  remote daemon's host, not yours.
+
+Each row keeps two things apart on purpose: **quota** is what the provider
+reports about the account's ceiling — `not reported` everywhere today, because
+no supported agent exposes a quota API and af does not guess one — while
+**observed** is what af's own sessions show (running counts, a session parked
+at a wall, and the earliest recorded reset). A record file af could not read
+makes the report say so rather than look complete.
+
 ## Manual retry
 
 Resume a limit-blocked session immediately from any surface:

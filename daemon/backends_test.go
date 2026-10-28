@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/rpc"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -466,5 +468,39 @@ func TestBackendCatalog_CallbackAdvisoryOnlyOnInjectingKinds(t *testing.T) {
 			assert.Empty(t, opt.CallbackUnavailableReason,
 				"backend %s never injects a callback, so it has nothing to lose", opt.Name)
 		}
+	}
+}
+
+// TestSandboxOptionCarriesTheCachedHostVerdict (#5571 W2.3 part B): the catalog
+// reads the readiness cache and never dials — unprobed and stale hosts stay
+// selectable but carry a note, only a fresh blocking verdict is unavailable.
+func TestSandboxOptionCarriesTheCachedHostVerdict(t *testing.T) {
+	cfg := &config.ResolvedConfig{}
+	cfg.SandboxSSH = "ssh backends-test-host"
+
+	opt := BackendOption{Name: "sandbox", Status: BackendAvailable}
+	applyHostReadiness(&opt, session.BackendSandbox, cfg)
+	if opt.Status != BackendAvailable || opt.Readiness != "unprobed" || opt.Note == "" {
+		t.Fatalf("never-probed host: got %+v, want available + unprobed note", opt)
+	}
+
+	session.RecordHostReadiness(cfg.SandboxSSH, errors.New("git is not on the host's PATH"))
+	opt = BackendOption{Name: "sandbox", Status: BackendAvailable}
+	applyHostReadiness(&opt, session.BackendSandbox, cfg)
+	if opt.Status != BackendUnavailable || !strings.Contains(opt.Reason, "git is not on the host's PATH") {
+		t.Fatalf("fresh blocking verdict: got %+v, want unavailable naming the fix", opt)
+	}
+
+	session.RecordHostReadiness(cfg.SandboxSSH, nil)
+	opt = BackendOption{Name: "sandbox", Status: BackendAvailable}
+	applyHostReadiness(&opt, session.BackendSandbox, cfg)
+	if opt.Status != BackendAvailable || opt.Readiness != "ready" || opt.Note != "" {
+		t.Fatalf("fresh pass: got %+v, want plain available", opt)
+	}
+
+	other := BackendOption{Name: "docker", Status: BackendAvailable}
+	applyHostReadiness(&other, session.BackendDocker, cfg)
+	if other.Readiness != "" || other.Note != "" {
+		t.Fatalf("a backend with no remote host must carry no readiness: %+v", other)
 	}
 }

@@ -233,3 +233,14 @@ test("an unavailable catalog degrades to the repo default alone", () => {
   assert.equal(choices[0].label, "Repo default");
   assert.equal(backendSelectable(choices, REPO_DEFAULT), true, "a create must still be possible when the catalog is unknown");
 });
+
+test("a stale or unprobed host note rides beside an available backend without blocking it", () => {
+  const choices = backendChoices({
+    backends: [{ name: "sandbox", label: "sandbox", status: "available", readiness: "unprobed", note: "not probed yet — the host is checked when a session is created" }],
+    default: "",
+    default_status: "available",
+  });
+  const sandbox = choices.find((c) => c.value === "sandbox");
+  assert.match(sandbox?.reason ?? "", /not probed yet/);
+  assert.equal(backendSelectable(choices, "sandbox"), true);
+});
