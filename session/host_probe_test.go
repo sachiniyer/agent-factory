@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -76,4 +77,35 @@ func TestCheckAllHosts_SkipsAndContinuesPastARefusal(t *testing.T) {
 	assert.Contains(t, out, "a-all")
 	assert.NotContains(t, out, "b-all", "skipped")
 	assert.Contains(t, errs, "c-all", "an invalid entry is refused without stopping the rest")
+}
+
+// A create on a listed host records its prerequisite verdict under host:<name>,
+// the key the catalog and doctor read, and not under the per-create ssh command
+// (#5840). An unnamed sandbox.ssh host keeps the command-string key.
+func TestProvisionerRecordsUnderTheListedHostKey(t *testing.T) {
+	probe := func(out string) func(time.Duration, string, io.Reader, bool) ([]byte, error) {
+		return func(time.Duration, string, io.Reader, bool) ([]byte, error) { return []byte(out), nil }
+	}
+	const blocked = "git=missing\ntmux=tmux 3.4\ngh=ok\n"
+	const ready = "git=ok\ntmux=tmux 3.4\ngh=ok\n"
+
+	cmd := "ssh -o pin=1 create-key-box.example"
+	key := HostReadinessKey("create-key-box")
+	p := &sandboxProvisioner{sshCmd: cmd, readinessKey: key, runCommandFn: probe(blocked)}
+	_, err := p.provision()
+	require.Error(t, err)
+	assert.Equal(t, HostReadinessBlocked, ReadHostReadiness(key).State, "the create proved the host blocked")
+	assert.Equal(t, HostReadinessUnprobed, ReadHostReadiness(cmd).State, "nothing is recorded under the command key")
+
+	// A later create that finds the host fixed clears the stale block.
+	p = &sandboxProvisioner{sshCmd: cmd, readinessKey: key, runCommandFn: probe(ready)}
+	_, _ = p.provision()
+	assert.Equal(t, HostReadinessReady, ReadHostReadiness(key).State)
+
+	// Unnamed sandbox.ssh: the command string stays the key.
+	cmd2 := "ssh unnamed-create-box.example"
+	p = &sandboxProvisioner{sshCmd: cmd2, runCommandFn: probe(blocked)}
+	_, err = p.provision()
+	require.Error(t, err)
+	assert.Equal(t, HostReadinessBlocked, ReadHostReadiness(cmd2).State)
 }
