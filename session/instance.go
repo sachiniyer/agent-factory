@@ -459,7 +459,7 @@ type Instance struct {
 	carriedConversation AgentConversationData
 
 	// reportedConversation is the last conversation a remote agent-server reported
-	// (RecordReportedConversation), held until the daemon-side agent tab exists to
+	// (recordReportedConversationFrom), held until the daemon-side agent tab exists to
 	// carry it. Guarded by mu.
 	reportedConversation AgentConversationData
 	// conversationUnpersisted is set when a remote agent-server reported a

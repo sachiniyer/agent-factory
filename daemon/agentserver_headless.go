@@ -596,8 +596,12 @@ func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKRespons
 	}
 	if codex && hs.inst != nil {
 		// Before the spawn, so the capture can tell the new rollout from old ones.
+		// Correlated against the directory the launch command actually runs the
+		// agent in (an `env -C DIR codex` moves it off the worktree), not the
+		// worktree; unscoped when that is not provable (#5861).
 		codexSnap = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(
-			codexHomeFor(hs.program, hs.inst.GetWorktreePath()), hs.inst.GetWorktreePath())
+			codexHomeFor(hs.program, hs.inst.GetWorktreePath()),
+			session.LaunchCaptureWorkingDir(hs.program, hs.inst.GetWorktreePath()))
 	}
 	if err := hs.as.Launch(req.FirstTimeSetup); err != nil {
 		return err
