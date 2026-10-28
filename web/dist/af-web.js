@@ -6798,6 +6798,24 @@ function formatLimitReset(reset, now) {
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
 }
+function placementShort(s) {
+  const p = s.placement;
+  if (!p || p.kind !== "remote") return "";
+  return p.host || p.backend || "";
+}
+function placementDetail(s) {
+  const p = s.placement;
+  if (!p) return "";
+  const parts = [];
+  if (p.kind === "remote") {
+    parts.push(placementShort(s));
+    if (p.host && p.backend) parts.push(p.backend);
+  } else {
+    parts.push("local");
+  }
+  if (p.location) parts.push(p.location);
+  return parts.filter(Boolean).join(" \xB7 ");
+}
 
 // src/backends.ts
 var HOST_VALUE_PREFIX = "host:";
@@ -7852,6 +7870,10 @@ function terminalChrome(opts) {
   const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
   title.setAttribute("aria-label", opts.title);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
+  if (opts.placement) {
+    const place = h("span", { class: "af-term-placement", title: opts.placement }, opts.placement);
+    titleBox.insertBefore(place, titleBox.lastChild);
+  }
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
   const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
@@ -18675,6 +18697,7 @@ var AppShell = class {
     }
     const chrome = terminalChrome({
       title: selected.title,
+      placement: placementDetail(selected),
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
@@ -19341,6 +19364,12 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
       " \xB7 ",
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch)
     );
+  }
+  const place = placementShort(s);
+  if (place) {
+    const placed = h("span", { class: "af-row-place" }, place);
+    placed.title = placementDetail(s);
+    branchParts.push(" \xB7 ", placed);
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);

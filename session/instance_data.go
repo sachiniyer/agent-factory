@@ -311,6 +311,9 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// an identity, empty stays honest and matches the pre-#1933 projection.
 		data.Worktree.RepoPath = i.repoIdentityPath
 	}
+	if i.backend != nil {
+		data.Placement = i.placementLocked(data.BackendType, data.Worktree.WorktreePath)
+	}
 
 	return data
 }
@@ -508,6 +511,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		Account:                  data.Account,
 		Host:                     data.Host,
 		archivedWorkspace:        cloneArchivedWorkspace(data.ArchivedWorkspace),
+		placement:                clonePlacement(data.Placement),
 		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),

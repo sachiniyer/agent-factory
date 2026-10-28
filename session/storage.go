@@ -420,6 +420,11 @@ type InstanceData struct {
 	// nil therefore means only "not projected", and ForStorage sets it back to nil
 	// so a derived verdict still never reaches instances.json.
 	TabRosterMutable *bool `json:"tab_roster_mutable,omitempty"`
+	// Placement is where the session runs (#5571 W6.4): derived on every snapshot
+	// so each surface can show host, local-versus-off-box and workspace location.
+	// ForStorage sets it back to nil, so a derived fact never reaches
+	// instances.json.
+	Placement *PlacementData `json:"placement,omitempty"`
 	// RuntimeCleanupStateUnknown is the independent retention marker for a sandbox
 	// teardown whose completion could not be determined. The next restore must
 	// retry RuntimeCleanup before it can safely provision a replacement. It is not

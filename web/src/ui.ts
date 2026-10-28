@@ -53,6 +53,8 @@ import {
   isPendingManualHandoffDeliveryUnconfirmed,
   isPendingManualSwapDeliveryConfirmable,
   OPERATOR_KIND_LABELS,
+  placementDetail,
+  placementShort,
   type OperatorKind,
   operatorKind,
   rowStatus,
@@ -2543,6 +2545,7 @@ export class AppShell {
     }
     const chrome = terminalChrome({
       title: selected.title,
+      placement: placementDetail(selected),
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
@@ -3594,6 +3597,12 @@ export function sessionRow(
       " · ",
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch),
     );
+  }
+  const place = placementShort(s);
+  if (place) {
+    const placed = h("span", { class: "af-row-place" }, place);
+    placed.title = placementDetail(s);
+    branchParts.push(" · ", placed);
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);

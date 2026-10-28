@@ -140,7 +140,7 @@ export function sessionFirstComposition(moves: [HTMLElement, HTMLElement][]) {
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
+export function terminalChrome(opts: { title: string; placement?: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
   const menu = actionsDisclosure();
   const action = (label: string, className: string, run: () => void) => {
     const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
@@ -150,6 +150,11 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
   title.setAttribute("aria-label", opts.title);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
+  if (opts.placement) {
+    // Where the session runs (#5571 W6.4): muted, after the title, clipped like it.
+    const place = h("span", { class: "af-term-placement", title: opts.placement }, opts.placement);
+    titleBox.insertBefore(place, titleBox.lastChild);
+  }
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
   const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");

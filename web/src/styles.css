@@ -1401,6 +1401,15 @@ button:disabled,
 .af-term-keyboard, .af-pane-keyboard { color: var(--af-ink); font-size: var(--af-type-body); }
 .af-pane-keyboard { display: none; }
 .af-kb-terminal .af-pane-focused .af-pane-keyboard { display: inline; }
+.af-term-placement {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--af-ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: var(--af-space-2);
+}
 .af-term-title-separator { color: var(--af-ink); font-size: var(--af-type-heading); }
 
 /* A durable incomplete-archive notice, sourced from the daemon snapshot rather

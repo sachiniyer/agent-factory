@@ -402,6 +402,9 @@ type Instance struct {
 	// archivedWorkspace records where this archived off-box session's work lives
 	// (#5571 W8.5); nil for a live row or one archived before the field.
 	archivedWorkspace *ArchivedWorkspaceData
+	// placement is the daemon-projected place this row runs (#5571 W6.4). Set on
+	// a client row built from a snapshot, which has no runtime to derive it from.
+	placement *PlacementData
 	// accountAgent is the agent namespace Account was selected in. It must be
 	// durable rather than re-derived at refresh time: a program_overrides edit
 	// after the pin can resolve the recorded Program to a different agent's
