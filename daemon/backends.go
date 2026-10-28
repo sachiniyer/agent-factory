@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -70,6 +71,15 @@ type BackendOption struct {
 	// from the session package's precondition checks. It names what to fix ("set
 	// docker.image in …"), never merely "unavailable". Empty when available.
 	Reason string `json:"reason,omitempty"`
+	// CallbackUnavailableReason says a create on this backend will succeed but
+	// the session will have NO af callback — the daemon cannot mint a credential
+	// under its current listener/auth posture (#5571 W3.1). It is advisory, not
+	// a precondition: the backend stays available because a callback-less
+	// session still works, and the text is the SAME refusal the create path
+	// degrades with (one shared check in daemon/sandbox_token.go), so picker and
+	// create cannot disagree. Set only on kinds that inject a callback; empty
+	// when a callback would be delivered.
+	CallbackUnavailableReason string `json:"callback_unavailable_reason,omitempty"`
 }
 
 // ListBackendsResponse is the catalog for one repo.
@@ -96,21 +106,76 @@ type ListBackendsResponse struct {
 	// DefaultReason explains a DefaultStatus that is not available, naming the
 	// offending value and the file it is in.
 	DefaultReason string `json:"default_reason,omitempty"`
+	// Hosts is every host in the operator's global host list, sorted by name, with
+	// whether a create picking it (CreateSessionRequest.Host) would work right now
+	// (W6.3). Absent when no hosts are configured. Reason follows the same rule as
+	// BackendOption.Reason.
+	Hosts []HostOption `json:"hosts,omitempty"`
+	// DefaultHost is the configured default_host, which applies when a create picks
+	// no host and resolves to the ssh backend with no repo [ssh] host. Empty when unset.
+	DefaultHost string `json:"default_host,omitempty"`
+}
+
+// HostOption is one listed host and whether this repo can place a session on it.
+type HostOption struct {
+	// Name is what a client sends back as CreateSessionRequest.Host.
+	Name string `json:"name"`
+	// Address is the host's ssh destination, shown for orientation only.
+	Address string              `json:"address"`
+	Status  BackendAvailability `json:"status"`
+	Reason  string              `json:"reason,omitempty"`
+}
+
+// hostCatalog answers for the operator's host list. An unreadable config is
+// reported as unknown per host rather than by omitting them.
+func hostCatalog(cfg *config.ResolvedConfig, cfgErr error, repoRoot string) []HostOption {
+	if cfgErr != nil || cfg == nil || len(cfg.Hosts) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Hosts))
+	for name := range cfg.Hosts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]HostOption, 0, len(names))
+	for _, name := range names {
+		opt := HostOption{Name: name, Address: cfg.Hosts[name].Host, Status: BackendAvailable}
+		if err := session.HostUnusableReason(name, cfg, repoRoot); err != nil {
+			opt.Status, opt.Reason = BackendUnavailable, err.Error()
+		}
+		out = append(out, opt)
+	}
+	return out
 }
 
 // ListBackends reports the selectable runtimes for a repo, and which backend an
 // unspecified create resolves to. It is read-only: it provisions nothing, starts
 // nothing, dials nothing, and touches no session state.
 func (s *controlServer) ListBackends(req ListBackendsRequest, resp *ListBackendsResponse) error {
-	repo, err := config.RepoFromPath(req.RepoPath)
+	// A remote client sends the path as typed; expand ~ against THIS (the
+	// daemon's) home, never the caller's.
+	repo, err := config.RepoFromPath(config.ExpandTilde(strings.TrimSpace(req.RepoPath)))
 	if err != nil {
 		return err
 	}
 
 	workspace := repo.WorkspacePath()
 	cfg, cfgErr := config.ResolveConfigForRepo(repo)
-	resp.Backends = backendCatalog(config.SupportedBackends, cfg, cfgErr, workspace)
+	// The callback check reads the LIVE global config — the same input the mint
+	// reads — never the repo-resolved cfg: callback availability is a daemon
+	// property (listener + auth posture), not a project property. A bare
+	// controlServer (some tests) has no manager; "" then means "cannot say",
+	// which renders as no advisory rather than a fabricated finding.
+	callbackReason := ""
+	if s.manager != nil {
+		callbackReason = s.manager.callbackUnavailableReason(s.manager.Config())
+	}
+	resp.Backends = backendCatalog(config.SupportedBackends, cfg, cfgErr, workspace, callbackReason)
 	resp.Default, resp.DefaultStatus, resp.DefaultReason = defaultFor(resp.Backends, cfg, cfgErr, workspace)
+	resp.Hosts = hostCatalog(cfg, cfgErr, workspace)
+	if cfgErr == nil && cfg != nil {
+		resp.DefaultHost = cfg.DefaultHost
+	}
 	return nil
 }
 
@@ -129,10 +194,10 @@ func (s *controlServer) ListBackends(req ListBackendsRequest, resp *ListBackends
 // — is what `go test -race` failed on in #1970, and this one had simply not been
 // unlucky yet. Neither enum is ever written in production; both are read-only
 // after init, which is precisely why their read paths need no lock.
-func backendCatalog(names []string, cfg *config.ResolvedConfig, cfgErr error, repoRoot string) []BackendOption {
+func backendCatalog(names []string, cfg *config.ResolvedConfig, cfgErr error, repoRoot string, callbackReason string) []BackendOption {
 	out := make([]BackendOption, 0, len(names))
 	for _, name := range names {
-		out = append(out, backendOptionFor(session.BackendKind(name), cfg, cfgErr, repoRoot))
+		out = append(out, backendOptionFor(session.BackendKind(name), cfg, cfgErr, repoRoot, callbackReason))
 	}
 	return out
 }
@@ -143,8 +208,14 @@ func backendCatalog(names []string, cfg *config.ResolvedConfig, cfgErr error, re
 // requires docker.image" for a repo whose config we could not parse would be a
 // fabricated finding: docker.image might be set perfectly well in a file with a
 // stray comma elsewhere. The user needs to hear about the comma.
-func backendOptionFor(kind session.BackendKind, cfg *config.ResolvedConfig, cfgErr error, repoRoot string) BackendOption {
+func backendOptionFor(kind session.BackendKind, cfg *config.ResolvedConfig, cfgErr error, repoRoot string, callbackReason string) BackendOption {
 	opt := BackendOption{Name: string(kind), Label: backendLabel(kind, cfg)}
+	// The callback advisory is set BEFORE the early returns below so it renders
+	// on every status — an "unknown" or "unavailable" backend still deserves the
+	// same answer the create path would degrade with.
+	if kind.InjectsSandboxCallback() {
+		opt.CallbackUnavailableReason = callbackReason
+	}
 
 	if cfgErr != nil {
 		// local is the one backend that reads nothing from the repo config, so an

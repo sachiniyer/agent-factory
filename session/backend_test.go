@@ -120,6 +120,7 @@ func TestBackendCapabilities(t *testing.T) {
 		TabManagement:    false,
 		TerminalTab:      true,
 		InteractiveInput: true,
+		LoopbackRelay:    true,
 		Handoff:          false,
 	}
 
@@ -156,6 +157,21 @@ func TestBackendCapabilities(t *testing.T) {
 			b:    &sshBackend{},
 			want: sandboxCaps,
 		},
+		{
+			name: "sandbox_ssh runtime — remote parity, no tab management",
+			b:    &sandboxBackend{},
+			want: sandboxCaps,
+		},
+	}
+
+	// The table above is hand-written, so pin that it covers the whole
+	// off-box family derived from the registry (W10.2).
+	covered := map[string]bool{}
+	for _, tt := range tests {
+		covered[tt.b.Type()] = true
+	}
+	for _, kind := range offBoxKinds() {
+		assert.True(t, covered[offBoxBackendType[kind]], "off-box backend %q has no row in the capabilities table", kind)
 	}
 
 	for _, tt := range tests {

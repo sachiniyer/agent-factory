@@ -336,18 +336,41 @@ func ensureDevinSkillDir() (string, error) {
 // exactly as claude uses --plugin-dir. It is plain markdown (aider adds it to
 // the chat as a read-only file), not a SKILL.md, so it needs no frontmatter; the
 // afSkillMarker rides in a leading HTML comment for ownership.
+//
+// aiderReadDocFor picks between the full reference and the callbackless variant
+// (#5571 W3.1): a session with no af callback must not be taught af verbs it
+// cannot use, and --read is a per-instance seam, so the variant lands here.
 var aiderReadDoc = "<!-- " + afSkillMarker + " -->\n\n" + afUsageReference + "\n"
+
+var aiderReadDocCallbackless = "<!-- " + afSkillMarker + " -->\n\n" + afUsageReferenceCallbackless + "\n"
+
+func aiderReadDocFor(callbackUnavailable bool) string {
+	if callbackUnavailable {
+		return aiderReadDocCallbackless
+	}
+	return aiderReadDoc
+}
 
 // aiderReadFilePath returns the path of the af-owned aider context file, under the
 // af config dir (config.GetConfigDir()). It is NOT written into the user's worktree
 // (that would pollute git status) nor into .aider.conf.yml (that is the user's
 // file). The path is af-exclusive, so --read can point at it safely.
-func aiderReadFilePath() (string, error) {
+//
+// The callbackless variant gets its OWN filename rather than sharing
+// af-skill.md: remote sessions under one remote user share the config dir, and
+// two variants at one path flap — a later launch could overwrite the file an
+// earlier session then reads, teaching a working session that af is dead or a
+// callbackless one verbs that fail (#5571 W3.1, PR #5577 review).
+func aiderReadFilePath(callbackUnavailable bool) (string, error) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(configDir, "aider", "af-skill.md"), nil
+	name := "af-skill.md"
+	if callbackUnavailable {
+		name = "af-skill-callbackless.md"
+	}
+	return filepath.Join(configDir, "aider", name), nil
 }
 
 // ensureAiderReadFile writes aiderReadDoc to the af-owned aider context file and
@@ -355,12 +378,12 @@ func aiderReadFilePath() (string, error) {
 // file exists but is NOT af-managed — the caller must then skip injecting --read
 // rather than point it at a file we do not own. A non-af file at our own path is
 // nearly impossible (af owns the dir), but the marker guard is honored uniformly.
-func ensureAiderReadFile() (string, error) {
-	path, err := aiderReadFilePath()
+func ensureAiderReadFile(callbackUnavailable bool) (string, error) {
+	path, err := aiderReadFilePath(callbackUnavailable)
 	if err != nil {
 		return "", err
 	}
-	wrote, err := writeAfMarkedFile(path, aiderReadDoc)
+	wrote, err := writeAfMarkedFile(path, aiderReadDocFor(callbackUnavailable))
 	if err != nil {
 		return "", err
 	}

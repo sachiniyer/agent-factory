@@ -33,9 +33,11 @@ import type {
   AccountsResponse,
   ConfigResponse,
   ConfigSetResponse,
+  ExplainConfigResponse,
   RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
+  SkippedRepo,
   SnapshotResponse,
   TaskData,
   TaskMutationRef,
@@ -200,6 +202,10 @@ function isDaemonRejection(err: EnvelopeError | null | undefined, status: number
 
 export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 
+/** apiproto.ErrorCodeProjectRebound: a rebind carrying expected_root was refused
+ *  because another rebind moved the project first (#4822). Nothing was written. */
+export const PROJECT_REBOUND_ERROR_CODE = "project_rebound";
+
 /**
  * A failed API call. `status` is the HTTP status (0 for a network/transport
  * failure), while `code` preserves an optional machine-readable daemon outcome.
@@ -223,6 +229,12 @@ export function isMutationCommittedError(e: unknown): e is ApiError {
     e.status !== 502 && e.status !== 504;
 }
 
+/** The daemon refused a rebind because the project is no longer bound to the
+ *  root the caller expected — a definitive refusal, never an unknown outcome. */
+export function isProjectReboundError(e: unknown): e is ApiError {
+  return e instanceof ApiError && e.daemonRejected && e.code === PROJECT_REBOUND_ERROR_CODE;
+}
+
 /** Only a definitive daemon refusal permits an immediate mutation retry. */
 export function isMutationOutcomeUncertain(e: unknown): boolean {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
@@ -234,7 +246,7 @@ export function isMutationOutcomeUncertain(e: unknown): boolean {
  * a non-null error, or on a transport failure — mirroring apiclient.call so the
  * whole client shares one error path.
  */
-export async function af<T>(method: string, body: unknown, token: string): Promise<T> {
+export async function af<T>(method: string, body: unknown, token: string, signal?: AbortSignal): Promise<T> {
   // An empty token is the "this client needs none" sentinel (loopback, or
   // require_token=false, #1696): send no Authorization header at all rather than a
   // bogus "Bearer " — the daemon exempts the peer, so the header is simply absent.
@@ -248,6 +260,7 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
       method: "POST",
       headers,
       body: JSON.stringify(body ?? {}),
+      signal: signal ?? null,
     });
   } catch (e) {
     // A TypeError from fetch is a transport failure (daemon down, wrong host).
@@ -282,14 +295,25 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
  * is the read side of the single-writer model (#960): the daemon owns the state
  * and the web mirrors this Snapshot exactly like the TUI does, seeding the rail on
  * login and re-seeding it after an events-stream reconnect. Returns the instances
- * (never null — an empty daemon yields []); throws ApiError on transport/auth
+ * (never null — an empty daemon yields []) and the daemon's startup-skipped repo
+ * set (omitted/empty when nothing was dropped); throws ApiError on transport/auth
  * failure so callers share one error path.
+ *
+ * `skippedRepos` is the incompleteness channel the daemon fills when it dropped a
+ * repo's instances.json at startup (#4742). The rail surfaces it as a persistent
+ * notice rather than presenting the truncated `instances` as complete — the same
+ * contract the CLI's list/get/whoami honor by refusing or caveating. Empty in the
+ * healthy steady state, so a clean daemon renders no notice.
  */
 export interface SessionSnapshot {
   sessions: SessionData[];
   operationLockTimeoutMs?: number;
   operationClockMs?: number;
   daemonBootId?: string;
+  /** Repos the daemon dropped at startup (daemon SnapshotResponse.skipped_repos),
+   *  so the rail can name them rather than silently hiding their sessions. Empty
+   *  when no repo was skipped. */
+  skippedRepos?: SkippedRepo[];
 }
 
 export async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
@@ -299,6 +323,7 @@ export async function fetchSessionSnapshot(token: string): Promise<SessionSnapsh
     operationLockTimeoutMs: resp.operation_lock_timeout_ms,
     operationClockMs: resp.operation_clock_ms,
     daemonBootId: resp.boot_id,
+    skippedRepos: resp.skipped_repos,
   };
 }
 
@@ -682,6 +707,14 @@ export interface RegisteredProject {
   root: string;
   relative_root: string;
   path_exists: boolean;
+  /** The repository identity this project RESOLVED to (config.Project.RepoID,
+   *  `repo_id` on the wire) — a short hex hash from config.RepoIDFromRoot, NOT the
+   *  registry `id` (`prj_...`). Empty for a record written before this field
+   *  existed; the daemon backfills it on the first successful resolution. This is
+   *  the key the snapshot's `skipped_repos[].repo_id` carries, so the rail maps a
+   *  skipped repo to its registered root through it (not through `id`, which is the
+   *  registry identity and never matches a repo hash). */
+  repo_id?: string;
 }
 
 /** Registers a git checkout as a durable, sessionless project (mirrors
@@ -702,6 +735,12 @@ export async function registerProject(path: string, token: string): Promise<Regi
   return resp.project;
 }
 
+/** The documented remedy when a guarded rebind's versioned route proves absent:
+ *  mirrors daemon.ErrGuardedRebindUnsupported's wording so every client names
+ *  the same fix. */
+const GUARDED_REBIND_UNSUPPORTED =
+  "this daemon predates guarded rebinds — upgrade it, or rebind from the daemon host";
+
 /** Moves a registered project's stable identity to the checkout at `path`
  *  (mirrors `af projects rebind`): the repair after the checkout a registration
  *  names was moved or recloned elsewhere — the `id` survives, only where it
@@ -710,9 +749,62 @@ export async function registerProject(path: string, token: string): Promise<Regi
  *  root another project already owns. A rejection (unknown id, not a git repo,
  *  ownership conflict) throws an ApiError carrying the daemon's actionable
  *  message for inline display; on success the echoed projects.changed refetches
- *  the registry and the rebound root lands in the switcher union. */
-export async function rebindProject(id: string, path: string, token: string): Promise<RegisteredProject> {
-  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", { id, path }, token);
+ *  the registry and the rebound root lands in the switcher union.
+ *
+ *  `expectedRoot`/`expectedCheckoutID` are the pair the UI showed for the
+ *  project — its recorded root and the checkout marker behind it. The daemon
+ *  applies the rebind only while the registry still records BOTH, and otherwise
+ *  refuses with PROJECT_REBOUND_ERROR_CODE (#4822): a reclone at the same path
+ *  keeps the root spelling but mints a new checkout marker, so the pair is what
+ *  a same-path replacement fails on. Each rides verbatim — a value the record
+ *  never showed is sent as no field rather than an empty one, because a guarded
+ *  precondition the client cannot fully name is a refusal, not a silent
+ *  last-writer-wins. A guarded send goes to RebindProjectGuarded — the route
+ *  is the capability check (#4888 review): a daemon that predates it answers
+ *  its marked 404 instead of dropping the expected_* fields it does not know
+ *  and applying the move unconditionally. */
+export async function rebindProject(
+  id: string,
+  path: string,
+  token: string,
+  expectedRoot: string | null = null,
+  expectedCheckoutID: string | null = null,
+): Promise<RegisteredProject> {
+  const request: { id: string; path: string; expected_root?: string; expected_checkout_id?: string } = {
+    id,
+    path,
+  };
+  if (expectedRoot !== null && expectedRoot !== "") {
+    request.expected_root = expectedRoot;
+  }
+  if (expectedCheckoutID !== null && expectedCheckoutID !== "") {
+    request.expected_checkout_id = expectedCheckoutID;
+  }
+  // Two literal af() calls: the parity inventory derives web RPCs statically.
+  if (request.expected_root !== undefined || request.expected_checkout_id !== undefined) {
+    let resp: { ok: boolean; project: RegisteredProject };
+    try {
+      resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProjectGuarded", request, token);
+    } catch (e) {
+      // The route is the capability check, so its proven absence must surface
+      // as the guarded-rebind remedy rather than a bare 404 the modal invites
+      // the user to retry. daemonRejected marks the daemon's own catch-all;
+      // the legacy sentence covers daemons older than that marker — the same
+      // pair routeNotServed404 accepts on the Go side. An unmarked 404 (an
+      // intermediary's answer) stays an ordinary ApiError: the outcome is
+      // unconfirmed, not unsupported.
+      if (
+        e instanceof ApiError &&
+        e.status === 404 &&
+        (e.daemonRejected || (e.code === "" && e.message === 'unknown route "/v1/RebindProjectGuarded"'))
+      ) {
+        throw new ApiError(404, GUARDED_REBIND_UNSUPPORTED, e.code, true);
+      }
+      throw e;
+    }
+    return resp.project;
+  }
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", request, token);
   return resp.project;
 }
 
@@ -722,8 +814,8 @@ export async function rebindProject(id: string, path: string, token: string): Pr
  *  switcher and is creatable-into (projectSummaries / pickerProjects). The web is the
  *  only client that reads the registry over HTTP; the TUI and CLI read
  *  config.ListProjects() in-process, so this has no Go apiclient twin. */
-export async function listProjects(token: string): Promise<RegisteredProject[]> {
-  const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token);
+export async function listProjects(token: string, signal?: AbortSignal): Promise<RegisteredProject[]> {
+  const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token, signal);
   return resp.projects ?? [];
 }
 
@@ -1181,6 +1273,19 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
  *  form shows it verbatim rather than substituting its own wording. */
 export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
   return af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
+}
+
+/** ExplainConfig (#4803): the same `config.ResolvedValue` `af config get
+ *  --explain` renders — which on-disk layer supplied the effective value, and
+ *  which were shadowed, absent, or disallowed — served to clients that cannot
+ *  resolve in-process. Global scope; the daemon reports on-disk sources and
+ *  deliberately does not consult its running config snapshot.
+ *
+ *  Throws ApiError carrying the daemon's message on an unknown key or on a
+ *  daemon too old to know the route — the view shows it verbatim rather than
+ *  fabricating a trace. */
+export async function explainConfig(key: string, token: string): Promise<ExplainConfigResponse> {
+  return af<ExplainConfigResponse>("ExplainConfig", { key }, token);
 }
 
 // --- config assistant (#2467) ----------------------------------------------

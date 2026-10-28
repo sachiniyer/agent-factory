@@ -6513,6 +6513,7 @@ function isDaemonRejection(err, status) {
   return err?.daemon_rejected === true && status !== 502 && status !== 504 && envelopeErrorCode(err) !== MUTATION_COMMITTED_ERROR_CODE;
 }
 var MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
+var PROJECT_REBOUND_ERROR_CODE = "project_rebound";
 var ApiError = class extends Error {
   status;
   code;
@@ -6529,10 +6530,13 @@ var ApiError = class extends Error {
 function isMutationCommittedError(e) {
   return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE && e.status !== 502 && e.status !== 504;
 }
+function isProjectReboundError(e) {
+  return e instanceof ApiError && e.daemonRejected && e.code === PROJECT_REBOUND_ERROR_CODE;
+}
 function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
-async function af(method, body, token2) {
+async function af(method, body, token2, signal) {
   const headers = { "Content-Type": "application/json" };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
@@ -6542,7 +6546,8 @@ async function af(method, body, token2) {
     resp = await fetch(`/v1/${method}`, {
       method: "POST",
       headers,
-      body: JSON.stringify(body ?? {})
+      body: JSON.stringify(body ?? {}),
+      signal: signal ?? null
     });
   } catch (e) {
     throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
@@ -6568,7 +6573,8 @@ async function fetchSessionSnapshot(token2) {
     sessions: resp.instances ?? [],
     operationLockTimeoutMs: resp.operation_lock_timeout_ms,
     operationClockMs: resp.operation_clock_ms,
-    daemonBootId: resp.boot_id
+    daemonBootId: resp.boot_id,
+    skippedRepos: resp.skipped_repos
   };
 }
 async function probeAuthRequired() {
@@ -6706,12 +6712,35 @@ async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
   return resp.project;
 }
-async function rebindProject(id, path, token2) {
-  const resp = await af("RebindProject", { id, path }, token2);
+var GUARDED_REBIND_UNSUPPORTED = "this daemon predates guarded rebinds \u2014 upgrade it, or rebind from the daemon host";
+async function rebindProject(id, path, token2, expectedRoot = null, expectedCheckoutID = null) {
+  const request = {
+    id,
+    path
+  };
+  if (expectedRoot !== null && expectedRoot !== "") {
+    request.expected_root = expectedRoot;
+  }
+  if (expectedCheckoutID !== null && expectedCheckoutID !== "") {
+    request.expected_checkout_id = expectedCheckoutID;
+  }
+  if (request.expected_root !== void 0 || request.expected_checkout_id !== void 0) {
+    let resp2;
+    try {
+      resp2 = await af("RebindProjectGuarded", request, token2);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404 && (e.daemonRejected || e.code === "" && e.message === 'unknown route "/v1/RebindProjectGuarded"')) {
+        throw new ApiError(404, GUARDED_REBIND_UNSUPPORTED, e.code, true);
+      }
+      throw e;
+    }
+    return resp2.project;
+  }
+  const resp = await af("RebindProject", request, token2);
   return resp.project;
 }
-async function listProjects(token2) {
-  const resp = await af("ListProjects", {}, token2);
+async function listProjects(token2, signal) {
+  const resp = await af("ListProjects", {}, token2, signal);
   return resp.projects ?? [];
 }
 async function listDirectory(path, token2) {
@@ -6850,6 +6879,9 @@ async function getConfig(token2) {
 }
 async function setConfigValue(key, value, token2) {
   return af("SetConfigValue", { key, value }, token2);
+}
+async function explainConfig(key, token2) {
+  return af("ExplainConfig", { key }, token2);
 }
 function spawnConfigAssistant(token2) {
   return af("config-assistant", {}, token2);
@@ -7765,6 +7797,22 @@ function saveNotice(resp) {
   }
   return parts.join(" \xB7 ");
 }
+function explainValueText(value) {
+  if (typeof value === "string") {
+    return value === "" ? '""' : value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (value === null || value === void 0) {
+    return "null";
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
 function createKeyedQueue() {
   const tails = /* @__PURE__ */ new Map();
   return (key, run) => {
@@ -7810,6 +7858,15 @@ var ConfigPane = class {
    *  and cleared around the single `this.render()` call). */
   restoreKey = null;
   advancedToggle = null;
+  // The open provenance trace (#4803): at most one row explains at a time, the
+  // same way at most one edits — two open traces would read as though the keys
+  // resolved together. `explainGeneration` drops a stale fetch that lands after
+  // the user opened a different row or closed this one.
+  explainKey = null;
+  explainResp = null;
+  explainError = "";
+  explainBusy = false;
+  explainGeneration = 0;
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
@@ -7821,6 +7878,7 @@ var ConfigPane = class {
       return;
     }
     const statusIsNew = status !== this.lastStatus;
+    const entriesAreNew = this.lastEntries !== entries;
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
     if (registrationSucceeded) {
       const submitted = this.accountInput(accounts.status.agent);
@@ -7838,6 +7896,9 @@ var ConfigPane = class {
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
+    }
+    if (entriesAreNew && this.explainKey !== null) {
+      this.requestExplain(this.explainKey);
     }
     this.rerenderKeepingUserState();
   }
@@ -7868,6 +7929,7 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    const explainFocusedKey = active instanceof HTMLElement && active.classList.contains("af-config-explain-trigger") ? active.getAttribute("data-key") : null;
     const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
     const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
@@ -7881,6 +7943,8 @@ var ConfigPane = class {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (explainFocusedKey !== null) {
+      this.el.querySelector(`.af-config-explain-trigger[data-key="${CSS.escape(explainFocusedKey)}"]`)?.focus({ preventScroll: true });
     } else if (focusedConfigControlKey !== null) {
       const restored = this.el.querySelector(
         `.af-config-list [aria-label="${CSS.escape(focusedConfigControlKey)}"]`
@@ -8035,10 +8099,27 @@ var ConfigPane = class {
   renderRow(e) {
     const row = h("div", { class: "af-config-row" });
     row.setAttribute("data-key", e.key);
+    const open = this.explainKey === e.key;
+    const caret = h("span", { class: "af-config-explain-caret" }, open ? "\u25BE" : "\u25B8");
+    caret.setAttribute("aria-hidden", "true");
+    const trigger = h(
+      "button",
+      {
+        type: "button",
+        class: "af-config-key af-config-explain-trigger",
+        title: "Which config layer supplied this value"
+      },
+      caret,
+      e.key
+    );
+    trigger.setAttribute("aria-expanded", String(open));
+    trigger.setAttribute("aria-controls", `af-config-explain-${e.key}`);
+    trigger.setAttribute("data-key", e.key);
+    trigger.addEventListener("click", () => this.toggleExplain(e.key));
     const label = h(
       "div",
       { class: "af-config-label" },
-      h("span", { class: "af-config-key" }, e.key),
+      trigger,
       h("span", { class: "af-config-purpose" }, e.purpose)
     );
     row.append(label);
@@ -8054,7 +8135,118 @@ var ConfigPane = class {
         }
       }
     }
+    if (open) {
+      row.append(this.renderExplainSection(e));
+    }
     return row;
+  }
+  /** The open provenance panel (#4803): the SAME candidate trace
+   *  `af config get --explain` prints — which on-disk layer won, and which were
+   *  shadowed, absent, or disallowed. The daemon computes the ResolvedValue;
+   *  this view only formats it, so the two surfaces cannot disagree about what
+   *  a layer did. Rendered only while the row's key trigger is open, so a closed
+   *  row carries no trace chrome. */
+  renderExplainSection(e) {
+    const section = h("div", { class: "af-config-explain", id: `af-config-explain-${e.key}` });
+    section.append(this.renderExplainBody());
+    return section;
+  }
+  toggleExplain(key) {
+    if (this.explainKey === key) {
+      this.explainKey = null;
+      this.explainResp = null;
+      this.explainError = "";
+      this.explainBusy = false;
+      this.rerenderKeepingUserState();
+      return;
+    }
+    this.explainKey = key;
+    this.explainResp = null;
+    this.explainError = "";
+    this.explainBusy = true;
+    const generation = ++this.explainGeneration;
+    this.rerenderKeepingUserState();
+    this.requestExplain(key, generation);
+  }
+  /** Fetches one key's trace into the open disclosure. update() calls this
+   *  without a generation when fresh manifest rows arrive (the trace re-resolves
+   *  in place); toggleExplain passes its own so a second open supersedes the
+   *  first. The settle check is the same either way: the answer paints only if
+   *  it is still the newest request for the row still open. */
+  requestExplain(key, generation) {
+    const gen = generation ?? ++this.explainGeneration;
+    void this.actions.explain(key).then((outcome) => {
+      if (gen !== this.explainGeneration || this.explainKey !== key) {
+        return;
+      }
+      this.explainBusy = false;
+      if (outcome.ok) {
+        this.explainResp = outcome.resp;
+        this.explainError = "";
+      } else {
+        this.explainResp = null;
+        this.explainError = outcome.error;
+      }
+      this.rerenderKeepingUserState();
+    });
+  }
+  /** The trace body for the open row: busy, refusal, or the ResolvedValue the
+   *  daemon answered — effective value, default, merge policy, then each
+   *  candidate's value, location, and verdict, plus per-leaf origins for
+   *  composite keys. */
+  renderExplainBody() {
+    const body = h("div", { class: "af-config-explain-body", role: "status" });
+    if (this.explainBusy) {
+      body.append(h("div", { class: "af-config-explain-line" }, "Resolving provenance\u2026"));
+      return body;
+    }
+    if (this.explainError !== "") {
+      body.append(h("div", { class: "af-config-error", role: "alert" }, this.explainError));
+      return body;
+    }
+    const v = this.explainResp?.explanation;
+    if (!v) {
+      body.append(h("div", { class: "af-config-error", role: "alert" }, "The daemon returned no explanation."));
+      return body;
+    }
+    body.append(
+      h("div", { class: "af-config-explain-effective" }, `${v.key} = ${explainValueText(v.value)}`),
+      h(
+        "div",
+        { class: "af-config-explain-line" },
+        v.default ? `default: ${v.default} \xB7 ` : "",
+        `policy: ${v.merge} \xB7 ${v.precedence.join(" < ")}`
+      )
+    );
+    for (const cand of v.candidates) {
+      const result = cand.reason !== "" ? `${cand.result} \xB7 ${cand.reason}` : cand.result;
+      const value = cand.present ? explainValueText(cand.value) : "\u2014";
+      const location2 = cand.path ? `${cand.path}:${cand.key_path}` : "compiled default";
+      body.append(
+        h(
+          "div",
+          { class: `af-config-explain-cand af-config-explain-${cand.result}` },
+          h("div", { class: "af-config-explain-layer" }, `${cand.layer}: ${result}`),
+          h("div", { class: "af-config-explain-src" }, `${value} \xB7 ${location2}`)
+        )
+      );
+    }
+    const origins = v.origins ?? {};
+    const leaves2 = Object.keys(origins).sort();
+    if (leaves2.length > 0) {
+      body.append(h("div", { class: "af-config-explain-line" }, "origins:"));
+      for (const leaf of leaves2) {
+        const origin = origins[leaf];
+        const location2 = origin.path ? `${origin.path}:${origin.key_path}` : "compiled default";
+        body.append(
+          h("div", { class: "af-config-explain-src" }, `${leaf}: ${origin.layer} \xB7 ${location2}`)
+        );
+      }
+    }
+    body.append(
+      h("div", { class: "af-config-explain-note" }, "On-disk sources \xB7 the running daemon's value was not checked.")
+    );
+    return body;
   }
   /** The control for one key, chosen from the manifest's own description of it:
    *  a picker when the values are enumerated, a checkbox for a bool, and a text
@@ -11739,24 +11931,387 @@ var AccountSelection = class {
   }
 };
 
+// src/types.ts
+var Liveness = {
+  Unset: 0,
+  Running: 1,
+  Ready: 2,
+  Lost: 3,
+  Dead: 4,
+  Archived: 5,
+  LimitReached: 6
+};
+var TabKind = {
+  Agent: 0,
+  Shell: 1,
+  Process: 2,
+  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
+   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
+   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
+  Web: 3,
+  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
+   *  per-session code-server rooted at the session's worktree, reachable only
+   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
+   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
+   *  lockstep with the Go enum. */
+  VSCode: 4,
+  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
+   *  Mirrors session.TabKindDocs (session/tab.go). */
+  Docs: 5
+};
+var InFlightOp = {
+  None: 0,
+  Creating: 1,
+  Killing: 2,
+  Archiving: 3,
+  Restoring: 4,
+  Replacing: 5,
+  Respawning: 6
+};
+var Status = {
+  Running: 0,
+  Ready: 1,
+  Loading: 2,
+  Deleting: 3,
+  Dead: 4,
+  Lost: 5,
+  Archived: 6
+};
+
+// src/time.ts
+function formatDuration(ms) {
+  const age = Math.max(0, ms);
+  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
+  if (age < minute) return "<1m";
+  if (age < hour) return `${Math.floor(age / minute)}m`;
+  if (age < day) return `${Math.floor(age / hour)}h`;
+  return `${Math.floor(age / day)}d`;
+}
+function formatTime(value, now = /* @__PURE__ */ new Date()) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  const delta = date.getTime() - now.getTime();
+  if (Math.abs(delta) < 24 * 60 * 6e4) {
+    const duration = formatDuration(Math.abs(delta));
+    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
+  }
+  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// src/status.ts
+var OPERATOR_KIND_LABELS = {
+  "needs-you": "Needs you",
+  working: "Working",
+  "waiting-limit": "Waiting on a limit",
+  broken: "Broken",
+  archived: "Archived"
+};
+var ROW_KIND_LABELS = {
+  ready: "Ready",
+  working: "Working",
+  lost: "Lost",
+  dead: "Dead",
+  limit: "Limit reached",
+  archived: "Archived"
+};
+var IDLE_REASON_LABELS = {
+  "usage-limit": "usage limit",
+  "process-exited": "process exited",
+  "restore-gave-up": "restore gave up",
+  "restore-waiting-on-environment": "restore waiting on environment",
+  "recreate-pending": "recreate notice pending",
+  "prompt-not-delivered": "prompt not delivered",
+  "delivery-unconfirmed": "delivery unknown",
+  "no-pane-change-since-delivery": "no change after delivery",
+  "settled-after-pane-change": "pane changed"
+};
+function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
+  const label = idleReasonLabel(s.idle_reason);
+  if (!label) {
+    return "";
+  }
+  let detail = label;
+  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
+    const { attempts, error } = s.lost_restore_failure;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "attempt" : "attempts";
+      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+    }
+  }
+  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
+    const { attempts, error } = s.lost_restore_wait;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
+      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
+    }
+  }
+  if (s.last_pane_churn_at) {
+    const churn = new Date(s.last_pane_churn_at);
+    if (!Number.isNaN(churn.getTime())) {
+      const age = `${formatPaneChurnAge(churn, now)} ago`;
+      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
+    }
+  }
+  return detail;
+}
+function idleReasonLabel(reason) {
+  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
+}
+function unreachableDetail(s, now = /* @__PURE__ */ new Date()) {
+  const u = s.unreachable;
+  if (!u?.since || !u.error) {
+    return "";
+  }
+  const since = new Date(u.since);
+  if (Number.isNaN(since.getTime())) {
+    return "";
+  }
+  return `unreachable ${formatPaneChurnAge(since, now)} ago \xB7 ${u.error}`;
+}
+function formatPaneChurnAge(churn, now) {
+  return formatDuration(now.getTime() - churn.getTime());
+}
+var READY_ICON = "circle";
+var DEAD_ICON = "circle";
+var LOST_ICON = "circle-dashed";
+var ARCHIVED_ICON = "archive";
+var LIMIT_ICON = "diamond";
+var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
+function rowStatus(s) {
+  const op = s.in_flight_op ?? InFlightOp.None;
+  if (op !== InFlightOp.None) {
+    return WORKING;
+  }
+  return dotForLiveness(livenessOf(s));
+}
+function isWorking(s) {
+  return rowStatus(s).kind === null;
+}
+function isCreating(s) {
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
+}
+function rowKind(s) {
+  return rowStatus(s).kind ?? "working";
+}
+function operatorKind(s) {
+  const displayed = rowKind(s);
+  if (displayed === "working") {
+    return "working";
+  }
+  if (displayed === "archived") {
+    return "archived";
+  }
+  if (displayed === "limit" || s.idle_reason === "usage-limit") {
+    return "waiting-limit";
+  }
+  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
+    return "broken";
+  }
+  return "needs-you";
+}
+function livenessOf(s) {
+  const lv = s.liveness ?? Liveness.Unset;
+  if (lv !== Liveness.Unset) {
+    return lv;
+  }
+  switch (s.status) {
+    case Status.Ready:
+      return Liveness.Ready;
+    case Status.Dead:
+      return Liveness.Dead;
+    case Status.Lost:
+      return Liveness.Lost;
+    case Status.Archived:
+      return Liveness.Archived;
+    // Running and the transient values (Loading/Deleting, which never persist)
+    // fall through to the working dot, matching render.go's LivenessUnset arm.
+    default:
+      return Liveness.Running;
+  }
+}
+function dotForLiveness(lv) {
+  switch (lv) {
+    case Liveness.Ready:
+      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
+    case Liveness.Lost:
+      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
+    case Liveness.Dead:
+      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
+    case Liveness.Archived:
+      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
+    case Liveness.LimitReached:
+      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
+    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
+    case Liveness.Running:
+    case Liveness.Unset:
+    default:
+      return WORKING;
+  }
+}
+function isArchived(s) {
+  return livenessOf(s) === Liveness.Archived;
+}
+function isLimitReached(s) {
+  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
+}
+function isPendingManualHandoffDeliveryUnconfirmed(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
+}
+function ambiguousHandoffDelivery(status) {
+  return status === "sent-unverified" || status === "could-not-confirm";
+}
+function confirmableHandoffDelivery(status) {
+  return ambiguousHandoffDelivery(status) || status === "delivered";
+}
+function isPendingAgentHandoffDeliveryUnconfirmed(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+}
+function isPendingAgentHandoffDeliveryConfirmable(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function isPendingManualSwapDeliveryConfirmable(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function canHandoff(s) {
+  return s.can_handoff === true;
+}
+function isRootSession(s) {
+  return s.is_root === true;
+}
+function compareSessionsForRail(a, b) {
+  const aArchived = isArchived(a);
+  const aa = aArchived ? 1 : 0;
+  const bb = isArchived(b) ? 1 : 0;
+  if (aa !== bb) {
+    return aa - bb;
+  }
+  const ar = isRootSession(a) ? 0 : 1;
+  const br = isRootSession(b) ? 0 : 1;
+  if (ar !== br) {
+    return ar - br;
+  }
+  const at = a.created_at ?? "";
+  const bt = b.created_at ?? "";
+  if (at !== bt) {
+    const asc = at < bt ? -1 : 1;
+    return aArchived ? -asc : asc;
+  }
+  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+}
+var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
+function isOffBoxWorkspace(s) {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
+function rowTitle(s) {
+  const lv = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  let title = s.title;
+  if (isOffBoxWorkspace(s)) {
+    title = "[remote] " + title;
+  }
+  if (lv === Liveness.Lost) {
+    title = "[lost] " + title;
+  }
+  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
+    title = "[deleting] " + title;
+  }
+  if (lv === Liveness.LimitReached) {
+    title = limitBadgePrefix(s) + title;
+  }
+  const recreate = rootRecreateNote(s);
+  if (recreate) {
+    title = `[${recreate}] ` + title;
+  }
+  if (archiveWarningText(s) !== "") {
+    title = "[archive incomplete] " + title;
+  }
+  if (s.unreachable?.since && s.unreachable?.error) {
+    title = "[unreachable] " + title;
+  }
+  if (s.model_change) {
+    title = "[model changed] " + title;
+  }
+  return title;
+}
+function archiveWarningText(s) {
+  return s.archive_warning?.trim() ?? "";
+}
+var CALLBACK_UNAVAILABLE_PREFIX = "af callback unavailable: ";
+function callbackUnavailableText(s) {
+  const reason = s.callback_unavailable?.trim() ?? "";
+  return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
+}
+function sessionWarningText(s) {
+  return [archiveWarningText(s), callbackUnavailableText(s)].filter((t) => t !== "").join(" \xB7 ");
+}
+function rootRecreateNote(s) {
+  switch (s.root_recreate_context) {
+    case "fresh":
+      return "fresh context";
+    case "unknown":
+      return "context unknown";
+    default:
+      return "";
+  }
+}
+function limitBadgePrefix(s) {
+  if (!s.limit_reset_at) {
+    return "[limit] ";
+  }
+  const reset = new Date(s.limit_reset_at);
+  if (Number.isNaN(reset.getTime())) {
+    return "[limit] ";
+  }
+  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
+}
+function formatLimitReset(reset, now) {
+  const h12 = (reset.getHours() + 11) % 12 + 1;
+  const ampm = reset.getHours() < 12 ? "am" : "pm";
+  const min = reset.getMinutes();
+  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
+  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
+  if (sameDay) {
+    return clock;
+  }
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
+}
+
 // src/backends.ts
 var REPO_DEFAULT = "";
 function backendChoices(catalog) {
   if (catalog === null) {
     return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
   }
+  const callbackAdvisory = (opt) => opt?.status === "available" && opt.callback_unavailable_reason ? CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason : "";
+  const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
   const choices = [
     {
       value: REPO_DEFAULT,
       // "Repo default" with no parenthetical when the daemon reports no default:
       // that is the misconfigured case, where naming a backend would be inventing
       // one. The reason says what is wrong with the key.
-      label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.backends.find((opt) => opt.name === catalog.default)?.label ?? catalog.default})`,
+      label: catalog.default === "" ? "Repo default" : `Repo default (${resolvedDefault?.label ?? catalog.default})`,
       // Taken from the daemon, not inferred here. A repo whose declared default is
       // broken resolves to that broken backend and FAILS — it does not quietly run
       // local — so the default is not automatically a safe harbour.
       status: catalog.default_status,
-      reason: catalog.default_status === "available" ? "" : catalog.default_reason ?? ""
+      reason: catalog.default_status === "available" ? callbackAdvisory(resolvedDefault) : catalog.default_reason ?? ""
     }
   ];
   for (const opt of catalog.backends) {
@@ -11764,7 +12319,7 @@ function backendChoices(catalog) {
       value: opt.name,
       label: opt.label,
       status: opt.status,
-      reason: opt.status === "available" ? "" : opt.reason ?? ""
+      reason: opt.status === "available" ? callbackAdvisory(opt) : opt.reason ?? ""
     });
   }
   return choices;
@@ -12605,53 +13160,6 @@ function markDeliveredModal(sessionTitle, onConfirm, onCancel) {
   return handle;
 }
 
-// src/types.ts
-var Liveness = {
-  Unset: 0,
-  Running: 1,
-  Ready: 2,
-  Lost: 3,
-  Dead: 4,
-  Archived: 5,
-  LimitReached: 6
-};
-var TabKind = {
-  Agent: 0,
-  Shell: 1,
-  Process: 2,
-  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
-   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
-   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
-  Web: 3,
-  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
-   *  per-session code-server rooted at the session's worktree, reachable only
-   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
-   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
-   *  lockstep with the Go enum. */
-  VSCode: 4,
-  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
-   *  Mirrors session.TabKindDocs (session/tab.go). */
-  Docs: 5
-};
-var InFlightOp = {
-  None: 0,
-  Creating: 1,
-  Killing: 2,
-  Archiving: 3,
-  Restoring: 4,
-  Replacing: 5,
-  Respawning: 6
-};
-var Status = {
-  Running: 0,
-  Ready: 1,
-  Loading: 2,
-  Deleting: 3,
-  Dead: 4,
-  Lost: 5,
-  Archived: 6
-};
-
 // src/delete_tab_modal.ts
 function confirmDeleteTabModal(opts) {
   const { handle, body, cancelBtn } = modalChrome({
@@ -12763,294 +13271,6 @@ function restoreShortcutFocus(navigationTarget, rail) {
     }
   }
   document.activeElement?.blur();
-}
-
-// src/time.ts
-function formatDuration(ms) {
-  const age = Math.max(0, ms);
-  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
-  if (age < minute) return "<1m";
-  if (age < hour) return `${Math.floor(age / minute)}m`;
-  if (age < day) return `${Math.floor(age / hour)}h`;
-  return `${Math.floor(age / day)}d`;
-}
-function formatTime(value, now = /* @__PURE__ */ new Date()) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Unknown time";
-  const delta = date.getTime() - now.getTime();
-  if (Math.abs(delta) < 24 * 60 * 6e4) {
-    const duration = formatDuration(Math.abs(delta));
-    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
-  }
-  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
-// src/status.ts
-var OPERATOR_KIND_LABELS = {
-  "needs-you": "Needs you",
-  working: "Working",
-  "waiting-limit": "Waiting on a limit",
-  broken: "Broken",
-  archived: "Archived"
-};
-var ROW_KIND_LABELS = {
-  ready: "Ready",
-  working: "Working",
-  lost: "Lost",
-  dead: "Dead",
-  limit: "Limit reached",
-  archived: "Archived"
-};
-var IDLE_REASON_LABELS = {
-  "usage-limit": "usage limit",
-  "process-exited": "process exited",
-  "restore-gave-up": "restore gave up",
-  "restore-waiting-on-environment": "restore waiting on environment",
-  "recreate-pending": "recreate notice pending",
-  "prompt-not-delivered": "prompt not delivered",
-  "delivery-unconfirmed": "delivery unknown",
-  "no-pane-change-since-delivery": "no change after delivery",
-  "settled-after-pane-change": "pane changed"
-};
-function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
-  const label = idleReasonLabel(s.idle_reason);
-  if (!label) {
-    return "";
-  }
-  let detail = label;
-  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
-    const { attempts, error } = s.lost_restore_failure;
-    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "attempt" : "attempts";
-      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
-    }
-  }
-  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
-    const { attempts, error } = s.lost_restore_wait;
-    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
-      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
-    }
-  }
-  if (s.last_pane_churn_at) {
-    const churn = new Date(s.last_pane_churn_at);
-    if (!Number.isNaN(churn.getTime())) {
-      const age = `${formatPaneChurnAge(churn, now)} ago`;
-      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
-    }
-  }
-  return detail;
-}
-function idleReasonLabel(reason) {
-  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
-}
-function formatPaneChurnAge(churn, now) {
-  return formatDuration(now.getTime() - churn.getTime());
-}
-var READY_ICON = "circle";
-var DEAD_ICON = "circle";
-var LOST_ICON = "circle-dashed";
-var ARCHIVED_ICON = "archive";
-var LIMIT_ICON = "diamond";
-var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
-function rowStatus(s) {
-  const op = s.in_flight_op ?? InFlightOp.None;
-  if (op !== InFlightOp.None) {
-    return WORKING;
-  }
-  return dotForLiveness(livenessOf(s));
-}
-function isWorking(s) {
-  return rowStatus(s).kind === null;
-}
-function isCreating(s) {
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
-}
-function rowKind(s) {
-  return rowStatus(s).kind ?? "working";
-}
-function operatorKind(s) {
-  const displayed = rowKind(s);
-  if (displayed === "working") {
-    return "working";
-  }
-  if (displayed === "archived") {
-    return "archived";
-  }
-  if (displayed === "limit" || s.idle_reason === "usage-limit") {
-    return "waiting-limit";
-  }
-  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
-    return "broken";
-  }
-  return "needs-you";
-}
-function livenessOf(s) {
-  const lv = s.liveness ?? Liveness.Unset;
-  if (lv !== Liveness.Unset) {
-    return lv;
-  }
-  switch (s.status) {
-    case Status.Ready:
-      return Liveness.Ready;
-    case Status.Dead:
-      return Liveness.Dead;
-    case Status.Lost:
-      return Liveness.Lost;
-    case Status.Archived:
-      return Liveness.Archived;
-    // Running and the transient values (Loading/Deleting, which never persist)
-    // fall through to the working dot, matching render.go's LivenessUnset arm.
-    default:
-      return Liveness.Running;
-  }
-}
-function dotForLiveness(lv) {
-  switch (lv) {
-    case Liveness.Ready:
-      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
-    case Liveness.Lost:
-      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
-    case Liveness.Dead:
-      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
-    case Liveness.Archived:
-      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
-    case Liveness.LimitReached:
-      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
-    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
-    case Liveness.Running:
-    case Liveness.Unset:
-    default:
-      return WORKING;
-  }
-}
-function isArchived(s) {
-  return livenessOf(s) === Liveness.Archived;
-}
-function isLimitReached(s) {
-  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
-}
-function isPendingManualHandoffDeliveryUnconfirmed(s) {
-  const pending = s.pending_account_swap;
-  const liveness = livenessOf(s);
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
-}
-function ambiguousHandoffDelivery(status) {
-  return status === "sent-unverified" || status === "could-not-confirm";
-}
-function confirmableHandoffDelivery(status) {
-  return ambiguousHandoffDelivery(status) || status === "delivered";
-}
-function isPendingAgentHandoffDeliveryUnconfirmed(s) {
-  const liveness = livenessOf(s);
-  const status = s.pending_handoff_delivery_status;
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
-}
-function isPendingAgentHandoffDeliveryConfirmable(s) {
-  const liveness = livenessOf(s);
-  const status = s.pending_handoff_delivery_status;
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
-}
-function isPendingManualSwapDeliveryConfirmable(s) {
-  const pending = s.pending_account_swap;
-  const liveness = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  const status = pending?.mission_delivery_status;
-  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
-}
-function canHandoff(s) {
-  return s.can_handoff === true;
-}
-function isRootSession(s) {
-  return s.is_root === true;
-}
-function compareSessionsForRail(a, b) {
-  const aArchived = isArchived(a);
-  const aa = aArchived ? 1 : 0;
-  const bb = isArchived(b) ? 1 : 0;
-  if (aa !== bb) {
-    return aa - bb;
-  }
-  const ar = isRootSession(a) ? 0 : 1;
-  const br = isRootSession(b) ? 0 : 1;
-  if (ar !== br) {
-    return ar - br;
-  }
-  const at = a.created_at ?? "";
-  const bt = b.created_at ?? "";
-  if (at !== bt) {
-    const asc = at < bt ? -1 : 1;
-    return aArchived ? -asc : asc;
-  }
-  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
-}
-function rowTitle(s) {
-  const lv = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  let title = s.title;
-  if (s.backend_type === "remote") {
-    title = "[remote] " + title;
-  }
-  if (lv === Liveness.Lost) {
-    title = "[lost] " + title;
-  }
-  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
-    title = "[deleting] " + title;
-  }
-  if (lv === Liveness.LimitReached) {
-    title = limitBadgePrefix(s) + title;
-  }
-  const recreate = rootRecreateNote(s);
-  if (recreate) {
-    title = `[${recreate}] ` + title;
-  }
-  if (archiveWarningText(s) !== "") {
-    title = "[archive incomplete] " + title;
-  }
-  if (s.model_change) {
-    title = "[model changed] " + title;
-  }
-  return title;
-}
-function archiveWarningText(s) {
-  return s.archive_warning?.trim() ?? "";
-}
-function rootRecreateNote(s) {
-  switch (s.root_recreate_context) {
-    case "fresh":
-      return "fresh context";
-    case "unknown":
-      return "context unknown";
-    default:
-      return "";
-  }
-}
-function limitBadgePrefix(s) {
-  if (!s.limit_reset_at) {
-    return "[limit] ";
-  }
-  const reset = new Date(s.limit_reset_at);
-  if (Number.isNaN(reset.getTime())) {
-    return "[limit] ";
-  }
-  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
-}
-function formatLimitReset(reset, now) {
-  const h12 = (reset.getHours() + 11) % 12 + 1;
-  const ampm = reset.getHours() < 12 ? "am" : "pm";
-  const min = reset.getMinutes();
-  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
-  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
-  if (sameDay) {
-    return clock;
-  }
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
 }
 
 // src/filter.ts
@@ -13581,6 +13801,27 @@ function remapByIdentity(root2, prevIds, ids) {
   for (const leaf of leaves(cur)) {
     if (!moved.has(leaf.id) && claimed.has(leaf.tab)) {
       cur = closeLeaf(cur, leaf.id) ?? cur;
+    }
+  }
+  const max = ids.length - 1;
+  const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
+  if (maxLeaf) {
+    const isSynth = (id) => /^\d+:/.test(id);
+    const backfill = ids.some((id) => id !== "" && !isSynth(id) && !prevIds.includes(id));
+    const deadIdentity = (tab) => {
+      const prev = prevIds[tab];
+      if (prev === void 0 || prev === "") {
+        return true;
+      }
+      return !isSynth(prev) || !backfill;
+    };
+    for (const leaf of leaves(cur)) {
+      if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
+        cur = closeLeaf(cur, leaf.id) ?? cur;
+      }
+    }
+    if (!moved.has(maxLeaf.id) && deadIdentity(maxLeaf.tab) && leaves(cur).some((l) => !moved.has(l.id) && l.tab >= ids.length && !deadIdentity(l.tab))) {
+      cur = closeLeaf(cur, maxLeaf.id) ?? cur;
     }
   }
   return cur;
@@ -14226,6 +14467,7 @@ var SplitView = class {
     }
     const desired = leaves(this.tree);
     const wanted = new Set(desired.map((l) => l.id));
+    const focusedDropped = this.focusedId !== null && !wanted.has(this.focusedId);
     for (const [id, pane] of this.panes) {
       if (!wanted.has(id)) {
         pane.term?.dispose();
@@ -14313,36 +14555,50 @@ var SplitView = class {
       pane.label.textContent = tabLabel(named);
     }
     this.applyFocusClass();
-    this.reEngageFocusAfterRebuild(focusedRebuilt);
+    this.reEngageFocusAfterRebuild(focusedRebuilt, focusedDropped);
   }
-  /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, correcting
-   *  the desync where `store.focus` stays "terminal" while DOM focus fell back to
-   *  `document.body` (the disposed terminal's blur is suppressed, so nothing else
-   *  reports the loss).
+  /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, or closed it
+   *  and re-pointed focus at a survivor, correcting the desync where `store.focus`
+   *  stays "terminal" while DOM focus fell back to `document.body` (a disposed
+   *  terminal's blur is suppressed, so nothing else reports the loss).
    *
-   *  Gated on BOTH a focused-pane rebuild AND `termHoldsFocus` so it only fires when
-   *  the operator was keyboard-attached at the moment of the rebuild: a passive
-   *  repaint (rename, archive flip on a sibling, proxy change) that reaches a user
-   *  who DELIBERATELY detached to rail via Ctrl+] does not rebuild the focused pane
-   *  (so `focusedRebuilt` is false anyway), and a same-session rebuild that happens
-   *  to reach a rail-mode user is skipped by `termHoldsFocus` — neither yanks a
-   *  detached operator back into "terminal" without intent.
+   *  Gated on a focused-pane change AND `termHoldsFocus` so it only fires when the
+   *  operator was keyboard-attached at the moment of the change: a passive repaint
+   *  (rename, archive flip on a sibling, proxy change) that reaches a user who
+   *  DELIBERATELY detached to rail via Ctrl+] does not rebuild or close the focused
+   *  pane (so `focusedRebuilt`/`focusedDropped` are both false), and a same-session
+   *  change that happens to reach a rail-mode user is skipped by `termHoldsFocus` —
+   *  neither yanks a detached operator back into "terminal" without intent.
    *
-   *  Two rebuild outcomes land differently, and both are the correct one:
+   *  `focusedRebuilt`: the focused pane's terminal/iframe was torn down and rebuilt
+   *  this pass (an out-of-band close slid a different tab into its ordinal). The new
+   *  terminal never auto-focuses, so refocus() hands it the keyboard.
    *
-   *    - Rebuilt as a TERMINAL: refocus() → focus() focuses the new textarea, whose
-   *      focus listener echoes onPaneFocus(_, true), re-confirming store.focus=
-   *      "terminal" against the new DOM-focal textarea. The desync is undone.
-   *    - Rebuilt as a WEB/VS Code pane (no terminal to hand the keyboard to): DOM
-   *      focus is on document.body and no textarea blur can arm onPaneFocus's
-   *      corrector, so report the loss ourselves — store.focus lands on "rail",
-   *      which is the right mode when the focused pane ceases to be a terminal.
+   *  `focusedDropped`: the focused pane was CLOSED this pass (a pure-shrink
+   *  remapByIdentity evicted a dead pane that happened to hold focus, or validate's
+   *  dedup dropped it) and focus was re-pointed at the first survivor. The closed
+   *  terminal's blur was suppressed, so without an explicit re-engage the keyboard
+   *  would stay on `document.body` while `store.focus` still reads "terminal" — the
+   *  same desync as the rebuild case. Mirrors closePane's explicit refocus on a
+   *  user-initiated close.
+   *
+   *  Both outcomes land the same way, and each is the correct one:
+   *
+   *    - The new focused pane has a TERMINAL: refocus() → focus() focuses its
+   *      textarea, whose focus listener echoes onPaneFocus(_, true), re-confirming
+   *      store.focus="terminal" against the now-DOM-focal textarea. The desync is
+   *      undone.
+   *    - The new focused pane is a WEB/VS Code pane (no terminal to hand the
+   *      keyboard to): DOM focus is on document.body and no textarea blur can arm
+   *      onPaneFocus's corrector, so report the loss ourselves — store.focus lands
+   *      on "rail", which is the right mode when the focused pane ceases to be a
+   *      terminal.
    *
    *  Split out from reconcile() so the boolean contract is unit-testable without a
    *  DOM/xterm/WS (split_focus.test.ts stages the pane map directly); the end-to-end
    *  behavior is pinned by the Playwright selftest. */
-  reEngageFocusAfterRebuild(focusedRebuilt) {
-    if (!focusedRebuilt || !this.termHoldsFocus) {
+  reEngageFocusAfterRebuild(focusedRebuilt, focusedDropped = false) {
+    if (!focusedRebuilt && !focusedDropped || !this.termHoldsFocus) {
       return;
     }
     const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
@@ -14360,7 +14616,12 @@ var SplitView = class {
     const paneHost = el("div", "af-pane-host");
     const overlay = el("div", "af-drop-overlay");
     container.append(head, paneHost, overlay);
-    container.addEventListener("mousedown", () => this.focusPane(leaf.id));
+    container.addEventListener("mousedown", (e) => {
+      this.onPaneMouseDown(leaf.id);
+      if (!paneHost.contains(e.target)) {
+        e.preventDefault();
+      }
+    });
     const pane = {
       leafId: leaf.id,
       container,
@@ -14804,6 +15065,19 @@ var SplitView = class {
     pane.overlay.className = "af-drop-overlay";
   }
   // --- internal: focus + status ---------------------------------------------
+  /** Click-to-focus (#1694, #4341). focusPane only moves the bookkeeping; the DOM
+   *  focus handoff lives in refocus(), so a click that does not reach xterm's own
+   *  textarea (the pane header) must go through both or the highlight and the
+   *  keyboard disagree. A click on the pane that already holds focus is left to
+   *  xterm: re-focusing here would steal the keyboard from rail mode on every
+   *  click of an already-selected pane. */
+  onPaneMouseDown(leafId) {
+    if (this.focusedId === leafId) {
+      return;
+    }
+    this.focusPane(leafId);
+    this.refocus();
+  }
   focusPane(leafId) {
     if (this.focusedId === leafId) {
       return;
@@ -15432,14 +15706,29 @@ function createFencedRefetcher(spec) {
         return Promise.resolve();
       }
       const request = gate.begin();
-      const isNewest = () => request.isCurrent() && spec.readToken() === tok;
-      return spec.fetch(tok).then((value) => {
+      let expired = false;
+      const isNewest = () => !expired && request.isCurrent() && spec.readToken() === tok;
+      let controller;
+      let bound;
+      if (spec.timeoutMs !== void 0) {
+        controller = new AbortController();
+        const own = controller;
+        bound = globalThis.setTimeout(() => {
+          expired = true;
+          own.abort();
+        }, spec.timeoutMs);
+      }
+      return spec.fetch(tok, controller?.signal).then((value) => {
         if (isNewest()) {
           spec.commit(value);
         }
       }).catch((error) => {
         if (isNewest() && !options?.silent) {
           spec.onError?.(error);
+        }
+      }).finally(() => {
+        if (bound !== void 0) {
+          globalThis.clearTimeout(bound);
         }
       });
     },
@@ -16523,6 +16812,36 @@ function orderChildren(parent, children) {
 }
 
 // src/ui.ts
+var SKIPPED_REPO_REASON = {
+  corrupted: "corrupted-instances-json",
+  unreadable: "unreadable-instances-json",
+  newerSchema: "newer-schema-instances-json",
+  rowsFailed: "rows-failed-to-load"
+};
+function skippedRepoReasonLabel(reason) {
+  switch (reason) {
+    case SKIPPED_REPO_REASON.unreadable:
+      return "instances.json could not be read";
+    case SKIPPED_REPO_REASON.newerSchema:
+      return "instances.json written by a newer af";
+    case SKIPPED_REPO_REASON.rowsFailed:
+      return "some sessions could not be loaded (worktree or tmux gone)";
+    default:
+      return "instances.json is corrupted";
+  }
+}
+function skippedRepoRepairHint(reason) {
+  switch (reason) {
+    case SKIPPED_REPO_REASON.unreadable:
+      return "Make the file(s) readable by the user the af daemon runs as (check ownership, permissions and the disk), then restart the daemon so it re-reads them; do not delete them, they hold the hidden sessions.";
+    case SKIPPED_REPO_REASON.newerSchema:
+      return "Upgrade af to a version that understands the newer state file, then restart the daemon; do not edit or delete these files, they hold sessions this binary cannot read.";
+    case SKIPPED_REPO_REASON.rowsFailed:
+      return "Restore or delete the sessions the daemon could not load (their worktree or tmux is gone), then the daemon re-reads the complete list on the next poll; e.g. `af sessions restore <title>` or `af sessions delete <title>`; the instances.json itself is not the problem.";
+    default:
+      return "Stop the af daemon, copy the corrupt file(s) aside, fix the JSON or restore it from a backup, then start the daemon; af keeps no backup of these files.";
+  }
+}
 function isActionableSession(s) {
   return typeof s.id === "string" && s.id !== "" && (s.lifecycle_action === "archive" || s.lifecycle_action === "restore");
 }
@@ -16562,10 +16881,6 @@ function isKillableSession(s) {
 var TAB_PINNED_NOTICE = "Agent tab stays first \xB7 drag to a pane to split";
 function restoreRequiresConfirmation(session) {
   return session.backend_type !== void 0 && session.backend_type !== "" && session.backend_type !== "local";
-}
-var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
-function isOffBoxWorkspace(s) {
-  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
 }
 function allowedTabKinds(s) {
   if (s.tab_kinds && s.tab_kinds.length > 0) {
@@ -16931,6 +17246,7 @@ var AppShell = class {
     this.configPane = new ConfigPane({
       save: (key, value) => this.actions.setConfigValue(key, value),
       openAssistant: () => this.actions.openConfigAssistant(),
+      explain: (key) => this.actions.explainConfig(key),
       accounts: {
         register: (agent, name) => this.actions.registerAccount(agent, name),
         login: (agent, name) => this.actions.openAccountLogin(agent, name)
@@ -17258,6 +17574,7 @@ var AppShell = class {
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
+    const registryChanged = this.lastRegisteredProjects !== state.registeredProjects;
     if (selectionChanged && state.selectedId) {
       this.setNav(false);
     }
@@ -17272,7 +17589,7 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -17413,7 +17730,24 @@ var AppShell = class {
       this.lastRailNoticeSignature = noticeSignature;
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
-    orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    const skipped = state.skippedRepos ?? [];
+    const skippedRoots = state.registeredProjects.filter((p) => p.repo_id && skipped.some((s) => s.repo_id === p.repo_id)).map((p) => [p.repo_id, p.root]);
+    const skippedSig = JSON.stringify([skipped, skippedRoots]);
+    if (skippedSig !== this.lastSkippedNoticeSignature) {
+      this.lastSkippedNoticeSignature = skippedSig;
+      this.cachedSkippedNotice = this.skippedReposNotice(state);
+    }
+    const head = [];
+    if (this.cachedRailNotice) head.push(this.cachedRailNotice);
+    orderChildren(this.railList, [...head, ...rows]);
+    const railNav = this.railList.parentElement;
+    if (this.cachedSkippedNotice !== this.mountedSkippedNotice) {
+      this.mountedSkippedNotice?.remove();
+      if (this.cachedSkippedNotice && railNav) {
+        railNav.insertBefore(this.cachedSkippedNotice, this.railList);
+      }
+      this.mountedSkippedNotice = this.cachedSkippedNotice;
+    }
     for (const menu of reopened) if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
@@ -17427,6 +17761,12 @@ var AppShell = class {
   lastFilterSignature = "";
   lastRailNoticeSignature = "";
   cachedRailNotice = null;
+  lastSkippedNoticeSignature = "";
+  cachedSkippedNotice = null;
+  // The element currently mounted as a sibling of the rail listbox; null when the
+  // skip set is empty. Distinct from cachedSkippedNotice (the latest value) so a
+  // transition to empty removes the previously mounted alert.
+  mountedSkippedNotice = null;
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
    *  the browser never reconstructs either policy from status pixels. */
@@ -17558,6 +17898,55 @@ var AppShell = class {
       );
     }
     return null;
+  }
+  /** A persistent incompleteness notice for the rail, naming the repos the daemon
+   *  dropped at startup and the daemon's reason for each (#4742). This is the web's
+   *  half of the contract the CLI's list/get/whoami honor by refusing or caveating:
+   *  rather than presenting the truncated `instances` as a complete roster, the rail
+   *  shows WHAT is missing and WHY so a user can tell "repo has no sessions" from
+   *  "the daemon dropped this repo's sessions at startup". Returns null when no repo
+   *  was skipped — the healthy steady state — so the rail renders nothing extra.
+   *
+   *  Each skipped repo is named by its project root when the registry knows it (the
+   *  repo_id is a short hash, not a path), falling back to the bare id; the reason
+   *  renders the daemon's stable code plus a one-line repair hint mirroring
+   *  api/skipped_repos.go verbatim so the web and the CLI send the operator to the
+   *  same remedy. An unknown/empty reason is treated as corrupted, which is all an
+   *  older daemon ever sent. */
+  skippedReposNotice(state) {
+    const skipped = state.skippedRepos ?? [];
+    if (skipped.length === 0) return null;
+    const knownRoot = /* @__PURE__ */ new Map();
+    for (const p of state.registeredProjects) {
+      if (p.repo_id && !knownRoot.has(p.repo_id)) knownRoot.set(p.repo_id, p.root);
+    }
+    const body = h("div", { class: "af-rail-skipped-body" });
+    for (const s of skipped) {
+      const label = knownRoot.get(s.repo_id) ?? s.repo_id;
+      const reason = skippedRepoReasonLabel(s.reason);
+      const hint = skippedRepoRepairHint(s.reason);
+      const line = h(
+        "p",
+        { class: "af-rail-skipped-row" },
+        h("strong", {}, label),
+        ` \u2014 ${reason}. `,
+        hint
+      );
+      if (s.failed_rows && s.failed_rows > 0) {
+        line.append(` (${s.failed_rows} session(s) hidden)`);
+      }
+      body.append(line);
+    }
+    return h(
+      "div",
+      { class: "af-rail-skipped", role: "alert" },
+      h(
+        "div",
+        { class: "af-rail-skipped-head" },
+        "Some sessions are hidden \u2014 a daemon repo could not be loaded."
+      ),
+      body
+    );
   }
   /** (Re)builds the filter menu: one checkbox per session state with its scoped
    *  count, plus a reset. Counts come from the PROJECT-scoped list (the filter is a
@@ -18026,7 +18415,7 @@ var AppShell = class {
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
     const head = chrome.head;
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
@@ -18443,7 +18832,7 @@ var AppShell = class {
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
         this.archiveWarning.textContent = warningText;
@@ -18640,14 +19029,18 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const killable = isKillableSession(s);
   const managed = actionable || killable;
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
-  const idleDetail = idleReasonDetail(s);
+  const outageDetail = unreachableDetail(s);
+  const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
   const branchParts = [
     h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator])
   ];
-  if (selected && idleDetail) {
+  if ((selected || outageDetail !== "") && idleDetail) {
     const idle = h("span", { class: "af-idle-reason" }, ` \xB7 ${idleDetail}`);
     idle.dataset.idleReason = s.idle_reason ?? "";
-    if (s.last_pane_churn_at) {
+    if (outageDetail !== "" && s.unreachable) {
+      idle.dataset.unreachableSince = s.unreachable.since ?? "";
+      idle.dataset.unreachableError = s.unreachable.error ?? "";
+    } else if (s.last_pane_churn_at) {
       idle.dataset.paneChurnAt = s.last_pane_churn_at;
     }
     branchParts.push(idle);
@@ -18687,14 +19080,16 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  const callbackWarning = callbackUnavailableText(s);
   const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
   row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
+  row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
   row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${inertReason}`
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${inertReason}`
   );
   if (actionable) {
     row.onclick = () => openSession(s.id);
@@ -18704,6 +19099,23 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   return row;
 }
 function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
+  for (const idle of root2.querySelectorAll(".af-idle-reason[data-unreachable-since]")) {
+    const detail = unreachableDetail(
+      {
+        unreachable: { since: idle.dataset.unreachableSince, error: idle.dataset.unreachableError }
+      },
+      now
+    );
+    idle.textContent = detail ? ` \xB7 ${detail}` : "";
+    const row = idle.closest(".af-row");
+    if (row) {
+      const reason = detail ? `; ${detail}` : "";
+      row.setAttribute(
+        "title",
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`
+      );
+    }
+  }
   for (const idle of root2.querySelectorAll(".af-idle-reason[data-pane-churn-at]")) {
     const detail = idleReasonDetail(
       {
@@ -18718,7 +19130,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleInert ?? ""}`
       );
     }
   }
@@ -18751,6 +19163,9 @@ var store = new Store({
   connecting: true,
   loginError: null,
   sessions: [],
+  // No skipped repos until a Snapshot carries the incompleteness channel (#4742);
+  // the rail renders no notice in this default state.
+  skippedRepos: [],
   selectedId: null,
   live: "connecting",
   termStatus: "connecting",
@@ -18882,12 +19297,14 @@ async function connect(candidate) {
   let operationLockTimeoutMs;
   let operationClockMs;
   let daemonBootId;
+  let skippedRepos;
   try {
     const snapshot = await fetchSessionSnapshot(candidate);
     sessions = snapshot.sessions;
     operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
     operationClockMs = snapshot.operationClockMs;
     daemonBootId = snapshot.daemonBootId;
+    skippedRepos = snapshot.skippedRepos;
   } catch (e) {
     if (!attempt.isCurrent()) return;
     if (shouldForgetToken(e)) {
@@ -18931,6 +19348,7 @@ async function connect(candidate) {
     connecting: false,
     loginError: null,
     sessions,
+    skippedRepos: skippedRepos ?? [],
     selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
     focus: "rail",
@@ -18948,7 +19366,8 @@ async function connect(candidate) {
     generation: restoreSnapshot,
     operationLockTimeoutMs,
     operationClockMs,
-    daemonBootId
+    daemonBootId,
+    skippedRepos
   }, sessions);
   resolvingRoute = false;
   resolveRoute();
@@ -19479,6 +19898,7 @@ function openAddProject() {
 var rebindInFlight = null;
 var rebindInFlightGeneration = 0;
 var REBIND_ANSWER_MS = 3e4;
+var REBIND_REFRESH_MS = 1e4;
 function rebindOutcomeUnknown(label) {
   return new Error(`Rebind of ${label} \xB7 outcome unknown \xB7 check the project list`);
 }
@@ -19500,7 +19920,10 @@ function openRebindProject(projectId, label) {
     showTransientNotice(`Rebind of ${rebindInFlight} is still running \u2014 try again when it finishes.`);
     return;
   }
-  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  const shown = store.get().registeredProjects.find((r) => r.id === projectId);
+  const oldRoot = shown?.root ?? null;
+  let expectedRoot = oldRoot;
+  let expectedCheckoutID = shown?.checkout_id ?? null;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -19537,6 +19960,49 @@ function openRebindProject(projectId, label) {
           return true;
         };
         const stillHere = () => modal === m || oldRoot !== null && store.get().selectedProject === oldRoot;
+        const reArmAfterRebound = (e) => {
+          const missed = () => {
+            if (!current()) return;
+            refreshRegisteredProjects();
+            if (modal !== m) {
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          };
+          let readSettled = false;
+          const bound = window.setTimeout(() => {
+            if (readSettled) return;
+            readSettled = true;
+            missed();
+          }, REBIND_REFRESH_MS);
+          void projectsRefetcher.refresh().then(() => {
+            if (readSettled) return;
+            readSettled = true;
+            window.clearTimeout(bound);
+            if (!current()) return;
+            const own = token === tok;
+            if (own && store.get().projectsError) {
+              missed();
+              return;
+            }
+            const now = own ? store.get().registeredProjects.find((p) => p.id === projectId) : void 0;
+            if (own) {
+              if (now !== void 0) {
+                expectedRoot = now.root;
+                expectedCheckoutID = now.checkout_id;
+              }
+              refreshRegisteredProjects();
+            }
+            if (modal !== m) {
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(now !== void 0 ? `Rebound elsewhere, to ${now.root} \xB7 submit again to move it from there` : errorText(e));
+          });
+        };
         const unknownOutcome = () => {
           if (modal === m) closeModal();
           refreshRegisteredProjects();
@@ -19546,7 +20012,7 @@ function openRebindProject(projectId, label) {
           if (!current() || !settle()) return;
           unknownOutcome();
         }, REBIND_ANSWER_MS);
-        void rebindProject(projectId, path, tok).then(() => {
+        void rebindProject(projectId, path, tok, expectedRoot, expectedCheckoutID).then(() => {
           if (!current()) return;
           if (!settle()) {
             refreshRegisteredProjects();
@@ -19578,6 +20044,10 @@ function openRebindProject(projectId, label) {
           }
           if (isMutationOutcomeUncertain(e)) {
             unknownOutcome();
+            return;
+          }
+          if (isProjectReboundError(e)) {
+            reArmAfterRebound(e);
             return;
           }
           if (modal !== m) {
@@ -19621,7 +20091,8 @@ function guardedTabRebind(selId, run, resolve, verb) {
       generation,
       operationLockTimeoutMs,
       operationClockMs,
-      daemonBootId
+      daemonBootId,
+      skippedRepos
     } = snapshot;
     const targetIdx = resolve(sessions);
     const currentGen = splitView.layoutGeneration();
@@ -19630,7 +20101,8 @@ function guardedTabRebind(selId, run, resolve, verb) {
       generation,
       operationLockTimeoutMs,
       operationClockMs,
-      daemonBootId
+      daemonBootId,
+      skippedRepos
     }, authoritative);
     const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
     const outcome = rebindTargetAfterAwait({
@@ -19757,7 +20229,8 @@ function renameSessionTab(id, name, editedSessionId) {
       generation: snapshot.generation,
       operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
       operationClockMs: snapshot.operationClockMs,
-      daemonBootId: snapshot.daemonBootId
+      daemonBootId: snapshot.daemonBootId,
+      skippedRepos: snapshot.skippedRepos
     }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
@@ -19781,7 +20254,8 @@ function reorderSessionTab(from, to) {
       generation: snapshot.generation,
       operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
       operationClockMs: snapshot.operationClockMs,
-      daemonBootId: snapshot.daemonBootId
+      daemonBootId: snapshot.daemonBootId,
+      skippedRepos: snapshot.skippedRepos
     }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
@@ -19854,7 +20328,10 @@ async function reconcileConfigRead(candidate, attempt) {
 }
 var accountsRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: listAccounts,
+  // The refetch reads every agent's defaults, never a single repo's — wrap
+  // rather than pass listAccounts directly, whose second parameter is
+  // repoPath, so an AbortSignal the refetcher hands out could never land in it.
+  fetch: (tok) => listAccounts(tok),
   commit: (resp) => {
     store.set({
       accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "", loaded: true }
@@ -19928,6 +20405,16 @@ function applyConfigValue(key, value) {
   }
   return queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
+function explainConfigValue(key) {
+  const tok = token;
+  if (tok === null) {
+    return Promise.resolve({ ok: false, error: "not connected to the daemon" });
+  }
+  return explainConfig(key, tok).then(
+    (resp) => ({ ok: true, resp }),
+    (err) => ({ ok: false, error: errorText(err) })
+  );
+}
 function applyConfigValueNow(key, value, tok) {
   const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok).then((resp) => {
@@ -19987,9 +20474,11 @@ function requestTaskResync() {
     refreshTasks();
   }, 150);
 }
+var REGISTRY_READ_MS = 3e4;
 var projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
+  timeoutMs: REGISTRY_READ_MS,
   commit: commitRegisteredProjects,
   onError: (e) => store.set({ projectsError: errorText(e) })
 });
@@ -20285,6 +20774,7 @@ var actions = {
   setConfigValue: applyConfigValue,
   stepTerminalFontSize: (delta) => stepTerminalFontSize(delta),
   openConfigAssistant: doOpenConfigAssistant,
+  explainConfig: explainConfigValue,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,
   switchProject,
@@ -20410,7 +20900,13 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
   }
   const settled = selectedId ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId)) : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
-  store.set({ sessions, selectedProject, selectedId, activeTab });
+  store.set({
+    sessions,
+    selectedProject,
+    selectedId,
+    activeTab,
+    ...evidence?.kind === "snapshot" ? { skippedRepos: evidence.skippedRepos ?? [] } : {}
+  });
   if (evidence) pendingRestores.observe(authoritative.map((s) => ({
     id: s.id,
     restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
@@ -20425,6 +20921,7 @@ async function fetchProjectedSnapshot(tok) {
     let operationLockTimeoutMs;
     let operationClockMs;
     let daemonBootId;
+    let skippedRepos;
     const sessions = await optimisticSessions.refresh(async () => {
       generation = pendingRestores.beginSnapshot();
       const snapshot = await fetchSessionSnapshot(tok);
@@ -20432,6 +20929,7 @@ async function fetchProjectedSnapshot(tok) {
       operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
       operationClockMs = snapshot.operationClockMs;
       daemonBootId = snapshot.daemonBootId;
+      skippedRepos = snapshot.skippedRepos;
       return authoritative;
     });
     return sessions === null ? null : {
@@ -20440,7 +20938,8 @@ async function fetchProjectedSnapshot(tok) {
       generation,
       operationLockTimeoutMs,
       operationClockMs,
-      daemonBootId
+      daemonBootId,
+      skippedRepos
     };
   } catch (error) {
     requestResync();
@@ -20480,7 +20979,8 @@ function requestResync() {
         generation: restoreSnapshot,
         operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
         operationClockMs: snapshot.operationClockMs,
-        daemonBootId: snapshot.daemonBootId
+        daemonBootId: snapshot.daemonBootId,
+        skippedRepos: snapshot.skippedRepos
       }, sessions);
       root?.setAttribute("data-af-resync-settled", "");
       resolveResyncCompletions();
@@ -20525,7 +21025,8 @@ function onKeydown(e) {
   }
   const target = e.target;
   const inTerminal = target ? termHost.contains(target) : false;
-  if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
+  const isTerminalTextarea = inTerminal && target?.tagName === "TEXTAREA";
+  if (!isTerminalTextarea && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
   const selected = selectedSessionData();

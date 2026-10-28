@@ -315,3 +315,17 @@ func TestLiteralCommandArgv_LinearOnPathologicalWords(t *testing.T) {
 		})
 	}
 }
+
+// A word of many unmatched brackets is judged without rescanning its suffix per
+// `[` (Codex P2 on #5718); the closing bracket is found once per part. These
+// sizes would not finish under the old per-bracket scan.
+func TestLiteralCommandArgv_UnmatchedBracketsStayLinear(t *testing.T) {
+	small := strings.Repeat("[", 20000)
+	large := strings.Repeat("[", 400000)
+	_, ok := LiteralCommandArgv("codex " + small)
+	require.True(t, ok, "an unmatched [ is literal text")
+	_, ok = LiteralCommandArgv("codex " + large)
+	require.True(t, ok)
+	_, ok = LiteralCommandArgv("codex [a]" + strings.Repeat("[", 1000))
+	require.False(t, ok, "a closed class is a glob")
+}

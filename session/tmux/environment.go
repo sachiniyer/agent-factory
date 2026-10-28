@@ -77,7 +77,7 @@ func (e CommandEnvironment) WorkingDirKnown() bool {
 // false, so receipt callers can preserve their non-correlating fallback rather
 // than treating that inherited base as the agent process's proven cwd.
 func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironment, error) {
-	tokens, _ := splitShellTokens(command)
+	tokens, _ := SplitShellTokens(command)
 	targetIdx, agent, findErr := findAgentTokenStrict(tokens)
 	result := CommandEnvironment{
 		WorkingDir:      filepath.Clean(workingDir),

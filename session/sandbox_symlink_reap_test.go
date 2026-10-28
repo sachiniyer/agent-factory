@@ -155,7 +155,7 @@ func TestRemotePIDIdentityKillScriptMatchesResolvedArgvZeroAndKills(t *testing.T
 	pid := proc.Process.Pid
 	require.True(t, pidAlive(pid), "premise: the process must be alive before the kill")
 
-	script := remotePIDIdentityKillScript(strconv.Itoa(pid), resolvedAfPath)
+	script := remotePIDIdentityKillScript(strconv.Itoa(pid), resolvedAfPath, "")
 	out, err := exec.Command("sh", "-c", script).CombinedOutput()
 	require.NoError(t, err, "the identity-kill subshell exits 0 after a successful kill: %s", out)
 
@@ -184,7 +184,7 @@ func TestRemotePIDIdentityKillScriptMismatchOnUnresolvedArgvZeroSkipsKill(t *tes
 	require.True(t, pidAlive(pid), "premise: the process must be alive")
 
 	// The BUGGY reaper: expected = unresolved, running argv[0] = resolved -> mismatch.
-	script := remotePIDIdentityKillScript(strconv.Itoa(pid), unresolvedAfPath)
+	script := remotePIDIdentityKillScript(strconv.Itoa(pid), unresolvedAfPath, "")
 	out, err := exec.Command("sh", "-c", script).CombinedOutput()
 	require.NoError(t, err,
 		"the identity-kill exits 0 WITHOUT killing when the PID is someone else's — the buggy branch: %s", out)

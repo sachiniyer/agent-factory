@@ -36,6 +36,19 @@ func (c *Client) GetConfig(req daemon.GetConfigRequest) (daemon.GetConfigRespons
 	return resp, nil
 }
 
+// ExplainConfig reads one global config key's provenance on the targeted
+// daemon — the same config.ResolvedValue `af config get <key> --explain`
+// prints — so the TUI's `,` editor pointed at a remote daemon explains THAT
+// daemon's file rather than the operator's own (#4803). It is the remote half
+// of the editor's explain read, exactly as GetConfig is for its manifest rows.
+func (c *Client) ExplainConfig(req daemon.ExplainConfigRequest) (daemon.ExplainConfigResponse, error) {
+	var resp daemon.ExplainConfigResponse
+	if err := c.call("ExplainConfig", req, &resp); err != nil {
+		return daemon.ExplainConfigResponse{}, err
+	}
+	return resp, nil
+}
+
 // SetConfigValue writes one global config key on the targeted daemon.
 func (c *Client) SetConfigValue(req daemon.SetConfigValueRequest) (daemon.SetConfigValueResponse, error) {
 	var resp daemon.SetConfigValueResponse

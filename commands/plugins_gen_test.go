@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/require"
@@ -399,8 +400,8 @@ func TestPreflightHookReportsMissingAf(t *testing.T) {
 // test covers the bound itself.
 func TestPreflightHookBoundsVersionCapture(t *testing.T) {
 	hook := afPreflightHook()
-	if !strings.Contains(hook, "timeout 10s af version") {
-		t.Errorf("preflight hook does not bound af version with a 10s timeout; a wrapper that hangs or floods output could stall SessionStart for Codex's 600s default:\n%s", hook)
+	if !strings.Contains(hook, "timeout -k 2s 10s bash -c 'af version'") {
+		t.Errorf("preflight hook does not bound af version with a 10s timeout and a --kill-after grace; a wrapper that hangs or floods output could stall SessionStart for Codex's 600s default:\n%s", hook)
 	}
 	if !strings.Contains(hook, "command -v timeout") {
 		t.Errorf("preflight hook bounds af version with timeout(1) unconditionally; on systems without timeout (older macOS) the hook would misreport a healthy af as broken. It must fall back to the unbounded capture when timeout is missing:\n%s", hook)
@@ -594,4 +595,44 @@ func TestAmpInstallUsesDocumentedDirectoryCopy(t *testing.T) {
 			t.Errorf("generated Amp instructions are missing %q", want)
 		}
 	}
+}
+
+// TestPreflightHookAcceptsExportedFunctionAf pins #5648: Codex's Bash hook
+// environment can export `af` as a shell function (`export -f af`). command -v
+// finds it, but timeout(1) can only exec files, so probing it directly reported
+// a working CLI as broken. The probe runs through a child bash, which inherits
+// the exported function.
+func TestPreflightHookAcceptsExportedFunctionAf(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("timeout(1) not available")
+	}
+	hook := filepath.Join(t.TempDir(), "hook.sh")
+	require.NoError(t, os.WriteFile(hook, []byte(afPreflightHook()), 0o644))
+	cmd := exec.Command("bash", "-c", `af() { echo "af version 9.9.9"; }; export -f af; bash "$0"`, hook)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.Contains(t, string(out), "af version 9.9.9 is available.")
+	require.NotContains(t, string(out), "failed to execute")
+}
+
+// TestPreflightHookKillsAfThatIgnoresTerm pins the --kill-after half of #5648:
+// plain `timeout 10s` sends only SIGTERM, so a wrapper that traps it kept the
+// hook alive past the bound. The probe must be hard-killed and report broken
+// within roughly timeout+grace (~12s), not hang.
+func TestPreflightHookKillsAfThatIgnoresTerm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out the 10s probe bound")
+	}
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("timeout(1) not available")
+	}
+	start := time.Now()
+	out, code := runPreflightHook(t, []byte("#!/usr/bin/env bash\ntrap '' TERM\nwhile :; do sleep 1; done\n"), false)
+	elapsed := time.Since(start)
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "failed to execute")
+	require.Less(t, elapsed, 20*time.Second, "TERM-ignoring af outlived the hard bound")
 }

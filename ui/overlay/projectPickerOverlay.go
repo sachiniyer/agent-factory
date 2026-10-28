@@ -42,6 +42,12 @@ type Project struct {
 	// highest-priority path (a live session, the active workspace). Whether a
 	// rebind MOVED the record is judged against this, never the display root.
 	RegistryRoot string
+	// RegistryCheckoutID is the checkout marker the registration recorded —
+	// the second half of the guarded rebind's observed pair (#4822 spec). A
+	// reclone at the same path mints a new marker, so root spelling alone
+	// cannot see the checkout the picker displayed being replaced. Empty on a
+	// pre-marker record, which a guarded rebind always refuses.
+	RegistryCheckoutID string
 	// MissingPath marks a registry-backed row whose recorded root the registry
 	// reports absent (path_exists=false) — the checkout moved or was recloned,
 	// which is exactly what rebind repairs.
@@ -130,6 +136,16 @@ type ProjectPickerOverlay struct {
 	// sessionless project may be missing, and the picker must say so instead
 	// of presenting the list as complete.
 	degraded bool
+	// snapshotDegraded marks a failed cross-repo session snapshot fetch: the
+	// rows still render from the registry/active/root_agents union, but every
+	// project's live SessionCount/InPlaceCount is silently zeroed (the fetch
+	// that populates them never answered). The destructive D path gates on
+	// this — those zeroed counts are exactly what would let
+	// deleteProjectConfirmMessage's "total == 0" branch claim "It has no live
+	// sessions" for a project whose live sessions the daemon will still
+	// archive and tear down, consent obtained on copy the data behind it
+	// never confirmed (#1973 / #1985).
+	snapshotDegraded bool
 }
 
 // NewProjectPickerOverlay creates a picker over the given projects (already
@@ -155,6 +171,20 @@ func (p *ProjectPickerOverlay) SetWidth(width int) { p.width = width }
 // SetDegraded records whether the project registry read failed (#3298), so
 // the picker warns that the list may be incomplete.
 func (p *ProjectPickerOverlay) SetDegraded(degraded bool) { p.degraded = degraded }
+
+// SetSnapshotDegraded records whether the picker's cross-repo session snapshot
+// fetch failed. The rows still render, but every live SessionCount/InPlaceCount
+// in them is silently zeroed; callers read this via SnapshotDegraded to gate
+// the destructive D path so delete-project's consent copy cannot claim "no
+// live sessions" against counts the fetch behind it never confirmed
+// (#1973 / #1985).
+func (p *ProjectPickerOverlay) SetSnapshotDegraded(degraded bool) { p.snapshotDegraded = degraded }
+
+// SnapshotDegraded reports whether the cross-repo session snapshot fetch
+// failed. The destructive D path reads it to refuse delete-project rather
+// than render a consent dialog whose session counts the data behind it never
+// confirmed (#1973 / #1985).
+func (p *ProjectPickerOverlay) SnapshotDegraded() bool { return p.snapshotDegraded }
 
 // SetMaxSize sets the maximum outer size the rendered overlay may occupy.
 func (p *ProjectPickerOverlay) SetMaxSize(width, height int) {
@@ -183,6 +213,15 @@ func (p *ProjectPickerOverlay) SelectedProject() (Project, bool) {
 		return p.all[p.selectedIdx], true
 	}
 	return Project{}, false
+}
+
+// Projects exposes the picker's current row set — for callers verifying what a
+// conflict merge produced, where a single highlighted row cannot describe the
+// split a RepoID-changing rebind leaves behind.
+func (p *ProjectPickerOverlay) Projects() []Project {
+	out := make([]Project, len(p.all))
+	copy(out, p.all)
+	return out
 }
 
 // HighlightedProject names the existing row under the cursor, excluding the
@@ -257,6 +296,25 @@ func (p *ProjectPickerOverlay) SetRebindError(msg string) {
 	// user can correct the path and resubmit.
 	p.rebindPending = false
 	p.rebindErr = msg
+}
+
+// SetRebindConflict answers the in-flight rebind with the daemon's "rebound
+// elsewhere" refusal (#4822): another rebind moved the registration after this
+// picker read it. projects is the caller's just-refreshed project list, and the
+// open picker is REBUILT from it rather than patched in place — the conflict
+// moved the registration, so the row's Root, RepoID, name and missing-path
+// state are all stale, and an Esc back to a list still showing them would let
+// Enter select a checkout the registry no longer records (#4888 review).
+// The rebind target is re-read from the rebuilt list too: its fresh
+// RegistryRoot is what the re-armed form's next submission expects, so Enter
+// retries against the root the user was just told rather than being refused
+// again on the root it was opened with. A target whose record vanished keeps
+// its last row — resubmitting against a deleted registration fails
+// definitively, as it should.
+func (p *ProjectPickerOverlay) SetRebindConflict(msg string, projects []Project) {
+	p.all = projects
+	p.reseatAfterConflictRebuild()
+	p.SetRebindError(msg)
 }
 
 // SetRebindDenied refuses rebind before it can submit, carrying the refusal
@@ -436,13 +494,25 @@ func (p *ProjectPickerOverlay) Render() string {
 	}
 
 	lines := []string{title, ""}
-	if p.degraded {
-		// A failed registry read may hide every registered sessionless
-		// project — say so rather than render the remainder as complete
-		// (#3298). Only the list states it: the add/rebind forms show no
-		// list, and their rows are budgeted without it.
+	// The two degraded halves collapse to a single notice line when both
+	// fail: with two separate lines the chrome alone exceeds the text rect
+	// at the declared minimum terminal height (ui/layout/grid.go
+	// HardMinHeight=10), which PlaceOverlay refuses to composite — one extra
+	// row makes the whole TUI background disappear. A single combined line
+	// bounds the chrome so the dialog stays rendered in every degraded
+	// combination, while a watcher reading only the notice can still tell
+	// which half(es) failed. Only the list states it: the add/rebind forms
+	// show no list, and their rows are budgeted without it.
+	switch {
+	case p.degraded && p.snapshotDegraded:
+		warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
+		lines = append(lines, truncateOverlayLine(warnStyle.Render("Cannot read registry · Snapshot failed · D disabled"), cw))
+	case p.degraded:
 		warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
 		lines = append(lines, truncateOverlayLine(warnStyle.Render("Cannot read registry · list may be incomplete"), cw))
+	case p.snapshotDegraded:
+		warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
+		lines = append(lines, truncateOverlayLine(warnStyle.Render("Snapshot failed · D disabled (counts unknown)"), cw))
 	}
 
 	// Reserve rows for the fixed chrome (title, blank, blank, hint — plus the
@@ -567,7 +637,7 @@ func finishRender(style lipgloss.Style, fit, textRect layout.Rect, lines []strin
 // degraded notice when present).
 func (p *ProjectPickerOverlay) listRowWindow(textHeight int) (start, end int, showAbove, showBelow bool) {
 	avail := textHeight - 4
-	if p.degraded {
+	if p.degraded || p.snapshotDegraded {
 		avail--
 	}
 	if avail < 1 {
@@ -609,7 +679,7 @@ func (p *ProjectPickerOverlay) RegisterZones(reg *zones.Registry, origin layout.
 	textRect := overlayTextRect(fit, style)
 	start, end, showAbove, _ := p.listRowWindow(textRect.H)
 	firstRowLine := 2 // title + blank
-	if p.degraded {
+	if p.degraded || p.snapshotDegraded {
 		firstRowLine++
 	}
 	if showAbove {

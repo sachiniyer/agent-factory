@@ -187,6 +187,7 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 		(i.taskRunPromptAttemptAt.IsZero() ||
 			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
 		i.taskRunPromptAttemptAt = attemptedAt
+		i.taskRunPromptBound = true
 	}
 	// A send that affirmatively failed while the run's boundary was still
 	// unbound is the run's INITIAL delivery proven undelivered (#5278): the
@@ -194,9 +195,15 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	// have delivered it. The run ends here, failed — left open, its unarmed
 	// gate lets the first idle edge read as a completion and hand on_complete
 	// a session that never received its prompt.
-	if status == PromptNotDelivered && i.taskRunActive && i.taskRunPromptAttemptAt.IsZero() {
+	//
+	// The boundary must also have NEVER bound (#5644): a replacement mission's
+	// failed send after a handoff lands on a boundary the swap cleared, though
+	// the original prompt provably landed — that run is not this failure.
+	if status == PromptNotDelivered && i.taskRunActive &&
+		i.taskRunPromptAttemptAt.IsZero() && !i.taskRunPromptBound {
 		i.endTaskRunFailedLocked()
 		i.taskRunFailedStamp = true
+		i.taskRunFailurePending = true
 	}
 	i.touchLocked()
 	i.stateEpoch++
@@ -444,6 +451,80 @@ func (i *Instance) ConsumeLoadRuntimeReplacement() bool {
 	return replaced
 }
 
+// markAgentRuntimeReplaced records whether the runtime a recover or load just
+// re-established is a REPLACEMENT process — a respawn or remote re-provision,
+// or a reattach whose pane identity could not be verified — rather than the
+// recorded agent still running (#4222). Both branches of a re-establishment
+// assign it before their ConfirmLive edge (or before Start(false) returns), so
+// the run-end classifier reads this attempt's verdict, never a stale one.
+func (i *Instance) markAgentRuntimeReplaced(replaced bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.agentRuntimeReplaced = replaced
+}
+
+// InterruptTaskRunIfRuntimeReplaced ends a still-in-flight task run as
+// interrupted when this instance's runtime was just established as a
+// replacement (#4222). It is the load path's sibling of transition.go's
+// ConfirmLive carve-out — there is no ConfirmLive edge where Start(false)
+// re-spawns a gone runtime, so the daemon's load settlement calls this before
+// persisting the row. Reports whether a run was ended.
+func (i *Instance) InterruptTaskRunIfRuntimeReplaced() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.taskRunActive || !i.agentRuntimeReplaced {
+		return false
+	}
+	i.endTaskRunInterruptedLocked()
+	return true
+}
+
+// InterruptTaskRunForRestoreBoundary ends a still-in-flight task run as
+// interrupted at a restore's ConfirmLive boundary — BEFORE the daemon's
+// settlement persist — when the runtime being confirmed is a replacement and
+// the fence it confirms is OpRestoring (#4222 review). The op scope keeps a
+// limit-resume's OpRespawning boundary out: that path replays the prompt, so
+// its run is alive by design. Landing the end inside the boundary write is
+// what makes it durable through a daemon exit between that settlement and the
+// post-recovery persist — a restart would otherwise reattach to the
+// replacement's own verified identity and let its first idle edge complete
+// the run for on_complete. Reports whether a run was ended; the one-shot
+// stamp flag is armed either way, so the post-recovery settlement records the
+// outcome exactly once.
+func (i *Instance) InterruptTaskRunForRestoreBoundary() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.taskRunActive || !i.agentRuntimeReplaced || i.inFlightOp != OpRestoring {
+		return false
+	}
+	i.endTaskRunInterruptedLocked()
+	i.taskRunInterruptedStamp = true
+	return true
+}
+
+// TaskRunInterrupted reports whether this session's task run ended interrupted
+// by a runtime replacement (#4222) rather than on an agent-idle completion
+// edge. Sticky for the process's lifetime — used by the daemon's completion
+// predicate to tell the two ways the run marker clears apart.
+func (i *Instance) TaskRunInterrupted() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.taskRunInterrupted
+}
+
+// ConsumeTaskRunInterrupted reports once that a restore's ConfirmLive ended an
+// in-flight task run as interrupted (#4222). The daemon calls it at its restore
+// sites to stamp the owning task's run status; in-memory and one-shot, so a
+// restart before the consume keeps the prior status — matching every other
+// best-effort status write.
+func (i *Instance) ConsumeTaskRunInterrupted() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	interrupted := i.taskRunInterruptedStamp
+	i.taskRunInterruptedStamp = false
+	return interrupted
+}
+
 // TaskRunFailed reports whether this session's task run ended failed — a
 // proven-undelivered initial delivery (#5278) — rather than on an agent-idle
 // completion edge. Sticky for the process's lifetime; the load path re-derives
@@ -465,6 +546,21 @@ func (i *Instance) ConsumeTaskRunFailed() bool {
 	failed := i.taskRunFailedStamp
 	i.taskRunFailedStamp = false
 	return failed
+}
+
+// AckTaskRunFailureStamped clears the durable pending-failure flag once the
+// daemon has settled the owning task's status write (applied, or refused as
+// belonging to another run) so a restart does not re-drive it (#5646).
+func (i *Instance) AckTaskRunFailureStamped() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.taskRunFailurePending {
+		i.taskRunFailurePending = false
+		// Mark the row dirty so the cleared flag reaches disk with the next
+		// checkpoint (#5662). The task's run-keyed status write is idempotent
+		// against a stale re-arm either way, so this is belt and braces.
+		i.touchLocked()
+	}
 }
 
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.

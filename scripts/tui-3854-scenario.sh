@@ -61,16 +61,15 @@ drive_accounts_hint() {
     register_account
     af_boot
     af_open_config
-    # ACCOUNTS, not Accounts: the pane renders section headings in caps.
-    af_wait_for 'ACCOUNTS' "$AF_DRIVER_TIMEOUT" 'the Accounts section heading'
+    # Section headings render in sentence case (no caps-shouting, see CLAUDE.md copy conventions).
+    af_wait_for 'Accounts' "$AF_DRIVER_TIMEOUT" 'the Accounts section heading'
     select_account_row
 
     # The claim, on the screen an operator is looking at.
     af_assert_screen 'device code' 'the Accounts row calls the sign-in a device code'
-    af_assert_screen 'prints a URL' 'the row says the pane prints a URL'
-    af_assert_screen 'own browser' 'the row says you finish it in your own browser'
+    af_assert_screen 'follow the URL' 'the row says to follow the URL in the pane'
     # And the property the whole feature rests on is still said beside it.
-    af_assert_screen 'never reads the credential' 'the row still says af never reads the credential'
+    af_assert_screen 'never reads or stores' 'the section still says af never reads or stores the credential'
 
     _af_log '----- Accounts section as an operator sees it -----'
     af_capture >&2

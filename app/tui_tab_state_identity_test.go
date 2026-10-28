@@ -406,6 +406,58 @@ func TestSwapSameTitle_TabGoneWithOpenPane(t *testing.T) {
 		"the cursor lands on the replacement's instance row — the viewed tab's name is gone from the roster, so the name re-pin finds no equivalent tab")
 }
 
+// TestSwapSameTitle_PartialRosterThenTabArrives pins the composed timeline
+// behind #5620: the daemon creates the replacement's tabs one call at a time, so
+// a snapshot poll can swap in a PARTIAL roster ([agent, b], "a" not yet created)
+// and a later poll adds "a" in place. The swap lands on the sibling "b" that
+// took the vacated slot (#5298), and the late arrival of "a" must not drag the
+// active tab or the cursor away from where the user now is.
+func TestSwapSameTitle_PartialRosterThenTabArrives(t *testing.T) {
+	h := newTestHome(t)
+	base := time.Now().Add(-4 * time.Hour)
+
+	first := instanceWithFakeBackend(t, "first")
+	first.ID = "first-id"
+	first.CreatedAt = base
+	stale := instanceWithFakeBackend(t, "dup")
+	stale.ID = "stale-dup"
+	stale.CreatedAt = base.Add(time.Hour)
+	last := instanceWithFakeBackend(t, "last")
+	last.ID = "last-id"
+	last.CreatedAt = base.Add(2 * time.Hour)
+	addSwapTabs(t, stale, "stale", "agent", "a", "b")
+	h.store.AddInstance(first)
+	h.store.AddInstance(stale)
+	h.store.AddInstance(last)
+	h.sidebar.SelectInstance(stale)
+	h.sidebar.SelectTabRow(stale.Title, 1)
+	resizeHome(h, 200, 40)
+	openTestPane(t, h, stale, 1)
+
+	recreated := instanceWithFakeBackend(t, "dup")
+	recreated.ID = "fresh-dup"
+	recreated.CreatedAt = base.Add(3 * time.Hour)
+	addSwapTabs(t, recreated, "fresh", "agent", "b")
+	t.Cleanup(SetInstanceBuilderForTest(func(session.InstanceData) (*session.Instance, error) {
+		return recreated, nil
+	}))
+	require.True(t, h.reconcileSnapshot([]session.InstanceData{
+		first.ToInstanceData(), recreated.ToInstanceData(), last.ToInstanceData(),
+	}))
+	require.Equal(t, "b", recreated.GetTabs()[h.store.ActiveTab()].Name)
+
+	// A later poll: "a" now exists on the daemon's row (same CreatedAt, so an
+	// in-place update, not another swap).
+	recreated.AddTabForTest("a", session.TabKindShell)
+	recreated.GetTabs()[2].ID = "fresh-a"
+	h.reconcileSnapshot([]session.InstanceData{
+		first.ToInstanceData(), recreated.ToInstanceData(), last.ToInstanceData(),
+	})
+	require.Same(t, recreated, h.sidebar.GetSelectedInstance())
+	assert.Equal(t, "b", recreated.GetTabs()[h.store.ActiveTab()].Name,
+		"a tab arriving after the swap must not move the active tab")
+}
+
 // TestSwapSameTitle_TabReorderedWithOpenPane is the second pane-open repro: the
 // replacement KEEPS the viewed tab but moves it ([agent, b, a], "a" 1→2, fresh
 // ids) and re-sorts after "last". The pane re-binds and the swap's relayout

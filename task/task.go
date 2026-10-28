@@ -113,6 +113,11 @@ type Task struct {
 	CreatedAt     time.Time  `json:"created_at"`
 	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
 	LastRunStatus string     `json:"last_run_status,omitempty"`
+	// LastRunID / LastRunStartedAt identify the run LastRunStatus describes
+	// (see RunKey, RecordRunStatus): daemon-owned, never patchable, and absent on
+	// rows written before they existed — a row without a key accepts any writer.
+	LastRunID        string     `json:"last_run_id,omitempty"`
+	LastRunStartedAt *time.Time `json:"last_run_started_at,omitempty"`
 	// DroppedEvents is the cumulative count of watch-source events discarded by
 	// the per-minute delivery cap. It is daemon-owned history, not a task
 	// definition field: create clears a client-supplied value and updates cannot
@@ -593,17 +598,37 @@ func loadTasksForScope(scope *repoScope) ([]Task, error) {
 // the store that this very call retired (#3684 review). Callers that only need
 // the error discard it.
 func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
+	updated, _, err := UpdateTaskStatusIf(taskID, lastRunAt, lastRunStatus, nil)
+	return updated, err
+}
+
+// UpdateTaskStatusIf is UpdateTaskStatus with a compare-and-set: guard sees the
+// task row as committed on disk, under the same file lock the write takes, and
+// the write happens only when it returns true (nil guard = always write). It is
+// how a status writer keyed to ONE run (#5645) refuses to overwrite another
+// run's outcome — the decision and the write cannot be separated by a
+// concurrent writer. applied reports whether the row was written; when it was
+// not, the returned Task is the unmodified row.
+func UpdateTaskStatusIf(taskID string, lastRunAt *time.Time, lastRunStatus string, guard func(Task) bool) (Task, bool, error) {
+	return updateTaskStatusLocked(taskID, lastRunAt, lastRunStatus, guard, nil)
+}
+
+// updateTaskStatusLocked is the single store write behind every last-run status
+// change: guard decides, mutate (optional) adds fields beside the status, and
+// both run under the task-file lock against the row as committed.
+func updateTaskStatusLocked(taskID string, lastRunAt *time.Time, lastRunStatus string, guard func(Task) bool, mutate func(*Task)) (Task, bool, error) {
 	if err := ValidateTaskID(taskID); err != nil {
-		return Task{}, err
+		return Task{}, false, err
 	}
 	path, err := getTasksPathFn()
 	if err != nil {
-		return Task{}, err
+		return Task{}, false, err
 	}
 	if err := ensureTasksSchemaMigrated(path); err != nil {
-		return Task{}, err
+		return Task{}, false, err
 	}
 	var updated Task
+	applied := false
 	lockErr := config.WithFileLock(path, func() error {
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
@@ -614,6 +639,11 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 		row := -1
 		for i := range tasks {
 			if tasks[i].ID == taskID {
+				if guard != nil && !guard(tasks[i]) {
+					updated = tasks[i]
+					return nil
+				}
+				applied = true
 				// nil means "preserve the on-disk LastRunAt": a status-only
 				// update must not clobber a newer event-delivery timestamp that
 				// a concurrent writer committed while this caller held a stale
@@ -622,6 +652,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 					tasks[i].LastRunAt = lastRunAt
 				}
 				tasks[i].LastRunStatus = lastRunStatus
+				if mutate != nil {
+					mutate(&tasks[i])
+				}
 				row = i
 				found = true
 				break
@@ -630,6 +663,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 
 		if !found {
 			return fmt.Errorf("task with id %q not found", taskID)
+		}
+		if !applied {
+			return nil
 		}
 
 		generation, err := writeTasks(tasks)
@@ -640,9 +676,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 		return nil
 	})
 	if lockErr != nil {
-		return Task{}, lockErr
+		return Task{}, false, lockErr
 	}
-	return updated, nil
+	return updated, applied, nil
 }
 
 // capApplies reports whether this task's shape can carry a concurrency cap: it

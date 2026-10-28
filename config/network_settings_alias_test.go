@@ -55,6 +55,14 @@ func TestNetworkSettingsAliasesUseGroupedPresence(t *testing.T) {
 			read: func(cfg *Config) string { return boolString(cfg.RequireLoopbackToken) },
 		},
 		{
+			name: "unauthenticated network opt-in", legacyKey: "allow_unauthenticated_network", canonical: "network.allow_unauthenticated_network",
+			oldOnly: `allow_unauthenticated_network = true`, groupOnly: "[network]\nallow_unauthenticated_network = true",
+			bothEqual: "allow_unauthenticated_network = true\n[network]\nallow_unauthenticated_network = true",
+			conflict:  "allow_unauthenticated_network = true\n[network]\nallow_unauthenticated_network = false",
+			oldValue:  "true", groupValue: "true", equalValue: "true",
+			read: func(cfg *Config) string { return boolString(cfg.AllowUnauthenticatedNetwork) },
+		},
+		{
 			name: "CORS origins", legacyKey: "cors_allowed_origins", canonical: "network.cors_allowed_origins",
 			oldOnly: `cors_allowed_origins = ["https://old.example.com"]`, groupOnly: "[network]\ncors_allowed_origins = [\"https://new.example.com\"]",
 			bothEqual: "cors_allowed_origins = [\"https://same.example.com\"]\n[network]\ncors_allowed_origins = [\"https://same.example.com\"]",
@@ -105,6 +113,7 @@ func TestNetworkSettingsFlatJSONAliasesRemainSupported(t *testing.T) {
 		"preview_listen_addr":"127.0.0.1:8444",
 		"require_token":true,
 		"require_loopback_token":true,
+		"allow_unauthenticated_network":true,
 		"cors_allowed_origins":["https://af.example.com"]
 	}`), "config.json")
 	require.NoError(t, err)
@@ -112,10 +121,11 @@ func TestNetworkSettingsFlatJSONAliasesRemainSupported(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:8444", cfg.PreviewListenAddr)
 	assert.True(t, cfg.RequireToken)
 	assert.True(t, cfg.RequireLoopbackToken)
+	assert.True(t, cfg.AllowUnauthenticatedNetwork)
 	assert.Equal(t, []string{"https://af.example.com"}, cfg.CORSAllowedOrigins)
 	for _, canonical := range []string{
 		"network.listen_addr", "network.preview_listen_addr", "network.require_token",
-		"network.require_loopback_token", "network.cors_allowed_origins",
+		"network.require_loopback_token", "network.allow_unauthenticated_network", "network.cors_allowed_origins",
 	} {
 		assert.Contains(t, warnings.String(), canonical)
 	}
@@ -126,9 +136,9 @@ func TestNetworkSettingsFlatJSONAliasesRemainSupported(t *testing.T) {
 func TestNetworkAliasManifestAndEffectsUseCanonicalNames(t *testing.T) {
 	canonical := []string{
 		"network.listen_addr", "network.preview_listen_addr", "network.require_token",
-		"network.require_loopback_token", "network.cors_allowed_origins",
+		"network.require_loopback_token", "network.allow_unauthenticated_network", "network.cors_allowed_origins",
 	}
-	legacy := []string{"listen_addr", "preview_listen_addr", "require_token", "require_loopback_token", "cors_allowed_origins"}
+	legacy := []string{"listen_addr", "preview_listen_addr", "require_token", "require_loopback_token", "allow_unauthenticated_network", "cors_allowed_origins"}
 	manifestKeys := make([]string, 0, len(Manifest()))
 	for _, entry := range Manifest() {
 		manifestKeys = append(manifestKeys, entry.Key)
@@ -157,6 +167,7 @@ func TestNetworkAliasSetPreservesLegacyForDowngradeAndUnknownKeys(t *testing.T) 
 		{name: "preview", key: "preview_listen_addr", value: "127.0.0.1:9001", legacyLine: "preview_listen_addr = '127.0.0.1:9001'", assert: func(t *testing.T, cfg *Config) { assert.Equal(t, "127.0.0.1:9001", cfg.PreviewListenAddr) }},
 		{name: "token", key: "require_token", value: "false", legacyLine: "require_token = false", assert: func(t *testing.T, cfg *Config) { assert.False(t, cfg.RequireToken) }},
 		{name: "loopback token", key: "require_loopback_token", value: "false", legacyLine: "require_loopback_token = false", assert: func(t *testing.T, cfg *Config) { assert.False(t, cfg.RequireLoopbackToken) }},
+		{name: "unauthenticated opt-in", key: "allow_unauthenticated_network", value: "false", legacyLine: "allow_unauthenticated_network = false", assert: func(t *testing.T, cfg *Config) { assert.False(t, cfg.AllowUnauthenticatedNetwork) }},
 		{name: "CORS", key: "cors_allowed_origins", value: "https://new.example.com", legacyLine: "cors_allowed_origins = ['https://new.example.com']", assert: func(t *testing.T, cfg *Config) {
 			assert.Equal(t, []string{"https://new.example.com"}, cfg.CORSAllowedOrigins)
 		}},
@@ -198,7 +209,7 @@ func networkAliasOldEncoded(key string) string {
 	switch key {
 	case "listen_addr", "preview_listen_addr":
 		return `"0.0.0.0:8000"`
-	case "require_token", "require_loopback_token":
+	case "require_token", "require_loopback_token", "allow_unauthenticated_network":
 		return "true"
 	default:
 		return `["https://old.example.com"]`
@@ -225,6 +236,7 @@ func TestNetworkAliasUnsetRemovesBothSpellingsWithoutResurrection(t *testing.T) 
 		{legacy: "preview_listen_addr", flat: `"0.0.0.0:8001"`, grouped: `""`, assert: func(t *testing.T, cfg *Config) { assert.Empty(t, cfg.PreviewListenAddr) }},
 		{legacy: "require_token", flat: "true", grouped: "false", assert: func(t *testing.T, cfg *Config) { assert.False(t, cfg.RequireToken) }},
 		{legacy: "require_loopback_token", flat: "true", grouped: "false", assert: func(t *testing.T, cfg *Config) { assert.False(t, cfg.RequireLoopbackToken) }},
+		{legacy: "allow_unauthenticated_network", flat: "true", grouped: "false", assert: func(t *testing.T, cfg *Config) { assert.False(t, cfg.AllowUnauthenticatedNetwork) }},
 		{legacy: "cors_allowed_origins", flat: `["https://old.example.com"]`, grouped: `[]`, assert: func(t *testing.T, cfg *Config) { assert.Empty(t, cfg.CORSAllowedOrigins) }},
 	}
 	for _, tc := range tests {
@@ -255,12 +267,14 @@ func TestNetworkAliasCurrentValueAcceptsBothSpellings(t *testing.T) {
 	cfg.PreviewListenAddr = "127.0.0.1:9001"
 	cfg.RequireToken = true
 	cfg.RequireLoopbackToken = true
+	cfg.AllowUnauthenticatedNetwork = true
 	cfg.CORSAllowedOrigins = []string{"https://af.example.com"}
 	for _, tc := range []struct{ legacy, canonical, want string }{
 		{legacy: "listen_addr", canonical: "network.listen_addr", want: "127.0.0.1:9000"},
 		{legacy: "preview_listen_addr", canonical: "network.preview_listen_addr", want: "127.0.0.1:9001"},
 		{legacy: "require_token", canonical: "network.require_token", want: "true"},
 		{legacy: "require_loopback_token", canonical: "network.require_loopback_token", want: "true"},
+		{legacy: "allow_unauthenticated_network", canonical: "network.allow_unauthenticated_network", want: "true"},
 		{legacy: "cors_allowed_origins", canonical: "network.cors_allowed_origins", want: "https://af.example.com"},
 	} {
 		legacy, legacyOK := CurrentValue(cfg, tc.legacy)
@@ -312,7 +326,7 @@ func TestNetworkAliasDefaultMaterializationUsesGroupedTOMLOnly(t *testing.T) {
 	body := string(written)
 	assert.Contains(t, body, "[network]\n")
 	assert.Contains(t, body, "listen_addr = '127.0.0.1:8443'")
-	for _, legacy := range []string{"listen_addr =", "preview_listen_addr =", "require_token =", "require_loopback_token =", "cors_allowed_origins ="} {
+	for _, legacy := range []string{"listen_addr =", "preview_listen_addr =", "require_token =", "require_loopback_token =", "allow_unauthenticated_network =", "cors_allowed_origins ="} {
 		beforeNetwork, _, _ := strings.Cut(body, "[network]")
 		assert.NotContains(t, beforeNetwork, legacy)
 	}
@@ -327,6 +341,7 @@ func TestNetworkAliasJSONUpgradeKeepsFlatValuesForDowngrade(t *testing.T) {
 		"preview_listen_addr":"127.0.0.1:8444",
 		"require_token":true,
 		"require_loopback_token":true,
+		"allow_unauthenticated_network":true,
 		"cors_allowed_origins":["https://af.example.com"]
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(home, ConfigFileName), []byte(legacyJSON), 0o644))
@@ -340,6 +355,7 @@ func TestNetworkAliasJSONUpgradeKeepsFlatValuesForDowngrade(t *testing.T) {
 	for _, fragment := range []string{
 		"listen_addr = '0.0.0.0:8443'", "preview_listen_addr = '127.0.0.1:8444'",
 		"require_token = true", "require_loopback_token = true",
+		"allow_unauthenticated_network = true",
 		"cors_allowed_origins = ['https://af.example.com']",
 	} {
 		assert.Equal(t, 2, strings.Count(body, fragment), "flat and grouped copies of %q", fragment)
@@ -351,6 +367,7 @@ func TestNetworkAliasJSONUpgradeKeepsFlatValuesForDowngrade(t *testing.T) {
 	assert.Equal(t, upgraded.PreviewListenAddr, downgraded.PreviewListenAddr)
 	assert.Equal(t, upgraded.RequireToken, downgraded.RequireToken)
 	assert.Equal(t, upgraded.RequireLoopbackToken, downgraded.RequireLoopbackToken)
+	assert.Equal(t, upgraded.AllowUnauthenticatedNetwork, downgraded.AllowUnauthenticatedNetwork)
 	assert.Equal(t, upgraded.CORSAllowedOrigins, downgraded.CORSAllowedOrigins)
 }
 
@@ -370,6 +387,7 @@ func TestNetworkAliasDocumentationUsesCanonicalTableAndNamesAliases(t *testing.T
 		{legacy: "preview_listen_addr", canonical: "network.preview_listen_addr"},
 		{legacy: "require_token", canonical: "network.require_token"},
 		{legacy: "require_loopback_token", canonical: "network.require_loopback_token"},
+		{legacy: "allow_unauthenticated_network", canonical: "network.allow_unauthenticated_network"},
 		{legacy: "cors_allowed_origins", canonical: "network.cors_allowed_origins"},
 	} {
 		assert.Contains(t, string(configuration), "`"+tc.legacy+"`", "permanent alias must be documented")
