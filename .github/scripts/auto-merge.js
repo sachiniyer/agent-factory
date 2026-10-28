@@ -25,6 +25,10 @@ const MASTER_WORKFLOWS = [
   // Since slim PR CI (#5615) the heavy jobs (macOS, systemd, perf) run only on
   // master's pr.yml, and a GITHUB_TOKEN merge fires no push to run them (#5674).
   "pr.yml",
+  // Advisory like the heavy suites (not in VERIFY_WORKFLOWS), but master must
+  // still exercise the sandbox path after every batch: a GITHUB_TOKEN merge
+  // fires no push, so without this entry it never ran again.
+  "sandbox-e2e.yml",
   "tui-driver-selftest.yml",
   "web-selftest.yml",
 ];
