@@ -186,6 +186,9 @@ func ensureAfSkillDir(base string, legacy ...string) (string, error) {
 			legacyDir := filepath.Join(other, afSkillDirName)
 			removeAfSkillDir(legacyDir, filepath.Join(legacyDir, "SKILL.md"))
 		}
+		// Roots an earlier granted launch wrote under that the operator has
+		// since moved away from (#4510 review).
+		cleanManagedSkillDirs()
 		// INFO, not WARNING (#2166): global_agent_skills defaults false, so this
 		// fires on every codex/gemini/amp/devin session start on a DEFAULT
 		// install. af is honoring the documented default, which is not a defect.
@@ -204,6 +207,8 @@ func ensureAfSkillDir(base string, legacy ...string) (string, error) {
 		// deliberately not overwriting it. That is the designed outcome of the
 		// marker guard, repeated on every session start, not something to fix.
 		log.InfoLog.Printf("af skill: %s exists but is not af-managed; leaving it untouched (af guidance not injected)", path)
+	} else {
+		recordManagedSkillDir(skillDir)
 	}
 	return skillDir, nil
 }
