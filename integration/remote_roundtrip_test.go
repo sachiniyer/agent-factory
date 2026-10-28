@@ -330,7 +330,23 @@ func (h *harness) startDaemon() {
 	}
 	go func() { _ = cmd.Wait() }()
 
-	h.waitHTTPHealth(10*time.Second, func() string { return stderr.String() })
+	h.waitHTTPHealth(10*time.Second, func() string { return stderr.String() + h.daemonLogTail() })
+}
+
+// daemonLogTail is the end of the daemon's own log in the test AF home. The
+// daemon's stderr is empty on a slow start (#5815: "starting (restoring
+// sessions)" for 45s+ with nothing captured), so a health-wait failure dumps this
+// too: it holds the startup steps and their durations.
+func (h *harness) daemonLogTail() string {
+	raw, err := os.ReadFile(filepath.Join(h.home, "agent-factory.log"))
+	if err != nil {
+		return fmt.Sprintf("\n(no daemon log at %s: %v)", h.home, err)
+	}
+	const keep = 16 << 10
+	if len(raw) > keep {
+		raw = raw[len(raw)-keep:]
+	}
+	return "\n--- daemon log tail (" + h.home + ") ---\n" + string(raw)
 }
 
 func (h *harness) waitHTTPHealth(timeout time.Duration, stderr func() string) {
