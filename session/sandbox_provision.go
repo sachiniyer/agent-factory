@@ -272,17 +272,6 @@ func (w *sandboxWorkspace) fetchRestoreBranch(branch string, timeout time.Durati
 	return nil
 }
 
-// copyAfBinary streams the daemon's own `af` binary (from binary) into
-// <sessionDir>/af over the shell's stdin and makes it executable.
-func (w *sandboxWorkspace) copyAfBinary(timeout time.Duration, binary io.Reader) error {
-	dst := w.AfPath()
-	script := fmt.Sprintf("cat > %s && chmod +x %s", shellQuote(dst), shellQuote(dst))
-	if out, err := w.shell.Run(timeout, script, binary, true); err != nil {
-		return fmt.Errorf("streaming the af binary to the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
 // writeRuntimeIdentity places the session's reattach credential material on
 // the remote (#5571 W1.1):
 //
@@ -434,6 +423,11 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
+	// Put the session dir — which holds the `af` symlink — on the
+	// agent-server's PATH so the agent pane inherits `af` through the env
+	// filter (PATH rides the allowlist) and in-sandbox `af` commands work
+	// (#5571 W2.2, AR-02 PATH half). The VAR=val prefix sits inside the launch
+	// command, left of nohup, so the `& echo $!` tail is undisturbed.
 	// setsid, when the host has it, moves the agent-server into its own session
 	// (#5571 W1.4): it then outlives the provisioning ssh session's teardown,
 	// whose SIGHUP/session-kill nohup alone does not survive under
@@ -441,9 +435,9 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	// non-interactive shell — never a process-group leader — so setsid execs in
 	// place rather than forking, and `$!` below is still the agent-server's own
 	// PID, which the reap-side argv[0] identity check depends on. Hosts without
-	// setsid (macOS) keep the previous nohup-only launch.
-	launch := fmt.Sprintf("d=; if command -v setsid >/dev/null 2>&1; then d=setsid; fi; nohup $d %s >%s 2>%s </dev/null & echo $!",
-		filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
+	// setsid (macOS) keep the nohup-only launch.
+	launch := fmt.Sprintf("d=; if command -v setsid >/dev/null 2>&1; then d=setsid; fi; PATH=%s:\"$PATH\" nohup $d %s >%s 2>%s </dev/null & echo $!",
+		shellQuote(w.SessionDir), filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
 	// The runtime-identity env is unconditional — every W1.1 provision writes
 	// af-identity.env before this point. AF_TOKEN_REF must land in the
 	// agent-server's exec-time environment so the persisted identity's host-side

@@ -441,7 +441,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		}
 		// The shared selector keeps the refusal's off-ramp executable even when
 		// this session's branch is not durable and --force-reap cannot proceed (#4195).
-		if err := m.preserveSandboxBeforeReap(repoID, key, instance, reapRefusalSuggestionFor(repoID, instance)); err != nil {
+		if err := m.preserveUnlessRelaunchable(repoID, key, instance); err != nil {
 			// The failure is the session's newest evidence even though it is an
 			// operator's, not the episode's. A structural one — rejected auth, an
 			// empty branch — means the row must stop claiming the environment,
@@ -488,6 +488,10 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
 		return m.stopVSCodeForInstance(key, i.ID)
 	})
+	// --force-reap asks for the sandbox to be REPLACED; the in-place relaunch
+	// would keep the work it asked to discard (W7.1).
+	instance.SetForceSandboxReplacement(force)
+	defer instance.SetForceSandboxReplacement(false)
 	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
