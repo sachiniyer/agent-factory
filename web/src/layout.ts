@@ -457,34 +457,76 @@ export function remapByIdentity(root: LayoutNode, prevIds: string[], ids: string
   }
   // Drop a dead-identity leaf whose ordinal no longer has a slot after a pure
   // shrink (the closed tab was the highest-ordinal one, nothing replaced it) — but
-  // ONLY when the slot it would clamp down onto is already held by a leaf validate()
-  // will KEEP there. validate() clamps every out-of-range leaf to the last ordinal
-  // (`ids.length - 1`) and then drops duplicates keeping the FIRST in visual order;
-  // that evicts a SURVIVOR at that ordinal only when a dead leaf is also clamped onto
-  // it (and happens to come first). Closing the dead leaf here pre-empts that
-  // eviction.
+  // ONLY the DEAD one, so validate()'s clamp does not evict a SURVIVOR. validate()
+  // clamps every out-of-range leaf to the last ordinal (`ids.length - 1`) and then
+  // drops duplicates keeping the FIRST in visual order; that evicts a survivor at
+  // that ordinal only when a dead leaf is also clamped onto it (and happens to come
+  // first). Closing the dead leaf here pre-empts that eviction.
   //
-  // The holder at `max` may be a survivor `moved` tracked — in which case
-  // `claimed.has(max)` already covers it — OR a backfilled survivor whose identity
-  // string changed (#1779): a synthesized `kind:name` that a later snapshot
-  // replaces with a real id is the SAME tab to ui.ts, but `moved` matches by
-  // identity string, so the backfill reads as "identity gone" and the leaf falls out
-  // of `moved`/`claimed` while staying at its (in-range) ordinal. `claimed` alone
-  // misses that case, so detect the holder structurally instead: any leaf at ordinal
-  // `max` is in range (`max < ids.length`), so validate() keeps it there, and
-  // clamping the dead leaf onto it would create a duplicate validate() resolves by
-  // visual order — evicting the holder when the dead leaf is visually earlier (e.g. a
-  // split-LEFT). When `max` is empty (no leaf there), validate() rebinds the dead
-  // leaf to the unclaimed slot with no duplicate to drop — closing it would collapse
-  // a multi-pane layout the new tab count still admits, so this loop leaves it alone
+  // A clamp collision has TWO shapes, and the dead leaf is in a different position
+  // in each:
+  //  1. The dead leaf is OUT OF RANGE and a survivor holds `max`. This is the common
+  //     shrink (the closed tab was the highest-ordinal one). Close the dead leaf so
+  //     validate() does not clamp it onto the survivor.
+  //  2. A backfilled survivor is out of range and the DEAD leaf holds `max` (a
+  //     different, lower tab closed while the snapshot also adopted a real id onto
+  //     the survivor — #1779). Closing the out-of-range survivor here would discard
+  //     its live terminal; the dead holder at `max` is the leaf to drop, so the
+  //     survivor rebinds to `max` via validate() instead.
+  // The holder at `max` may itself be a backfilled survivor whose identity string
+  // changed (#1779): a synthesized `kind:name` that a later snapshot replaces with a
+  // real id is the SAME tab to ui.ts, but `moved` matches by identity string, so the
+  // backfill reads as "identity gone" and the leaf falls out of `moved`/`claimed`
+  // while staying at its (in-range) ordinal. `claimed` (or any leaf at `max`) alone
+  // cannot tell a survivor holder from a dead one, so the dead leaf is identified by
+  // its identity: a real id gone from `ids` is a genuinely closed tab, while a
+  // synthesized `kind:name` gone from `ids` is an ADOPTED survivor (not closed) as
+  // long as a backfill happened (a real id appeared in `ids` that was not in
+  // `prevIds`). A synthesized id gone with NO backfill is a closed legacy tab (pre
+  // #1738, no id) and degrades like any other dead leaf. A real daemon id is hex or
+  // `t-` (session/tab.go newTabID); a synthesized id is `${kind}:${name}`
+  // (ui.ts tabIdentity), so a leading `digits:` distinguishes them.
+  //
+  // When `max` is empty (no leaf there), validate() rebinds an out-of-range leaf to
+  // the unclaimed slot with no duplicate to drop — closing it would collapse a
+  // multi-pane layout the new tab count still admits, so this loop leaves it alone
   // (the [A,_,C]→[A,B] case keeps C's pane, clamped to the unshown B).
   // `closeLeaf` returns null for the last pane, so `?? cur` leaves a sole dead leaf
   // in place to degrade as before (validate clamps it to max).
   const max = ids.length - 1;
-  const maxHeld = leaves(cur).some((l) => l.tab === max);
-  for (const leaf of leaves(cur)) {
-    if (!moved.has(leaf.id) && leaf.tab >= ids.length && maxHeld) {
-      cur = closeLeaf(cur, leaf.id) ?? cur;
+  const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
+  if (maxLeaf) {
+    const isSynth = (id: string): boolean => /^\d+:/.test(id);
+    // A backfill happened when a real id (not synthesized, not empty) is in `ids`
+    // but was not in `prevIds` — the daemon resolved a tab's id after a prior snapshot
+    // tracked it by the synthesized `kind:name` fallback.
+    const backfill = ids.some((id) => id !== "" && !isSynth(id) && !prevIds.includes(id));
+    // A !moved leaf is DEAD (its tab was genuinely closed) when its prev identity is a
+    // real id that's gone from `ids`, or a synthesized `kind:name` that's gone with no
+    // backfill (a closed pre-#1738 legacy tab). A backfilled survivor (synthesized id
+    // gone, but a real id took its place) is NOT dead — its pane must be preserved.
+    const deadIdentity = (tab: number): boolean => {
+      const prev = prevIds[tab];
+      if (prev === undefined || prev === "") {
+        return true;
+      }
+      return !isSynth(prev) || !backfill;
+    };
+    // (1) Close a dead leaf clamped out of range onto a survivor's slot at `max`.
+    for (const leaf of leaves(cur)) {
+      if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
+        cur = closeLeaf(cur, leaf.id) ?? cur;
+      }
+    }
+    // (2) A dead leaf HOLDING `max`, with a backfilled survivor still out of range
+    //     that would clamp onto it: close the dead holder so the survivor rebinds to
+    //     `max`, instead of closing the survivor and handing its pane to the dead tab.
+    if (
+      !moved.has(maxLeaf.id) &&
+      deadIdentity(maxLeaf.tab) &&
+      leaves(cur).some((l) => !moved.has(l.id) && l.tab >= ids.length && !deadIdentity(l.tab))
+    ) {
+      cur = closeLeaf(cur, maxLeaf.id) ?? cur;
     }
   }
   return cur;

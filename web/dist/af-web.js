@@ -13458,10 +13458,24 @@ function remapByIdentity(root2, prevIds, ids) {
     }
   }
   const max = ids.length - 1;
-  const maxHeld = leaves(cur).some((l) => l.tab === max);
-  for (const leaf of leaves(cur)) {
-    if (!moved.has(leaf.id) && leaf.tab >= ids.length && maxHeld) {
-      cur = closeLeaf(cur, leaf.id) ?? cur;
+  const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
+  if (maxLeaf) {
+    const isSynth = (id) => /^\d+:/.test(id);
+    const backfill = ids.some((id) => id !== "" && !isSynth(id) && !prevIds.includes(id));
+    const deadIdentity = (tab) => {
+      const prev = prevIds[tab];
+      if (prev === void 0 || prev === "") {
+        return true;
+      }
+      return !isSynth(prev) || !backfill;
+    };
+    for (const leaf of leaves(cur)) {
+      if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
+        cur = closeLeaf(cur, leaf.id) ?? cur;
+      }
+    }
+    if (!moved.has(maxLeaf.id) && deadIdentity(maxLeaf.tab) && leaves(cur).some((l) => !moved.has(l.id) && l.tab >= ids.length && !deadIdentity(l.tab))) {
+      cur = closeLeaf(cur, maxLeaf.id) ?? cur;
     }
   }
   return cur;
