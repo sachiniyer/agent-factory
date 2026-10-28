@@ -12185,11 +12185,15 @@ function compareSessionsForRail(a, b) {
   }
   return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
 }
+var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
+function isOffBoxWorkspace(s) {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
 function rowTitle(s) {
   const lv = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
   let title = s.title;
-  if (s.backend_type === "remote") {
+  if (isOffBoxWorkspace(s)) {
     title = "[remote] " + title;
   }
   if (lv === Liveness.Lost) {
@@ -16834,10 +16838,6 @@ function isKillableSession(s) {
 var TAB_PINNED_NOTICE = "Agent tab stays first \xB7 drag to a pane to split";
 function restoreRequiresConfirmation(session) {
   return session.backend_type !== void 0 && session.backend_type !== "" && session.backend_type !== "local";
-}
-var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
-function isOffBoxWorkspace(s) {
-  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
 }
 function allowedTabKinds(s) {
   if (s.tab_kinds && s.tab_kinds.length > 0) {
