@@ -116,6 +116,16 @@ type InstanceData struct {
 	// row that reloads INERT drops it on load instead: no automatic retry can
 	// reach that row, so the record would report an armed retry forever.
 	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
+	// Unreachable projects a live remote-probe outage (#5571 W1.3): the
+	// daemon's observation stopped being answered at Since, and Error is the
+	// last transport failure — collapsed, bounded, and token-redacted before it
+	// was stored on the record, so it is safe to ride every client surface. It
+	// is an observation flag, not a liveness: it coexists with Running/Ready/
+	// Lost and suppresses the destructive lifecycle verbs for the flag's
+	// duration. Projection-only like IdleReason above: ForStorage scrubs it so
+	// a restarted daemon re-derives the claim from its own probes rather than
+	// inheriting an outage it never observed.
+	Unreachable *UnreachableData `json:"unreachable,omitempty"`
 
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
 	// pane churn. Callers capture it before sending so churn racing the delivery is
@@ -147,6 +157,17 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunInterrupted records that the run ended interrupted by a runtime
+	// replacement — Lost-restore respawn or load-time re-spawn — rather than on
+	// an agent-idle completion edge (#4222). Persisted because the daemon's
+	// startup reconcile must recognize the row: a pending fire marker that
+	// still names it describes an occurrence that was never delivered to the
+	// replacement runtime, so adopting the row as the fire's product would
+	// misreport the interrupted run as started and discharge a prompt that was
+	// never replayed. omitempty + additive: an older record decodes to false —
+	// indistinguishable from a normally-ended run, which is the pre-fix
+	// reading and matches it.
+	TaskRunInterrupted bool `json:"task_run_interrupted,omitempty"`
 	// TaskRunFailurePending records that the run ended failed (initial prompt
 	// proven undelivered, #5278) and the task's errored status has not yet been
 	// acknowledged as written (#5646). omitempty + additive: an older record

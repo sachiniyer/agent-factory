@@ -16,11 +16,12 @@ func TestTitlePrefixParity(t *testing.T) {
 	data, err := os.ReadFile("testdata/title_prefixes.json")
 	require.NoError(t, err)
 	var fixtures []struct {
-		Name     string             `json:"name"`
-		Liveness session.Liveness   `json:"liveness"`
-		Op       session.InFlightOp `json:"in_flight_op"`
-		Backend  string             `json:"backend_type"`
-		Expected string             `json:"expected"`
+		Name        string                   `json:"name"`
+		Liveness    session.Liveness         `json:"liveness"`
+		Op          session.InFlightOp       `json:"in_flight_op"`
+		Backend     string                   `json:"backend_type"`
+		Unreachable *session.UnreachableData `json:"unreachable"`
+		Expected    string                   `json:"expected"`
 	}
 	require.NoError(t, json.Unmarshal(data, &fixtures))
 	require.NotEmpty(t, fixtures)
@@ -35,6 +36,7 @@ func TestTitlePrefixParity(t *testing.T) {
 				inst.SetBackend(&session.HookBackend{})
 			}
 			require.NoError(t, inst.Transition(session.ObserveLiveness(tc.Liveness)))
+			inst.ReconcileUnreachable(tc.Unreachable)
 			inst.SetInFlightOpForTest(tc.Op)
 			r := NewInstanceRenderer()
 			r.SetWidth(100)

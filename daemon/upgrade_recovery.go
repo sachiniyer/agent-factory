@@ -15,11 +15,22 @@ import (
 
 // upgradeValidateGrace bounds how long ValidatePrevious waits for the restored
 // previous daemon to answer Ping at the expected version with its recorded
-// listeners. Package vars so tests can shorten the path.
+// listeners. upgradeCandidateRestoreGrace is the longer allowance a candidate
+// that already matches its identity gets to finish restoring its instances
+// (#5693): restore time grows with the user's session count and the box's load,
+// and running out of it rolls the upgrade back, so it is generous — but bounded
+// well inside the supervisor's phase deadline. Package vars so tests can shorten
+// the path.
 var (
-	upgradeValidateGrace = 30 * time.Second
-	upgradeValidatePoll  = 100 * time.Millisecond
+	upgradeValidateGrace         = 30 * time.Second
+	upgradeCandidateRestoreGrace = 2 * time.Minute
+	upgradeValidatePoll          = 100 * time.Millisecond
 )
+
+// errDaemonStillRestoring marks a candidate that matches its required identity
+// but still reports DaemonPhaseWarming. awaitDaemonIdentity keys the longer
+// restore allowance on it.
+var errDaemonStillRestoring = errors.New("instance restore has not completed")
 
 // Indirection points so the recovery/rollback operations can be exercised
 // without a real service manager, a spawned daemon, or a live control socket.
@@ -346,7 +357,7 @@ func awaitDaemonIdentity(ctx context.Context, journal upgradetxn.Journal, want d
 	if err := recoveryHomeGuard(journal); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(upgradeValidateGrace)
+	start := time.Now()
 	var lastErr error
 	for {
 		if err := ctx.Err(); err != nil {
@@ -356,9 +367,16 @@ func awaitDaemonIdentity(ctx context.Context, journal upgradetxn.Journal, want d
 		if lastErr == nil {
 			return nil
 		}
-		if !time.Now().Before(deadline) {
+		// Only a responder that is otherwise exactly the candidate gets the
+		// restore allowance; a wrong version, id, or listener still fails on
+		// the ordinary grace so a broken candidate rolls back promptly.
+		grace := upgradeValidateGrace
+		if errors.Is(lastErr, errDaemonStillRestoring) && upgradeCandidateRestoreGrace > grace {
+			grace = upgradeCandidateRestoreGrace
+		}
+		if time.Since(start) >= grace {
 			return fmt.Errorf("%s daemon did not become healthy at version %s within %s: %w",
-				want.role, want.version, upgradeValidateGrace, lastErr)
+				want.role, want.version, grace, lastErr)
 		}
 		time.Sleep(upgradeValidatePoll)
 	}
@@ -383,7 +401,8 @@ type daemonIdentity struct {
 // validatePreviousDaemon and validateCandidateDaemon, factored so it is testable
 // without real time and so the require-vs-reject-id polarity lives in exactly one
 // place. It requires a live responder at the exact version, the expected
-// transaction-id polarity, and every listener the journal recorded as healthy.
+// transaction-id polarity, every listener the journal recorded as healthy, and —
+// for a candidate — a completed instance restore.
 func daemonMatchesIdentity(h HealthStatus, want daemonIdentity) error {
 	if h.PingErr != nil {
 		return fmt.Errorf("%s daemon is not answering: %w", want.role, h.PingErr)
@@ -427,6 +446,19 @@ func daemonMatchesIdentity(h HealthStatus, want daemonIdentity) error {
 	if want.listeners.TCPConfigured && want.listeners.TCPBound && !h.Listeners.TCPBound &&
 		h.Listeners.TCPRefusalReason == "" {
 		return fmt.Errorf("%s daemon has not bound the configured TCP listener", want.role)
+	}
+	// A candidate binds its control socket BEFORE it restores instances (#829),
+	// so Ping answering at the right identity is not yet proof it can run the
+	// user's sessions. Commit is irreversible and approval follows it at once,
+	// so a candidate is validated only once its restore has completed (#5693):
+	// approval then never races the restore, and a candidate whose restore fails
+	// or hangs rolls back instead of being committed. Checked LAST, so this error
+	// means "everything else already matches" — the restore allowance in
+	// awaitDaemonIdentity keys on it. Only an explicit warming phase fails: a
+	// daemon too old to report a phase answers "", and the previous daemon
+	// (requireTransactionID == "") is held to liveness, not restore.
+	if want.requireTransactionID != "" && h.Phase == DaemonPhaseWarming {
+		return fmt.Errorf("%s daemon is still restoring its instances: %w", want.role, errDaemonStillRestoring)
 	}
 	return nil
 }

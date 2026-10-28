@@ -76,6 +76,14 @@ const taskLifecycleHookWait = 10 * time.Minute
 //     retention exists to preserve. Stating the condition here means a future
 //     refactor of the poll's early returns cannot silently authorize that.
 //
+//   - the run did not end interrupted (#4222). A Lost-restore whose replacement
+//     runtime was never replayed the prompt clears the marker inside its own
+//     ConfirmLive — off the poll's edge entirely — so a tick that captured
+//     taskRunWasActive before racing that restore would otherwise read the
+//     freshly-idle replacement pane as a completed run and apply on_complete
+//     to work the interrupted run produced. The sticky flag is the
+//     distinguishing fact: the marker cleared, but not by a completion edge.
+//
 //   - the run did not end failed. A proven-undelivered initial delivery ends the
 //     run where the verdict lands, BETWEEN polls (#5278) — the same
 //     true→false flip a completed run makes, and indistinguishable from it
@@ -86,7 +94,7 @@ func runEndedIntoIdle(instance *session.Instance, taskRunWasActive bool) bool {
 	if !taskRunWasActive || instance.TaskRunActive() {
 		return false
 	}
-	if instance.TaskRunFailed() || instance.StartupStateUnknown() {
+	if instance.TaskRunInterrupted() || instance.TaskRunFailed() || instance.StartupStateUnknown() {
 		return false
 	}
 	return instance.GetLiveness() == session.LiveReady

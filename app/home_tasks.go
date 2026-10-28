@@ -136,10 +136,19 @@ func (m *home) handleTaskCreate() tea.Cmd {
 			reloadErr = fmt.Errorf("this list could not be reloaded, so it is showing the tasks from before — wait for it to refresh before creating the task again: %w", err)
 		}
 	}
+	// The binding is committed whatever the reload did, so when it lands outside
+	// the active scope the destination is known even though the list could not be
+	// re-read to show its absence. It rides along with a reload failure instead of
+	// being dropped (#5667): the user is told the save committed, and must also
+	// learn it is in another project.
+	var bindingNotice error
+	if reloadErr != nil && (addErr == nil || apiclient.IsMutationCommitted(addErr)) && boundOutsideActiveScope(m.repoID, absPath) {
+		bindingNotice = fmt.Errorf("task %q was saved and bound to %s; it does not appear in this project's list", name, absPath)
+	}
 	if addErr != nil && apiclient.IsMutationCommitted(addErr) {
 		err := errors.Join(
 			fmt.Errorf("task was saved, but the daemon could not refresh its schedules: %w", addErr),
-			reloadErr)
+			reloadErr, bindingNotice)
 		// A cross-repo create that committed with a warning still landed in
 		// another project, so the active-scope reload omits it — the scheduler
 		// warning alone reads as a failed save that lost the task. The nil-error
@@ -164,7 +173,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 			reloadErr))
 	}
 	if reloadErr != nil {
-		return m.handleError(reloadErr)
+		return m.handleError(errors.Join(reloadErr, bindingNotice))
 	}
 	// Cross-repo binding notice. A committed save whose owning project differs
 	// from the active scope is omitted from the reloaded list above (the same
@@ -184,6 +193,14 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		}
 	}
 	return m.handleNotice(fmt.Errorf("task %q was saved and bound to %s; it does not appear in this project's list", name, absPath))
+}
+
+// boundOutsideActiveScope reports whether a task bound to projectPath is omitted
+// from the active project's task list: registry mode (no active scope) or a
+// path that resolves to a different repo. Used when the list could not be
+// reloaded to show the absence directly (#5667).
+func boundOutsideActiveScope(activeRepoID, projectPath string) bool {
+	return activeRepoID == "" || config.RepoIDForPath(projectPath) != activeRepoID
 }
 
 // taskTriggeredMsg reports the outcome of a TUI "run now" (#1169). The run
