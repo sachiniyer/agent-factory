@@ -158,7 +158,7 @@ func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
 	if err == nil {
 		s.idNative() // warm the feature advertisement (#5571 W4.5)
 		if s.inst != nil && resp.Conversation != nil {
-			s.inst.RecordReportedConversation(*resp.Conversation)
+			s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
 		}
 	}
 	return err
@@ -195,7 +195,7 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 	// The server captures a conversation the provider only exposes after launch
 	// (a Codex rollout) and reports it on later polls (#5571 W7.2).
 	if s.inst != nil && resp.Conversation != nil {
-		s.inst.RecordReportedConversation(*resp.Conversation)
+		s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
 	}
 	return Observation{
 		Updated:     resp.Updated,
@@ -335,7 +335,16 @@ func (s *remoteAgentServer) StopPreservingWorkspace() error {
 		br.close()
 	}
 	s.closeRelays()
-	return s.rc.call("/v1/agent/stop", struct{}{}, nil)
+	if err := s.rc.call("/v1/agent/stop", struct{}{}, nil); err != nil {
+		// The agent was not proven stopped, so the session carries on: lift the
+		// latch so the next subscribe, input or resize dials a fresh broker rather
+		// than failing "is being terminated" for as long as the row lives (#5869).
+		s.mu.Lock()
+		s.closed = false
+		s.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (s *remoteAgentServer) Kill(_ bool) error {

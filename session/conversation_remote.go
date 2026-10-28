@@ -60,16 +60,42 @@ func ConversationResumableHere(program, workingDir string, conv AgentConversatio
 	}
 }
 
-// RecordReportedConversation records the conversation a remote agent-server
+// recordReportedConversationFrom records the conversation a remote agent-server
 // reported it launched or resumed. An empty report never erases a recorded id (a
 // server that predates the field, or one that has not captured yet, reports
 // none). Returns true when the in-memory value changed and should be persisted.
-func (i *Instance) RecordReportedConversation(conv AgentConversationData) bool {
+//
+// The report is bound to the runtime that produced it: rc is the client of the
+// agent-server that answered, and it is validated under the instance lock
+// against the instance's CURRENT runtime before either conversation field is
+// written. A retired runtime's in-flight snapshot — still holding this instance
+// pointer after a replacement was bound — is dropped, so it can never overwrite
+// the replacement's identity (#5862). Checking the observation generation after
+// Snapshot() returns is too late: the write has already happened.
+func (i *Instance) recordReportedConversationFrom(rc *remoteAgentClient, conv AgentConversationData) bool {
 	if !conv.HasID() {
 		return false
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if rc == nil || i.remoteClient != rc {
+		return false
+	}
+	return i.recordReportedConversationLocked(conv)
+}
+
+// RecordReportedConversationForTest records a report with no runtime fence, for
+// tests that exercise persistence without binding a remote runtime.
+func (i *Instance) RecordReportedConversationForTest(conv AgentConversationData) bool {
+	if !conv.HasID() {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.recordReportedConversationLocked(conv)
+}
+
+func (i *Instance) recordReportedConversationLocked(conv AgentConversationData) bool {
 	// Kept apart from Tabs[0]: a launch report arrives before the daemon-side
 	// agent tab is seeded, and the seeding step applies it.
 	i.reportedConversation = conv

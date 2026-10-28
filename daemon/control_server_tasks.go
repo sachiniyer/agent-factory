@@ -114,6 +114,7 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		return err
 	}
 	resp.OK = true
+	resp.Task = &created
 	// The task-file write is the durable commit. Publish it before the
 	// non-transactional scheduler/watch reload so other clients never remain
 	// stale when that follow-up fails.
