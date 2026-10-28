@@ -194,8 +194,10 @@ type ProvisionResult struct {
 	// serialized by the runtime; docker/SSH latch answered outcomes and leave
 	// unknown outcomes retryable, while hook runs its idempotent delete once.
 	Teardown func() error
-	// Branch is the branch name the daemon passed the runtime (ProvisionSpec.Branch),
-	// recorded on the new Instance so surfaces show it from the first frame.
+	// Branch is the branch the runtime actually put the agent-server on: set only
+	// by a runtime that handed ProvisionSpec.Branch to it (docker, sandbox/ssh),
+	// and left empty by one that did not (hook), so the Instance never records a
+	// name nothing used (#5971).
 	Branch string
 
 	// CallbackUnavailable carries the reason no callback credential was

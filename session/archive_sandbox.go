@@ -90,7 +90,7 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	//    Instance; the branch reaches the daemon solely as this Archive() return), and
 	//    a failed Kill sends the session to Lost + recovery-eligible via the caller's
 	//    AbortArchiveToLost (daemon/archive.go). The Lost-restore loop then re-provisions
-	//    from i.Branch (reprovisionRemote → ProvisionSpec.RestoreBranch), and an empty
+	//    from this recorded checkpoint (reprovisionRemote → ProvisionSpec.RestoreBranch), and an empty
 	//    RestoreBranch makes the docker/ssh runtimes SKIP the restore fetch and clone the
 	//    repo's DEFAULT branch — a "successful" recovery onto the wrong branch that
 	//    silently strands the work this push just made durable.
@@ -246,12 +246,13 @@ func (i *Instance) reprovisionRemote() error {
 	i.mu.RLock()
 	backend := i.backend
 	accountName := i.Account
+	restoreBranch := i.restoreCheckpointLocked()
 	spec := ProvisionSpec{
 		RepoRoot:      i.Path,
 		Title:         i.Title,
 		Program:       i.Program,
 		CloneURL:      originRemoteURL(i.Path),
-		RestoreBranch: i.Branch,
+		RestoreBranch: restoreBranch,
 		// The replacement agent-server must land on the SAME branch the fetch
 		// just materialized, not re-derive one from its own branch_prefix
 		// (#5571 W2.4).
@@ -776,4 +777,19 @@ func (i *Instance) RestoreWouldDiscardUnpushedWork() bool {
 	default:
 		return false
 	}
+}
+
+// restoreCheckpointLocked is the branch a replacement sandbox may fetch from
+// origin: the one a push archive proved is there (recordArchivePush). The
+// displayed i.Branch is the NAME the session works on and may never have been
+// pushed, and a runtime fetches a non-empty RestoreBranch unconditionally — so
+// handing it the bare name would make a never-pushed session fail every
+// replacement and stay Lost (#5972). Empty means there is no checkpoint, and
+// the replacement is created fresh on the (unchanged) session branch name.
+// The caller holds i.mu.
+func (i *Instance) restoreCheckpointLocked() string {
+	if w := i.archivedWorkspace; w != nil && w.Pushed {
+		return strings.TrimSpace(w.Branch)
+	}
+	return ""
 }

@@ -408,20 +408,58 @@ func TestReprovisionRemote_ConfirmedReapDropsDischargedCleanupHandle(t *testing.
 }
 
 // TestReprovisionRemote_ForwardsThePersistedBranch proves the replacement
-// agent-server is told the exact branch the restore fetch materialized, rather
-// than re-deriving one from its own branch_prefix (#5571 W2.4).
+// agent-server is told the exact branch name the session works on, rather than
+// re-deriving one from its own branch_prefix (#5571 W2.4) — and that the restore
+// FETCH is requested only for a branch a push archive proved is on origin
+// (#5972). A never-pushed session keeps its name but asks for no fetch: a
+// non-empty RestoreBranch is fetched unconditionally, so the bare name would
+// fail every replacement and leave the session Lost.
 func TestReprovisionRemote_ForwardsThePersistedBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		archived    *ArchivedWorkspaceData
+		wantRestore string
+	}{
+		{"never pushed", nil, ""},
+		{"archive recorded a failed push", &ArchivedWorkspaceData{Pushed: false, Branch: "root/s"}, ""},
+		{"push archive proved the ref", &ArchivedWorkspaceData{Pushed: true, Branch: "root/s"}, "root/s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got ProvisionSpec
+			rt := &orderedReprovisionRuntime{got: &got, err: fmt.Errorf("stop after provision")}
+			defer SetRuntimeForTest(BackendDocker, func() Runtime { return rt })()
+
+			i := &Instance{
+				Title:             "s",
+				Path:              t.TempDir(),
+				Branch:            "root/s",
+				archivedWorkspace: tc.archived,
+				backend:           &dockerBackend{containerID: "old"},
+			}
+			_ = i.reprovisionRemote()
+			assert.Equal(t, tc.wantRestore, got.RestoreBranch)
+			assert.Equal(t, "root/s", got.Branch, "the name is forwarded either way")
+		})
+	}
+}
+
+// #5972: the push recovery performs before replacing a reachable sandbox
+// reports the branch through SetSandboxBranch; that push is the proof a
+// replacement may fetch it, and it must survive a restart of the daemon.
+func TestReprovisionRemote_PushRecoveryRecordsTheCheckpoint(t *testing.T) {
 	var got ProvisionSpec
 	rt := &orderedReprovisionRuntime{got: &got, err: fmt.Errorf("stop after provision")}
 	defer SetRuntimeForTest(BackendDocker, func() Runtime { return rt })()
 
-	i := &Instance{
-		Title:   "s",
-		Path:    t.TempDir(),
-		Branch:  "root/s",
-		backend: &dockerBackend{containerID: "old"},
-	}
+	i := &Instance{Title: "s", Path: t.TempDir(), Branch: "root/s", backend: &dockerBackend{containerID: "old"}}
 	_ = i.reprovisionRemote()
+	require.Empty(t, got.RestoreBranch, "control: the create-time name is not a checkpoint")
+
+	i.SetSandboxBranch("root/s")
+	reloaded, err := FromInstanceData(i.ToInstanceData())
+	require.NoError(t, err)
+	reloaded.backend = &dockerBackend{containerID: "old"}
+	got = ProvisionSpec{}
+	_ = reloaded.reprovisionRemote()
 	assert.Equal(t, "root/s", got.RestoreBranch)
-	assert.Equal(t, "root/s", got.Branch)
 }
