@@ -734,7 +734,6 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 	r.noteTitle(t.TargetSession)
 	rt := redactedTask{
 		ID:            t.ID,
-		Name:          t.Name,
 		CronExpr:      t.CronExpr,
 		ProjectPath:   r.collapsePathField(t.ProjectPath),
 		Program:       redactProgram(t.Program),
@@ -744,6 +743,11 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 	}
 	if t.TargetSession != "" {
 		rt.TargetSession = redactedMarker
+	}
+	if t.Name != "" {
+		// The name is free text the user typed (a client, codename or person),
+		// like a tab name, so it is dropped rather than shipped (#4318).
+		rt.Name = redactedMarker
 	}
 	if strings.TrimSpace(t.Prompt) != "" {
 		rt.HasPrompt = true

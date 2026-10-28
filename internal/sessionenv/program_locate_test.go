@@ -25,6 +25,9 @@ func TestLocateProgramExecutable(t *testing.T) {
 		{command: `"/opt/my agent/claude" --x`, want: ProgramExecutable{Name: "/opt/my agent/claude"}, raw: `"/opt/my agent/claude"`},
 		{command: "env -i claude", want: ProgramExecutable{Name: "claude", Opaque: true}, raw: "claude"},
 		{command: "env -u PATH claude", want: ProgramExecutable{Name: "claude", Opaque: true}, raw: "claude"},
+		{command: `claude --add-dir "$HOME/p" --x`, want: ProgramExecutable{Name: "claude"}, raw: "claude"},
+		{command: `FOO="$HOME" claude`, want: ProgramExecutable{Name: "claude"}, raw: "claude"},
+		{command: `env CFG="$HOME/c" claude "$(date)"`, want: ProgramExecutable{Name: "claude"}, raw: "claude"},
 		{command: "env -C /tmp claude", want: ProgramExecutable{Name: "claude", Opaque: true}, raw: "claude"},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
@@ -37,12 +40,17 @@ func TestLocateProgramExecutable(t *testing.T) {
 	}
 
 	for command, want := range map[string]error{
-		"":              ErrNoProgramExecutable,
-		"   ":           ErrNoProgramExecutable,
-		"FOO=1 BAR=two": ErrNoProgramExecutable,
-		"claude | tee":  ErrProgramNotLiteral,
-		"$AGENT --x":    ErrProgramNotLiteral,
-		"env":           ErrProgramNotLiteral,
+		"":                     ErrNoProgramExecutable,
+		"   ":                  ErrNoProgramExecutable,
+		"FOO=1 BAR=two":        ErrNoProgramExecutable,
+		"claude | tee":         ErrProgramNotLiteral,
+		"$AGENT --x":           ErrProgramDynamic,
+		"exec $AGENT":          ErrProgramDynamic,
+		"env $AGENT":           ErrProgramDynamic,
+		`PATH=$X claude`:       ErrProgramDynamic,
+		`env PATH="$X" claude`: ErrProgramDynamic,
+		`env -u "$N" claude`:   ErrProgramDynamic,
+		"env":                  ErrProgramNotLiteral,
 	} {
 		_, err := LocateProgramExecutable(command)
 		assert.ErrorIs(t, err, want, command)

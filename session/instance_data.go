@@ -76,7 +76,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// Project the per-kind tab verdict rather than leaving clients to infer one
 		// from BackendType (#3060). Computed here, on the snapshot every surface
 		// reads, so the TUI, the web UI and the API all get the same answer.
-		data.TabKinds = tabKindAllowances(i.backend.Capabilities())
+		data.TabKinds = tabKindAllowances(i.capabilitiesLocked())
 		// NOT Capabilities.TabManagement any more. tabMutationTarget dropped that gate
 		// when the first off-box tab was admitted (#3062), so projecting it would tell
 		// clients to hide close/rename/reorder for tabs the daemon now accepts —
@@ -197,17 +197,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// would land in that slot (#3062).
 	data.PendingTabs = append(data.PendingTabs, i.pendingMetadataTabs...)
 	for _, tab := range i.Tabs {
-		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL, Proposal: tab.Proposal, PushMode: tab.PushMode}
-		if tab.tmux != nil {
-			td.TmuxName = tab.tmux.SanitizedName()
-		}
-		td.Conversation = conversationDataPtr(tab.Conversation)
-		if len(tab.Handoffs) > 0 {
-			td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)
-		}
-		td.Exit = tab.Exit.data()
-		td.AccountScope = tab.accountScope
-		data.Tabs = append(data.Tabs, td)
+		data.Tabs = append(data.Tabs, i.tabDataLocked(tab))
 	}
 	// An archived off-box row is inert, but the web rail still renders its
 	// metadata-only tabs as restore placeholders. After a daemon restart those

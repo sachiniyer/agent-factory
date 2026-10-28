@@ -2670,7 +2670,14 @@ function doTriggerTask(task: TaskData): void {
   }
   void triggerTask(task, tok)
     .then(refreshTasks)
-    .catch((e) => surfaceTabError(e));
+    .catch((e) => {
+      // A committed run (auto-created session, start unconfirmed) still moved
+      // last-run: refetch, and show the warning rather than a plain success.
+      if (isMutationCommittedError(e)) {
+        refreshTasks();
+      }
+      surfaceTabError(e);
+    });
 }
 
 /**
