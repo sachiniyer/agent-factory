@@ -140,6 +140,33 @@ function combineVerification(states) {
 
 // Returns {status: ok|red|wait, head, states, runs: {workflow: failing/blocking run}}.
 // Dispatches workflows that have no live run. A failed read throws: no merge.
+// build.yml / lint.yml end with a `Kick auto-merge` job that dispatches the merger
+// from INSIDE the run it announces, so that run cannot be `completed` yet when the
+// kicked merger looks. Classify an incomplete run by its other jobs: once every
+// non-kick job has concluded, the run's verdict is theirs, however fast the
+// merger started. Any real job still running keeps the run incomplete (wait).
+const KICK_JOB_NAME = "Kick auto-merge";
+
+async function effectiveRun(github, core, owner, repo, run) {
+  if (run.status === "completed") return run;
+  try {
+    const res = await github.rest.actions.listJobsForWorkflowRun({
+      owner, repo, run_id: run.id, filter: "latest", per_page: 100,
+    });
+    const real = res.data.jobs.filter((j) => j.name !== KICK_JOB_NAME);
+    if (!real.length || real.some((j) => j.status !== "completed")) return run;
+    const conclusions = real.map((j) => j.conclusion);
+    const conclusion = conclusions.some((c) => RED_CONCLUSIONS.has(c))
+      ? "failure"
+      : conclusions.includes("cancelled") ? "cancelled" : "success";
+    return { ...run, status: "completed", conclusion };
+  } catch (error) {
+    // Unreadable jobs: stay conservative (the run reads as still incomplete).
+    core.warning(`Could not read jobs of run ${run.id}: ${error.message}`);
+    return run;
+  }
+}
+
 async function verifyMasterHead(github, core, owner, repo) {
   const branch = await github.rest.repos.getBranch({ owner, repo, branch: BASE });
   const head = branch.data.commit.sha;
@@ -149,7 +176,11 @@ async function verifyMasterHead(github, core, owner, repo) {
     const res = await github.rest.actions.listWorkflowRuns({
       owner, repo, workflow_id, head_sha: head, per_page: 20,
     });
-    const rows = res.data.workflow_runs.filter((r) => !r.head_sha || r.head_sha === head);
+    let rows = res.data.workflow_runs.filter((r) => !r.head_sha || r.head_sha === head);
+    // Only worth a jobs read when a success is not already in hand.
+    if (workflowState(rows) === "wait") {
+      rows = await Promise.all(rows.map((r) => effectiveRun(github, core, owner, repo, r)));
+    }
     states[workflow_id] = workflowState(rows);
     runs[workflow_id] = rows.find((r) => r.status !== "completed" || RED_CONCLUSIONS.has(r.conclusion)) || null;
   }
@@ -245,6 +276,46 @@ async function deleteMergedBranch({ github, core, owner, repo, pr, defaultBranch
   }
 }
 
+const UNKNOWN_RETRY_ATTEMPTS = 3;
+const UNKNOWN_RETRY_DELAY_MS = 12000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function mergeableQuery(numbers) {
+  const fields = numbers
+    .map((n) => `\n    p${n}: pullRequest(number: ${Number(n)}) { mergeable }`)
+    .join("");
+  return `query($owner: String!, $repo: String!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $repo) {${fields}
+  }
+}`;
+}
+
+// GitHub computes mergeability lazily: the first read starts the computation and
+// returns UNKNOWN. Re-read ONLY the UNKNOWN PRs that would otherwise be eligible,
+// after a short delay, a bounded number of times; mutates pr.mergeable in place.
+// A PR still UNKNOWN afterwards stays a skip, tagged pr.unknownRetries.
+async function resolveUnknownMergeable({ github, core, owner, repo, prs, attempts, delayMs }) {
+  const maxAttempts = attempts ?? UNKNOWN_RETRY_ATTEMPTS;
+  const wait = delayMs ?? UNKNOWN_RETRY_DELAY_MS;
+  let pending = prs.filter(
+    (pr) => pr.mergeable === "UNKNOWN" && evaluate({ ...pr, mergeable: "MERGEABLE" }) === null,
+  );
+  for (let attempt = 1; pending.length && attempt <= maxAttempts; attempt++) {
+    core.info(`mergeable=UNKNOWN for ${pending.map((p) => "#" + p.number).join(", ")}; re-reading in ${wait}ms (attempt ${attempt}/${maxAttempts})`);
+    if (wait > 0) await sleep(wait);
+    const data = await github.graphql(mergeableQuery(pending.map((p) => p.number)), { owner, repo });
+    noteRateLimit(core, "mergeable", data.rateLimit);
+    for (const pr of pending) {
+      const node = data.repository[`p${pr.number}`];
+      pr.unknownRetries = attempt;
+      if (node && node.mergeable) pr.mergeable = node.mergeable;
+    }
+    pending = pending.filter((pr) => pr.mergeable === "UNKNOWN");
+  }
+}
+
 function isCodex(login) {
   return (login || "").replace(/\[bot\]$/, "") === CODEX_LOGIN;
 }
@@ -290,7 +361,10 @@ function evaluate(pr) {
   if (pr.isDraft) return "draft";
   const held = HOLD_LABELS.find((l) => labels.includes(l));
   if (held) return `label ${held}`;
-  if (pr.mergeable !== "MERGEABLE") return `mergeable=${pr.mergeable}`;
+  if (pr.mergeable !== "MERGEABLE") {
+    const retried = pr.unknownRetries ? ` (still UNKNOWN after ${pr.unknownRetries} re-reads)` : "";
+    return `mergeable=${pr.mergeable}${retried}`;
+  }
   if (!checksGreen(pr)) return "Build/Lint not green on current head";
   return null;
 }
@@ -398,6 +472,11 @@ async function mergeAll({ github, core, context }) {
     core.warning(`Master ${verdict.head} failed verification; only ${FIX_LABEL} PRs may merge.`);
   }
   const prs = await fetchOpenPrs(github, core, owner, repo);
+  await resolveUnknownMergeable({
+    github, core, owner, repo, prs,
+    delayMs: process.env.AUTO_MERGE_UNKNOWN_DELAY_MS !== undefined
+      ? Number(process.env.AUTO_MERGE_UNKNOWN_DELAY_MS) : undefined,
+  });
   const phase1 = selectCandidates(prs);
   await attachThreads(github, core, owner, repo, phase1.filter((e) => !e.reason).map((e) => e.pr));
   let selected = phase1.map((e) =>
@@ -509,5 +588,5 @@ module.exports = {
   checkHalt, settleBroken, mergeAll, reportBroken,
   workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
-  isTruncated, ACK_RE, branchDeletionDecision,
+  resolveUnknownMergeable, isTruncated, ACK_RE, branchDeletionDecision,
 };
