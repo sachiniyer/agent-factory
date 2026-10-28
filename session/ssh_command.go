@@ -573,9 +573,19 @@ func sshLoginUser(cfg config.SSHConfig) string {
 // provisioned before W1.1 (or a remote without /proc, where the ps fallback
 // below stands in for the cmdline check and the ref is left unverified) — the
 // argv[0]-only identity such rows always had, no weaker.
+//
+// SIGTERM gets up to ~5s to take effect before the SIGKILL (#5571 W1.7): an
+// agent-server flushing state or stopping its tmux children routinely needs
+// longer than the 0.3s this once allowed, and an early -9 abandoned that work
+// mid-write. The identity is re-checked after the wait either way. After the
+// SIGKILL it polls for the pid to vanish and exits 78 if it did not, so the
+// caller retains the workspace rather than deleting the dir under a live process.
+// An identity probe that cannot answer (exit 75) is re-tried as a liveness
+// check first: a pid that vanished between the kill -0 and the probe — likely
+// now that the wait polls through the process's exit — is gone, not unknown.
 func remotePIDIdentityKillScript(remotePID, afPath, tokenRef string) string {
 	return fmt.Sprintf(
-		`pid=%s; expected=%s; expected_ref=%s; has_session_ref() { if [ -r "/proc/$pid/environ" ]; then actual_ref=$(tr '\000' '\n' < "/proc/$pid/environ" | sed -n "s/^%s=//p" | sed -n '1p') || return 2; [ "$actual_ref" = "$expected_ref" ]; return; fi; return 2; }; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ] || return 1; if [ -n "$expected_ref" ]; then has_session_ref; return; fi; return 0; fi; actual=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 2; actual=${actual#"${actual%%%%[![:space:]]*}"}; case "$actual" in "$expected"|"$expected "*) return 0 ;; *) return 1 ;; esac; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
+		`pid=%s; expected=%s; expected_ref=%s; has_session_ref() { if [ -r "/proc/$pid/environ" ]; then actual_ref=$(tr '\000' '\n' < "/proc/$pid/environ" | sed -n "s/^%s=//p" | sed -n '1p') || return 2; [ "$actual_ref" = "$expected_ref" ]; return; fi; return 2; }; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ] || return 1; if [ -n "$expected_ref" ]; then has_session_ref; return; fi; return 0; fi; actual=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 2; actual=${actual#"${actual%%%%[![:space:]]*}"}; case "$actual" in "$expected"|"$expected "*) return 0 ;; *) return 1 ;; esac; }; gone() { if ! kill -0 "$pid" 2>/dev/null; then return 0; fi; matches_session; [ "$?" -eq 1 ]; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then kill -0 "$pid" 2>/dev/null || exit 0; exit 75; fi; kill "$pid" 2>/dev/null || exit 76; n=0; while [ "$n" -lt 50 ] && ! gone; do sleep 0.1; n=$((n+1)); done; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then kill -0 "$pid" 2>/dev/null || exit 0; exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77; i=0; while [ "$i" -lt 10 ]; do sleep 0.3; if gone; then exit 0; fi; i=$((i+1)); done; exit 78`,
 		shellQuote(remotePID), shellQuote(afPath), shellQuote(tokenRef), runtimetoken.RefEnvName)
 }
 

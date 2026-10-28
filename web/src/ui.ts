@@ -37,6 +37,7 @@ import {
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import type { RegisteredProject } from "./api.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
+import { applyProjectFavicon, applyProjectFrame, projectColor, projectColorRow } from "./project_color.js";
 import {
   archiveWarningText,
   callbackUnavailableText,
@@ -488,6 +489,9 @@ export interface Actions {
    *  project's stable identity at the checkout it should track now — the repair
    *  after that checkout was moved or recloned. */
   rebindProject(id: string, label: string): void;
+  /** Sets (or, with "", clears) the display color of the project at root,
+   *  registering it first when it has no registry record yet. */
+  setProjectColor(root: string, color: string): void;
   /** Sets the theme preference (redesign PR1): persists it, stamps data-theme on
    *  <html>, and re-themes the live terminals. */
   setTheme(choice: ThemeChoice): void;
@@ -1366,6 +1370,7 @@ export class AppShell {
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectFavicon(null);
   }
 
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
@@ -1415,6 +1420,9 @@ export class AppShell {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
+    const color = projectColor(state.registeredProjects, state.selectedProject);
+    applyProjectFrame(this.main, color);
+    applyProjectFavicon(color);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -2067,6 +2075,11 @@ export class AppShell {
 
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      children.push(
+        projectColorRow(projectColor(state.registeredProjects, currentSummary.root), currentSummary.name, (color) => {
+          this.actions.setProjectColor(currentSummary.root, color);
+        }),
+      );
       const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
       if (currentRecord) {
         // Rebind (`af projects rebind`): repoint the registration at the checkout
@@ -2133,10 +2146,18 @@ export class AppShell {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...(current ? [icon("check")] : []));
     check.setAttribute("aria-hidden", "true");
+    const name = h("span", { class: "af-project-item-name" }, p.name);
+    const dotColor = record ? projectColor([record], record.root) : null;
+    if (dotColor !== null) {
+      const dot = h("span", { class: "af-project-dot" });
+      dot.style.setProperty("--af-swatch", dotColor);
+      dot.setAttribute("aria-hidden", "true");
+      name.prepend(dot, " ");
+    }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      h("span", { class: "af-project-item-name" }, p.name),
+      name,
       h("span", { class: "af-project-item-path" }, p.path),
     );
     // The missing marker leads the glance: a dead checkout is the consequential

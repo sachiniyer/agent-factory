@@ -254,6 +254,29 @@ func (s *localAgentServer) PreviewGrid(tab int) (PaneSnapshot, error) {
 	return tmuxPaneSnapshot(ts)
 }
 
+// PreviewGridByID is PreviewGrid bound to one stable tab identity: the pane is
+// selected under the roster lock, so no ordinal crosses it (#2200).
+func (s *localAgentServer) PreviewGridByID(tabID string) (PaneSnapshot, error) {
+	s.inst.mu.RLock()
+	idx, ok := s.inst.tabIndexByIDLocked(tabID)
+	var ts *tmux.TmuxSession
+	if ok {
+		if idx == 0 {
+			ts = s.inst.tmuxLocked()
+		} else {
+			ts = s.inst.Tabs[idx].tmux
+		}
+	}
+	s.inst.mu.RUnlock()
+	if !ok {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab id %q: %w", s.inst.Title, tabID, ErrTabGone)
+	}
+	if ts == nil {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab id %q: no tmux pane to capture a grid from", s.inst.Title, tabID)
+	}
+	return tmuxPaneSnapshot(ts)
+}
+
 // PreviewByID binds directly to the tmux/backend target selected under the
 // instance lock. No ordinal crosses that lock boundary (#2200).
 func (s *localAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapshot, error) {

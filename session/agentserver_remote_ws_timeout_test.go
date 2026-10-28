@@ -59,7 +59,7 @@ func TestRemoteAgentDialStream_StalledHandshakeTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, e := rc.dialStream(context.Background(), 0, 0)
+		_, e := rc.dialStream(context.Background(), 0, "", 0)
 		errc <- e
 	}()
 	select {
@@ -95,7 +95,7 @@ func TestRemoteAgentDialStream_StalledRequestWriteTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, err := rc.dialStream(context.Background(), 0, 0)
+		_, err := rc.dialStream(context.Background(), 0, "", 0)
 		errc <- err
 	}()
 	select {
@@ -145,7 +145,7 @@ func TestRemoteAgentDialStream_SlowTCPDialKeepsFullHandshakeBudget(t *testing.T)
 		}
 	}
 
-	conn, err := rc.dialStream(context.Background(), 0, 0)
+	conn, err := rc.dialStream(context.Background(), 0, "", 0)
 	if err != nil {
 		t.Fatalf("TCP dial used the WebSocket handshake budget: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestRemoteAgentDialStream_RejectedUpgradeClosesPerDialTransport(t *testing.
 		return &closeNotifyAgentConn{Conn: conn, closed: closed}, nil
 	}
 
-	if _, err := rc.dialStream(context.Background(), 0, 0); err == nil {
+	if _, err := rc.dialStream(context.Background(), 0, "", 0); err == nil {
 		t.Fatal("rejected agent-server WebSocket upgrade unexpectedly succeeded")
 	}
 	select {
