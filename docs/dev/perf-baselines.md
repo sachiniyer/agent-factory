@@ -123,7 +123,7 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
 
-### Bundle refresh provenance (#5673)
+### Bundle refresh provenance (#5681)
 
 Master's bundle crossed both budgets on 2026-10-27 (run 40604391077: raw 1,074,498 > 1,074,413.55, gzip 242,312 > 239,969.1). The #5057 baseline (1,023,251 / 228,542) was already 32,832 raw / 9,051 gzip bytes stale when it merged, because the committed bundle was 1,056,083 / 237,593 at that commit, so the budget left almost no headroom. Slim CI (#5615) made this job master-only, so no PR saw the crossing. Committed `web/dist` growth since then, summed per merge (gzip level 9 over `web/dist/**.{js,css}`):
 
