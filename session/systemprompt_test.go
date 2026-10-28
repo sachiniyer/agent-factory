@@ -1,12 +1,15 @@
 package session
 
 import (
+	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -32,7 +35,7 @@ func TestInjectSystemPrompt_Claude(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt("claude", skillTarget{})
+	result := injectSystemPrompt("claude", skillTarget{}, false)
 
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir flag, got %q", result)
@@ -51,7 +54,7 @@ func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
 
 	// The resolved form (from program_overrides) carries the path-and-flags;
 	// injectSystemPrompt appends --plugin-dir to it.
-	result := injectSystemPrompt("/usr/local/bin/claude --model opus", skillTarget{})
+	result := injectSystemPrompt("/usr/local/bin/claude --model opus", skillTarget{}, false)
 
 	if !strings.HasPrefix(result, "/usr/local/bin/claude --model opus") {
 		t.Errorf("expected resolved form preserved, got %q", result)
@@ -75,7 +78,7 @@ func TestInjectSystemPrompt_Codex(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "") // force the ~/.codex fallback under the temp HOME
 
-	result := injectSystemPrompt("codex", skillTarget{})
+	result := injectSystemPrompt("codex", skillTarget{}, false)
 
 	if result != "codex -c check_for_update_on_startup=false" {
 		t.Errorf("expected codex command carrying the startup update check suppression, got %q", result)
@@ -101,7 +104,7 @@ func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
 
-	result := injectSystemPrompt("codex --full-auto", skillTarget{})
+	result := injectSystemPrompt("codex --full-auto", skillTarget{}, false)
 
 	if result != "codex -c check_for_update_on_startup=false --full-auto" {
 		t.Errorf("expected the update-check suppression in codex's global -c position (right after the executable), got %q", result)
@@ -119,7 +122,7 @@ func TestInjectSystemPrompt_CodexRespectsUserUpdateCheckSetting(t *testing.T) {
 		"codex -c check_for_update_on_startup=true",
 		"codex -c check_for_update_on_startup=false",
 	} {
-		if got := injectSystemPrompt(resolved, skillTarget{}); got != resolved {
+		if got := injectSystemPrompt(resolved, skillTarget{}, false); got != resolved {
 			t.Errorf("expected %q untouched (user's own value wins), got %q", resolved, got)
 		}
 	}
@@ -131,7 +134,7 @@ func TestInjectSystemPrompt_Aider(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt("aider", skillTarget{})
+	result := injectSystemPrompt("aider", skillTarget{}, false)
 
 	if !strings.HasPrefix(result, "aider --read ") {
 		t.Errorf("expected aider to gain a --read flag, got %q", result)
@@ -163,7 +166,7 @@ func TestInjectSystemPrompt_Gemini(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GEMINI_CLI_HOME", "") // force the ~/.gemini fallback under the temp HOME
 
-	result := injectSystemPrompt("gemini", skillTarget{})
+	result := injectSystemPrompt("gemini", skillTarget{}, false)
 
 	if result != "gemini" {
 		t.Errorf("expected gemini command unchanged (file seam, no flag), got %q", result)
@@ -193,7 +196,7 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("amp", skillTarget{})
+	result := injectSystemPrompt("amp", skillTarget{}, false)
 
 	// The launch command must come back byte-identical — that is what keeps the
 	// amp spawn safe (#1582), since amp dies on unknown flags (#1116/#1131).
@@ -225,7 +228,7 @@ func TestInjectSystemPrompt_DevinSkill(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("devin", skillTarget{})
+	result := injectSystemPrompt("devin", skillTarget{}, false)
 	if result != "devin --respect-workspace-trust false" {
 		t.Errorf("expected devin trust flag, got %q", result)
 	}
@@ -256,7 +259,7 @@ func TestInjectSystemPrompt_Opencode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("opencode", skillTarget{})
+	result := injectSystemPrompt("opencode", skillTarget{}, false)
 
 	// The command word must survive verbatim; only an env assignment leads it.
 	if !strings.HasSuffix(result, " opencode") {
@@ -315,7 +318,7 @@ func TestInjectSystemPrompt_OpencodeWritesNothingOutsideAf(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 
-	injectSystemPrompt("opencode", skillTarget{})
+	injectSystemPrompt("opencode", skillTarget{}, false)
 
 	// Nothing may appear in the user's opencode config dir — under either the
 	// XDG path or the $HOME/.config fallback.
@@ -351,7 +354,7 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 		// OPENCODE_CONFIG can arrive behind an env wrapper too.
 		"env OPENCODE_CONFIG=/home/me/mine.jsonc opencode",
 	} {
-		if got := injectSystemPrompt(resolved, skillTarget{}); got != resolved {
+		if got := injectSystemPrompt(resolved, skillTarget{}, false); got != resolved {
 			t.Errorf("expected a user-set OPENCODE_CONFIG left untouched, got %q", got)
 		}
 	}
@@ -361,7 +364,7 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 	// case above with a bare strings.Contains, which would silently drop af
 	// guidance for anyone whose prompt mentions the variable.
 	arg := "opencode --prompt 'set OPENCODE_CONFIG=x'"
-	if got := injectSystemPrompt(arg, skillTarget{}); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
+	if got := injectSystemPrompt(arg, skillTarget{}, false); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
 		t.Errorf("OPENCODE_CONFIG as an argument is not an assignment; af should still inject, got %q", got)
 	}
 }
@@ -383,13 +386,188 @@ func TestInjectSystemPrompt_OpencodeDoesNotClobberAfOwnedFiles(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if got := injectSystemPrompt("opencode", skillTarget{}); got != "opencode" {
+	if got := injectSystemPrompt("opencode", skillTarget{}, false); got != "opencode" {
 		t.Errorf("expected no injection when our path holds a non-af file, got %q", got)
 	}
 	back, err := os.ReadFile(instructionsPath)
 	if err != nil || string(back) != userContent {
 		t.Errorf("non-af file must be left untouched, got %q (err %v)", back, err)
 	}
+}
+
+// TestInjectSystemPrompt_OpencodeRespectsExportedConfigEnv pins the env channel
+// of the user-supplied-config guard — the second of the two channels
+// opencodeCarriesConfigEnv does NOT cover, because that helper inspects only the
+// resolved command string and the env channel travels out-of-band.
+//
+// A user who exports OPENCODE_CONFIG in their shell has that value delivered to
+// the pane by the opencode allowlist (internal/sessionenv). Despite that, before
+// this fix af unconditionally prepended its own `OPENCODE_CONFIG=<af-config>` to
+// the resolved command, and a POSIX command-prefix assignment SHADOWS an
+// already-exported variable of the same name — so opencode silently saw only af's
+// path and the user's config file was never read, with no log on either side.
+// (This is the case the guard's doc says it prevents: af must "say the guidance
+// did not land rather than leaving that silent".)
+//
+// The fix: in the opencode branch, also treat a non-empty os.Getenv("OPENCODE_CONFIG")
+// as "user already provided config" and skip injection, mirroring the in-command
+// case. SandboxHome (session's TestMain) unsets OPENCODE_CONFIG, so the env channel
+// is unreachable by default; this test re-sets it explicitly.
+func TestInjectSystemPrompt_OpencodeRespectsExportedConfigEnv(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	// The env-channel guard attributes the command through GrantAgentForCommand,
+	// which walks PATH. Pin an all-absolute PATH with no opencode so the bare
+	// "opencode" case is attributed deterministically (all-absolute no hit),
+	// independent of the runner's PATH.
+	t.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	userCfg := "/home/me/mine.jsonc"
+	t.Setenv("OPENCODE_CONFIG", userCfg)
+
+	// Capture the INFO log so the "af says the guidance did not land" half of
+	// the contract is locked alongside the behavioral suppression. The other
+	// half — that the user's value is what reaches opencode — is the pane
+	// env seam (internal/sessionenv), covered by exec_unix_test.go's allowlist
+	// assertions; here we only assert af does not shadow it.
+	info := captureOpencodeInfoLog(t)
+
+	// Every resolved shape must come back VERBATIM: with OPENCODE_CONFIG
+	// exported, af must not prepend its own. The case set is intentionally
+	// larger than TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv's
+	// command-string cases, because the env channel must short-circuit the
+	// argument-mention case too (a user's export shadows whatever the prompt
+	// says).
+	for _, resolved := range []string{
+		"opencode",
+		"/home/me/.opencode/bin/opencode",
+		"/home/me/.opencode/bin/opencode --model anthropic/claude-opus-4-5",
+		// A bare mention is NOT an in-command assignment, but the env channel
+		// already says the user named their own config — af must not shadow it.
+		"opencode --prompt 'set OPENCODE_CONFIG=x'",
+		// Both channels set: the redundant-but-harmless shape (env AND in-command
+		// assignment) must also short-circuit on either trigger.
+		"OPENCODE_CONFIG=/home/me/other.jsonc opencode",
+		"env OPENCODE_CONFIG=/home/me/other.jsonc opencode",
+	} {
+		if got := injectSystemPrompt(resolved, skillTarget{}, false); got != resolved {
+			t.Errorf("with OPENCODE_CONFIG=%q exported, expected %q returned unchanged (env channel); af shadowed it to %q",
+				userCfg, resolved, got)
+		}
+	}
+
+	// af must SAY it skipped — the bug it was masking was silent on both sides.
+	// Strict prefix-match the long-lived phrasing so a wording tweak does not
+	// silently drop the "already has / leaving it alone" contract.
+	out := info.String()
+	if !strings.Contains(out, "opencode already has OPENCODE_CONFIG") {
+		t.Errorf("expected an INFO log noting OPENCODE_CONFIG was left alone; got %q", out)
+	}
+	if !strings.Contains(out, "not injected for opencode") {
+		t.Errorf("expected the INFO log to say the af guidance was not injected; got %q", out)
+	}
+}
+
+// TestInjectSystemPrompt_OpencodeExportedConfigEnvUnattributableCommandStillInjects
+// pins the env-channel guard's attribution gate: a non-operator-attributable
+// opencode spelling (a relative `./opencode`, or an `ionice … opencode` wrapper
+// GrantAgentForCommand does not model) reaches the opencode branch through
+// DetectAgentFromCommand, but the opencode allowlist in internal/sessionenv
+// admits OPENCODE_CONFIG only for an operator-attributable command, so the
+// pane's FilterForCommand strips the user's export and the pane would get
+// neither the user's config nor af's. The guard must NOT fire for those
+// spellings: af still injects its own config, restoring the pre-env-channel
+// behavior, so the pane gets af's guidance rather than nothing.
+//
+// GrantAgentForCommand("") workDir is the conservative default the remote-host
+// path uses; it denies every non-absolute spelling, which is exactly the class
+// whose env does not survive the pane's filter.
+func TestInjectSystemPrompt_OpencodeExportedConfigEnvUnattributableCommandStillInjects(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENCODE_CONFIG", "/home/me/mine.jsonc")
+
+	// Capture the INFO log so the test can assert the guard did NOT fire (no
+	// "leaving it alone" line) for these spellings.
+	info := captureOpencodeInfoLog(t)
+
+	for _, resolved := range []string{
+		"./opencode",
+		"ionice -c 3 opencode",
+	} {
+		got := injectSystemPrompt(resolved, skillTarget{}, false)
+		if !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
+			t.Errorf("for unattributable %q with OPENCODE_CONFIG exported, expected af to still inject (env does not reach the pane); got %q", resolved, got)
+			continue
+		}
+		if !strings.HasSuffix(got, " "+resolved) {
+			t.Errorf("for unattributable %q, expected the command preserved after the OPENCODE_CONFIG prefix; got %q", resolved, got)
+		}
+	}
+	if out := info.String(); strings.Contains(out, "leaving it alone") {
+		t.Errorf("the env-channel guard must not fire for unattributable opencode (the pane would get neither config); got INFO log %q", out)
+	}
+}
+
+// TestInjectSystemPrompt_OpencodeExportedConfigEnvDoesNotAffectOtherAgents pins
+// that the env-channel guard fires ONLY in the opencode branch: a non-empty
+// OPENCODE_CONFIG in the environment is irrelevant to every other agent (af
+// injects only the OPENCODE_CONFIG name; it does not touch claude/aider/etc.'s
+// flags), so those branches must not notice it. Without this guard, narrowing
+// future refactor could accidentally hoist `os.Getenv("OPENCODE_CONFIG")` up to
+// the switch dispatch and drop af's flag from every agent when the user exports
+// OPENCODE_CONFIG for their opencode sessions.
+func TestInjectSystemPrompt_OpencodeExportedConfigEnvDoesNotAffectOtherAgents(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENCODE_CONFIG", "/home/me/mine.jsonc")
+
+	tests := []struct {
+		name     string
+		resolved string
+		wantSub  string
+	}{
+		{"claude still gets --plugin-dir", "claude", "--plugin-dir"},
+		{"aider still gets --read", "aider", "--read"},
+		// codex is a file seam PLUS a startup-update-check flag splice
+		// (tmux.EnsureCodexUpdateCheckDisabled), so the env guard must NOT
+		// drop the flag splice either — assert the flag still lands.
+		{"codex still gets update-check disabled", "codex", "check_for_update_on_startup=false"},
+		// gemini is a pure file seam: the resolved command comes back
+		// unchanged, but the file write must still run — a HOME is set so the
+		// write lands, and the resolved command is asserted verbatim.
+		{"gemini unchanged (file seam)", "gemini", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := injectSystemPrompt(tt.resolved, skillTarget{}, false)
+			if tt.wantSub == "" {
+				if got != tt.resolved {
+					t.Errorf("expected %q unchanged, got %q", tt.resolved, got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.wantSub) {
+				t.Errorf("expected %q in the %q injection (env guard must NOT fire for non-opencode agents); got %q",
+					tt.wantSub, tt.resolved, got)
+			}
+			if strings.Contains(got, "OPENCODE_CONFIG=") {
+				t.Errorf("OPENCODE_CONFIG leaked into a non-opencode (%q) injection: %q",
+					tt.resolved, got)
+			}
+		})
+	}
+}
+
+// captureOpencodeInfoLog redirects log.InfoLog to a buffer for the duration of
+// the test and returns the buffer. Restoration happens via t.Cleanup. It mirrors
+// captureWarningLog in backend_test.go.
+func captureOpencodeInfoLog(t *testing.T) *logtest.Buffer {
+	t.Helper()
+	var buf logtest.Buffer
+	orig := log.InfoLog
+	log.InfoLog = stdlog.New(&buf, "INFO: ", 0)
+	t.Cleanup(func() { log.InfoLog = orig })
+	return &buf
 }
 
 // TestInjectSystemPrompt_Devin pins devin's launch-flag seam: af appends
@@ -435,7 +613,7 @@ func TestInjectSystemPrompt_Devin(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := injectSystemPrompt(tt.resolved, skillTarget{})
+			got := injectSystemPrompt(tt.resolved, skillTarget{}, false)
 			if got != tt.want {
 				t.Errorf("injectSystemPrompt(%q) = %q, want %q", tt.resolved, got, tt.want)
 			}
@@ -517,7 +695,7 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := injectSystemPrompt(tt.resolved, skillTarget{})
+			got := injectSystemPrompt(tt.resolved, skillTarget{}, false)
 			if tt.want == "" {
 				if got != tt.resolved {
 					t.Errorf("expected %q unchanged, got %q", tt.resolved, got)
@@ -591,8 +769,8 @@ func TestAfUsageReference_NamesTheRemoteTabBoundaryPerKind(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Shell, process, and VS Code tabs require a local session",
-		"external HTTPS web tabs work on remote sessions",
-		"loopback web targets still require a local session",
+		"web tabs work on remote sessions too",
+		"shows whatever listens on that port inside the session's own workspace",
 	} {
 		if !strings.Contains(afUsageReference, want) {
 			t.Errorf("af usage must name the per-kind remote tab boundary with %q", want)
@@ -898,7 +1076,7 @@ func TestEnsureAiderReadFile(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	path, err := ensureAiderReadFile()
+	path, err := ensureAiderReadFile(false)
 	if err != nil {
 		t.Fatalf("ensureAiderReadFile() failed: %v", err)
 	}
@@ -922,7 +1100,7 @@ func TestEnsureAiderReadFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(userFile), 0644); err != nil {
 		t.Fatalf("seed user file: %v", err)
 	}
-	got, err := ensureAiderReadFile()
+	got, err := ensureAiderReadFile(false)
 	if err != nil {
 		t.Fatalf("ensureAiderReadFile() on foreign file: %v", err)
 	}
@@ -942,9 +1120,9 @@ func TestEnsurePluginDir(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	pluginDir, err := ensurePluginDir()
+	pluginDir, err := ensurePluginDir(false)
 	if err != nil {
-		t.Fatalf("ensurePluginDir() failed: %v", err)
+		t.Fatalf("ensurePluginDir(false) failed: %v", err)
 	}
 
 	expectedDir := filepath.Join(tmpDir, "plugin")
@@ -981,12 +1159,12 @@ func TestEnsurePluginDir_Idempotent(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	dir1, err := ensurePluginDir()
+	dir1, err := ensurePluginDir(false)
 	if err != nil {
 		t.Fatalf("first call failed: %v", err)
 	}
 
-	dir2, err := ensurePluginDir()
+	dir2, err := ensurePluginDir(false)
 	if err != nil {
 		t.Fatalf("second call failed: %v", err)
 	}
@@ -1000,7 +1178,7 @@ func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	pluginDir, err := ensurePluginDir()
+	pluginDir, err := ensurePluginDir(false)
 	if err != nil {
 		t.Fatalf("first call failed: %v", err)
 	}
@@ -1017,7 +1195,7 @@ func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
 		t.Fatalf("failed to seed keep file: %v", err)
 	}
 
-	if _, err := ensurePluginDir(); err != nil {
+	if _, err := ensurePluginDir(false); err != nil {
 		t.Fatalf("second call failed: %v", err)
 	}
 
@@ -1028,7 +1206,7 @@ func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
 		t.Errorf("expected non-.md file %s to survive prune: %v", keep, err)
 	}
 
-	for name := range pluginCommands {
+	for name := range pluginCommands(false) {
 		if _, err := os.Stat(filepath.Join(commandsDir, name)); err != nil {
 			t.Errorf("expected %s to still exist after prune: %v", name, err)
 		}

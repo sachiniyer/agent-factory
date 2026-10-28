@@ -51,6 +51,12 @@ type SnapshotRequest struct {
 
 type SnapshotResponse struct {
 	Instances []session.InstanceData `json:"instances"`
+	// Caller is the id of the session the presented sandbox credential is bound
+	// to (#5571 W3.2). It lets an in-sandbox `whoami` / `archive --self` resolve
+	// the caller from the credential instead of from TmuxName, which the narrowed
+	// projection withholds. Empty for an operator credential, so every existing
+	// client and the local path are unchanged.
+	Caller string `json:"caller,omitempty"`
 	// BootID is the same per-process daemon identity reported by Ping. A changed
 	// value proves requests admitted by the previous process can no longer run.
 	BootID string `json:"boot_id,omitempty"`
@@ -93,14 +99,18 @@ type SnapshotResponse struct {
 	//
 	// Lifecycle: seeded from the startup refresh (refreshDaemonInstances with
 	// existing==nil) and trimmed by the polling path to drop repaired repos — a
-	// previously-skipped repo whose instances.json now parses falls out of the
-	// set so list/get/whoami stop refusing the now-complete snapshot without
-	// waiting for a daemon restart. It never gains a mid-life-corrupted repo:
-	// a repo that becomes corrupted mid-life keeps its prior in-memory rows via
-	// re-hydration, so its sessions remain in the snapshot and it is correctly
-	// NOT reported as skipped until the daemon restarts and re-runs startup. See
-	// daemon.daemon.go::refreshDaemonInstances and
-	// snapshot.go::retainStillSkipped for the skip lifecycle.
+	// previously-skipped repo whose instances.json now parses AND re-materializes
+	// its rows falls out of the set so list/get/whoami stop refusing the
+	// now-complete snapshot without waiting for a daemon restart. It never gains
+	// a mid-life-corrupted repo: a repo that becomes corrupted mid-life keeps its
+	// prior in-memory rows via re-hydration, so its sessions remain in the
+	// snapshot and it is correctly NOT reported as skipped until the daemon
+	// restarts and re-runs startup. A fresh startup rows-failure (the file
+	// parsed but a row failed to load) is WITHHELD from this wire field — master
+	// never seeded it, and the refusal names a count with no working remedy —
+	// while the startup orphan sweep still defers from the internal skip set;
+	// see Manager.startupRowsFailedRepos. See daemon.daemon.go::refreshDaemonInstances
+	// and snapshot.go::retainStillSkipped for the skip lifecycle.
 	SkippedRepos []SkippedRepo `json:"skipped_repos,omitempty"`
 }
 
@@ -146,9 +156,16 @@ const SkippedRepoReasonNewerSchemaInstancesJSON = "newer-schema-instances-json"
 // tmux session a Live row points at is gone, not the file (#4876). It is kept
 // apart from the corrupted/unreadable reasons because the file is fine: the
 // remedy is to restore or delete the unloadable sessions, not to repair a JSON
-// error that is not there. Carried on the polling path only (a previously-
-// skipped repo whose stale reason it rewrites); a fresh repo with unloadable
-// rows at startup is out of this fix's scope.
+// error that is not there. On the POLLING path it rewrites a previously-skipped
+// repo's stale reason (corrupted/unreadable) to the accurate one and surfaces
+// on the wire. At STARTUP it arms the orphan-sweep deferral (a repo whose rows
+// dropped contributes the same zero rows to the protected-slug set as a
+// corrupted one, so the sweep must spare its live containers, #4998
+// follow-up), but it is WITHHELD from the wire SkippedRepos — master never
+// seeded a fresh startup rows-failure, and the refusal names a count with no
+// working remedy (restore/kill resolve titles against the in-memory set, which
+// excludes the unloadable row); list/get/whoami serve the loadable rows plus a
+// log warning instead. See Manager.startupRowsFailedRepos.
 const SkippedRepoReasonRowsFailedToLoad = "rows-failed-to-load"
 
 // skippedRepoReasonForReadError names the reason for a repo the loader could
@@ -161,11 +178,13 @@ func skippedRepoReasonForReadError(err error) string {
 	return SkippedRepoReasonUnreadableInstancesJSON
 }
 
-// SkippedRepos returns the repos dropped at daemon startup due to a corrupted
-// instances.json (#603), scoped to repoID (all repos when empty). It is the wire
-// surface the Snapshot RPC carries so a CLI list/get/whoami can refuse or caveat
-// rather than silently serving a partial list as complete (#730's principle
-// extended to the wire surface #1029 PR 2 introduced).
+// SkippedRepos returns the repos dropped at daemon startup due to a
+// corrupted/unreadable instances.json, or a file that parsed but whose rows
+// failed to load (#603), scoped to repoID (all repos when empty). It is the
+// wire surface the Snapshot RPC carries so a CLI list/get/whoami can refuse or
+// caveat rather than silently serving a partial list as complete (#730's
+// principle extended to the wire surface #1029 PR 2 introduced) — except a
+// fresh startup rows-failure, which is withheld (see startupRowsFailedRepos).
 //
 // Seeded from the most recent startup refresh and trimmed by the polling path
 // to drop repaired repos, but never gains a mid-life-corrupted one: a repo
@@ -182,24 +201,71 @@ func (m *Manager) SkippedRepos(repoID string) []SkippedRepo {
 	return m.skippedReposScopedLocked(repoID)
 }
 
+// seedStartupRowsFailedRepos records the repos whose instances.json PARSED at
+// daemon startup but whose rows failed to load (rows-failed-to-load). The
+// startup orphan sweep still arms from skippedRepos, but the Snapshot RPC
+// withholds these repos from the wire SkippedRepos so list/get/whoami serve
+// the loadable rows plus a log warning instead of refusing the whole repo —
+// matching master, which never seeded a fresh startup rows-failure (the
+// refusal names a count, not a session, and restore/kill resolve titles
+// against the in-memory set, which by definition excludes the unloadable row).
+// A polling-path previously-skipped repo (corrupted at startup, then
+// parses-but-rows-fail on poll) is NOT seeded here, so its rows-failed rewrite
+// still surfaces on the wire. The caller MUST hold m.mu.
+func (m *Manager) seedStartupRowsFailedRepos(skipped []SkippedRepo) {
+	m.startupRowsFailedRepos = make(map[string]bool, len(skipped))
+	for _, s := range skipped {
+		if s.Reason == SkippedRepoReasonRowsFailedToLoad {
+			m.startupRowsFailedRepos[s.RepoID] = true
+		}
+	}
+}
+
 // skippedReposScopedLocked returns a defensive copy of m.skippedRepos scoped to
-// repoID (all repos when empty). The caller MUST hold m.mu: it is the read side
-// shared by SkippedRepos (the public wrapper that locks for the standalone
+// repoID (all repos when empty), with a fresh startup rows-failure withheld from
+// the wire (startupRowsFailedRepos). The caller MUST hold m.mu: it is the read
+// side shared by SkippedRepos (the public wrapper that locks for the standalone
 // read) and SnapshotWithSkipped (which calls it inside its own single lock
 // acquisition so the instance pointers and the skip set are sampled from the
 // same manager generation).
 func (m *Manager) skippedReposScopedLocked(repoID string) []SkippedRepo {
+	// A repo whose rows failed to load at startup is withheld from the wire:
+	// master never seeded a fresh rows-failure, and the refusal names a count
+	// with no working remedy (the file is fine; restore/kill resolve titles
+	// against the in-memory set, which by definition excludes the unloadable
+	// row). The sweep deferral still arms from skippedRepos, so the live
+	// container is spared; only the wire refusal is decoupled. See
+	// startupRowsFailedRepos.
+	//
+	// The withholding is gated on the entry's CURRENT reason, not the repo ID
+	// alone: a polling refresh can rewrite a startup rows-failure's reason to
+	// corrupted/unreadable when the file later fails to read or parse
+	// (retainStillSkipped carries the fresh entry's reason), and that is an
+	// actionable state with a real remedy the wire must surface — so only a
+	// reason still equal to rows-failed-to-load stays suppressed.
+	withheld := m.startupRowsFailedRepos
 	if repoID == "" {
 		if len(m.skippedRepos) == 0 {
 			return nil
 		}
-		return append([]SkippedRepo(nil), m.skippedRepos...)
+		out := make([]SkippedRepo, 0, len(m.skippedRepos))
+		for _, s := range m.skippedRepos {
+			if withheld[s.RepoID] && s.Reason == SkippedRepoReasonRowsFailedToLoad {
+				continue
+			}
+			out = append(out, s)
+		}
+		return out
 	}
 	var out []SkippedRepo
 	for _, s := range m.skippedRepos {
-		if s.RepoID == repoID {
-			out = append(out, s)
+		if s.RepoID != repoID {
+			continue
 		}
+		if withheld[s.RepoID] && s.Reason == SkippedRepoReasonRowsFailedToLoad {
+			continue
+		}
+		out = append(out, s)
 	}
 	return out
 }
@@ -425,6 +491,7 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	alarms := s.deliveryAlarms(req.RepoID)
 	if owner, isSandbox := sandboxOwner(ctx); isSandbox {
 		instances = onlyOwnedBySandbox(instances, owner)
+		resp.Caller = owner
 		alarms = nil
 		// A repo ID is operator identity a sandbox must not learn — the
 		// sandboxSafeInstanceData projection already withholds Path/Worktree/

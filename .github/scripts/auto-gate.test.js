@@ -13411,9 +13411,12 @@ test("the re-raised Docs run decides deployment from its own path list", () => {
   // publish Pages, so substituting it into the program text would be a script
   // injection with a publish primitive on the end of it.
   assert.match(docs, /env:\s+EVENT_NAME:[\s\S]*?VERIFY_SHA: \$\{\{ inputs\.verify_sha \}\}/);
-  assert.match(docs, /if \[\[ -n "\$VERIFY_SHA" && ! "\$VERIFY_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/);
-  assert.match(docs, /after="\$\{VERIFY_SHA:-\$EVENT_SHA\}"/);
-  assert.match(docs, /if \[\[ -n "\$VERIFY_SHA" \|\| -z "\$before"/);
+  // The decision lives in scripts/docs-deploy-changed.sh (#5659), tested by
+  // scripts/docs_deploy_changed_test.go; the shape is pinned here.
+  const script = fs.readFileSync(path.join(__dirname, "..", "..", "scripts", "docs-deploy-changed.sh"), "utf8");
+  assert.match(script, /if \[\[ -n "\$\{VERIFY_SHA:-\}" && ! "\$VERIFY_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/);
+  assert.match(script, /after="\$\{VERIFY_SHA:-\$EVENT_SHA\}"/);
+  assert.match(script, /if \[\[ -n "\$\{VERIFY_SHA:-\}" \|\| -z "\$before"/);
   // No ${{ }} expansion may remain inside the step's shell program.
   const step = /- name: Check docs deploy paths[\s\S]*?\n      - name: /.exec(docs)[0];
   const program = step.slice(step.indexOf("run: |"));
@@ -13422,8 +13425,8 @@ test("the re-raised Docs run decides deployment from its own path list", () => {
   // docs.yml accepts a dispatch that defers to its own rule, and falls through
   // to the same path diff a push uses when it does.
   assert.match(docs, /deploy_docs:[\s\S]*?default: auto[\s\S]*?options: \[auto, 'true', 'false'\]/);
-  assert.match(docs, /"\$EVENT_NAME" == "workflow_dispatch" && "\$DEPLOY_DOCS" != "auto"/);
-  assert.match(docs, /case "\$path" in\s+docs\/\*\|mkdocs\.yml\|README\.md/);
+  assert.match(script, /"\$\{EVENT_NAME:-\}" == "workflow_dispatch" && "\$\{DEPLOY_DOCS:-auto\}" != "auto"/);
+  assert.match(script, /case "\$path" in\s+docs\/\*\|mkdocs\.yml\|README\.md/);
 });
 
 test("one unavailable master-verify workflow does not suppress the others", async () => {

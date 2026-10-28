@@ -20,10 +20,14 @@ func (i *Instance) ValidateHandoffRuntimeAction(agent, account string) error {
 		// post-commit blind-teardown wedge. The latter marks
 		// StartupStateUnknown and clears Started while preserving the committed
 		// swap; this retry is the inspection the marker waits for, so suppress
-		// those gates alongside the pending-swap one.
+		// those gates alongside the pending-swap one. RebuildTeardownPending
+		// must lift too: the retry's respawn is the teardown's OWNER — the gate
+		// exists to fence NEW bindings, not the path that discharges the
+		// obligation (#5371 review).
 		view.PendingAccountSwap = false
 		view.StartupStateUnknown = false
 		view.Started = true
+		view.RebuildTeardownPending = false
 	}
 	i.mu.RUnlock()
 	return view.ValidateRuntimeAction(RuntimeActionHandoff)
@@ -95,10 +99,13 @@ func (i *Instance) BeginManualAccountSwap() error {
 		// clears Started while preserving the committed swap, so the explicit
 		// retry — the inspection the marker waits for — must reach the alreadySet
 		// recovery branches of resumeFromLimitLockedOutcome. Suppress the gates
-		// that exist to hold automatic retries back until that inspection lands.
+		// that exist to hold automatic retries back until that inspection lands
+		// — including RebuildTeardownPending, whose retrying respawn IS this
+		// path's destination (#5371 review).
 		view.PendingAccountSwap = false
 		view.StartupStateUnknown = false
 		view.Started = true
+		view.RebuildTeardownPending = false
 	}
 	if err := view.ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
 		return err
@@ -400,7 +407,7 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 		return fmt.Errorf("manual account limit requires the pending replacement fence")
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
-	i.liveness = LiveLimitReached
+	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
 	i.attributeLimitIdentityLocked()
 	// Readiness found the incoming identity's wall before mission submission,
@@ -458,7 +465,7 @@ func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time) error {
 		return fmt.Errorf("automatic account limit requires the pending replacement fence")
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
-	i.liveness = LiveLimitReached
+	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
 	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)

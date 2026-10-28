@@ -172,8 +172,50 @@ func ValidateAccountCommand(command string, account Account) error {
 	}
 	return accountCommandValidationErrorf(
 		"account %q cannot scope agent %q: its program could not be proven to be a direct %s invocation free of "+
-			"identity assignments, and an unverifiable program is not evidence that the account would be used",
-		account.Name, account.Agent, account.Agent)
+			"identity assignments, and an unverifiable program is not evidence that the account would be used%s",
+		account.Name, account.Agent, account.Agent, programPathHint(command, account))
+}
+
+// programPathHint names the fix when the program's executable is written with a
+// path. executableIsAgent accepts a bare name resolved through PATH — the
+// operator's configuration — and an absolute path only when it is af's own
+// detected executable, so `~/bin/claude` and `/home/me/bin/claude` are both
+// refused. The default message gives no hint for that, and "use an absolute
+// path" would be the wrong advice.
+func programPathHint(command string, account Account) string {
+	call, ok := singleSimpleCall(command)
+	if !ok {
+		return ""
+	}
+	args, _ := stripExecPrefix(call.Args)
+	if len(args) == 0 {
+		return ""
+	}
+	var executable strings.Builder
+	for _, part := range args[0].Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			executable.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			executable.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, nested := range p.Parts {
+				if lit, ok := nested.(*syntax.Lit); ok {
+					executable.WriteString(lit.Value)
+				}
+			}
+		}
+	}
+	text := executable.String()
+	if !strings.Contains(text, "/") && !strings.HasPrefix(text, "~") {
+		return ""
+	}
+	if account.TrustedExecutable != "" && text == account.TrustedExecutable {
+		return "" // the path is accepted; the refusal has another cause
+	}
+	return fmt.Sprintf("; the program is written with a path (%s), which an account-scoped agent does not accept — "+
+		"use the bare command name `%s` and put its directory on PATH (a leading ~ is not expanded, and an absolute path is refused too)",
+		text, account.Agent)
 }
 
 // ValidateAccountEnvironmentCommand protects a shell/process sibling's selected

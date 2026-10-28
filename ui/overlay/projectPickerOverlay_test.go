@@ -249,6 +249,236 @@ func TestProjectPickerRebindFlow(t *testing.T) {
 	}
 }
 
+// TestProjectPickerRebindConflictRebuildsRows pins the #4888-review follow-up
+// to #4822: a rebind conflict means the registration moved, so every field of
+// the row the picker returns to — Root, RepoID, name, missing-path — is stale.
+// The open picker is rebuilt from the caller's refreshed list rather than
+// patched in place, so an Esc back to it cannot select a checkout the registry
+// no longer records, and a retried rebind expects the root reported NOW.
+func TestProjectPickerRebindConflictRebuildsRows(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "old", Root: "/old/root", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/root", MissingPath: true},
+		{Name: "other", Root: "/repos/other", RepoID: "repo-other", RegistryID: "prj_bbb", RegistryRoot: "/repos/other"},
+	}, "")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+
+	// The caller's registry re-read puts the project somewhere else entirely:
+	// different root, identity, display name, and no longer missing.
+	p.SetRebindConflict("Rebound elsewhere, to /new/root · Enter retries from there", []Project{
+		{Name: "moved", Root: "/new/root", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/new/root"},
+		{Name: "other", Root: "/repos/other", RepoID: "repo-other", RegistryID: "prj_bbb", RegistryRoot: "/repos/other"},
+	})
+
+	// Esc returns to the list — the row must describe the rebound
+	// registration, not the pre-conflict snapshot.
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	row, ok := p.HighlightedProject()
+	if !ok {
+		t.Fatalf("the rebuilt list should still have a highlighted row")
+	}
+	if row.Root != "/new/root" || row.RepoID != "repo-new" || row.Name != "moved" || row.MissingPath || row.RegistryRoot != "/new/root" {
+		t.Fatalf("the conflict row must be the refreshed one, got %+v", row)
+	}
+
+	// Rebinding again from that row carries the registry's CURRENT root as the
+	// expected root — the retry is a compare-and-set on present state.
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/final")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	req, ok := p.TakeRebindRequest()
+	if !ok || req.Project.RegistryRoot != "/new/root" || req.Project.Root != "/new/root" {
+		t.Fatalf("the retry must carry the refreshed row, got %+v (ok=%v)", req.Project, ok)
+	}
+}
+
+// TestProjectPickerRebindConflictKeepsCursorOnReboundRow pins the other half
+// of the #4888-review picker rebuild: a conflict rebuild can REORDER rows —
+// the record's name feeds the sort — so leaving selectedIdx at its old numeric
+// position highlights whichever row now sits there. Esc must return to a list
+// whose cursor rests on the registration the rebind targeted.
+func TestProjectPickerRebindConflictKeepsCursorOnReboundRow(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "alpha", Root: "/old/alpha", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/alpha"},
+		{Name: "omega", Root: "/repos/omega"},
+		{Name: "zed", Root: "/repos/zed"},
+	}, "")
+	// The cursor is on alpha (idx 0); its rebind is refused. The rebuild names
+	// the rebound registration "zeta" — sorting it LAST — so a stale index 0
+	// would highlight omega instead.
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+	p.SetRebindConflict("Rebound elsewhere, to /new/zeta · Enter retries from there", []Project{
+		{Name: "omega", Root: "/repos/omega"},
+		{Name: "zed", Root: "/repos/zed"},
+		{Name: "zeta", Root: "/new/zeta", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/new/zeta"},
+	})
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+
+	row, ok := p.HighlightedProject()
+	if !ok {
+		t.Fatalf("the rebuilt list should still have a highlighted row")
+	}
+	if row.RegistryID != "prj_aaa" || row.Name != "zeta" || row.Root != "/new/zeta" {
+		t.Fatalf("the cursor must follow the rebound row to its rebuilt position, got %+v", row)
+	}
+}
+
+// TestProjectPickerRebindConflictClampsCursor: if the refreshed list is
+// shorter than the cursor position — the record was deleted outright, so it
+// has no row at all — the rebuild must not leave selectedIdx pointing past
+// the rows.
+func TestProjectPickerRebindConflictClampsCursor(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "a", Root: "/repos/a"},
+		{Name: "b", Root: "/repos/b"},
+		{Name: "gone", Root: "/old/gone", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/gone"},
+	}, "")
+	// The cursor sits on the last row, the registry record being rebound.
+	p.HandleKeyPress(keyRune('j'))
+	p.HandleKeyPress(keyRune('j'))
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+	// The record is gone: two rows remain where the cursor was at index 2.
+	// Clamping lands it on the trailing add-project row — a valid cursor spot —
+	// never past it, and never on a stale row for the vanished record.
+	p.SetRebindConflict("Rebound elsewhere — its record is gone", []Project{
+		{Name: "a", Root: "/repos/a"},
+		{Name: "b", Root: "/repos/b"},
+	})
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	if p.selectedIdx > len(p.all) {
+		t.Fatalf("cursor must stay within the navigable rows, got %d over %d projects", p.selectedIdx, len(p.all))
+	}
+	if row, ok := p.HighlightedProject(); ok && row.RegistryID == "prj_aaa" {
+		t.Fatalf("a deleted record's stale row must not be highlightable, got %+v", row)
+	}
+	// Navigating up off the add row lands on a live one that selects normally.
+	p.HandleKeyPress(keyRune('k'))
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	row, ok := p.SelectedProject()
+	if !ok || row.RegistryID == "prj_aaa" {
+		t.Fatalf("only a live row may be selectable after the record vanished, got %+v (ok=%v)", row, ok)
+	}
+}
+
+// TestProjectPickerRebindConflictPreservesRowsOnFailedSnapshot pins the #4888
+// round-4 review finding: when the conflict-time session snapshot never
+// answers, the refreshed list holds only the registry-side union — installing
+// it wholesale would drop every session-derived row and zero the live counts
+// the daemon still runs. The merge must keep session-derived rows, carry each
+// surviving registry row's last-known counts onto its fresh record, and strip
+// a row whose record a healthy read proves deleted to session-only — dropping
+// it only when no session provenance remains.
+func TestProjectPickerRebindConflictPreservesRowsOnFailedSnapshot(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "alpha", Root: "/old/alpha", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/alpha", MissingPath: true, SessionCount: 4, InPlaceCount: 1},
+		{Name: "sessions", Root: "/repos/sessions", RepoID: "repo-sess", SessionCount: 3},
+		{Name: "gone", Root: "/repos/gone", RepoID: "repo-gone", RegistryID: "prj_gone", RegistryRoot: "/repos/gone", SessionCount: 2},
+	}, "/old/alpha")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+
+	// The snapshot fetch failed: fresh rows carry the registry union only —
+	// alpha's record moved (/old/alpha → /new/alpha, new repo identity, no
+	// longer missing), gone's record is deleted, and a registration newer
+	// than the picker appears. No row carries a session count.
+	p.SetRebindConflictPreserving("Rebound elsewhere, to /new/alpha · Enter retries from there", []Project{
+		{Name: "alpha", Root: "/new/alpha", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/new/alpha"},
+		{Name: "newbie", Root: "/repos/newbie", RepoID: "repo-nb", RegistryID: "prj_new", RegistryRoot: "/repos/newbie"},
+	}, false)
+
+	// Five rows, not three: alpha's RepoID changed (repo-old → repo-new), so
+	// the merge splits — repo-old keeps a session-only row for its 4 live
+	// sessions while the registration lands on repo-new with counts it must
+	// NOT inherit (#4888 review). Sessions and the new record land as before,
+	// and gone's 2 last-known sessions outlive the deleted record as a
+	// session-only row of their own (#4888 review).
+	if len(p.all) != 5 {
+		t.Fatalf("the RepoID change splits alpha into the old repo's session row plus the new repo's registry row: %+v", p.all)
+	}
+	rowByRepoID := map[string]Project{}
+	for _, row := range p.all {
+		rowByRepoID[row.RepoID] = row
+	}
+	if got, ok := rowByRepoID["repo-old"]; !ok || got.RegistryID != "" || got.Root != "/old/alpha" || got.SessionCount != 4 || got.InPlaceCount != 1 {
+		t.Fatalf("the old repo keeps a session-only row carrying its own counts, got %+v (ok=%v)", got, ok)
+	}
+	if got, ok := rowByRepoID["repo-new"]; !ok || got.RegistryID != "prj_aaa" || got.Root != "/new/alpha" || got.MissingPath || got.SessionCount != 0 {
+		t.Fatalf("the conflict row must be the fresh registry record under the NEW repo, with no borrowed counts, got %+v (ok=%v)", got, ok)
+	}
+	if got, ok := rowByRepoID["repo-sess"]; !ok || got.Name != "sessions" || got.SessionCount != 3 || got.RegistryID != "" {
+		t.Fatalf("the session-derived row must be kept whole, got %+v (ok=%v)", got, ok)
+	}
+	if got, ok := rowByRepoID["repo-gone"]; !ok || got.RegistryID != "" || got.RegistryRoot != "" || got.SessionCount != 2 {
+		t.Fatalf("a deleted record's row survives session-only — live sessions are provenance the deletion cannot erase, got %+v (ok=%v)", got, ok)
+	}
+	if got, ok := rowByRepoID["repo-nb"]; !ok || got.RegistryID != "prj_new" {
+		t.Fatalf("a registration newer than the picker still lands, got %+v (ok=%v)", got, ok)
+	}
+
+	// The cursor and rebind target re-seat onto the rebound row as before.
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	row, ok := p.HighlightedProject()
+	if !ok || row.RegistryID != "prj_aaa" || row.Root != "/new/alpha" {
+		t.Fatalf("Esc must highlight the rebound row from the merge, got %+v (ok=%v)", row, ok)
+	}
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/final")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	req, ok := p.TakeRebindRequest()
+	if !ok || req.Project.RegistryRoot != "/new/alpha" {
+		t.Fatalf("the retry must expect the fresh registry root, got %+v (ok=%v)", req.Project, ok)
+	}
+}
+
+// TestProjectPickerRebindConflictPreservesRowsWhenRegistryIsDegraded is the
+// other half: when the registry read failed TOO, no record's absence is
+// proven — every registry row must survive behind the degraded warning rather
+// than the merge emptying the list it was meant to repair.
+func TestProjectPickerRebindConflictPreservesRowsWhenRegistryIsDegraded(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "alpha", Root: "/old/alpha", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/alpha", SessionCount: 4},
+		{Name: "sessions", Root: "/repos/sessions", RepoID: "repo-sess", SessionCount: 3},
+	}, "/old/alpha")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+
+	// Both reads failed: the fresh list cannot describe any registry record,
+	// so nothing is proven gone — the old rows stay, counts included.
+	p.SetRebindConflictPreserving("Rebound elsewhere — refresh and retry", nil, true)
+
+	if len(p.all) != 2 {
+		t.Fatalf("with both reads failed the existing rows must be kept whole, got %+v", p.all)
+	}
+	if p.all[0].RegistryID != "prj_aaa" || p.all[0].SessionCount != 4 {
+		t.Fatalf("the registry row must survive a degraded read untouched, got %+v", p.all[0])
+	}
+	if p.all[1].Name != "sessions" || p.all[1].SessionCount != 3 {
+		t.Fatalf("the session-derived row must survive a degraded read untouched, got %+v", p.all[1])
+	}
+}
+
 func TestProjectPickerRebindOnlyOnRegistryRows(t *testing.T) {
 	p := NewProjectPickerOverlay([]Project{
 		{Name: "derived", Root: "/repos/derived"}, // no RegistryID: session-derived
@@ -333,6 +563,118 @@ func TestProjectPickerDegradedNotice(t *testing.T) {
 	}
 }
 
+// TestProjectPickerSnapshotDegradedNotice pins the snapshot-fetch half of the
+// picker's degraded surface, the fail-closed companion to the registry read:
+// when the cross-repo snapshot fetch fails, every project's live session
+// count is silently zeroed; the destructive D path gates on this so the
+// delete-project consent copy cannot claim a no-op against a project whose
+// live sessions the daemon will still archive and tear down (#1973/#1985).
+// The picker must announce the failure rather than present the silent-zero
+// counts as the truth, just as the registry notice announces an incomplete
+// union. A healthy fetch must NOT render the notice — gating that fired on
+// healthy counts would be the inverse bug.
+func TestProjectPickerSnapshotDegradedNotice(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{{Name: "alpha", Root: "/repos/alpha", SessionCount: 0}}, "")
+	p.SetMaxSize(60, 20)
+	if p.SnapshotDegraded() {
+		t.Fatalf("a freshly created picker must not report SnapshotDegraded")
+	}
+	if out := renderedText(p.Render()); strings.Contains(out, "Snapshot failed") || strings.Contains(out, "D disabled") {
+		t.Fatalf("a healthy picker must not announce a failed snapshot fetch, got:\n%s", out)
+	}
+
+	p.SetSnapshotDegraded(true)
+	if !p.SnapshotDegraded() {
+		t.Fatalf("SetSnapshotDegraded(true) must make SnapshotDegraded() report true")
+	}
+	out := renderedText(p.Render())
+	if !strings.Contains(out, "Snapshot failed") {
+		t.Fatalf("a snapshot-degraded picker must announce the failed fetch, got:\n%s", out)
+	}
+	if !strings.Contains(out, "D disabled") {
+		t.Fatalf("a snapshot-degraded picker must tell the user D is gated on the failed fetch, got:\n%s", out)
+	}
+
+	p.SetSnapshotDegraded(false)
+	if p.SnapshotDegraded() {
+		t.Fatalf("SetSnapshotDegraded(false) must clear SnapshotDegraded")
+	}
+	if out := renderedText(p.Render()); strings.Contains(out, "Snapshot failed") {
+		t.Fatalf("clearing snapshot-degraded must remove the notice, got:\n%s", out)
+	}
+}
+
+// TestProjectPickerSnapshotDegradedNoticeDistinctFromRegistry pins that a
+// snapshot-fetch failure and a registry-read failure are SEPARATE degraded
+// states: a watcher reading the notices should be able to tell which half(es)
+// failed. When only one half is degraded only its notice renders. When both
+// fail the two collapse to a SINGLE combined line so the chrome stays bounded
+// at the minimum terminal height (both notice + content fit, instead of one
+// notice pushing the chrome past the text rect and breaking PlaceOverlay);
+// the combined line still NAMES both halves so the user is not told about one
+// failure under the other's wording.
+func TestProjectPickerSnapshotDegradedNoticeDistinctFromRegistry(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{{Name: "alpha", Root: "/repos/alpha"}}, "")
+	p.SetMaxSize(80, 24)
+
+	// Only the snapshot failed; the registry is healthy. The registry notice
+	// must not render, and the snapshot notice must.
+	p.SetDegraded(false)
+	p.SetSnapshotDegraded(true)
+	out := renderedText(p.Render())
+	if strings.Contains(out, "Cannot read registry") {
+		t.Fatalf("a healthy registry must not render the registry notice when only the snapshot failed, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Snapshot failed") {
+		t.Fatalf("a failed snapshot must render the snapshot notice even when the registry is healthy, got:\n%s", out)
+	}
+	if !strings.Contains(out, "D disabled") {
+		t.Fatalf("the snapshot notice must tell the user D is gated on the failed fetch, got:\n%s", out)
+	}
+
+	// Only the registry failed; the snapshot is healthy. The snapshot notice
+	// must not render, and the registry notice must.
+	p.SetDegraded(true)
+	p.SetSnapshotDegraded(false)
+	out = renderedText(p.Render())
+	if !strings.Contains(out, "Cannot read registry") {
+		t.Fatalf("a failed registry read must still render the registry notice, got:\n%s", out)
+	}
+	if strings.Contains(out, "Snapshot failed") {
+		t.Fatalf("a healthy snapshot must not render the snapshot notice when only the registry failed, got:\n%s", out)
+	}
+	if strings.Contains(out, "D disabled") {
+		t.Fatalf("a healthy snapshot must not advertise D as disabled when only the registry failed, got:\n%s", out)
+	}
+
+	// Both failed. The combined notice NAMES both halves — so a watcher
+	// reading only the notice can tell BOTH failed rather than one hiding the
+	// other — and keeps the chrome to one notice line so the picker fits the
+	// minimum terminal height (PlaceOverlay refuses an oversized foreground,
+	// and a second notice row would push the chrome past the text rect at
+	// maxH=10). Each half's wording from its solo notice must appear in the
+	// combined line: "Cannot read registry" for the registry half,
+	// "Snapshot failed" for the snapshot half, plus the D-disabled marker.
+	p.SetDegraded(true)
+	p.SetSnapshotDegraded(true)
+	out = renderedText(p.Render())
+	if !strings.Contains(out, "Cannot read registry") {
+		t.Fatalf("with both degraded the combined notice must name the registry failure, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Snapshot failed") {
+		t.Fatalf("with both degraded the combined notice must name the snapshot failure, got:\n%s", out)
+	}
+	if !strings.Contains(out, "D disabled") {
+		t.Fatalf("with both degraded the combined notice must advertise D as disabled, got:\n%s", out)
+	}
+	registryIdx := strings.Index(out, "Cannot read registry")
+	snapshotIdx := strings.Index(out, "Snapshot failed")
+	if registryIdx < 0 || snapshotIdx < 0 || registryIdx >= snapshotIdx {
+		t.Fatalf("in the combined notice the registry fragment must precede the snapshot fragment, got registry@%d snapshot@%d:\n%s",
+			registryIdx, snapshotIdx, out)
+	}
+}
+
 // TestProjectPickerStaysWithinMaxHeight pins the #3331 review P2: the scroll
 // indicators and the degraded warning must be budgeted inside the frame,
 // because PlaceOverlay refuses to composite an oversized foreground — one
@@ -343,18 +685,21 @@ func TestProjectPickerStaysWithinMaxHeight(t *testing.T) {
 	for _, maxH := range []int{10, 14, 20} {
 		for n := 1; n <= 18; n++ {
 			for _, degraded := range []bool{false, true} {
-				projects := make([]Project, n)
-				for i := range projects {
-					projects[i] = Project{Name: fmt.Sprintf("p%02d", i), Root: fmt.Sprintf("/repos/p%02d", i)}
-				}
-				p := NewProjectPickerOverlay(projects, "")
-				p.SetMaxSize(60, maxH)
-				p.SetDegraded(degraded)
-				for step := 0; step <= n+1; step++ {
-					if got := lipgloss.Height(p.Render()); got > maxH {
-						t.Fatalf("picker rendered %d rows with maxHeight=%d (n=%d degraded=%v cursor step %d)", got, maxH, n, degraded, step)
+				for _, snapshotDegraded := range []bool{false, true} {
+					projects := make([]Project, n)
+					for i := range projects {
+						projects[i] = Project{Name: fmt.Sprintf("p%02d", i), Root: fmt.Sprintf("/repos/p%02d", i)}
 					}
-					p.HandleKeyPress(keyRune('j'))
+					p := NewProjectPickerOverlay(projects, "")
+					p.SetMaxSize(60, maxH)
+					p.SetDegraded(degraded)
+					p.SetSnapshotDegraded(snapshotDegraded)
+					for step := 0; step <= n+1; step++ {
+						if got := lipgloss.Height(p.Render()); got > maxH {
+							t.Fatalf("picker rendered %d rows with maxHeight=%d (n=%d degraded=%v snapshotDegraded=%v cursor step %d)", got, maxH, n, degraded, snapshotDegraded, step)
+						}
+						p.HandleKeyPress(keyRune('j'))
+					}
 				}
 			}
 		}
@@ -589,5 +934,507 @@ func TestProjectPickerRegistryHintKeepsRebindAtNarrowWidths(t *testing.T) {
 		if got := lipgloss.Width(p.Render()); got > w {
 			t.Fatalf("width %d: picker rendered %d columns", w, got)
 		}
+	}
+}
+
+// TestProjectPickerRebindConflictCoalescesAReboundOntoASessionRepo pins the
+// #4888 round-6 + round-7 review findings: a registration that rebounds onto a
+// repo the picker already lists from live sessions must not produce a second
+// row for the same RepoID — the registry copy would inherit counts tallied
+// against the OLD root while the session row kept the real ones. And when the
+// rebind moved the registration to a DIFFERENT RepoID, the merge must SPLIT:
+// the original repository keeps a session-only row with its own counts (the
+// sessions still run there) while the registration grafts onto the new repo's
+// row — never counts copied across repos, never the old repo's sessions
+// silently rowless.
+func TestProjectPickerRebindConflictCoalescesAReboundOntoASessionRepo(t *testing.T) {
+	// The session row sorts before AND after the registry row across the two
+	// orderings — the graft must land either way.
+	for _, sessionFirst := range []bool{true, false} {
+		rows := []Project{
+			{Name: "sessions", Root: "/repos/shared", RepoID: "repo-shared", SessionCount: 3, InPlaceCount: 2},
+			{Name: "alpha", Root: "/old/alpha", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/alpha", RegistryCheckoutID: "chk_old", MissingPath: true, SessionCount: 4},
+		}
+		if !sessionFirst {
+			rows[0], rows[1] = rows[1], rows[0]
+		}
+		p := NewProjectPickerOverlay(rows, "/old/alpha")
+		p.HandleKeyPress(keyRune('b'))
+		typeRunes(p, "/candidate")
+		p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+		if _, ok := p.TakeRebindRequest(); !ok {
+			t.Fatalf("the submitted rebind should reach the caller")
+		}
+
+		// The conflict refresh failed on the session side: the fresh rows carry
+		// the registry union only, and the alpha record's rebind landed it on
+		// the repo the "sessions" row already owns — under a DIFFERENT RepoID.
+		p.SetRebindConflictPreserving("Rebound elsewhere, to /repos/shared · Enter retries from there", []Project{
+			{Name: "alpha", Root: "/repos/shared", RepoID: "repo-shared", RegistryID: "prj_aaa", RegistryRoot: "/repos/shared", RegistryCheckoutID: "chk_new"},
+		}, false)
+
+		// Two rows, not one: repo-old keeps a session-only row for its 4 live
+		// sessions; repo-shared's row holds its own 3 sessions plus the grafted
+		// registration. The old repo's counts never transfer to the new repo.
+		if len(p.all) != 2 {
+			t.Fatalf("sessionFirst=%v: the split must keep the old repo's sessions AND the new repo's row, got %+v", sessionFirst, p.all)
+		}
+		var oldRow, sharedRow *Project
+		for i := range p.all {
+			switch p.all[i].RepoID {
+			case "repo-old":
+				oldRow = &p.all[i]
+			case "repo-shared":
+				sharedRow = &p.all[i]
+			}
+		}
+		if oldRow == nil || sharedRow == nil {
+			t.Fatalf("sessionFirst=%v: both repos keep a row, got %+v", sessionFirst, p.all)
+		}
+		if oldRow.RegistryID != "" || oldRow.SessionCount != 4 {
+			t.Fatalf("sessionFirst=%v: the old repo keeps a session-only row with its own counts, got %+v", sessionFirst, *oldRow)
+		}
+		if sharedRow.Name != "sessions" || sharedRow.SessionCount != 3 || sharedRow.InPlaceCount != 2 {
+			t.Fatalf("sessionFirst=%v: the session row keeps its own live counts, got %+v", sessionFirst, *sharedRow)
+		}
+		if sharedRow.RegistryID != "prj_aaa" || sharedRow.RegistryRoot != "/repos/shared" || sharedRow.RegistryCheckoutID != "chk_new" || sharedRow.MissingPath {
+			t.Fatalf("sessionFirst=%v: the session row gains the registration's fresh identity, got %+v", sessionFirst, *sharedRow)
+		}
+	}
+
+	// The rebind target re-seats onto the merged row — its retry expects the
+	// pair the grafted registry fields carry.
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "alpha", Root: "/old/alpha", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/alpha", RegistryCheckoutID: "chk_old"},
+		{Name: "sessions", Root: "/repos/shared", RepoID: "repo-shared", SessionCount: 3},
+	}, "/old/alpha")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+	p.SetRebindConflictPreserving("Rebound elsewhere, to /repos/shared · Enter retries from there", []Project{
+		{Name: "alpha", Root: "/repos/shared", RepoID: "repo-shared", RegistryID: "prj_aaa", RegistryRoot: "/repos/shared", RegistryCheckoutID: "chk_new"},
+	}, false)
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/final")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	req, ok := p.TakeRebindRequest()
+	if !ok || req.Project.RegistryID != "prj_aaa" || req.Project.RegistryRoot != "/repos/shared" || req.Project.RegistryCheckoutID != "chk_new" {
+		t.Fatalf("the retry must expect the pair the merged row carries, got %+v (ok=%v)", req.Project, ok)
+	}
+}
+
+// TestProjectPickerRebindConflictDropsAStaleRowOnAReusedRoot pins the
+// same-path replacement case: the competing rebind repaired /repo onto a
+// DIFFERENT repository's checkout, so the old repo's row would still navigate
+// to /repo — the replacement's live root — while displaying the old repo's
+// name and counts. The split must drop it rather than show two rows at one
+// live path (#4888 review).
+func TestProjectPickerRebindConflictDropsAStaleRowOnAReusedRoot(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "old", Root: "/repo", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/repo", RegistryCheckoutID: "chk_old", SessionCount: 2},
+	}, "/repo")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+
+	p.SetRebindConflictPreserving("Rebound elsewhere, to /repo · Enter retries from there", []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/repo", RegistryCheckoutID: "chk_new"},
+	}, false)
+
+	if len(p.all) != 1 || p.all[0].RepoID != "repo-new" || p.all[0].RegistryID != "prj_aaa" {
+		t.Fatalf("a reused root must not leave a stale old-repo row beside the fresh one, got %+v", p.all)
+	}
+}
+
+// TestProjectPickerRebindConflictKeepsADistinctSessionWorkspace is the other
+// half: when the old repo's row navigates to a workspace the fresh
+// registration does NOT claim, that workspace still belongs to the old repo's
+// sessions — the row survives as session-only.
+func TestProjectPickerRebindConflictKeepsADistinctSessionWorkspace(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "old", Root: "/ws-old", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/repo", RegistryCheckoutID: "chk_old", SessionCount: 2},
+	}, "/ws-old")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+
+	p.SetRebindConflictPreserving("Rebound elsewhere, to /repo · Enter retries from there", []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/repo", RegistryCheckoutID: "chk_new"},
+	}, false)
+
+	if len(p.all) != 2 {
+		t.Fatalf("a distinct session workspace keeps the old repo's row, got %+v", p.all)
+	}
+	var oldRow, newRow *Project
+	for i := range p.all {
+		switch p.all[i].RepoID {
+		case "repo-old":
+			oldRow = &p.all[i]
+		case "repo-new":
+			newRow = &p.all[i]
+		}
+	}
+	if oldRow == nil || newRow == nil {
+		t.Fatalf("both rows must survive, got %+v", p.all)
+	}
+	if oldRow.Root != "/ws-old" || oldRow.RegistryID != "" || oldRow.SessionCount != 2 {
+		t.Fatalf("the old repo keeps a session-only row at its own workspace, got %+v", *oldRow)
+	}
+	if newRow.RegistryID != "prj_aaa" || newRow.SessionCount != 0 {
+		t.Fatalf("the fresh row lands under the new repo with no borrowed counts, got %+v", *newRow)
+	}
+}
+
+// TestProjectPickerRebindConflictDropsARegistrationOnlyRowOnRepoChange: when
+// the competing rebind moves a record onto another repository and the old row
+// carried no live sessions (registry-backed only, SessionCount 0), nothing
+// retains the old repository — preserving a session-only row would show a
+// phantom project at the obsolete root forever (#4888 review).
+func TestProjectPickerRebindConflictDropsARegistrationOnlyRowOnRepoChange(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "old", Root: "/repo-old", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/repo-old", RegistryCheckoutID: "chk_old"},
+	}, "/repo-old")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+
+	p.SetRebindConflictPreserving("Rebound elsewhere, to /repo-new · Enter retries from there", []Project{
+		{Name: "new", Root: "/repo-new", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/repo-new", RegistryCheckoutID: "chk_new"},
+	}, false)
+
+	if len(p.all) != 1 || p.all[0].RepoID != "repo-new" || p.all[0].RegistryID != "prj_aaa" {
+		t.Fatalf("a registration-only row with no sessions leaves no phantom behind, got %+v", p.all)
+	}
+}
+
+// TestMergePreservingSessionRowsDegradedRegistryGraftsOntoLiveSession: when the
+// session snapshot is live but the registry read degraded, the caller merges
+// only the old REGISTRY rows against the fresh session list. A fresh session
+// row for the same repo must absorb the stale row's registration identity —
+// live counts win — instead of being deduped behind it (#4888 review).
+func TestMergePreservingSessionRowsDegradedRegistryGraftsOntoLiveSession(t *testing.T) {
+	old := []Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", RegistryID: "prj_aaa", RegistryRoot: "/repos/alpha", RegistryCheckoutID: "chk_old", SessionCount: 2},
+	}
+	fresh := []Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", SessionCount: 5, InPlaceCount: 1},
+	}
+	merged := MergePreservingSessionRows(registryBackedOnly(old), fresh, true)
+	if len(merged) != 1 {
+		t.Fatalf("one row for the repo — the live session row grafts the registration, got %+v", merged)
+	}
+	row := merged[0]
+	if row.SessionCount != 5 || row.InPlaceCount != 1 {
+		t.Fatalf("the live session row's counts win, got %+v", row)
+	}
+	if row.RegistryID != "prj_aaa" || row.RegistryRoot != "/repos/alpha" || row.RegistryCheckoutID != "chk_old" {
+		t.Fatalf("the grafted row carries the registration identity, got %+v", row)
+	}
+
+	// A registry row with no session counterpart is preserved as-is.
+	fresh = append(fresh, Project{Name: "beta", Root: "/repos/beta", RepoID: "repo-beta", SessionCount: 1})
+	old = append(old, Project{Name: "gamma", Root: "/repos/gamma", RepoID: "repo-gamma", RegistryID: "prj_ggg", RegistryRoot: "/repos/gamma", RegistryCheckoutID: "chk_g", SessionCount: 2})
+	merged = MergePreservingSessionRows(registryBackedOnly(old), fresh, true)
+	if len(merged) != 3 {
+		t.Fatalf("alpha grafted, beta fresh, gamma preserved — got %+v", merged)
+	}
+	var gamma *Project
+	for i := range merged {
+		if merged[i].RepoID == "repo-gamma" {
+			gamma = &merged[i]
+		}
+	}
+	if gamma == nil || gamma.RegistryID != "prj_ggg" || gamma.SessionCount != 0 || gamma.InPlaceCount != 0 {
+		t.Fatalf("the uncovered registry row survives with its counts cleared — the landed session snapshot is the count authority (#4888 review), got %+v", merged)
+	}
+}
+
+// TestMergePreservingSessionRowsDeletedRegistrationKeepsLiveSessions pins the
+// #4888 review finding on the healthy-read drop: when the session snapshot
+// failed and the healthy registry proves a record was DELETED, a row whose
+// sessions are last-known live still has provenance the deletion does not
+// touch — it degrades to a session-only row rather than vanishing until the
+// next good snapshot. Zero-session rows have nothing left to describe and
+// still drop.
+func TestMergePreservingSessionRowsDeletedRegistrationKeepsLiveSessions(t *testing.T) {
+	old := []Project{
+		{Name: "live", Root: "/repos/live", RepoID: "repo-live", RegistryID: "prj_gone", RegistryRoot: "/repos/live", RegistryCheckoutID: "chk_x", SessionCount: 3, InPlaceCount: 1},
+		{Name: "empty", Root: "/repos/empty", RepoID: "repo-empty", RegistryID: "prj_also_gone", RegistryRoot: "/repos/empty", RegistryCheckoutID: "chk_y", SessionCount: 0},
+	}
+	fresh := []Project{
+		{Name: "other", Root: "/repos/other", RepoID: "repo-other", RegistryID: "prj_ok", RegistryRoot: "/repos/other", RegistryCheckoutID: "chk_z"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, false)
+
+	var live *Project
+	for i := range merged {
+		if merged[i].RepoID == "repo-live" {
+			live = &merged[i]
+		}
+		if merged[i].RepoID == "repo-empty" {
+			t.Fatalf("a deleted zero-session registration has no provenance left — the row must drop, got %+v", merged)
+		}
+	}
+	if live == nil {
+		t.Fatalf("live sessions outlive a deleted registration — the row must survive session-only, got %+v", merged)
+	}
+	if live.RegistryID != "" || live.RegistryRoot != "" || live.RegistryCheckoutID != "" || live.MissingPath {
+		t.Fatalf("the dead registration's identity is stripped, got %+v", *live)
+	}
+	if live.SessionCount != 3 || live.InPlaceCount != 1 {
+		t.Fatalf("last-known session counts carry — the failed snapshot could not recount, got %+v", *live)
+	}
+}
+
+// registryBackedOnly mirrors the caller contract for the snapshot-landed /
+// registry-degraded merge: session rows are already covered by the fresh set,
+// and counts on the registry rows are stale — the landed snapshot proved
+// them, so the caller zeroes them rather than leave dead sessions on screen
+// (#4888 review).
+func registryBackedOnly(rows []Project) []Project {
+	out := make([]Project, 0, len(rows))
+	for _, r := range rows {
+		if r.RegistryID != "" {
+			r.SessionCount = 0
+			r.InPlaceCount = 0
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// TestMergePreservingSessionRowsReplacedRootKeepsTheLiveSession pins the #4888
+// review finding on the root-only collision: with the registry read degraded
+// and the session snapshot landed, a preserved registry row can claim a root
+// that now hosts a DIFFERENT repository (the checkout was re-cloned onto a new
+// remote). The live session row must still land beside the stale claim —
+// dedupe on Root alone would hide live work behind an unproven registration.
+func TestMergePreservingSessionRowsReplacedRootKeepsTheLiveSession(t *testing.T) {
+	old := []Project{
+		{Name: "old", Root: "/repo", RepoID: "repo-old", RegistryID: "prj_old", RegistryRoot: "/repo", RegistryCheckoutID: "chk_o", SessionCount: 4, InPlaceCount: 1},
+	}
+	fresh := []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-new", SessionCount: 2},
+	}
+	merged := MergePreservingSessionRows(registryBackedOnly(old), fresh, true)
+
+	var oldRow, newRow *Project
+	for i := range merged {
+		switch merged[i].RepoID {
+		case "repo-old":
+			oldRow = &merged[i]
+		case "repo-new":
+			newRow = &merged[i]
+		}
+	}
+	if newRow == nil || newRow.SessionCount != 2 {
+		t.Fatalf("the live session row at the replaced root must land, got %+v", merged)
+	}
+	if newRow.RegistryID != "" {
+		t.Fatalf("a different repo must not graft the stale registration, got %+v", *newRow)
+	}
+	if oldRow == nil || oldRow.RegistryID != "prj_old" || oldRow.SessionCount != 0 {
+		t.Fatalf("the stale registration claim survives with zeroed counts until a healthy read settles it, got %+v", merged)
+	}
+}
+
+// TestMergePreservingSessionRowsBothFailedKeepsLastKnownCounts pins the #4888
+// review finding on the zero-count graft: when the session snapshot AND the
+// registry read both fail, fresh carries synthesized zero-count fallback rows
+// (root_agents, the active workspace). If one shares a preserved row's RepoID,
+// the graft must graft the IDENTITY while keeping the preserved row's
+// last-known counts — no successful snapshot exists to prove them zero.
+func TestMergePreservingSessionRowsBothFailedKeepsLastKnownCounts(t *testing.T) {
+	old := []Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", RegistryID: "prj_aaa", RegistryRoot: "/repos/alpha", RegistryCheckoutID: "chk_a", SessionCount: 4, InPlaceCount: 1},
+	}
+	fresh := []Project{
+		// The synthesized fallback row root_agents/active produced — no
+		// registry identity, no real counts.
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, true)
+	if len(merged) != 1 {
+		t.Fatalf("one row — the fallback grafts onto the preserved record, got %+v", merged)
+	}
+	row := merged[0]
+	if row.RegistryID != "prj_aaa" || row.RegistryRoot != "/repos/alpha" {
+		t.Fatalf("the registry identity grafts across, got %+v", row)
+	}
+	if row.SessionCount != 4 || row.InPlaceCount != 1 {
+		t.Fatalf("zero-count fallback must not erase last-known counts, got %+v", row)
+	}
+}
+
+// TestMergePreservingSessionRowsFreshRegistryRowSurvivesASessionClaimedRoot
+// pins the mirror of the root-only collision finding (#4888 review): an OLD
+// session-only row (the snapshot that produced it never answered) names a
+// repo at a root a FRESH registry row claims for a different repository — the
+// registration moved, or the path was re-bound. The registry row is the read
+// that DID answer; dedupe on Root alone would hide authoritative truth behind
+// a stale session claim. Both rows survive — the session row as last-known
+// provenance, the registration as the path's real record.
+func TestMergePreservingSessionRowsFreshRegistryRowSurvivesASessionClaimedRoot(t *testing.T) {
+	old := []Project{
+		{Name: "old", Root: "/repo", RepoID: "repo-old", SessionCount: 3},
+	}
+	fresh := []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-new", RegistryID: "prj_new", RegistryRoot: "/repo", RegistryCheckoutID: "chk_n"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, true)
+
+	var oldRow, newRow *Project
+	for i := range merged {
+		switch merged[i].RepoID {
+		case "repo-old":
+			oldRow = &merged[i]
+		case "repo-new":
+			newRow = &merged[i]
+		}
+	}
+	if newRow == nil || newRow.RegistryID != "prj_new" {
+		t.Fatalf("the fresh registration must land beside the stale session claim, got %+v", merged)
+	}
+	if oldRow == nil || oldRow.SessionCount != 3 || oldRow.RegistryID != "" {
+		t.Fatalf("the session-only row keeps its last-known counts and no registry identity, got %+v", merged)
+	}
+}
+
+// TestMergePreservingSessionRowsRestoresDocumentedOrder pins the #4888 review
+// finding on ordering: the merge substitutes preserved rows at their old
+// positions and appends new ones, so a rebind that moved a project's display
+// name or root would leave the list mis-sorted for the life of the degraded
+// read. The result must come back under the documented Name/Root ordering the
+// normal project-list build produces.
+func TestMergePreservingSessionRowsRestoresDocumentedOrder(t *testing.T) {
+	old := []Project{
+		{Name: "zeta", Root: "/repos/zeta", RepoID: "repo-zeta", RegistryID: "prj_z", RegistryRoot: "/repos/zeta", SessionCount: 1},
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", RegistryID: "prj_a", RegistryRoot: "/repos/alpha"},
+	}
+	// alpha's registration moved it to /repos/mmm — the preserved row lands
+	// where alpha sat, but must sort under its NEW name.
+	fresh := []Project{
+		{Name: "mmm", Root: "/repos/mmm", RepoID: "repo-alpha", RegistryID: "prj_a", RegistryRoot: "/repos/mmm"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, false)
+	if len(merged) != 2 {
+		t.Fatalf("expected two rows, got %+v", merged)
+	}
+	if merged[0].Name != "mmm" || merged[1].Name != "zeta" {
+		t.Fatalf("the merged list must restore name order (mmm before zeta), got %+v", merged)
+	}
+}
+
+// TestRebindConflictReseatParksCursorWhenTheRecordVanishes pins the #4888
+// review finding on the no-match path: when the target registration is
+// deleted before the conflict refresh, nothing in the rebuilt list carries
+// its RegistryID. The in-range clamp alone leaves the cursor on whatever row
+// inherited the index — Esc returning to the list would highlight an
+// unrelated project, and Enter/`b` would act on it. The cursor must park on
+// the neutral trailing add-project row instead.
+func TestRebindConflictReseatParksCursorWhenTheRecordVanishes(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "a", Root: "/repos/a", RepoID: "repo-a", RegistryID: "prj_a", RegistryRoot: "/repos/a"},
+		{Name: "gone", Root: "/old/gone", RepoID: "repo-old", RegistryID: "prj_gone", RegistryRoot: "/old/gone", SessionCount: 2},
+	}, "")
+	p.HandleKeyPress(keyRune('j'))
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+	// The registry read proves the record deleted; the failed session
+	// snapshot keeps its row only as session-only provenance — nothing in the
+	// rebuild still carries prj_gone's registration identity.
+	p.SetRebindConflictPreserving("Rebound elsewhere — its record is gone", []Project{
+		{Name: "a", Root: "/repos/a", RepoID: "repo-a", RegistryID: "prj_a", RegistryRoot: "/repos/a"},
+	}, false)
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	if p.selectedIdx != len(p.all) || !p.addRowSelected() {
+		t.Fatalf("no matching registration — the cursor must park on the add-project row, got idx %d over %d rows", p.selectedIdx, len(p.all))
+	}
+}
+
+// TestMergePreservingSessionRowsDropsASessionRowWhoseRootWasReclaimed pins the
+// #4888 review finding on the healthy-registry case: when the session
+// snapshot fails but the registry read answers that a root now hosts a
+// DIFFERENT repository, the preserved session-only row is stale outright —
+// its only navigable target opens the replacement checkout under the old
+// repo's name and counts. It must drop beside the fresh registration that
+// claimed its root. (registryDegraded=false is what makes the registry's root
+// claim authoritative; the degraded sibling keeps both rows because nothing
+// proved the claim.)
+func TestMergePreservingSessionRowsDropsASessionRowWhoseRootWasReclaimed(t *testing.T) {
+	old := []Project{
+		{Name: "old", Root: "/repo", RepoID: "repo-old", SessionCount: 3},
+	}
+	fresh := []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-new", RegistryID: "prj_new", RegistryRoot: "/repo", RegistryCheckoutID: "chk_n"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, false)
+
+	if len(merged) != 1 {
+		t.Fatalf("the reclaimed root must show one row, not the stale session claim beside the fresh registration, got %+v", merged)
+	}
+	if merged[0].RepoID != "repo-new" || merged[0].RegistryID != "prj_new" {
+		t.Fatalf("the surviving row is the authoritative registration, got %+v", merged)
+	}
+
+	// The SAME RepoID at the same root is the graft case, not a reclaim: the
+	// session row's target still hosts its own repository, so the
+	// registration's identity lands on the live row rather than dropping it.
+	same := []Project{
+		{Name: "new", Root: "/repo", RepoID: "repo-old", RegistryID: "prj_new", RegistryRoot: "/repo"},
+	}
+	merged = MergePreservingSessionRows(old, same, false)
+	if len(merged) != 1 || merged[0].SessionCount != 3 || merged[0].RegistryID != "prj_new" {
+		t.Fatalf("a same-repo root claim grafts the registration onto the session row's counts, got %+v", merged)
+	}
+}
+
+// TestMergePreservingSessionRowsReadsTheClaimThroughRegistryRoot pins the
+// follow-on #4888 review finding: the union may give a fresh registry row a
+// higher-priority session workspace in Root while its registration still
+// records the original root in RegistryRoot. A stale session row squatting on
+// THAT path is reclaimed all the same — indexing only Root would keep it
+// pointing at a checkout its repo no longer occupies.
+func TestMergePreservingSessionRowsReadsTheClaimThroughRegistryRoot(t *testing.T) {
+	old := []Project{
+		{Name: "old", Root: "/repo", RepoID: "repo-old", SessionCount: 2},
+	}
+	fresh := []Project{
+		{Name: "new", Root: "/worktree-b", RepoID: "repo-new", RegistryID: "prj_new", RegistryRoot: "/repo", RegistryCheckoutID: "chk_n"},
+	}
+	merged := MergePreservingSessionRows(old, fresh, false)
+
+	if len(merged) != 1 {
+		t.Fatalf("the registry's RegistryRoot claims /repo even though the row navigates to /worktree-b, got %+v", merged)
+	}
+	if merged[0].RepoID != "repo-new" || merged[0].RegistryID != "prj_new" {
+		t.Fatalf("the surviving row is the authoritative registration, got %+v", merged)
+	}
+
+	// And the navigable Root still counts as a claim in its own right: a stale
+	// row squatting on the workspace the union promoted must drop too.
+	oldAtWorkspace := []Project{
+		{Name: "old", Root: "/worktree-b", RepoID: "repo-old", SessionCount: 2},
+	}
+	merged = MergePreservingSessionRows(oldAtWorkspace, fresh, false)
+	if len(merged) != 1 || merged[0].RepoID != "repo-new" {
+		t.Fatalf("a stale row on the promoted workspace drops beside the fresh registration, got %+v", merged)
 	}
 }

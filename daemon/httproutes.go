@@ -279,9 +279,16 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/RebindProject",
-		Description: "Move a registered project's stable identity (id, a prj_… registry id) to the checkout at path — the repair after that checkout was moved or recloned elsewhere. Path resolves on the daemon's filesystem; the rebind refuses a root another project already owns.",
+		Description: "Move a registered project's stable identity (id, a prj_… registry id) to the checkout at path — the repair after that checkout was moved or recloned elsewhere. Path resolves on the daemon's filesystem; the rebind refuses a root another project already owns. With expected_root and expected_checkout_id (the pair the caller last saw the project bound to — a same-path reclone changes the checkout half while the root spelling stays), it applies only if the registry still records both, and otherwise answers 409 project_rebound; omitted, last writer wins.",
 		requestType: reflect.TypeOf(RebindProjectRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProject) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/RebindProjectGuarded",
+		Description: "Guarded twin of RebindProject: requires expected_root or expected_checkout_id and exists only on daemons that enforce the pair — a daemon predating it answers the marked 404, which clients map to an upgrade refusal rather than letting the precondition drop silently.",
+		requestType: reflect.TypeOf(RebindProjectRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProjectGuarded) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -390,6 +397,19 @@ var httpRoutes = []HTTPRoute{
 		Description: "List every user-facing global config key with its purpose, type, default, and current value.",
 		requestType: reflect.TypeOf(GetConfigRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetConfig) },
+	},
+	// The explain read (#4803): the same ResolvedValue `af config get --explain`
+	// prints, served so the UIs answer "which layer supplied this" through the
+	// identical resolver. Not sandboxAllowed: candidate locations are absolute
+	// host paths, and reading them hands a compromised sandbox the operator's
+	// filesystem layout — the same reconnaissance ListProjects/ListDirectory
+	// are denied for.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ExplainConfig",
+		Description: "Explain one global config key's provenance: every source candidate with its value, location, and the reason it won, was shadowed, was absent, or is disallowed.",
+		requestType: reflect.TypeOf(ExplainConfigRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ExplainConfig) },
 	},
 	{
 		Method:      http.MethodPost,

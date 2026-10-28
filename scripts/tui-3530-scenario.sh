@@ -99,7 +99,7 @@ printf '%s\n' "$screen"
 # project legitimately (that is the project list, not the picker), and counting
 # the whole screen made the first run of this scenario report 2 for a correct
 # render — the assertion has to name the region it is about.
-overlay="$(printf '%s\n' "$screen" | sed -n '/Switch project/,/navigate/p')"
+overlay="$(printf '%s\n' "$screen" | sed -n '/Switch project/,/╰/p')"
 rows="$(printf '%s\n' "$overlay" | grep -c 'mock-repo-2' || true)"
 echo "=== overlay rows naming mock-repo-2: $rows ==="
 if [ "$rows" -ne 1 ]; then

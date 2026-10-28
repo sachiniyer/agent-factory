@@ -1,11 +1,21 @@
 package daemon
 
 // retractRereadOnUnloadableRows retracts a parsed-but-not-fully-loadable repo
-// from reread so it stays skipped, and on the polling path records a
-// rows-failed-to-load skip entry (with the failed-row count) so
-// retainStillSkipped rewrites the previously-skipped repo's stale reason
-// (corrupted/unreadable) to the accurate one — the file parsed; the worktree
-// or tmux is what is gone (#4812, #4876).
+// from reread so it stays skipped, and records a rows-failed-to-load skip entry
+// (with the failed-row count). At startup that entry is the only signal that
+// arms the orphan-sweep deferral for a repo whose file parsed but whose rows
+// the daemon could not load — its still-running containers are just as absent
+// from m.instances (and thus from the protected-slug set) as a corrupted
+// repo's, so the sweep must defer on the same incomplete-view principle
+// (#4998). The entry is seeded on BOTH paths so the sweep deferral arms at
+// startup and the polling refresh re-arms it, but a FRESH startup rows-failure
+// is withheld from the wire SkippedRepos by startupRowsFailedRepos (master
+// never seeded it; the refusal names a count with no working remedy). On the
+// polling path the entry also lets retainStillSkipped rewrite a previously-
+// skipped repo's stale reason (corrupted/unreadable) to the accurate one — the
+// file parsed; the worktree or tmux is what is gone (#4812, #4876) — and that
+// rewrite (a repo corrupted at startup, not a fresh rows-failure) DOES surface
+// on the wire.
 //
 // A PARTIAL loss is the same lie as a total one: list/get/whoami would serve
 // N-1 of N rows as the complete answer the skip set exists to prevent, so the
@@ -13,14 +23,14 @@ package daemon
 // genuinely-empty file ([]) never reaches the caller's materialize loop: it
 // is short-circuited there, so reread stays set and the repo still clears
 // (zero sessions is the complete answer). A later poll that re-materializes
-// every row re-arms reread and drops the repo (self-healing). Not seeded at
-// startup (onPollingPath is false): a fresh repo with unloadable rows is out
-// of this fix's scope, and seeding it would widen the startup skip set the PR
-// does not touch.
-func retractRereadOnUnloadableRows(reread map[string]bool, repoID string, dataLen, materialized, failedRows int, onPollingPath bool, skipped []SkippedRepo) []SkippedRepo {
+// every row re-arms reread and drops the repo (self-healing). A mid-life row
+// failure is invisible to the wire set anyway (retainStillSkipped returns nil
+// when the startup skip set was empty, and the prior in-memory rows are
+// re-hydrated so the failing rows are never reached on poll).
+func retractRereadOnUnloadableRows(reread map[string]bool, repoID string, dataLen, materialized, failedRows int, skipped []SkippedRepo) []SkippedRepo {
 	if materialized < dataLen {
 		delete(reread, repoID)
-		if onPollingPath && failedRows > 0 {
+		if failedRows > 0 {
 			skipped = append(skipped, SkippedRepo{
 				RepoID:     repoID,
 				Reason:     SkippedRepoReasonRowsFailedToLoad,

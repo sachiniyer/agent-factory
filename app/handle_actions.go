@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiclient"
@@ -211,6 +212,23 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	// sessions), which get their final dialog straight away.
 	reserved := session.IsReservedTitle(selectedTitle)
 	var cleanupImpact *session.WorktreeCleanupImpact
+	var loss killLossAssessment
+	// An unreachable row keeps Kill available — that is the deliberate escape
+	// hatch for a wedged remote — but the confirmation must say what the flag
+	// means: af cannot verify the teardown lands, and the sandbox may keep
+	// running with everything it never pushed (#5571 W1.3). The flag is
+	// in-memory, so this warning costs no I/O and rides every kill path below,
+	// pending and direct alike.
+	if u := selected.UnreachableSnapshot(); u != nil {
+		age := time.Since(u.Since)
+		if age < 0 {
+			age = 0
+		}
+		loss.warnings = append(loss.warnings, fmt.Sprintf(
+			"Warning: af cannot reach this session's sandbox — unreachable for %s (%s). "+
+				"The sandbox may still be running and holding unpushed work, and af cannot confirm the remote teardown.",
+			age.Round(time.Second), u.Error))
+	}
 	if selected.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 		// GetWorktreeCleanupImpact is an in-memory snapshot, intentionally not
 		// gated on started (unlike GetGitWorktree), so a session that HAS a
@@ -223,10 +241,10 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 			cleanupImpact = &impact
 		}
 		if hasWorktree && impact.RemoveWorktree && impact.Path != "" {
-			return m, m.openPendingKillConfirm(selectedTitle, reserved, cleanupImpact, killAction)
+			return m, m.openPendingKillConfirm(selectedTitle, reserved, cleanupImpact, loss, killAction)
 		}
 	}
-	return m, m.openKillConfirm(selectedTitle, reserved, cleanupImpact, killLossAssessment{}, killAction)
+	return m, m.openKillConfirm(selectedTitle, reserved, cleanupImpact, loss, killAction)
 }
 
 // killInstanceCmd returns a tea.Cmd that performs the actual session teardown

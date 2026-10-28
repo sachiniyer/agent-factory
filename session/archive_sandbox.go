@@ -211,6 +211,11 @@ func recoverSandbox(i *Instance) error {
 		}
 		return err
 	}
+	// A sandbox recover re-provisions unconditionally — there is no remote
+	// reattach — so the runtime ConfirmLive publishes is always a replacement
+	// (#4222). Stamp the verdict before the edge so the run-end classifier
+	// inside it can interrupt a still-in-flight task run.
+	i.markAgentRuntimeReplaced(true)
 	_ = i.Transition(ConfirmLive())
 	return nil
 }
@@ -238,6 +243,7 @@ func (i *Instance) reprovisionRemote() error {
 		Program:               i.Program,
 		CloneURL:              originRemoteURL(i.Path),
 		RestoreBranch:         i.Branch,
+		Host:                  i.Host,
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 	}
 	i.mu.RUnlock()
@@ -329,10 +335,12 @@ func (i *Instance) reprovisionRemote() error {
 	// possibly-live sandbox keeps working, and only a runtime that is provably gone
 	// is replaced by a fresh mint. Minting before this point severed callback from
 	// exactly that retained runtime, permanently and silently.
-	cred, err := mintForProvision(&spec, kind, creds)
-	if err != nil {
-		return fmt.Errorf("cannot re-provision session %q: its callback credential could not be re-issued, and restoring it without one would silently leave its agent unable to call af: %w", i.Title, err)
-	}
+	// Mint through the same shared helper the create path uses, which DEGRADES
+	// on refusal rather than failing: a restored sandbox without callback is
+	// more useful than no restore at all, and the reason rides the result onto
+	// the durable record so the surfaces say why instead of the agent
+	// discovering af commands silently fail (#5571 W3.1).
+	cred := mintForProvision(&spec, kind, creds)
 	// ARMED HERE, disarmed only once the replacement is bound and live (#3065
 	// review). Every exit below this line abandons a credential minted for a
 	// sandbox that either does not exist or cannot be used, and unlike the create
@@ -355,6 +363,11 @@ func (i *Instance) reprovisionRemote() error {
 	if err != nil {
 		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, err)
 	}
+	// A runtime-set reason (the mid-provision loss detected before the env
+	// commit, PR #5577 review) is more precise than the mint's — keep it.
+	if res.CallbackUnavailable == "" {
+		res.CallbackUnavailable = cred.UnavailableReason
+	}
 	// EVERY exit below this line disposes of the replacement through
 	// discardUnusableReplacement — the same reason the credential revoke above is a
 	// defer rather than a line per branch. What the exits share is not the message
@@ -363,11 +376,17 @@ func (i *Instance) reprovisionRemote() error {
 	// bind exit retaining an unconfirmed cleanup handle and the revalidation exit
 	// beside it discarding one.
 	//
-	// Same post-provision revalidation the create path performs. Doing it in one
-	// and not the other is exactly how these two drifted the first time.
+	// Same post-provision revalidation the create path performs — and the same
+	// degrade (#5571 W3.1): the replacement is provisioned, runnable and already
+	// replacing the old sandbox, so discarding it for a dead callback would trade
+	// a working session for a clean failure. The dead grant is revoked for
+	// tidiness, the reason overrides the mint's (it is the more specific cause),
+	// and binding proceeds into a callback-less session.
 	if rerr := revalidateAfterProvision(cred); rerr != nil {
-		return fmt.Errorf("re-provisioned sandbox for session %q, but its callback credential was invalidated while it was being provisioned: %w",
-			i.Title, i.discardUnusableReplacement(res, rerr))
+		if creds != nil {
+			creds.Revoke()
+		}
+		res.CallbackUnavailable = rerr.Error()
 	}
 	// The sandbox is up but its endpoint could not be wired — reap it so a bad
 	// restore never leaks a container/remote.
@@ -405,6 +424,7 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 	i.backend = res.Backend
 	i.remoteClient = rc
 	i.runtimeTeardown = res.Teardown
+	i.callbackUnavailable = res.CallbackUnavailable
 	i.touchLocked()
 	if i.runtimeCleanupStateUnknown {
 		i.runtimeCleanupStateUnknown = false

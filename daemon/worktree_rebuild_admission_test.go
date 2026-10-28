@@ -158,3 +158,32 @@ func TestCreateAdmissionWaitIsBoundedBeforeReservation(t *testing.T) {
 	defer manager.mu.Unlock()
 	assert.Empty(t, manager.reservedTitles, "an admission timeout must not reserve a session title")
 }
+
+// The rebuild-teardown notify fires while the recovery entry point holds this
+// repo's worktree-admission lock. CreateSession holds repoStartLock across its
+// body and waits on that admission inside it — so a notify that routes through
+// persistInstanceErr (which takes repoStartLock) closes an ABBA cycle:
+// recovery blocks on the start lock unboundedly while holding the admission a
+// create needs, and the create's bounded admission wait fails it ~opLockTimeout
+// later (#5371 review). Holding repoStartLock exactly the way CreateSession
+// does, the installed notify must still complete — the lock-free
+// persistInstanceData is the durable write for a lock-constrained caller.
+func TestRebuildTeardownNotifyDoesNotNeedRepoStartLock(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "notify-under-admission", session.NewFakeBackend(), true, session.Lost)
+
+	repoLock := manager.startLockForRepo(repoID)
+	repoLock.Lock()
+	defer repoLock.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.rebuildTeardownNotify(repoID)(inst)
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("rebuild-teardown notify blocked on the repo start lock — ABBA against create's worktree-admission wait")
+	}
+}
