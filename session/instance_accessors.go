@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,7 +12,19 @@ import (
 
 func (i *Instance) RepoName() (string, error) {
 	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
-		return "", fmt.Errorf("remote instances do not have a local repo")
+		// An off-box row owns no local worktree, but the daemon records which
+		// project it belongs to; that identity is what a multi-repo rail
+		// disambiguates by (W8.8).
+		i.mu.RLock()
+		repoPath := i.repoIdentityPath
+		if repoPath == "" {
+			repoPath = i.Path
+		}
+		i.mu.RUnlock()
+		if repoPath == "" {
+			return "", fmt.Errorf("remote instance has no recorded repo")
+		}
+		return filepath.Base(filepath.Clean(repoPath)), nil
 	}
 	i.mu.RLock()
 	started := i.started
@@ -836,6 +849,15 @@ func (i *Instance) AddTabForTest(name string, kind TabKind) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.Tabs = append(i.Tabs, &Tab{Name: name, Kind: kind})
+	i.touchLocked()
+}
+
+// AddTabWithIDForTest is AddTabForTest with a chosen stable id — the identity an
+// off-box tab is streamed by (#5571 W4.8), which a bare AddTabForTest leaves empty.
+func (i *Instance) AddTabWithIDForTest(id, name string, kind TabKind) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Tabs = append(i.Tabs, &Tab{ID: id, Name: name, Kind: kind})
 	i.touchLocked()
 }
 

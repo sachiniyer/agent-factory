@@ -342,6 +342,10 @@ func NewRootCommand(opts Options) *cobra.Command {
 	// above tells the daemon who is calling, this one lets a caller learn who
 	// answered.
 	daemon.SetVersion(version)
+	// session needs the same build version to pick and verify the remote `af`
+	// binary a sandbox host runs (#5571 W2.2); it cannot import daemon (a
+	// cycle), so the version is planted a second time.
+	session.SetDaemonVersion(version)
 	// Setting Version makes cobra provide `af --version` (and -v) for free,
 	// instead of erroring with a usage dump (#1749). The `version` subcommand is
 	// kept; both share this format so they never drift.

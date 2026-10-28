@@ -49,10 +49,10 @@ var (
 	sessionsArchiveSelf     bool
 	sendPromptViaDaemon     = routedSendPrompt
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
-	createTabViaDaemon      = daemon.CreateTab
-	closeTabViaDaemon       = daemon.CloseTab
-	renameTabViaDaemon      = daemon.RenameTab
-	reorderTabViaDaemon     = daemon.ReorderTab
+	createTabViaDaemon      = routedCreateTab
+	closeTabViaDaemon       = routedCloseTab
+	renameTabViaDaemon      = routedRenameTab
+	reorderTabViaDaemon     = routedReorderTab
 	previewSessionViaDaemon = func(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
 		if !apiclient.IsRemoteTarget() {
 			return daemon.PreviewSessionSnapshot(req)

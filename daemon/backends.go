@@ -178,7 +178,7 @@ func (s *controlServer) ListBackends(req ListBackendsRequest, resp *ListBackends
 	// which renders as no advisory rather than a fabricated finding.
 	callbackReason := ""
 	if s.manager != nil {
-		callbackReason = s.manager.callbackUnavailableReason(s.manager.Config())
+		callbackReason = s.manager.callbackUnavailableReason()
 	}
 	resp.Backends = backendCatalog(config.SupportedBackends, cfg, cfgErr, workspace, callbackReason)
 	resp.Default, resp.DefaultStatus, resp.DefaultReason = defaultFor(resp.Backends, cfg, cfgErr, workspace)

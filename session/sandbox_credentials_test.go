@@ -27,6 +27,7 @@ func (f *fakeCreds) Mint() (SandboxCredential, error) {
 	f.lastCred = SandboxCredential{
 		URL:        "http://10.0.0.5:8443",
 		Token:      "secret",
+		Socket:     "/af/sandbox-callback.sock",
 		Revalidate: func() error { return f.invalid },
 	}
 	return f.lastCred, nil
@@ -53,6 +54,7 @@ func TestMintForProvision_OnlyForKindsThatInjectACallback(t *testing.T) {
 	assert.Equal(t, 1, creds.mints)
 	assert.Equal(t, "http://10.0.0.5:8443", spec.CallbackURL)
 	assert.Equal(t, "secret", spec.CallbackToken)
+	assert.Equal(t, "/af/sandbox-callback.sock", spec.CallbackSocket, "the carrier rides the spec with the credential")
 
 	// No minter at all (a local session, a test, the in-sandbox agent-server) is a
 	// no-op rather than an error — but the ABSENCE is still named, so a kind that
@@ -246,4 +248,40 @@ func TestMintForProvision_WiresTheRevalidateHook(t *testing.T) {
 	var spec2 ProvisionSpec
 	mintForProvision(&spec2, BackendSSH, creds2)
 	assert.Nil(t, spec2.CallbackRevalidate)
+}
+
+// The -R spec is built only from the daemon's own mint: a loopback sandbox port
+// carried to the daemon's endpoint socket. Anything else clears the grant and
+// says why, so the agent is never handed a URL that nothing answers (W3.4).
+func TestCallbackReverseForward(t *testing.T) {
+	granted := func(url, sock string) *sandboxWorkspace {
+		return &sandboxWorkspace{spec: ProvisionSpec{CallbackURL: url, CallbackToken: "secret", CallbackSocket: sock}}
+	}
+
+	w := granted("http://127.0.0.1:34567", "/home/u/.agent-factory/sandbox-callback.sock")
+	fwd, lost := w.callbackReverseForward()
+	assert.Equal(t, "127.0.0.1:34567:/home/u/.agent-factory/sandbox-callback.sock", fwd)
+	assert.Empty(t, lost)
+	assert.Equal(t, "secret", w.spec.CallbackToken)
+
+	// No credential: no forward and no reason (a local-style spec).
+	fwd, lost = (&sandboxWorkspace{}).callbackReverseForward()
+	assert.Empty(t, fwd)
+	assert.Empty(t, lost)
+
+	for name, c := range map[string]struct{ url, sock string }{
+		"routable host":     {"http://10.0.0.5:8443", "/af/cb.sock"},
+		"localhost name":    {"http://localhost:34567", "/af/cb.sock"},
+		"no port":           {"http://127.0.0.1", "/af/cb.sock"},
+		"port out of range": {"http://127.0.0.1:70000", "/af/cb.sock"},
+		"no socket":         {"http://127.0.0.1:34567", ""},
+		"relative socket":   {"http://127.0.0.1:34567", "cb.sock"},
+		"colon in socket":   {"http://127.0.0.1:34567", "/af/a:b/cb.sock"},
+	} {
+		w := granted(c.url, c.sock)
+		fwd, lost := w.callbackReverseForward()
+		assert.Emptyf(t, fwd, "%s: no forward may be built", name)
+		assert.NotEmptyf(t, lost, "%s: the loss must be reported", name)
+		assert.Emptyf(t, w.spec.CallbackToken, "%s: a grant with no carrier must not be committed to the host", name)
+	}
 }

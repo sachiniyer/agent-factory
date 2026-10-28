@@ -32,6 +32,23 @@ func (i *Instance) currentBackend() Backend {
 	return i.backend
 }
 
+// StreamsViaAgentServer reports whether this instance runs in a provisioned
+// sandbox (docker/ssh/sandbox) whose PTY the daemon streams over its WS by
+// stable tab id (#5571 W4.4, W4.8). The remote hook backend is also
+// WorkspaceRemote and shares the agent-server base, but it attaches through its
+// own terminal_cmd, so Workspace alone cannot answer this.
+func (i *Instance) StreamsViaAgentServer() bool {
+	b := i.currentBackend()
+	if b == nil {
+		return false
+	}
+	switch b.Type() {
+	case "docker", "ssh", "sandbox":
+		return true
+	}
+	return false
+}
+
 // firstTimeSetup is true if this is a new instance. Otherwise, it's one loaded from storage.
 func (i *Instance) Start(firstTimeSetup bool) error {
 	return i.currentBackend().Start(i, firstTimeSetup)

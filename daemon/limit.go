@@ -640,7 +640,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// restore paths guard, reached through a third door (#2923). Push and durably
 		// record the branch first, and refuse rather than re-spawn if that cannot be
 		// done. A local session has no sandbox to preserve and falls through.
-		if isRemoteWorkspace(instance) {
+		if replacesSandbox(instance) {
 			// kill, not --force-reap: RestoreSession refuses a LiveLimitReached
 			// session and ResumeFromLimitRequest has no force option, so the
 			// forced-reap hatch cannot open from this door (Codex on #2967).

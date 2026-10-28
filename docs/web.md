@@ -67,7 +67,7 @@ Read the state words alongside the glyphs, rather than relying on color:
 The secondary line includes the branch when available, and the selected row adds
 idle detail, such as `Needs you · pane changed · 12m ago`. These are observations of terminal activity,
 not a claim that the agent finished or asked a question. Diagnostic title prefixes
-such as `[lost]`, `[deleting]`, `[limit]`, and `[remote]` add context.
+such as `[lost]`, `[deleting]`, `[limit]`, and `[remote]` (shown only for hook-backed rows) add context.
 
 The **funnel** opens state checkboxes: **Needs you · Working · Waiting on a limit ·
 Broken · Archived**. Archived sessions start hidden. The filter applies inside the

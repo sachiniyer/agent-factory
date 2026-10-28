@@ -47,6 +47,8 @@ type localAgentServer struct {
 	// capture goroutine on a session that is already being torn down and never gets
 	// closed — the #1632 leak). ensureBroker refuses once closed.
 	closed bool
+	// relaunch collapses overlapping Relaunch requests onto one attempt (W7.1).
+	relaunch relaunchFlight
 }
 
 // AgentServer returns the cached agent-server for this instance's runtime (#1592
@@ -100,7 +102,7 @@ func (i *Instance) agentServerLocked() AgentServer {
 			// out-of-process case (no sandbox to reap), set for a docker session.
 			i.agentSrv = &remoteAgentServer{rc: i.remoteClient, inst: i, teardown: i.runtimeTeardown}
 		case backendIsRemoteWorkspace(i.backend):
-			// A remote-workspace backend (docker/ssh/hook) with NO live client:
+			// A remote-workspace backend (docker/ssh/sandbox/hook) with NO live client:
 			// remoteClient is nil because the runtime wiring was torn down — a
 			// sandbox session loaded inert from disk, or one left Lost by a FAILED
 			// lost-recovery (reprovisionRemote succeeded, Start failed, then
@@ -122,7 +124,7 @@ func (i *Instance) agentServerLocked() AgentServer {
 }
 
 // backendIsRemoteWorkspace reports whether b drives an off-box workspace
-// (docker/ssh/hook) — the backends whose data-plane methods delegate back to
+// (docker/ssh/sandbox/hook) — the backends whose data-plane methods delegate back to
 // i.AgentServer() (they embed remoteAgentBackend), and which therefore must never
 // be wrapped in a localAgentServer (#2005). A nil backend is treated as local
 // (the not-yet-initialised default, matching Instance.Capabilities).

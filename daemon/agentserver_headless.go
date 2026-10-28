@@ -331,6 +331,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		// say so on the instance so the injected guidance stops teaching them
 		// (#5571 W3.1).
 		CallbackUnavailable: os.Getenv("AF_DAEMON_URL") == "" || os.Getenv("AF_DAEMON_TOKEN") == "",
+		// The daemon holds this session as a remote workspace and admits its tabs
+		// accordingly; the injected guidance must match (#5571 W3.3).
+		HostedRemotely: true,
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,
@@ -446,6 +449,9 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
 	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
+	// W7.1: stop the agent and start it again in this workspace, resuming the
+	// provider's conversation. Advertised as the "relaunch" feature.
+	mux.HandleFunc("/v1/agent/relaunch", rpcHandler(hs.Relaunch))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -483,6 +489,9 @@ var agentServerWireFeatures = []string{
 	// "tab-id-addressing": ?tab_id= on the WS stream and tab_id on preview —
 	// the id-addressed data plane (ws_pty.go's bindTab picks the binding).
 	"tab-id-addressing",
+	// "relaunch": POST /v1/agent/relaunch — stop the agent and start it again
+	// in this workspace with the provider's resume (#5571 W7.1).
+	session.RelaunchFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version
@@ -905,6 +914,21 @@ func (hs *headlessServer) Archive(_ struct{}, resp *agentArchiveResponse) error 
 		return err
 	}
 	resp.Branch = branch
+	return nil
+}
+
+// Relaunch stops the agent and starts it again in this workspace. Nothing is
+// pushed, reaped or re-cloned: the branch, tree and uncommitted work stay as
+// they are.
+func (hs *headlessServer) Relaunch(_ struct{}, resp *agentOKResponse) error {
+	r, ok := hs.as.(session.AgentRelauncher)
+	if !ok {
+		return session.ErrRelaunchUnsupported
+	}
+	if err := r.Relaunch(); err != nil {
+		return err
+	}
+	resp.OK = true
 	return nil
 }
 

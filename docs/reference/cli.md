@@ -1480,6 +1480,10 @@ agent-factory/checkout-id-<home-id> marker under the Git common directory, so
 one AF home's reset cannot remove another home's identity. No working-tree file
 is created, and adding a project does NOT start an always-on agent for it.
 
+With --daemon-url (or AF_DAEMON_URL) the registration goes to that daemon and the
+path is a path ON ITS HOST, sent as typed: absolute or starting with ~, never
+relative.
+
 'register' is a deprecated alias for 'add'.
 
 ```
@@ -1562,6 +1566,7 @@ af projects delete [repo]
 List registered projects
 
 List durable machine-local project bindings.
+With --daemon-url this is the targeted daemon's registry, not this machine's.
 
 path_exists reports only whether the last-known path is present. It does not
 claim that a new checkout at a reused path has the registered identity.
@@ -1591,6 +1596,9 @@ The path may be relative (including '.'), absolute, or start with ~. A relative
 path or '~' is resolved against YOUR shell's working directory before the
 request is sent — the daemon, which owns the registry write, then resolves the
 checkout it lands on.
+
+Against a remote daemon (--daemon-url) the path is on the daemon's host and is
+sent as typed (absolute or ~/…).
 
 ```
 af projects rebind <project-id> <path>

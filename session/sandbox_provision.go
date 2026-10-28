@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -271,17 +274,6 @@ func (w *sandboxWorkspace) fetchRestoreBranch(branch string, timeout time.Durati
 	return nil
 }
 
-// copyAfBinary streams the daemon's own `af` binary (from binary) into
-// <sessionDir>/af over the shell's stdin and makes it executable.
-func (w *sandboxWorkspace) copyAfBinary(timeout time.Duration, binary io.Reader) error {
-	dst := w.AfPath()
-	script := fmt.Sprintf("cat > %s && chmod +x %s", shellQuote(dst), shellQuote(dst))
-	if out, err := w.shell.Run(timeout, script, binary, true); err != nil {
-		return fmt.Errorf("streaming the af binary to the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
 // writeRuntimeIdentity places the session's reattach credential material on
 // the remote (#5571 W1.1):
 //
@@ -336,10 +328,47 @@ func (w *sandboxWorkspace) revalidateCallbackBeforeEnv() string {
 		return ""
 	}
 	if err := w.spec.CallbackRevalidate(); err != nil {
-		w.spec.CallbackURL, w.spec.CallbackToken = "", ""
+		w.spec.CallbackURL, w.spec.CallbackToken, w.spec.CallbackSocket = "", "", ""
 		return err.Error()
 	}
 	return ""
+}
+
+// callbackReverseForward returns the `-R` spec that carries the sandbox's
+// loopback callback port to the daemon's dedicated sandbox endpoint socket
+// (#5571 W3.4): `127.0.0.1:<port>:<socket>`. Both halves come from the daemon's
+// own mint — the port from the URL it issued, the socket from its endpoint —
+// so nothing a repo or the sandbox supplies picks where the credential goes.
+// ssh binds the remote end on the loopback address only (explicit, never
+// "localhost", which can resolve to ::1 and leave 127.0.0.1 free for another
+// process to answer), and ExitOnForwardFailure makes a taken port fatal to the
+// provision rather than silently routing the credential to a stranger.
+//
+// No credential, or one with no socket, yields no forward and no reason. A
+// credential whose carrier cannot be built clears the grant and returns why,
+// like a revalidation loss.
+func (w *sandboxWorkspace) callbackReverseForward() (string, string) {
+	if w.spec.CallbackToken == "" {
+		return "", ""
+	}
+	fail := func(why string) (string, string) {
+		w.spec.CallbackURL, w.spec.CallbackToken, w.spec.CallbackSocket = "", "", ""
+		return "", "the callback forward could not be built: " + why
+	}
+	u, err := url.Parse(w.spec.CallbackURL)
+	if err != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Port() == "" {
+		return fail("the callback URL is not a loopback http address")
+	}
+	if port, perr := strconv.Atoi(u.Port()); perr != nil || port < 1 || port > 65535 {
+		return fail("the callback port is out of range")
+	}
+	sock := w.spec.CallbackSocket
+	// "port:local_socket" is ssh's -R grammar, so a colon (or a space) in the
+	// path would be re-parsed as part of it.
+	if sock == "" || !filepath.IsAbs(sock) || strings.ContainsAny(sock, ": \t\n") {
+		return fail("the daemon's sandbox endpoint socket path is unusable")
+	}
+	return "127.0.0.1:" + u.Port() + ":" + sock, ""
 }
 
 // writeCallbackEnv puts the daemon URL and the per-session callback token on the
@@ -377,6 +406,11 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
+	// Put the session dir — which holds the `af` symlink — on the
+	// agent-server's PATH so the agent pane inherits `af` through the env
+	// filter (PATH rides the allowlist) and in-sandbox `af` commands work
+	// (#5571 W2.2, AR-02 PATH half). The VAR=val prefix sits inside the launch
+	// command, left of nohup, so the `& echo $!` tail is undisturbed.
 	// setsid, when the host has it, moves the agent-server into its own session
 	// (#5571 W1.4): it then outlives the provisioning ssh session's teardown,
 	// whose SIGHUP/session-kill nohup alone does not survive under
@@ -384,9 +418,9 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	// non-interactive shell — never a process-group leader — so setsid execs in
 	// place rather than forking, and `$!` below is still the agent-server's own
 	// PID, which the reap-side argv[0] identity check depends on. Hosts without
-	// setsid (macOS) keep the previous nohup-only launch.
-	launch := fmt.Sprintf("d=; if command -v setsid >/dev/null 2>&1; then d=setsid; fi; nohup $d %s >%s 2>%s </dev/null & echo $!",
-		filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
+	// setsid (macOS) keep the nohup-only launch.
+	launch := fmt.Sprintf("d=; if command -v setsid >/dev/null 2>&1; then d=setsid; fi; PATH=%s:\"$PATH\" nohup $d %s >%s 2>%s </dev/null & echo $!",
+		shellQuote(w.SessionDir), filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
 	// The runtime-identity env is unconditional — every W1.1 provision writes
 	// af-identity.env before this point. AF_TOKEN_REF must land in the
 	// agent-server's exec-time environment so the persisted identity's host-side

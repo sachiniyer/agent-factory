@@ -83,14 +83,22 @@ type ProvisionSpec struct {
 	//
 	// The token is per-session, scoped and revocable — never the operator's, which
 	// grants DeliverPrompt over every agent on the machine. The scope it currently
-	// carries is deliberately one route (SuggestSessionName): it does not include
-	// creating a session, which would start an agent on the host with a
+	// carries is deliberately read-only and self-scoped: the daemon admits only
+	// /v1/Snapshot (see sandboxConstrainedRoutes), answering with the caller's own
+	// session. It does not include creating a session, which would start an agent on the host with a
 	// caller-supplied program, nor the repo/path reads, whose caller-supplied paths
 	// are a host oracle (#3012 review). See HTTPRoute.sandboxAllowed for the rule
 	// and what widening it waits on. Empty means no callback was granted, which is
 	// the normal case for a local session and also what a refusal leaves behind.
 	CallbackURL   string
 	CallbackToken string
+	// CallbackSocket is the daemon-host unix socket the supervised connection's
+	// -R forward terminates on (#5571 W3.4): CallbackURL names a loopback port on
+	// the SANDBOX, and ssh carries that port to this socket. It is af's own
+	// dedicated sandbox-only endpoint, chosen by the daemon at mint — never a
+	// value from repo config or the sandbox. Empty means the credential has no
+	// carrier and the provisioner opens no -R.
+	CallbackSocket string
 	// CallbackRevalidate re-checks the minted credential's posture INSIDE
 	// provisioning, at the last step that can still keep a dead credential out
 	// of the launched agent-server's environment — after the clone/binary

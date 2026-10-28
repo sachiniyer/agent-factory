@@ -166,8 +166,35 @@ func DeriveAgentServerToken(key []byte, ref string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
+// argv0 is a test seam for the spelling this process was launched under.
+var argv0 = func() string {
+	if len(os.Args) > 0 {
+		return os.Args[0]
+	}
+	return ""
+}
+
+// sessionLaunchDir is the directory the session's own token sits in: the
+// directory of the path THIS session launched the binary under. With one af
+// binary shared per host (#5571 W2.2) the session's <sessionDir>/af is a
+// symlink to the shared cache file, and os.Executable resolves through it — so
+// the executable's own directory is the HOST-WIDE cache, which no session may
+// look in. The launch path is used only when it is absolute and names the very
+// file that is running; anything else falls back to the executable's directory,
+// the pre-W2.2 behavior, and never to a lookup keyed to anything shared.
+func sessionLaunchDir(exe, launch string) string {
+	if filepath.IsAbs(launch) {
+		if a, err := os.Stat(launch); err == nil {
+			if b, err := os.Stat(exe); err == nil && os.SameFile(a, b) {
+				return filepath.Dir(launch)
+			}
+		}
+	}
+	return filepath.Dir(exe)
+}
+
 // SuppliedAgentServerToken reads the token a W1.1 provision placed beside THIS
-// binary — <dirname(executable)>/af-server-token — when one exists. It returns
+// binary's session-specific launch path — <dirname(argv[0])>/af-server-token — when one exists. It returns
 // "" when the file is absent: an agent-server provisioned before W1.1, or run
 // by hand, keeps the file-backed daemon-token of the AF home it runs under.
 //
@@ -185,7 +212,7 @@ func SuppliedAgentServerToken() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("agent-server cannot resolve its own binary path: %w", err)
 	}
-	path := filepath.Join(filepath.Dir(exe), TokenFileName)
+	path := filepath.Join(sessionLaunchDir(exe, argv0()), TokenFileName)
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
