@@ -535,7 +535,7 @@ func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResp
 func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
 	var codexSnap session.ConversationCaptureSnapshot
 	codex := tmux.DetectAgentFromCommand(hs.program) == tmux.ProgramCodex
-	if req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {
+	if hs.inst != nil && req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {
 		// A resume flag for a transcript this host does not hold makes the agent
 		// exit on launch, so a fresh workspace starts a new conversation instead.
 		if session.ConversationResumableHere(hs.program, hs.inst.GetWorktreePath(), *req.Conversation) {
@@ -545,7 +545,7 @@ func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKRespons
 				req.Conversation.ID, req.Conversation.Agent)
 		}
 	}
-	if codex {
+	if codex && hs.inst != nil {
 		// Before the spawn, so the capture can tell the new rollout from old ones.
 		codexSnap = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(
 			codexHomeFor(hs.program, hs.inst.GetWorktreePath()), hs.inst.GetWorktreePath())
@@ -554,6 +554,9 @@ func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKRespons
 		return err
 	}
 	resp.OK = true
+	if hs.inst == nil {
+		return nil
+	}
 	if conv := hs.inst.AgentConversation(); conv.HasID() {
 		resp.Conversation = &conv
 	} else if codex {
@@ -639,8 +642,10 @@ func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) erro
 	resp.Content = obs.Content
 	resp.ModelChange = obs.ModelChange
 	resp.Captured = obs.Captured
-	if conv := hs.inst.AgentConversation(); conv.HasID() {
-		resp.Conversation = &conv
+	if hs.inst != nil {
+		if conv := hs.inst.AgentConversation(); conv.HasID() {
+			resp.Conversation = &conv
+		}
 	}
 	return nil
 }
