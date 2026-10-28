@@ -304,6 +304,22 @@ func BeginConversationCaptureAtCodexHome(home string) ConversationCaptureSnapsho
 	return beginConversationCaptureAtCodexHomeAndWorkingDir(home, "")
 }
 
+// LaunchCaptureWorkingDir is the directory a conversation capture must correlate
+// rollouts against: the directory the launch command actually runs the agent in
+// as af composed it, which an `env -C DIR codex` command moves away from the
+// worktree (#5861). It is the modeled command-environment cwd when that is
+// established entirely through the launch directory and modeled env -C options;
+// when it is not provable (an arbitrary prefix, `cd … &&`, a dynamic chdir) it
+// returns "", which leaves correlation unscoped rather than keying on a
+// directory the agent may not be in.
+func LaunchCaptureWorkingDir(program, workDir string) string {
+	launch, err := tmux.CommandEnvironmentFromCommand(program, workDir)
+	if err != nil || !launch.WorkingDirKnown() {
+		return ""
+	}
+	return launch.WorkingDir
+}
+
 // BeginConversationCaptureAtCodexHomeAndWorkingDir snapshots an exact Codex
 // store and binds later discovery to one launch directory. Account-scoped
 // runtimes share a provider store, so the directory correlation keeps another
