@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -84,11 +85,19 @@ func backendChoicesFrom(catalog daemon.ListBackendsResponse) []backendChoice {
 	// on an available choice — the selection handler proceeds with an available
 	// choice AND shows its reason as a notice, which is exactly the advisory's
 	// semantics ("this will create, just without a callback", #5571 W3.1).
-	advisory := func(reason string) string {
-		if reason == "" {
-			return ""
+	//
+	// The host-readiness note (an unprobed or stale sandbox host) rides beside it,
+	// as on the web: the choice stays available, the notice says the host is
+	// unverified (#5785).
+	advisory := func(opt daemon.BackendOption) string {
+		var parts []string
+		if opt.Note != "" {
+			parts = append(parts, "Host "+opt.Note)
 		}
-		return session.CallbackUnavailablePrefix + reason
+		if opt.CallbackUnavailableReason != "" {
+			parts = append(parts, session.CallbackUnavailablePrefix+opt.CallbackUnavailableReason)
+		}
+		return strings.Join(parts, " · ")
 	}
 	choices := []backendChoice{{
 		value:  repoDefaultBackend,
@@ -100,7 +109,7 @@ func backendChoicesFrom(catalog daemon.ListBackendsResponse) []backendChoice {
 		choices[0].reason = ""
 		for _, opt := range catalog.Backends {
 			if opt.Name == catalog.Default {
-				choices[0].reason = advisory(opt.CallbackUnavailableReason)
+				choices[0].reason = advisory(opt)
 				choices[0].callbackless = opt.CallbackUnavailableReason != ""
 				break
 			}
@@ -110,7 +119,7 @@ func backendChoicesFrom(catalog daemon.ListBackendsResponse) []backendChoice {
 	for _, opt := range catalog.Backends {
 		choice := backendChoice{value: opt.Name, label: opt.Label, status: opt.Status, reason: opt.Reason}
 		if opt.Status == daemon.BackendAvailable {
-			choice.reason = advisory(opt.CallbackUnavailableReason)
+			choice.reason = advisory(opt)
 			choice.callbackless = opt.CallbackUnavailableReason != ""
 		}
 		choices = append(choices, choice)
