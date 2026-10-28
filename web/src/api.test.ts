@@ -589,6 +589,24 @@ test("triggerTask / removeTask post the stable id", async () => {
   assert.equal(cap.body.id, "t-abc123");
 });
 
+test("triggerTask surfaces a committed run's warning instead of plain success (#5762)", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: { ok: true, code: "mutation_committed", warning: "session created, but its start could not be confirmed" },
+      error: null,
+    }),
+  });
+  const err = await triggerTask(displayedTask(), "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError, "a committed run must reject, not resolve as success");
+  assert.equal(isMutationCommittedError(err), true);
+  assert.match((err as ApiError).message, /start could not be confirmed/);
+});
+
 test("task mutations pin the displayed record's project binding (#3230)", async () => {
   const cap = stubFetch();
   const pinned = { enforce: true, project_path: "/repo/one" };

@@ -244,7 +244,8 @@ func shellQuote(s string) string {
 // injectSystemPrompt adds af's guidance to the resolved command, and for the two
 // agents that DISCOVER it from a config root, places it where the launch will
 // actually look: target carries the account boundary's config root for a scoped
-// session, and the zero value means unscoped (#3645).
+// session (#3645) and the root the command itself resolves to for an unscoped one
+// (#4501). The zero value places nothing; see skillTarget.
 //
 // callbackUnavailable swaps the guidance on the PER-INSTANCE seams (claude's
 // --plugin-dir, aider's --read) for the callbackless variant — a session with

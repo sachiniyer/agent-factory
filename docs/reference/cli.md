@@ -39,6 +39,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
 - [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
+- [`af projects color`](#af-projects-color) — Set the display color of a registered project
 - [`af projects delete`](#af-projects-delete) — Delete a project, archiving its restorable sessions
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
@@ -1438,6 +1439,7 @@ af projects
 **Subcommands**
 
 - [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
+- [`af projects color`](#af-projects-color) — Set the display color of a registered project
 - [`af projects delete`](#af-projects-delete) — Delete a project, archiving its restorable sessions
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
@@ -1484,6 +1486,30 @@ af projects add <path>
 ```
 
 **Aliases:** `register`
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af projects color
+
+Set the display color of a registered project
+
+Set the display color of a registered project.
+
+<project> is a prj_ id or a path inside the project's checkout. <color> is a hex
+color such as '#2f5fd8' or '2f5fd8'. Pass "" to clear the color.
+
+The web client paints the frame around the session and the browser tab's
+favicon with this color, so you can find the project's tab or window quickly.
+
+```
+af projects color <project> <color>
+```
 
 **Global flags**
 
@@ -2547,6 +2573,11 @@ status claims delivery. A draft still staged in the composer shortly after Enter
 gets one more Enter only when it is exactly the single paste chip bound to this
 delivery and nothing in the composer changed; every other staged shape is
 reported sent-unverified. It is never re-pasted.
+
+If --create made the session but could not confirm its start, the command still
+exits 0: the JSON carries a warning, the status stays could-not-confirm, and
+stderr says the session was created. Do not retry; inspect it with
+'af sessions list'.
 
 With --all, broadcast a single prompt to every live session in scope:
 

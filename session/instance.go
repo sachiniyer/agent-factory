@@ -604,6 +604,32 @@ type Instance struct {
 	// spawn must reserve against both in the same critical section. It is
 	// deliberately NOT part of the roster: nothing renders or respawns from it.
 	pendingTabCleanup []TabCleanupData
+
+	// tabSpawnClaims reserves the FULL tmux session names of sibling spawns
+	// still in flight — derived under i.mu, released once the append resolves
+	// (#5571 W4.3). uniqueTabTmuxNameReserving consults it alongside the roster
+	// and pendingTabCleanup so two concurrent creates never derive the same
+	// name: without it a loser's new-session collides inside tmux on the
+	// winner's name and Start's failed-spawn cleanup kill-sessions that name —
+	// the winner's live session. Guarded by i.mu; lazily allocated since an
+	// instance that never spawns a sibling never needs it.
+	tabSpawnClaims map[string]bool
+
+	// tabDisplayClaims is tabSpawnClaims for the roster DISPLAY name: names
+	// derived by in-flight creates but not yet on i.Tabs. Guarded by i.mu.
+	tabDisplayClaims map[string]bool
+
+	// tabCreateInFlight reserves the stable ids of supplied-id creates still
+	// in flight — claimed under i.mu at the early check, released when the
+	// owning create returns (#5571 W4.3). The roster dedupes same-id creates
+	// only AFTER they spawn, which cannot undo a duplicate command's side
+	// effects — a replayed `deploy.sh` that ran twice already deployed twice.
+	// The claim serializes same-id creates instead: a second request joins on
+	// the owner's done channel and resolves through the roster recheck, so a
+	// matching retry adopts without spawning and a mismatched one refuses
+	// before spawning. Guarded by i.mu; lazily allocated.
+	tabCreateInFlight map[string]*tabCreateClaim
+
 	// unreachableSince/unreachableErr are the live-probe OUTAGE observation
 	// (#5571 W1.3): set when a remote observation goes unanswered, retired on
 	// the next answered probe or any other transport evidence (attach stream,

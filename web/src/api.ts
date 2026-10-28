@@ -707,6 +707,8 @@ export interface RegisteredProject {
   root: string;
   relative_root: string;
   path_exists: boolean;
+  /** The user-chosen display color (#rrggbb); absent when none is set. */
+  color?: string;
   /** The repository identity this project RESOLVED to (config.Project.RepoID,
    *  `repo_id` on the wire) — a short hex hash from config.RepoIDFromRoot, NOT the
    *  registry `id` (`prj_...`). Empty for a record written before this field
@@ -805,6 +807,14 @@ export async function rebindProject(
     return resp.project;
   }
   const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", request, token);
+  return resp.project;
+}
+
+/** Sets (or, with "", clears) a registered project's display color (mirrors
+ *  `af projects color`). The daemon normalizes it to #rrggbb and emits
+ *  projects.changed, so every open client repaints from the refetched registry. */
+export async function setProjectColor(id: string, color: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("SetProjectColor", { id, color }, token);
   return resp.project;
 }
 
@@ -1240,7 +1250,13 @@ export async function updateTask(task: TaskMutationRef, update: TaskUpdate, toke
  *  DISPLAYED record and pins its project binding (#3230). */
 export async function triggerTask(task: TaskMutationRef, token: string): Promise<void> {
   requireTaskID(task.id, "trigger a task");
-  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
+  const result = await af<{ warning?: string }>("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
+  if (result.warning) {
+    // The run reached a committed outcome — e.g. it auto-created its target
+    // session but could not confirm the start. Surface it through the shared
+    // mutation-committed path like every sibling mutation, not as plain success.
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 
 /** Removes a task (mirrors `af tasks remove`). Refuses a task with no stable

@@ -806,6 +806,16 @@ func RebindProject(req RebindProjectRequest) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// SetProjectColor asks the daemon to set or clear a registered project's
+// display color (`af projects color`).
+func SetProjectColor(req SetProjectColorRequest) (config.Project, error) {
+	var resp SetProjectColorResponse
+	if err := callDaemon("SetProjectColor", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
 // SendPromptWithStatus asks the daemon to send a prompt and returns the
 // delivery observation made by the runtime's existing bounded submit path.
 func SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, error) {

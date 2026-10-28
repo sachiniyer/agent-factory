@@ -74,6 +74,7 @@ test("a normal PR reports exactly the check names it reported before probe mode"
       "Web",
       "Web and performance scope",
       "Web selftest",
+      "TUI driver selftest",
       "Performance and visual baselines",
       "Test (macOS)",
       "Build",

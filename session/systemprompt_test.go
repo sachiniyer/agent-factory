@@ -78,7 +78,7 @@ func TestInjectSystemPrompt_Codex(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "") // force the ~/.codex fallback under the temp HOME
 
-	result := injectSystemPrompt("codex", skillTarget{}, false)
+	result := injectSystemPrompt("codex", ambientSkillTarget(t, "codex"), false)
 
 	if result != "codex -c check_for_update_on_startup=false" {
 		t.Errorf("expected codex command carrying the startup update check suppression, got %q", result)
@@ -104,7 +104,7 @@ func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
 
-	result := injectSystemPrompt("codex --full-auto", skillTarget{}, false)
+	result := injectSystemPrompt("codex --full-auto", ambientSkillTarget(t, "codex"), false)
 
 	if result != "codex -c check_for_update_on_startup=false --full-auto" {
 		t.Errorf("expected the update-check suppression in codex's global -c position (right after the executable), got %q", result)
@@ -166,7 +166,7 @@ func TestInjectSystemPrompt_Gemini(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GEMINI_CLI_HOME", "") // force the ~/.gemini fallback under the temp HOME
 
-	result := injectSystemPrompt("gemini", skillTarget{}, false)
+	result := injectSystemPrompt("gemini", ambientSkillTarget(t, "gemini"), false)
 
 	if result != "gemini" {
 		t.Errorf("expected gemini command unchanged (file seam, no flag), got %q", result)
@@ -935,7 +935,7 @@ func TestEnsureCodexSkillDir(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "")
 
-	skillDir, err := ensureCodexSkillDir(skillTarget{})
+	skillDir, err := ensureCodexSkillDir(ambientSkillTarget(t, "codex"))
 	if err != nil {
 		t.Fatalf("ensureCodexSkillDir() failed: %v", err)
 	}
@@ -963,7 +963,7 @@ func TestEnsureCodexSkillDir_HonorsCodexHome(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", codexHome)
 
-	skillDir, err := ensureCodexSkillDir(skillTarget{})
+	skillDir, err := ensureCodexSkillDir(ambientSkillTarget(t, "codex"))
 	if err != nil {
 		t.Fatalf("ensureCodexSkillDir() failed: %v", err)
 	}
@@ -984,7 +984,7 @@ func TestEnsureGeminiSkillDir(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GEMINI_CLI_HOME", "")
 
-	skillDir, err := ensureGeminiSkillDir(skillTarget{})
+	skillDir, err := ensureGeminiSkillDir(ambientSkillTarget(t, "gemini"))
 	if err != nil {
 		t.Fatalf("ensureGeminiSkillDir() failed: %v", err)
 	}
@@ -1012,7 +1012,7 @@ func TestEnsureGeminiSkillDir_HonorsGeminiCliHome(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GEMINI_CLI_HOME", geminiHome)
 
-	skillDir, err := ensureGeminiSkillDir(skillTarget{})
+	skillDir, err := ensureGeminiSkillDir(ambientSkillTarget(t, "gemini"))
 	if err != nil {
 		t.Fatalf("ensureGeminiSkillDir() failed: %v", err)
 	}
@@ -1043,7 +1043,7 @@ func TestWriteAfMarkedFile_NonDestructive(t *testing.T) {
 		t.Fatalf("seed user skill: %v", err)
 	}
 
-	if _, err := ensureCodexSkillDir(skillTarget{}); err != nil {
+	if _, err := ensureCodexSkillDir(ambientSkillTarget(t, "codex")); err != nil {
 		t.Fatalf("ensureCodexSkillDir() must not error on a foreign skill: %v", err)
 	}
 	got, err := os.ReadFile(path)
@@ -1058,7 +1058,7 @@ func TestWriteAfMarkedFile_NonDestructive(t *testing.T) {
 	if err := os.WriteFile(path, []byte("stale\n<!-- "+afSkillMarker+" -->\n"), 0644); err != nil {
 		t.Fatalf("seed af-owned skill: %v", err)
 	}
-	if _, err := ensureCodexSkillDir(skillTarget{}); err != nil {
+	if _, err := ensureCodexSkillDir(ambientSkillTarget(t, "codex")); err != nil {
 		t.Fatalf("ensureCodexSkillDir() on af-owned file: %v", err)
 	}
 	got, err = os.ReadFile(path)
