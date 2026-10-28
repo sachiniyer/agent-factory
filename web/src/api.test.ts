@@ -100,6 +100,36 @@ test("Snapshot carries daemon identity and lifecycle admission timing with its r
   assert.equal(snapshot.operationLockTimeoutMs, 30_000);
   assert.equal(snapshot.operationClockMs, 12_345);
   assert.equal(snapshot.daemonBootId, "daemon-a");
+  // A healthy daemon omits skipped_repos (omitempty on the Go side), so the web
+  // decodes nothing here — no incompleteness notice. Guards the happy path against
+  // a regression that would render a spurious "sessions hidden" banner (#4742).
+  assert.deepEqual(snapshot.skippedRepos, undefined);
+});
+
+test("Snapshot carries the daemon's startup-skipped repos so the rail can surface them (#4742)", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        instances: [{ id: "survivor" }],
+        skipped_repos: [
+          { repo_id: "abc123", reason: "corrupted-instances-json" },
+          { repo_id: "def456", reason: "rows-failed-to-load", failed_rows: 3 },
+        ],
+      },
+      error: null,
+    }),
+  }) as unknown as Response;
+  const snapshot = await fetchSessionSnapshot("tok");
+  // The incompleteness channel must be plumbed through verbatim: the rail renders
+  // its notice from these, and the daemon's reason codes are the contract. Before
+  // the fix the web decoded only `instances` and silently dropped the skip set.
+  assert.equal(snapshot.sessions[0]?.id, "survivor");
+  assert.equal(snapshot.skippedRepos?.length, 2);
+  assert.deepEqual(snapshot.skippedRepos?.[0], { repo_id: "abc123", reason: "corrupted-instances-json" });
+  assert.deepEqual(snapshot.skippedRepos?.[1], { repo_id: "def456", reason: "rows-failed-to-load", failed_rows: 3 });
 });
 
 // The backend-on-create contract (#1933). The daemon already accepted `backend`;

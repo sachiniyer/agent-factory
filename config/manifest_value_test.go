@@ -390,6 +390,12 @@ func TestCurrentValueRendersRootAgentByOnDiskPresence(t *testing.T) {
 // longer diverges from its siblings, the property both config panes rely on to
 // show an unconfigured install honestly.
 func TestCurrentValueStructuredKeysRenderEmptyAggregatesWhenAbsent(t *testing.T) {
+	// program_overrides is the only key below that DefaultConfig fills in on its
+	// own — it seeds the machine's auto-detected claude command — so on a box with
+	// claude installed it renders non-empty even though no table is present
+	// (#5612). Pin the probe to "nothing found" so this asserts the absent-table
+	// render, not whatever happens to be installed where the test runs.
+	withoutClaude(t)
 	writeTempConfig(t, "default_program = 'claude'\n")
 	cfg, err := LoadConfig()
 	if err != nil {

@@ -83,6 +83,16 @@ type ProvisionSpec struct {
 	// the normal case for a local session and also what a refusal leaves behind.
 	CallbackURL   string
 	CallbackToken string
+	// CallbackRevalidate re-checks the minted credential's posture INSIDE
+	// provisioning, at the last step that can still keep a dead credential out
+	// of the launched agent-server's environment — after the clone/binary
+	// window (where a listener move or auth change lands) and before the
+	// callback env is committed to the host. Once that file is written the
+	// server's own process env is fixed, so a post-launch revalidation could
+	// only mark the daemon-side record while the agent kept being taught af
+	// verbs that all fail (#5571 W3.1, PR #5577 review). Set by
+	// mintForProvision next to the pair it validates; nil means nothing to check.
+	CallbackRevalidate func() error
 	// CloneURL is the git remote an off-box runtime clones the workspace from —
 	// the repo's `origin` for a real repo, or a file:// / bind-mounted path for a
 	// self-contained test. Empty for the in-process local runtime. On a fresh
@@ -97,6 +107,14 @@ type ProvisionSpec struct {
 	// Only off-box runtimes (docker/ssh/hook) honor it; the in-process local
 	// runtime never clones, so it is a no-op there.
 	RestoreBranch string
+	// SeedBundlePath, when set, seeds the sandbox workspace from a local git
+	// bundle (a W7.9 session move) instead of only a fresh clone: after cloning,
+	// the bundle is streamed to the sandbox and SeedRefs are fetched from it as
+	// local refs, so the session's branch and snapshot commit arrive exactly as
+	// they were. Off-box runtimes honour it; local never clones.
+	SeedBundlePath string
+	// SeedRefs are the refs fetched from SeedBundlePath (each as ref:ref).
+	SeedRefs []string
 	// Account scopes this session to a registered credential account (#3082), for
 	// the off-box kinds that can carry one. Zero value means unscoped.
 	//
@@ -134,6 +152,14 @@ type ProvisionResult struct {
 	// serialized by the runtime; docker/SSH latch answered outcomes and leave
 	// unknown outcomes retryable, while hook runs its idempotent delete once.
 	Teardown func() error
+	// CallbackUnavailable carries the reason no callback credential was
+	// delivered to this sandbox (#5571 W3.1): the mint refused, or the grant
+	// died while provisioning. A non-empty value means the runtime deliberately
+	// still provisioned — a callback-less session is more useful than none —
+	// but the reason must reach the instance's durable record so every surface
+	// can render it rather than leaving the agent to discover af silently
+	// fails. Empty when a credential was delivered (or the kind injects none).
+	CallbackUnavailable string
 }
 
 // Runtime is the provision-and-expose seam (#1592 Phase 4 PR3): given a session

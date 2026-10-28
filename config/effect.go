@@ -91,7 +91,12 @@ var keyEffectClasses = map[string]EffectClass{
 	"network.preview_listen_addr":    EffectAppliedLive,
 	"network.require_token":          EffectAppliedLive,
 	"network.require_loopback_token": EffectAppliedLive,
-	"network.cors_allowed_origins":   EffectAppliedLive,
+	// The #5137 opt-in is posture, not an address, but reconcile consults it on
+	// every apply: flipping it true lets a refused non-loopback listen_addr bind
+	// in place, and withdrawing it retires a serving one — so live, like the
+	// other auth-posture keys.
+	"network.allow_unauthenticated_network": EffectAppliedLive,
+	"network.cors_allowed_origins":          EffectAppliedLive,
 	// Next daemon start — the daemon reads these once, at startup.
 	"root_agents":   EffectNextDaemonStart,
 	"root_agent":    EffectNextDaemonStart,

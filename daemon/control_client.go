@@ -259,19 +259,22 @@ func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
 		return daemonAdmissionDeadlineError()
 	}
 
-	// No auth-posture pre-flight here any more (#2168 Phase 0). This used to load
-	// the config and return the #2090 refusal before spawning, because a spawned
-	// daemon's stderr is discarded (startDaemonChild) and the refusal would
-	// otherwise reach the user only as the 5s "did not become ready" timeout
-	// below. There is nothing left to pre-flight: a tokenless network bind starts
-	// and serves, so this path can no longer predict a startup failure — and
-	// keeping the check would turn the very config the owner chose to allow into
-	// an `af` that refuses to run at all.
+	// No auth-posture pre-flight here (#2168 Phase 0, kept through #5137). This
+	// used to load the config and return the #2090 refusal before spawning,
+	// because a spawned daemon's stderr is discarded (startDaemonChild) and the
+	// refusal would otherwise reach the user only as the 5s "did not become
+	// ready" timeout below. There is still nothing to pre-flight: #5137 scopes
+	// the refusal to the TCP LISTENER — the daemon starts and its unix sockets
+	// work under every config — so this path can no longer predict a startup
+	// failure, and keeping the check would turn a listener posture into an `af`
+	// that refuses to run at all.
 	//
-	// The exposure is still reported, on surfaces the user is actually looking
-	// at: `af config set` warns at write time, the daemon warns once when the
-	// listener binds (startHTTPServer), and `af doctor` / `af daemon status`
-	// carry a row for it.
+	// The posture is still reported, on surfaces the user is actually looking
+	// at: `af config set` refuses the unsafe write outright (or warns when the
+	// opt-in makes it a real exposure), the daemon logs the refused bind at
+	// ERROR and reports the exposure notice when it binds an opted-in listener
+	// (startHTTPServer), and `af doctor` / `af daemon status` carry a row for
+	// each.
 
 	// Scope the spawn marker to this launch before the launcher runs: a
 	// stubbed or early-failing launcher must not let a marker from an earlier

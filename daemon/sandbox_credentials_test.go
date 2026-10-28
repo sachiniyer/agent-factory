@@ -90,8 +90,12 @@ func TestSandboxCredentials_MintReadsTheLivePosture(t *testing.T) {
 	// for a reason of its own — a sandbox dialling it reaches itself — and that
 	// refusal would mask the posture one this test is about. (My first version
 	// asserted the require_token hint here and got the loopback message, because
-	// dialability is checked first.)
-	_, err := config.SetGlobalConfigValue("listen_addr", "10.0.0.5:8443")
+	// dialability is checked first.) The network address makes this a tokenless
+	// non-loopback posture, so the opt-in goes in first — without it #5137
+	// refuses the listen_addr write itself.
+	_, err := config.SetGlobalConfigValue("allow_unauthenticated_network", "true")
+	require.NoError(t, err)
+	_, err = config.SetGlobalConfigValue("listen_addr", "10.0.0.5:8443")
 	require.NoError(t, err)
 	_, err = m.ApplyConfig()
 	require.NoError(t, err)

@@ -40,6 +40,18 @@ type SandboxRuntimeCleanupData struct {
 	SSHCommand string `json:"ssh_command"`
 	SessionDir string `json:"session_dir"`
 	RemotePID  string `json:"remote_pid,omitempty"`
+	// RemoteAddr, AgentServerVersion and TokenRef are the reattach half of the
+	// runtime identity (#5571 W1.1): the agent-server's own loopback address on
+	// the sandbox (the banner's addr — the destination an `ssh -L` forward has
+	// to re-dial), the version the remote binary reported, and the opaque
+	// reference the daemon's runtime-identity key derives the expected bearer
+	// token from. The token itself is NEVER persisted — deriving it needs the
+	// 0600 key the daemon keeps in its AF home. All three are absent on rows
+	// written before W1.1 (and on docker/hook rows), which reload inert
+	// exactly as before.
+	RemoteAddr         string `json:"remote_addr,omitempty"`
+	AgentServerVersion string `json:"agent_server_version,omitempty"`
+	TokenRef           string `json:"token_ref,omitempty"`
 }
 
 type DockerRuntimeCleanupData struct {
@@ -94,6 +106,11 @@ type SSHRuntimeCleanupData struct {
 	// sshPinnedCleanupTarget.
 	DialAddress         string `json:"dial_address,omitempty"`
 	HostKeyVerification string `json:"host_key_verification,omitempty"`
+	// The same reattach identity as SandboxRuntimeCleanupData carries (#5571
+	// W1.1) — see its fields for the contract.
+	RemoteAddr         string `json:"remote_addr,omitempty"`
+	AgentServerVersion string `json:"agent_server_version,omitempty"`
+	TokenRef           string `json:"token_ref,omitempty"`
 }
 
 type HookRuntimeCleanupData struct {
@@ -309,6 +326,12 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		p := newSSHSandboxProvisioner(ProvisionSpec{Title: title}, sshCmd, "", "")
 		p.sessionDir = data.SSH.SessionDir
 		p.remotePID = data.SSH.RemotePID
+		// The W1.1 identity rides the handle back into the live provisioner: the
+		// token ref re-binds the reap's process check, and remote_addr/version are
+		// what a reattach keys on. All three are empty on pre-W1.1 rows.
+		p.remoteAddr = data.SSH.RemoteAddr
+		p.agentServerVersion = data.SSH.AgentServerVersion
+		p.tokenRef = data.SSH.TokenRef
 		// The accept-new store is prepared inside each ATTEMPT, never here: this
 		// function composes a closure while persisted instances are being loaded,
 		// and a transiently unwritable AF home must not be captured as a permanently
@@ -338,10 +361,13 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		}
 		cleanup := *data.Sandbox
 		p := &sandboxProvisioner{
-			spec:       ProvisionSpec{Title: title},
-			sshCmd:     data.Sandbox.SSHCommand,
-			sessionDir: data.Sandbox.SessionDir,
-			remotePID:  data.Sandbox.RemotePID,
+			spec:               ProvisionSpec{Title: title},
+			sshCmd:             data.Sandbox.SSHCommand,
+			sessionDir:         data.Sandbox.SessionDir,
+			remotePID:          data.Sandbox.RemotePID,
+			remoteAddr:         data.Sandbox.RemoteAddr,
+			agentServerVersion: data.Sandbox.AgentServerVersion,
+			tokenRef:           data.Sandbox.TokenRef,
 		}
 		teardown := p.reap
 		return &sandboxBackend{

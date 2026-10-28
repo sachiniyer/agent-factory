@@ -96,3 +96,37 @@ func TestJSONOut_BareDirtySuccessStillReportsLogLocation(t *testing.T) {
 	require.True(t, strings.Contains(stderr, "wrote logs to"),
 		"bare dirty success must still report the log location (#1749); got %q", stderr)
 }
+
+// TestCloseLogForOutputMode_JSONDirtyLeavesStderrClean pins #5649: `af sessions
+// attach --json` returns nil after detach without a jsonOut envelope, so its
+// deferred close must itself be quiet under --json — a dirty run (e.g. the
+// detach-key config-load warning) must not leak "wrote logs to ..." on stderr.
+// The bare path must still report it.
+func TestCloseLogForOutputMode_JSONDirtyLeavesStderrClean(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		envelope bool
+		wantNote bool
+	}{
+		{"json", true, false},
+		{"bare", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			log.Initialize(false)
+			t.Cleanup(log.CloseQuiet)
+			log.WarningLog.Printf("failed to load config for detach key: simulated")
+
+			orig := envelopeOutput
+			envelopeOutput = tc.envelope
+			t.Cleanup(func() { envelopeOutput = orig })
+
+			stderr := captureStderr(t, closeLogForOutputMode)
+			if tc.wantNote {
+				require.Contains(t, stderr, "wrote logs to")
+			} else {
+				require.Empty(t, stderr, "stderr must be empty under --json success")
+			}
+		})
+	}
+}

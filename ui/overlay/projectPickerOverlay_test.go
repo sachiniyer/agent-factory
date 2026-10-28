@@ -563,6 +563,118 @@ func TestProjectPickerDegradedNotice(t *testing.T) {
 	}
 }
 
+// TestProjectPickerSnapshotDegradedNotice pins the snapshot-fetch half of the
+// picker's degraded surface, the fail-closed companion to the registry read:
+// when the cross-repo snapshot fetch fails, every project's live session
+// count is silently zeroed; the destructive D path gates on this so the
+// delete-project consent copy cannot claim a no-op against a project whose
+// live sessions the daemon will still archive and tear down (#1973/#1985).
+// The picker must announce the failure rather than present the silent-zero
+// counts as the truth, just as the registry notice announces an incomplete
+// union. A healthy fetch must NOT render the notice — gating that fired on
+// healthy counts would be the inverse bug.
+func TestProjectPickerSnapshotDegradedNotice(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{{Name: "alpha", Root: "/repos/alpha", SessionCount: 0}}, "")
+	p.SetMaxSize(60, 20)
+	if p.SnapshotDegraded() {
+		t.Fatalf("a freshly created picker must not report SnapshotDegraded")
+	}
+	if out := renderedText(p.Render()); strings.Contains(out, "Snapshot failed") || strings.Contains(out, "D disabled") {
+		t.Fatalf("a healthy picker must not announce a failed snapshot fetch, got:\n%s", out)
+	}
+
+	p.SetSnapshotDegraded(true)
+	if !p.SnapshotDegraded() {
+		t.Fatalf("SetSnapshotDegraded(true) must make SnapshotDegraded() report true")
+	}
+	out := renderedText(p.Render())
+	if !strings.Contains(out, "Snapshot failed") {
+		t.Fatalf("a snapshot-degraded picker must announce the failed fetch, got:\n%s", out)
+	}
+	if !strings.Contains(out, "D disabled") {
+		t.Fatalf("a snapshot-degraded picker must tell the user D is gated on the failed fetch, got:\n%s", out)
+	}
+
+	p.SetSnapshotDegraded(false)
+	if p.SnapshotDegraded() {
+		t.Fatalf("SetSnapshotDegraded(false) must clear SnapshotDegraded")
+	}
+	if out := renderedText(p.Render()); strings.Contains(out, "Snapshot failed") {
+		t.Fatalf("clearing snapshot-degraded must remove the notice, got:\n%s", out)
+	}
+}
+
+// TestProjectPickerSnapshotDegradedNoticeDistinctFromRegistry pins that a
+// snapshot-fetch failure and a registry-read failure are SEPARATE degraded
+// states: a watcher reading the notices should be able to tell which half(es)
+// failed. When only one half is degraded only its notice renders. When both
+// fail the two collapse to a SINGLE combined line so the chrome stays bounded
+// at the minimum terminal height (both notice + content fit, instead of one
+// notice pushing the chrome past the text rect and breaking PlaceOverlay);
+// the combined line still NAMES both halves so the user is not told about one
+// failure under the other's wording.
+func TestProjectPickerSnapshotDegradedNoticeDistinctFromRegistry(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{{Name: "alpha", Root: "/repos/alpha"}}, "")
+	p.SetMaxSize(80, 24)
+
+	// Only the snapshot failed; the registry is healthy. The registry notice
+	// must not render, and the snapshot notice must.
+	p.SetDegraded(false)
+	p.SetSnapshotDegraded(true)
+	out := renderedText(p.Render())
+	if strings.Contains(out, "Cannot read registry") {
+		t.Fatalf("a healthy registry must not render the registry notice when only the snapshot failed, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Snapshot failed") {
+		t.Fatalf("a failed snapshot must render the snapshot notice even when the registry is healthy, got:\n%s", out)
+	}
+	if !strings.Contains(out, "D disabled") {
+		t.Fatalf("the snapshot notice must tell the user D is gated on the failed fetch, got:\n%s", out)
+	}
+
+	// Only the registry failed; the snapshot is healthy. The snapshot notice
+	// must not render, and the registry notice must.
+	p.SetDegraded(true)
+	p.SetSnapshotDegraded(false)
+	out = renderedText(p.Render())
+	if !strings.Contains(out, "Cannot read registry") {
+		t.Fatalf("a failed registry read must still render the registry notice, got:\n%s", out)
+	}
+	if strings.Contains(out, "Snapshot failed") {
+		t.Fatalf("a healthy snapshot must not render the snapshot notice when only the registry failed, got:\n%s", out)
+	}
+	if strings.Contains(out, "D disabled") {
+		t.Fatalf("a healthy snapshot must not advertise D as disabled when only the registry failed, got:\n%s", out)
+	}
+
+	// Both failed. The combined notice NAMES both halves — so a watcher
+	// reading only the notice can tell BOTH failed rather than one hiding the
+	// other — and keeps the chrome to one notice line so the picker fits the
+	// minimum terminal height (PlaceOverlay refuses an oversized foreground,
+	// and a second notice row would push the chrome past the text rect at
+	// maxH=10). Each half's wording from its solo notice must appear in the
+	// combined line: "Cannot read registry" for the registry half,
+	// "Snapshot failed" for the snapshot half, plus the D-disabled marker.
+	p.SetDegraded(true)
+	p.SetSnapshotDegraded(true)
+	out = renderedText(p.Render())
+	if !strings.Contains(out, "Cannot read registry") {
+		t.Fatalf("with both degraded the combined notice must name the registry failure, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Snapshot failed") {
+		t.Fatalf("with both degraded the combined notice must name the snapshot failure, got:\n%s", out)
+	}
+	if !strings.Contains(out, "D disabled") {
+		t.Fatalf("with both degraded the combined notice must advertise D as disabled, got:\n%s", out)
+	}
+	registryIdx := strings.Index(out, "Cannot read registry")
+	snapshotIdx := strings.Index(out, "Snapshot failed")
+	if registryIdx < 0 || snapshotIdx < 0 || registryIdx >= snapshotIdx {
+		t.Fatalf("in the combined notice the registry fragment must precede the snapshot fragment, got registry@%d snapshot@%d:\n%s",
+			registryIdx, snapshotIdx, out)
+	}
+}
+
 // TestProjectPickerStaysWithinMaxHeight pins the #3331 review P2: the scroll
 // indicators and the degraded warning must be budgeted inside the frame,
 // because PlaceOverlay refuses to composite an oversized foreground — one
@@ -573,18 +685,21 @@ func TestProjectPickerStaysWithinMaxHeight(t *testing.T) {
 	for _, maxH := range []int{10, 14, 20} {
 		for n := 1; n <= 18; n++ {
 			for _, degraded := range []bool{false, true} {
-				projects := make([]Project, n)
-				for i := range projects {
-					projects[i] = Project{Name: fmt.Sprintf("p%02d", i), Root: fmt.Sprintf("/repos/p%02d", i)}
-				}
-				p := NewProjectPickerOverlay(projects, "")
-				p.SetMaxSize(60, maxH)
-				p.SetDegraded(degraded)
-				for step := 0; step <= n+1; step++ {
-					if got := lipgloss.Height(p.Render()); got > maxH {
-						t.Fatalf("picker rendered %d rows with maxHeight=%d (n=%d degraded=%v cursor step %d)", got, maxH, n, degraded, step)
+				for _, snapshotDegraded := range []bool{false, true} {
+					projects := make([]Project, n)
+					for i := range projects {
+						projects[i] = Project{Name: fmt.Sprintf("p%02d", i), Root: fmt.Sprintf("/repos/p%02d", i)}
 					}
-					p.HandleKeyPress(keyRune('j'))
+					p := NewProjectPickerOverlay(projects, "")
+					p.SetMaxSize(60, maxH)
+					p.SetDegraded(degraded)
+					p.SetSnapshotDegraded(snapshotDegraded)
+					for step := 0; step <= n+1; step++ {
+						if got := lipgloss.Height(p.Render()); got > maxH {
+							t.Fatalf("picker rendered %d rows with maxHeight=%d (n=%d degraded=%v snapshotDegraded=%v cursor step %d)", got, maxH, n, degraded, snapshotDegraded, step)
+						}
+						p.HandleKeyPress(keyRune('j'))
+					}
 				}
 			}
 		}

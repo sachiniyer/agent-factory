@@ -479,3 +479,19 @@ func IsProjectRebound(err error) bool {
 	var rebound *ProjectReboundError
 	return errors.As(err, &rebound)
 }
+
+// SendPrompt asks the daemon to deliver a prompt to an existing session and
+// returns the delivery observation, HTTP twin of daemon.SendPromptWithStatus. A
+// daemon that predates the Status field answers without one; that proves only
+// that submission returned, so it reports could-not-confirm rather than a
+// manufactured "delivered".
+func (c *Client) SendPrompt(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
+	var resp daemon.SendPromptResponse
+	if err := c.call("SendPrompt", req, &resp); err != nil {
+		return session.PromptCouldNotConfirm, err
+	}
+	if !resp.Status.Valid() {
+		return session.PromptCouldNotConfirm, nil
+	}
+	return resp.Status, nil
+}

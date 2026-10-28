@@ -949,8 +949,11 @@ _af_tab_count() {
 
 # _AF_TASKS_RUN_HINT remains the edit-mode assertion marker. It is deliberately
 # not the open/close anchor: the default list footer hides secondary actions
-# behind `?`, and an empty list has no run action at all (#3995).
-: "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? ·}"
+# behind `?`, and an empty list has no run action at all (#3995). A focused text
+# field only names the verbs as the destination of the tab steps (#5538), so the
+# editor that opens on Name reads "tab → r run now · …", and below 41 cells that
+# path compacts to "tab → r/x/D ·" — still the run affordance, so both count.
+: "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])(r run( now)? ·|r/x/D ·)}"
 
 # _AF_TASKS_LIST_TITLE is only the list/edit discriminator used by the self-test
 # before revealing secondary list actions. It is NOT the open/close anchor: the
@@ -958,18 +961,38 @@ _af_tab_count() {
 # supported 80x10 floor.
 : "${_AF_TASKS_LIST_TITLE:=│[[:space:]]+Tasks[[:space:]]+│}"
 
+# _AF_TASKS_EDIT_TITLE is the edit form's title row ("Edit task <id>"). It is
+# the one marker that does not move when a hint row is reworded, so a complete
+# dialog showing it is recognized whatever its footer says. It only SUPPLEMENTS
+# the footer: the form scrolls the title away at the 80x10 floor, where the
+# pinned footer is all that identifies the dialog. The bare list title is not
+# accepted this way — "Tasks" alone is ordinary output text (review on #3995);
+# the row must also carry the task id token that only the editor prints.
+: "${_AF_TASKS_EDIT_TITLE:=│[[:space:]]+Edit task[[:space:]]+[^[:space:]]+.*│}"
+
 # _AF_TASKS_FOOTER uses combinations unique to Tasks among the built-in dialogs:
 # recovery/list has n new or ? actions, edit/watch has x toggle, and create has
 # tab[/shift+tab] fields. Do not accept enter edit or D delete alone: Hooks and
 # the project picker share them. These mirror task_pane_recovery.go and
 # task_pane_edit.go; unlike the title, the footer survives the 80x10 form scroll.
-: "${_AF_TASKS_FOOTER:=(n new ·|[?] actions ·|x toggle ·|tab(/shift[+]tab)? fields ·).*esc.*│}"
+#
+# The edit form's action row is contextual and width-tiered (#5538), so no verb
+# fragment anchors it any more: at a text stop the verbs compact to
+# "tab → r/x/D · esc list" below 41 cells and to "esc list" alone below 22, and
+# neither tier says "x toggle". What every tier at every focus stop keeps is
+# esc's destination, `esc list` — the label the product pins at all nine stops
+# (TestTaskPaneEditActionFooterFollowsFocus) and one no other built-in dialog
+# prints (they say esc back, esc cancel or esc close), so it anchors the edit
+# form. The one row without it, a selector stop's narrowest
+# "r run · x toggle · D del · esc", still carries `x toggle`.
+: "${_AF_TASKS_FOOTER:=(n new ·|[?] actions ·|x toggle ·|tab(/shift[+]tab)? fields ·).*esc.*│|(^|[^[:alnum:]])esc list.*│}"
 
 # _AF_TASKS_FRAME_TOP/BOTTOM are the rounded borders shared by every task
 # dialog mode. A workspace pane uses square corners, and its OWN │ borders can
-# surround output whose complete line is "Tasks". Requiring a task footer
-# between both rounded borders prevents that pane text from satisfying the open
-# marker or keeping the close marker alive (review on #3995).
+# surround output whose complete line is "Tasks". Requiring a task footer (or
+# the editor's id-bearing title) between both rounded borders prevents that
+# pane text from satisfying the open marker or keeping the close marker alive
+# (review on #3995).
 #
 # Group the repeated horizontal glyph: under the sandbox's C/POSIX locale,
 # `─+` repeats only the last byte of the UTF-8 sequence, while `(─)+` repeats
@@ -1061,7 +1084,8 @@ _af_tasks_overlay_visible() {
     # Before #4006 lands, the empty recovery has no pinned task footer.
     # Accept its task-specific title only inside the same complete rounded
     # frame; the first-run workspace shares the action sentence, not this title.
-    _af_tasks_dialog_has "$_AF_TASKS_FOOTER|│[[:space:]]+No tasks[[:space:]]+│"
+    # The edit form's title is accepted the same way (see _AF_TASKS_EDIT_TITLE).
+    _af_tasks_dialog_has "$_AF_TASKS_FOOTER|$_AF_TASKS_EDIT_TITLE|│[[:space:]]+No tasks[[:space:]]+│"
 }
 
 _af_tasks_list_visible() {
