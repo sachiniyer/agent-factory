@@ -610,7 +610,7 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 	if isRemoteTarget() {
 		// Pre-loop (bubbletea has not started), bounded by remoteReadTimeout: seeds
 		// the cache the first render reads. Every later refresh is the poll's.
-		h.remote.apply(fetchRemoteReads())
+		h.remote.apply(fetchRemoteReads(ctx))
 	}
 	h.refreshSidebarProjects()
 	// In registry mode (launched outside a repo, #2477) the session tree is empty

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -57,41 +58,48 @@ func TestRemoteProjectListKeepsStaleRowsAndReportsDegradedWhenTheTargetFails(t *
 }
 
 // A target that accepts the connection and never answers must cost the poll's
-// goroutine a bounded wait, and must cost the event loop nothing.
+// goroutine a bounded wait, must leave no goroutine behind, and must cost the
+// event loop nothing.
 func TestRemoteHungTargetNeverBlocksTheEventLoop(t *testing.T) {
 	stubRemote(t)
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
 	pp, pt, pto := remoteListProjects, remoteListTasks, remoteReadTimeout
-	remoteListProjects = func() ([]config.Project, error) { <-release; return nil, nil }
-	remoteListTasks = func() ([]task.Task, error) { <-release; return nil, nil }
-	remoteReadTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { remoteListProjects, remoteListTasks, remoteReadTimeout = pp, pt, pto })
+	// A hung target: only the caller's context ends the read.
+	remoteListProjects = func(ctx context.Context) ([]config.Project, error) { <-ctx.Done(); return nil, ctx.Err() }
+	remoteListTasks = func(ctx context.Context) ([]task.Task, error) { <-ctx.Done(); return nil, ctx.Err() }
+	remoteReadTimeout = 100 * time.Millisecond
 
-	// The off-loop read gives up at the bound and says why.
+	// The off-loop read gives up at the deadline and says why. It returns only
+	// after both workers have, so nothing is left running past this line.
 	start := time.Now()
-	reads := fetchRemoteReads()
+	reads := fetchRemoteReads(context.Background())
 	require.Less(t, time.Since(start), 2*time.Second)
 	require.ErrorContains(t, reads.projectsErr, "did not answer")
 	require.ErrorContains(t, reads.tasksErr, "did not answer")
 
-	// Every loop-side consumer reads the cache and returns at once while the
-	// target is still hung.
+	// The model's lifetime context also ends the read, well before the deadline.
+	remoteReadTimeout = time.Minute
+	owner, cancelOwner := context.WithCancel(context.Background())
+	finished := make(chan *remoteReads, 1)
+	go func() { finished <- fetchRemoteReads(owner) }()
+	cancelOwner()
+	select {
+	case r := <-finished:
+		require.Error(t, r.projectsErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read outlived the context of the model that owns it")
+	}
+
+	// Every loop-side consumer reads the cache and never dials, so none can wait
+	// on the target (the stubs above would block until their context ends).
 	m := &home{repoID: "aaaaaaaaaaaa", repoRoot: "/srv/box/alpha"}
 	m.remote.apply(reads)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, degraded := m.buildProjectList()
-		require.True(t, degraded)
-		_, _ = m.activeTasks(m.repoRoot, m.repoID)
-		_, _ = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa")
-	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("a loop-side remote consumer blocked on the hung target")
-	}
+	_, degraded := m.buildProjectListFrom(nil)
+	require.True(t, degraded)
+	_, err := m.activeTasks(m.repoRoot, m.repoID)
+	require.NoError(t, err)
+	_, err = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa")
+	require.NoError(t, err)
 }
 
 // Every selection entry point resolves through the target's row, not local git.
@@ -143,11 +151,14 @@ func TestRemoteHooksSaveIsRefusedNotWrittenLocally(t *testing.T) {
 func failOnDial(t *testing.T) {
 	t.Helper()
 	pp, pt := remoteListProjects, remoteListTasks
-	remoteListProjects = func() ([]config.Project, error) {
+	remoteListProjects = func(context.Context) ([]config.Project, error) {
 		t.Error("event loop dialed the target for projects")
 		return nil, nil
 	}
-	remoteListTasks = func() ([]task.Task, error) { t.Error("event loop dialed the target for tasks"); return nil, nil }
+	remoteListTasks = func(context.Context) ([]task.Task, error) {
+		t.Error("event loop dialed the target for tasks")
+		return nil, nil
+	}
 	t.Cleanup(func() { remoteListProjects, remoteListTasks = pp, pt })
 }
 

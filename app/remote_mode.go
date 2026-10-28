@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
@@ -25,26 +26,25 @@ import (
 // the event loop, so an unreachable target degrades the view instead of hanging it.
 var remoteReadTimeout = 5 * time.Second
 
-// remoteListProjects reads the target's project registry. A seam so the app
-// tests can stub it without dialing a daemon.
-var remoteListProjects = func() ([]config.Project, error) {
+// remoteListProjects reads the target's project registry, abandoning the read
+// when ctx ends. A seam so the app tests can stub it without dialing a daemon.
+var remoteListProjects = func(ctx context.Context) ([]config.Project, error) {
 	c, err := apiclient.NewTargeted()
 	if err != nil {
 		return nil, err
 	}
 	defer c.CloseIdleConnections()
-	return c.ListProjects()
+	return c.ListProjectsContext(ctx)
 }
 
-// remoteListTasks reads every task on the target. A seam like remoteListProjects.
-var remoteListTasks = func() ([]task.Task, error) {
+// remoteListTasks reads every task on the target, abandoning the read when ctx
+// ends. A seam like remoteListProjects.
+var remoteListTasks = func(ctx context.Context) ([]task.Task, error) {
 	c, err := apiclient.NewTargeted()
 	if err != nil {
 		return nil, err
 	}
 	defer c.CloseIdleConnections()
-	ctx, cancel := context.WithTimeout(context.Background(), remoteReadTimeout)
-	defer cancel()
 	return c.ListTasks(ctx)
 }
 
@@ -84,41 +84,34 @@ func (c *remoteCache) apply(r *remoteReads) {
 	}
 }
 
-// fetchRemoteReads reads the target's registry and tasks concurrently, each
-// bounded by remoteReadTimeout. The client's own deadline is minutes, so the
-// bound is enforced here: a target that accepts the connection and never
-// answers costs one timeout per poll in the background goroutine, not a frozen
-// TUI. Call it only off the event loop.
-func fetchRemoteReads() *remoteReads {
-	type projectsResult struct {
-		p   []config.Project
-		err error
+// fetchRemoteReads reads the target's registry and tasks concurrently under one
+// deadline of remoteReadTimeout, derived from parent (the model's lifetime
+// context). It touches no model state: both reads write only their own locals
+// and the function RETURNS the result for Update to apply. It does not return
+// until both reads have, and both are cancelled by the deadline or by parent, so
+// no goroutine outlives the call — or, through parent, the model that owns it.
+// Call it only off the event loop.
+func fetchRemoteReads(parent context.Context) *remoteReads {
+	// Read the seams on the caller's goroutine, not inside the workers.
+	listProjects, listTasks := remoteListProjects, remoteListTasks
+	if parent == nil {
+		parent = context.Background()
 	}
-	type tasksResult struct {
-		t   []task.Task
-		err error
-	}
-	pc, tc := make(chan projectsResult, 1), make(chan tasksResult, 1)
-	go func() { p, err := remoteListProjects(); pc <- projectsResult{p, err} }()
-	go func() { t, err := remoteListTasks(); tc <- tasksResult{t, err} }()
-	timeout := time.After(remoteReadTimeout)
+	ctx, cancel := context.WithTimeout(parent, remoteReadTimeout)
+	defer cancel()
 	out := &remoteReads{}
-	gotP, gotT := false, false
-	for !gotP || !gotT {
-		select {
-		case r := <-pc:
-			out.projects, out.projectsErr, gotP = r.p, r.err, true
-		case r := <-tc:
-			out.tasks, out.tasksErr, gotT = r.t, r.err, true
-		case <-timeout:
-			err := fmt.Errorf("the daemon at %s did not answer within %s", apiclient.RemoteTargetURL(), remoteReadTimeout)
-			if !gotP {
-				out.projectsErr = err
-			}
-			if !gotT {
-				out.tasksErr = err
-			}
-			return out
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); out.projects, out.projectsErr = listProjects(ctx) }()
+	go func() { defer wg.Done(); out.tasks, out.tasksErr = listTasks(ctx) }()
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		unanswered := fmt.Errorf("the daemon at %s did not answer within %s", apiclient.RemoteTargetURL(), remoteReadTimeout)
+		if out.projectsErr != nil {
+			out.projectsErr = unanswered
+		}
+		if out.tasksErr != nil {
+			out.tasksErr = unanswered
 		}
 	}
 	return out

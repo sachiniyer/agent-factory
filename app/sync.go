@@ -94,6 +94,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	repoID := m.repoID
 	repoRoot := m.repoRoot
 	fetch := m.snapshotFetcher
+	lifetime := m.ctx
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
 	return func() tea.Msg {
@@ -108,7 +109,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		var tasks []task.Task
 		var tasksErr error
 		if isRemoteTarget() {
-			remote = fetchRemoteReads()
+			remote = fetchRemoteReads(lifetime)
 			if repoID != "" {
 				tasks, tasksErr = filterTasksToProject(remote.tasks, repoRoot, repoID), remote.tasksErr
 			}
