@@ -42,6 +42,17 @@ type HostConfig struct {
 	// WorkspaceRoot is the directory on the host under which each session gets
 	// its own workspace dir. Optional — empty means the host's default session root.
 	WorkspaceRoot string `json:"workspace_root,omitempty" toml:"workspace_root,omitempty"`
+	// HostKeyVerification overrides ssh.host_key_verification for this host only:
+	// "strict", "accept-new" or "insecure". Optional — empty uses the global
+	// setting, whose own default is strict. Incompatible with UseSSHConfig, where
+	// the operator's ssh_config is the host-key authority instead.
+	HostKeyVerification string `json:"host_key_verification,omitempty" toml:"host_key_verification,omitempty"`
+	// UseSSHConfig opts this host into the operator's ssh_config (jump hosts,
+	// ProxyJump, ProxyCommand, per-host keys). Off by default: af then composes the
+	// whole ssh command itself with `-F none` and its own host-key posture, the way
+	// backend = "ssh" does. When on, af still pins the connection to one machine,
+	// but host-key checking is ssh's own, exactly as for sandbox.ssh.
+	UseSSHConfig bool `json:"use_ssh_config,omitempty" toml:"use_ssh_config,omitempty"`
 }
 
 const maxHostNameLen = 62 // after the first character
@@ -82,6 +93,15 @@ func ValidateHostEntry(name string, entry HostConfig) error {
 	}
 	if entry.Port < 0 || entry.Port > 65535 {
 		return fmt.Errorf("hosts.%s.port must be between 1 and 65535 (or omitted for 22), got %d", name, entry.Port)
+	}
+	if entry.HostKeyVerification != "" {
+		if !IsValidSSHHostKeyVerification(entry.HostKeyVerification) {
+			return fmt.Errorf("hosts.%s.host_key_verification must be one of [%s, %s, %s], got %q",
+				name, SSHHostKeyStrict, SSHHostKeyAcceptNew, SSHHostKeyInsecure, entry.HostKeyVerification)
+		}
+		if entry.UseSSHConfig {
+			return fmt.Errorf("hosts.%s sets both host_key_verification and use_ssh_config; with use_ssh_config your ssh_config decides host-key checking, so remove host_key_verification", name)
+		}
 	}
 	for field, v := range map[string]string{"identity_file": entry.IdentityFile, "workspace_root": entry.WorkspaceRoot} {
 		if v == "" {

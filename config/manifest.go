@@ -501,7 +501,7 @@ var configManifest = []ManifestEntry{
 		Key:        "hosts",
 		Type:       "table",
 		Default:    "none",
-		Purpose:    "Named hosts sessions can run on · one entry per name with host (the ssh destination), and optional user, port, identity_file and workspace_root · set the whole table with compact JSON · global-only: af executes against these hosts and sends credentials to them, so no repo can set or extend the list.",
+		Purpose:    "Named hosts sessions can run on · one entry per name with host (the ssh destination), and optional user, port, identity_file, workspace_root, host_key_verification and use_ssh_config (opt that host into your ssh_config) · set the whole table with compact JSON · global-only: af executes against these hosts and sends credentials to them, so no repo can set or extend the list.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalOnly,
