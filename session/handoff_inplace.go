@@ -79,11 +79,24 @@ func (i *Instance) swapAgentInPlace(target string) (string, error) {
 // confirmed stop of the old agent and the start of the new one (the account
 // handoff's scope rotation). A failing step aborts the swap before anything starts.
 func (i *Instance) swapAgentInPlaceWith(target string, afterStop func() error) (string, error) {
+	return i.swapAgentInPlaceFrom(target, "", afterStop)
+}
+
+// swapAgentInPlaceFrom is swapAgentInPlaceWith with the launch command fixed: a
+// non-empty restart re-executes exactly that command (the account swap's), where
+// an empty one resolves the target agent as a handoff does.
+func (i *Instance) swapAgentInPlaceFrom(target, restart string, afterStop func() error) (string, error) {
 	target = strings.TrimSpace(target)
 	if account, _ := i.AccountSelection(); account != "" {
 		return "", i.accountSwapRefusal(account)
 	}
-	plan, err := i.PrepareAgentSwap(target)
+	var plan AgentSwapPlan
+	var err error
+	if restart != "" {
+		plan, err = i.prepareRestartSwap(target, restart)
+	} else {
+		plan, err = i.PrepareAgentSwap(target)
+	}
 	if err != nil {
 		return "", fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", i.Title, target, err)
 	}

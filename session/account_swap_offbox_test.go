@@ -39,13 +39,37 @@ type acctSwapServer struct {
 	// lets a test damage the host between the two.
 	loseResponse, loseBefore error
 	afterRotate              func()
+	statusErr                error
+	rec                      accountSwapRecorder
 	calls                    int
 	atCall                   struct{ live, next string }
 }
 
 func (s *acctSwapServer) CanSwapAccount() (bool, error) { return s.can, s.canErr }
 
+func (s *acctSwapServer) AccountSwapStatus() (string, string, error) {
+	if s.statusErr != nil {
+		return "", "", s.statusErr
+	}
+	o, p := s.rec.status()
+	return o, p, nil
+}
+
+// SwapAccountInPlace records the terminal outcome the way the real server does,
+// and may then lose the response.
 func (s *acctSwapServer) SwapAccountInPlace() (string, error) {
+	if s.loseBefore != nil {
+		s.calls++
+		return "", s.loseBefore
+	}
+	prog, err := s.rec.run(s.swap)
+	if err == nil && s.loseResponse != nil {
+		return "", s.loseResponse
+	}
+	return prog, err
+}
+
+func (s *acctSwapServer) swap() (string, error) {
 	s.calls++
 	s.atCall.live = readOrEmpty(filepath.Join(s.live, credFile))
 	s.atCall.next = readOrEmpty(filepath.Join(s.next, credFile))
@@ -61,9 +85,6 @@ func (s *acctSwapServer) SwapAccountInPlace() (string, error) {
 	}
 	if s.afterRotate != nil {
 		s.afterRotate()
-	}
-	if s.loseResponse != nil {
-		return "", s.loseResponse
 	}
 	if s.failAfter != nil {
 		if rbErr := rot.restore(); rbErr != nil {
@@ -408,7 +429,7 @@ func TestSwapOffBoxAccountUnknownHostStateAssertsNeitherAccount(t *testing.T) {
 	f := newSwapFixture(t)
 	f.refreshOnHost(t, "work-refreshed-on-host")
 	f.srv.loseResponse = errors.New("transport: connection reset")
-	f.srv.afterRotate = func() { _ = os.RemoveAll(f.w.PrevAccountDir()) } // neither marker remains
+	f.srv.statusErr = errors.New("transport: connection reset") // the terminal record cannot be read either
 
 	_, err := f.inst.SwapOffBoxAccount("alt", false)
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
@@ -419,9 +440,13 @@ func TestSwapOffBoxAccountUnknownHostStateAssertsNeitherAccount(t *testing.T) {
 	assert.Equal(t, secretWork, readOrEmpty(f.workReg), "no write-back from an unknown scope")
 }
 
-func TestSwapOffBoxAccountUnreadableHostIsUnknownToo(t *testing.T) {
+// A server that never ran the request vouches for nothing by itself: the host's
+// markers must agree, or the state is unknown.
+func TestSwapOffBoxAccountNoRecordNeedsTheHostToAgree(t *testing.T) {
 	f := newSwapFixture(t)
-	f.srv.loseResponse = errors.New("transport: connection reset")
+	f.srv.loseBefore = errors.New("transport: connection reset")
+	require.NoError(t, os.RemoveAll(f.w.NextAccountDir())) // contradicts "never ran, staged"
+	// stageAccountNext re-stages, so damage the probe instead.
 	p := f.inst.currentBackend().(*sshBackend).provisioner
 	real := p.runCommandFn
 	p.runCommandFn = func(d time.Duration, script string, stdin io.Reader, c bool) ([]byte, error) {
@@ -433,6 +458,103 @@ func TestSwapOffBoxAccountUnreadableHostIsUnknownToo(t *testing.T) {
 	_, err := f.inst.SwapOffBoxAccount("alt", false)
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
+}
+
+// The server's own record can say it could not restore the scope.
+func TestSwapOffBoxAccountServerThatCouldNotRestoreIsUnknown(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.failAfter = errors.New("start failed (" + accountScopeIndeterminate + ")")
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
+	assert.True(t, f.inst.StartupStateUnknown())
+	acct, _ := f.inst.AccountSelection()
+	assert.Equal(t, "work", acct)
+}
+
+// A status request made while the swap is mid-flight waits for its terminal
+// result: it can never observe the intermediate layout and let the daemon delete
+// the rollback state under a swap that may still fail.
+func TestAccountSwapStatusWaitsForTheRunningSwap(t *testing.T) {
+	var r accountSwapRecorder
+	started, release, got := make(chan struct{}), make(chan struct{}), make(chan [2]string, 1)
+	go func() {
+		_, _ = r.run(func() (string, error) {
+			close(started)
+			<-release
+			return "claude", nil
+		})
+	}()
+	<-started
+	go func() { o, p := r.status(); got <- [2]string{o, p} }()
+	select {
+	case v := <-got:
+		t.Fatalf("status answered %v while the swap was still running", v)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	assert.Equal(t, [2]string{swapOutcomeCommitted, "claude"}, <-got)
+
+	var fresh accountSwapRecorder
+	o, _ := fresh.status()
+	assert.Equal(t, swapOutcomeNone, o)
+	_, _ = fresh.run(func() (string, error) { return "", errors.New("refused") })
+	o, _ = fresh.status()
+	assert.Equal(t, swapOutcomeRolledBack, o)
+	_, _ = fresh.run(func() (string, error) { return "", errors.New(accountScopeIndeterminate) })
+	o, _ = fresh.status()
+	assert.Equal(t, swapOutcomeUnknown, o)
+}
+
+// Siblings are stopped before the scope moves, and one that cannot be confirmed
+// stopped aborts the rotation untouched.
+func TestScopeRotationStopsSiblingsFirst(t *testing.T) {
+	live := rotationHost(t)
+	rot, err := newScopeRotation(tmux.ProgramClaude)
+	require.NoError(t, err)
+
+	var order []string
+	require.NoError(t, rot.rotateAfter(func() error {
+		order = append(order, "siblings")
+		assert.Equal(t, "A", readOrEmpty(filepath.Join(live, credFile)), "the scope has not moved yet")
+		return nil
+	})())
+	assert.Equal(t, []string{"siblings"}, order)
+	assert.Equal(t, "B", readOrEmpty(filepath.Join(live, credFile)))
+
+	live = rotationHost(t)
+	rot, err = newScopeRotation(tmux.ProgramClaude)
+	require.NoError(t, err)
+	err = rot.rotateAfter(func() error { return errors.New("cannot confirm tab \"shell\" stopped") })()
+	require.ErrorContains(t, err, "cannot confirm")
+	assert.Equal(t, "A", readOrEmpty(filepath.Join(live, credFile)), "no rotation under a live sibling")
+	assert.DirExists(t, live+accountNextSuffix)
+}
+
+// The restart re-executes the recorded, attributed launch command — never a
+// re-resolution of the agent's name, and never a command af cannot attribute.
+func TestProvenRestartCommand(t *testing.T) {
+	bin := t.TempDir()
+	claude := filepath.Join(bin, "claude")
+	require.NoError(t, os.WriteFile(claude, []byte("#!/bin/sh\n"), 0o755))
+	notClaude := filepath.Join(bin, "codex")
+	require.NoError(t, os.WriteFile(notClaude, []byte("#!/bin/sh\n"), 0o755))
+
+	inst := &Instance{Title: "s"}
+	_, err := inst.provenRestartCommand("claude")
+	require.ErrorContains(t, err, "no recorded launch command")
+
+	inst.runtimeProgram = claude
+	got, err := inst.provenRestartCommand("claude")
+	require.NoError(t, err)
+	assert.Equal(t, claude, got, "exactly the recorded absolute command")
+
+	inst.runtimeProgram = "claude" // bare: a PATH lookup the workspace could answer
+	_, err = inst.provenRestartCommand("claude")
+	require.Error(t, err, "a bare command is not attributable")
+
+	inst.runtimeProgram = notClaude // overrides pointed claude's slot at codex
+	_, err = inst.provenRestartCommand("claude")
+	require.ErrorContains(t, err, "refusing to restart a different agent")
 }
 
 // A refusal the agent-server itself returned is a definite answer; one that says

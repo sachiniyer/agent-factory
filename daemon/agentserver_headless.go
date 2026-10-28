@@ -498,6 +498,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// W7.6: rotate the account scope and relaunch. Advertised as the
 	// "account-swap" feature.
 	mux.HandleFunc("/v1/agent/swap-account", rpcHandler(hs.SwapAccount))
+	mux.HandleFunc("/v1/agent/swap-account-status", rpcHandler(hs.SwapAccountStatus))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -879,22 +880,6 @@ func (hs *headlessServer) SwapAgent(req agentSwapRequest, resp *agentSwapRespons
 		return session.ErrHandoffUnsupported
 	}
 	program, err := sw.SwapAgentTo(req.Target)
-	if err != nil {
-		return err
-	}
-	resp.OK = true
-	resp.Program = program
-	return nil
-}
-
-// SwapAccount rotates the staged account scope in and relaunches the agent. The
-// request names nothing: the scope is derived from this server's own environment.
-func (hs *headlessServer) SwapAccount(_ struct{}, resp *agentSwapResponse) error {
-	sw, ok := hs.as.(session.AccountSwapper)
-	if !ok {
-		return session.ErrAccountSwapUnsupported
-	}
-	program, err := sw.SwapAccountInPlace()
 	if err != nil {
 		return err
 	}

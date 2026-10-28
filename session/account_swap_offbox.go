@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -72,6 +73,88 @@ const (
 	scopeIncoming            // account.prev holds the old scope: the new account is live
 )
 
+// Terminal outcomes of the sandbox's last account swap, as the agent-server
+// itself recorded them under the lock the swap held.
+const (
+	swapOutcomeNone       = "none"        // no swap has run on this server
+	swapOutcomeCommitted  = "committed"   // the new agent started on the new account
+	swapOutcomeRolledBack = "rolled_back" // the old scope was put back
+	swapOutcomeUnknown    = "unknown"     // the scope could not be put back
+)
+
+// accountSwapRecorder serializes a swap with the question "how did it end?": the
+// swap holds mu from start to its terminal result, so a status request made while
+// it is mid-flight WAITS for it instead of observing an intermediate layout.
+type accountSwapRecorder struct {
+	mu      sync.Mutex
+	outcome string
+	program string
+}
+
+// run executes swap and records how it ended.
+func (r *accountSwapRecorder) run(swap func() (string, error)) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outcome, r.program = swapOutcomeUnknown, "" // until it is terminal
+	program, err := swap()
+	switch {
+	case err == nil:
+		r.outcome, r.program = swapOutcomeCommitted, program
+	case strings.Contains(err.Error(), accountScopeIndeterminate):
+		r.outcome = swapOutcomeUnknown
+	default:
+		r.outcome = swapOutcomeRolledBack
+	}
+	return program, err
+}
+
+// status blocks until any running swap is terminal, then reports its outcome.
+func (r *accountSwapRecorder) status() (outcome, program string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.outcome == "" {
+		return swapOutcomeNone, ""
+	}
+	return r.outcome, r.program
+}
+
+// reconcileSwap learns how a swap whose response was lost actually ended, from the
+// agent-server's own terminal record. Rollback state (account.prev) is never
+// touched on anything less.
+func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper) (committed bool, program string, known bool) {
+	discarded := false
+	for attempt := 0; attempt < 2; attempt++ {
+		outcome, prog, err := sw.AccountSwapStatus()
+		if err != nil {
+			return false, "", false
+		}
+		switch outcome {
+		case swapOutcomeCommitted:
+			return true, prog, true
+		case swapOutcomeRolledBack:
+			return false, "", true
+		case swapOutcomeNone:
+			// The request never ran here (or this server restarted since). Only the
+			// host's own markers can vouch for that, and the staged scope is removed
+			// so a request still in flight cannot run afterwards; a second status
+			// catches one that ran in between.
+			if discarded {
+				return false, "", true // still none after the staged scope is gone
+			}
+			if w.probeScopeState(sshShortStepTimeout) != scopeOutgoing {
+				return false, "", false
+			}
+			if err := w.discardAccountNext(sshShortStepTimeout); err != nil {
+				return false, "", false
+			}
+			discarded = true
+		default:
+			return false, "", false
+		}
+	}
+	return false, "", true
+}
+
 // probeScopeState reads the host afresh (a new shell, not the lost call) and
 // reports which account its live scope holds, from the rotation's own markers.
 func (w *sandboxWorkspace) probeScopeState(timeout time.Duration) scopeState {
@@ -122,6 +205,10 @@ type AccountSwapper interface {
 	// CanSwapAccount reports whether SwapAccountInPlace is available, without side
 	// effects. An error means the answer could not be determined.
 	CanSwapAccount() (bool, error)
+	// AccountSwapStatus reports how the last swap ended, waiting for a running
+	// one to finish: one of the swapOutcome* values and, when committed, the
+	// command launched.
+	AccountSwapStatus() (outcome, program string, err error)
 }
 
 var (
@@ -315,11 +402,12 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	if err != nil && swapOutcomeIndeterminate(err) {
 		// The call may have completed on the host with its response lost. What the
 		// session records must be what the host runs, so ask the host.
-		switch w.probeScopeState(sshShortStepTimeout) {
-		case scopeIncoming:
-			res.Reconciled, err, program = true, nil, ""
-		case scopeOutgoing:
-			// Nothing rotated (or it was put back): fall through as a refusal.
+		switch committed, prog, known := w.reconcileSwap(sw); {
+		case known && committed:
+			res.Reconciled, err, program = true, nil, prog
+		case known:
+			// The agent-server reports a terminal rollback (or that it never ran):
+			// the old account is live. Fall through as a refusal.
 		default:
 			// Neither account can be asserted. Nothing is written back from a scope
 			// of unknown identity, and nothing relaunches into it.
@@ -380,7 +468,13 @@ func (i *Instance) recordOffBoxAccount(name, agent string, automatic bool, progr
 func (s *localAgentServer) SwapAccountInPlace() (string, error) {
 	s.agentOpMu.Lock()
 	defer s.agentOpMu.Unlock()
-	return s.inst.swapAccountInPlace()
+	return s.acctSwap.run(s.inst.swapAccountInPlace)
+}
+
+// AccountSwapStatus is the terminal record, served after any running swap ends.
+func (s *localAgentServer) AccountSwapStatus() (string, string, error) {
+	outcome, program := s.acctSwap.status()
+	return outcome, program, nil
 }
 
 // CanSwapAccount is always true for the local runtime: it owns the tmux session.
@@ -396,6 +490,12 @@ func (i *Instance) swapAccountInPlace() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The command that was proven and is running, byte for byte: never a
+	// re-resolution of the agent name, and never one af cannot attribute.
+	restart, err := i.provenRestartCommand(agent)
+	if err != nil {
+		return "", err
+	}
 	i.mu.Lock()
 	i.restartingSameAgent = true
 	i.mu.Unlock()
@@ -404,7 +504,7 @@ func (i *Instance) swapAccountInPlace() (string, error) {
 		i.restartingSameAgent = false
 		i.mu.Unlock()
 	}()
-	program, err := i.swapAgentInPlaceWith(agent, rot.rotate)
+	program, err := i.swapAgentInPlaceFrom(agent, restart, rot.rotateAfter(i.stopSiblingsForAccountSwap))
 	if err != nil {
 		// The scope may have been rotated before the start failed; leave it as A so
 		// a retry or a relaunch finds the identity the row still records.
@@ -414,6 +514,66 @@ func (i *Instance) swapAccountInPlace() (string, error) {
 		return "", err
 	}
 	return program, nil
+}
+
+// provenRestartCommand is the command the running agent was launched with — the
+// runtime evidence the launch recorded — re-proven attributed. The local swap
+// restarts the same evidence; an account-scoped agent-server proved it before the
+// first start (RequireAttributedAccountProgram) and this proves it again, so the
+// restart cannot launch anything else.
+func (i *Instance) provenRestartCommand(agent string) (string, error) {
+	command := i.RuntimeProgram()
+	if command == "" {
+		command = i.ResolvedPaneProgram()
+	}
+	if strings.TrimSpace(command) == "" {
+		return "", fmt.Errorf("session %q has no recorded launch command to restart; refusing to guess one for an account-scoped agent", i.Title)
+	}
+	if got := sessionenv.AgentForCommand(command); got != agent {
+		return "", fmt.Errorf("session %q's launch command %q runs %q, not %q; refusing to restart a different agent under the account", i.Title, command, got, agent)
+	}
+	if err := RequireAttributedAccountProgram(command, agent); err != nil {
+		return "", err
+	}
+	return command, nil
+}
+
+// prepareRestartSwap is PrepareAgentSwap for the account swap: the same runtime
+// gates, with the launch command fixed to restart.
+func (i *Instance) prepareRestartSwap(target, restart string) (AgentSwapPlan, error) {
+	if err := i.ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
+		return AgentSwapPlan{}, err
+	}
+	if err := i.ValidateHandoffTarget(target); err != nil {
+		return AgentSwapPlan{}, err
+	}
+	if !i.Capabilities().Handoff {
+		return AgentSwapPlan{}, ErrHandoffUnsupported
+	}
+	return prepareAgentSwapFrom(i, target, restart)
+}
+
+// stopSiblingsForAccountSwap stops every other credential-bearing pane — shell and
+// process tabs inherited the scope — exactly as the local swap does, so none
+// survives the rotation holding the old account or a dangling scope. A pane that
+// cannot be confirmed stopped aborts the swap before anything rotates.
+func (i *Instance) stopSiblingsForAccountSwap() error {
+	b, ok := i.currentBackend().(*LocalBackend)
+	if !ok {
+		return fmt.Errorf("session %q has no local runtime whose panes can be stopped", i.Title)
+	}
+	return b.stopForAccountSwap(i, true)
+}
+
+// rotateAfter is the swap's post-stop step: siblings are stopped first, and only
+// when that is confirmed does the scope move.
+func (r *scopeRotation) rotateAfter(stopSiblings func() error) func() error {
+	return func() error {
+		if err := stopSiblings(); err != nil {
+			return err
+		}
+		return r.rotate()
+	}
 }
 
 // scopeRotation is the directory dance, derived from the environment only.
@@ -520,5 +680,22 @@ func (s *remoteAgentServer) SwapAccountInPlace() (string, error) {
 	return resp.Program, nil
 }
 
-func (s *deadRemoteAgentServer) SwapAccountInPlace() (string, error) { return "", s.err() }
-func (s *deadRemoteAgentServer) CanSwapAccount() (bool, error)       { return false, s.err() }
+type accountSwapStatusResp struct {
+	OK      bool   `json:"ok"`
+	Outcome string `json:"outcome"`
+	Program string `json:"program"`
+}
+
+// AccountSwapStatus asks the sandbox how its last swap ended. The request waits
+// for a swap still running there, which is what makes the answer terminal.
+func (s *remoteAgentServer) AccountSwapStatus() (string, string, error) {
+	var resp accountSwapStatusResp
+	if err := s.rc.callWithin("/v1/agent/swap-account-status", struct{}{}, &resp, AgentRelaunchCallTimeout); err != nil {
+		return "", "", err
+	}
+	return resp.Outcome, resp.Program, nil
+}
+
+func (s *deadRemoteAgentServer) AccountSwapStatus() (string, string, error) { return "", "", s.err() }
+func (s *deadRemoteAgentServer) SwapAccountInPlace() (string, error)        { return "", s.err() }
+func (s *deadRemoteAgentServer) CanSwapAccount() (bool, error)              { return false, s.err() }
