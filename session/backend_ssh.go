@@ -231,6 +231,11 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// unbuilt hosts (#5571 W2.2) — global-only config, so it can never be
 	// repo-supplied.
 	p.sandboxBinary = strings.TrimSpace(cfg.Config.SandboxBinary)
+	// A listed host's verdict lives under host:<name> — the key the catalog and
+	// `af doctor` read — not under the composed (per-create pinned) ssh command.
+	if listed != nil {
+		p.readinessKey = HostReadinessKey(hostName)
+	}
 	res, err := p.provision()
 	if err != nil {
 		// Best-effort reap whatever the failed provision left behind. Preserve any
