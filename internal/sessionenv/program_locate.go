@@ -26,6 +26,10 @@ type ProgramExecutable struct {
 	// HasPATH. The last assignment wins, as in a shell.
 	PATH    string
 	HasPATH bool
+	// PATHDynamic is true when the command assigns PATH from something computed
+	// at run time. It only matters to a bare-name lookup: a path-qualified
+	// executable never consults PATH, so it is reported, not refused (#5781).
+	PATHDynamic bool
 	// Opaque is true when the command changes lookup in a way a host probe
 	// cannot reproduce — env -i, env -u PATH, env -C. Such a command is not
 	// resolved; it runs as written.
@@ -36,8 +40,9 @@ type ProgramExecutable struct {
 // looking through leading assignments, the exec builtin and an env wrapper. It
 // returns ErrNoProgramExecutable when the command is only assignments or empty,
 // ErrProgramNotLiteral when it is not one simple call (a pipeline), and
-// ErrProgramDynamic when the executable word, or the PATH it is looked up in,
-// is computed at run time.
+// ErrProgramDynamic when the executable word is computed at run time. A
+// computed PATH is not an error here: it sets PATHDynamic, and the caller
+// refuses it only when the executable is a bare name that PATH would resolve.
 //
 // Only what decides WHICH program runs has to be literal: the leading words up
 // to and including the executable, and a PATH assignment. Arguments after the
@@ -64,10 +69,7 @@ func LocateProgramExecutable(command string) (ProgramExecutable, error) {
 		if assign.Value != nil && !assign.Append && assign.Index == nil && assign.Array == nil {
 			value, literal = literalShellWord(assign.Value)
 		}
-		if !literal {
-			return ProgramExecutable{}, ErrProgramDynamic
-		}
-		out.PATH, out.HasPATH = value, true
+		out.PATH, out.HasPATH, out.PATHDynamic = value, literal, !literal
 	}
 	words, _ := stripExecPrefix(call.Args)
 	if len(words) == 0 {
@@ -107,10 +109,11 @@ func LocateProgramExecutable(command string) (ProgramExecutable, error) {
 				out.Opaque = true
 				continue
 			}
-			if strings.Contains(m.Value, dynamicMark) {
-				return ProgramExecutable{}, ErrProgramDynamic
+			dyn := strings.Contains(m.Value, dynamicMark)
+			out.PATH, out.HasPATH, out.PATHDynamic = m.Value, !dyn, dyn
+			if dyn {
+				out.PATH = ""
 			}
-			out.PATH, out.HasPATH = m.Value, true
 		}
 	}
 	word := words[idx]
@@ -129,17 +132,45 @@ const dynamicMark = "\x00dynamic"
 
 // dynamicWordPlaceholder stands in for a word whose value is computed at run
 // time when env's operands are parsed. A word that starts NAME= keeps that
-// shape — env treats it as an assignment whatever the value expands to — so
-// its name, and only its name, is known.
+// shape — env treats it as an assignment whatever the value expands to, and
+// whether or not the whole word is quoted ("VAR=$HOME/x", #5780) — so its
+// name, and only its name, is known.
 func dynamicWordPlaceholder(word *syntax.Word) string {
-	if len(word.Parts) > 0 {
-		if lit, ok := word.Parts[0].(*syntax.Lit); ok {
-			if name, _, found := strings.Cut(lit.Value, "="); found && validAssignmentName(name) {
-				return name + "=" + dynamicMark
-			}
-		}
+	if name, _, found := strings.Cut(leadingLiteral(word.Parts), "="); found && validAssignmentName(name) {
+		return name + "=" + dynamicMark
 	}
 	return dynamicMark
+}
+
+// leadingLiteral returns the literal text a word starts with, looking through
+// the first quoting layer; it stops at the first expansion.
+func leadingLiteral(parts []syntax.WordPart) string {
+	var b strings.Builder
+	for _, part := range parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			b.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			b.WriteString(leadingLiteral(p.Parts))
+			if !allLiteral(p.Parts) {
+				return b.String()
+			}
+		default:
+			return b.String()
+		}
+	}
+	return b.String()
+}
+
+func allLiteral(parts []syntax.WordPart) bool {
+	for _, part := range parts {
+		if _, ok := part.(*syntax.Lit); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func validAssignmentName(name string) bool {
@@ -161,8 +192,8 @@ var (
 	// ErrProgramNotLiteral: the command is not one literal simple call, so no
 	// word can be named as its executable without guessing.
 	ErrProgramNotLiteral = errors.New("the command is not one literal simple command")
-	// ErrProgramDynamic: the executable word, or the PATH it is looked up in,
-	// is computed at run time. The returned offsets, when set, locate the word.
+	// ErrProgramDynamic: the executable word is computed at run time. The
+	// returned offsets, when set, locate the word.
 	ErrProgramDynamic = errors.New("the executable word or its PATH is computed at run time")
 )
 

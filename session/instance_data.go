@@ -558,11 +558,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// Pick backend based on persisted BackendType.
 	switch {
 	case isSandboxBackendType(data.BackendType):
-		// A sandbox session (docker/ssh/hook, #1592 Phase 4 PR6/PR7) has no
+		// A sandbox session (docker/ssh/sandbox/hook, #1592 Phase 4 PR6/PR7) has no
 		// daemon-side worktree or tmux to reconstruct — its workspace lived in a
-		// container/remote/user-provisioned sandbox that does not survive a daemon
-		// restart; only its pushed branch on origin does. Rebuild only an INERT
-		// sandbox backend so the row still classifies as its runtime
+		// container/remote/user-provisioned sandbox. The load itself is inert: an
+		// ssh/sandbox row that persisted a runtime identity is reattached afterwards
+		// by restoreInstances (W1.5); any other row relies on its pushed branch on
+		// origin. Rebuild only an INERT sandbox backend so the row still classifies as its runtime
 		// (Type/Capabilities) for archive + restore; the live runtime is
 		// re-provisioned on restore (re-running launch_cmd for hook), never
 		// reconstructed here.
@@ -811,9 +812,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return inertReturn(), nil
 	}
 
-	// A non-archived sandbox session (docker/ssh/hook) cannot be driven on load: its
-	// container/remote is gone after a daemon restart and only its pushed branch
-	// on origin survives (#1592 Phase 4 PR6). Load it INERT + Lost — started stays
+	// A non-archived sandbox session (docker/ssh/sandbox/hook) cannot be driven on
+	// load: the reattach (W1.5) is a separate step, run by restoreInstances after
+	// the rows are published, and only for ssh/sandbox rows with a persisted
+	// runtime identity. Everything else (docker, hook, pre-W1.1 rows, a failed
+	// reattach) recovers by re-provisioning from the branch pushed to origin
+	// (#1592 Phase 4 PR6). Load it INERT + Lost — started stays
 	// false, so the status poll and the Lost-restore loop both pass it by (the
 	// #1028 started=false fence) — and let an explicit restore re-provision a fresh
 	// sandbox from the branch. Skipping Start also avoids driving the recursive

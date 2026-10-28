@@ -439,15 +439,17 @@ Versions before #791 installed one systemd timer / launchd plist **per task** (`
 
 ```bash
 af tasks list [--all]
-af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--on-complete keep|archive|kill] [--program <agent>]
-af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill]
+af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--on-complete keep|archive|kill] [--host <name>] [--program <agent>]
+af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--host <name>]
 af tasks get <id-or-name>
 af tasks show <id-or-name>     # human-readable: schedule health and audit trail
-af tasks update <id-or-name> [--cron …|--watch-cmd …] [--prompt …|--prompt-file <path>] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--project-path <repo>] [--program <agent>] [--enabled true|false]
+af tasks update <id-or-name> [--cron …|--watch-cmd …] [--prompt …|--prompt-file <path>] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--host <name>|--host ""] [--project-path <repo>] [--program <agent>] [--enabled true|false]
 af tasks restart <id-or-name>  # enabled watch tasks only; reloads an edited script
 af tasks trigger <id-or-name>  # cron tasks only
 af tasks remove <id-or-name>
 ```
+
+`--host <name>` places every session the task creates (including a missing `--target-session`) on a host from your global `hosts` list, over ssh. A name that is not in the list is refused when you add or update the task, with the same message `af sessions create --host` gives; `--host ""` on `update` clears it. The same flag exists on `af sessions send-prompt --create`, where it applies only to a session that call creates.
 
 `<id-or-name>` accepts a task's id or its exact name. An id match always wins — a name that collides with another task's id still resolves to the id — while a name resolves only when exactly one task in scope carries it: several in-scope matches are refused with their ids listed, so a shared name can never act on a task at random.
 

@@ -127,6 +127,7 @@ var (
 	taskAddTargetSessionFlag     string
 	taskAddMaxConcurrentRunsFlag int
 	taskAddOnCompleteFlag        string
+	taskAddHostFlag              string
 	taskAddProgramFlag           string
 )
 
@@ -217,6 +218,7 @@ var tasksAddCmd = &cobra.Command{
 			TargetSession:     taskAddTargetSessionFlag,
 			MaxConcurrentRuns: taskAddMaxConcurrentRunsFlag,
 			OnComplete:        taskAddOnCompleteFlag,
+			Host:              strings.TrimSpace(taskAddHostFlag),
 			ProjectPath:       projectPath,
 			Program:           program,
 			Enabled:           true,
@@ -227,6 +229,15 @@ var tasksAddCmd = &cobra.Command{
 		// session), so the CLI surfaces the same wording the API does.
 		if err := s.ValidateTrigger(); err != nil {
 			return jsonError(err)
+		}
+
+		// A host pick must reach a daemon that stores it: one that predates the
+		// field would drop it and every run would silently use the repo's default
+		// backend. The daemon's store refuses a name outside the global host list.
+		if s.Host != "" {
+			if err := requireHostPickOn(hostPickOnTask, s.Host); err != nil {
+				return jsonError(err)
+			}
 		}
 
 		// Route the write through the daemon: it owns scheduling and reloads its
@@ -400,6 +411,7 @@ var (
 	taskUpdateTargetSessionFlag     string
 	taskUpdateMaxConcurrentRunsFlag int
 	taskUpdateOnCompleteFlag        string
+	taskUpdateHostFlag              string
 	taskUpdateProjectPathFlag       string
 	taskUpdateEnabledFlag           string
 	taskUpdateProgramFlag           string
@@ -549,6 +561,15 @@ var tasksUpdateCmd = &cobra.Command{
 		// the two above do (#2595).
 		if cmd.Flags().Changed("on-complete") {
 			patch.OnComplete = strPtr(taskUpdateOnCompleteFlag)
+		}
+		// --host "" clears the pick, so this gates on the flag being passed too.
+		if cmd.Flags().Changed("host") {
+			patch.Host = strPtr(strings.TrimSpace(taskUpdateHostFlag))
+			if *patch.Host != "" {
+				if err := requireHostPickOn(hostPickOnTask, *patch.Host); err != nil {
+					return jsonError(err)
+				}
+			}
 		}
 		// --repo authorizes the task against its CURRENT project. Keep the new
 		// binding separate so a caller can say `--repo old --project-path new`

@@ -3,16 +3,14 @@ package apiclient
 import "os"
 
 // Remote-target resolution (#1592 Phase 3 PR4, §1.6). A TUI/CLI points at a
-// remote daemon with flags, falling back to env; unset ⇒ the local unix socket
+// remote daemon with flags, falling back to env, then the saved target; unset ⇒ the local unix socket
 // (today's behavior, unchanged). The precedence is flag > env, resolved lazily at
 // each client-construction site so a flag parsed by the root command and an env
 // var in a bare `af sessions ...` invocation both take effect through one path.
 //
-// There is deliberately no client-side config FILE (§1.6): flags/env suffice for
-// a single-owner operator, and a client can hold at most one daemon target, so a
-// per-repo/global config layer would only add ambiguity. A `known_daemons` pin
-// file is an additive follow-up if managing several remotes by hand becomes
-// annoying — explicitly out of scope here.
+// Since W9.6 there IS a client-side saved target (savedtarget.go, `af target`),
+// as the lowest-precedence source: flag, then env, then the saved file. It holds
+// at most one target; a per-repo/global config layer would only add ambiguity.
 
 // Env-var names for the remote target, the fallback when the matching flag is
 // unset. Named on the AF_DAEMON_* namespace so they read as "which daemon".
@@ -30,11 +28,40 @@ var (
 	FlagDaemonToken string
 )
 
-// resolveTarget merges flag > env into the effective remote target. An empty
-// daemonURL means "no remote target" — the caller uses the local unix socket.
+// resolveTargetFull merges flag > env > saved into the effective target and says
+// which source won. An empty URL with a nil error means "no remote target" — the
+// caller uses the local unix socket. A non-nil error means the SAVED target
+// failed closed (see savedtarget.go); URL is then empty but the target must be
+// treated as remote so nothing quietly acts on the local daemon.
+//
+// The token follows the URL's source: a flag/env URL takes only the flag/env
+// token, never the saved one.
+func resolveTargetFull() (daemonURL, token string, src TargetSource, err error) {
+	flagOrEnvURL := firstNonEmpty(FlagDaemonURL, os.Getenv(envDaemonURL))
+	flagOrEnvToken := firstNonEmpty(FlagDaemonToken, os.Getenv(envDaemonToken))
+	if flagOrEnvURL != "" {
+		src = TargetEnv
+		if FlagDaemonURL != "" {
+			src = TargetFlag
+		}
+		return flagOrEnvURL, flagOrEnvToken, src, nil
+	}
+	saved, err := LoadSavedTarget()
+	if err != nil {
+		return "", "", TargetSaved, err
+	}
+	if saved != nil {
+		// An explicit token (flag/env) still overrides the saved one for the
+		// saved URL, e.g. a rotated token supplied for one invocation.
+		return saved.URL, firstNonEmpty(flagOrEnvToken, saved.Token), TargetSaved, nil
+	}
+	return "", flagOrEnvToken, TargetLocal, nil
+}
+
+// resolveTarget is resolveTargetFull without the diagnostics, for callers that
+// only branch on remote-or-not.
 func resolveTarget() (daemonURL, token string) {
-	daemonURL = firstNonEmpty(FlagDaemonURL, os.Getenv(envDaemonURL))
-	token = firstNonEmpty(FlagDaemonToken, os.Getenv(envDaemonToken))
+	daemonURL, token, _, _ = resolveTargetFull()
 	return
 }
 
@@ -44,8 +71,8 @@ func resolveTarget() (daemonURL, token string) {
 // this rather than read the environment, or a flag-supplied credential takes the
 // unauthenticated path (#5747).
 func HasDaemonToken() bool {
-	_, token := resolveTarget()
-	return token != ""
+	// Flag/env only: a SAVED operator token is not a sandbox identity.
+	return firstNonEmpty(FlagDaemonToken, os.Getenv(envDaemonToken)) != ""
 }
 
 // IsRemoteTarget reports whether a remote daemon target is configured (a non-empty
@@ -54,8 +81,8 @@ func HasDaemonToken() bool {
 // to suppress the local disk fallback (a remote read has no local disk to fall
 // back to; surfacing the error is correct — see api/sessions.go).
 func IsRemoteTarget() bool {
-	url, _ := resolveTarget()
-	return url != ""
+	url, _, _, err := resolveTargetFull()
+	return url != "" || err != nil
 }
 
 // RemoteTargetURL returns the resolved remote daemon URL, or "" when none is
@@ -74,7 +101,10 @@ func RemoteTargetURL() string {
 // CLI call instead of New(), so pointing at a remote daemon is one flag away and
 // the local path is provably untouched when unset.
 func NewTargeted() (*Client, error) {
-	daemonURL, token := resolveTarget()
+	daemonURL, token, _, err := resolveTargetFull()
+	if err != nil {
+		return nil, err
+	}
 	if daemonURL == "" {
 		return New()
 	}

@@ -45,14 +45,14 @@ func (c *sandboxCredentials) Mint() (session.SandboxCredential, error) {
 	// window opened — the fence comparing equal on both sides while the config it
 	// guards was already stale (#3065 review).
 	fence := c.manager.sandboxTokens.invalidationCount()
-	grant, err := c.manager.mintSandboxCallbackFenced(fence, c.manager.Config(), c.sessionID)
+	grant, err := c.manager.mintSandboxCallbackFenced(fence, c.sessionID)
 	if err != nil {
 		return session.SandboxCredential{}, err
 	}
 	registry := &c.manager.sandboxTokens
 	return session.SandboxCredential{
-		URL:   grant.URL,
-		Token: grant.Token,
+		Token:  grant.Token,
+		Socket: grant.Socket,
 		// Carries the fence with it, so whoever provisions can re-check it after —
 		// the create path and the replacement path both do, through the same
 		// helper. The first version handed back only url+token, and the fence it
@@ -61,7 +61,7 @@ func (c *sandboxCredentials) Mint() (session.SandboxCredential, error) {
 			if grant.stillValid(registry) {
 				return nil
 			}
-			return errSandboxCallbackInvalidated(grant.URL)
+			return errSandboxCallbackInvalidated(grant.Socket)
 		},
 	}, nil
 }

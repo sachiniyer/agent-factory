@@ -378,6 +378,7 @@ func (m *Manager) createMissingPromptTarget(req DeliverPromptRequest) (_ session
 		Title:      req.Title,
 		RepoPath:   req.RepoPath,
 		Program:    req.Program,
+		Host:       req.Host,
 		Prompt:     req.Prompt,
 		TaskRepoID: req.TaskRepoID,
 		TaskOrigin: req.TaskOrigin,

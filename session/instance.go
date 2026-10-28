@@ -28,8 +28,12 @@ type Instance struct {
 	// replacement invalidates it before later manager bookkeeping, which orders a
 	// predecessor side effect either wholly before the replacement or drops it.
 	agentObservationGeneration atomic.Uint64
-	liveBoundaryMu             sync.Mutex
-	liveBoundary               *runtimeLiveBoundary
+	// forceSandboxReplacement is the operator's explicit "replace this sandbox"
+	// intent (`sessions restore --force-reap`) for the recovery in flight; it makes
+	// recovery skip the in-place relaunch. See relaunchOrRecoverSandbox.
+	forceSandboxReplacement atomic.Bool
+	liveBoundaryMu          sync.Mutex
+	liveBoundary            *runtimeLiveBoundary
 	// ID is the instance's stable identity (#1195): a random UUID minted once at
 	// NewInstance, persisted, and never mutated. The reconcile uses it to tell
 	// "same session" from "title reused" (#765) without leaning on CreatedAt
@@ -296,6 +300,10 @@ type Instance struct {
 	// client-side projection. Persisted; surfaces render it under
 	// CallbackUnavailablePrefix. Mutex-protected; see callback_unavailable.go.
 	callbackUnavailable string
+	// hostedRemotely marks an instance running INSIDE a sandbox, where the daemon
+	// holds the session as a remote workspace. It decides which capability
+	// projection the injected guidance is rendered from (guidance.go, #5571 W3.3).
+	hostedRemotely bool
 	// worktreeMissing is true once a bounded probe proved the tracked worktree
 	// path absent with no af relocation owning it — deleted outside af (#5102).
 	// Persisted with the worktree record; see worktree_missing.go for who sets
@@ -449,6 +457,11 @@ type Instance struct {
 	// the resolved command can actually express it, and the conversation the
 	// session ends up with is whatever the launch plan committed to Tabs[0].
 	carriedConversation AgentConversationData
+
+	// reportedConversation is the last conversation a remote agent-server reported
+	// (RecordReportedConversation), held until the daemon-side agent tab exists to
+	// carry it. Guarded by mu.
+	reportedConversation AgentConversationData
 
 	// carriedTabs is the tab roster a PREVIOUS record held, to be rebuilt onto
 	// this instance once its agent tab is live (#2628). It has the same single
