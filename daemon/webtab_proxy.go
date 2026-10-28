@@ -186,6 +186,12 @@ func (m *Manager) WebTabTarget(sessionID, tabID string) (webTabTarget, error) {
 		}
 		return webTabTarget{URL: tabURL, Kind: kind}, nil
 	case session.TabKindVSCode:
+		// An off-box workspace's editor runs on its HOST and is relayed (W5.4);
+		// the daemon's own supervisor is rooted at a daemon-host directory the
+		// workspace does not have, and must never be pointed at one.
+		if instance.Capabilities().Workspace == session.WorkspaceRemote {
+			return m.remoteEditorTarget(instance, repoID, title)
+		}
 		endpoint, err := m.ensureVSCodeServer(instance, repoID, title)
 		if err != nil {
 			return webTabTarget{Kind: kind}, err

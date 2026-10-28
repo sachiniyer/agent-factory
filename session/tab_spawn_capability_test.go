@@ -141,11 +141,11 @@ func TestSandboxInstanceTabSpawnIsPerKind(t *testing.T) {
 			assert.Equal(t, TabKindWeb, webTab.Kind)
 			assert.Nil(t, webTab.tmux, "a web tab must hold no tmux session")
 
-			// Needs the worktree to READ, which off-box cannot serve yet (#3054).
-			_, vscodeErr := newInst().AddVSCodeTab("")
-			require.Error(t, vscodeErr, "AddVSCodeTab must reject a worktree-less sandbox instance")
-			assert.Contains(t, strings.ToLower(vscodeErr.Error()), "editor",
-				"the vscode refusal must name the editor requirement, not a spawn it does not do")
+			// The editor runs on the host (W5.4), so a worktree-less instance whose
+			// runtime has one admits the tab as metadata.
+			vscodeTab, vscodeErr := newInst().AddVSCodeTab("")
+			require.NoError(t, vscodeErr, "AddVSCodeTab serves a worktree-less instance whose host runs the editor")
+			assert.Equal(t, TabKindVSCode, vscodeTab.Kind)
 
 			// Need a PTY in the local worktree.
 			_, shellErr := newInst().AddShellTab()

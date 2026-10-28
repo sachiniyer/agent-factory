@@ -74,6 +74,8 @@ type headlessServer struct {
 	// archive collapses concurrent /v1/agent/archive requests onto one in-flight
 	// archive (#2997 finding 2). See singleFlightArchive.
 	archive singleFlightArchive
+	// editor is the workspace's code-server supervisor (W5.4), created on first use.
+	editor agentEditor
 }
 
 // tabKeeper is the tab-roster surface the /v1/agent/tab-* routes bind to
@@ -412,6 +414,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// tmux session or worktree is orphaned. Durability of in-progress work is the
 	// driving daemon's job (archive = push branch, epic §5), not the agent-server's.
 	_ = closeTCP.close()
+	hs.stopEditor()
 	if err := hs.as.Kill(false); err != nil {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)
 	}
@@ -447,6 +450,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// W7.1: stop the agent and start it again in this workspace, resuming the
 	// provider's conversation. Advertised as the "relaunch" feature.
 	mux.HandleFunc("/v1/agent/relaunch", rpcHandler(hs.Relaunch))
+	mux.HandleFunc(agentproto.EditorPath, rpcHandler(hs.Editor))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -487,6 +491,9 @@ var agentServerWireFeatures = []string{
 	// "relaunch": POST /v1/agent/relaunch — stop the agent and start it again
 	// in this workspace with the provider's resume (#5571 W7.1).
 	session.RelaunchFeature,
+	// "editor": POST /v1/agent/editor and /v1/agent/relay?target=editor — the
+	// workspace's own code-server, relayed to the daemon (#5571 W5.4).
+	agentproto.EditorFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version
@@ -860,6 +867,7 @@ func (hs *headlessServer) Relaunch(_ struct{}, resp *agentOKResponse) error {
 }
 
 func (hs *headlessServer) Kill(_ struct{}, resp *agentOKResponse) error {
+	hs.stopEditor()
 	if err := hs.as.Kill(false); err != nil {
 		return err
 	}

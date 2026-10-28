@@ -71,13 +71,14 @@ func TestGuidanceFollowsTheCapabilityProjection(t *testing.T) {
 
 // A sandbox session's guidance is rendered from the REMOTE runtime's tab
 // admission even though its instance runs the local runtime inside the sandbox:
-// the daemon admits its tabs, and it refuses shell/process/vscode there.
+// the daemon admits its tabs, and it refuses shell/process there (a vscode tab
+// opens the editor on the host, W5.4).
 func TestInSandboxInstanceRendersFromTheRemoteProjection(t *testing.T) {
 	in := &Instance{hostedRemotely: true}
 	caps := in.guidanceCaps()
 	assert.True(t, caps.Callback)
 	assert.False(t, caps.Shell, "the daemon refuses shell tabs on a remote workspace")
-	assert.False(t, caps.VSCode)
+	assert.True(t, caps.VSCode, "the host runs the editor for a remote workspace (W5.4)")
 	assert.True(t, caps.Web, "an external HTTPS web tab works on a remote workspace")
 
 	local := (&Instance{}).guidanceCaps()

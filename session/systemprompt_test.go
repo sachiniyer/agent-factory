@@ -768,8 +768,8 @@ func TestAfUsageReference_NamesTheRemoteTabBoundaryPerKind(t *testing.T) {
 		t.Fatal("af usage still forbids every tab remotely after external web tabs became admissible")
 	}
 	for _, want := range []string{
-		"Shell, process, and VS Code tabs require a local session",
-		"web tabs work on remote sessions too",
+		"Shell and process tabs require a local session",
+		"web and VS Code tabs work on remote sessions too",
 		"shows whatever listens on that port inside the session's own workspace",
 	} {
 		if !strings.Contains(afUsageReference, want) {
