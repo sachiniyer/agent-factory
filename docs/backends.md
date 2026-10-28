@@ -44,6 +44,13 @@ surface — each overrides the repo config for that one session:
   alone (or choosing **Repo default**) keeps the repo's own setting.
 - **Web** — the backend select in the new-session modal, same list, same rule.
 
+A host from your global [`hosts` list](configuration.md) is picked the same way and
+places the session on that host over ssh: `af sessions create --host <name>` (or
+`af sessions send-prompt --create --host <name>`, or `--host` on `af tasks add`), a
+`host: <name>` row in the TUI's `ctrl+r` list and the web's backend select, and a
+**Host** field in the task forms. Every surface refuses a name that is not in the
+list with the same message, and lists an unusable host with the reason.
+
 !!! note "`af agent-server` is a backend, not the web UI"
     The non-local backends work by running an **`af agent-server`** in the remote
     workspace — a headless, single-workspace process that a daemon dials and

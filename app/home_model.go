@@ -420,6 +420,9 @@ type home struct {
 	// so an untouched field keeps today's behavior byte-identical. Reset by
 	// startNewInstance so a cancelled create cannot leak a backend into the next.
 	pendingBackend string
+	// pendingHost is the listed host picked in the same field (#5571 W6.3), or ""
+	// for none. It is cleared everywhere pendingBackend is.
+	pendingHost string
 	// backendPickerPending prevents submitting or switching fields before the
 	// configured new_remote binding has delivered its promised backend picker.
 	backendPickerPending bool

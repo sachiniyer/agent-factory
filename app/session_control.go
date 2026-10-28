@@ -150,6 +150,8 @@ type sessionStartRequest struct {
 	// or "" to let the repo's `backend` config key decide — the same defaulting
 	// `af sessions create` applies when --backend is absent.
 	Backend string
+	// Host is the listed host picked in the same field (#5571 W6.3), or "".
+	Host string
 	// Account is the credential account picked in the naming form's account field
 	// (#3844), or "" for the ambient identity — the same default `af sessions
 	// create` applies with no --account. It is a directory name in the DAEMON's
@@ -181,6 +183,7 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 			Program:   req.Program,
 			Prompt:    req.Prompt,
 			Backend:   req.Backend,
+			Host:      req.Host,
 			Account:   req.Account,
 		})
 		return e

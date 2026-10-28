@@ -557,7 +557,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		case "ctrl+r":
 			// Same swap for the backend hint (#1933).
 			name = keys.KeySetBackend
-			if m.pendingBackend != repoDefaultBackend {
+			if m.backendPicked() {
 				name = keys.KeyEditBackend
 			}
 		case "ctrl+o":

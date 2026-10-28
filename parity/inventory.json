@@ -716,20 +716,20 @@
       "id": "session.create.opt.host",
       "title": "Choose which listed host (global `hosts`) the session runs on, per session",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "app/backend_picker.go backendChoicesFrom appends one row per ListBackends.hosts to the ctrl+r backend field; choosing one sets home.pendingHost -> sessionStartRequest.Host -> daemon.CreateSessionRequest.Host (app/handle_input.go, app/session_control.go)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/backends.ts backendChoices adds a `host:<name>` row per ListBackends.hosts to the New-session select; web/src/api.ts createSession sends it as `host` (never as a backend)"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/sessions.go createHostFlag --host <name> -> daemon.CreateSessionRequest.Host (registered in api/api.go); `af sessions backends` lists each host and its availability via ListBackends.hosts"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5571",
-      "notes": "W6.3 of the sandbox-parity epic. The wire field (CreateSessionRequest.Host) and the CLI flags (`sessions create --host`, `sessions send-prompt --create --host`, via DeliverPromptRequest.Host) landed first; ListBackends already returns the per-host catalog (hosts, default_host) for the pickers. The TUI naming-form picker and the web New-session select are the remaining W6.3 surfaces, tracked on #5571 and claimed in its W6.3 plan comment; when they land, flip those cells to yes and delete the two field_coverage gap declarations for `host`."
+      "notes": "W6.3 of the sandbox-parity epic. Every create surface now picks from the daemon's ListBackends.hosts: the CLI flags (`sessions create --host`, `sessions send-prompt --create --host`), the TUI naming-form backend field and the web New-session select. Each lists an unusable host with the daemon's reason and refuses it, and the daemon refuses a name outside the global list with the same message (config.ValidateHostPick)."
     },
     {
       "id": "session.create.opt.inplace",
@@ -1443,20 +1443,20 @@
       "id": "task.host",
       "title": "Place the sessions a task creates on a listed host (global `hosts`)",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/task_pane.go taskFocusHost + editHost (the \"Host:\" row in ui/task_pane_edit.go); a create lands via app/home_tasks.go task.Task{Host: draft.Host}, an edit via task.DiffTask -> TaskUpdate.Host"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/tasks.ts the Host select in taskFormModal (fed by ListBackends.hosts through loadHosts) and buildTask; web/src/index.ts openEditTask sends a `host` patch only when it changed"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/api.go af tasks add/update --host -> task.Task.Host / TaskUpdate.Host; the daemon's task store refuses a name outside the global host list (task/host.go validateTaskHost) and daemon/taskrun.go sends it as CreateSessionRequest.Host / DeliverPromptRequest.Host"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5571",
-      "notes": "W6.3 of the sandbox-parity epic. The task field, its validation against the global host list and the run path landed with the CLI; the TUI task form and web task modal remain, tracked on #5571 in the W6.3 plan comment. When they land, flip those cells to yes and delete the four field_coverage gap declarations for `host`."
+      "notes": "W6.3 of the sandbox-parity epic. All three surfaces set the task host; the daemon's task store refuses a name outside the global host list (task/host.go validateTaskHost) with the shared config.ValidateHostPick message, so the free-text TUI field cannot save a typo. The web picks from the daemon's catalog and carries a seeded host the catalog no longer lists, so an unrelated edit never clears it."
     },
     {
       "id": "task.remove",
@@ -2273,9 +2273,6 @@
           },
           "in_place": {
             "gap": "session.create.opt.inplace"
-          },
-          "host": {
-            "gap": "session.create.opt.host"
           }
         }
       },
@@ -2466,9 +2463,6 @@
           "task.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
           },
-          "task.host": {
-            "gap": "task.host"
-          },
           "task.repo_id": {
             "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
           }
@@ -2503,14 +2497,14 @@
           "update.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
           },
-          "update.host": {
-            "gap": "task.host"
-          },
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
           "expect.project_path": {
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
+          },
+          "update.host": {
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's Host row (ui/task_pane_edit.go, editHost) writes task.Task.Host and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
           },
           "update.on_complete": {
             "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's On-done row (ui/task_pane_edit.go renderOnCompleteSelector) writes task.Task.OnComplete and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
@@ -2670,9 +2664,6 @@
         "in_place": {
           "gap": "session.create.opt.inplace"
         },
-        "host": {
-          "gap": "session.create.opt.host"
-        },
         "force_remote": {
           "ok": "The web reaches the hook backend explicitly via backend='hook' — its picker never emits force_remote, and the explicit backend wins over the legacy selector (session/instance_factory.go). Same reason the CLI's force_remote cell is `ok`."
         },
@@ -2702,9 +2693,6 @@
         },
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
-        },
-        "update.host": {
-          "gap": "task.host"
         }
       },
       "AddTask": {
@@ -2764,9 +2752,6 @@
         },
         "task.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
-        },
-        "task.host": {
-          "gap": "task.host"
         },
         "task.repo_id": {
           "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
