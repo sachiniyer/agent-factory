@@ -55,8 +55,26 @@ af_refute_screen "Custom: ${cron_re}" \
 # What must survive: the editable input still carries the expression, and the
 # preview line spends itself on the one thing that input cannot say.
 af_assert_screen "Cron.*${cron_re}" 'the editable Cron input still shows the expression'
-af_assert_screen 'Next run [0-9]{4}-[0-9][0-9]-[0-9][0-9]' \
-    'the preview line shows the next fire time instead'
+# The wording depends on the calendar (#5689): a next run more than the 60-day
+# far-out threshold away prints the ISO-dated note, a nearer one the short "Jan
+# 01 00:00" form. Derive which from today's date so the check stays exact on
+# either side of the window instead of accepting both.
+next_jan1="$(( $(date -u +%Y) + 1 ))-01-01"
+if [ "$(date -u +%Y-%m-%d)" = "$(date -u +%Y)-01-01" ]; then
+    next_jan1="$(date -u +%Y)-01-01"
+fi
+days_out=$(( ( $(date -u -d "$next_jan1" +%s) - $(date -u +%s) ) / 86400 ))
+if [ "$days_out" -gt 61 ]; then
+    next_re='Next run [0-9]{4}-[0-9][0-9]-[0-9][0-9]'
+elif [ "$days_out" -lt 59 ]; then
+    next_re='Next run Jan 01 00:00'
+else
+    # Within a day or two of the threshold the box clock and the TUI's disagree
+    # about the side; either wording is a real fire time.
+    next_re='Next run ([0-9]{4}-[0-9][0-9]-[0-9][0-9]|Jan 01 00:00)'
+fi
+af_assert_screen "$next_re" \
+    "the preview line shows the next fire time instead (${days_out} days out)"
 
 # Belt and braces on the whole pane: with the editor open over the rail the
 # expression is on screen exactly once.
