@@ -123,6 +123,22 @@ print(sum(w(c) for c in line[:i]))
 PY
 }
 
+# _last_cell_col LINE NEEDLE — like _cell_col, but the LAST occurrence.
+_last_cell_col() {
+    python3 - "$1" "$2" <<'PY'
+import sys, unicodedata
+line, needle = sys.argv[1], sys.argv[2]
+i = line.rfind(needle)
+if i < 0:
+    print(-1); raise SystemExit
+def w(ch):
+    if ch == '\u200d' or unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1
+print(sum(w(c) for c in line[:i]))
+PY
+}
+
 # --- #3614: the rail row must not overflow, and must keep its dot -----------
 #
 # 88 columns puts the rail at exactly its 22-column minimum: the grid clamps it
@@ -195,7 +211,7 @@ budget below it is now off by one (#3614/#3430)"
 #     opened, so the dot WOULD be written there by a compositor that copies or
 #     cuts the background (the #723 cut, or a regression of #5297);
 #   * after the modal opens neither row keeps any ●, i.e. the margin is blank;
-#   * the modal's own left edge is at the same column on both rows, so a
+#   * the modal's own right edge is at the same column on both rows, so a
 #     miscounted prefix on the clustered row would shift it;
 # Mutation check (see the PR body): restoring the background prefix on modal
 # rows fails the "margin is blank" assertion at the width this finds.
@@ -207,7 +223,7 @@ drive_overlay_background() {
     _af_log "=== overlay: modal rows have blank margins, rows outside keep the backdrop (#723/#5297) ==="
 
     local width height zwj_row plain_row found="" screen
-    local top bottom modal_line plain_line dot_col modal_col zwj_modal_col
+    local top bottom modal_line plain_line dot_col modal_col plain_edge zwj_edge
     for height in 40 30 24 20 16 14 12; do
     for width in $(seq 90 2 200); do
         af_resize "$width" "$height" || return 1
@@ -230,9 +246,14 @@ drive_overlay_background() {
         if [ -n "$top" ] && [ -n "$bottom" ] \
             && [ "$zwj_row" -ge "$top" ] && [ "$zwj_row" -le "$bottom" ] \
             && [ "$plain_row" -ge "$top" ] && [ "$plain_row" -le "$bottom" ]; then
-            modal_line="$(printf '%s\n' "$screen" | sed -n "${plain_row}p")"
-            modal_col="$(_cell_col "$modal_line" '│')"
-            zwj_modal_col="$(_cell_col "$(printf '%s\n' "$screen" | sed -n "${zwj_row}p")" '│')"
+            # The modal's left edge is its top border's corner; a `│` on a row
+            # is NOT usable here, the rail has its own divider.
+            modal_line="$(printf '%s\n' "$screen" | sed -n "${top}p")"
+            modal_col="$(_cell_col "$modal_line" '╭')"
+            # Its right border is the last `│` on each row, which shifts if a
+            # row's prefix was mis-measured.
+            plain_edge="$(_last_cell_col "$(printf '%s\n' "$screen" | sed -n "${plain_row}p")" '│')"
+            zwj_edge="$(_last_cell_col "$(printf '%s\n' "$screen" | sed -n "${zwj_row}p")" '│')"
             # The dot has to be where the modal now is, or a copying compositor
             # would not have shown it either.
             if [ "$modal_col" -gt "$dot_col" ] && [ "$((modal_col - dot_col))" -le 7 ]; then
@@ -264,10 +285,10 @@ background's own cells (#5297/#723)"
             return 1
         fi
     done
-    if [ "$modal_col" != "$zwj_modal_col" ]; then
+    if [ "$plain_edge" != "$zwj_edge" ]; then
         af_capture >&2
-        _af_fail "the modal's left edge is at column $modal_col on the plain row but \
-$zwj_modal_col on the clustered row at ${found}: the clustered row's prefix was mis-measured (#723)"
+        _af_fail "the modal's right edge is at column $plain_edge on the plain row but \
+$zwj_edge on the clustered row at ${found}: the clustered row's prefix was mis-measured (#723)"
         return 1
     fi
     _af_log "=== overlay: PASS at ${found} (both rows in the band, margins blank, edge aligned) ==="
