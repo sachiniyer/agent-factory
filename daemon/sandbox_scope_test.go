@@ -347,7 +347,8 @@ func TestSandboxScope_OperatorIsNotNarrowed(t *testing.T) {
 // unarchived, off-box session in the owner's project, and never creates one.
 func TestSandboxTaskIsRecheckedOnEveryDelivery(t *testing.T) {
 	deliver := func(f *scopeFixture) error {
-		return f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoA, "peer")
+		_, err := f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoA, "peer")
+		return err
 	}
 
 	t.Run("a valid target still delivers", func(t *testing.T) {
@@ -385,7 +386,7 @@ func TestSandboxTaskIsRecheckedOnEveryDelivery(t *testing.T) {
 	})
 	t.Run("the delivery resolved a different project than the owner's", func(t *testing.T) {
 		f := newScopeFixture(t)
-		err := f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoB, "peer")
+		_, err := f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoB, "peer")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errSandboxOutOfScope)
 	})
@@ -401,7 +402,8 @@ func TestSandboxTaskIsRecheckedOnEveryDelivery(t *testing.T) {
 	})
 	t.Run("no target", func(t *testing.T) {
 		f := newScopeFixture(t)
-		assert.ErrorIs(t, f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoA, "  "), errSandboxOutOfScope)
+		_, err := f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoA, "  ")
+		assert.ErrorIs(t, err, errSandboxOutOfScope)
 	})
 }
 
@@ -534,4 +536,44 @@ func TestSandboxAddNeverShadowsAnOperatorTask(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, count, "exactly one task owns the id")
+}
+
+// Authorization returns the target's session ID and delivery goes to exactly that
+// ID: if the authorized session is archived and another takes its title between
+// the check and the send, the prompt must not reach the newcomer (Codex P1 on
+// #5823, daemon/delivery.go).
+func TestSandboxTaskDeliveryIsPinnedToTheAuthorizedSessionID(t *testing.T) {
+	f := newScopeFixture(t)
+	idA, err := f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoA, "peer")
+	require.NoError(t, err)
+	require.Equal(t, f.peer.ID, idA, "authorization names the session by ID")
+	guard := f.mgr.sandboxDeliveryGuard(idA, f.repoA)
+	require.NoError(t, guard(f.peer, f.repoA), "anti-vacuous: the authorized session passes its own guard")
+
+	// B takes the title "peer" in the same project; A is gone from the map.
+	b, err := session.NewInstance(session.InstanceOptions{Title: "peer", Path: f.me.Path, Program: "claude"})
+	require.NoError(t, err)
+	b.SetStartedForTest(true)
+	b.SetStatusForTest(session.Ready)
+	f.mgr.mu.Lock()
+	f.mgr.instances[daemonInstanceKey(f.repoA, "peer")] = b
+	f.mgr.mu.Unlock()
+	require.NotEqual(t, f.peer.ID, b.ID)
+
+	// The guard refuses B outright.
+	err = guard(b, f.repoA)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errSandboxOutOfScope)
+
+	// And the send, addressed by A's ID with the guard, never resolves the title
+	// to B: it is skipped with the not-delivered marker.
+	_, err = f.mgr.SendPromptWithStatus(SendPromptRequest{
+		ID: idA, Title: "peer", RepoID: f.repoA, Prompt: "x", TaskOrigin: true, Guard: guard,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), notDeliveredMarker)
+
+	// A state change on the authorized session itself is refused too.
+	f.peer.SetStatusForTest(session.Archived)
+	assert.ErrorIs(t, guard(f.peer, f.repoA), errSandboxOutOfScope)
 }

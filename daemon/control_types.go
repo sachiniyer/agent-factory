@@ -273,6 +273,11 @@ type SendPromptRequest struct {
 	// manual send-prompt leaves it false because an operator may need to answer a
 	// limit or credits picker in that pane.
 	TaskOrigin bool `json:"-"`
+	// Guard is daemon-internal: when set it runs under the target's op lock, on
+	// the instance the send is about to reach, and may refuse the send. A
+	// sandbox-created task uses it to pin the delivery to the session it
+	// authorized (#5571 W3.5).
+	Guard func(inst *session.Instance, repoID string) error `json:"-"`
 }
 
 type SendPromptResponse struct {

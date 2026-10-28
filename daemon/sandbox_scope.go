@@ -361,19 +361,41 @@ func (s *controlServer) removeTaskScoped(ctx context.Context, req RemoveTaskRequ
 // the session that created the task, and that project must be the one the
 // delivery resolved. Any failure skips the run with the reason; there is no
 // fallback to the task's own project path or to a create.
-func (m *Manager) checkSandboxTaskDelivery(owner, deliveryRepoID, title string) error {
+func (m *Manager) checkSandboxTaskDelivery(owner, deliveryRepoID, title string) (string, error) {
 	if strings.TrimSpace(title) == "" {
-		return sandboxRefusal("the task has no target session")
+		return "", sandboxRefusal("the task has no target session")
 	}
 	proj, inst, err := m.authorizeSandboxSession(owner, "", title, false)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if proj.repoID != deliveryRepoID {
-		return sandboxRefusal("the target is not in the project the task was created in")
+		return "", sandboxRefusal("the target is not in the project the task was created in")
 	}
 	if inst.IsArchived() {
-		return sandboxRefusal("the target session %q is archived", title)
+		return "", sandboxRefusal("the target session %q is archived", title)
 	}
-	return nil
+	return inst.ID, nil
+}
+
+// sandboxDeliveryGuard pins a sandbox task's send to the session ID that
+// checkSandboxTaskDelivery authorized. It runs under the target's op lock on the
+// instance the send is about to reach, so a session that was archived and
+// replaced by another with the same title between the check and the send is
+// refused rather than reached: authorization is by ID and delivery is by that
+// same ID, never a second title resolution.
+func (m *Manager) sandboxDeliveryGuard(id, repoID string) func(*session.Instance, string) error {
+	return func(inst *session.Instance, resolvedRepo string) error {
+		switch {
+		case inst == nil || id == "" || inst.ID != id:
+			return sandboxRefusal("the authorized target session is gone; the title now names another session")
+		case resolvedRepo != repoID:
+			return sandboxRefusal("the target is no longer in the project the task was created in")
+		case inst.IsArchived():
+			return sandboxRefusal("the target session %q is archived", inst.Title)
+		case !offBoxBackendType(instanceBackendType(inst)):
+			return sandboxRefusal("the target session %q now runs on the daemon host", inst.Title)
+		}
+		return nil
+	}
 }

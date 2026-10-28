@@ -252,13 +252,18 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 	unlock := m.lockTarget(repo.ID, req.Title)
 	defer unlock()
 	testHookDeliverAfterTargetLock()
+	var sandboxTargetID string
 	if req.SandboxOwner != "" {
 		// Provenance of a sandbox-created task (#5571 W3.5): the target must STILL
-		// be an existing off-box, unarchived session in the owner's project. Checked
-		// under the target lock so it cannot go stale before the send below.
-		if err := m.checkSandboxTaskDelivery(req.SandboxOwner, repo.ID, req.Title); err != nil {
+		// be an existing off-box, unarchived session in the owner's project. The
+		// check returns the authorized session's ID and the send below goes to
+		// exactly that ID (re-verified under the op lock by the guard), so a title
+		// that is re-pointed at another session after this check is never reached.
+		id, err := m.checkSandboxTaskDelivery(req.SandboxOwner, repo.ID, req.Title)
+		if err != nil {
 			return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
 		}
+		sandboxTargetID = id
 	}
 
 	exists, deleting, err := m.targetSessionState(repo.ID, req.Title)
@@ -289,9 +294,14 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 			}
 			return StatusDeferredAttached, session.PromptNotDelivered, false, nil
 		}
-		deliveryStatus, err := m.SendPromptWithStatus(SendPromptRequest{
+		send := SendPromptRequest{
 			Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
-		})
+		}
+		if req.SandboxOwner != "" {
+			send.ID = sandboxTargetID
+			send.Guard = m.sandboxDeliveryGuard(sandboxTargetID, repo.ID)
+		}
+		deliveryStatus, err := m.SendPromptWithStatus(send)
 		if err != nil {
 			if errors.Is(err, errTargetLimitReached) {
 				return TaskStatusLimitParked, session.PromptNotDelivered, false, nil

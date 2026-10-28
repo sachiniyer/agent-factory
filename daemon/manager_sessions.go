@@ -485,6 +485,11 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	if instance.IsTearingDown() {
 		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
 	}
+	if req.Guard != nil {
+		if gerr := req.Guard(instance, repoID); gerr != nil {
+			return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("%w; %s", gerr, notDeliveredMarker))
+		}
+	}
 	releaseObservationFence := func() {}
 	releaseLimitFence := func() {}
 	if req.TaskOrigin {
