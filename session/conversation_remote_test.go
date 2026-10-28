@@ -170,9 +170,17 @@ func TestLateReportedConversationSurvivesRestartAndResumes(t *testing.T) {
 	require.NoError(t, err)
 	var stored InstanceData
 	require.NoError(t, json.Unmarshal(raw, &stored))
+	// The row the daemon wrote is a sandbox session: it reloads inert, and its
+	// recorded conversation is what a Lost restore sends back.
+	stored.ID, stored.Branch, stored.BackendType, stored.Liveness = "id-late", "root/s", "sandbox", LiveRunning
 	restored, err := FromInstanceData(stored)
 	require.NoError(t, err)
 	assert.Equal(t, late, restored.AgentConversation(), "the resume handle survives the restart")
+	// And the reloaded row, which has no agent tab until Launch seeds one, writes
+	// it back on every checkpoint instead of dropping it.
+	rewritten := restored.ToInstanceData()
+	require.NotNil(t, rewritten.AgentConversation, "a checkpoint of the reloaded row must keep the handle")
+	assert.Equal(t, late.ID, rewritten.AgentConversation.ID)
 
 	// And the restored row resumes with it.
 	s2 := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: restored}
