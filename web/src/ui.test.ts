@@ -18,6 +18,9 @@ import {
   isActionableSession,
   isKillableSession,
   sessionRow,
+  skippedRepoReasonLabel,
+  skippedRepoRepairHint,
+  SKIPPED_REPO_REASON,
   supportsTabManagement,
   tabBarSig,
   tabCreationUnavailableReason,
@@ -666,4 +669,47 @@ test("restore skips confirmation only for known local backends (#4017)", () => {
   for (const backend_type of ["docker", "ssh", "sandbox", "remote", "future-backend"]) {
     assert.equal(restoreRequiresConfirmation(sess({ backend_type })), true);
   }
+});
+
+// The skipped-repo reason/repair-hint helpers (#4742). The daemon stamps stable
+// reason codes (daemon/snapshot.go); the web must NOT reclassify them. The repair
+// hints mirror api/skipped_repos.go verbatim so the web sends the operator to the
+// SAME remedy the CLI does — a different hint here would drift the moment the CLI's
+// is refined. An unknown/empty reason is treated as corrupted, which is all an
+// older daemon ever sent.
+
+test("skippedRepoReasonLabel names each daemon reason and falls back to corrupted for unknown/empty (#4742)", () => {
+  assert.match(skippedRepoReasonLabel(SKIPPED_REPO_REASON.corrupted), /corrupted/i);
+  assert.match(skippedRepoReasonLabel(SKIPPED_REPO_REASON.unreadable), /could not be read/);
+  assert.match(skippedRepoReasonLabel(SKIPPED_REPO_REASON.newerSchema), /newer af/);
+  assert.match(skippedRepoReasonLabel(SKIPPED_REPO_REASON.rowsFailed), /could not be loaded/);
+  // An older daemon sent an empty reason; an unknown value is a future daemon's.
+  // Both must render as corrupted rather than as a missing/blank notice.
+  assert.match(skippedRepoReasonLabel(undefined), /corrupted/);
+  assert.match(skippedRepoReasonLabel(""), /corrupted/);
+  assert.match(skippedRepoReasonLabel("future-reason"), /corrupted/);
+});
+
+test("skippedRepoRepairHint sends the operator to the same remedy as the CLI for each reason (#4742)", () => {
+  // Verbatim mirror of api/skipped_repos.go's four hints — drift is the bug.
+  assert.equal(skippedRepoRepairHint(SKIPPED_REPO_REASON.unreadable),
+    "Make the file(s) readable by the user the af daemon runs as (check ownership, permissions and the disk), then restart the daemon so it re-reads them; do not delete them, they hold the hidden sessions.");
+  assert.match(skippedRepoRepairHint(SKIPPED_REPO_REASON.newerSchema), /Upgrade af to a version that understands the newer state file/);
+  assert.match(skippedRepoRepairHint(SKIPPED_REPO_REASON.rowsFailed), /Restore or delete the sessions the daemon could not load/);
+  assert.match(skippedRepoRepairHint(SKIPPED_REPO_REASON.corrupted), /Stop the af daemon, copy the corrupt file/);
+  // Unknown/empty → the corrupted remedy (the older-daemon default), never blank.
+  assert.equal(skippedRepoRepairHint(undefined), skippedRepoRepairHint(SKIPPED_REPO_REASON.corrupted));
+  assert.equal(skippedRepoRepairHint(""), skippedRepoRepairHint(SKIPPED_REPO_REASON.corrupted));
+  assert.equal(skippedRepoRepairHint("future-reason"), skippedRepoRepairHint(SKIPPED_REPO_REASON.corrupted));
+});
+
+test("each known reason gets a distinct label and hint, so the notice can tell failures apart", () => {
+  const reasons = Object.values(SKIPPED_REPO_REASON);
+  const labels = new Set(reasons.map(skippedRepoReasonLabel));
+  const hints = new Set(reasons.map(skippedRepoRepairHint));
+  // Four distinct codes → four distinct labels and four distinct hints. A collapsed
+  // notice would send every failure to the same remedy, which is the class of bug
+  // the per-reason split exists to prevent (#4783, #4876).
+  assert.equal(labels.size, reasons.length, "each reason has a unique label");
+  assert.equal(hints.size, reasons.length, "each reason has a unique repair hint");
 });

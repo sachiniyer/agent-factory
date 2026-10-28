@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/internal/sshrelay"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -562,10 +563,20 @@ func sshLoginUser(cfg config.SSHConfig) string {
 // be killed by mistake. It moved here when the x/crypto reap was deleted (#3052);
 // it was always transport-agnostic, which is why one copy now serves every
 // backend that reaps a remote agent-server.
-func remotePIDIdentityKillScript(remotePID, afPath string) string {
+//
+// tokenRef adds the second identity check from #5571 W1.1: when the persisted
+// row carries a token reference, /proc/<pid>/environ must yield an AF_TOKEN_REF
+// equal to it — the probe extracts ONLY that variable, never the environment
+// itself — before either signal. An unreadable environ reports "unknown" (75:
+// do not kill, retain and retry) rather than guessing; a ref mismatch reports a
+// definite non-match, exactly as a wrong argv[0] does. Empty tokenRef is a row
+// provisioned before W1.1 (or a remote without /proc, where the ps fallback
+// below stands in for the cmdline check and the ref is left unverified) — the
+// argv[0]-only identity such rows always had, no weaker.
+func remotePIDIdentityKillScript(remotePID, afPath, tokenRef string) string {
 	return fmt.Sprintf(
-		`pid=%s; expected=%s; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ]; return; fi; actual=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 2; actual=${actual#"${actual%%%%[![:space:]]*}"}; case "$actual" in "$expected"|"$expected "*) return 0 ;; *) return 1 ;; esac; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
-		shellQuote(remotePID), shellQuote(afPath))
+		`pid=%s; expected=%s; expected_ref=%s; has_session_ref() { if [ -r "/proc/$pid/environ" ]; then actual_ref=$(tr '\000' '\n' < "/proc/$pid/environ" | sed -n "s/^%s=//p" | sed -n '1p') || return 2; [ "$actual_ref" = "$expected_ref" ]; return; fi; return 2; }; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ] || return 1; if [ -n "$expected_ref" ]; then has_session_ref; return; fi; return 0; fi; actual=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 2; actual=${actual#"${actual%%%%[![:space:]]*}"}; case "$actual" in "$expected"|"$expected "*) return 0 ;; *) return 1 ;; esac; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
+		shellQuote(remotePID), shellQuote(afPath), shellQuote(tokenRef), runtimetoken.RefEnvName)
 }
 
 // expandUserPath expands a leading ~ to the user's home dir, so ssh.identity_file
