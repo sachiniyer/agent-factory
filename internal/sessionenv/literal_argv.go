@@ -164,8 +164,12 @@ func literalArgvWord(word *syntax.Word) (string, bool, bool) {
 					continue
 				}
 				switch c {
-				case '*', '?', '[':
+				case '*', '?':
 					return "", false, false
+				case '[':
+					if bracketMayBeClass(raw, j, i+1 < len(word.Parts)) {
+						return "", false, false
+					}
 				case '~':
 					if wordStart {
 						return "", false, false
@@ -285,4 +289,17 @@ func braceExpandable(unquoted string) bool {
 		}
 	}
 	return false
+}
+
+// bracketMayBeClass reports whether the unquoted `[` at raw[at] can open a glob
+// bracket expression. The shell treats `[` as a pattern only when a closing `]`
+// follows at least one member, so `[`, `[[` (the test builtins as plain words),
+// and the empty `[]` stay literal — which the xargs -I[] marker and a POSIX
+// parse of `[[ … ]]` rely on. A closer that could sit in a later part of the
+// word is unknowable here, so it counts as a class (fail closed).
+func bracketMayBeClass(raw string, at int, laterParts bool) bool {
+	if start := at + 2; start <= len(raw) && strings.IndexByte(raw[start:], ']') >= 0 {
+		return true
+	}
+	return laterParts
 }
