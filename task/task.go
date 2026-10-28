@@ -352,6 +352,12 @@ func AddTask(t Task) error {
 	return err
 }
 
+// ErrTaskIDExists is returned when an add names the ID of a task already in the
+// store. The store refuses it atomically, under the tasks-file lock: an append
+// that shadowed an existing row would let a second record re-arm, replace or
+// impersonate the first (#5571 W3.5, Codex P1 on #5823).
+var ErrTaskIDExists = errors.New("a task with this id already exists")
+
 // AddTaskChecked is AddTask with a final pre-commit validator. The validator
 // runs after RepoID derivation and trigger validation, under the tasks-file
 // lock, so an error guarantees that no task was appended. It must not shell out
@@ -362,12 +368,6 @@ func AddTask(t Task) error {
 //
 // actor names the surface the create came from; it is recorded as this task's
 // first audit entry (#3623).
-// ErrTaskIDExists is returned when an add names the ID of a task already in the
-// store. The store refuses it atomically, under the tasks-file lock: an append
-// that shadowed an existing row would let a second record re-arm, replace or
-// impersonate the first (#5571 W3.5, Codex P1 on #5823).
-var ErrTaskIDExists = errors.New("a task with this id already exists")
-
 func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error) {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return Task{}, err

@@ -123,10 +123,9 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 		return r
 	}
 
-	// The shipped table admits NOTHING, so the gate's admit path is exercised
-	// against a temporary entry. Without this the positive branch would be dead and
-	// the revocation assertion below would pass for the wrong reason — every route
-	// is refused anyway.
+	// A route the table admits is exercised here through a temporary entry too,
+	// so the revocation assertion below stays on a route that is admitted for
+	// this test alone, not on one whose scope may change.
 	sandboxAllowedPaths["/v1/TestOnlyAdmitted"] = true
 	t.Cleanup(func() { delete(sandboxAllowedPaths, "/v1/TestOnlyAdmitted") })
 
@@ -136,10 +135,13 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 		"and must not authorize the route withdrawn as an activity oracle")
 	assert.False(t, admits(gate, request("/v1/DeliverPrompt", secret)),
 		"a sandbox credential must NOT reach DeliverPrompt")
-	assert.False(t, admits(gate, request("/v1/SendPrompt", secret)),
-		"nor SendPrompt, which names a session and so reaches the same authority one agent at a time")
-	assert.False(t, admits(gate, request("/v1/CreateSession", secret)),
-		"nor CreateSession, which names no session and starts one on the host anyway")
+	// W3.5 admits SendPrompt and CreateSession at the gate; the handlers bound
+	// them to the owner's project (daemon/sandbox_scope.go), pinned by
+	// sandbox_scope_test.go.
+	assert.True(t, admits(gate, request("/v1/SendPrompt", secret)),
+		"SendPrompt is admitted at the gate and scoped to the project by its handler")
+	assert.True(t, admits(gate, request("/v1/CreateSession", secret)),
+		"CreateSession is admitted at the gate and bounded to a listed host by its handler")
 	assert.False(t, admits(gate, request("/v1/ListBackends", secret)),
 		"nor ListBackends, whose caller-supplied repo_path is a host path oracle")
 
