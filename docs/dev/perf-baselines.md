@@ -123,6 +123,25 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
 
+### Bundle refresh provenance (#5673)
+
+Master's bundle crossed both budgets on 2026-10-27 (run 40604391077: raw 1,074,498 > 1,074,413.55, gzip 242,312 > 239,969.1). The #5057 baseline (1,023,251 / 228,542) was already 32,832 raw / 9,051 gzip bytes stale when it merged, because the committed bundle was 1,056,083 / 237,593 at that commit, so the budget left almost no headroom. Slim CI (#5615) made this job master-only, so no PR saw the crossing. Committed `web/dist` growth since then, summed per merge (gzip level 9 over `web/dist/**.{js,css}`):
+
+| Merge | Raw | Gzip |
+| --- | ---: | ---: |
+| #5562 config text-field focus | +545 | +84 |
+| #5590 per-write config warnings | +76 | +12 |
+| #4553 tab insert indicator off the bar | +259 | +99 |
+| #5535 shared-modal focus containment | +597 | +151 |
+| #4806 config provenance (TUI and web) | +8,224 | +1,981 |
+| #5577 missing callback degrades create | +836 | +193 |
+| #5058 split-pane close button Enter | +83 | +23 |
+| #5413 skipped repos on Snapshot | +6,446 | +1,955 |
+| #5576 unreachable state for remote sessions | +1,349 | +220 |
+| Total over #5057 | +18,415 | +4,719 |
+
+All of it is feature code (gzip ratio about 26%, in line with the bundle's ~22%, so no incompressible bloat). Both bundle entries were re-recorded with `AF_PERF_RECORD=1 make perf-container` (three identical samples) and copied alone; every timing and layout-shift baseline is unchanged: raw_bytes 1,023,251 → 1,074,498, gzip_bytes 228,542 → 242,312.
+
 ### Bundle refresh provenance (#5057)
 
 PR #5057 adds `clearLoginDraft` (a one-line `ui.ts` helper plus a single gated
