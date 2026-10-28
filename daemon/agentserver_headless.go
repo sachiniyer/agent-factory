@@ -20,6 +20,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
@@ -58,6 +59,9 @@ type headlessServer struct {
 	// production the fallback is dead code; the field exists so the route has
 	// the same bind surface the daemon's streamHandler does.
 	inst *session.Instance
+	// program is the host-resolved agent command, for conversation resume and
+	// capture decisions (#5571 W7.2).
+	program string
 	// tabs is the roster the /v1/agent/tab-* routes create, close, and read —
 	// in production the SAME Instance inst points at, narrowed to the five
 	// methods the routes need so a wire-shape test can substitute a small fake.
@@ -342,11 +346,12 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	}
 
 	hs := &headlessServer{
-		as:     instance.AgentServer(),
-		inst:   instance,
-		tabs:   instance,
-		title:  opts.Title,
-		events: newEventsHub(),
+		as:      instance.AgentServer(),
+		inst:    instance,
+		program: resolvedProgram,
+		tabs:    instance,
+		title:   opts.Title,
+		events:  newEventsHub(),
 	}
 
 	// The bearer token this server expects comes from a 0600 file beside this
@@ -506,11 +511,17 @@ func (hs *headlessServer) healthHandler(w http.ResponseWriter, r *http.Request) 
 // fresh create materializes the worktree and spawns; a restore reconnects.
 type agentLifecycleRequest struct {
 	FirstTimeSetup bool `json:"first_time_setup"`
+	// Conversation is the daemon's recorded conversation for this launch to
+	// resume (#5571 W7.2); honored only where this host's provider store holds it.
+	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
 }
 
 // agentOKResponse is the acknowledgement for the no-return interface methods.
 type agentOKResponse struct {
 	OK bool `json:"ok"`
+	// Conversation is the conversation a launch came up on (#5571 W7.2); the
+	// daemon records it as it does for a local session.
+	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
 }
 
 func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResponse) error {
@@ -522,11 +533,62 @@ func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResp
 }
 
 func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
+	var codexSnap session.ConversationCaptureSnapshot
+	codex := tmux.DetectAgentFromCommand(hs.program) == tmux.ProgramCodex
+	if req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {
+		// A resume flag for a transcript this host does not hold makes the agent
+		// exit on launch, so a fresh workspace starts a new conversation instead.
+		if session.ConversationResumableHere(hs.program, hs.inst.GetWorktreePath(), *req.Conversation) {
+			hs.inst.SetResumeConversation(*req.Conversation)
+		} else {
+			log.InfoLog.Printf("agent-server: conversation %s is not in this host's %s store; starting a new conversation",
+				req.Conversation.ID, req.Conversation.Agent)
+		}
+	}
+	if codex {
+		// Before the spawn, so the capture can tell the new rollout from old ones.
+		codexSnap = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(
+			codexHomeFor(hs.program, hs.inst.GetWorktreePath()), hs.inst.GetWorktreePath())
+	}
 	if err := hs.as.Launch(req.FirstTimeSetup); err != nil {
 		return err
 	}
 	resp.OK = true
+	if conv := hs.inst.AgentConversation(); conv.HasID() {
+		resp.Conversation = &conv
+	} else if codex {
+		hs.captureCodexConversation(codexSnap)
+	}
 	return nil
+}
+
+// agentServerCaptureTimeout bounds how long the server waits for Codex to write
+// the rollout that names its conversation.
+const agentServerCaptureTimeout = 30 * time.Second
+
+func codexHomeFor(program, workDir string) string {
+	if home, err := tmux.CodexHomeFromCommand(program, workDir); err == nil && home != "" {
+		return home
+	}
+	return ""
+}
+
+// captureCodexConversation discovers the Codex conversation id in the
+// background — the capture the daemon Manager runs for a local session — and
+// records it on the instance, from which Snapshot reports it. Bound to the
+// process generation it was started for, so a replaced agent cannot inherit it.
+func (hs *headlessServer) captureCodexConversation(snap session.ConversationCaptureSnapshot) {
+	token := hs.inst.AgentRuntimeToken()
+	if token.Agent() != tmux.ProgramCodex {
+		return
+	}
+	go func() {
+		conv, err := session.CaptureAgentConversation(token.Agent(), snap, agentServerCaptureTimeout)
+		if err != nil || !conv.HasID() {
+			return
+		}
+		hs.inst.SetAgentConversationForRuntime(token, conv)
+	}()
 }
 
 // agentExposeResponse is StreamEndpoint over the wire — where this session's data
@@ -561,6 +623,9 @@ type agentSnapshotResponse struct {
 	// client can distinguish a reported miss from a server that predates the
 	// field.
 	Captured bool `json:"captured"`
+	// Conversation is the conversation identity once the server has one
+	// (#5571 W7.2); omitted until then.
+	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
 }
 
 func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) error {
@@ -574,6 +639,9 @@ func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) erro
 	resp.Content = obs.Content
 	resp.ModelChange = obs.ModelChange
 	resp.Captured = obs.Captured
+	if conv := hs.inst.AgentConversation(); conv.HasID() {
+		resp.Conversation = &conv
+	}
 	return nil
 }
 
