@@ -312,6 +312,16 @@ func requireKnownSandboxBranch(instance *session.Instance) error {
 		instance.Title, killSuggestionFor(instance))
 }
 
+// unreachableAge renders the outage's wall-clock span for refusal prose and
+// logs. Negative durations (clock skew between set and read) floor at zero.
+func unreachableAge(u *session.UnreachableData) string {
+	age := time.Since(u.Since)
+	if age < 0 {
+		age = 0
+	}
+	return age.Round(time.Second).String()
+}
+
 // refuseIndeterminateReap is the message for a sandbox whose reachability could
 // not be established at all — a transport failure or a timed-out probe.
 //
@@ -319,6 +329,16 @@ func requireKnownSandboxBranch(instance *session.Instance) error {
 // be holding hours of unpushed commits, so the decision is to refuse: stranded
 // cloud spend is visible on a bill and fixable afterwards, lost work is neither.
 func refuseIndeterminateReap(repoID string, instance *session.Instance) error {
+	// A row already carrying the outage flag earns the named version: the since
+	// and the last transport error are exactly the evidence the operator needs
+	// to decide between "wait" and "discard" (#5571 W1.3).
+	if u := instance.UnreachableSnapshot(); u != nil {
+		return fmt.Errorf(
+			"cannot restore %q: its sandbox has been unreachable for %s (last error: %s), so af cannot tell whether it is gone or merely unreachable, "+
+				"and replacing it would discard anything it has not pushed. "+
+				"It stays recoverable and the daemon keeps retrying. Recovery guidance: %s",
+			instance.Title, unreachableAge(u), u.Error, reapRefusalSuggestionFor(repoID, instance))
+	}
 	return fmt.Errorf(
 		"cannot restore %q: af could not determine whether its sandbox is gone or merely unreachable, "+
 			"and replacing it would discard anything it has not pushed. "+

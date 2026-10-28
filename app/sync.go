@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -438,7 +439,7 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 			// first would reclassify its adopted op as local — vetoing every later
 			// retry and turning a transient build failure into the permanent stale row
 			// this change exists to prevent.
-			if m.swapInstanceFromSnapshot(d) {
+			if m.swapInstanceFromSnapshot(d, selectedTitle) {
 				m.adoptedSnapshotOps.forget(inst)
 				changed = true
 			}
@@ -457,7 +458,7 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		// Archived→live transition specifically (not merely !Started), so it fires
 		// on real restores without disturbing live in-place updates.
 		if inst.GetLiveness() == session.LiveArchived && snapshotLiveness(inst.GetLiveness(), d) != session.LiveArchived {
-			if m.swapInstanceFromSnapshot(d) {
+			if m.swapInstanceFromSnapshot(d, selectedTitle) {
 				changed = true
 			}
 			continue
@@ -503,6 +504,30 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	// exit without each one having to remember this map (#3005).
 	m.adoptedSnapshotOps.pruneTo(m.store.GetInstances())
 
+	// Re-pin the selection to the same logical instance (by title) if it
+	// survived the reconcile, BEFORE the pane-prune relayout. Re-resolving by
+	// title correctly re-pins across a swap because the rebuilt instance keeps
+	// the same title (#969). The store's SelectInstance records the assertion;
+	// the sidebar moves its cursor onto the asserted row on its next read. If
+	// the selected title is gone from the snapshot, leave the sidebar's own
+	// clamp behavior as-is.
+	//
+	// The re-pin runs ahead of pruneDeadPanes's relayout for the same #5298
+	// reason the swap path pre-pins ahead of its own: that relayout reads the
+	// sidebar (the footer's row-verb target), and a rebuild running while the
+	// cursor still holds its removal-drifted flat index commits the drifted
+	// row via pushSelection and rewrites the lastCursor* identity evidence the
+	// re-pin's replaced-session (by-name) tab lookup depends on. Running the
+	// assertion first turns that relayout's sync into a cursor move on intact
+	// evidence instead of a drift commit. The re-pin still runs after the
+	// per-row loop and the removals above (which shift indices), so it
+	// re-resolves the survivor by title against the post-removal roster.
+	if selectedTitle != "" {
+		if inst := m.store.GetInstanceByTitle(selectedTitle); inst != nil {
+			m.store.SelectInstance(inst)
+		}
+	}
+
 	// Prune panes whose backing session can no longer render — a removed
 	// instance takes its open panes with it (#1088), and a session archived out
 	// of band (`af sessions archive` while the TUI runs, #1028) leaves its pane
@@ -510,21 +535,10 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 	// selectionChanged tick, so the focus ring and pane layout are consistent
 	// the moment the reconcile returns. Unconditional: pruneDeadPanes is O(open
 	// panes) and only relayouts when it actually closed something, so a reconcile
-	// with nothing to prune is a cheap no-op.
+	// with nothing to prune is a cheap no-op. The selection re-pin above already
+	// ran, so this relayout's sidebar sync commits a cursor move, not a drift.
 	if m.pruneDeadPanes() {
 		m.relayout()
-	}
-
-	// Re-pin the selection to the same logical instance (by title) if it
-	// survived the reconcile. Re-resolving by title correctly re-pins across a
-	// swap because the rebuilt instance keeps the same title (#969). The store's
-	// SelectInstance records the assertion; the sidebar moves its cursor onto
-	// the asserted row on its next read. If the selected title is gone from the
-	// snapshot, leave the sidebar's own clamp behavior as-is.
-	if selectedTitle != "" {
-		if inst := m.store.GetInstanceByTitle(selectedTitle); inst != nil {
-			m.store.SelectInstance(inst)
-		}
 	}
 
 	return changed
@@ -563,8 +577,10 @@ func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 // swapInstanceFromSnapshot replaces a stale same-title row with a freshly
 // built instance for the recreated session (#765), preserving the selection.
 // Built BEFORE the swap so a transient build failure leaves the existing row in
-// place rather than dropping it.
-func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
+// place rather than dropping it. selectedTitle is the title of the row the
+// sidebar cursor rested on at the start of this reconcile ("" while it rested on
+// a section header), captured once before the per-row loop — see reconcileSnapshot.
+func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle string) bool {
 	inst, err := buildInstanceFromSnapshot(d)
 	if err != nil {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
@@ -592,13 +608,52 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 		// The row vanished between read and swap; add it fresh.
 		m.store.AddInstance(inst)()
 	}
+	// Record the roster the TUI observed at swap time: the daemon builds a
+	// recreated session's tabs one call at a time, so a poll can swap in a
+	// partial roster, and the real-TUI scenarios (scripts/tui-swap-pane-repin-
+	// scenario.sh, #5620) need this evidence to tell that setup race from a
+	// re-pin defect.
+	tabNames := make([]string, 0, len(inst.GetTabs()))
+	for _, tab := range inst.GetTabs() {
+		tabNames = append(tabNames, tab.Name)
+	}
+	log.InfoLog.Printf("same-title swap of %q: replacement roster [%s]", d.Title, strings.Join(tabNames, ","))
+	// Pre-pin the cursor to the surviving selectedTitle BEFORE any
+	// sidebar-reading relayout this swap can trigger (#5298 ordering, applied
+	// to the swap path). ReplaceInstanceByTitle re-sorts the whole projection,
+	// so a non-selected swap drifts the cursor's flat index too — an open pane
+	// on the swapped session makes reconcilePanesForTabs call relayout, and a
+	// cursor still holding its removal/re-sort drifted flat index then commits
+	// a different row through pushSelection, rewriting lastCursor* and
+	// clobbering that session's tab identity ahead of the tail by-title re-pin.
+	// Re-pin the surviving selectedTitle (by title) so the relayout's sidebar
+	// sync is a cursor move on intact lastCursor* evidence instead of a drift
+	// commit: a non-selected swap re-resolves the still-present row the cursor
+	// was on, and a selected-swap resolves to the fresh replacement
+	// ReplaceInstanceByTitle kept under that title (same instance the old
+	// selectedTitle==d.Title path pinned). ReplaceInstance's silent re-point
+	// deliberately never asserts — a cursor resting on a section header must
+	// not be yanked onto any row — so the empty-title header guard is retained
+	// here, the same capture reconcileSnapshot uses to drive the tail re-pin.
+	// The sidebar consumes the assertion lazily on its next read; the pane
+	// reconcile's relayout (when a pane closed or re-bound) is that read, so
+	// moveCursorToInstance resolves the replacement's equivalent tab by name
+	// from the corpse's intact evidence instead of letting pushSelection commit
+	// the stale flat index and rewrite lastCursor* first.
+	if selectedTitle != "" {
+		if sel := m.store.GetInstanceByTitle(selectedTitle); sel != nil {
+			m.store.SelectInstance(sel)
+		}
+	}
 	// The tree selection is another binding into the same replaced-session
 	// roster. Carry it through the same name domain as panes: every ID is freshly
 	// minted, while the equivalent replacement tab keeps its name (#1991). Bound
 	// before the pane reconcile for the same #5298 reason as the in-place path —
 	// a sidebar-reading relayout must not run while the selection binding is
-	// unresolved — but the CURSOR re-pin still belongs to the reconcile's final
-	// SelectInstance: the re-sort leaves the flattened indices stale until then.
+	// unresolved. The pre-pin above closed the swap's window for the CURSOR too
+	// (the in-place path uses SyncCursorToActiveTab; the swap re-sorts, so it
+	// re-pins by identity via SelectInstance instead), leaving only the active-tab
+	// binding for remapActiveTabForTabs to resolve.
 	m.remapActiveTabForTabs(inst, oldKeys, replacedSessionTabs)
 	if m.reconcilePanesForTabs(inst, oldKeys, replacedSessionTabs) {
 		m.relayout()
@@ -645,6 +700,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		changed = true
 	}
 	if inst.ReconcileTaskRunState(d.TaskRunActive, d.TaskRunIdleEdgeHeld, d.TaskRunTurnGateHeld) {
+		changed = true
+	}
+	// The outage flag is daemon truth on every snapshot: this is the reconcile
+	// path for rows the snapshot updates IN PLACE, where FromInstanceData never
+	// runs (#5571 W1.3).
+	if inst.ReconcileUnreachable(d.Unreachable) {
 		changed = true
 	}
 	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
@@ -706,6 +767,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// cleanup can clear it without changing status, so same-row polls must mirror
 	// both transitions explicitly.
 	if inst.ReconcileArchiveWarning(d.ArchiveWarning) {
+		changed = true
+	}
+	// The callback-absence reason is the same class of axis: a sandbox create
+	// stamps it while liveness stays Ready/Running, and it never flips a status
+	// on its own (#5571 W3.1).
+	if inst.ReconcileCallbackUnavailable(d.CallbackUnavailable) {
 		changed = true
 	}
 	// Automatic restore can exhaust its attempts while liveness stays Lost. Mirror
@@ -792,134 +859,4 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		}
 	}
 	return changed
-}
-
-// reconcileSnapshotOp mirrors the daemon snapshot's operation axis while
-// preserving local optimistic operations until the daemon liveness confirms an
-// outcome. Snapshot ops are transient but authoritative for daemon-side
-// archive/restore windows (#1436); terminal snapshots carry OpNone and clear
-// stale overlays through the Transition chokepoint.
-func (m *home) reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
-	if op != session.OpNone {
-		return m.adoptSnapshotOp(inst, op, lv)
-	}
-
-	switch inst.GetInFlightOp() {
-	case session.OpArchiving, session.OpKilling:
-		if lv == session.LiveArchived || lv == session.LiveLost {
-			_ = inst.Transition(session.ClearOp())
-			m.adoptedSnapshotOps.forget(inst)
-			return true
-		}
-	case session.OpRestoring:
-		if lv != session.LiveArchived {
-			_ = inst.Transition(session.ClearOp())
-			m.adoptedSnapshotOps.forget(inst)
-			return true
-		}
-	case session.OpReplacing:
-		// A daemon handoff owns the replacement fence. Once its snapshot settles
-		// to OpNone, the projection must release the same fence regardless of the
-		// resulting liveness (running, limit-parked, or startup-unknown).
-		_ = inst.Transition(session.ClearOp())
-		m.adoptedSnapshotOps.forget(inst)
-		return true
-	case session.OpRespawning:
-		// Same contract for the limit-resume fence (#2997), and for the same reason:
-		// a respawn settles to running, back to limit-parked, or to lost, so keying
-		// the release on any particular liveness would strand the fence on the
-		// others. This clause is what makes adopting the op above safe — and unlike
-		// OpCreating, a missed release would not even show, since OpRespawning
-		// composes to the settled liveness rather than masking it as Loading.
-		_ = inst.Transition(session.ClearOp())
-		// Drop the provenance with the op, exactly as the three cases above do
-		// (#3005/#3006 landed after this case was written). Leaving it is benign only
-		// by accident — vetoesReconcile short-circuits on OpNone, so the stale entry is
-		// never read — but it survives pruneTo for as long as the row is live, and the
-		// next path that consults provenance without checking the op first would
-		// inherit a wrong answer.
-		m.adoptedSnapshotOps.forget(inst)
-		return true
-	}
-	return false
-}
-
-func (m *home) adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
-	if inst.GetInFlightOp() == op {
-		// Already carrying it, but provenance may not be recorded yet — a row whose
-		// op the daemon reported before this build learned to track it, or one this
-		// reconcile adopted on an earlier pass. Record it either way: the guards ask
-		// about the CURRENT op, not about who set it first.
-		m.adoptedOpsFor().note(inst, op)
-		return false
-	}
-	if inst.GetInFlightOp() != session.OpNone {
-		_ = inst.Transition(session.ClearOp())
-	}
-
-	var err error
-	switch op {
-	case session.OpCreating:
-		err = inst.Transition(session.BeginCreate())
-	case session.OpKilling:
-		err = inst.Transition(session.BeginKill())
-	case session.OpArchiving:
-		if lv == session.LiveArchived {
-			m.adoptedOpsFor().note(inst, op)
-			return true
-		}
-		err = inst.Transition(session.BeginArchive())
-	case session.OpRestoring:
-		err = inst.Transition(session.MarkRestoring())
-	case session.OpReplacing:
-		err = inst.Transition(session.BeginHandoff())
-	case session.OpRespawning:
-		// A limit resume re-spawning the runtime (#2997). Adopted so this TUI's action
-		// gating agrees with the daemon that owns the fence. It DOES also change how
-		// the row reads, which an earlier version of this comment wrongly denied:
-		// ui/tree/render.go masks the liveness glyph for any non-None op, so a
-		// respawning row shows the blank working glyph rather than its limit diamond,
-		// and web/src/status.ts classifies it as working (project.ts counts it that
-		// way). That is consistent with every other op and with #1766 — a resume in
-		// flight IS work in flight — and the "[limit] resets …" title prefix still
-		// renders throughout, so the state is not hidden. Without adopting, this TUI's own
-		// ValidateRuntimeAction(RuntimeActionHandoff) reads OpNone and opens the
-		// picker, and the daemon then refuses the selected handoff because its
-		// authoritative instance still carries the fence — an action offered and
-		// then rejected. The settle path below must clear it; see there for why
-		// adopting is safe here in a way adopting OpCreating on an established row
-		// was not.
-		err = inst.Transition(session.BeginRespawn())
-	default:
-		return false
-	}
-	if err != nil {
-		log.WarningLog.Printf("failed to adopt snapshot op %v for %q: %v", op, inst.Title, err)
-		return false
-	}
-	// The row now carries a DAEMON-owned op with no local completion handler
-	// waiting on it. Recorded here, at the only moment the fact is known (#3005).
-	m.adoptedOpsFor().note(inst, op)
-	return true
-}
-
-// snapshotLiveness resolves the daemon-owned liveness a snapshot record carries
-// (#1195). It prefers the explicit `liveness` field; a record from a daemon that
-// predates the field (LivenessUnset) falls back to the legacy `status` int.
-//
-// A legacy TRANSIENT (Loading/Deleting) carries NO real liveness in the two-axis
-// model — the new daemon only ever sends liveness, so a legacy transient is
-// version-skew noise from an upgrade window. It must NOT be mapped to Ready
-// (LivenessForStatus's default), which would flip a mid-kill row (legacy
-// `status: Deleting`) to Ready during the window. Instead we keep the row's
-// CURRENT liveness untouched; the daemon reports a real liveness on a later poll
-// once it's upgraded. `cur` is the existing row's liveness for exactly this.
-func snapshotLiveness(cur session.Liveness, d session.InstanceData) session.Liveness {
-	if d.Liveness != session.LivenessUnset {
-		return d.Liveness
-	}
-	if d.Status == session.Loading || d.Status == session.Deleting {
-		return cur
-	}
-	return session.LivenessForStatus(d.Status)
 }

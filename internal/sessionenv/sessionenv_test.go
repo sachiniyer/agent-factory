@@ -60,6 +60,22 @@ func TestAgentForCommandAuthenticatesEnvWrapper(t *testing.T) {
 		}
 	}
 }
+func TestAgentForCommandDashTerminatesEnvOptions(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    string
+	}{
+		{command: "env - claude", want: "claude"},
+		{command: "env - -i claude"},
+		{command: "env - -C /evilpath claude"},
+		{command: "/usr/bin/env - -i claude"},
+		{command: "env -i -u PATH claude", want: "claude"},
+	} {
+		if got := AgentForCommand(test.command); got != test.want {
+			t.Errorf("AgentForCommand(%q) = %q, want %q", test.command, got, test.want)
+		}
+	}
+}
 
 func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 	for _, test := range []struct {
@@ -724,5 +740,66 @@ func TestAgentNamespaceForCommandRejectsNonAgentCommands(t *testing.T) {
 				t.Errorf("AgentNamespaceForCommand(%q) = %q, want \"\"", test.command, got)
 			}
 		})
+	}
+}
+
+// TestImportedCredentialNamesCoversTheExpansionUniverse pins the set a launch
+// strips out of a stored tmux update-environment value: every name af's
+// transient expansion can add that is credential- or agent-specific. The
+// helper derives the set from the name tables, so this test's table walk is
+// what keeps it honest — a regression to a hand-listed set fails here the
+// moment the tables grow (#5390).
+func TestImportedCredentialNamesCoversTheExpansionUniverse(t *testing.T) {
+	set := make(map[string]struct{}, len(agentNames))
+	for _, name := range ImportedCredentialNames() {
+		set[name] = struct{}{}
+	}
+	for agent, names := range agentNames {
+		for name := range names {
+			if _, ok := set[name]; !ok {
+				t.Errorf("ImportedCredentialNames() omits %s agent name %s", agent, name)
+			}
+		}
+	}
+	for agent, groups := range conditionalAgentNames {
+		for _, group := range groups {
+			for name := range group.names {
+				if _, ok := set[name]; !ok {
+					t.Errorf("ImportedCredentialNames() omits %s conditional name %s", agent, name)
+				}
+			}
+		}
+	}
+	for agent, names := range accountLateEnvironmentNames {
+		for name := range names {
+			if _, ok := set[name]; !ok {
+				t.Errorf("ImportedCredentialNames() omits %s late-environment name %s", agent, name)
+			}
+		}
+	}
+	for name := range accountShellStartupNames {
+		if _, ok := set[name]; !ok {
+			t.Errorf("ImportedCredentialNames() omits shell startup hook %s", name)
+		}
+	}
+	for _, name := range []string{
+		"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+		"GEMINI_API_KEY", "AMP_API_KEY", "AWS_SECRET_ACCESS_KEY",
+		"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+	} {
+		if _, ok := set[name]; !ok {
+			t.Errorf("ImportedCredentialNames() omits credential name %s", name)
+		}
+	}
+	// Names a plausible hand-set update-environment legitimately carries must
+	// survive the strip: SSH_AUTH_SOCK is even in tmux's compiled default, and
+	// the rest are ordinary routing/locale configuration.
+	for _, name := range []string{
+		"SSH_AUTH_SOCK", "SSH_AGENT_PID", "DISPLAY", "PATH", "HOME",
+		"HTTP_PROXY", "GIT_SSH_COMMAND", "LANG", "LC_ALL",
+	} {
+		if _, ok := set[name]; ok {
+			t.Errorf("ImportedCredentialNames() must not strip plausible operator name %s", name)
+		}
 	}
 }

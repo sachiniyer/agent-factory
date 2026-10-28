@@ -30,9 +30,9 @@ var SessionsCmd = &cobra.Command{
 
 var (
 	createSessionViaDaemon  = daemon.CreateSession
-	killSessionViaDaemon    = daemon.KillSession
-	archiveSessionViaDaemon = daemon.ArchiveSession
-	restoreSessionViaDaemon = daemon.RestoreSession
+	killSessionViaDaemon    = routedKillSession
+	archiveSessionViaDaemon = routedArchiveSession
+	restoreSessionViaDaemon = routedRestoreSession
 	pruneSessionsViaDaemon  = func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
 		// A remote --daemon-url/AF_DAEMON_URL target must receive the prune —
 		// the local control socket would report THIS host's archives for a
@@ -47,7 +47,7 @@ var (
 		return client.PruneSessions(req)
 	}
 	sessionsArchiveSelf     bool
-	sendPromptViaDaemon     = daemon.SendPromptWithStatus
+	sendPromptViaDaemon     = routedSendPrompt
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
 	createTabViaDaemon      = daemon.CreateTab
 	closeTabViaDaemon       = daemon.CloseTab
@@ -165,11 +165,19 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 			// rows); the destructive paths already resolve through findSession.
 			var notice string
 			if !apiclient.IsRemoteTarget() {
-				extra, gaps, err := diskRepoPathsForTitle(title, paths)
-				if err == nil && len(extra) > 1 {
-					return nil, "", session.AmbiguousTitleError(title, extra)
+				// Count distinct PROJECTS by repoID (the storage map key,
+				// never empty), not by Path: the snapshot carries no repoID,
+				// so its primary check above keys on Path and DedupeSorted
+				// drops an empty-Path row, collapsing two distinct repos to
+				// zero and silently returning one of them. The widening
+				// reads the repoID-keyed storage map and so recovers what the
+				// snapshot dropped. The error message keeps the
+				// human-readable repo Paths the user passes to --repo.
+				repoIDs, repoPaths, unreadable, corrupted, err := diskRepoPathsForTitle(title, paths)
+				if err == nil && len(repoIDs) > 1 {
+					return nil, "", session.AmbiguousTitleError(title, repoPaths)
 				}
-				notice = warnIncompleteTitleWidening(title, gaps, err)
+				notice = warnIncompleteTitleWidening(title, unreadable, corrupted, err)
 			}
 			return &matches[0], notice, nil
 		}
@@ -747,6 +755,19 @@ func resolveAttachTarget(title string) (string, string, error) {
 	return instance.Title, repoID, nil
 }
 
+// closeLogForOutputMode is the deferred close for commands whose success path
+// returns nil without going through jsonOut (attach hands the terminal over, so
+// it writes no envelope). Under --json stderr must stay empty on success, so the
+// free-form "wrote logs to ..." note is suppressed; the bare path still prints it
+// (#5649).
+func closeLogForOutputMode() {
+	if envelopeOutput {
+		log.CloseQuiet()
+		return
+	}
+	log.Close()
+}
+
 var sessionsAttachCmd = &cobra.Command{
 	Use:   "attach <title>",
 	Short: "Attach to a session's terminal",
@@ -754,11 +775,33 @@ var sessionsAttachCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
-		defer log.Close()
+		defer closeLogForOutputMode()
 
 		title, repoID, err := resolveAttachTarget(args[0])
 		if err != nil {
 			return jsonError(err)
+		}
+
+		// Apply the configured detach key BEFORE the attach dials. `af sessions
+		// attach` recognizes the detach key CLIENT-side in this process —
+		// apiclient's stdin pump matches tmux.DetachKeyByte live (see
+		// apiclient/trailingDetachKeyLen) — so the global must be armed from
+		// the user's config here, exactly what the TUI does at startup
+		// (app's newHome). Without this, the matcher ran with the hardcoded
+		// default ctrl+w regardless of detach_keys, so a user who customized
+		// the key could not detach with it (ctrl+w tore them out instead),
+		// even though this command's Long help promises "the configured detach
+		// key". config.ApplyConfiguredDetachKey is the shared wiring site so
+		// the CLI and TUI paths cannot drift apart again.
+		//
+		// A config load failure is warned, not fatal: attach only needs the
+		// detach key from config, and the global already defaults to ctrl+w,
+		// so the user can still attach (with the documented default detach)
+		// while a broken config is surfaced rather than silently ignored.
+		if appConfig, cfgErr := config.LoadConfig(); cfgErr != nil {
+			log.WarningLog.Printf("failed to load config for detach key: %v; using default detach key", cfgErr)
+		} else {
+			config.ApplyConfiguredDetachKey(appConfig.DetachKeys)
 		}
 
 		// EVERY session — local or remote — attaches CLIENT-side over the daemon's

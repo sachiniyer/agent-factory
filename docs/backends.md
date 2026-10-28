@@ -239,16 +239,17 @@ only needs the workspace tooling:
   busybox and coreutils each provide all of them.
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
 - A libc/architecture compatible with the daemon's `af` binary. The copied-in
-  binary is the **daemon's own executable**, and release builds are a plain
-  `go build` (cgo on) on `ubuntu-latest` — i.e. **dynamically linked against
-  glibc**. So your base must be **glibc, and its glibc must be ≥ the daemon
-  build's** (`ubuntu-latest` is glibc 2.39 today): `debian:trixie`/`ubuntu:24.04`
-  work, `debian:bookworm` (2.36) is too old, and a musl base (alpine) will not run
-  the binary at all. If you rebuild the daemon on a newer-glibc distro, rebuild the
-  image on a matching-or-newer base. (A **static** `af`, `CGO_ENABLED=0`, would run
-  on any base including alpine — but that is not how release builds are produced;
-  the integration test force-builds a static `af` precisely so it can use an alpine
-  test image.)
+  binary is the **daemon's own executable**, and the release artifacts
+  `install.sh` fetches are a plain `go build` (cgo on) on `ubuntu-latest` —
+  i.e. **dynamically linked against glibc**. So your base must be **glibc, and
+  its glibc must be ≥ the daemon build's** (`ubuntu-latest` is glibc 2.39
+  today): `debian:trixie`/`ubuntu:24.04` work, `debian:bookworm` (2.36) is too
+  old, and a musl base (alpine) will not run the binary at all. If you rebuild
+  the daemon on a newer-glibc distro, rebuild the image on a matching-or-newer
+  base. (Docker keeps this daemon-binary copy on purpose. The sandbox/ssh
+  transports instead stream `agent-factory-linux-<arch>-static.tar.gz` — a
+  CGO_ENABLED=0 release artifact that execs on ANY libc, alpine included —
+  so only docker's image needs this glibc rule.)
 
 The container's internal agent-server port is `8000`; avoid binding it in your
 image.
@@ -388,6 +389,19 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 3. It streams the `af` binary onto the remote and starts an **`af agent-server`**
    bound to `127.0.0.1:0` (a random loopback port — never exposed on the remote's
    public interface), behind the same bearer-token protocol (plain HTTP).
+
+   The bearer token is **per-session**: the daemon derives it from a 0600
+   `sandbox-runtime-key` in its own AF home plus a per-session nonce, and writes
+   it to `af-server-token` (0600) in the session directory, where the remote
+   `af agent-server` reads it — beside its own binary, never through a flag or
+   an environment variable, so nothing the agent-server spawns can inherit it.
+   The session record persists the agent-server's address and version and the
+   nonce reference (`token_ref`) — never the token — so the identity a reattach
+   or a cleanup needs survives a daemon restart. The reference also rides in the
+   agent-server's own environment as `AF_TOKEN_REF` so a host-side
+   `/proc/<pid>/environ` probe can bind the live process to the record; it is
+   the one variable that probe may read, and it never reaches agent or shell
+   panes.
 4. It opens an **SSH local-forward tunnel** from a daemon-local loopback port to
    that remote port and drives the agent-server over `http://127.0.0.1:<localport>`.
    Attach, preview, prompts, and the live terminal stream all flow through the one

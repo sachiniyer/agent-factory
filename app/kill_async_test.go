@@ -215,6 +215,7 @@ func TestTeardownRowHandlersShowMessageNotSilence(t *testing.T) {
 		{"kill", func(h *home) (tea.Model, tea.Cmd) { return h.handleKill() }, "already being deleted"},
 		{"archive", func(h *home) (tea.Model, tea.Cmd) { return h.handleArchive() }, "is being deleted"},
 		{"restore", func(h *home) (tea.Model, tea.Cmd) { return h.handleRestore() }, "is being deleted"},
+		{"handoff", func(h *home) (tea.Model, tea.Cmd) { return h.handleHandoff() }, "is being deleted"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHome(t)

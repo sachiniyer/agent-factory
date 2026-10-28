@@ -257,9 +257,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if workDir != "" {
 			resolution := resolveLaunchProgramForInstance(i)
 			runtimeProgram = resolution.command
-			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command))
+			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command), i.CallbackUnavailable() != "")
 			setLaunchProgram(tmuxSession, program,
-				accountLaunchProof(resolution.command, program, resolution.trustBase))
+				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 		}
 		// And a flagged row's reattach is recovery-inert (ReattachInert): it only
 		// keeps a live pane bound. Through RestoreWithResult it also refreshed the
@@ -300,15 +300,31 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// unconditionally, even when there was no idle evidence to clear.
 			resetAgentBrokerCaptures(i)
 			i.markLoadRuntimeReplaced()
+			// The same verdict the recover path stamps (#4222): a load-time
+			// respawn is a replacement process, so a task run still in flight on
+			// this row ends interrupted rather than finished by the fresh agent's
+			// first idle tick.
+			i.markAgentRuntimeReplaced(true)
 		} else {
 			// A tmux name surviving across daemon downtime does not prove that it
 			// still names the process AF launched: an operator can remove and recreate
 			// the session under the same sanitized name. The pane root's (pid,
 			// start-time) identity is the proof — a match keeps the recorded launch
 			// command across the restart, and only a mismatch or an unanswerable
-			// probe retires the claim.
-			if i.clearRuntimeProgramForUnverifiedReattach(tmuxSession) {
+			// probe retires the claim. A reattach that retires the claim could not
+			// prove it kept the prompted process, so it counts as replacement for
+			// the task-run question too (#4222).
+			//
+			// This is deliberately claim-gated where the Lost-restore path is not
+			// (backend_local_respawn.go marks ANY unverified reattach replaced): a
+			// tmux name that survived a routine daemon restart is the EXPECTED
+			// same-runtime case, so a row carrying no recorded identity — a legacy
+			// record — has nothing to distrust and stays a pure reattach. Only a
+			// recorded claim that fails verification — retires it — says the pane
+			// under the af name is not the launch af made.
+			if _, claimRetired := i.settleReattachVerification(tmuxSession); claimRetired {
 				i.markLoadRuntimeReplaced()
+				i.markAgentRuntimeReplaced(true)
 			}
 		}
 	} else {
@@ -346,8 +362,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			base := resolution.command
 			runtimeProgram = base
 			program = prepareLaunchConversation(i, base)
-			program = injectSystemPrompt(program, resolveSkillTarget(i, program))
-			proof = accountLaunchProof(base, program, resolution.trustBase)
+			program = injectSystemPrompt(program, resolveSkillTarget(i, program), i.CallbackUnavailable() != "")
+			proof = accountLaunchProof(base, program, resolution.trustBase, nil, "")
 		}
 		setLaunchProgram(tmuxSession, program, proof)
 

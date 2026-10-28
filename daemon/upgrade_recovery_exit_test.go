@@ -92,12 +92,11 @@ func canonicalHome(t *testing.T, dir string) string {
 // plantCorruptJournal writes a malformed active.json so that upgradetxn.Load
 // returns a JSON decode error (not ErrNoActiveTransaction). That is the
 // cheapest hermetic way to make RunUpgradeRecoveryActor return a non-nil
-// error: runRecoveryActorWith returns the Load error immediately
-// (internal/upgradetxn/recovery_actor.go:72-73), before any lease
-// acquisition, supervisor run, daemon spawn, or tmux touch — so the child
-// process fails fast, logs "daemon upgrade recovery actor failed: <err>"
-// (which sets dirty=true via dirtyWriter), and reaches the os.Exit(1) path
-// the bug lives on. home must be the canonical home, because Load reads
+// error: runRecoveryActorWith returns the Load error immediately, before
+// any lease acquisition, supervisor run, daemon spawn, or tmux touch — so
+// the child process fails fast, logs "daemon upgrade recovery actor failed:
+// <err>" (which sets dirty=true via dirtyWriter), and reaches the os.Exit(1)
+// path the bug lives on. home must be the canonical home, because Load reads
 // active.json under the canonicalized home (see canonicalHome).
 func plantCorruptJournal(t *testing.T, home string) {
 	t.Helper()
@@ -244,18 +243,20 @@ const recoveryExit0ReexecEnv = "AF_TEST_RECOVERY_EXIT0_REEXEC"
 // daemonless-after-irreversible-commit outcome this test guards.
 func recoveryExit0ReexecMain() {
 	// runRecoveryActorFn: a successful commit removes active.json during
-	// lease.Cleanup (supervisor.go cleanup()). The stub removes it so the
-	// second upgradetxn.Load in RunUpgradeRecoveryActor returns
-	// ErrNoActiveTransaction, unlocking the adoptAfterUpgradeCommitFn
-	// hand-off — the same signal a real committed supervisor produces.
-	runRecoveryActorFn = func(_ context.Context, invocation upgradetxn.RecoveryInvocation, _ upgradetxn.Supervisor) error {
+	// lease.Cleanup (supervisor.go cleanup()) AND reports a positive commit
+	// signal. The stub returns RecoveryActorResult{Committed: true, ...} so
+	// RunUpgradeRecoveryActor hands off on the signal — the same way it does
+	// for a real committed supervisor. It also removes active.json for realism
+	// (a real Cleanup does), but RunUpgradeRecoveryActor no longer reads the
+	// journal to decide the hand-off, so the removal is cosmetic here.
+	runRecoveryActorFn = func(_ context.Context, invocation upgradetxn.RecoveryInvocation, _ upgradetxn.Supervisor) (upgradetxn.RecoveryActorResult, error) {
 		_ = os.Remove(filepath.Join(invocation.HomeDir, "upgrade", "active.json"))
-		return nil
+		return upgradetxn.RecoveryActorResult{Committed: true, JournalID: invocation.TransactionID}, nil
 	}
 	// adoptAfterUpgradeCommitFn: simulates the candidateAbsent + fresh-daemon
 	// failure path (upgrade_forward.go:174-178) — the upgrade is
 	// irreversibly committed, an adopt error means the home is daemonless.
-	// The error triggers the :132 WARNING in RunUpgradeRecoveryActor, which
+	// The error triggers the WARNING in RunUpgradeRecoveryActor, which
 	// sets dirty=true on a path that returns nil (exit 0).
 	adoptAfterUpgradeCommitFn = func(_, _ string) error {
 		return errors.New("test: candidate absent and fresh-daemon start failed")
@@ -268,14 +269,14 @@ func recoveryExit0ReexecMain() {
 }
 
 // prepareValidJournal calls upgradetxn.Prepare to publish a real, valid,
-// fully-validated active.json for txnID under home, so the first
-// upgradetxn.Load in RunUpgradeRecoveryActor (the ourTransaction check)
-// succeeds and sets ourTransaction=true. Prepare creates every artifact
-// validateJournal checks (recovery lock, transaction directory, binary
+// fully-validated active.json for txnID under home. Prepare creates every
+// artifact validateJournal checks (recovery lock, transaction directory, binary
 // snapshots, metadata), which is why a hand-written journal file does NOT
 // work: validateJournal (storage.go:24-118) checks directory existence,
 // recovery-lock identity/nonce, daemon-snapshot/recovery-job pairing, and
-// binary-artifact path derivation.
+// binary-artifact path derivation. The journal is planted so the re-exec'd
+// child sees a real transaction; the commit signal the stub returns carries
+// the transaction id and canonical path the hand-off uses.
 func prepareValidJournal(t *testing.T, home, txnID string) {
 	t.Helper()
 	binDir := t.TempDir()
@@ -356,14 +357,14 @@ func TestRecoveryExit0LogsHintOnDirty(t *testing.T) {
 	require.Equal(t, 0, exitCode,
 		"a committed upgrade with a failed adopt must exit 0 (the WARNING, not a returned error, is the signal), got %d (stderr: %q)", exitCode, stderr)
 
-	// (2) The :132 WARNING must be in the rotating log file the handler's
+	// (2) The WARNING must be in the rotating log file the handler's
 	// log.WarningLog writes to (the only place it lands on the file-open
 	// path), so the hinted pointer is worth following.
 	logPath := filepath.Join(home, "agent-factory.log")
 	logBytes, err := os.ReadFile(logPath)
 	require.NoError(t, err, "the recovery run must have written its log at %s", logPath)
 	assert.Contains(t, string(logBytes), "upgrade committed but arming the post-upgrade daemon did not complete",
-		"the log file must record the :132 WARNING about the failed adopt")
+		"the log file must record the WARNING about the failed adopt")
 
 	// (3) THE FIX: the "wrote logs to <path>" hint reaches stderr before
 	// exit 0. Before the fix, os.Exit(0) ran without log.Close(), so
@@ -388,9 +389,10 @@ func TestRecoveryExit0LogsHintOnDirty(t *testing.T) {
 // nothing worth reading was logged. This test uses the PRODUCTION af
 // binary (no seams needed — the no-active-transaction path returns nil
 // hermetically without a supervisor run) and an empty home (no journal),
-// which is the cleanest exit-0 path: runRecoveryActorWith returns nil for
-// ErrNoActiveTransaction without logging, and ourTransaction stays false,
-// so RunUpgradeRecoveryActor returns nil with dirty=false.
+// which is the cleanest exit-0 path: runRecoveryActorWith returns
+// (RecoveryActorResult{Committed: false}, nil) for ErrNoActiveTransaction
+// without logging, so RunUpgradeRecoveryActor skips the hand-off and
+// returns nil with dirty=false.
 func TestRecoveryExit0CleanStaysSilent(t *testing.T) {
 	home := canonicalHome(t, t.TempDir())
 	// No journal planted: the no-active-transaction path is the cleanest

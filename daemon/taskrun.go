@@ -458,6 +458,7 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 		}
 	}
 
+	deliveryStart := time.Now()
 	status, err := deliverCronTaskPrompt(t, t.Prompt)
 	if err != nil {
 		return err
@@ -466,8 +467,16 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 	// Update task status. Use UpdateTaskStatus so we don't re-validate Program
 	// — the task already ran via deliverTaskPrompt, and the stored Program
 	// value may predate current enum validation (see #664).
+	//
+	// Compare-and-set (#5645): a run whose prompt was proven undelivered may
+	// have had its failure stamped by the status sweep after the session was
+	// registered but before this write. That outcome is newer than this
+	// delivery's start and strictly more informative than "started".
 	now := time.Now()
-	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
+	if _, _, err := task.UpdateTaskStatusIf(taskID, &now, status, func(cur task.Task) bool {
+		return !(cur.LastRunStatus == taskStatusErroredPromptUndelivered &&
+			cur.LastRunAt != nil && !cur.LastRunAt.Before(deliveryStart))
+	}); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	// The delivery completed — the occurrence is consumed whether or not the

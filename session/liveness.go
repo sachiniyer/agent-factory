@@ -143,9 +143,14 @@ func opIsTeardown(op InFlightOp) bool {
 // other settled row archives. Kill addressability is intentionally independent
 // (CanKill): a retained tombstone or startup-unknown row must remain removable
 // without becoming attachable, archivable, or restorable.
-func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap bool) LifecycleAction {
+//
+// An unreachable row (#5571 W3) also offers nothing: Archive would try to push
+// a worktree the daemon cannot reach, and Restore's live recheck would refuse
+// — both verbs fail on press exactly like the #2500 fence above, so the flag
+// hides them for the outage's duration while Kill stays available.
+func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap, unreachable bool) LifecycleAction {
 	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning || op == OpRestoring ||
-		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap {
+		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap || unreachable {
 		return LifecycleActionNone
 	}
 	switch liveness {
@@ -203,7 +208,7 @@ func canKillFor(id string, op InFlightOp) bool {
 func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil)
+	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil)
 }
 
 // CanKill reports whether interactive clients may offer explicit teardown for

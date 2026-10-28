@@ -65,6 +65,15 @@ func (i *Instance) ArchiveWarning() string {
 	return i.archiveWarning
 }
 
+// CallbackUnavailable returns the reason this session has no af callback, or ""
+// when one was delivered (or the session's backend never injects one). Surfaces
+// render it prefixed by CallbackUnavailablePrefix.
+func (i *Instance) CallbackUnavailable() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.callbackUnavailable
+}
+
 // SetRuntimeTeardownForTest installs the physical reap a sandbox runtime would
 // normally supply through ProvisionResult.Teardown.
 //
@@ -96,6 +105,43 @@ func SetRuntimeTeardownForTest(i *Instance, teardown func() error) {
 	}
 	i.agentSrv = nil
 	i.runtimeTeardown = teardown
+}
+
+// owesNoRuntimeTeardownLocked reports whether a sandbox-backed instance
+// positively owes no off-box reap — i.e. its backend carries no durable cleanup
+// identity at all (the cleanup field is nil). It is the EARNED-EVIDENCE half of
+// the KilledWithoutLiveRuntime marker staging in toInstanceDataLocked.
+//
+// Caller holds i.mu (read or write) and hands over the backend pointer it
+// already read. It must NOT acquire i.mu itself: sync.RWMutex is not reentrant,
+// so a nested RLock from a caller holding the read lock deadlocks the moment a
+// writer queues between the two acquisitions, and from a caller holding the
+// write lock it deadlocks unconditionally. The snapshot path (toInstanceDataLocked
+// — whose contract is that the caller already holds i.mu) calls this, so any lock
+// acquisition here would wedge snapshot, persistence, and kill behind a session
+// mutex that never releases.
+//
+// The necessity of the second condition besides `runtimeTeardown == nil` is the
+// f58ca97f wedge-fix gone wrong: a sandbox row reloaded INERT after a daemon
+// restart ALWAYS has `runtimeTeardown == nil` (the inert backend binds no live
+// teardown), regardless of whether its off-box runtime survived — so gating the
+// "nothing owed" marker on that nil alone laundered a still-live ssh workspace or
+// hook-provisioned sandbox into a no-op kill and deleted the only record that
+// pointed at it. Persisting RuntimeCleanup for ordinary sandbox rows (ForStorage)
+// and rebuilding it at load (FromInstanceData) puts a real teardown handle back on
+// a reloaded LIVE row, so this `runtimeTeardown == nil` arm stops firing for it;
+// the marker is staged only when the backend itself positively carries no
+// cleanup identity, which is the always-inert shape the original wedge fix meant
+// to admit.
+func owesNoRuntimeTeardownLocked(backend Backend) bool {
+	if backend == nil {
+		return true
+	}
+	provider, ok := backend.(runtimeCleanupProvider)
+	if !ok {
+		return true
+	}
+	return provider.runtimeCleanupData() == nil
 }
 
 // SetSandboxBranch records the branch a SANDBOX session's own runtime reports,
@@ -400,6 +446,44 @@ func (i *Instance) ResolvedPaneProgram() string {
 	return ts.Program()
 }
 
+// ResolvedPaneGeneratedArgs returns the af-authored argument words recorded for
+// the local agent pane's frozen program, or nil when the instance has no local
+// tmux binding. It surfaces TmuxSession.GeneratedArgs through the instance so
+// validateAccountSwapPlan can seed a launch proof whose base came from
+// ResolvedPaneProgram instead of RuntimeProgram: that pane command already
+// carries af's own injected flags, so re-deriving the declaration from that base
+// treats af's words as undeclared user arguments and the swap is refused
+// (#5433). The recorded declaration is the provenance the pane carries beside
+// the command string, and is exactly what the proof needs to trust them.
+func (i *Instance) ResolvedPaneGeneratedArgs() []string {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil {
+		return nil
+	}
+	return ts.GeneratedArgs()
+}
+
+// ResolvedPaneTrustedExecutable returns the exact executable path af's built-in
+// program detection recorded for the local agent pane's frozen program, or empty
+// when the launch recorded none. It surfaces TmuxSession.TrustedExecutable so a
+// launch proof seeded from the pane's frozen program (the #5433 pane-fallback)
+// carries the pane's recorded executable provenance instead of inferring the
+// base's first word: an untrusted absolute override records an empty
+// TrustedExecutable deliberately, and inferring the path would launder a
+// repository-controlled executable into the account boundary's trust
+// (internal/sessionenv/account.go:47-54, account_command.go:269-276).
+func (i *Instance) ResolvedPaneTrustedExecutable() string {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil {
+		return ""
+	}
+	return ts.TrustedExecutable()
+}
+
 // RuntimeProgram returns durable evidence of the override-resolved base command
 // used by the last positively established agent runtime. It is intentionally
 // empty for legacy or uncertain records; Program is intent, not runtime proof.
@@ -505,22 +589,31 @@ func (i *Instance) setRuntimeEvidenceLocked(program string, pid int, startID uin
 	i.runtimeStartID = startID
 }
 
-// clearRuntimeProgramForUnverifiedReattach retires a persisted launch-command
-// claim when the reattach cannot prove the pane is still the launch that
-// recorded it. The proof is the pane root's (pid, start-time) identity
-// captured at that launch: a surviving tmux name reporting the recorded pair
-// keeps the claim, while a different process, a pane that cannot be probed,
-// and a record carrying no identity are all unverified. It reports whether
-// durable state changed so a load caller can checkpoint the clear before
-// publishing the restored row.
-func (i *Instance) clearRuntimeProgramForUnverifiedReattach(ts *tmux.TmuxSession) bool {
+// settleReattachVerification probes the pane behind the reused tmux name ONCE
+// and settles the recorded runtime claim to match the answer: a positive
+// (pid, start-time) match keeps the claim and reports verified; anything else
+// — a different process, an unanswerable probe, a record carrying no identity
+// — is unverified, and the persisted claim is retired if there was one. Both
+// answers come from the SAME probe so the task-run verdict and the evidence
+// clear can never disagree about which pane answered (#4222 review: two
+// separate probes let a pane respawned between them read verified to the
+// interruption classifier while the clear saw the mismatch).
+//
+// verified answers the task-run question on the Lost-restore path — a pane
+// that appears while the session was believed dead and cannot prove it is the
+// prompted agent is treated as a replacement. claimRetired is the load path's
+// deliberately narrower predicate: a tmux name surviving a routine daemon
+// restart is the EXPECTED same-runtime case, so only a recorded claim that
+// failed verification marks a replacement there — a row carrying none (a
+// legacy record) has nothing to distrust and stays a pure reattach.
+func (i *Instance) settleReattachVerification(ts *tmux.TmuxSession) (verified, claimRetired bool) {
 	i.mu.RLock()
 	oldProgram, pid, startID := i.runtimeProgram, i.runtimePID, i.runtimeStartID
 	i.mu.RUnlock()
 	if pid > 0 && ts != nil {
 		if same, err := ts.PaneRootProcessMatches(pid, startID); err == nil && same {
 			// Provably the same launch: keep the claim.
-			return false
+			return true, false
 		}
 	}
 	i.mu.Lock()
@@ -528,16 +621,16 @@ func (i *Instance) clearRuntimeProgramForUnverifiedReattach(ts *tmux.TmuxSession
 	// Re-check under the write lock: a launch boundary that committed fresh
 	// evidence while the pane query ran must not lose it to this verdict.
 	if i.runtimeProgram != oldProgram || i.runtimePID != pid || i.runtimeStartID != startID {
-		return false
+		return false, false
 	}
 	if i.runtimeProgram == "" && i.runtimePID == 0 {
-		return false
+		return false, false
 	}
 	i.runtimeEvidenceGeneration.Add(1)
 	i.runtimeProgram = ""
 	i.runtimePID = 0
 	i.runtimeStartID = 0
-	return true
+	return false, true
 }
 
 // SetTmuxSession sets the agent tab's tmux session for testing purposes,
@@ -582,6 +675,14 @@ func (i *Instance) SetBranchForTest(branch string) {
 // confirmed Start(false) respawn. Production sets it only from LocalBackend.
 func (i *Instance) MarkLoadRuntimeReplacedForTest() {
 	i.markLoadRuntimeReplaced()
+}
+
+// MarkAgentRuntimeReplacedForTest seeds the replacement verdict a backend
+// stamps on a recovered runtime (#4222). Production sets it only from backend
+// recover/load paths; tests use it to model a respawn vs a verified reattach
+// around a ConfirmLive edge.
+func (i *Instance) MarkAgentRuntimeReplacedForTest(replaced bool) {
+	i.markAgentRuntimeReplaced(replaced)
 }
 
 // SetPendingTabCleanupForTest seeds the unconfirmed tab-teardown handles a

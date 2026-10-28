@@ -9,11 +9,9 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -81,6 +79,10 @@ const (
 	// runtime polls the file for it because `docker exec -d` detaches the process.
 	dockerBannerPath = "/tmp/af-agent-server.json"
 	dockerLogPath    = "/tmp/af-agent-server.log"
+	// dockerPidPath captures the agent-server's in-container PID, written by
+	// the startAgentServer wrapper so readBanner can tell "still starting"
+	// from "died before printing the banner" (#5571 W2.1).
+	dockerPidPath = "/tmp/af-agent-server.pid"
 	// dockerSessionLabel tags every managed container so orphans can be swept with
 	// `docker ps -aq -f label=af.session` (documented in docs/backends.md). The
 	// runtime reaps by container ID; the label is for operators.
@@ -177,6 +179,8 @@ type dockerBanner struct {
 	Addr  string `json:"addr"`
 	Token string `json:"token"`
 	Title string `json:"title"`
+	// Program is the command the host resolved and bound (#5571 W2.1).
+	Program string `json:"program,omitempty"`
 }
 
 // dockerRuntime provisions a real container sandbox (#1592 Phase 4 PR4). Declared
@@ -223,7 +227,7 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			return ProvisionResult{}, fmt.Errorf("backend=docker: %w", err)
 		}
 		proof := accountLaunchProof(resolvedProgram, resolvedProgram,
-			builtInProgramOverride(cfg, spec.Program, resolvedProgram))
+			builtInProgramOverride(cfg, spec.Program, resolvedProgram), nil, "")
 		// The built-in proof is established in the host namespace. Docker may not
 		// contain that path (or may contain a different file there), so never grant
 		// its executable identity across the container boundary. A bare agent name
@@ -260,7 +264,12 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		image:   image,
 		runArgs: runArgs,
 		afBin:   afBin,
-		program: resolvedProgram,
+		// The wire program is the configured name and flags — never af's
+		// auto-detected daemon path, which the container's filesystem does
+		// not have. The in-container agent-server resolves it on the host's
+		// login PATH (#5571). resolvedProgram stays host-side: it is the
+		// value the account boundary above validated.
+		program: remoteProgramForHost(cfg, spec.Program),
 		homeID:  homeID,
 	}
 	// docker_mount_agent_credentials is a GLOBAL-only operator grant (config.Config,
@@ -333,6 +342,10 @@ type dockerProvisioner struct {
 	credentialMounts []string
 	afBin            string
 	program          string
+	// hostProgram is the program the container actually resolved and bound,
+	// reported back in the startup banner (#5571 W2.1). Empty until the banner
+	// arrives; remoteAgentBackend falls back to the wire program without it.
+	hostProgram string
 	// homeID is the AF home (config.GetConfigDir()) stamped into the af.home
 	// container label so the orphan sweeper can scope to this daemon's home
 	// (#2194). Empty when the home cannot be resolved — the label is then omitted
@@ -359,10 +372,39 @@ type dockerProvisioner struct {
 // provision runs the full container lifecycle and returns the wiring a docker
 // session needs. Each step wraps docker's combined output in the error so a
 // failure is self-diagnosing.
+//
+// EVERY step's failure — not only `docker run`'s — can be the data root
+// answering ENOSPC: the engine writes there when it creates the container's
+// layer, and the in-container steps write through docker exec into the
+// writable layer on the same filesystem. docker's combined output loses that
+// errno as text the lost-restore classifier refuses to read, so any failed
+// step re-derives the verdict from the data-root filesystem itself and joins
+// it BEFORE the error returns to Provision's reap — reaping the failed
+// container frees its partial layer data and could mask the fullness being
+// measured (#5382). The probe still yields nothing when the engine is remote,
+// foreign-namespaced, or reports free capacity — no invented errnos — and it
+// only runs for step failures that could have BEEN a data-root write: each
+// step's error carries its operation class (dockerStepError), so a local
+// parse or validation failure on a coincidentally-full root stays structural
+// instead of waiting on the environment's unbounded budget (#5382 review).
 func (p *dockerProvisioner) provision() (ProvisionResult, error) {
+	res, err := p.provisionSteps()
+	if err != nil {
+		var se *dockerStepError
+		if errors.As(err, &se) && se.op != dockerOpLocal {
+			if evidence := p.dockerRootFSFullEvidence(se.op); evidence != nil {
+				err = errors.Join(err, evidence)
+			}
+		}
+		return ProvisionResult{}, err
+	}
+	return res, nil
+}
+
+func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if p.spec.Account.Dir != "" {
 		if err := p.ensureAccountDockerEngineLocal(); err != nil {
-			return ProvisionResult{}, err
+			return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 		}
 	} else {
 		// A remote Docker engine publishes the agent-server port on the engine
@@ -372,16 +414,16 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 		// reason (bind-mount identity); refuse here too, before `docker run`, so a
 		// non-account session fails fast with the remote-engine cause instead.
 		if err := p.ensureDockerEngineLocal(); err != nil {
-			return ProvisionResult{}, err
+			return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 		}
 	}
 	engineID, err := p.currentEngineID(dockerShortStepTimeout)
 	if err != nil {
-		return ProvisionResult{}, fmt.Errorf("backend=docker: cannot establish the Docker cleanup target before creating a container: %w", err)
+		return ProvisionResult{}, dockerStepErr(fmt.Errorf("backend=docker: cannot establish the Docker cleanup target before creating a container: %w", err), dockerOpLocal)
 	}
 	p.engineID = engineID
 	if err := p.runContainer(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
 	// The account boundary, verified against the RUNNING container before anything
 	// touches it (#3598). The lexical run_args guard reads strings and cannot see a
@@ -390,30 +432,37 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	// reapProvisionFailure tears the container down on the way out — a shadowed
 	// account never reaches the agent. No-op for a session with no account.
 	if err := p.verifyAccountRuntimeBoundary(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 	}
 	if err := p.prepareAccountUser(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpRootExec)
 	}
 	if err := p.configureGit(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	if err := p.cloneWorkspace(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	if err := p.copyAfBinary(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
 	if err := p.startAgentServer(); err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	banner, err := p.readBanner()
 	if err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
+	}
+	// The banner's program is the command the HOST resolved and bound — the
+	// true runtime evidence (#5108); the wire value is only its pre-resolution
+	// form, kept as the fallback for a banner from an older agent-server.
+	p.hostProgram = banner.Program
+	if p.hostProgram == "" {
+		p.hostProgram = p.program
 	}
 	hostPort, err := p.publishedPort()
 	if err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 	}
 
 	endpoint := &AgentServerEndpoint{
@@ -425,9 +474,10 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	return ProvisionResult{
 		Backend: &dockerBackend{
 			// The command the in-container agent-server was bound to launch
-			// (#5108) — recorded as runtime evidence when the launch RPC
+			// (#5108) — the host-resolved value reported back in the banner
+			// (#5571 W2.1) — recorded as runtime evidence when the launch RPC
 			// returns.
-			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.program},
+			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.hostProgram},
 			containerID:        p.containerID,
 			provisioner:        p,
 			cleanup: &DockerRuntimeCleanupData{
@@ -530,13 +580,8 @@ func (p *dockerProvisioner) runContainer() error {
 		if id := parseCreatedContainerID(out); id != "" {
 			p.containerID = id
 		}
-		// docker's combined output loses the daemon-side resource errno as
-		// text, which the lost-restore classifier refuses to read — re-derive
-		// it from the engine's data-root filesystem so an out-of-space engine
-		// carries typed ENOSPC evidence (#5295 review).
-		if evidence := p.dockerRootFSFullEvidence(); evidence != nil {
-			err = errors.Join(err, evidence)
-		}
+		// The data-root capacity evidence joins at the provision() boundary,
+		// shared with every other provisioning step (#5382).
 		return fmt.Errorf("backend=docker: `docker run` failed for image %q: %s: %w", p.image, strings.TrimSpace(string(out)), err)
 	}
 	id := strings.TrimSpace(string(out))
@@ -545,46 +590,6 @@ func (p *dockerProvisioner) runContainer() error {
 	}
 	p.containerID = id
 	return nil
-}
-
-// statfsFull is the test seam over the bounded filesystem fullness answer —
-// a statfs needs no write access, so it is the only probe that works on a
-// root-owned engine data root.
-var statfsFull = fsprobe.Full
-
-// dockerRootFSFullEvidence derives the resource verdict docker's combined
-// output cannot carry: `docker run`'s stderr loses the engine-side errno
-// into text, but the engine's data-root filesystem answers it from THIS
-// process — statfs needs no write access to the root-owned dir, and zero
-// free blocks is exactly the ENOSPC dockerd's own write hit. The joined
-// PathError carries the real errno for the lost-restore classifier's
-// errors.Is chain, with provenance text naming where it came from. Every
-// unresolved or non-local step returns nil instead: a remote engine's root
-// is not statfs-able from here, an engine that cannot answer `docker info`
-// has no resolved root, and a root with free blocks has no evidence to add
-// — the error path never gains noise it did not earn (#5295 review).
-func (p *dockerProvisioner) dockerRootFSFullEvidence() error {
-	_, local, err := resolveDockerEngineEndpoint(p.dockerEnvironment())
-	if err != nil || !local {
-		return nil
-	}
-	out, err := p.docker(dockerShortStepTimeout, "info", "--format", "{{.DockerRootDir}}")
-	if err != nil {
-		return nil
-	}
-	root := strings.TrimSpace(string(out))
-	if root == "" {
-		return nil
-	}
-	full, err := statfsFull(root)
-	if err != nil {
-		return fmt.Errorf("could not statfs docker data root %s: %w", root, err)
-	}
-	if !full {
-		return nil
-	}
-	return fmt.Errorf("statfs on docker data root %s reports zero free blocks — engine writes there would fail ENOSPC: %w",
-		root, &os.PathError{Op: "statfs", Path: root, Err: syscall.ENOSPC})
 }
 
 func (p *dockerProvisioner) containerEnvironmentNames() []string {
@@ -660,7 +665,14 @@ func (p *dockerProvisioner) copyAfBinary() error {
 		return fmt.Errorf("backend=docker: copying the af binary into the container failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	if out, err := p.execSh(dockerShortStepTimeout, "chmod +x "+shellQuote(dockerAfBinaryPath)); err != nil {
-		return fmt.Errorf("backend=docker: chmod on the copied af binary failed: %s: %w", strings.TrimSpace(string(out)), err)
+		// execSh pins --user 0:0 for account sessions; otherwise the exec
+		// inherits the image's USER. Mark it so the callsite's daemon-write
+		// default doesn't mislabel an exec that ran as a container user.
+		op := dockerOpSessionExec
+		if p.spec.Account.Dir != "" {
+			op = dockerOpRootExec
+		}
+		return dockerStepErr(fmt.Errorf("backend=docker: chmod on the copied af binary failed: %s: %w", strings.TrimSpace(string(out)), err), op)
 	}
 	return nil
 }
@@ -673,9 +685,16 @@ func (p *dockerProvisioner) copyAfBinary() error {
 func (p *dockerProvisioner) startAgentServer() error {
 	filteredInner, err := p.agentServerCommand()
 	if err != nil {
-		return err
+		// A local construction failure, not a docker round-trip — keep the
+		// callsite's session-exec default from lending it the fs verdict.
+		return dockerStepErr(err, dockerOpLocal)
 	}
 	filteredInner += fmt.Sprintf(" >%s 2>%s", shellQuote(dockerBannerPath), shellQuote(dockerLogPath))
+	// Record the server's in-container PID so readBanner can distinguish a slow
+	// start from a dead one (#5571 W2.1). The trailing `wait` keeps this exec's
+	// sh alive as the server's parent, so an exited server is reaped immediately
+	// — a zombie would keep answering kill -0 and read alive forever.
+	filteredInner = fmt.Sprintf("{ %s & echo $! >%s; wait; }", filteredInner, dockerPidPath)
 
 	// -d: detach. The agent-server keeps running in the container after this exec
 	// client returns; we read its banner from the file below.
@@ -722,24 +741,51 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 // whose real cause is a permission denied on the banner file.
 func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 	deadline := time.Now().Add(dockerBannerPollTimeout)
+	// One exec per poll: cat the banner, then report the server's liveness so a
+	// process that died before printing its banner fails fast rather than
+	// outwaiting the timeout (#5571 W2.1). A missing pidfile is still
+	// "starting" — startAgentServer writes it in the same instant as the spawn,
+	// and the first poll can legitimately outrun it.
+	pollScript := fmt.Sprintf(
+		"cat %s 2>/dev/null; if [ -f %s ]; then kill -0 \"$(cat %s)\" 2>/dev/null && echo %s || echo %s; else echo %s; fi",
+		dockerBannerPath, dockerPidPath, dockerPidPath,
+		remoteProcAlive, remoteProcDead, remoteProcStarting)
 	for {
 		args := []string{"exec"}
 		args = append(args, p.sessionExecOptions()...)
-		args = append(args, p.containerID, "cat", dockerBannerPath)
+		args = append(args, p.containerID, "sh", "-c", pollScript)
 		out, err := p.docker(dockerShortStepTimeout, args...)
+		body, liveness := splitRemoteLiveness(string(out))
 		if err == nil {
 			var b dockerBanner
-			if jErr := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &b); jErr == nil && b.Addr != "" && b.Token != "" {
+			if jErr := json.Unmarshal([]byte(strings.TrimSpace(body)), &b); jErr == nil && b.Addr != "" && b.Token != "" {
 				return b, nil
 			}
+		}
+		if liveness == remoteProcDead {
+			logArgs := []string{"exec"}
+			logArgs = append(logArgs, p.sessionExecOptions()...)
+			logArgs = append(logArgs, p.containerID, "cat", dockerLogPath)
+			logOut, _ := p.docker(dockerShortStepTimeout, logArgs...)
+			return dockerBanner{}, fmt.Errorf("backend=docker: af agent-server exited before reporting a startup banner; container log:\n%s",
+				strings.TrimSpace(string(logOut)))
 		}
 		if time.Now().After(deadline) {
 			logArgs := []string{"exec"}
 			logArgs = append(logArgs, p.sessionExecOptions()...)
 			logArgs = append(logArgs, p.containerID, "cat", dockerLogPath)
 			logOut, _ := p.docker(dockerShortStepTimeout, logArgs...)
-			return dockerBanner{}, fmt.Errorf("backend=docker: af agent-server did not report a startup banner within %s; container log:\n%s",
+			bannerErr := fmt.Errorf("backend=docker: af agent-server did not report a startup banner within %s; container log:\n%s",
 				dockerBannerPollTimeout, strings.TrimSpace(string(logOut)))
+			// A banner that never appeared is always writer-side evidence:
+			// the reads may keep failing (daemon exec state is a data-root
+			// write), or the file exists empty because the startup shell's
+			// redirect created it while the agent-server's own write died
+			// ENOSPC — a successful `cat` only proves the file is
+			// readable, never that the writer could populate it (#5382
+			// review). Classify with the session writer's privilege so the
+			// Bavail window is seen either way.
+			return dockerBanner{}, dockerStepErr(bannerErr, dockerOpSessionExec)
 		}
 		// The poll interval bounds how long we can outrun the deadline; use a
 		// non-wall-clock sleep so it is deterministic under test time control.

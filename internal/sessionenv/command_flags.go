@@ -37,7 +37,7 @@ func AgentForCommand(command string) string {
 // wrapper the gate accepted onto a pre-#4356 session stays classifiable on
 // restore. This shares only the env-basename rule, not a parser:
 // DetectAgentExecutable and AgentNamespaceForCommand are otherwise independent
-// (the gate uses splitShellTokens + baseCommand, this surface uses mvdan.cc/sh +
+// (the gate uses SplitShellTokens + baseCommand, this surface uses mvdan.cc/sh +
 // filepath.Base) and agree on the env-wrapper spellings the #4356 fix targets,
 // not on every command.
 //
@@ -405,20 +405,57 @@ func supportedAgent(command string) string {
 // agent-looking word used as data, a compound command, a redirect, or a second
 // possible execution path can never widen the credential allowlist. Nothing is
 // expanded or executed.
+//
+// The selector's value is parsed under BOTH POSIX and Bash and the verdict is
+// only returned when the two variants agree. A command-local assignment whose
+// value is dialect-dependent — the bug report's $'0' / $"0" family — tokenizes
+// under POSIX as Lit{"$"}+SglQuoted{Dollar:false} (literalizing to "$0", which
+// flagValueEnabled calls truthy) while under Bash it tokenizes as a single
+// SglQuoted{Dollar:true} (rejected by the Dollar guard in
+// appendLiteralShellPart). The /bin/sh -c that finally runs the command expands
+// such a word differently per host: bash-as-sh turns $'0' into 0 (falsy — mode
+// OFF), while dash leaves it as the literal "$0" (truthy).
+//
+// The operator DID write an explicit assignment to the selector, so the
+// command-local value must override whatever the ambient environment carries —
+// otherwise `ResolveAuthSelectors` falls back to the ambient value and a
+// pre-existing `CLAUDE_CODE_USE_BEDROCK=1` in the environment would re-admit
+// the AWS credential group to a session the running shell started with the mode
+// off (bash-as-sh expands $'0' to 0). A dialect-dependent word is therefore
+// unprovable and fails closed as found-but-disabled (found=true, enabled=false):
+// the selector was set on the command, so the ambient no longer speaks for it,
+// but the value cannot be proven enabling, so it reads as disabled. This is the
+// documented invariant ("a dynamic value is an explicit but unprovable override
+// and therefore fails closed as disabled"), applied with the same dual-variant
+// treatment commandMutatesAccountEnvironment already uses for the package's
+// other dialect-dependent validators.
 func commandEnvironmentFlagState(command, agent, name string) (found, enabled bool) {
 	if strings.TrimSpace(command) == "" || agent == "" {
 		return false, false
 	}
-	call, ok := singleSimpleCall(command)
+	posix, ok := singleCallVariant(command, false, syntax.LangPOSIX)
 	if !ok {
 		return false, false
 	}
-
-	return directAgentFlagState(call, agent, name)
+	bash, ok := singleCallVariant(command, false, syntax.LangBash)
+	if !ok {
+		return false, false
+	}
+	posixFound, posixEnabled := directAgentFlagState(posix, agent, name)
+	bashFound, bashEnabled := directAgentFlagState(bash, agent, name)
+	if posixFound != bashFound || posixEnabled != bashEnabled {
+		// The selector IS assigned on the command, but its value is dialect-
+		// dependent and cannot be proven enabling. Report it as found-but-disabled
+		// so the ambient does not leak back in: ResolveAuthSelectors overrides the
+		// ambient with disabled, and CommandEnablesCloudCredentials (found &&
+		// enabled) still reports disabled.
+		return true, false
+	}
+	return posixFound, posixEnabled
 }
 
 func singleSimpleCall(command string) (*syntax.CallExpr, bool) {
-	return singleCall(command, false)
+	return singleCallVariant(command, false, syntax.LangPOSIX)
 }
 
 // singleCallIgnoringRedirections is singleSimpleCall for callers that ask about
@@ -437,7 +474,15 @@ func singleCallIgnoringRedirections(command string) (*syntax.CallExpr, bool) {
 // rule and nothing else, so the two questions cannot drift apart on any of the
 // others.
 func singleCall(command string, allowRedirections bool) (*syntax.CallExpr, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
+	return singleCallVariant(command, allowRedirections, syntax.LangPOSIX)
+}
+
+// singleCallVariant is singleCall parameterized by a parser dialect. The
+// selector path parses under BOTH LangPOSIX and LangBash and fails closed on
+// disagreement (see commandEnvironmentFlagState); the other callers stay on the
+// POSIX variant they always used by going through singleCall.
+func singleCallVariant(command string, allowRedirections bool, variant syntax.LangVariant) (*syntax.CallExpr, bool) {
+	file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
 	if err != nil || len(file.Stmts) != 1 {
 		return nil, false
 	}
@@ -461,13 +506,23 @@ func directAgentFlagState(call *syntax.CallExpr, agent, name string) (found, ena
 		return false, false
 	}
 
-	allLiteral := callIsLiteral(call)
+	// An argument after the agent cannot change the agent's environment, so a
+	// dollar-quoted ($'…') argument — static text whose only dialect dependence
+	// is how it expands — must not poison a selector that is itself
+	// unambiguous (#5652). Dynamic arguments still fail closed. Everything
+	// that can change the environment (assignment prefixes, env's own words up
+	// to the agent) is held to the strict literal rule.
+	assignsLiteral := assignmentsAreLiteral(call.Assigns)
 	if isTrustedEnvWord(words[0]) {
-		found, enabled, ok := envAgentFlagState(call.Assigns, words[1:], agent, name)
+		found, enabled, commandIndex, ok := envAgentFlagState(call.Assigns, words[1:], agent, name)
 		if !ok || !found {
 			return false, false
 		}
-		if !allLiteral {
+		if !assignsLiteral {
+			return true, false
+		}
+		if _, literal := literalCommandArgs(words[:commandIndex+2]); !literal ||
+			!argsAreStatic(words[commandIndex+2:]) {
 			return true, false
 		}
 		return true, enabled
@@ -479,13 +534,34 @@ func directAgentFlagState(call *syntax.CallExpr, agent, name string) (found, ena
 	if !found {
 		return false, false
 	}
-	if !allLiteral {
+	if !assignsLiteral || !argsAreStatic(words[1:]) {
 		return true, false
 	}
 	return true, enabled
 }
 
-func envAgentFlagState(assignments []*syntax.Assign, words []*syntax.Word, agent, name string) (found, enabled, ok bool) {
+// argsAreStatic reports whether every word is fixed text: literal, or an ANSI-C
+// $'…' quote (whose content is never expanded). Locale $"…" quotes and any
+// expansion are not static.
+func argsAreStatic(words []*syntax.Word) bool {
+	for _, word := range words {
+		if word == nil {
+			return false
+		}
+		for _, part := range word.Parts {
+			if sq, ok := part.(*syntax.SglQuoted); ok && sq.Dollar {
+				continue
+			}
+			var sb strings.Builder
+			if !appendLiteralShellPart(&sb, part) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func envAgentFlagState(assignments []*syntax.Assign, words []*syntax.Word, agent, name string) (found, enabled bool, commandIndex int, ok bool) {
 	args := make([]string, 0, len(words))
 	dynamicValues := make(map[string]struct{})
 	for idx, word := range words {
@@ -507,7 +583,7 @@ func envAgentFlagState(assignments []*syntax.Assign, words []*syntax.Word, agent
 	invocation, err := envcommand.Parse(args, envcommand.Policy{AllowAssignments: true})
 	if err != nil || invocation.CommandIndex < 0 || invocation.CommandIndex >= len(args) ||
 		!strings.EqualFold(filepath.Base(args[invocation.CommandIndex]), agent) {
-		return false, false, false
+		return false, false, 0, false
 	}
 
 	found, enabled = callAssignmentFlagState(assignments, name)
@@ -526,7 +602,7 @@ func envAgentFlagState(assignments []*syntax.Assign, words []*syntax.Word, agent
 		_, dynamic := dynamicValues[mutation.Name+"="+mutation.Value]
 		enabled = !dynamic && flagValueEnabled(mutation.Value)
 	}
-	return found, enabled, true
+	return found, enabled, invocation.CommandIndex, true
 }
 
 // agentServerProgram parses the exact argument order generated by the Docker and
@@ -560,7 +636,15 @@ func agentServerProgram(args []string) (string, bool) {
 }
 
 func callIsLiteral(call *syntax.CallExpr) bool {
-	for _, assignment := range call.Assigns {
+	if !assignmentsAreLiteral(call.Assigns) {
+		return false
+	}
+	_, literal := literalCommandArgs(call.Args)
+	return literal
+}
+
+func assignmentsAreLiteral(assigns []*syntax.Assign) bool {
+	for _, assignment := range assigns {
 		if assignment == nil || assignment.Name == nil || assignment.Append || assignment.Naked ||
 			assignment.Index != nil || assignment.Array != nil || assignment.Value == nil {
 			return false
@@ -569,8 +653,7 @@ func callIsLiteral(call *syntax.CallExpr) bool {
 			return false
 		}
 	}
-	_, literal := literalCommandArgs(call.Args)
-	return literal
+	return true
 }
 
 func callAssignmentFlagState(assignments []*syntax.Assign, name string) (found, enabled bool) {

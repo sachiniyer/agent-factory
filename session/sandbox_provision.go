@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -52,16 +54,58 @@ type sandboxWorkspace struct {
 	SessionDir string
 	// RemotePID is the backgrounded agent-server PID captured for teardown.
 	RemotePID string
+
+	// tokenRef and agentServerToken are the launch's runtime identity (#5571
+	// W1.1): the opaque reference the row persists, and the derived bearer
+	// token writeRuntimeIdentity places in a 0600 file beside the remote
+	// binary for `af agent-server` to read. The token is held only in memory
+	// and in that file — never in argv, the launch script, or an environment
+	// variable.
+	tokenRef         string
+	agentServerToken string
 }
 
 // bannerJSON is the one JSON line `af agent-server` prints on startup — addr,
-// token, title. Shared by every transport (the wire contract is the JSON tags,
-// pinned by the round-trip test); duplicated from daemon.AgentServerInfo because
-// session cannot import daemon (a cycle).
+// token, title, and (since W1.1) the server's own version. Shared by every
+// transport (the wire contract is the JSON tags, pinned by the round-trip
+// test); duplicated from daemon.AgentServerInfo because session cannot import
+// daemon (a cycle). version is additive: a server that does not emit it simply
+// leaves AgentServerVersion empty, which reattach reads as "pre-W1.1 row".
 type bannerJSON struct {
 	Addr  string `json:"addr"`
 	Token string `json:"token"`
 	Title string `json:"title"`
+	// Program is the command the host resolved and bound (#5571 W2.1). Older
+	// agent-servers omit it; callers fall back to the wire program.
+	Program string `json:"program,omitempty"`
+	// Version is the server binary's self-report (#5571 W1.1); additive.
+	Version string `json:"version,omitempty"`
+}
+
+// remoteProcAlive / remoteProcDead / remoteProcStarting are the liveness lines
+// a banner poll appends after the banner read, so one remote exec answers both
+// "has the banner arrived" and "is the process that writes it still alive"
+// (#5571 W2.1). "starting" covers the window before a pidfile exists.
+const (
+	remoteProcAlive    = "__af_proc_alive__"
+	remoteProcDead     = "__af_proc_dead__"
+	remoteProcStarting = "__af_proc_starting__"
+)
+
+// splitRemoteLiveness strips the trailing liveness marker a banner-poll script
+// appends, returning the banner text and the marker ("" when none arrived).
+// The marker is always the last line; anything above it is the cat output.
+func splitRemoteLiveness(out string) (body, liveness string) {
+	text := strings.TrimRight(out, "\n")
+	for _, marker := range []string{remoteProcAlive, remoteProcDead, remoteProcStarting} {
+		if idx := strings.LastIndex(text, "\n"+marker); idx >= 0 && idx+len(marker)+1 == len(text) {
+			return text[:idx], marker
+		}
+		if text == marker {
+			return "", marker
+		}
+	}
+	return text, ""
 }
 
 // makeSessionDir creates a fresh per-session dir under the remote home with
@@ -79,6 +123,41 @@ func (w *sandboxWorkspace) makeSessionDir(timeout time.Duration) error {
 	}
 	w.SessionDir = dir
 	return nil
+}
+
+// resolveSessionDirSymlinks resolves the remote session directory to its physical
+// (symlink-free) path, so the reaper's argv[0] identity check matches the running
+// agent-server's resolved path.
+//
+// The agent-server re-execs through os.Executable(), which on Linux reads
+// /proc/self/exe — the kernel-resolved physical path. When a session-directory
+// ancestor is a symlink (e.g. a symlinked $HOME, as the automounter symlink form
+// produces), the running process's /proc/<pid>/cmdline argv[0] carries the
+// resolved spelling, while the mktemp-printed session dir carries the unresolved
+// one. The reaper (remotePIDIdentityKillScript) compares its `expected` against
+// that argv[0], so an unresolved expected mismatches: the reaper skips the kill,
+// still rm -rf's the directory, and latches success for an orphaned agent-server.
+// Resolving here — at provision time, the same moment os.Executable() resolves
+// it for the re-exec — captures the identity token the reaper needs; persisting
+// the resolved path in the cleanup handle keeps that token stable across a daemon
+// restart (the process's argv[0] does not change). Re-resolving at reap time is
+// deliberately avoided: remote symlink topology can change between provision and
+// reap, which would introduce a new mismatch against the still-running process's
+// launch-time argv.
+//
+// BEST-EFFORT: a remote shell that cannot resolve the path leaves the session dir
+// as mktemp printed it. That preserves the existing behavior on hosts where
+// resolution is unavailable, rather than introducing a new provision failure mode.
+// The POSIX `pwd -P` builtin this relies on is available everywhere the reaper's
+// own POSIX shell features are.
+func (w *sandboxWorkspace) resolveSessionDirSymlinks(timeout time.Duration) {
+	out, err := w.shell.Run(timeout, "(cd "+shellQuote(w.SessionDir)+" && pwd -P)", nil, false)
+	if err != nil {
+		return
+	}
+	if resolved := strings.TrimSpace(string(out)); resolved != "" {
+		w.SessionDir = resolved
+	}
 }
 
 // configureGit sets a git identity and marks every directory safe on the remote
@@ -115,8 +194,52 @@ func (w *sandboxWorkspace) cloneWorkspace(cloneTimeout, shortTimeout time.Durati
 	if branch := strings.TrimSpace(w.spec.RestoreBranch); branch != "" {
 		return w.fetchRestoreBranch(branch, cloneTimeout)
 	}
+	return w.seedFromBundle(cloneTimeout)
+}
+
+// seedFromBundle streams spec.SeedBundlePath into the session dir and fetches
+// spec.SeedRefs from it as local refs of the cloned workspace (W7.9). A no-op
+// when no bundle was given, so every ordinary create is unchanged.
+func (w *sandboxWorkspace) seedFromBundle(timeout time.Duration) error {
+	if w.spec.SeedBundlePath == "" {
+		return nil
+	}
+	if len(w.spec.SeedRefs) == 0 {
+		return fmt.Errorf("seeding the remote workspace: a bundle was given with no refs to fetch")
+	}
+	f, err := os.Open(w.spec.SeedBundlePath)
+	if err != nil {
+		return fmt.Errorf("seeding the remote workspace: %w", err)
+	}
+	defer f.Close()
+	dst := w.SeedBundlePath()
+	if out, err := w.shell.Run(timeout, "cat > "+shellQuote(dst), f, true); err != nil {
+		return fmt.Errorf("streaming the seed bundle to the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	args := make([]string, 0, len(w.spec.SeedRefs))
+	for _, ref := range w.spec.SeedRefs {
+		args = append(args, shellQuote(ref+":"+ref))
+	}
+	// git refuses to fetch into the branch a non-bare repo has checked out, and
+	// the clone has the origin's default branch checked out — the very branch a
+	// session working on it brings (#5685). Detach HEAD first: the clone was made
+	// a moment ago and is clean, so this moves nothing on disk, and the session's
+	// worktree is created later by the agent-server on its own branch. An unborn
+	// HEAD (empty origin) cannot be detached and has no checkout to protect, so
+	// --update-head-ok is the safe spelling there.
+	ws := shellQuote(w.WorkspacePath())
+	script := fmt.Sprintf(
+		"if git -C %[1]s rev-parse -q --verify HEAD >/dev/null; then git -C %[1]s checkout -q --detach && git -C %[1]s fetch %[2]s %[3]s; "+
+			"else git -C %[1]s fetch --update-head-ok %[2]s %[3]s; fi && rm -f %[2]s",
+		ws, shellQuote(dst), strings.Join(args, " "))
+	if out, err := w.shell.Run(timeout, script, nil, true); err != nil {
+		return fmt.Errorf("seeding the remote workspace from the move bundle failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
 	return nil
 }
+
+// SeedBundlePath is where the seed bundle is staged inside the session dir.
+func (w *sandboxWorkspace) SeedBundlePath() string { return w.SessionDir + "/seed.bundle" }
 
 func (w *sandboxWorkspace) fetchRestoreBranch(branch string, timeout time.Duration) error {
 	script := fmt.Sprintf("git -C %s fetch origin %s:%s",
@@ -140,9 +263,69 @@ func (w *sandboxWorkspace) copyAfBinary(timeout time.Duration, binary io.Reader)
 	return nil
 }
 
+// writeRuntimeIdentity places the session's reattach credential material on
+// the remote (#5571 W1.1):
+//
+//   - <sessionDir>/af-server-token — the bearer token this agent-server must
+//     expect, 0600, which `af agent-server` reads from beside its own streamed
+//     binary (internal/runtimetoken.SuppliedAgentServerToken). The token
+//     travels ONLY over this stdin and lives ONLY in that file on the remote:
+//     never in argv, the launch script, or any environment variable — so
+//     nothing the agent-server spawns can inherit it, and nothing that reads
+//     /proc/<pid>/environ on the host can extract it.
+//   - <sessionDir>/af-identity.env — AF_TOKEN_REF=<ref>, sourced into the
+//     launch shell so the reference lands in the agent-server's exec-time
+//     environment. The ref is a nonce, not a credential — it is the ONE name
+//     the host-side /proc/<pid>/environ probe may extract to bind the live
+//     process to this row's persisted identity.
+func (w *sandboxWorkspace) writeRuntimeIdentity(timeout time.Duration) error {
+	if w.tokenRef == "" || w.agentServerToken == "" {
+		return fmt.Errorf("provisioning has no runtime identity to write")
+	}
+	// Through STDIN and a file, never the launch command — the same rule
+	// writeCallbackEnv documents: a token in argv is visible to `ps` on the
+	// daemon side, and `umask 077` makes the file 0600 from the moment it
+	// exists. The error names the path, never the value.
+	tokenScript := "umask 077 && cat > " + shellQuote(w.ServerTokenPath())
+	out, err := w.shell.Run(timeout, tokenScript, strings.NewReader(w.agentServerToken+"\n"), false)
+	if err != nil {
+		return fmt.Errorf("writing the sandbox agent-server token failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	envBody := fmt.Sprintf("%s=%s\n", runtimetoken.RefEnvName, shellQuote(w.tokenRef))
+	envScript := "umask 077 && cat > " + shellQuote(w.IdentityEnvPath())
+	out, err = w.shell.Run(timeout, envScript, strings.NewReader(envBody), false)
+	if err != nil {
+		return fmt.Errorf("writing the sandbox runtime identity failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // startAgentServer launches `af agent-server` headless on the remote, detached
 // via nohup with its banner + log redirected to files, bound to 127.0.0.1:0, and
 // captures the background PID.
+// revalidateCallbackBeforeEnv re-checks the minted credential at the LAST step
+// that can still keep a dead grant out of the launched agent-server's
+// environment (#5571 W3.1, PR #5577 review): once the env file is written and
+// the server inherits it, the server's own process env is fixed — a post-launch
+// revalidation could only mark the daemon-side record while the agent kept
+// being taught af verbs that all fail. The clone/binary window is where a
+// listener move or auth change lands, so the check runs after it and before
+// writeCallbackEnv. A loss degrades: the token pair is cleared (writeCallbackEnv
+// and the launch prefix both no-op on empty, so the inner server degrades
+// itself) and the reason is returned for the result's CallbackUnavailable —
+// outer and inner records agree. The caller's post-provision revalidation still
+// runs for the residual banner/tunnel window and revokes the dead grant.
+func (w *sandboxWorkspace) revalidateCallbackBeforeEnv() string {
+	if w.spec.CallbackToken == "" || w.spec.CallbackRevalidate == nil {
+		return ""
+	}
+	if err := w.spec.CallbackRevalidate(); err != nil {
+		w.spec.CallbackURL, w.spec.CallbackToken = "", ""
+		return err.Error()
+	}
+	return ""
+}
+
 // writeCallbackEnv puts the daemon URL and the per-session callback token on the
 // remote, in a file only the sandbox user can read (#2999).
 //
@@ -177,6 +360,12 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	}
 	launch := fmt.Sprintf("nohup %s >%s 2>%s </dev/null & echo $!",
 		filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
+	// The runtime-identity env is unconditional — every W1.1 provision writes
+	// af-identity.env before this point. AF_TOKEN_REF must land in the
+	// agent-server's exec-time environment so the persisted identity's host-side
+	// /proc/<pid>/environ probe can bind the live process to the row. Same
+	// `set -a`/`;`/`|| exit 1` contract the callback source below documents.
+	launch = "set -a && . " + shellQuote(w.IdentityEnvPath()) + " && set +a || exit 1; " + launch
 	if w.spec.CallbackToken != "" {
 		// Sourced into the shell that launches the agent-server, so the variables
 		// are in its ENVIRONMENT rather than its argv. AF_DAEMON_URL and
@@ -217,10 +406,22 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	for _, name := range w.spec.SessionEnvPassthrough {
 		args = append(args, "--session-env", name)
 	}
+	// AF_TOKEN_REF rides the handoff's per-invocation extras — the one channel
+	// that reaches THIS process's exec-time environment — rather than
+	// sessionenv's common allowlist, which is also the pane allowlist: joining
+	// that set would inherit the variable into every shell/process pane the
+	// agent-server spawns. The ref is a nonce, but the rule keeps the
+	// credential-class channel narrow on principle (#5571 W1.1 approval).
+	extras := append(append([]string{}, w.spec.SessionEnvPassthrough...), runtimetoken.RefEnvName)
 	// The marker re-execs the staged binary it is already running, so a symlinked
-	// session directory changes no identity comparison: there is none. Policy and
-	// the agent-server effect are derived from the same structured arguments.
-	filteredInner, err := sessionenv.WrapAgentServerCommand(w.AfPath(), w.spec.SessionEnvPassthrough, args)
+	// session directory changes no launch-side identity comparison: there is none
+	// here — policy and the agent-server effect are derived from the same
+	// structured arguments. The re-exec DOES resolve argv[0] through
+	// os.Executable, so the reap-side identity check (remotePIDIdentityKillScript)
+	// compares against a resolved path; resolveSessionDirSymlinks provisions that
+	// resolved path before the launch so the reaper's `expected` stays in
+	// agreement.
+	filteredInner, err := sessionenv.WrapAgentServerCommand(w.AfPath(), extras, args)
 	if err != nil {
 		return "", fmt.Errorf("preparing filtered agent-server environment failed: %w", err)
 	}
@@ -242,15 +443,34 @@ func (w *sandboxWorkspace) agentName() string {
 // listener and printed its {addr,token} JSON line, or times out — pulling the
 // agent-server's stderr log into the error on timeout so a start failure is
 // self-diagnosing.
+//
+// Each poll is ONE remote command that also probes the spawned process with
+// kill -0 (#5571 W2.1): an agent-server that exited — a program the host's
+// login PATH does not have, a crashed start — fails create in seconds instead
+// of outliving the banner timeout. The spawned process's parent exited at
+// spawn, so a dead agent-server is reaped by init and kill -0 answers ESRCH —
+// no zombie can masquerade as alive.
 func (w *sandboxWorkspace) readBanner(pollTimeout, pollInterval, stepTimeout time.Duration) (bannerJSON, error) {
 	deadline := time.Now().Add(pollTimeout)
+	poll := "cat " + shellQuote(w.BannerPath()) + " 2>/dev/null"
+	if w.RemotePID != "" {
+		// RemotePID is a positivePID-validated number — the only value ever
+		// interpolated into the script.
+		poll += fmt.Sprintf("; kill -0 %s 2>/dev/null && echo %s || echo %s", w.RemotePID, remoteProcAlive, remoteProcDead)
+	}
 	for {
-		out, err := w.shell.Run(stepTimeout, "cat "+shellQuote(w.BannerPath()), nil, false)
+		out, err := w.shell.Run(stepTimeout, poll, nil, false)
+		body, liveness := splitRemoteLiveness(string(out))
 		if err == nil {
 			var b bannerJSON
-			if jErr := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &b); jErr == nil && b.Addr != "" && b.Token != "" {
+			if jErr := json.Unmarshal([]byte(strings.TrimSpace(body)), &b); jErr == nil && b.Addr != "" && b.Token != "" {
 				return b, nil
 			}
+		}
+		if liveness == remoteProcDead {
+			logOut, _ := w.shell.Run(stepTimeout, "cat "+shellQuote(w.LogPath()), nil, true)
+			return bannerJSON{}, fmt.Errorf("af agent-server (pid %s) exited before reporting a startup banner; remote log:\n%s",
+				w.RemotePID, strings.TrimSpace(string(logOut)))
 		}
 		if time.Now().After(deadline) {
 			logOut, _ := w.shell.Run(stepTimeout, "cat "+shellQuote(w.LogPath()), nil, true)
@@ -271,5 +491,19 @@ func (w *sandboxWorkspace) BannerPath() string    { return w.SessionDir + "/" + 
 func (w *sandboxWorkspace) CallbackEnvPath() string { return w.SessionDir + "/" + sshCallbackEnvName }
 
 const sshCallbackEnvName = "af-callback.env"
+
+// IdentityEnvPath is the 0600 env file holding only AF_TOKEN_REF — the launch
+// sources it unconditionally so the token reference lands in the agent-server's
+// exec-time environment (#5571 W1.1).
+func (w *sandboxWorkspace) IdentityEnvPath() string { return w.SessionDir + "/" + sshIdentityEnvName }
+
+const sshIdentityEnvName = "af-identity.env"
+
+// ServerTokenPath is the 0600 file `af agent-server` reads its expected bearer
+// token from: it sits beside the streamed binary because the remote process
+// locates it as <dirname(os.Executable)>/<TokenFileName> (#5571 W1.1).
+func (w *sandboxWorkspace) ServerTokenPath() string {
+	return w.SessionDir + "/" + runtimetoken.TokenFileName
+}
 
 func (w *sandboxWorkspace) LogPath() string { return w.SessionDir + "/" + sshLogName }
