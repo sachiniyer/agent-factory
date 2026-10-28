@@ -476,6 +476,13 @@ func liveSessionName(inst *session.Instance, tab int) string {
 	if local {
 		return inst.TabTmuxName(tab)
 	}
+	// Only a PTY-bearing tab can stream. Web and docs tabs own no process and
+	// vscode tabs are a browser surface, so attaching one would blank the pane
+	// that otherwise shows the tab's placeholder (#5825).
+	tabs := inst.GetTabs()
+	if tab < 0 || tab >= len(tabs) || !tabBearsPTY(tabs[tab].Kind) {
+		return ""
+	}
 	id, _ := inst.TabIDAt(tab)
 	return id
 }
@@ -507,4 +514,13 @@ func (m *home) closeAllLiveTermPanes() {
 	for id := range m.liveTerms {
 		m.closeLiveTermPaneFor(id)
 	}
+}
+
+// tabBearsPTY reports whether a tab of this kind runs a process behind a PTY.
+func tabBearsPTY(kind session.TabKind) bool {
+	switch kind {
+	case session.TabKindAgent, session.TabKindShell, session.TabKindProcess:
+		return true
+	}
+	return false
 }
