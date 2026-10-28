@@ -600,6 +600,28 @@ func previewTabMissErr() error {
 	return fmt.Errorf("--tab %d is not a slot in this session", previewTabFlag)
 }
 
+// previewGoneErr words a Gone preview. A tab whose own pane is gone while the
+// session lives (TabPaneGone, #4647) must name the tab and say the session is
+// still running; only a plain Gone — the session's own runtime — says it stopped.
+func previewGoneErr(title string, snapshot daemon.PreviewResponse) error {
+	if !snapshot.TabPaneGone {
+		return fmt.Errorf("session %q is no longer running", title)
+	}
+	var tab string
+	switch {
+	case previewTabIDFlag != "":
+		tab = fmt.Sprintf("%q", previewTabIDFlag)
+	case previewTabNameFlag != "":
+		tab = fmt.Sprintf("%q", previewTabNameFlag)
+	default:
+		tab = fmt.Sprintf("tab %d", previewTabFlag)
+	}
+	if previewTabIDFlag != "" || previewTabNameFlag != "" {
+		tab = "tab " + tab
+	}
+	return fmt.Errorf("%s of session %q has no pane — its tmux session is gone; the session itself is still running", tab, title)
+}
+
 var sessionsPreviewCmd = &cobra.Command{
 	Use:   "preview <title>",
 	Short: "Preview a session's terminal content",
@@ -665,7 +687,7 @@ parse it rather than render it.`,
 			return jsonError(previewTabMissErr())
 		}
 		if snapshot.Gone {
-			return jsonError(fmt.Errorf("session %q is no longer running", args[0]))
+			return jsonError(previewGoneErr(args[0], snapshot))
 		}
 		content := snapshot.Content
 		if previewPlainFlag {
