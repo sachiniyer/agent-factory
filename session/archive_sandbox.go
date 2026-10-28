@@ -1,10 +1,14 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
+	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -247,7 +251,7 @@ func (i *Instance) reprovisionRemote() error {
 	i.mu.RLock()
 	backend := i.backend
 	accountName := i.Account
-	restoreBranch := i.restoreCheckpointLocked()
+	restoreBranch, unverified := i.restoreCheckpointLocked()
 	spec := ProvisionSpec{
 		RepoRoot:      i.Path,
 		Title:         i.Title,
@@ -262,6 +266,22 @@ func (i *Instance) reprovisionRemote() error {
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 	}
 	i.mu.RUnlock()
+	if unverified {
+		// af never observed this branch being pushed, but a lost response or a
+		// crash mid-push leaves exactly that picture with the branch on origin.
+		// Ask origin before discarding it (#5972).
+		verdict, err := branchOnOrigin(spec.CloneURL, restoreBranch)
+		switch {
+		case err != nil:
+			// Unknown stays unknown: not discarded, not fetched blindly.
+			return fmt.Errorf("cannot re-provision session %q: af could not check whether its branch %q is on origin (%v); nothing was changed — fix access to the repository's origin from this machine and retry, or push the branch from the session's host", i.Title, restoreBranch, err)
+		case verdict:
+			i.markBranchPushed()
+		default:
+			restoreBranch = ""
+		}
+		spec.RestoreBranch = restoreBranch
+	}
 	spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(spec.RepoRoot)
 	if backend == nil {
 		return fmt.Errorf("cannot re-provision session %q: no backend on record", i.Title)
@@ -780,18 +800,53 @@ func (i *Instance) RestoreWouldDiscardUnpushedWork() bool {
 	}
 }
 
-// restoreCheckpointLocked is the branch a replacement sandbox may fetch from
-// origin. The displayed i.Branch is the NAME the session works on and, for a
-// session created by this af, may never have been pushed; a runtime fetches a
-// non-empty RestoreBranch unconditionally, so handing it that bare name would
-// fail every replacement and leave the session Lost (#5972). Only the marked
-// exception is withheld: a row an older af wrote never carries the mark, and
-// there a recorded branch could only have come from a push, so it stays
-// restorable. Empty means the replacement is created fresh on the unchanged
-// session branch name. The caller holds i.mu.
-func (i *Instance) restoreCheckpointLocked() string {
+// restoreCheckpointLocked returns the branch a replacement sandbox may fetch
+// from origin, and whether that is still unverified. The displayed i.Branch is
+// the NAME the session works on and, for a session created by this af, may never
+// have been pushed; a runtime fetches a non-empty RestoreBranch unconditionally,
+// so handing it that bare name would fail every replacement and leave the
+// session Lost (#5972). A row an older af wrote carries no unpushed mark, and
+// there a recorded branch could only have come from a push, so it is returned
+// verified. For the marked exception the name is returned with unverified set:
+// the caller asks origin, because af merely not having SEEN a push is not
+// evidence there was none. The caller holds i.mu.
+func (i *Instance) restoreCheckpointLocked() (branch string, unverified bool) {
+	return strings.TrimSpace(i.Branch), i.branchUnpushed && strings.TrimSpace(i.Branch) != ""
+}
+
+// markBranchPushed records that origin was seen to hold the branch.
+func (i *Instance) markBranchPushed() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	if i.branchUnpushed {
-		return ""
+		i.branchUnpushed = false
+		i.touchLocked()
 	}
-	return strings.TrimSpace(i.Branch)
+}
+
+// branchOnOrigin answers whether origin holds refs/heads/<branch>: true when it
+// does, false only on a positive "origin lacks it", and an error for anything
+// else (no URL, unreachable, auth). A var so tests need no network.
+var branchOnOrigin = branchOnOriginViaGit
+
+func branchOnOriginViaGit(originURL, branch string) (bool, error) {
+	if strings.TrimSpace(originURL) == "" {
+		return false, errors.New("the repository has no origin remote")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", "--heads", originURL, "refs/heads/"+branch)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.WaitDelay = dockerWaitDelay
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	var exit *exec.ExitError
+	// --exit-code makes 2 mean "reached origin, no matching ref"; any other
+	// failure says nothing about the ref.
+	if errors.As(err, &exit) && exit.ExitCode() == 2 && ctx.Err() == nil {
+		return false, nil
+	}
+	return false, fmt.Errorf("git ls-remote: %w: %s", err, strings.TrimSpace(string(out)))
 }
