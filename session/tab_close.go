@@ -229,7 +229,7 @@ func (i *Instance) closeRemovedTab(tab *Tab) error {
 	i.endTabPTYStream(tab.ID)
 
 	if tab.tmux == nil {
-		return nil
+		return i.closeOffBoxTab(tab)
 	}
 	// Pane state deliberately ignored: closing ONE tab touches no worktree, so
 	// nothing destructive follows an unknown here. (A Close that fails after the

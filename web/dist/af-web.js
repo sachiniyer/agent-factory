@@ -6739,6 +6739,10 @@ async function rebindProject(id, path, token2, expectedRoot = null, expectedChec
   const resp = await af("RebindProject", request, token2);
   return resp.project;
 }
+async function setProjectColor(id, color, token2) {
+  const resp = await af("SetProjectColor", { id, color }, token2);
+  return resp.project;
+}
 async function listProjects(token2, signal) {
   const resp = await af("ListProjects", {}, token2, signal);
   return resp.projects ?? [];
@@ -6867,7 +6871,10 @@ async function updateTask(task, update, token2) {
 }
 async function triggerTask(task, token2) {
   requireTaskID(task.id, "trigger a task");
-  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+  const result = await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 async function removeTask(task, token2) {
   requireTaskID(task.id, "remove a task");
@@ -16729,6 +16736,138 @@ function replaceProjectMenuChildren(menu, children, fallback) {
   (replacement ?? fallback).focus({ preventScroll: true });
 }
 
+// src/project_color.ts
+var PROJECT_COLOR_PALETTE = [
+  "#e11d48",
+  "#ea580c",
+  "#ca8a04",
+  "#16a34a",
+  "#0d9488",
+  "#2563eb",
+  "#7c3aed",
+  "#db2777"
+];
+var FAVICON_MARK_PATH = "M96 416 L96 96 L160 96 L160 288 L224 288 L224 192 L320 288 L320 192 L416 288 L416 416 Z";
+var HEX = /^#[0-9a-f]{6}$/;
+function projectColor(projects, root2) {
+  if (root2 === null) return null;
+  const color = projects.find((p) => p.root === root2)?.color?.toLowerCase() ?? "";
+  return HEX.test(color) ? color : null;
+}
+function markInk(color) {
+  const channel = (i) => {
+    const v = parseInt(color.slice(i, i + 2), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+  const darkInkContrast = (luminance + 0.05) / (0.014 + 0.05);
+  const whiteInkContrast = 1.05 / (luminance + 0.05);
+  return darkInkContrast >= whiteInkContrast ? "#1f1f1f" : "#ffffff";
+}
+function projectFaviconSvg(color) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${color}"/><path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`;
+}
+function projectFaviconDataUrl(color) {
+  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color))}`;
+}
+function projectFaviconPng(color, size) {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx || typeof Path2D === "undefined") return null;
+  ctx.scale(size / 512, size / 512);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(112, 0);
+  ctx.arcTo(512, 0, 512, 512, 112);
+  ctx.arcTo(512, 512, 0, 512, 112);
+  ctx.arcTo(0, 512, 0, 0, 112);
+  ctx.arcTo(0, 0, 512, 0, 112);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = markInk(color);
+  ctx.fill(new Path2D(FAVICON_MARK_PATH));
+  return canvas.toDataURL("image/png");
+}
+var appliedFavicon = null;
+function applyProjectFavicon(color) {
+  if (appliedFavicon === color) return;
+  appliedFavicon = color;
+  for (const link of document.querySelectorAll('link[rel="icon"]')) {
+    if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
+    let href = null;
+    if (color !== null) {
+      if (link.type === "image/svg+xml") {
+        href = projectFaviconDataUrl(color);
+      } else {
+        href = projectFaviconPng(color, Number.parseInt(link.sizes.value, 10) || 32);
+      }
+    }
+    link.setAttribute("href", href ?? link.dataset.afDefaultHref);
+  }
+}
+function applyProjectFrame(main, color) {
+  if (color === null) {
+    if (main.dataset.projectColor === void 0) return;
+    delete main.dataset.projectColor;
+    main.style.removeProperty("--af-project-color");
+    return;
+  }
+  if (main.dataset.projectColor === color) return;
+  main.dataset.projectColor = color;
+  main.style.setProperty("--af-project-color", color);
+}
+function projectColorRow(current, label, onPick) {
+  const pick = (color) => (e) => {
+    e.stopPropagation();
+    onPick(color);
+  };
+  const swatches = PROJECT_COLOR_PALETTE.map((color) => {
+    const swatch = h("button", { type: "button", class: "af-project-swatch" });
+    swatch.style.setProperty("--af-swatch", color);
+    swatch.setAttribute("aria-label", `Color ${label} ${color}`);
+    swatch.setAttribute("title", color);
+    swatch.setAttribute("aria-pressed", current === color ? "true" : "false");
+    swatch.dataset.projectFocus = `color:${color}`;
+    swatch.addEventListener("click", pick(color));
+    return swatch;
+  });
+  const input = h("input", { type: "color", class: "af-project-color-input", tabIndex: -1 });
+  input.value = current ?? PROJECT_COLOR_PALETTE[5];
+  input.setAttribute("aria-hidden", "true");
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("change", () => onPick(input.value));
+  const custom2 = h("button", { type: "button", class: "af-project-swatch af-project-swatch-custom" }, "+");
+  custom2.setAttribute("aria-label", `Custom color for ${label}`);
+  custom2.setAttribute("title", "Custom color");
+  custom2.dataset.projectFocus = "color:custom";
+  custom2.addEventListener("click", (e) => {
+    e.stopPropagation();
+    try {
+      input.showPicker();
+    } catch {
+      input.click();
+    }
+  });
+  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "No color");
+  clear.disabled = current === null;
+  clear.dataset.projectFocus = "color:clear";
+  clear.addEventListener("click", pick(""));
+  const row = h(
+    "div",
+    { class: "af-project-color" },
+    h("span", { class: "af-project-color-label" }, "Color"),
+    ...swatches,
+    custom2,
+    input,
+    clear
+  );
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", `Color for ${label}`);
+  return row;
+}
+
 // src/tabreorder.ts
 var PINNED_TABS = 1;
 function insertionIndexAt(centers, x) {
@@ -17474,6 +17613,7 @@ var AppShell = class {
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectFavicon(null);
   }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
    *  history entry name the session and project rather than a static "Agent Factory".
@@ -17515,6 +17655,9 @@ var AppShell = class {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
+    const color = projectColor(state.registeredProjects, state.selectedProject);
+    applyProjectFrame(this.main, color);
+    applyProjectFavicon(color);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -18023,6 +18166,11 @@ var AppShell = class {
     footChildren.push(add);
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      children.push(
+        projectColorRow(projectColor(state.registeredProjects, currentSummary.root), currentSummary.name, (color) => {
+          this.actions.setProjectColor(currentSummary.root, color);
+        })
+      );
       const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
       if (currentRecord) {
         const rebind = h("button", { type: "button", class: "af-ghost af-project-rebind" }, "Rebind\u2026");
@@ -18076,10 +18224,18 @@ var AppShell = class {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
+    const name = h("span", { class: "af-project-item-name" }, p.name);
+    const dotColor = record ? projectColor([record], record.root) : null;
+    if (dotColor !== null) {
+      const dot = h("span", { class: "af-project-dot" });
+      dot.style.setProperty("--af-swatch", dotColor);
+      dot.setAttribute("aria-hidden", "true");
+      name.prepend(dot, " ");
+    }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      h("span", { class: "af-project-item-name" }, p.name),
+      name,
       h("span", { class: "af-project-item-path" }, p.path)
     );
     const meta = h(
@@ -19136,6 +19292,37 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
   }
 }
 
+// src/project_color_writes.ts
+function createLatestWriter(write, onError) {
+  const waiting = /* @__PURE__ */ new Map();
+  const draining = /* @__PURE__ */ new Map();
+  const drain = async (key) => {
+    for (let next = waiting.get(key); next !== void 0; next = waiting.get(key)) {
+      waiting.delete(key);
+      try {
+        await write(key, next.value);
+      } catch (e) {
+        onError(e, key, next.value);
+      }
+    }
+    draining.delete(key);
+  };
+  return {
+    set(key, value) {
+      waiting.set(key, { value });
+      const running = draining.get(key);
+      if (running) return running;
+      const started = drain(key);
+      draining.set(key, started);
+      return started;
+    },
+    cancel(key) {
+      waiting.delete(key);
+      return draining.get(key) ?? Promise.resolve();
+    }
+  };
+}
+
 // src/tab_delete_target.ts
 function captureTabDeleteTarget(target) {
   const identity = tabIdentity(target);
@@ -19844,18 +20031,40 @@ function openDeleteProject(root2, label) {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root2, tok).then(() => {
-          if (modal === m) closeModal();
-        }).catch((e) => {
-          if (isMutationCommittedError(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            refreshRegisteredProjects();
-            surfaceTabError(e);
-            return;
+        const connection = connectionGeneration;
+        void projectColorWriter.cancel(root2).then(async () => {
+          if (!isCurrentConnection(connection, tok)) return;
+          const learned = projectColorRegistrations.get(root2);
+          if (learned && "uncertain" in learned) {
+            try {
+              await registerProject(root2, tok);
+            } catch (e) {
+              if (!isMutationCommittedError(e) && isMutationOutcomeUncertain(e)) {
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(new Error(`The project registration outcome could not be confirmed. ${errorText(e)}`));
+                return;
+              }
+            }
+            projectColorRegistrations.delete(root2);
           }
-          m.setBusy(false);
-          m.setError(errorText(e));
+          if (!isCurrentConnection(connection, tok)) return;
+          return deleteProject(root2, tok).then(() => {
+            projectColorRegistrations.delete(root2);
+            if (modal === m) closeModal();
+          }).catch((e) => {
+            if (isMutationCommittedError(e)) {
+              projectColorRegistrations.delete(root2);
+              if (modal === m) closeModal();
+              requestResync();
+              refreshRegisteredProjects();
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
         });
       },
       onCancel: closeModal
@@ -20483,6 +20692,15 @@ var projectsRefetcher = createFencedRefetcher({
   onError: (e) => store.set({ projectsError: errorText(e) })
 });
 function commitRegisteredProjects(projects) {
+  const byRoot = new Map(projects.map((p) => [p.root, p.id]));
+  for (const [root2, learned] of projectColorRegistrations) {
+    if ("uncertain" in learned) {
+      const id = byRoot.get(root2);
+      if (id !== void 0) projectColorRegistrations.set(root2, { id });
+    } else if (byRoot.get(root2) !== learned.id) {
+      projectColorRegistrations.delete(root2);
+    }
+  }
   const selectedProject = reconcileProject(
     store.get().sessions,
     store.get().tasks,
@@ -20494,6 +20712,39 @@ function commitRegisteredProjects(projects) {
 }
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
+}
+var projectColorRegistrations = /* @__PURE__ */ new Map();
+var projectColorWriter = createLatestWriter(
+  async (root2, { color, tok, connection, projectId: known }) => {
+    const current = () => isCurrentConnection(connection, tok);
+    if (!current()) return;
+    const learned = projectColorRegistrations.get(root2);
+    const projectId = known ?? (learned && "id" in learned ? learned.id : null) ?? await (async () => {
+      try {
+        const project = await registerProject(root2, tok);
+        projectColorRegistrations.set(root2, { id: project.id });
+        return project.id;
+      } catch (e) {
+        if (isMutationOutcomeUncertain(e)) projectColorRegistrations.set(root2, { uncertain: true });
+        throw e;
+      }
+    })();
+    if (!current()) return;
+    await setProjectColor(projectId, color, tok);
+    if (current()) refreshRegisteredProjects();
+  },
+  (e, _root, { tok, connection }) => {
+    if (isCurrentConnection(connection, tok)) surfaceMutationError(e);
+  }
+);
+function isCurrentConnection(connection, tok) {
+  return connection === connectionGeneration && token === tok;
+}
+function doSetProjectColor(root2, color) {
+  const tok = token;
+  if (tok === null) return;
+  const projectId = store.get().registeredProjects.find((r) => r.root === root2)?.id ?? null;
+  void projectColorWriter.set(root2, { color, tok, connection: connectionGeneration, projectId });
 }
 function requestProjectsResync() {
   if (projectsResyncTimer !== null) {
@@ -20597,7 +20848,12 @@ function doTriggerTask(task) {
   if (tok === null) {
     return;
   }
-  void triggerTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void triggerTask(task, tok).then(refreshTasks).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      refreshTasks();
+    }
+    surfaceTabError(e);
+  });
 }
 function doRetryLimit() {
   const sel = selectedSession2();
@@ -20788,6 +21044,7 @@ var actions = {
   deleteProject: openDeleteProject,
   addProject: openAddProject,
   rebindProject: openRebindProject,
+  setProjectColor: doSetProjectColor,
   setTheme
 };
 function syncSplit(state) {

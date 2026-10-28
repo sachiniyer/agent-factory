@@ -235,11 +235,31 @@ only needs the workspace tooling:
 - **`cat`** — reads the agent-server's startup banner, and, for an
   account-scoped session, the container's own `/proc/1/mountinfo` when af
   verifies the account boundary (#3598).
-- **`stat`**, **`mkdir`** and **`chown`** — account-scoped sessions ONLY: af asks
-  the mounted account who owns it, then prepares a writable HOME for that same
-  uid. A session with no `--account` never runs these. Both these entries and
-  `cat` were already required and simply missing from this list (#3602 review);
-  busybox and coreutils each provide all of them.
+- **`stat`**, **`mkdir`**, **`chown`**, **`find`** and **`id`** — af probes the container's
+  default user and prepares a writable HOME and `/workspace` for that uid, so a
+  BYO image that sets a non-root `USER` directive (a common hardening practice)
+  provisions the same way a root-default image does. An account-scoped session
+  probes the **mounted account**'s owner; a session with no `--account` probes
+  the **image**'s default `USER` (`id -u`/`id -g`), and af chowns HOME and
+  `/workspace` to that uid as root before provisioning as that user. `stat` is
+  account-only (it reads the mounted directory's owner); `id` runs on every
+  non-account session, and `mkdir`/`chown` run on an account session or when
+  the probe finds a non-root default user — a root-default image on a
+  non-account session skips the chown entirely, so a host directory
+  bind-mounted at `/root` or `/workspace` is never re-owned and a HOME set via
+  `run_args` stays in effect. Before chowning, af reads the container's own mount table
+  (`/proc/self/mountinfo`, via `cat`, `cd` and `pwd -P`) and never lets the
+  recursive chown cross into **any** mount point at or under HOME — however it
+  was created (`-v`, `--mount`, `--volumes-from`, `--tmpfs`, an image `VOLUME`,
+  an agent-credential mount) — so it neither re-owns the operator's host files
+  (a read-write bind) nor EROFS-aborts on a read-only one. `find` walks HOME with
+  that prune list when there is at least one such mount; with none it is a plain
+  `chown -R`. Only a directory whose containing mount is the container's own root filesystem is chowned: if HOME or `/workspace` is itself a mount, or lives beneath one (a host bind, a volume, a tmpfs, or a symlinked HOME that resolves into one), af skips that chown and logs why. If the
+  mount table cannot be read or understood, provisioning fails with an error
+  naming it rather than chowning blind. `chown` runs with `-h` in that form so a symlink the image ships under `/root`
+  is re-owned itself, not its target outside HOME. These entries and `cat` were
+  already required and simply missing from this list (#3602 review); busybox and
+  coreutils each provide all of them.
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
 - A libc/architecture compatible with the daemon's `af` binary. The copied-in
   binary is the **daemon's own executable**, and the release artifacts
@@ -618,6 +638,12 @@ inherit it. A local token is never copied to the SSH host implicitly.
 
 ### Testing
 
+CI runs `TestSandboxDaemonE2E` (`.github/workflows/sandbox-e2e.yml`, on every master
+push and nightly): a real daemon on a default config drives a `backend = "sandbox"`
+session against a containerized sshd host through its own RPCs (create, prompt,
+preview, tab, archive, restore, kill, and a task-fired create). `make
+backend-sandbox-e2e` runs it by hand; it is not a routine local gate.
+
 `make backend-ssh-roundtrip` runs the real end-to-end SSH round-trips on a host
 with Docker: it stands up a throwaway `sshd`+git+tmux container as the ssh target
 (no external host, no dependency on the box's own sshd), creates a session on the
@@ -721,6 +747,38 @@ recipe in
 **[Remote hooks → Migrating from the old contract](remote-hooks.md#migrating-from-the-old-contract)**.
 
 ---
+
+## Moving a live session to a sandbox (move script)
+
+> **Status:** the building blocks (worktree snapshot, move-script contract,
+> all-or-nothing orchestration) live in the `move` package. The
+> `af sessions move <title> --to <host>` command is not wired yet. The global-only
+> `move_cmd` setting exists (a checked-in value is a load error) but nothing reads
+> it yet, so nothing here is user-invokable today; this
+> section is the contract the script will run under.
+
+A move seeds the sandbox workspace from a snapshot of the local worktree — the
+branch history plus every uncommitted and untracked file — rather than a fresh
+clone. `.gitignore`d files are not carried; the operator's **move script** copies
+them. The script runs on the daemon box, never from repository config.
+
+- **stdin:** a JSON object with `session_id`, `title`, `branch`,
+  `source_worktree`, `host`, `dest_workspace` and (when scoped) `account`.
+- **env:** `AF_SSH` — the ssh command **without** the destination (options
+  only); `AF_SSH_DEST` — the destination (`user@host` or an ssh alias);
+  `AF_SSH_FULL` — the complete command including the destination. So
+  `rsync -e "$AF_SSH" file "$AF_SSH_DEST:dir/"` and
+  `$AF_SSH "$AF_SSH_DEST" 'cmd'` reach the same machine af does. The same three
+  values are in the JSON as `ssh`, `ssh_dest` and `ssh_full`. A free-form
+  `sandbox.ssh` command already embeds its host and af cannot split it, so there
+  `AF_SSH` and `AF_SSH_DEST` are empty and only `AF_SSH_FULL` is set: run
+  `$AF_SSH_FULL 'cmd'` and, instead of `rsync -e`, pipe tar:
+  `tar -C src -c . | $AF_SSH_FULL 'tar -C dir -x'`.
+- **exit:** `0` continues; anything else aborts. Any failure before the session
+  row switches leaves the local session running exactly as before and reaps the
+  half-built sandbox workspace.
+
+See `examples/move-script/move.sh` for a documented example.
 
 ## Archive & restore
 

@@ -7,7 +7,7 @@
 - has `Build` and `Lint` check runs concluded `success` on its **current** head;
 - has no unanswered **P1** Codex inline finding — a review thread whose first comment is by the Codex bot and contains `P1 Badge`, with no reply containing `RESOLVED`, `ACCEPTED` or `[gate-ack]`. P2/P3 are advisory.
 
-API economy is a hard requirement (the Actions `GITHUB_TOKEN` quota starved the old gate). Each run is two-phase GraphQL: a cheap query for all open master PRs (head, mergeable, labels, `Build`/`Lint` rollup), then one aliased query fetching review threads **only** for PRs that passed phase 1. Both log `rateLimit` cost and remaining as notices. REST is used for merges, workflow dispatches, the broken-master issue, and one `listWorkflowRuns` call to debounce. `workflow_run` triggers are debounced: a run is skipped if another auto-merge run started within the last 3 minutes (the 10-minute schedule and manual dispatch always run).
+API economy is a hard requirement (the Actions `GITHUB_TOKEN` quota starved the old gate). Each run is two-phase GraphQL: a cheap query for all open master PRs (head, mergeable, labels, `Build`/`Lint` rollup), then one aliased query fetching review threads **only** for PRs that passed phase 1. Both log `rateLimit` cost and remaining as notices. REST is used for merges, workflow dispatches, the broken-master issue, and one `listWorkflowRuns` call to debounce. `workflow_run` triggers are debounced only when safe: a trigger is skipped only if another merger run STARTED AFTER the triggering run completed, or one is already queued — either reads state at least as new as the event. A merely "recent" run is not enough (it read older state and would discard the signal). The schedule and manual dispatch always run.
 
 ## After a merge
 
@@ -24,6 +24,13 @@ Under continuous merging every master Build is cancelled by the next push (`canc
 A PR labelled `fix-master` (Build + Lint still required on its head) is exempt from the red halt, so a red master can always be repaired through the merger.
 
 Other halt: an open `master broken by merge batch <sha>` issue while master still fails the composition check.
+
+## UNKNOWN mergeability, and how verification re-wakes the merger
+
+- GitHub computes `mergeable` lazily: the first read returns `UNKNOWN`. The merger re-reads only the otherwise-eligible UNKNOWN PRs, up to 3 times ~12s apart, and logs a PR that is still UNKNOWN as a skip "after 3 re-reads".
+- Events made with `GITHUB_TOKEN` never start `workflow_run` workflows, so the verification runs the merger dispatches could not wake it. `build.yml` and `lint.yml` therefore end with a `kick-auto-merge` job: on a master `workflow_dispatch` run that was not cancelled (success **or** failure — a red master still has `fix-master` PRs to merge) it runs `gh workflow run auto-merge.yml --ref master`. `workflow_dispatch` is the one event `GITHUB_TOKEN` may trigger. The kicked run keeps the usual concurrency group; the debounce only applies to `workflow_run`.
+- The kick job runs inside the run it announces, so that run is still `in_progress` when the kicked merger starts. An incomplete `build.yml`/`lint.yml` run is therefore classified by its non-kick jobs (jobs API): once every job except `Kick auto-merge` has concluded, the run counts as success or red, so the verdict never stays `wait` merely because the kick job has not finished.
+- Why this terminates: a run dispatches verification only when it merged something (the head moved) or a verification workflow has no live run. A verified master with nothing to merge, a red master, and a master still being verified dispatch nothing; a cancelled run does not kick, so the next scheduled run recovers it.
 
 ## Workflow-touching PRs and `AUTO_MERGE_TOKEN`
 
