@@ -1222,6 +1222,10 @@ af daemon restart [flags]
 
 Report daemon liveness, config freshness, and supervision
 
+With --daemon-url (or AF_DAEMON_URL, or a saved target) this reads the TARGET's
+health route and reports whether it responds, its version, phase and boot
+identity — never this machine's sockets or autostart unit.
+
 Print a read-only snapshot of the background daemon: whether it is responding
 on the control socket, the control and HTTP socket paths (and whether their
 files are present), the recorded and responding pids, whether the installed
