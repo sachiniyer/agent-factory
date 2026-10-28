@@ -332,6 +332,12 @@ func resolvePinnedSSHDialAddress(host string, port int) string {
 	// window (~130s on Linux) where the first ssh step would have failed at its own
 	// 30s deadline. Timing out here just means no pin, which composes the ordinary
 	// name-based command and lets that step report the real error.
+	//
+	// A NAME is never resolved by a Go resolver that is not the system's (#5750):
+	// the static CGO_ENABLED=0 build cannot see NSS answers ssh would use.
+	if !dialUsesSystemResolver && !pinHostIsIPLiteral(host) {
+		return resolvePinnedViaGetent(host, port)
+	}
 	dialer := net.Dialer{Timeout: sshDialProbeTimeout}
 	conn, err := dialer.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {

@@ -289,6 +289,16 @@ func (m *Manager) resumeLimitedSession(
 	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapScheduledResumeEligible(inst) {
 		return
 	}
+	// A TUI attached to this session holds the attach pause lease, and the resume
+	// pastes a prompt and presses Enter (or tears the pane down for a swap) — into
+	// a pane the user may be typing in. Every DeliverPrompt path defers on the
+	// same lease (#1586, #1638); the scheduler must too (#5412). Return BEFORE
+	// limitResumeAttempted records an attempt, so a deferral burns no backoff
+	// step and the resume fires on the first tick after detach. The explicit
+	// ResumeFromLimit RPC is an operator action and stays exempt.
+	if m.isPollPaused(repoID, inst.Title, inst.ID) {
+		return
+	}
 	if accountSwap != nil {
 		// This value only schedules the attempt. admitAccountSwap rebuilds all facts
 		// after the limit-resume fence is raised and is the only result allowed to

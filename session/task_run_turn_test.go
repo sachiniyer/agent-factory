@@ -802,3 +802,26 @@ func TestTaskRunFailureSurvivesRestartBeforeStamp(t *testing.T) {
 	require.False(t, reloaded.ToInstanceData().TaskRunFailurePending,
 		"an acknowledged stamp is not re-driven by the next restart")
 }
+
+// #5644: a handoff clears the pane-relative boundary, but the original prompt
+// provably landed. A PromptNotDelivered on the replacement mission's send must
+// not end that run failed — in memory, and after a restart.
+func TestTaskRunHandoffReplacementFailureDoesNotFailBoundRun(t *testing.T) {
+	inst := taskRunSession(t)
+	require.True(t, inst.RecordPromptAttempt(PromptDelivered, time.Now()), "the original prompt binds the boundary")
+	inst.ClearIdleEvidence() // the runtime swap zeroes the pane-relative boundary
+
+	inst.RecordPromptAttempt(PromptNotDelivered, time.Now()) // replacement mission failed
+	require.True(t, inst.TaskRunActive(), "a run whose prompt landed is not ended failed by a replacement send")
+	require.False(t, inst.TaskRunFailed())
+	require.False(t, inst.ConsumeTaskRunFailed())
+
+	data := inst.ToInstanceData()
+	require.True(t, data.TaskRunPromptBound)
+	data.TaskRunPromptAttemptAt = time.Time{}
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.True(t, reloaded.TaskRunActive(), "the load-time re-derivation honours the bound bit too")
+	require.False(t, reloaded.TaskRunFailed())
+}

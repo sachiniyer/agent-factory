@@ -33,14 +33,16 @@ func TestTaskFireForeignRowReasonTmuxIdentity(t *testing.T) {
 		owner := session.InstanceData{Title: "other", Tabs: []session.TabData{{TmuxName: sanitized}}}
 		assert.Equal(t, "tmux session name", taskFireForeignRowReason(&owner, fire, root, sanitized, "", ""))
 	})
-	t.Run("a legacy row without tmux fields owns the name its title sanitizes to", func(t *testing.T) {
+	t.Run("a legacy row without tmux fields owns only its unscoped runtime name (#5724)", func(t *testing.T) {
 		slashFire := &taskFireMarker{Title: "api/refactor"}
 		slashName := tmux.SanitizedNameForRepo(slashFire.Title, root)
 		legacy := session.InstanceData{Title: "api_refactor"}
-		require.Equal(t, slashName, tmux.SanitizedNameForRepo(legacy.Title, root), "precondition: the sanitizer collapses these titles")
-		assert.Equal(t, "tmux session name", taskFireForeignRowReason(&legacy, slashFire, root, slashName, "", ""))
-		unrelated := session.InstanceData{Title: "other"}
-		assert.Equal(t, "", taskFireForeignRowReason(&unrelated, slashFire, root, slashName, "", ""))
+		require.Equal(t, slashName, tmux.SanitizedNameForRepo("api_refactor", root), "precondition: the sanitizer collapses these titles")
+		assert.Equal(t, "", taskFireForeignRowReason(&legacy, slashFire, root, slashName, "", ""),
+			"the legacy runtime is unscoped, so it cannot hold the fire's repo-scoped name")
+		unscoped := tmux.SanitizedNameForRepo("api_refactor", "")
+		assert.Equal(t, "tmux session name", taskFireForeignRowReason(&legacy, &taskFireMarker{Title: "x"}, root, unscoped, "", ""),
+			"it does own the unscoped name restoreLocalTabs binds")
 	})
 	t.Run("the fire's own leftover record matches by TmuxName", func(t *testing.T) {
 		leftover := session.InstanceData{Title: "foo-leftover", TmuxName: sanitized, Worktree: session.GitWorktreeData{SessionName: sanitized}}

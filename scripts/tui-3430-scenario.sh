@@ -75,8 +75,12 @@ drive_narrow_hints() {
 
     row="$(_row_with 'esc close')"
     _af_log "#3430 hint row (${cols}x${rows}): $row"
-    if ! printf '%s' "$row" | grep -qF -- '↵ edit'; then
-        _af_fail "#3430: at ${cols}x${rows} the hint row wrapped — 'esc close' is on a different physical row from '↵ edit', so the pane rendered a line wider than itself:"
+    # `C assistant` is the neighbour that is shed LAST (#2453), so it is the one
+    # fragment still guaranteed to share the row with `esc close` at these widths.
+    # `↵ edit` is no longer that anchor: #4806 put `e explain` ahead of it in the
+    # ladder (ui/config_pane_width.go), so `↵ edit` is shed first when narrow.
+    if ! printf '%s' "$row" | grep -qF -- 'C assistant'; then
+        _af_fail "#3430: at ${cols}x${rows} the hint row wrapped — 'esc close' is on a different physical row from 'C assistant', so the pane rendered a line wider than itself:"
         af_capture >&2
         return 1
     fi
