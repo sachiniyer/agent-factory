@@ -905,6 +905,51 @@ button:disabled,
   background: var(--af-surface-raised);
 }
 
+/* A persistent incompleteness notice for the rail (#4742): names the repos the
+ * daemon dropped at startup and the reason each, so a user can tell "repo has no
+ * sessions" from "the daemon dropped this repo's sessions at startup" instead of
+ * seeing them silently vanish. Sourced from SnapshotResponse.skipped_repos, so it
+ * is rebuilt only when the skip set changes and stays put across project/filter
+ * switches — the missing sessions are a property of the snapshot, not the view. */
+.af-rail-skipped {
+  /* flex: 0 1 (not 0 0) so a tall notice with several skipped repos, or a short
+   * mobile/landscape viewport, cannot crowd the sessions list to zero height:
+   * the notice shrinks before the list does, and min-height: 0 + overflow-y: auto
+   * makes the overflow scrollable inside the notice instead of spilling the rail
+   * (the rail itself is not a scroll container; only .af-rail-list is). */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--af-space-2);
+  margin: 0 0 var(--af-space-1) 0;
+  border-left: calc(var(--af-space-1) * 0.5) solid var(--af-dead);
+  background: var(--af-surface-raised);
+  color: var(--af-dead);
+  font-size: var(--af-type-body);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.af-rail-skipped-head {
+  font-weight: 600;
+  margin-bottom: var(--af-space-1);
+}
+
+.af-rail-skipped-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+}
+
+.af-rail-skipped-row {
+  margin: 0;
+}
+
+.af-rail-skipped-row strong {
+  color: var(--af-dead);
+  font-weight: 600;
+}
+
 .af-row {
   display: flex;
   align-items: flex-start;
@@ -3255,6 +3300,88 @@ button:disabled,
   background: var(--af-surface-raised);
   border-radius: var(--af-radius-control);
   padding: var(--af-space-1) var(--af-space-2);
+}
+
+/* The Explain affordance (#4803): the key itself is the disclosure trigger, so
+ * a closed row carries no trace chrome at all — the most repeated control on
+ * the page stays the quietest. The trigger is a button reset to the key's own
+ * box metrics; only the muted caret marks it as expandable. It keeps the
+ * label column narrow (align-self) rather than spanning it, so a click in the
+ * dead space right of the name cannot surprise-toggle the trace. The open
+ * trace panel spans both columns like the write echo — a candidate list is
+ * prose, not a control.
+ *
+ * The .af-config scope outranks the shared button recipes
+ * (:is(.af-appbar, .af-rail, .af-main-term) button and the global control
+ * floor): without it the trigger inherits the touch-target min-height and a
+ * closed row grows ~22px. */
+.af-config .af-config-explain-trigger {
+  align-self: flex-start;
+  appearance: none;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  line-height: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.af-config-explain-caret {
+  color: var(--af-ink-muted);
+  margin-right: var(--af-space-1);
+}
+
+.af-config-explain-trigger:hover .af-config-explain-caret {
+  color: var(--af-ink);
+}
+
+.af-config-explain {
+  grid-column: 1 / -1;
+}
+
+.af-config-explain-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+  margin: var(--af-space-1) 0 var(--af-space-2);
+  padding: var(--af-space-2);
+  background: var(--af-surface-raised);
+  border-radius: var(--af-radius-control);
+  font-size: var(--af-type-caption);
+  font-family: var(--af-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.af-config-explain-effective {
+  color: var(--af-ink);
+  font-weight: 600;
+}
+
+.af-config-explain-line {
+  color: var(--af-ink-muted);
+}
+
+.af-config-explain-layer {
+  color: var(--af-ink);
+}
+
+/* The winner stands out; every other verdict is muted — the trace exists to
+ * answer "which layer supplied this", so that is the line to find first. */
+.af-config-explain-winner .af-config-explain-layer {
+  color: var(--af-accent);
+  font-weight: 600;
+}
+
+.af-config-explain-src {
+  color: var(--af-ink-muted);
+  padding-left: var(--af-space-4);
+}
+
+.af-config-explain-note {
+  color: var(--af-ink-muted);
+  margin-top: var(--af-space-1);
 }
 
 /* The Accounts section of the config view (#3385).

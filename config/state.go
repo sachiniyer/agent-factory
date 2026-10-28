@@ -247,13 +247,24 @@ func refuseStateDowngrade(statePath string) error {
 	}
 }
 
-// onDiskStateSchemaVersion reports whether a state.json blob carries a
-// schema_version field and, if so, how it parses. present is false for a
-// structurally-corrupt blob (not a JSON object), a JSON array (legacy), or an
-// object lacking the field — with verr carrying the parse failure for the
-// corrupt case. present is true when the field exists; verr is then non-nil iff
-// the value could not be interpreted as a version integer.
-func onDiskStateSchemaVersion(data []byte) (present bool, version int, verr error) {
+// OnDiskSchemaVersion reports whether a JSON store blob carries a schema_version
+// field and, if so, how it parses. It is the generic form of the schema-version
+// probe refuseStateDowngrade uses for state.json: the same field name
+// (SchemaVersionField) and the same interpretation rules every versioned store
+// in the tree shares.
+//
+// present is false for a structurally-corrupt blob (not a JSON object), a JSON
+// array (legacy), or an object lacking the field — with verr carrying the parse
+// failure for the corrupt case. present is true when the field exists; verr is
+// then non-nil iff the value could not be interpreted as a version integer
+// (null, a string, a negative, an overflowing number, or any non-integer
+// type). Callers that must not clobber a file a newer binary may have written
+// — e.g. a shutdown checkpoint that rewrites instances.json wholesale — use
+// present && verr != nil as the "possibly newer, refuse to overwrite" signal,
+// mirroring refuseStateDowngrade's present-but-uninterpretable rule: a value
+// this binary cannot interpret may come from a newer af, so the remedy is to
+// upgrade rather than to repair from memory.
+func OnDiskSchemaVersion(data []byte) (present bool, version int, verr error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	var root any
@@ -278,6 +289,16 @@ func onDiskStateSchemaVersion(data []byte) (present bool, version int, verr erro
 	}
 	version, verr = schemaVersionFromValue(value)
 	return true, version, verr
+}
+
+// onDiskStateSchemaVersion reports whether a state.json blob carries a
+// schema_version field and, if so, how it parses. present is false for a
+// structurally-corrupt blob (not a JSON object), a JSON array (legacy), or an
+// object lacking the field — with verr carrying the parse failure for the
+// corrupt case. present is true when the field exists; verr is then non-nil iff
+// the value could not be interpreted as a version integer.
+func onDiskStateSchemaVersion(data []byte) (present bool, version int, verr error) {
+	return OnDiskSchemaVersion(data)
 }
 
 // Per-repo instance file functions

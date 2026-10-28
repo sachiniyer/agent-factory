@@ -624,12 +624,16 @@ func TestLocalConfigSetSurfacesExposureWarningNoDaemon(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	cfgPath := filepath.Join(home, config.TomlConfigFileName)
+	// The write must land for the warning path to exist, and an unauthenticated
+	// non-loopback write without the opt-in is refused outright — so the fixture
+	// opts in, which still emits the exposureWarning the test pins.
 	seed := strings.Join([]string{
 		"# hand-written",
 		"default_program = 'claude'",
 		"",
 		"[network]",
 		"require_token = false",
+		"allow_unauthenticated_network = true",
 		"",
 	}, "\n")
 	if err := os.WriteFile(cfgPath, []byte(seed), 0644); err != nil {

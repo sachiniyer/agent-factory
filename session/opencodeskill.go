@@ -118,9 +118,23 @@ func ensureOpencodeAfConfig() (string, error) {
 // QUOTED value containing spaces in an assignment BEFORE an OPENCODE_CONFIG one
 // (`FOO='a b' OPENCODE_CONFIG=x opencode`) ends the scan early and misses it. The
 // cost is only the warning: the user's assignment still wins at runtime, so their
-// config is honored regardless. tmux's splitShellTokens would handle it but is
+// config is honored regardless. tmux's SplitShellTokens would handle it but is
 // package-private, and duplicating a shell tokenizer here to recover a log line is
 // not worth the second parser.
+//
+// This function inspects ONLY the resolved command string. It does NOT consult
+// the process environment, so it cannot see a user's EXPORTED OPENCODE_CONFIG
+// (which the opencode allowlist in internal/sessionenv deliberately delivers to
+// the pane when the command is operator-attributable). For that channel — where,
+// unlike the in-command case, an af-injected command-prefix assignment would
+// SHADOW the exported variable rather than lose to it — the caller
+// (injectSystemPrompt) additionally checks `os.Getenv("OPENCODE_CONFIG")` and
+// skips injection on a non-empty value, gated on
+// opencodeExportedConfigReachesPane so the env channel is honored only when the
+// pane's allowlist will actually deliver it. Do not move that env check into this
+// function: its single-string contract keeps it unit-testable without t.Setenv,
+// and the call site is the only place that knows which environment the pane will
+// actually inherit.
 func opencodeCarriesConfigEnv(resolved string) bool {
 	for _, tok := range strings.Fields(resolved) {
 		switch {

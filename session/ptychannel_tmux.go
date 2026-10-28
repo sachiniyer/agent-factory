@@ -214,19 +214,26 @@ func (c *tmuxClientlessChannel) SendRaw(b []byte) error {
 // on the right line regardless of the client's width (#1688); the 0-based cursor_y
 // then names the same row in the client that it named in the pane.
 func (c *tmuxClientlessChannel) Snapshot() (PaneSnapshot, error) {
+	return tmuxPaneSnapshot(c.ts)
+}
+
+// tmuxPaneSnapshot is the capture behind tmuxClientlessChannel.Snapshot, a
+// function of the pane alone so the agent-server's grid preview serves a remote
+// subscriber from the very same code (#5571 W4.2) rather than a second capture.
+func tmuxPaneSnapshot(ts *tmux.TmuxSession) (PaneSnapshot, error) {
 	// A held dead pane has no future output for the repaint to precede, but a
 	// subscriber still needs its screen (#5330): pipe-pane already refused it,
 	// and the visible grid alone is not the answer — tmux pushed content into
 	// history when it drew the "Pane is dead" marker, and on the lost-SIGCHLD
 	// shapes it never draws (#4682) the grid is simply the pre-death screen.
 	// Capture the full buffer and bottom-anchor it below.
-	dead := c.ts.PaneDead()
+	dead := ts.PaneDead()
 	var content string
 	var err error
 	if dead {
-		content, err = c.ts.CapturePaneBuffer()
+		content, err = ts.CapturePaneBuffer()
 	} else {
-		content, err = c.ts.CaptureVisiblePaneGrid()
+		content, err = ts.CaptureVisiblePaneGrid()
 	}
 	if err != nil {
 		return PaneSnapshot{}, err
@@ -235,7 +242,7 @@ func (c *tmuxClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	// Cursor and terminal modes are best-effort: a failure degrades to the old
 	// screen-only repaint rather than failing the subscription. ReadTerminalState
 	// gets both in one tmux request so a fresh client receives a coherent owner.
-	if state, stateErr := c.ts.ReadTerminalState(); stateErr == nil {
+	if state, stateErr := ts.ReadTerminalState(); stateErr == nil {
 		snap.CursorRow, snap.CursorCol, snap.HasCursor = state.CursorRow, state.CursorCol, true
 		snap.Modes, snap.HasModes = state.Modes, true
 		// The pane's measured dimensions — the only size a never-driven pane ever
@@ -244,7 +251,7 @@ func (c *tmuxClientlessChannel) Snapshot() (PaneSnapshot, error) {
 		if state.PaneWidth > 0 && state.PaneWidth <= 0xFFFF && state.PaneHeight > 0 && state.PaneHeight <= 0xFFFF {
 			snap.Cols, snap.Rows, snap.HasSize = uint16(state.PaneWidth), uint16(state.PaneHeight), true
 		}
-	} else if row, col, curErr := c.ts.CursorPosition(); curErr == nil {
+	} else if row, col, curErr := ts.CursorPosition(); curErr == nil {
 		// Preserve the cursor-only fallback for tmux versions/sources that cannot
 		// expose the mode formats.
 		snap.CursorRow, snap.CursorCol, snap.HasCursor = row, col, true
@@ -258,7 +265,7 @@ func (c *tmuxClientlessChannel) Snapshot() (PaneSnapshot, error) {
 		// height collapse onto its last row. With no measured height the
 		// visible grid is the safe stand-in: it is pane-height by construction
 		// and already carries tmux's marker when tmux drew one.
-		content, err = c.ts.CaptureVisiblePaneGrid()
+		content, err = ts.CaptureVisiblePaneGrid()
 		if err != nil {
 			return PaneSnapshot{}, err
 		}

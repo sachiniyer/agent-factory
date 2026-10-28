@@ -257,6 +257,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"SpawnConfigAgent":       blockedDuringProbation,
 	"RebindProject":          blockedDuringProbation,
 	"SetProjectColor":        blockedDuringProbation,
+	"RebindProjectGuarded":   blockedDuringProbation,
 	// AccountLogin registers a credential directory in the daemon host's
 	// agent-factory home and starts a process on it (#3384). Both halves are
 	// mutations of the very candidate an upgrade supervisor is mid-validation on,
@@ -285,9 +286,13 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// write config.toml around the gate, and an apply is not inert — it swaps the
 	// live config, rebinds listeners, and changes auth posture, mutating the very
 	// daemon the supervisor is mid-validation on. Blocked, like the write itself.
-	"ApplyConfig":  blockedDuringProbation,
-	"GetConfig":    allowedDuringProbation,
-	"ListBackends": allowedDuringProbation,
+	"ApplyConfig": blockedDuringProbation,
+	"GetConfig":   allowedDuringProbation,
+	// A read of the daemon host's on-disk config provenance (#4803): no
+	// manager, no daemon state, nothing an upgrade window is protecting —
+	// same class as GetConfig, whose rows it explains.
+	"ExplainConfig": allowedDuringProbation,
+	"ListBackends":  allowedDuringProbation,
 	// A read of the daemon host's directory names (#2788): no manager, no daemon
 	// state, nothing an upgrade window is protecting. It sits with ListProjects
 	// for the same reason — the Add-project view a client builds out of the two
