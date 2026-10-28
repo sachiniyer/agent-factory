@@ -844,11 +844,18 @@ config, so the host's own login is neither read nor replaced.
 - **Only to a listed host.** The licence to send credentials is the host-list
   entry, which only the operator writes. A target a repository named (its `[ssh]`
   section) or a free-form `sandbox.ssh` command is refused before anything is sent.
-- **Refreshes are written back.** Credential files the agent rewrote on the host
-  replace the registry copy (atomically, mode 0600, only when the content changed),
-  and the archive the host returns is untrusted: any entry that is not exactly an
-  expected credential file refuses the whole write-back. Teardown writes back one
-  last time, then removes the scope.
+- **Refreshes are written back — as a versioned compare-and-swap from a bounded
+  stream.** af remembers the version (a content digest) of each credential file it
+  synced into the session. A file the agent did not change is never written back, and
+  a changed one replaces the registry copy only while the registry still holds the
+  version this session synced in: if another session on the same account refreshed it
+  first, or the account was removed, the write is skipped and logged, so a stale
+  snapshot can never overwrite a fresher one. The host is untrusted, so its archive is
+  read under a hard byte limit while it streams — the command is killed when the limit
+  is crossed — and a truncated, oversized or malformed archive is refused whole.
+  Replacement is atomic, mode 0600, credential files only. Teardown writes back one
+  last time, then removes the scope. A refresh that loses the race stays on the host
+  and is discarded with the session; fan-out to live sessions is not built yet.
 - **Sessions on one host share its ssh user**, so they can read each other's
   workspaces and synced credentials, exactly as local worktrees share one user
   today. A Unix user per session is a later hardening, not part of this contract.

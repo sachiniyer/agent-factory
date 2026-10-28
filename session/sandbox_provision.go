@@ -52,6 +52,11 @@ type sandboxWorkspace struct {
 	spec    ProvisionSpec
 	program string
 
+	// syncedVersion is, per credential file, the version this session synced into
+	// its scope (W7.3): the baseline a write-back is judged against. In memory
+	// only — a process with no baseline writes nothing back.
+	syncedVersion map[string]string
+
 	// SessionDir is the mktemp'd per-session dir on the target; the workspace,
 	// binary, and banner all live under it, so one `rm -rf` reaps the session.
 	SessionDir string
