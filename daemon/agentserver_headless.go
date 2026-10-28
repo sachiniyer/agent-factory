@@ -368,7 +368,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	if sdErr != nil {
 		return fmt.Errorf("agent-server: %w", sdErr)
 	}
-	if err := instance.InstallDurableRebuildTeardown(sessionDir); err != nil {
+	if err := instance.InstallDurableRebuildTeardown(sessionDir, session.RebuildTeardownKey(opts.RepoPath, opts.Title)); err != nil {
 		return fmt.Errorf("agent-server: %w", err)
 	}
 
