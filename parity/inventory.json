@@ -1938,6 +1938,7 @@
       "af accounts login --help": "meta.discovery",
       "af accounts login --json": "cli.json-envelope",
       "af accounts login --no-attach": "session.account-login",
+      "af agent-server --branch": "meta.internal",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
       "af agent-server --program": "meta.internal",
