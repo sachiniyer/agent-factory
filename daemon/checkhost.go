@@ -76,14 +76,20 @@ func (h *hostProbes) release(name string) {
 // probeHostsFn is the seam tests replace; production probes over ssh.
 var probeHostsFn = session.CheckHost
 
-func probeOne(ctx context.Context, name string, hosts map[string]config.HostConfig, posture string) HostCheckResult {
+// hostProbeFunc is the shape of the probe seam (session.CheckHost).
+type hostProbeFunc = func(ctx context.Context, name string, hosts map[string]config.HostConfig, posture string, timeout time.Duration) (session.HostCheck, error)
+
+// probeOne probes one host with the given probe. The caller passes the probe in
+// rather than this function reading probeHostsFn, so a background loop that
+// outlives its starter never touches the package variable after it starts.
+func probeOne(ctx context.Context, probe hostProbeFunc, name string, hosts map[string]config.HostConfig, posture string) HostCheckResult {
 	res := HostCheckResult{Name: name}
 	if !daemonHostProbes.tryAcquire(name) {
 		res.Readiness = string(session.ReadHostReadiness(session.HostReadinessKey(name)).State)
 		return res
 	}
 	defer daemonHostProbes.release(name)
-	c, err := probeHostsFn(ctx, name, hosts, posture, session.HostCheckTimeout)
+	c, err := probe(ctx, name, hosts, posture, session.HostCheckTimeout)
 	res.Probed = true
 	if err != nil {
 		res.Error = err.Error()
@@ -116,14 +122,14 @@ func (s *controlServer) CheckHost(req CheckHostRequest, resp *CheckHostResponse)
 		if err := config.ValidateHostPick(cfg.Hosts, name); err != nil {
 			return err
 		}
-		resp.Hosts = []HostCheckResult{probeOne(ctx, name, cfg.Hosts, cfg.SSHHostKeyVerification)}
+		resp.Hosts = []HostCheckResult{probeOne(ctx, probeHostsFn, name, cfg.Hosts, cfg.SSHHostKeyVerification)}
 		return nil
 	}
 	for _, n := range config.SortedHostNames(cfg.Hosts) {
 		if ctx.Err() != nil {
 			break
 		}
-		resp.Hosts = append(resp.Hosts, probeOne(ctx, n, cfg.Hosts, cfg.SSHHostKeyVerification))
+		resp.Hosts = append(resp.Hosts, probeOne(ctx, probeHostsFn, n, cfg.Hosts, cfg.SSHHostKeyVerification))
 	}
 	return nil
 }
@@ -133,8 +139,8 @@ func (s *controlServer) CheckHost(req CheckHostRequest, resp *CheckHostResponse)
 // so a test can shorten it.
 var hostRefreshInterval = 10 * time.Minute
 
-// refreshListedHosts probes every listed host once under ctx.
-func refreshListedHosts(ctx context.Context, manager *Manager) {
+// refreshListedHosts probes every listed host once under ctx, with probe.
+func refreshListedHosts(ctx context.Context, manager *Manager, probe hostProbeFunc) {
 	// A candidate in upgrade probation dials nothing and learns no host keys, as
 	// the CheckHost RPC refuses for the same window.
 	if manager != nil && manager.lifecycle != nil && manager.lifecycle.isUpgradeProbation() {
@@ -148,7 +154,7 @@ func refreshListedHosts(ctx context.Context, manager *Manager) {
 		if ctx.Err() != nil {
 			return
 		}
-		if r := probeOne(ctx, n, cfg.Hosts, cfg.SSHHostKeyVerification); r.Probed && !r.Reachable && ctx.Err() == nil {
+		if r := probeOne(ctx, probe, n, cfg.Hosts, cfg.SSHHostKeyVerification); r.Probed && !r.Reachable && ctx.Err() == nil {
 			log.InfoLog.Printf("host %q readiness refresh: %s", n, r.Error)
 		}
 	}
@@ -167,12 +173,22 @@ func refreshListedHosts(ctx context.Context, manager *Manager) {
 // the advisory scope (cancelled first thing in drainDaemon, which kills the ssh
 // child) and on stopCh; if the process exits before it notices, nothing is lost —
 // its only output is an in-memory cache.
-func startHostReadinessRefresh(manager *Manager, stopCh <-chan struct{}) {
+//
+// Because it outlives its starter, it reads the package seams (the interval and
+// the probe) ONCE, here, and the goroutine uses only those copies: a later write
+// to a seam, such as a test restoring it, cannot race with the loop. The
+// returned channel closes when the loop has exited. It is NOT the drain
+// waitgroup — shutdown never waits on it — and exists so a caller that wants to
+// know the loop is gone (a test, before it restores state) can wait.
+func startHostReadinessRefresh(manager *Manager, stopCh <-chan struct{}) <-chan struct{} {
 	ctx := manager.advisoryContext()
+	interval, probe := hostRefreshInterval, probeHostsFn
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			// +/-10% jitter so many daemons do not hit a shared host together.
-			d := hostRefreshInterval + time.Duration(rand.Int63n(int64(hostRefreshInterval/5))) - hostRefreshInterval/10
+			d := interval + time.Duration(rand.Int63n(int64(interval/5))) - interval/10
 			select {
 			case <-stopCh:
 				return
@@ -180,7 +196,8 @@ func startHostReadinessRefresh(manager *Manager, stopCh <-chan struct{}) {
 				return
 			case <-time.After(d):
 			}
-			refreshListedHosts(ctx, manager)
+			refreshListedHosts(ctx, manager, probe)
 		}
 	}()
+	return done
 }

@@ -29,13 +29,13 @@ func TestProbeOne_ReportsTheProbeAndSkipsAnInFlightHost(t *testing.T) {
 	called := stubProbe(t, func(string) (session.HostCheck, error) {
 		return session.HostCheck{Reachable: true, Complete: true}, nil
 	})
-	r := probeOne(context.Background(), "one-probe", nil, "")
+	r := probeOne(context.Background(), probeHostsFn, "one-probe", nil, "")
 	assert.True(t, r.Probed && r.Reachable)
 	assert.Equal(t, []string{"one-probe"}, *called)
 
 	require.True(t, daemonHostProbes.tryAcquire("busy-probe"))
 	defer daemonHostProbes.release("busy-probe")
-	r = probeOne(context.Background(), "busy-probe", nil, "")
+	r = probeOne(context.Background(), probeHostsFn, "busy-probe", nil, "")
 	assert.False(t, r.Probed, "a second probe of a host mid-probe is skipped, not stacked")
 	assert.Len(t, *called, 1)
 }
@@ -44,7 +44,7 @@ func TestProbeOne_RefusalSurfacesAsErrorText(t *testing.T) {
 	stubProbe(t, func(string) (session.HostCheck, error) {
 		return session.HostCheck{}, errors.New("host \"x\" is not in the host list")
 	})
-	r := probeOne(context.Background(), "x-refused", nil, "")
+	r := probeOne(context.Background(), probeHostsFn, "x-refused", nil, "")
 	assert.True(t, r.Probed)
 	assert.False(t, r.Reachable)
 	assert.Contains(t, r.Error, "not in the host list")

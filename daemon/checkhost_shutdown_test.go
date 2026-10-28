@@ -96,10 +96,22 @@ func TestHostRefreshIsNotJoinedByTheDrainWaitgroup(t *testing.T) {
 		return session.HostCheck{}, nil
 	}
 	hostRefreshInterval = 10 * time.Millisecond
-	t.Cleanup(func() { close(release); probeHostsFn, hostRefreshInterval = prev, prevInterval })
 
 	stopCh := make(chan struct{})
-	startHostReadinessRefresh(manager, stopCh)
+	loopDone := startHostReadinessRefresh(manager, stopCh)
+	// The loop is deliberately not joined by the drain, so it outlives this test:
+	// stop it and wait for it to exit BEFORE restoring the seams it was started
+	// with (it holds its own copies, but waiting keeps the test self-contained).
+	t.Cleanup(func() {
+		close(release)
+		manager.advisory.Cancel()
+		select {
+		case <-loopDone:
+		case <-time.After(5 * time.Second):
+			t.Error("the refresh loop did not exit after its advisory scope was cancelled")
+		}
+		probeHostsFn, hostRefreshInterval = prev, prevInterval
+	})
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
