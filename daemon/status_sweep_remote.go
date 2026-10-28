@@ -49,20 +49,27 @@ func (m *Manager) refreshStatusProbes(targets []worktreeProbeTarget) {
 	})
 }
 
+// fanOutRemoteProbes dispatches every target within one sweep budget. Targets
+// beyond the concurrency bound wait for a slot rather than being dropped, so a
+// healthy fleet larger than remoteProbeConcurrency is fully covered each
+// sweep; only when the budget expires is the undispatched remainder discarded
+// (they were never marked active, so wedged hosts cannot starve them).
 func fanOutRemoteProbes(targets []worktreeProbeTarget, probe func(string, *session.Instance), admit func() (func(), bool)) {
 	if len(targets) == 0 {
 		return
 	}
 	sem := make(chan struct{}, max(remoteProbeConcurrency, 1))
 	var wg sync.WaitGroup
+	timer := time.NewTimer(remoteProbeSweepWait)
+	defer timer.Stop()
+dispatch:
 	for _, t := range targets {
-		// A full fan-out skips the session this sweep rather than queueing it: a
-		// queued probe would be marked active and starve behind wedged hosts
-		// long after the sweep gave up on it.
 		select {
 		case sem <- struct{}{}:
-		default:
-			continue
+		case <-timer.C:
+			// Re-arm so the join below also sees the expired budget.
+			timer.Reset(0)
+			break dispatch
 		}
 		if _, busy := remoteProbesActive.LoadOrStore(t.instance, struct{}{}); busy {
 			<-sem
@@ -91,8 +98,6 @@ func fanOutRemoteProbes(targets []worktreeProbeTarget, probe func(string, *sessi
 		wg.Wait()
 		close(finished)
 	}()
-	timer := time.NewTimer(remoteProbeSweepWait)
-	defer timer.Stop()
 	select {
 	case <-finished:
 	case <-timer.C:

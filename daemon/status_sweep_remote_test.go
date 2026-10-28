@@ -44,3 +44,48 @@ func TestFanOutRemoteProbes_WedgedHostIsolated(t *testing.T) {
 		t.Fatalf("wedged host probed %d times, want 1 (no stacking)", got)
 	}
 }
+
+// A fleet larger than the concurrency bound is fully probed in one sweep when
+// the probes are fast: overflow targets queue for a slot instead of dropping.
+func TestFanOutRemoteProbes_FleetBeyondConcurrencyIsCovered(t *testing.T) {
+	oldConc, oldWait := remoteProbeConcurrency, remoteProbeSweepWait
+	remoteProbeConcurrency, remoteProbeSweepWait = 2, 5*time.Second
+	t.Cleanup(func() { remoteProbeConcurrency, remoteProbeSweepWait = oldConc, oldWait })
+
+	const n = 11
+	var targets []worktreeProbeTarget
+	for range n {
+		targets = append(targets, worktreeProbeTarget{instance: &session.Instance{}})
+	}
+	var probed atomic.Int32
+	probe := func(string, *session.Instance) {
+		time.Sleep(5 * time.Millisecond)
+		probed.Add(1)
+	}
+	fanOutRemoteProbes(targets, probe, func() (func(), bool) { return func() {}, true })
+	if got := probed.Load(); got != n {
+		t.Fatalf("probed %d of %d remotes in one sweep", got, n)
+	}
+}
+
+// When the budget expires with every slot wedged, the sweep returns promptly
+// and drops the undispatched remainder.
+func TestFanOutRemoteProbes_BudgetExpiryDiscardsQueue(t *testing.T) {
+	oldConc, oldWait := remoteProbeConcurrency, remoteProbeSweepWait
+	remoteProbeConcurrency, remoteProbeSweepWait = 1, 100*time.Millisecond
+	t.Cleanup(func() { remoteProbeConcurrency, remoteProbeSweepWait = oldConc, oldWait })
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var calls atomic.Int32
+	probe := func(string, *session.Instance) { calls.Add(1); <-release }
+	targets := []worktreeProbeTarget{{instance: &session.Instance{}}, {instance: &session.Instance{}}, {instance: &session.Instance{}}}
+	start := time.Now()
+	fanOutRemoteProbes(targets, probe, func() (func(), bool) { return func() {}, true })
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("sweep ran %v past its budget", d)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("%d probes dispatched behind a wedged slot, want 1", got)
+	}
+}
