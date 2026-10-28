@@ -144,3 +144,36 @@ func TestPreviewTabMissErr_TabNameOnly_RacePromotedTabGone(t *testing.T) {
 	require.NotContains(t, got, "is not a slot",
 		"the agent tab slot (index 0, which is never closeable) must not be named as gone")
 }
+
+// TestPreviewGoneErr_TabPaneGoneDoesNotClaimTheSessionStopped pins #4647: a
+// process tab whose own tmux session is gone resolves fine, so the daemon
+// reports Gone (for the TUI) plus TabPaneGone. The CLI used to render every
+// plain Gone as `session "x" is no longer running`, a false claim about a
+// session whose agent tab is still running.
+func TestPreviewGoneErr_TabPaneGoneDoesNotClaimTheSessionStopped(t *testing.T) {
+	setPreviewTabFlags(t, 0, "run", "")
+	err := previewGoneErr("s1", daemon.PreviewResponse{Gone: true, TabPaneGone: true})
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "no longer running")
+	require.Contains(t, err.Error(), `"run"`)
+	require.Contains(t, err.Error(), `"s1"`)
+	require.Contains(t, err.Error(), "still running")
+}
+
+func TestPreviewGoneErr_TabPaneGoneNamesTheSelectorUsed(t *testing.T) {
+	setPreviewTabFlags(t, 0, "", "tab-id-1")
+	err := previewGoneErr("s1", daemon.PreviewResponse{Gone: true, TabPaneGone: true})
+	require.Contains(t, err.Error(), `"tab-id-1"`)
+
+	setPreviewTabFlags(t, 3, "", "")
+	err = previewGoneErr("s1", daemon.PreviewResponse{Gone: true, TabPaneGone: true})
+	require.Contains(t, err.Error(), "tab 3")
+}
+
+// The agent tab's runtime IS the session's: a plain Gone keeps the accurate
+// message.
+func TestPreviewGoneErr_PlainGoneStillSaysSessionStopped(t *testing.T) {
+	setPreviewTabFlags(t, 0, "", "")
+	err := previewGoneErr("s1", daemon.PreviewResponse{Gone: true})
+	require.EqualError(t, err, `session "s1" is no longer running`)
+}

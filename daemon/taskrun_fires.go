@@ -420,11 +420,12 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	// means the residue is not ours to reap OR quarantine; a fresh create
 	// mints a new suffix around it.
 	for i := range rows {
-		d := &rows[i]
-		if d.Title == fire.Title ||
-			(sanitized != "" && (d.TmuxName == sanitized || d.Worktree.SessionName == sanitized)) ||
-			(wtPath != "" && d.Worktree.WorktreePath == wtPath) ||
-			(branch != "" && (d.Branch == branch || d.Worktree.BranchName == branch)) {
+		if why := taskFireForeignRowReason(&rows[i], fire, identityRoot, sanitized, wtPath, branch); why != "" {
+			// Visible, not silent: this is the one place af declines to reap or
+			// quarantine residue that may be its own, and a user debugging a
+			// colliding create needs to see which row made that call (#5696).
+			log.WarningLog.Printf("task %s: leaving interrupted-fire residue for %q alone — persisted session %q owns its %s",
+				t.ID, fire.Title, rows[i].Title, why)
 			return nil, nil
 		}
 	}
@@ -533,6 +534,51 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 			BranchCreatedByUs: createdByUs,
 		},
 	}, nil
+}
+
+// taskFireForeignRowReason names the identity through which a persisted row
+// owns one of the fire's discovered artifacts, or "" when it owns none.
+//
+// The tmux identity is compared against the row's tmux identity fields ONLY —
+// TmuxName, each tab's TmuxName, and, for a legacy row that recorded none, the
+// UNSCOPED name its title sanitizes to (the one its runtime is rebuilt with). It is never compared against Worktree.SessionName:
+// that field holds the raw session title on ordinary rows and the sanitized
+// name only on this function's own leftover records, so a session merely
+// TITLED like the sanitized name would impersonate the fire's tmux identity and
+// shield its genuine leftovers (#5696). Those leftover records carry the same
+// name in TmuxName, so they still match.
+func taskFireForeignRowReason(d *session.InstanceData, fire *taskFireMarker, identityRoot, sanitized, wtPath, branch string) string {
+	if d.Title == fire.Title {
+		return "title"
+	}
+	if sanitized != "" && taskFireRowOwnsTmuxName(d, sanitized) {
+		return "tmux session name"
+	}
+	if wtPath != "" && d.Worktree.WorktreePath == wtPath {
+		return "worktree path"
+	}
+	if branch != "" && (d.Branch == branch || d.Worktree.BranchName == branch) {
+		return "branch"
+	}
+	return ""
+}
+
+// taskFireRowOwnsTmuxName reports whether the row's real tmux identity is name.
+func taskFireRowOwnsTmuxName(d *session.InstanceData, name string) bool {
+	if d.TmuxName == name {
+		return true
+	}
+	for _, tab := range d.Tabs {
+		if tab.TmuxName == name {
+			return true
+		}
+	}
+	// A legacy row with no tmux fields is rebuilt by restoreLocalTabs through
+	// the UNSCOPED NewTmuxSession(title, …), so the only name its runtime can
+	// carry is the unscoped one (#5724) — never a repo-scoped name, which is
+	// what a fire derives. Compare against the derivation the runtime uses.
+	return d.TmuxName == "" && len(d.Tabs) == 0 && d.Title != "" &&
+		tmux.SanitizedNameForRepo(d.Title, "") == name
 }
 
 // taskFireTmuxEvidence reports whether a live tmux session proves it belongs to

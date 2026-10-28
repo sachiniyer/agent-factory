@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,6 +62,7 @@ const (
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.AccountHandoff = true
+	resp.HostPick = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
@@ -446,6 +448,9 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	if err := validateCreateProgram(req.Program); err != nil {
 		return err
 	}
+	// A remote client sends the project path as typed; expand ~ against this
+	// daemon's home before anything resolves it.
+	req.RepoPath = config.ExpandTilde(strings.TrimSpace(req.RepoPath))
 	req.Program = trimProgramEnumIfBare(req.Program)
 	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)
@@ -724,7 +729,12 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	}
 	managerDelegated = true
 	status, deliveryStatus, promptRetained, err := s.manager.deliverPromptWithOutcome(req)
-	if err != nil {
+	// A committed retained auto-create (#3357) — the absent-target branch
+	// routed through Manager.CreateSession, which provisioned a sandbox but
+	// could not confirm its teardown/startup — lands in the envelope so the
+	// marker survives the net/rpc hop that would otherwise flatten it to a
+	// plain rpc.ServerError string. A genuine failure returns unchanged.
+	if !resp.record(err) {
 		return err
 	}
 	resp.Status = status

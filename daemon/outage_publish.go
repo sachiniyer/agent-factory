@@ -33,6 +33,19 @@ func (m *Manager) refreshInstanceStatusPublishingOutage(repoID string, instance 
 	if data.InFlightOp != session.OpNone {
 		return
 	}
+	// The refresh above can be what finishes a kill, and a kill can commit while
+	// it runs. A session.updated published after session.killed makes a thin
+	// client upsert the row back from a whole-row payload (#5723). The registry
+	// check and the publish share m.mu, and every kill removes its map entry under
+	// m.mu before it announces session.killed — so either this publish precedes
+	// the removal (and so the killed event) or the check sees the row gone.
+	// publishEvent never blocks and never takes m.mu.
+	key := daemonInstanceKey(repoID, instance.Title)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.instances[key] != instance || instance.UserKilled() {
+		return
+	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 }
 

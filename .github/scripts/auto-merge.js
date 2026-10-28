@@ -40,6 +40,8 @@ query($owner: String!, $repo: String!, $base: String!, $after: String) {
       nodes {
         number
         headRefOid
+        headRefName
+        isCrossRepository
         isDraft
         mergeable
         labels(first: 20) { pageInfo { hasNextPage } nodes { name } }
@@ -167,6 +169,80 @@ function isTruncated(conn) {
   if (!conn) return false;
   if (conn.pageInfo && conn.pageInfo.hasNextPage) return true;
   return typeof conn.totalCount === "number" && conn.totalCount > (conn.nodes || []).length;
+}
+
+// Head-branch cleanup. GitHub applies delete_branch_on_merge only to merges made
+// by a user token, not GITHUB_TOKEN, so the merger deletes the branch itself.
+// The tip re-read and the open-PR checks are ported from deleteMergedHeadRef in
+// auto-gate.js. Returns {delete: true} or {delete: false, reason}.
+//   branch          repos.getBranch payload (null when already gone)
+//   blockingOpenPrs open PRs based ON the branch (deleting closes them) or whose
+//                   HEAD is the branch (deleting leaves them headless)
+//   tip             branch tip re-read immediately before the delete; undefined
+//                   until read. It must equal the merged head: a push after the
+//                   merge is work master does not have, and that ref may be its
+//                   only copy.
+function branchDeletionDecision({ pr, defaultBranch, branch, blockingOpenPrs, stackedOpenPrs, tip }) {
+  if (pr.isCrossRepository) return { delete: false, reason: "fork head — never touched" };
+  const name = pr.headRefName;
+  if (!name) return { delete: false, reason: "no head ref name" };
+  if (name === defaultBranch || name === BASE) return { delete: false, reason: "default branch" };
+  if (!branch) return { delete: false, reason: "branch already gone" };
+  if (branch.protected) return { delete: false, reason: "protected branch" };
+  const blocking = blockingOpenPrs ?? stackedOpenPrs ?? 0;
+  if (blocking > 0) {
+    return { delete: false, reason: `${blocking} open PR(s) use it as their base or head` };
+  }
+  if (tip !== undefined && String(tip).toLowerCase() !== String(pr.headRefOid).toLowerCase()) {
+    return {
+      delete: false,
+      reason: `tip moved after merge (${tip || "unreadable"}, merged ${pr.headRefOid}) — carries work this merge did not take`,
+    };
+  }
+  return { delete: true };
+}
+
+async function deleteMergedBranch({ github, core, owner, repo, pr, defaultBranch }) {
+  try {
+    let branch = null;
+    if (!pr.isCrossRepository && pr.headRefName && pr.headRefName !== defaultBranch) {
+      try {
+        branch = (await github.rest.repos.getBranch({ owner, repo, branch: pr.headRefName })).data;
+      } catch (error) {
+        if (error.status !== 404) throw error;
+      }
+    }
+    let blocking = 0;
+    if (branch) {
+      const [dependents, siblings] = await Promise.all([
+        github.rest.pulls.list({ owner, repo, state: "open", base: pr.headRefName, per_page: 1 }),
+        // The merged PR is closed by now, so an open head-PR here is a different one.
+        github.rest.pulls.list({ owner, repo, state: "open", head: `${owner}:${pr.headRefName}`, per_page: 1 }),
+      ]);
+      blocking = dependents.data.length + siblings.data.length;
+    }
+    const first = branchDeletionDecision({ pr, defaultBranch, branch, blockingOpenPrs: blocking });
+    if (!first.delete) {
+      core.info(`#${pr.number}: keeping branch ${pr.headRefName} (${first.reason})`);
+      return;
+    }
+    // LAST read before the delete: the REST delete takes no expected OID, so
+    // ordering is the only lever against a push landing in between.
+    const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${pr.headRefName}` });
+    const tip = String((ref && ref.data && ref.data.object && ref.data.object.sha) || "");
+    const decision = branchDeletionDecision({ pr, defaultBranch, branch, blockingOpenPrs: blocking, tip });
+    if (!decision.delete) {
+      core.notice(`Keeping ${pr.headRefName} (#${pr.number}): ${decision.reason}.`);
+      return;
+    }
+    await github.rest.git.deleteRef({ owner, repo, ref: `heads/${pr.headRefName}` });
+    core.notice(`Deleted merged branch ${pr.headRefName} (#${pr.number}).`);
+  } catch (error) {
+    // Best-effort. 404/422: already gone or the ref moved under us — nothing to prune.
+    const status = Number(error && (error.status || (error.response && error.response.status)));
+    const msg = status === 404 || status === 422 ? "nothing to prune" : "could not delete";
+    core.warning(`#${pr.number}: ${msg} branch ${pr.headRefName}: ${error.message}`);
+  }
 }
 
 function isCodex(login) {
@@ -382,6 +458,7 @@ async function mergeAll({ github, core, context }) {
       merged.push(pr.number);
       lastSha = res.data.sha;
       core.notice(`Merged #${pr.number} at ${pr.headRefOid} -> ${lastSha}`);
+      await deleteMergedBranch({ github, core, owner, repo, pr, defaultBranch: BASE });
     } catch (error) {
       // 405/409: head moved, conflict from an earlier merge in this batch, or a
       // protection rule. The next run re-evaluates from fresh state.
@@ -432,5 +509,5 @@ module.exports = {
   checkHalt, settleBroken, mergeAll, reportBroken,
   workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
-  isTruncated, ACK_RE,
+  isTruncated, ACK_RE, branchDeletionDecision,
 };
