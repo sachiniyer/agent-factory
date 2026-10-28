@@ -214,6 +214,42 @@ func TestSweepReportsUnpushedWorkAndRemovesNothing(t *testing.T) {
 			require.NoError(f.t, os.WriteFile(filepath.Join(w, "tracked.txt"), []byte("b"), 0o644))
 			f.git(w, "stash", "-q")
 		},
+		// The agent's commits can live in a LINKED worktree: the main workspace
+		// is clean and fully pushed, yet the work exists nowhere else (Codex P1).
+		"unpushed commit only in a linked worktree": func(f *sweepFixture, dir string) {
+			f.workspace(dir, false)
+			w := filepath.Join(dir, sshWorkspaceSubdir)
+			f.git(w, "worktree", "add", "-q", "-b", "agent-work", filepath.Join(dir, "linked"))
+			f.git(filepath.Join(dir, "linked"), "commit", "-q", "--allow-empty", "-m", "linked-only work")
+		},
+		// A detached HEAD is on no branch, so only a per-worktree HEAD check sees it.
+		"unpushed commit on a detached HEAD in a linked worktree": func(f *sweepFixture, dir string) {
+			f.workspace(dir, false)
+			w := filepath.Join(dir, sshWorkspaceSubdir)
+			f.git(w, "worktree", "add", "-q", "--detach", filepath.Join(dir, "linked"))
+			f.git(filepath.Join(dir, "linked"), "commit", "-q", "--allow-empty", "-m", "detached work")
+		},
+		"uncommitted file only in a linked worktree": func(f *sweepFixture, dir string) {
+			f.workspace(dir, false)
+			w := filepath.Join(dir, sshWorkspaceSubdir)
+			f.git(w, "worktree", "add", "-q", "-b", "agent-work", filepath.Join(dir, "linked"))
+			require.NoError(f.t, os.WriteFile(filepath.Join(dir, "linked", "notes.txt"), []byte("wip"), 0o644))
+		},
+		"a branch ahead of its upstream": func(f *sweepFixture, dir string) {
+			f.workspace(dir, false)
+			w := filepath.Join(dir, sshWorkspaceSubdir)
+			f.git(w, "branch", "--set-upstream-to=origin/main", "HEAD")
+			f.git(w, "checkout", "-q", "-b", "side")
+			f.git(w, "commit", "-q", "--allow-empty", "-m", "side work")
+			f.git(w, "push", "-q", "origin", "side")
+			f.git(w, "branch", "--set-upstream-to=origin/main", "side")
+		},
+		"a linked worktree whose directory is gone": func(f *sweepFixture, dir string) {
+			f.workspace(dir, false)
+			w := filepath.Join(dir, sshWorkspaceSubdir)
+			f.git(w, "worktree", "add", "-q", "-b", "agent-work", filepath.Join(dir, "linked"))
+			require.NoError(f.t, os.RemoveAll(filepath.Join(dir, "linked")))
+		},
 		"not a git workspace": func(f *sweepFixture, dir string) {
 			require.NoError(f.t, os.MkdirAll(filepath.Join(dir, sshWorkspaceSubdir), 0o755))
 			require.NoError(f.t, os.WriteFile(filepath.Join(dir, sshWorkspaceSubdir, "x"), []byte("x"), 0o644))
@@ -314,4 +350,27 @@ func TestSweepSandboxOrphansNeedsTheKey(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir()) // no runtime-identity key minted
 	assert.Empty(t, SweepSandboxOrphans([]SweepRow{{Title: "x", BackendType: "sandbox"}}, time.Minute, nil),
 		"with no key there is no proof to make, so nothing is touched")
+}
+
+// Anti-vacuous control for the linked-worktree cases: a clean, fully pushed
+// workspace WITH a clean linked worktree is still reaped, so the refusals above
+// come from the unpushed work and not from the mere presence of a worktree.
+func TestSweepReapsACleanWorkspaceWithACleanLinkedWorktree(t *testing.T) {
+	f := newSweepFixture(t)
+	const ref = "v1.cleanlinked001"
+	dir := f.session("work.DDD444", ref, true, time.Hour)
+	f.workspace(dir, false)
+	w := filepath.Join(dir, sshWorkspaceSubdir)
+	f.git(w, "worktree", "add", "-q", "-b", "agent-work", filepath.Join(dir, "linked"))
+	f.git(w, "push", "-q", "origin", "agent-work")
+	proc := f.agentServer(filepath.Join(dir, sshAfBinaryName), ref)
+
+	findings := f.sweep()
+
+	fd, ok := findingFor(findings, dir)
+	require.True(t, ok, "%+v", findings)
+	assert.Equal(t, SweepReaped, fd.Action, fd.Reason)
+	_, err := os.Stat(dir)
+	assert.True(t, os.IsNotExist(err))
+	assert.False(t, procAlive(proc))
 }

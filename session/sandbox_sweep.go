@@ -270,21 +270,34 @@ func sweepOne(h *sweepHostState, key []byte, c sweepCandidate, stillOwned func(d
 	return finding(SweepReaped, "no persisted row owned it and its workspace was clean")
 }
 
-// sweepWorkspaceState reports CLEAN only when nothing in the workspace is
-// absent from every remote. Anything else, including git being unable to
-// answer, is a state the sweep will not delete.
+// sweepWorkspaceState reports CLEAN only when no unpushed work exists ANYWHERE
+// the session's work can live: the workspace and every worktree linked to its
+// repository (git worktree list), every local branch (those with an upstream
+// against it, the rest against all remotes), the detached HEAD of each worktree,
+// and the stash. Anything else, including git being unable to answer at any
+// step, is a state the sweep will not delete.
 func sweepWorkspaceState(sh sandboxShell, dir string) (string, error) {
 	w := dir + "/" + sshWorkspaceSubdir
-	script := `w=` + shellQuote(w) + `; ` +
+	script := `w=` + shellQuote(w) + `; nl='
+'; ` +
 		`if [ ! -e "$w" ]; then echo CLEAN; exit 0; fi; ` +
 		`if [ ! -e "$w/.git" ]; then echo "UNKNOWN: not a git workspace"; exit 0; fi; ` +
 		`cd "$w" || { echo "UNKNOWN: cannot enter"; exit 0; }; ` +
-		`s=$(git status --porcelain --untracked-files=all 2>/dev/null) || { echo "UNKNOWN: git status failed"; exit 0; }; ` +
+		`wl=$(git worktree list --porcelain 2>/dev/null) || { echo "UNKNOWN: git worktree list failed"; exit 0; }; ` +
+		`paths=$(printf '%s\n' "$wl" | sed -n 's/^worktree //p'); ` +
+		`[ -n "$paths" ] || { echo "UNKNOWN: no worktrees listed"; exit 0; }; ` +
+		`printf '%s\n' "$wl" | grep -qE '^(prunable|bare)' && { echo "UNKNOWN: a linked worktree is missing or the repository is bare"; exit 0; }; ` +
+		`IFS="$nl"; for p in $paths; do ` +
+		`s=$(git -C "$p" status --porcelain --untracked-files=all 2>/dev/null) || { echo "UNKNOWN: git status failed in a linked worktree"; exit 0; }; ` +
 		`[ -z "$s" ] || { echo "UNCOMMITTED"; exit 0; }; ` +
+		`h=$(git -C "$p" log HEAD --not --remotes --oneline -n 1 2>/dev/null) || { echo "UNKNOWN: git log failed in a linked worktree"; exit 0; }; ` +
+		`[ -z "$h" ] || { echo "UNPUSHED COMMITS"; exit 0; }; done; ` +
 		`u=$(git log --branches --not --remotes --oneline -n 1 2>/dev/null) || { echo "UNKNOWN: git log failed"; exit 0; }; ` +
 		`[ -z "$u" ] || { echo "UNPUSHED COMMITS"; exit 0; }; ` +
-		`h=$(git log HEAD --not --remotes --oneline -n 1 2>/dev/null) || { echo "UNKNOWN: git log failed"; exit 0; }; ` +
-		`[ -z "$h" ] || { echo "UNPUSHED COMMITS"; exit 0; }; ` +
+		`refs=$(git for-each-ref --format='%(refname) %(upstream)' refs/heads 2>/dev/null) || { echo "UNKNOWN: git for-each-ref failed"; exit 0; }; ` +
+		`for l in $refs; do IFS=" "; set -- $l; IFS="$nl"; [ -n "$2" ] || continue; git rev-parse --verify -q "$2" >/dev/null 2>&1 || continue; ` +
+		`n=$(git rev-list --count "$1" --not "$2" 2>/dev/null) || { echo "UNKNOWN: git rev-list failed"; exit 0; }; ` +
+		`[ "$n" = 0 ] || { echo "UNPUSHED COMMITS"; exit 0; }; done; unset IFS; ` +
 		`t=$(git stash list 2>/dev/null) || { echo "UNKNOWN: git stash failed"; exit 0; }; ` +
 		`[ -z "$t" ] || { echo "STASH"; exit 0; }; echo CLEAN`
 	out, err := sh.Run(sshShortStepTimeout, script, nil, false)
