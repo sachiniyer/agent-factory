@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/log"
@@ -74,10 +75,10 @@ func (i *Instance) ReattachSandbox() error {
 		if p.callbackForwardPersisted() {
 			p.clearStaleCallbackSocket()
 		}
-		var withCallback bool
-		localAddr, withCallback, err = p.openTunnelForReattach()
-		if err == nil && !withCallback && p.callbackForwardPersisted() && callbackLost == "" {
-			callbackLost = "the callback forward could not be re-established on reattach (the sandbox host may still hold the old forward's port); it is retried each time the connection is re-dialed"
+		var note string
+		localAddr, _, note, err = p.openTunnelForReattach()
+		if err == nil && note != "" && callbackLost == "" {
+			callbackLost = note
 		}
 	}
 	if err != nil {
@@ -215,22 +216,74 @@ func (i *Instance) restoreCallbackForReattach(p *sandboxProvisioner) string {
 	return ""
 }
 
+// Bounds for confirming the callback -R after a reattach dial. Vars so tests
+// can shrink them.
+var (
+	callbackForwardConfirmTimeout = 6 * time.Second
+	callbackForwardConfirmPoll    = 250 * time.Millisecond
+)
+
+// confirmCallbackForward is positive evidence the -R was accepted (#5896). The
+// local -L listener answers before ssh has processed the remote-forward
+// replies, so a dial proves nothing about the -R: sshd's acceptance shows only
+// as the callback socket existing on the sandbox host (the stale one was
+// removed before the dial, so a socket now is the fresh one), and a rejection
+// as the ExitOnForwardFailure exit of the ssh child. Polled because the reply
+// is asynchronous. A var so tests can stand in for the sandbox host.
+var confirmCallbackForward = func(p *sandboxProvisioner) error {
+	p.reapMu.Lock()
+	sock, child := p.callbackSocket, p.tunnel
+	p.reapMu.Unlock()
+	if sock == "" {
+		return errors.New("the callback socket path on the sandbox host is unknown")
+	}
+	deadline := time.Now().Add(callbackForwardConfirmTimeout)
+	var last error
+	for {
+		if child != nil {
+			select {
+			case <-child.done:
+				return errors.New("ssh exited after the remote forward was rejected")
+			default:
+			}
+		}
+		if _, err := p.Run(sshShortStepTimeout, "test -S "+shellQuote(sock), nil, true); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the sandbox host never bound %s: %w", sock, last)
+		}
+		time.Sleep(callbackForwardConfirmPoll)
+	}
+}
+
 // openTunnelForReattach opens the first transport generation with the persisted
-// callback -R. The data plane is the point of a reattach, and ssh's
-// ExitOnForwardFailure makes a -R whose remote port the sandbox host still
-// holds (the old connection's sshd side not yet reaped) fatal to the whole
-// generation. So on failure with a callback forward present it retries once
-// WITHOUT it, reports that it did, and leaves the forward in place for the
-// supervisor to re-establish on its next re-dial. The original error is the one
-// returned when the data plane cannot open either way.
-func (p *sandboxProvisioner) openTunnelForReattach() (localAddr string, withCallback bool, err error) {
+// callback -R and only reports the callback as up (withCallback) once
+// confirmCallbackForward saw sshd accept it (#5896). The data plane is the
+// point of a reattach, and ssh's ExitOnForwardFailure makes a -R the sandbox
+// host rejects fatal to the whole generation. So when the -R is rejected, or
+// cannot be confirmed, it retries once WITHOUT it, returns why in note, and
+// leaves the forward in place for the supervisor to re-establish on its next
+// re-dial. The original error is the one returned when the data plane cannot
+// open either way.
+func (p *sandboxProvisioner) openTunnelForReattach() (localAddr string, withCallback bool, note string, err error) {
 	localAddr, err = p.openTunnel(p.remoteAddr)
 	if err == nil {
-		return localAddr, p.callbackForwardPersisted(), nil
+		if !p.callbackForwardPersisted() {
+			return localAddr, false, "", nil
+		}
+		if cerr := confirmCallbackForward(p); cerr == nil {
+			return localAddr, true, "", nil
+		} else {
+			err = cerr
+		}
 	}
 	if !p.callbackForwardPersisted() {
-		return "", false, err
+		return "", false, "", err
 	}
+	note = "the callback forward could not be confirmed on reattach (" + err.Error() + "); it is retried each time the connection is re-dialed"
 	p.abandonUnadoptedTunnel()
 	p.reapMu.Lock()
 	saved := p.reverseFwds
@@ -241,7 +294,7 @@ func (p *sandboxProvisioner) openTunnelForReattach() (localAddr string, withCall
 	p.reverseFwds = saved
 	p.reapMu.Unlock()
 	if retryErr != nil {
-		return "", false, err
+		return "", false, "", err
 	}
-	return localAddr, false, nil
+	return localAddr, false, note, nil
 }
