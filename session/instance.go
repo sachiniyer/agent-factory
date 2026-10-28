@@ -28,8 +28,12 @@ type Instance struct {
 	// replacement invalidates it before later manager bookkeeping, which orders a
 	// predecessor side effect either wholly before the replacement or drops it.
 	agentObservationGeneration atomic.Uint64
-	liveBoundaryMu             sync.Mutex
-	liveBoundary               *runtimeLiveBoundary
+	// forceSandboxReplacement is the operator's explicit "replace this sandbox"
+	// intent (`sessions restore --force-reap`) for the recovery in flight; it makes
+	// recovery skip the in-place relaunch. See relaunchOrRecoverSandbox.
+	forceSandboxReplacement atomic.Bool
+	liveBoundaryMu          sync.Mutex
+	liveBoundary            *runtimeLiveBoundary
 	// ID is the instance's stable identity (#1195): a random UUID minted once at
 	// NewInstance, persisted, and never mutated. The reconcile uses it to tell
 	// "same session" from "title reused" (#765) without leaning on CreatedAt
@@ -296,6 +300,13 @@ type Instance struct {
 	// client-side projection. Persisted; surfaces render it under
 	// CallbackUnavailablePrefix. Mutex-protected; see callback_unavailable.go.
 	callbackUnavailable string
+	// hostedRemotely marks an instance running INSIDE a sandbox, where the daemon
+	// holds the session as a remote workspace. It decides which capability
+	// projection the injected guidance is rendered from (guidance.go, #5571 W3.3).
+	hostedRemotely bool
+	// advertisedFeatures is what the hosting agent-server advertises on
+	// /v1/health; guidance lifts the static remote floor by it (#5878).
+	advertisedFeatures []string
 	// worktreeMissing is true once a bounded probe proved the tracked worktree
 	// path absent with no af relocation owning it — deleted outside af (#5102).
 	// Persisted with the worktree record; see worktree_missing.go for who sets
@@ -388,6 +399,9 @@ type Instance struct {
 	// runtime cleanup handle, which a teardown clears: restore and recovery
 	// re-provision from this so a pick never silently moves to another machine.
 	Host string `json:"host,omitempty"`
+	// archivedWorkspace records where this archived off-box session's work lives
+	// (#5571 W8.5); nil for a live row or one archived before the field.
+	archivedWorkspace *ArchivedWorkspaceData
 	// accountAgent is the agent namespace Account was selected in. It must be
 	// durable rather than re-derived at refresh time: a program_overrides edit
 	// after the pin can resolve the recorded Program to a different agent's
@@ -446,6 +460,17 @@ type Instance struct {
 	// the resolved command can actually express it, and the conversation the
 	// session ends up with is whatever the launch plan committed to Tabs[0].
 	carriedConversation AgentConversationData
+
+	// reportedConversation is the last conversation a remote agent-server reported
+	// (recordReportedConversationFrom), held until the daemon-side agent tab exists to
+	// carry it. Guarded by mu.
+	reportedConversation AgentConversationData
+	// conversationUnpersisted is set when a remote agent-server reported a
+	// conversation identity that changed the row and the change has not yet been
+	// durably written (#5826). The daemon's poll persistence reads it as a
+	// durable change of its own and clears it only after the write succeeds, so
+	// a failed write is retried on the next tick. Guarded by mu.
+	conversationUnpersisted bool
 
 	// carriedTabs is the tab roster a PREVIOUS record held, to be rebuilt onto
 	// this instance once its agent tab is live (#2628). It has the same single
@@ -791,22 +816,6 @@ func (i *Instance) TabIndexByID(id string) (int, bool) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.tabIndexByIDLocked(id)
-}
-
-// TabAlive reports whether the tab at idx has a live tmux session, as a LOSSY
-// bool: true means "alive OR could-not-determine (wedged/timeout)", false means
-// "no binding, or definitively gone". It is deliberately kept lossy because its
-// only consumers (ui/tab_pane.go) act solely on !TabAlive — they swap to the
-// "Terminal session not available" fallback. A wedged server reads as alive here,
-// which keeps the read-only TUI rendering the pane instead of falsely declaring a
-// merely-unreachable terminal dead: the safe direction for a view (#1962). A
-// caller that needs existence as EVIDENCE must use TmuxSession.ProbeSession
-// directly and handle !known.
-func (i *Instance) TabAlive(idx int) bool {
-	i.mu.RLock()
-	ts := i.tabTmuxAtLocked(idx)
-	i.mu.RUnlock()
-	return ts != nil && ts.ExistsOrUnknown()
 }
 
 // TabCount returns the number of tabs the instance currently holds.

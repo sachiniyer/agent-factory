@@ -19,6 +19,7 @@ import (
 var (
 	sendPromptCreateFlag  bool
 	sendPromptProgramFlag string
+	sendPromptHostFlag    string
 	// sendPromptPromptFlag is an ALIAS for the positional <prompt>, not a
 	// replacement: its sibling `sessions create` takes the prompt as --prompt,
 	// so a user who learned that verb hit "unknown flag: --prompt" here — same
@@ -215,7 +216,17 @@ can inspect per-session results.`,
 			// send-prompt has no --backend flag, so the repo's `backend` key is
 			// the whole selection; a docker/ssh/hook repo runs the agent in the
 			// sandbox and must not be refused for a missing local one.
-			local, err := session.LocalPrereqsRequired(session.InstanceOptions{}, workspace)
+			if sendPromptHostFlag != "" {
+				// The same refusal create and the task definition give: the host must
+				// be in the operator's global list. Checked before anything is sent.
+				if err := config.ValidateHostPick(cfg.Hosts, sendPromptHostFlag); err != nil {
+					return jsonError(err)
+				}
+				if err := requireHostPickOn(hostPickOnDeliver, sendPromptHostFlag); err != nil {
+					return jsonError(err)
+				}
+			}
+			local, err := session.LocalPrereqsRequired(session.InstanceOptions{Host: sendPromptHostFlag}, workspace)
 			if err != nil {
 				return jsonError(err)
 			}
@@ -229,6 +240,7 @@ can inspect per-session results.`,
 				Title:    title,
 				RepoPath: workspace,
 				Program:  program,
+				Host:     sendPromptHostFlag,
 				Prompt:   prompt,
 			})
 			// A committed auto-create (the sandbox provisioned but start or
@@ -316,6 +328,9 @@ type broadcastTarget struct {
 // and RunE through validateSendPromptInvocation, so unit tests that drive RunE
 // directly still get the same guard.
 func validateSendPromptFlags() error {
+	if sendPromptHostFlag != "" && !sendPromptCreateFlag {
+		return fmt.Errorf("--host picks where a NEW session is created, so it needs --create; to move work to a host, create the session there with --create --host %s", sendPromptHostFlag)
+	}
 	if !sendPromptAllFlag {
 		// The broadcast-only flags are meaningless without --all. Name whichever
 		// were passed and point the user at the flag that unlocks them.

@@ -227,7 +227,20 @@ func (c *Client) ResumeStatusPoll(req daemon.ResumeStatusPollRequest) error {
 // the daemon over these same HTTP routes the web UI uses, so the transport alone
 // cannot tell them apart and each client says which it is.
 func (c *Client) AddTask(t task.Task, actor task.Actor) error {
-	return c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &daemon.AddTaskResponse{})
+	_, err := c.AddTaskResult(t, actor)
+	return err
+}
+
+// AddTaskResult is AddTask returning the record the daemon stored, or nil when
+// the daemon predates the field or answered a committed-with-warning error. For a
+// remote target it also asks the daemon to validate the task's project path on its
+// own host (#5859).
+func (c *Client) AddTaskResult(t task.Task, actor task.Actor) (*task.Task, error) {
+	var resp daemon.AddTaskResponse
+	if err := c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Task, nil
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the
@@ -244,7 +257,7 @@ func (c *Client) AddTask(t task.Task, actor task.Actor) error {
 // actor names the calling surface for the audit trail — see AddTask.
 func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
 	var resp daemon.UpdateTaskResponse
-	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor)}, &resp); err != nil {
+	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil
@@ -431,15 +444,6 @@ func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResp
 	return resp, nil
 }
 
-// There is deliberately no ListProjects here. The web reads the registry over HTTP
-// (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),
-// but the two GO consumers read it in-process: the TUI's switcher union
-// (app/switch_project.go buildProjectListFrom) and the CLI's `af projects list`
-// (api/projects.go) both call config.ListProjects(), the same file-locked read the
-// daemon writes through — a read of on-disk config needs no round trip. A wrapper
-// here would be dead code whose only caller was its own test. RegisterProject stays
-// because it is a WRITE, which must go through the daemon (the single writer, #960).
-
 // RegisterProject registers a git checkout as a durable project through the
 // daemon (#2456) — the single-writer path the TUI's add-project action routes
 // through, replacing the legacy in-process root_agents write. The path is
@@ -447,6 +451,16 @@ func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResp
 func (c *Client) RegisterProject(path string) (config.Project, error) {
 	var resp daemon.RegisterProjectResponse
 	if err := c.call("RegisterProject", daemon.RegisterProjectRequest{Path: path}, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
+// SetProjectColor sets or clears (empty color) a registered project's display
+// color through the daemon — the single writer. HTTP twin of SetProjectColor.
+func (c *Client) SetProjectColor(req daemon.SetProjectColorRequest) (config.Project, error) {
+	var resp daemon.SetProjectColorResponse
+	if err := c.call("SetProjectColor", req, &resp); err != nil {
 		return config.Project{}, err
 	}
 	return resp.Project, nil
@@ -516,4 +530,21 @@ func (c *Client) SendPrompt(req daemon.SendPromptRequest) (session.PromptDeliver
 		return session.PromptCouldNotConfirm, nil
 	}
 	return resp.Status, nil
+}
+
+// ListProjects reads the daemon's own project registry (HTTP twin of
+// config.ListProjects run on the daemon's host), so a remote `af projects list`
+// describes the targeted machine rather than this one.
+func (c *Client) ListProjects() ([]config.Project, error) {
+	return c.ListProjectsContext(context.Background())
+}
+
+// ListProjectsContext is ListProjects bound to ctx, for a caller (the TUI's
+// poll) that must be able to abandon the read.
+func (c *Client) ListProjectsContext(ctx context.Context) ([]config.Project, error) {
+	var resp daemon.ListProjectsResponse
+	if err := c.callCtx(ctx, "ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Projects, nil
 }

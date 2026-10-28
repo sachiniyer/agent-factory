@@ -377,7 +377,14 @@ func TestHeadlessWorkspaceFactsMeasuresLinkedWorktree(t *testing.T) {
 	if err := hs.WorkspaceFacts(struct{}{}, &facts); err != nil {
 		t.Fatal(err)
 	}
-	if !facts.Exists || facts.DirtyFiles != 1 || len(facts.Unverified) != 0 {
-		t.Fatalf("expected the linked worktree's one untracked file, measured cleanly; got %+v", facts)
+	// A fresh repo has no upstream, so the unpushed count is honestly unverified;
+	// that is the one fact this fixture cannot measure and it must say so.
+	if !facts.Exists || facts.DirtyFiles != 1 {
+		t.Fatalf("expected the linked worktree's one untracked file; got %+v", facts)
+	}
+	for _, u := range facts.Unverified {
+		if u != "unpushed_commits" {
+			t.Fatalf("only the unpushed count may be unverified without an upstream; got %+v", facts)
+		}
 	}
 }

@@ -230,3 +230,28 @@ func TestListAccountsReportsResolvedAgents(t *testing.T) {
 			"a target with no override resolves to its own enum")
 	}
 }
+
+// #5571 W7.4: the default account resolves by ONE precedence whatever the target,
+// so an off-box create reads exactly what a local one does. applyDefaultAccount
+// takes no backend or host and runs before either is decided; whether the chosen
+// target can carry the account is session.NewInstance's call (it drops a default
+// that an unlisted target cannot carry, and never blocks the create).
+func TestDefaultAccountPrecedenceIsTheSameForAnOffBoxCreate(t *testing.T) {
+	_, repoPath, project := defaultAccountFixture(t, "claude", "work")
+	writeProjectAccounts(t, project, "[default_accounts]\nclaude = \"work\"\n")
+
+	local := CreateSessionRequest{Title: "local", RepoPath: repoPath, Program: "claude"}
+	require.NoError(t, applyDefaultAccount(&config.Config{}, &local))
+
+	offBox := CreateSessionRequest{Title: "offbox", RepoPath: repoPath, Program: "claude", Host: "box1"}
+	require.NoError(t, applyDefaultAccount(&config.Config{}, &offBox))
+
+	assert.Equal(t, local.Account, offBox.Account, "same project default, whatever the target")
+	assert.Equal(t, local.AccountSource, offBox.AccountSource)
+
+	// An explicit account still beats the default on an off-box create.
+	explicit := CreateSessionRequest{Title: "e", RepoPath: repoPath, Program: "claude", Host: "box1", Account: "other"}
+	require.NoError(t, applyDefaultAccount(&config.Config{}, &explicit))
+	assert.Equal(t, "other", explicit.Account)
+	assert.Empty(t, explicit.AccountSource)
+}

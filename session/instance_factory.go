@@ -147,6 +147,17 @@ type InstanceOptions struct {
 	// daemon-side create path instead learns the reason from the mint itself
 	// and arrives through ProvisionResult.CallbackUnavailable.
 	CallbackUnavailable bool
+	// HostedRemotely declares this instance runs inside a sandbox the daemon
+	// treats as a remote workspace (set by the in-sandbox agent-server), so its
+	// guidance reflects the remote runtime's tab admission rather than the local
+	// capabilities it happens to execute on (#5571 W3.3).
+	HostedRemotely bool
+	// AdvertisedFeatures is the /v1/health feature list the hosting
+	// agent-server advertises to the daemon. A hosted instance renders its
+	// guidance from what is advertised, not from a static per-backend floor
+	// (#5878): the daemon admits shell and process tabs only for a sandbox that
+	// advertises "tab-api".
+	AdvertisedFeatures []string
 }
 
 // backendFactory provisions the already-resolved runtime for a new Instance,
@@ -185,7 +196,13 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// launch_cmd, which does the clone on the user's infra).
 	if kind.ProvisionsOffBox() {
 		spec.CloneURL = originRemoteURL(absPath)
+		spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(absPath)
 		spec.Branch = daemonBranchForTitle(opts)
+		policy, perr := agentPolicyFor(absPath, opts.BranchPrefix)
+		if perr != nil {
+			return ProvisionResult{}, perr
+		}
+		spec.AgentPolicy = policy
 	}
 	// Mint through the SHARED helper, which the replacement path uses too, so the
 	// two cannot diverge on which kinds get a credential or on what a refusal
@@ -203,7 +220,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// path is a symlink out of the registry), and those must be checked on THIS
 	// machine, where the registry lives, before a path derived from them is handed
 	// to a runtime that will mount it.
-	if kind.CarriesAccount() && strings.TrimSpace(opts.Account) != "" {
+	if accountCarried(kind, absPath, opts.Host) && strings.TrimSpace(opts.Account) != "" {
 		account, aerr := resolveAccountForProvision(absPath, opts.Program, opts.Account)
 		if aerr != nil {
 			return ProvisionResult{}, aerr
@@ -307,12 +324,11 @@ func reapUnusableSandbox(title string, res ProvisionResult, cause error, retain 
 // ForceRemote hook selector; otherwise the repo's `backend` config key, which
 // defaults to local.
 //
-// The config read is best-effort for the DEFAULT (no explicit selection) path:
-// a path that is not a git repo, or a repo with no readable config, falls back
-// to local so a local session is never blocked by config resolution here (the
-// same posture as before Phase 4, where this factory read no config for a local
-// session). A config that loads but declares an invalid backend value surfaces
-// that error — misconfiguration should fail the create, not silently run local.
+// On the DEFAULT (no explicit selection) path a path that is not a git repo, or
+// a repo with no in-repo config or no `backend` key, resolves to local. A repo
+// whose config exists but cannot be resolved FAILS the create with that error
+// (#5801): the backend is undeterminable, and guessing local would run the agent
+// somewhere other than the isolation the repo chose.
 func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, error) {
 	if opts.Host != "" {
 		// A host pick is an ssh placement. An explicit backend that is not ssh
@@ -328,9 +344,18 @@ func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, erro
 	if opts.ForceRemote {
 		return BackendHook, nil
 	}
-	cfg, err := resolveRepoConfig(absPath)
+	// Not a git repo: there is no in-repo config to read, so local as ever.
+	repo, err := config.RepoFromPath(absPath)
 	if err != nil {
 		return BackendLocal, nil
+	}
+	// A repo whose config EXISTS but cannot be resolved (a TOML syntax error
+	// anywhere in it, an invalid value) has an undeterminable backend. Falling
+	// back to local would run an agent the repo isolated (docker/ssh) on the
+	// daemon host with no error, so refuse with the config error (#5801).
+	cfg, err := config.ResolveConfigForRepo(repo)
+	if err != nil {
+		return "", fmt.Errorf("cannot determine the backend for %s: its configuration could not be resolved, and creating the session on the local machine instead could bypass the isolation the repo asks for — fix the config and retry: %w", absPath, err)
 	}
 	return ParseBackendKind(cfg.Backend)
 }
@@ -531,6 +556,21 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	accountBackendErr := error(nil)
 	if resolveBackendErr == nil {
 		accountBackendErr = refuseOffBoxAccountForKind(opts, kind)
+		if accountBackendErr != nil && accountCarried(kind, absPath, opts.Host) {
+			// An account on a LISTED host is carried by W7.3's synced scope (#5571
+			// W7.4); the refusal below stands for every other off-box target.
+			accountBackendErr = nil
+		} else if accountBackendErr != nil && opts.AccountSource != "" {
+			// A DEFAULT account (default_accounts) must never make a sandbox create
+			// impossible: nobody typed it, so there is no identity to defend and no
+			// flag to fix. The session runs without it — on the host's own
+			// credentials, as an unlisted target always did — and the operator is
+			// told. An explicit --account is still refused with its remedy.
+			log.WarningLog.Printf("not applying account %q to %q on a %s target that cannot carry it: %s; %s",
+				opts.Account, opts.Title, kind, opts.AccountSource, listedHostAccountRemedy())
+			opts.Account, opts.AccountSource = "", ""
+			accountBackendErr = nil
+		}
 	} else {
 		// Preserve the direct guard's established answer for an explicitly invalid
 		// backend; the resolver error remains authoritative for repo-config errors.
@@ -628,7 +668,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		repoIdentityPath:      opts.RepoIdentityPath,
 		Program:               opts.Program,
 		Account:               opts.Account,
-		Host:                  opts.Host,
+		Host:                  recordedAccountHost(opts, kind, absPath),
 		accountAgent:          accountAgent,
 		Height:                0,
 		Width:                 0,
@@ -647,6 +687,8 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		remoteClient:          remoteClient,
 		runtimeTeardown:       res.Teardown,
 		callbackUnavailable:   callbackUnavailableReasonFor(opts, res),
+		hostedRemotely:        opts.HostedRemotely,
+		advertisedFeatures:    opts.AdvertisedFeatures,
 	}, nil
 }
 
@@ -714,13 +756,11 @@ const offBoxRoundTripReason = AccountWriteBackRationale +
 func offBoxAccountRefusal(kind BackendKind) string {
 	switch kind {
 	case BackendSSH:
-		// ssh shares the invariant AND may add the concrete consequence, because it is
-		// the one refusing backend whose session-directory lifecycle af owns — so
-		// "teardown removes it" is established here and nowhere else (#3103 review).
-		return "af can put the account on that host, and deliberately does not: " + offBoxRoundTripReason +
-			" On this backend af owns the remote session directory, so the teardown that removes it removes " +
-			"the refresh with it. Use the docker or local backend for account-scoped sessions, or omit " +
-			"--account to use the remote host's own credentials"
+		// Reached only for an ssh target that is NOT a listed host (#5571 W7.4): a
+		// listed host carries the account through W7.3's synced scope, so the old
+		// "refused by design" reasoning no longer applies to it. What remains is
+		// that af will not send an account to a target an operator did not list.
+		return listedHostAccountReason + "; " + listedHostAccountRemedy()
 
 	case BackendSandbox:
 		// The same round-trip reason as ssh, and NOT a "no provable location" one:

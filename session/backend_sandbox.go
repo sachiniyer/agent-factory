@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -94,6 +95,10 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		// auto-detected daemon path, which the sandbox's filesystem does not
 		// have. The agent-server resolves it on the host's login PATH (#5571).
 		program: remoteProgramForHost(cfg, spec.Program),
+		// sandbox.binary is the operator's daemon-local override for air-gapped
+		// or unbuilt hosts (#5571 W2.2) — global-only config, so it can never be
+		// repo-supplied.
+		sandboxBinary: strings.TrimSpace(cfg.Config.SandboxBinary),
 	}
 	res, err := p.provision()
 	if err != nil {
@@ -106,10 +111,20 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // and (since #3052) `backend = "ssh"` alike. There is no persistent client: every
 // step is its own `ssh` invocation, so the only long-lived child is the tunnel.
 type sandboxProvisioner struct {
-	spec    ProvisionSpec
-	sshCmd  string
-	afBin   string
-	program string
+	spec   ProvisionSpec
+	sshCmd string
+	// readinessKey is where this provisioner's prerequisite probe records its
+	// verdict. Empty means the ssh command, the key an unnamed sandbox.ssh host
+	// has always used; a session on a LISTED host sets HostReadinessKey(name) so
+	// create, CheckHost and the supervisor refresh all write the one key the
+	// catalog reads (#5840).
+	readinessKey string
+	afBin        string
+	program      string
+	// sandboxBinary is the operator's sandbox.binary override — a daemon-local
+	// af build to stream instead of the daemon's own binary or a release
+	// fetch (#5571 W2.2). Empty in production means "platform selection".
+	sandboxBinary string
 	// backendLabel is the name the OWNING backend puts on this transport's errors.
 	// Empty means "sandbox". Since #3052 `backend = "ssh"` provisions through this
 	// same type, and an auth, host-key, clone, tunnel or cleanup failure reported
@@ -156,13 +171,27 @@ type sandboxProvisioner struct {
 	// endpoint every consumer dials, fixed at provision and re-bound verbatim
 	// on every re-dial so a consumer's cached URL is never stale — and forward
 	// embeds the remote agent-server's listen address it targets. reverseFwds
-	// is W3.4's -R slot (the in-sandbox callback): empty here; each element is
-	// composed into the spawn as `-R "$N"` so a future reverse forward gets
-	// the same ExitOnForwardFailure fatality, group teardown, and supervision.
+	// is W3.4's -R slot (the in-sandbox callback), set at provision when a
+	// credential was granted; each element is composed into the spawn as
+	// `-R "$N"` so the reverse forward gets the same ExitOnForwardFailure
+	// fatality, group teardown, and supervision.
 	tunnel      *tunnelChild
 	forward     string
 	localAddr   string
 	reverseFwds []string
+	// callbackRef is the reference the granted callback credential derives from
+	// (W3.6). It persists with the runtime identity, together with the -R spec in
+	// reverseFwds, so a reattach after a daemon restart re-registers the credential
+	// and re-establishes the same forward. Empty when no callback was granted.
+	callbackRef string
+	// callbackSocket is the sandbox-side socket the -R slot creates, removed
+	// before a re-dial so a socket file a killed sshd left behind cannot make the
+	// bind fail forever (the client would otherwise retry a dead path).
+	callbackSocket string
+
+	// account is the workspace that carries this provision's synced account, for
+	// the teardown's write-back and removal (W7.3). nil without an account.
+	account *sandboxWorkspace
 
 	reapMu  sync.Mutex
 	reaped  bool
@@ -183,6 +212,12 @@ type sandboxProvisioner struct {
 	stopped   bool
 	stoppedCh chan struct{}
 
+	// runCtx, when set, parents every command Run starts, so cancelling it kills
+	// the ssh process group. nil means context.Background (a create, which must
+	// not be torn down by anything but its own timeout). Set only by an advisory
+	// probe (CheckHost), which a daemon shutdown has to be able to abandon.
+	runCtx context.Context
+
 	// runCommandFn is a per-instance seam so a test can drive the traps below
 	// without a real sshd. Production leaves it nil.
 	runCommandFn func(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error)
@@ -191,11 +226,20 @@ type sandboxProvisioner struct {
 	startTunnelFn func(remoteAddr string) (localAddr string, err error)
 }
 
+// hostReadinessKey is the readiness-cache key this provisioner's probe records
+// under: the listed host's canonical key when it has one, else the ssh command.
+func (p *sandboxProvisioner) hostReadinessKey() string {
+	if p.readinessKey != "" {
+		return p.readinessKey
+	}
+	return p.sshCmd
+}
+
 func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	w := &sandboxWorkspace{shell: p, spec: p.spec, program: p.program}
 	// Before anything is created on the host: a missing tool refuses the create
 	// with its fix instead of failing a later step half-provisioned (#5571 W2.3).
-	if err := w.checkHostPrereqs(p.sshCmd, sshShortStepTimeout); err != nil {
+	if err := w.checkHostPrereqs(p.hostReadinessKey(), sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
@@ -203,23 +247,21 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	w.resolveSessionDirSymlinks(sshShortStepTimeout)
 	p.sessionDir = w.SessionDir
-	if err := w.configureGit(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
-	}
+	// The identity is repo-local (#5571 W2.7), so it is written after the clone
+	// that creates the repository.
 	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
-	binary, err := os.Open(p.afBin)
-	if err != nil {
-		return ProvisionResult{}, fmt.Errorf("backend=%s: opening the af binary %q to stream to the sandbox failed: %w", p.label(), p.afBin, err)
+	if err := w.configureGit(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
-	copyErr := w.copyAfBinary(sshProvisionStepTimeout, binary)
-	_ = binary.Close()
-	if copyErr != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(copyErr)
-	}
-	if err := p.verifyCopiedBinary(); err != nil {
-		return ProvisionResult{}, err
+	// The binary stage is platform-aware (#5571 W2.2): probe the host's uname,
+	// pick the af build it can actually run (sandbox.binary override / the
+	// daemon's own binary / a sha256-verified release artifact), install it
+	// into the host's shared cache, and run `af version` on the host before
+	// any agent-server launch is attempted.
+	if err := p.stageRemoteBinary(w); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	// Mint the session's runtime identity BEFORE the agent-server launches
 	// (#5571 W1.1): the derived token reaches it only through the 0600 file
@@ -247,9 +289,34 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	// dead grant out of the launched agent-server's environment (#5571 W3.1,
 	// PR #5577 review — see revalidateCallbackBeforeEnv for why this point).
 	callbackLost := w.revalidateCallbackBeforeEnv()
+	// The callback's carrier is decided BEFORE its env is committed: a granted
+	// credential with no -R to ride is as dead as a revoked one, so it degrades
+	// the same way rather than leaving the agent a URL nothing answers (W3.4).
+	reverse, carrierLost := w.callbackReverseForward()
+	if callbackLost == "" {
+		callbackLost = carrierLost
+	}
+	p.reapMu.Lock()
+	p.reverseFwds, p.callbackRef = nil, ""
+	p.callbackSocket = ""
+	if reverse != "" {
+		p.reverseFwds = []string{reverse}
+		p.callbackRef = w.spec.CallbackRef
+		p.callbackSocket = w.CallbackSocketPath()
+	}
+	p.reapMu.Unlock()
+	if err := w.writePolicy(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
+	// W7.3: the session-scoped account, before the agent-server can launch the
+	// agent. Refuses (sending nothing) when the target is not a listed host.
+	if err := w.syncAccountIn(sshProvisionStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
+	p.account = w
 	// Reached only past the pre-launch steps (clone, binary copy, callback env),
 	// so a startAgentServer failure here is not the pre-launch empty-PID case: a
 	// nohup'd agent-server may have started even when the captured PID is empty or
@@ -312,6 +379,8 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 				RemoteAddr:         p.remoteAddr,
 				AgentServerVersion: p.agentServerVersion,
 				TokenRef:           p.tokenRef,
+				CallbackRef:        p.callbackRef,
+				CallbackReverse:    p.callbackReverse(),
 			},
 		},
 		Endpoint: endpoint,
@@ -355,7 +424,11 @@ func (p *sandboxProvisioner) Run(timeout time.Duration, script string, stdin io.
 }
 
 func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	parent := p.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	cmd := p.buildRunCommand(ctx, script, stdin)
@@ -430,9 +503,10 @@ func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string,
 	// much later somewhere unrelated. That reasoning holds ONLY while nothing else
 	// catches a truncated copy.
 	//
-	// Two things make bounding the right call here instead. verifyCopiedBinary now
-	// compares the byte count ON the sandbox, so a truncated copy fails AT the copy
-	// rather than silently. And a zero WaitDelay is not neutral: os/exec documents
+	// Two things make bounding the right call here instead. installRemoteBinary
+	// now compares the sha256 ON the sandbox (#5571 W2.2), so a truncated copy
+	// fails AT the copy rather than silently. And a zero WaitDelay is not neutral:
+	// os/exec documents
 	// that it makes Wait block until every orphaned descriptor-holder closes, which
 	// for this backend is precisely the ProxyCommand/wrapper it exists to support —
 	// so the copy's advertised timeout would not bound provisioning at all.
@@ -442,32 +516,6 @@ func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string,
 	// partial result the kill leaves behind.
 	cmd.WaitDelay = sandboxTunnelWaitDelay
 	return cmd
-}
-
-// verifyCopiedBinary re-checks the streamed `af` ON THE SANDBOX, because the
-// copy's failure mode is silent. A short write, a cut stream, or a full disk all
-// leave a binary that exists and is executable but is not the one we sent; the
-// next step would then fail with "exec format error" or a version mismatch far
-// from the cause. Comparing the byte count against the local file turns that
-// into an error naming the copy.
-func (p *sandboxProvisioner) verifyCopiedBinary() error {
-	local, err := os.Stat(p.afBin)
-	if err != nil {
-		return fmt.Errorf("backend=%s: cannot stat the local af binary %q: %w", p.label(), p.afBin, err)
-	}
-	remotePath := p.sessionDir + "/" + sshAfBinaryName
-	out, err := p.Run(sshShortStepTimeout, "wc -c < "+shellQuote(remotePath), nil, false)
-	if err != nil {
-		return fmt.Errorf("backend=%s: cannot verify the streamed af binary on the sandbox: %w", p.label(), err)
-	}
-	got := strings.TrimSpace(string(out))
-	want := fmt.Sprintf("%d", local.Size())
-	if got != want {
-		return fmt.Errorf("backend=%s: the af binary streamed to %s is %s bytes but the local one is %s — "+
-			"the copy was truncated, so the sandbox holds a binary that would fail later with an unrelated error; "+
-			"retry the session", p.label(), remotePath, got, want)
-	}
-	return nil
 }
 
 // startTunnel runs `<sandbox_ssh> -N -L <local>:<remote>` as a long-lived child.
@@ -641,6 +689,16 @@ func (p *sandboxProvisioner) reap() error {
 			ErrWorkspaceStateUnknown, p.label(), p.sessionDir)
 		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
 		return reapErr
+	}
+
+	// W7.3: write the account back and remove it BEFORE the session dir goes, while
+	// the agent-server is still reachable. Best-effort — the session-dir removal
+	// below is the backstop — so a failure is logged, never a reason to leave the
+	// sandbox in place.
+	if p.account != nil {
+		if aerr := p.account.teardownAccount(sshShortStepTimeout); aerr != nil {
+			log.WarningLog.Printf("sandbox runtime: account teardown for %q: %v", p.sessionDir, aerr)
+		}
 	}
 
 	nonce, nonceErr := sandboxReapNonce()
@@ -830,3 +888,89 @@ type sandboxBackend struct {
 }
 
 func (b *sandboxBackend) Type() string { return "sandbox" }
+
+// ErrOutputOverLimit reports that a remote command produced more output than the
+// caller allowed. The command was killed the moment the limit was crossed; nothing
+// past the limit was ever held.
+var ErrOutputOverLimit = errors.New("remote command output exceeded its limit")
+
+// limitedShell is the optional capability of a sandboxShell that can bound a
+// command's stdout while it streams (#5865). The host is untrusted by W7.3's own
+// design, so a response that is read in full before it is checked bounds nothing.
+type limitedShell interface {
+	// RunLimited runs script and returns its stdout, holding at most limit bytes.
+	// Past the limit the command is killed and ErrOutputOverLimit is returned.
+	RunLimited(timeout time.Duration, script string, limit int64) ([]byte, error)
+}
+
+// limitWriter accepts at most limit bytes, then cancels the command and refuses
+// the rest. It never buffers beyond the limit.
+type limitWriter struct {
+	limit    int64
+	buf      bytes.Buffer
+	exceeded bool
+	cancel   context.CancelFunc
+}
+
+func (w *limitWriter) Write(p []byte) (int, error) {
+	if w.exceeded {
+		return 0, ErrOutputOverLimit
+	}
+	room := w.limit - int64(w.buf.Len())
+	if int64(len(p)) > room {
+		w.buf.Write(p[:room])
+		w.exceeded = true
+		w.cancel()
+		return int(room), ErrOutputOverLimit
+	}
+	return w.buf.Write(p)
+}
+
+// RunLimited satisfies limitedShell over the operator's ssh invocation, with the
+// same command composition, process group and deadline as Run.
+func (p *sandboxProvisioner) RunLimited(timeout time.Duration, script string, limit int64) ([]byte, error) {
+	if p.runCommandFn != nil {
+		// A test seam that returns whole buffers cannot stream; it is bounded after
+		// the fact, which is all a seam can honestly do.
+		out, err := p.runCommandFn(timeout, script, nil, false)
+		if err == nil && int64(len(out)) > limit {
+			return nil, ErrOutputOverLimit
+		}
+		return out, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := p.buildRunCommand(ctx, script, nil)
+	out := &limitWriter{limit: limit, cancel: cancel}
+	var stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = out, &boundedBuffer{buf: &stderr, max: 4096}
+	err := cmd.Run()
+	if out.exceeded {
+		return nil, ErrOutputOverLimit
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
+	}
+	if err != nil && ctx.Err() != nil {
+		return out.buf.Bytes(), fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, ctx.Err())
+	}
+	return out.buf.Bytes(), err
+}
+
+// boundedBuffer keeps the first max bytes written and discards the rest, so a
+// chatty stderr cannot grow the daemon either.
+type boundedBuffer struct {
+	buf *bytes.Buffer
+	max int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.buf.Len(); room > 0 {
+		if len(p) > room {
+			b.buf.Write(p[:room])
+		} else {
+			b.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}

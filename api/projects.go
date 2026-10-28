@@ -22,12 +22,13 @@ var projectsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List registered projects",
 	Long: `List durable machine-local project bindings.
+With --daemon-url this is the targeted daemon's registry, not this machine's.
 
 path_exists reports only whether the last-known path is present. It does not
 claim that a new checkout at a reused path has the registered identity.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projects, err := config.ListProjects()
+		projects, err := routedListProjects()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -36,7 +37,7 @@ claim that a new checkout at a reused path has the registered identity.`,
 }
 
 // registerProjectViaDaemon is the daemon seam, overridable in tests.
-var registerProjectViaDaemon = daemon.RegisterProject
+var registerProjectViaDaemon = routedRegisterProject
 
 func newProjectsAddCmd() *cobra.Command {
 	return &cobra.Command{
@@ -61,6 +62,10 @@ agent-factory/checkout-id-<home-id> marker under the Git common directory, so
 one AF home's reset cannot remove another home's identity. No working-tree file
 is created, and adding a project does NOT start an always-on agent for it.
 
+With --daemon-url (or AF_DAEMON_URL) the registration goes to that daemon and the
+path is a path ON ITS HOST, sent as typed: absolute or starting with ~, never
+relative.
+
 'register' is a deprecated alias for 'add'.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -71,9 +76,9 @@ is created, and adding a project does NOT start an always-on agent for it.
 			// remote target selected. Resolve against the caller's cwd before the
 			// daemon (which may run from /) sees the path. ResolveUserPath expands
 			// ~ and calls filepath.Abs; remote registry routing is a separate change.
-			path, err := config.ResolveUserPath(args[0])
+			path, err := projectArgPath(args[0])
 			if err != nil {
-				return jsonError(fmt.Errorf("failed to resolve project path %q: %w", args[0], err))
+				return jsonError(err)
 			}
 			project, err := registerProjectViaDaemon(daemon.RegisterProjectRequest{Path: path})
 			if err != nil {
@@ -85,7 +90,7 @@ is created, and adding a project does NOT start an always-on agent for it.
 }
 
 // rebindProjectViaDaemon is the daemon seam, overridable in tests.
-var rebindProjectViaDaemon = daemon.RebindProject
+var rebindProjectViaDaemon = routedRebindProject
 
 var projectsRebindCmd = &cobra.Command{
 	Use:   "rebind <project-id> <path>",
@@ -98,7 +103,10 @@ another registered project.
 The path may be relative (including '.'), absolute, or start with ~. A relative
 path or '~' is resolved against YOUR shell's working directory before the
 request is sent — the daemon, which owns the registry write, then resolves the
-checkout it lands on.`,
+checkout it lands on.
+
+Against a remote daemon (--daemon-url) the path is on the daemon's host and is
+sent as typed (absolute or ~/…).`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -107,9 +115,9 @@ checkout it lands on.`,
 		// Same contract as `projects add`: resolve the caller-relative path
 		// here, because the daemon resolves what it is sent against ITS own
 		// filesystem and has no access to this shell's cwd.
-		path, err := config.ResolveUserPath(args[1])
+		path, err := projectArgPath(args[1])
 		if err != nil {
-			return jsonError(fmt.Errorf("failed to resolve project path %q: %w", args[1], err))
+			return jsonError(err)
 		}
 		project, err := rebindProjectViaDaemon(daemon.RebindProjectRequest{ID: args[0], Path: path})
 		if err != nil {
@@ -120,7 +128,7 @@ checkout it lands on.`,
 }
 
 // deleteProjectViaDaemon is the daemon seam, overridable in tests.
-var deleteProjectViaDaemon = daemon.DeleteProject
+var deleteProjectViaDaemon = routedDeleteProject
 
 var projectsDeleteCmd = &cobra.Command{
 	Use:   "delete [repo]",
@@ -185,6 +193,17 @@ were archived.`,
 // cleaned absolute path, so deleting a moved/removed project is still a clean
 // daemon-side no-op (it archives nothing and sweeps any stale opt-in).
 func resolveProjectDeleteTarget(args []string) (daemon.DeleteProjectRequest, string, error) {
+	if apiclient.IsRemoteTarget() {
+		// The current directory and the git probe below describe THIS machine.
+		if len(args) != 1 {
+			return daemon.DeleteProjectRequest{}, "", fmt.Errorf("a project path on the daemon host is required against the daemon at %s: the current directory names a repository on this machine", apiclient.RemoteTargetURL())
+		}
+		p, err := remoteProjectPath(args[0])
+		if err != nil {
+			return daemon.DeleteProjectRequest{}, "", err
+		}
+		return daemon.DeleteProjectRequest{RepoPath: p}, filepath.Base(p), nil
+	}
 	path := "."
 	if len(args) == 1 {
 		path = args[0]
@@ -198,4 +217,18 @@ func resolveProjectDeleteTarget(args []string) (daemon.DeleteProjectRequest, str
 	}
 	cleaned := filepath.Clean(abs)
 	return daemon.DeleteProjectRequest{RepoPath: cleaned}, filepath.Base(cleaned), nil
+}
+
+// projectArgPath is the path a registry mutation sends. Locally it is resolved
+// against the caller's cwd (the daemon may run from /). Against a remote target
+// it is the daemon-host path exactly as typed.
+func projectArgPath(raw string) (string, error) {
+	if apiclient.IsRemoteTarget() {
+		return remoteProjectPath(raw)
+	}
+	path, err := config.ResolveUserPath(raw)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve project path %q: %w", raw, err)
+	}
+	return path, nil
 }

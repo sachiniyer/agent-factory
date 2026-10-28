@@ -821,10 +821,10 @@ runs PR Validation for a head whose commit message skipped CI, because the gate
 cannot merge a head whose required checks never report.
 
 GitHub also suppresses `push` workflows when Auto Gate merges with its
-`GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five
-master-verification workflows named by `MASTER_PUSH_WORKFLOWS`: Build, Docs,
-Lint, TUI driver selftest, and Web selftest. A dispatch ignores each workflow's
-path filter, so all five run after every Auto Gate merge. The literal list is
+`GITHUB_TOKEN`. After a merge, the gate therefore dispatches the
+master-verification workflows named by `MASTER_PUSH_WORKFLOWS` (Build, Docs,
+Lint, ...). A dispatch ignores each workflow's path filter, so they all run
+after every Auto Gate merge. The literal list is
 kept honest by the required auto-gate helper test, which scans workflow triggers
 and requires every listed workflow to accept `workflow_dispatch`.
 

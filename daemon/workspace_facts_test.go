@@ -13,6 +13,7 @@ func TestWorkspaceFactsResolvesExplicitStableID(t *testing.T) {
 	m, repoID, repoPath := newStatusTestManager(t)
 	inst, err := session.FromInstanceData(session.InstanceData{
 		ID: "sess-123", Title: "alpha", Path: repoPath, Status: session.Archived, BackendType: "local",
+		Worktree: session.GitWorktreeData{RepoPath: repoPath, WorktreePath: repoPath},
 	})
 	if err != nil {
 		t.Fatal(err)

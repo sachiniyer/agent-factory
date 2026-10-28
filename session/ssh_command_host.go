@@ -2,7 +2,6 @@ package session
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -92,6 +91,16 @@ func sshCommandForHost(h config.HostConfig, globalPosture, dialAddr string, dial
 	return strings.Join(parts, " "), nil
 }
 
+// OperatorSSHCommand is the ssh invocation af itself uses for the listed host h,
+// without a remote command: what an operator runs (append a command such as
+// `true`) to test the very connection af will make. Printed remedies use this
+// rather than formatting `ssh user@host:port` by hand, which is not ssh syntax —
+// OpenSSH reads `box:2222` as a hostname on port 22 (#5852). The composition is
+// pure: it touches no filesystem state and dials nothing.
+func OperatorSSHCommand(h config.HostConfig, globalPosture string) (string, error) {
+	return sshCommandForHost(h, globalPosture, "", 0)
+}
+
 // chooseListedHost resolves which listed host a create uses: the named pick, or
 // else — only when the repo supplies no [ssh] host of its own — the global
 // default_host. It returns a nil host for "use the repo's [ssh] settings".
@@ -111,11 +120,10 @@ func chooseListedHost(pick string, cfg *config.ResolvedConfig) (string, *config.
 	if name == "" {
 		return "", nil, nil
 	}
-	entry, ok := cfg.Hosts[name]
-	if !ok {
-		return "", nil, fmt.Errorf("backend=ssh: host %q is not in the host list %v; add it under [hosts.%s] in the global config or pick a listed host",
-			name, sortedHostNames(cfg.Hosts), name)
+	if err := config.ValidateHostPick(cfg.Hosts, name); err != nil {
+		return "", nil, fmt.Errorf("backend=ssh: %w", err)
 	}
+	entry := cfg.Hosts[name]
 	// The same validation `af config set` and the loader run, so an entry that
 	// reached cfg some other way (a test, a stale in-memory copy) cannot be
 	// created against, and the catalog cannot call it usable.
@@ -129,15 +137,6 @@ func chooseListedHost(pick string, cfg *config.ResolvedConfig) (string, *config.
 		return "", nil, fmt.Errorf("backend=ssh: host %q sets use_ssh_config, which sessions cannot use yet (this path composes ssh itself); remove use_ssh_config for this host", name)
 	}
 	return name, &entry, nil
-}
-
-func sortedHostNames(hosts map[string]config.HostConfig) []string {
-	names := make([]string, 0, len(hosts))
-	for n := range hosts {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // HostUnusableReason reports why a create picking the listed host name would

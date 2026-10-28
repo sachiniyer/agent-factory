@@ -35,21 +35,6 @@ func (b *remoteAgentBackend) Capabilities() Capabilities {
 	}
 }
 
-// SwapAgent is not serviced off-box (#2013). Swapping the agent inside a
-// provisioned sandbox means re-launching a different process INSIDE it while
-// keeping the workspace — but every re-spawn path these runtimes have
-// (recoverSandbox) re-provisions the sandbox and re-clones the branch from
-// origin, which would discard unpushed work rather than hand it over. Wiring a
-// genuine in-sandbox relaunch is its own change; until then this says so instead
-// of quietly doing the destructive thing.
-func (b *remoteAgentBackend) PrepareAgentSwap(*Instance, string) (AgentSwapPlan, error) {
-	return AgentSwapPlan{}, ErrHandoffUnsupported
-}
-
-func (b *remoteAgentBackend) SwapAgent(*Instance, AgentSwapPlan) error {
-	return ErrHandoffUnsupported
-}
-
 // Start provisions then launches the remote workspace through its AgentServer.
 func (b *remoteAgentBackend) Start(i *Instance, firstTimeSetup bool) error {
 	if err := b.Provision(i, firstTimeSetup); err != nil {
@@ -91,6 +76,12 @@ func (b *remoteAgentBackend) Launch(i *Instance, firstTimeSetup bool) error {
 	// landed there would be read as the agent by every consumer (#3062). Draining
 	// here rather than at load is what keeps that ordering true.
 	i.appendPendingMetadataTabsLocked()
+	// The launch RPC reported the conversation it came up on, before the agent tab
+	// existed to hold it (W7.2).
+	if i.reportedConversation.HasID() && i.setAgentConversationLocked(i.reportedConversation) {
+		// Reported before the tab existed to hold it: still owes a durable write.
+		i.conversationUnpersisted = true
+	}
 	i.mu.Unlock()
 	return nil
 }
@@ -158,7 +149,8 @@ func (b *remoteAgentBackend) CheckAndHandleTrustPrompt(*Instance) bool { return 
 // daemon-side backend would recurse through that same server.
 func (b *remoteAgentBackend) AgentModelChange(*Instance) *AgentModelChange { return nil }
 
-// Recover and Respawn both re-provision a disposable remote workspace from the
-// session branch, then launch it again.
-func (b *remoteAgentBackend) Recover(i *Instance) error { return recoverSandbox(i) }
-func (b *remoteAgentBackend) Respawn(i *Instance) error { return recoverSandbox(i) }
+// Recover and Respawn relaunch the agent in its existing sandbox workspace when
+// the agent-server can (W7.1), and otherwise re-provision a disposable remote
+// workspace from the session branch, then launch it again.
+func (b *remoteAgentBackend) Recover(i *Instance) error { return relaunchOrRecoverSandbox(i) }
+func (b *remoteAgentBackend) Respawn(i *Instance) error { return relaunchOrRecoverSandbox(i) }

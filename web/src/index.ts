@@ -78,6 +78,7 @@ import { emptyQuotaState } from "./quota.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
+import type { HostOption } from "./backends.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
 import {
   addProjectModal,
@@ -229,6 +230,12 @@ const connectionGate = createLatestRequestGate();
  *  Tokenless ("") is a valid credential (#1696), so a null token — not a falsy one —
  *  is the "not authorized yet" case. Rejecting there is safe: every caller degrades
  *  to the repo default rather than blocking its form. */
+/** The listed hosts for a project (ListBackends.hosts, #5571 W6.3). */
+const loadHosts = (repoPath: string): Promise<HostOption[]> =>
+  token === null
+    ? Promise.reject(new Error("not authorized"))
+    : listBackends(repoPath, token).then((catalog) => catalog.hosts ?? []);
+
 const loadPrograms = (repoPath: string): Promise<ProgramCatalog> =>
   token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 /** The create form's account registry (#3844). The registry itself is not
@@ -2578,6 +2585,7 @@ function openAddTask(): void {
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -2626,6 +2634,7 @@ function openEditTask(task: TaskData): void {
     editTaskModal(projects, task, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -2635,6 +2644,9 @@ function openEditTask(task: TaskData): void {
         const m = modal;
         m.setBusy(true);
         const value = buildTask(input);
+        // `host` is patched only when CHANGED (undefined drops out of the JSON): an
+        // unrelated edit must not re-validate, and fail on, a host removed from the
+        // list since the task was written.
         void updateTask(
           task,
           {
@@ -2644,6 +2656,7 @@ function openEditTask(task: TaskData): void {
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
             on_complete: value.on_complete ?? "",
+            host: (input.host ?? "") !== (task.host ?? "") ? input.host ?? "" : undefined,
             project_path: input.projectPath,
             program: input.program,
           },

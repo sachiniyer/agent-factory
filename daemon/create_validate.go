@@ -5,7 +5,6 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/preflight"
-	"github.com/sachiniyer/agent-factory/session"
 )
 
 // validateCreateFirst runs the host-owned checks the local CLI runs client-side
@@ -36,14 +35,14 @@ func validateCreateFirst(req CreateSessionRequest) error {
 			return err
 		}
 	}
-	local, err := session.LocalPrereqsRequired(session.InstanceOptions{
-		Backend: session.BackendKind(req.Backend),
-	}, repo.WorkspacePath())
+	local, err := createNeedsDaemonHostPrereqs(req, repo.WorkspacePath())
 	if err != nil {
 		return err
 	}
 	if local {
-		return preflight.LocalSessionPrereqs(&cfg.Config, program)
+		// Relative overrides resolve where the launch will run: the session's
+		// repo/workspace, not this daemon's cwd (#5779).
+		return preflight.LocalSessionPrereqsAt(&cfg.Config, program, repo.WorkspacePath())
 	}
 	return nil
 }
