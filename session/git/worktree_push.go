@@ -89,6 +89,33 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// rather than `all` because we only need that boolean: `normal` reports an
 	// untracked directory as one `?? dir/` entry instead of walking every file
 	// beneath it, which is the same answer for less work on a big tree.
+	// Reconcile with origin BEFORE the snapshot commit (#5407). A HEAD that is an
+	// ancestor of origin's session branch (an agent ran `git reset --hard HEAD~1`
+	// or checked out an older commit) would otherwise be rejected as a
+	// non-fast-forward push AFTER the snapshot commit already landed locally,
+	// stranding it inside a sandbox that is about to be reaped. Behind-only is
+	// recoverable: nothing on origin would be overwritten.
+	behind, diverged := g.classifyAgainstOrigin(branch)
+	if diverged {
+		// Neither side contains the other: the plain push below can only be
+		// rejected. Refuse BEFORE snapshotting so the uncommitted work stays in the
+		// tree for the operator's retry rather than becoming a stranded local
+		// commit that later retries skip over.
+		return "", g.annotateGitWriteError(fmt.Errorf("HEAD has diverged from origin's %q (neither is an ancestor of the other), so the archive push would be rejected; nothing was committed — reconcile the branches in the sandbox and retry", branch), probeDir)
+	}
+	if behind {
+		if clean, err := g.isTreeClean(); err == nil && clean {
+			// Origin already holds every commit HEAD has: nothing to push.
+			return branch, nil
+		}
+		// Dirty: fast-forward onto origin's tip, carrying the working tree, so the
+		// snapshot lands on top of it. If the uncommitted changes overlap the
+		// incoming ones git refuses, and the push below reports the condition.
+		if _, err := g.runGitCommand(g.worktreePath, "merge", "--ff-only", "FETCH_HEAD"); err != nil {
+			return "", g.annotateGitWriteError(fmt.Errorf("HEAD is behind origin's %q and uncommitted changes overlap the incoming commits, so it cannot be fast-forwarded before the archive snapshot (nothing was committed; resolve in the sandbox and retry): %w", branch, err), probeDir)
+		}
+	}
+
 	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return "", g.annotateGitWriteError(fmt.Errorf("failed to check worktree status before archive push: %w", err), probeDir)
@@ -119,4 +146,44 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 			branch, strings.TrimSpace(out), err), probeDir)
 	}
 	return branch, nil
+}
+
+// classifyAgainstOrigin fetches origin's session branch (best effort, under the
+// network timeout) and compares HEAD to it. behind is true when HEAD is a strict
+// ancestor of origin's tip; diverged when neither is an ancestor of the other.
+// Any failure to fetch or resolve (no such branch on origin yet, unreachable
+// origin) reports neither, leaving the push to surface its own error.
+func (g *GitWorktree) classifyAgainstOrigin(branch string) (behind, diverged bool) {
+	if _, err := g.runGitNetworkCommand(g.worktreePath, "fetch", "origin", "refs/heads/"+branch); err != nil {
+		return false, false
+	}
+	head, err := g.runGitCommand(g.worktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		return false, false
+	}
+	tip, err := g.runGitCommand(g.worktreePath, "rev-parse", "FETCH_HEAD")
+	if err != nil {
+		return false, false
+	}
+	head, tip = strings.TrimSpace(head), strings.TrimSpace(tip)
+	if head == tip {
+		return false, false
+	}
+	if _, err := g.runGitCommand(g.worktreePath, "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"); err == nil {
+		return true, false
+	}
+	if _, err := g.runGitCommand(g.worktreePath, "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD"); err == nil {
+		return false, false // ahead: a plain fast-forward push
+	}
+	return false, true
+}
+
+// isTreeClean reports whether the worktree has nothing to snapshot, using the
+// same config-independent status gate as the snapshot itself (#2101).
+func (g *GitWorktree) isTreeClean() (bool, error) {
+	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(status) == "", nil
 }

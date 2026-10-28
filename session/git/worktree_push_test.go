@@ -272,3 +272,79 @@ func TestSnapshotAndPushBranch_RejectsExternalWorktree(t *testing.T) {
 		t.Fatal("SnapshotAndPushBranch on an external worktree: want error")
 	}
 }
+
+// behindOriginRepo is the #5407 shape: origin's session branch is at B, but the
+// sandbox's HEAD sits one commit behind it at A (an agent ran `git reset --hard
+// HEAD~1` or checked out an older commit). HEAD is an ancestor of origin's tip.
+func behindOriginRepo(t *testing.T, branch string) (gw *GitWorktree, bare, tipA, tipB string) {
+	t.Helper()
+	gw, bare = pushTestRepo(t, branch)
+	wt := gw.GetWorktreePath()
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a"), 0644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "A")
+	tipA = branchTip(t, wt, "HEAD")
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "b.txt"), []byte("b"), 0644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "B")
+	tipB = branchTip(t, wt, "HEAD")
+	runGit(t, wt, "push", "origin", "HEAD:refs/heads/"+branch)
+	runGit(t, wt, "reset", "--hard", tipA)
+	return gw, bare, tipA, tipB
+}
+
+// TestSnapshotAndPushBranch_BehindOnlyCleanHeadIsAlreadyDurable: a clean HEAD that
+// is an ancestor of origin's session branch has nothing to push — origin already
+// holds every commit — so the archive must succeed instead of aborting on a
+// non-fast-forward rejection (#5407).
+func TestSnapshotAndPushBranch_BehindOnlyCleanHeadIsAlreadyDurable(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, tipB := behindOriginRepo(t, "root/behind-clean")
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err, "a behind-only HEAD is recoverable, not divergent")
+	assert.Equal(t, "root/behind-clean", got)
+	assert.Equal(t, tipB, branchTip(t, bare, "refs/heads/root/behind-clean"), "origin's tip must not move backwards")
+}
+
+// TestSnapshotAndPushBranch_BehindOnlyDirtyHeadFastForwardsThenSnapshots: with
+// uncommitted work on a behind-only HEAD, the worktree is fast-forwarded onto
+// origin's tip (carrying the dirty tree) before the snapshot commit, so the push
+// is a plain fast-forward and the work is not stranded in the sandbox (#5407).
+func TestSnapshotAndPushBranch_BehindOnlyDirtyHeadFastForwardsThenSnapshots(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, tipB := behindOriginRepo(t, "root/behind-dirty")
+	wt := gw.GetWorktreePath()
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "dirty.txt"), []byte("uncommitted"), 0644))
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+
+	pushed := branchTip(t, bare, "refs/heads/root/behind-dirty")
+	assert.Equal(t, branchTip(t, wt, "HEAD"), pushed)
+	assert.NotEqual(t, tipB, pushed, "the snapshot commit advanced origin")
+	runGit(t, bare, "merge-base", "--is-ancestor", tipB, pushed)
+	assert.Contains(t, runGitOut(t, bare, "show", "--name-only", "--format=", pushed), "dirty.txt")
+}
+
+// TestSnapshotAndPushBranch_DivergedHeadStillFailsWithoutStranding: a genuinely
+// divergent HEAD must still be refused, and the refusal must not leave a snapshot
+// commit behind that a retry then skips (#5407).
+func TestSnapshotAndPushBranch_DivergedHeadStillFailsWithoutStranding(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, tipA, tipB := behindOriginRepo(t, "root/diverged")
+	wt := gw.GetWorktreePath()
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "c.txt"), []byte("c"), 0644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "C")
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "dirty.txt"), []byte("uncommitted"), 0644))
+	tipC := branchTip(t, wt, "HEAD")
+	_ = tipA
+
+	_, err := gw.SnapshotAndPushBranch()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "diverged")
+	assert.Equal(t, tipB, branchTip(t, bare, "refs/heads/root/diverged"))
+	assert.Equal(t, tipC, branchTip(t, wt, "HEAD"), "no snapshot commit may be stranded by a refused push")
+	assert.NotEmpty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")), "the dirty work stays uncommitted for the retry")
+}
