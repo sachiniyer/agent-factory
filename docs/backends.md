@@ -923,9 +923,10 @@ What the sandbox host needs, and what af does to it:
   through stdin into a `0600` file in the session directory, never through argv
   or the environment of a process the agent starts.
 - **Callback credential.** For the agent inside the sandbox to call back into
-  the daemon (`AF_DAEMON_URL`/`AF_DAEMON_TOKEN`), the daemon needs
-  `network.require_token = true` and a `network.listen_addr` that is a literal,
-  non-loopback IP the sandbox can reach, with a listener actually accepting on it.
+  the daemon (`AF_DAEMON_URL`/`AF_DAEMON_TOKEN`), the daemon's dedicated
+  sandbox callback endpoint must be running — `network.listen_addr` and
+  `network.require_token` are not involved, so a default (loopback, tokenless)
+  daemon already gives sandboxes a working callback.
   When that is not the case the create is **not** refused: the session is created
   without a callback credential and the reason is reported (`callback_unavailable_reason`
   in the backend picker). Only the `/v1/Snapshot` route is admitted for this
