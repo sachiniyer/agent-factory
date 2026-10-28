@@ -140,6 +140,9 @@ func literalArgvWord(word *syntax.Word) (string, bool, bool) {
 			}
 		case *syntax.Lit:
 			raw := p.Value
+			// Found once per part: a bracket check that rescanned the suffix
+			// for every `[` made a word of unmatched brackets quadratic.
+			lastClose := strings.LastIndexByte(raw, ']')
 			for j := 0; j < len(raw); j++ {
 				c := raw[j]
 				if c == '\\' {
@@ -167,7 +170,7 @@ func literalArgvWord(word *syntax.Word) (string, bool, bool) {
 				case '*', '?':
 					return "", false, false
 				case '[':
-					if bracketMayBeClass(raw, j, i+1 < len(word.Parts)) {
+					if bracketMayBeClass(raw, j, lastClose, i+1 < len(word.Parts)) {
 						return "", false, false
 					}
 				case '~':
@@ -297,8 +300,8 @@ func braceExpandable(unquoted string) bool {
 // and the empty `[]` stay literal — which the xargs -I[] marker and a POSIX
 // parse of `[[ … ]]` rely on. A closer that could sit in a later part of the
 // word is unknowable here, so it counts as a class (fail closed).
-func bracketMayBeClass(raw string, at int, laterParts bool) bool {
-	if start := at + 2; start <= len(raw) && strings.IndexByte(raw[start:], ']') >= 0 {
+func bracketMayBeClass(raw string, at, lastClose int, laterParts bool) bool {
+	if lastClose >= at+2 {
 		return true
 	}
 	return laterParts
