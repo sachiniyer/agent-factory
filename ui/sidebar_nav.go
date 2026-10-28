@@ -439,6 +439,12 @@ func (s *Sidebar) selectTabStop(stop sidebarTabStop) bool {
 
 	s.proj.SetSelectedInstance(inst)
 	s.proj.SetActiveTab(stop.tabIndex)
+	// The folded-instance-Down case is handled in tryMoveVerticalNavStop, which
+	// moves the cursor to the next instance row instead of targeting this
+	// instance's hidden tabs, so selectTabStop is reached for the same instance
+	// only on a normal dive into its (expanded) tabs. From a header or archived
+	// cursor the target tab must be revealed and selected normally. In both
+	// cases clearing the explicit-collapse override is the right thing.
 	s.treeCollapsed = nil
 	for i, sec := range s.sections {
 		if sec.Kind == SectionInstances {
@@ -508,7 +514,24 @@ func (s *Sidebar) tryMoveVerticalNavStop(dir int) bool {
 		target = cur + dir
 	} else if sel.Kind == SectionInstances && !sel.IsTab {
 		if dir > 0 {
-			target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex)
+			instances := s.proj.GetInstances()
+			if s.treeCollapsed != nil && sel.ItemIndex >= 0 && sel.ItemIndex < len(instances) &&
+				s.treeCollapsed == instances[sel.ItemIndex] {
+				if s.moveCursorToNextInstanceRow() {
+					return true
+				}
+				// Last live instance, folded: a Down must not target this
+				// instance's hidden tabs (that would re-expand the fold, #4770).
+				// Fall through to the next stop strictly past this instance —
+				// the Archived rows moveVerticalNavStop's #1518 reveal fallback
+				// exposes below it — so the tail lands on the first archived
+				// session instead of trapping on the folded row. Until that
+				// fallback runs there is no such stop, so target stays -1 and the
+				// fallback reveals it.
+				target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex+1)
+			} else {
+				target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex)
+			}
 		} else {
 			target = lastTabStopBeforeInstance(stops, sel.ItemIndex)
 		}
@@ -595,107 +618,6 @@ func (s *Sidebar) Up() {
 	s.afterCursorMove()
 }
 
-// ToggleSection expands or collapses the section of the current selection.
-func (s *Sidebar) ToggleSection() {
-	s.syncFromStore()
-	sel := s.rawSelection()
-	if !sel.IsHeader {
-		return
-	}
-	for i, sec := range s.sections {
-		if sec.Kind == sel.Kind {
-			s.sections[i].Expanded = !s.sections[i].Expanded
-			break
-		}
-	}
-	s.rebuildVisibleItems()
-	s.afterCursorMove()
-}
-
-// ExpandInstancesSection ensures the Instances section is expanded.
-func (s *Sidebar) ExpandInstancesSection() {
-	for i, sec := range s.sections {
-		if sec.Kind == SectionInstances {
-			s.sections[i].Expanded = true
-			break
-		}
-	}
-	s.rebuildVisibleItems()
-}
-
-// ExpandSection expands the tree node under the cursor: on a section header
-// the whole section; on an instance row the instance's tab children (clearing
-// an explicit h/← collapse). Tab rows are already inside an expanded node, so
-// they no-op.
-func (s *Sidebar) ExpandSection() {
-	s.syncFromStore()
-	sel := s.rawSelection()
-	if sel.Kind == SectionInstances && !sel.IsHeader && !sel.IsTab {
-		if s.treeCollapsed != nil {
-			s.treeCollapsed = nil
-			s.rebuildPreservingCursor()
-		}
-		s.afterCursorMove()
-		return
-	}
-	if !sel.IsHeader {
-		return
-	}
-	for i, sec := range s.sections {
-		if sec.Kind == sel.Kind {
-			s.sections[i].Expanded = true
-			break
-		}
-	}
-	s.rebuildVisibleItems()
-	s.afterCursorMove()
-}
-
-// CollapseSection collapses the tree node under the cursor: a tab row folds
-// its parent instance (cursor moves up onto it); an expanded instance row
-// folds its tab children in place; an already-collapsed instance row falls
-// back to the pre-tree behavior — jump to the section header and collapse the
-// whole section. Headers collapse their section as before.
-func (s *Sidebar) CollapseSection() {
-	s.syncFromStore()
-	sel := s.rawSelection()
-	if sel.Kind == SectionInstances && !sel.IsHeader {
-		instances := s.proj.GetInstances()
-		if sel.ItemIndex >= 0 && sel.ItemIndex < len(instances) {
-			inst := instances[sel.ItemIndex]
-			if s.instanceExpanded(inst) {
-				s.treeCollapsed = inst
-				if sel.IsTab {
-					// Fold to the parent: the cursor lands on the instance row.
-					s.rebuildVisibleItems()
-					s.moveCursorToInstanceRow(sel.ItemIndex)
-				} else {
-					s.rebuildPreservingCursor()
-				}
-				s.afterCursorMove()
-				return
-			}
-		}
-	}
-	if !sel.IsHeader {
-		// If on a child, jump to parent header
-		for i, item := range s.visibleItems {
-			if item.Kind == sel.Kind && item.IsHeader {
-				s.selectedIdx = i
-				break
-			}
-		}
-	}
-	for i, sec := range s.sections {
-		if sec.Kind == sel.Kind {
-			s.sections[i].Expanded = false
-			break
-		}
-	}
-	s.rebuildVisibleItems()
-	s.afterCursorMove()
-}
-
 // moveCursorToInstanceRow places the cursor on the instance row (not a tab
 // child) of the instance at instIdx, if visible.
 func (s *Sidebar) moveCursorToInstanceRow(instIdx int) {
@@ -705,6 +627,38 @@ func (s *Sidebar) moveCursorToInstanceRow(instIdx int) {
 			return
 		}
 	}
+}
+
+// moveCursorToNextInstanceRow advances the cursor to the next live instance
+// row below the current cursor, if one is visible in the Instances section,
+// and reports whether the cursor moved. It returns false when the cursor
+// already rests on the last instance row (there is nothing below it to move
+// to within the section). Used by Down off an explicitly folded instance to
+// move past it instead of diving into its hidden tabs.
+//
+// The row predicate mirrors the one normal vertical nav (liveTabStops) uses
+// to decide what is a stop: the IsRootSep hairline (#2513) is a display-only
+// SectionInstances item that is neither a header nor a tab — it must be
+// excluded so the cursor never lands on its ItemIndex == -1 row, and in-flight
+// (non-expandable) instance rows are skipped so a folded-Down does not
+// retarget selection onto a transient session that normal j/k navigation
+// never stops on. When no next expandable instance row is visible, this
+// returns false so the caller's reveal-Archived fallback (or a no-op) takes
+// over instead of trapping the cursor on a non-target row.
+func (s *Sidebar) moveCursorToNextInstanceRow() bool {
+	instances := s.proj.GetInstances()
+	for j := s.selectedIdx + 1; j < len(s.visibleItems); j++ {
+		item := s.visibleItems[j]
+		if item.Kind != SectionInstances || item.IsHeader || item.IsTab || item.IsRootSep {
+			continue
+		}
+		if item.ItemIndex >= 0 && item.ItemIndex < len(instances) && !tree.Expandable(instances[item.ItemIndex]) {
+			continue
+		}
+		s.selectedIdx = j
+		return true
+	}
+	return false
 }
 
 // GetSelectedInstance returns the instance under the cursor — including when

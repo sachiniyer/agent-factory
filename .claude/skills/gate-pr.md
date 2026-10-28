@@ -4,6 +4,31 @@ description: Gate and merge YOUR OWN pull request — CI, the Codex review for t
 user_invocable: true
 ---
 
+# Throughput mode (current policy, 2026-10-27)
+
+**The Auto Gate is disabled. Everything below the "Legacy gate procedure"
+heading applies only if it is re-enabled.** Today:
+
+1. Run the local checks from CLAUDE.md (gofmt, build, vet, golangci-lint
+   `--fast`, file-length, changed-package tests) and push. Do not wait for review
+   or play-tests.
+2. `Build` + `Lint` must be green on the **current** head, and the PR must not be
+   conflicting (`git merge origin/master`, resolve, push — never force-push). The
+   auto-merger (`.github/auto-merge.md`) then squash-merges it; you do not merge
+   by hand.
+3. A **P1** Codex finding blocks the merge until you fix it and reply
+   `RESOLVED in <sha>` on the thread. **P2/P3 are advisory**: fix if cheap, else
+   reply `ACCEPTED: <reason>`. Never write `ACCEPTED` for something you will fix.
+4. To stop a PR merging, add the `no-auto-merge` label.
+5. Play-tests and broader verification run on master. A regression they (or the
+   post-merge composition check) find is fixed forward on master, ahead of other
+   work. The nightly stable release preflight (full `go vet` + `-race` suite)
+   stays the hard gate before anything reaches users.
+
+---
+
+# Legacy gate procedure (only if the Auto Gate is re-enabled)
+
 # Gate your own pull request
 
 **You own your PR end to end, including the merge.** Nobody reviews it before it

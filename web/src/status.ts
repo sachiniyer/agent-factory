@@ -123,6 +123,23 @@ function idleReasonLabel(reason: IdleReason | undefined): string {
   return reason ? (IDLE_REASON_LABELS as Partial<Record<string, string>>)[reason] ?? "" : "";
 }
 
+/** Row detail for a live remote-probe outage (#5571 W1.3): static text, never
+ *  an animated indicator, mirroring the TUI's "unreachable <age> · <err>"
+ *  (render.go). It outranks the idle detail — the outage is why every other
+ *  fact on the row may be stale. Returns "" when the pair is incomplete, so a
+ *  malformed projection renders nothing rather than half a claim. */
+export function unreachableDetail(s: SessionData, now: Date = new Date()): string {
+  const u = s.unreachable;
+  if (!u?.since || !u.error) {
+    return "";
+  }
+  const since = new Date(u.since);
+  if (Number.isNaN(since.getTime())) {
+    return "";
+  }
+  return `unreachable ${formatPaneChurnAge(since, now)} ago · ${u.error}`;
+}
+
 function formatPaneChurnAge(churn: Date, now: Date): string {
   return formatDuration(now.getTime() - churn.getTime());
 }
@@ -497,6 +514,11 @@ export function rowTitle(s: SessionData): string {
   if (archiveWarningText(s) !== "") {
     title = "[archive incomplete] " + title;
   }
+  // Mirroring render.go: the outage marker is static text and sits just inside
+  // [model changed]; only a complete since/error pair earns it.
+  if (s.unreachable?.since && s.unreachable?.error) {
+    title = "[unreachable] " + title;
+  }
   if (s.model_change) {
     title = "[model changed] " + title;
   }
@@ -508,6 +530,28 @@ export function rowTitle(s: SessionData): string {
  * about whether a warning exists. */
 export function archiveWarningText(s: SessionData): string {
   return s.archive_warning?.trim() ?? "";
+}
+
+/** The cross-surface phrase every surface renders before the reason a session
+ *  has no af callback (#5571 W3.1) — kept as one exported constant so the rail
+ *  banner, the row tooltip and the backend picker can never spell it three ways.
+ *  Mirrors session.CallbackUnavailablePrefix. */
+export const CALLBACK_UNAVAILABLE_PREFIX = "af callback unavailable: ";
+
+/** The daemon-projected callback-absence reason, rendered under the shared
+ *  prefix. "" means callback was delivered (or the backend injects none). */
+export function callbackUnavailableText(s: SessionData): string {
+  const reason = s.callback_unavailable?.trim() ?? "";
+  return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
+}
+
+/** Every session-level notice the persistent pane banner carries — the
+ *  incomplete-archive warning and the callback-absence advisory — joined so a
+ *  row carrying both cannot drop either. "" means there is nothing to show. */
+export function sessionWarningText(s: SessionData): string {
+  return [archiveWarningText(s), callbackUnavailableText(s)]
+    .filter((t) => t !== "")
+    .join(" · ");
 }
 
 /** Mirrors session.RootRecreateContext.Note (session/root_recreate.go): the short
