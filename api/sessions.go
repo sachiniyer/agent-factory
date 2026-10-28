@@ -29,7 +29,7 @@ var SessionsCmd = &cobra.Command{
 }
 
 var (
-	createSessionViaDaemon  = daemon.CreateSession
+	createSessionViaDaemon  = routedCreateSession
 	killSessionViaDaemon    = routedKillSession
 	archiveSessionViaDaemon = routedArchiveSession
 	restoreSessionViaDaemon = routedRestoreSession
@@ -418,99 +418,14 @@ pointing at one).`,
 
 		inPlace := createHereFlag || createInPlaceFlag
 
-		// resolveRepo already differentiates "--repo is required" (absent) from a
-		// provided-but-invalid path and names the offending path (#892), so
-		// surface its error verbatim instead of relabeling every failure as
-		// "required".
-		repo, err := resolveRepo()
-		if err != nil {
-			if inPlace {
-				return jsonError(fmt.Errorf("--here requires a git repository to attach to: %w", err))
-			}
-			return jsonError(err)
+		var workspace, program string
+		if apiclient.IsRemoteTarget() {
+			workspace, program, err = remoteCreateInputs(inPlace)
+		} else {
+			workspace, program, err = localCreateInputs(createTitle, inPlace)
 		}
-		workspace := repo.WorkspacePath()
-
-		if err := requireGitRepoWorkspace(workspace); err != nil {
-			return jsonError(err)
-		}
-
-		// Fail fast on the reserved root-agent title (#1106) before any daemon
-		// round trip, through the daemon's own refusal rather than a copy of its
-		// message: what is reserved is the derived tmux name, not the spelling (#3732).
-		if err := session.ReservedTitleRefusalFor(createTitle, workspace); err != nil {
-			return jsonError(err)
-		}
-
-		// Best-effort per-repo pre-check to fail fast on duplicate titles
-		// before we spend time creating a tmux session and git worktree we'd
-		// just have to tear down. The authoritative race-safe check still
-		// happens inside the daemon under the per-repo file lock.
-		// repoHasLiveInstanceTitle skips archived rows so a create targeting
-		// a title held only by an archived session reaches the daemon, which
-		// reclaims the title (renameArchivedForReuseLocked).
-		exists, err := repoHasLiveInstanceTitle(repo.ID, createTitle)
 		if err != nil {
 			return jsonError(err)
-		}
-		if exists {
-			return jsonError(fmt.Errorf("session with title %q already exists", createTitle))
-		}
-
-		cfg, err := config.ResolveConfigForRepo(repo)
-		if err != nil {
-			return jsonError(err)
-		}
-
-		program := createProgramFlag
-		if program == "" {
-			program = cfg.DefaultProgram
-		} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
-			return jsonError(err)
-		}
-		// Validate --backend up front so a typo fails on the client with a clear
-		// message rather than after a daemon round trip (#1592 Phase 4 PR3). An
-		// empty flag defers to the repo's `backend` config key.
-		if _, err := session.ParseBackendKind(createBackendFlag); err != nil {
-			return jsonError(err)
-		}
-		if inPlace && createBackendFlag != "" && createBackendFlag != config.BackendLocal {
-			return jsonError(fmt.Errorf("--here runs in the local working tree and is incompatible with --backend %s", createBackendFlag))
-		}
-
-		// Backend resolution now runs BEFORE preflight, because it decides
-		// whether preflight applies at all (#2592): a docker/ssh/hook session
-		// runs tmux and the agent inside the sandbox, so refusing the create
-		// for a missing local `claude` blocks a session that would have
-		// worked. The RAW flag goes in, not the parsed kind —
-		// ParseBackendKind turns "" into BackendLocal, and passing that
-		// through would override the repo's `backend` key with a default the
-		// user never typed.
-		local, err := session.LocalPrereqsRequired(session.InstanceOptions{
-			Backend: session.BackendKind(createBackendFlag),
-		}, workspace)
-		if err != nil {
-			return jsonError(err)
-		}
-		if local {
-			if err := preflightLocalSession(&cfg.Config, program); err != nil {
-				return jsonError(err)
-			}
-		}
-
-		// Validate the account BEFORE the daemon makes a worktree and starts tmux.
-		// The shim lookup stays as the fail-closed final check, but it runs in the
-		// pane and deliberately prints only a generic message, so a typo'd account
-		// would otherwise fail after mutation with nothing naming the cause or the
-		// fix (#3051 review).
-		if createAccountFlag != "" {
-			home, herr := config.GetConfigDir()
-			if herr != nil {
-				return jsonError(herr)
-			}
-			if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag); aerr != nil {
-				return jsonError(aerr)
-			}
 		}
 
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
@@ -915,4 +830,105 @@ var sessionsWhoamiCmd = &cobra.Command{
 		}
 		return jsonOut(*data)
 	},
+}
+
+// localCreateInputs is the client-side half of a LOCAL create: it resolves the
+// repo against this machine's disk and runs every pre-check that fails faster
+// here than after a daemon round trip. Returns the workspace path and program.
+func localCreateInputs(createTitle string, inPlace bool) (string, string, error) {
+	// resolveRepo already differentiates "--repo is required" (absent) from a
+	// provided-but-invalid path and names the offending path (#892), so
+	// surface its error verbatim instead of relabeling every failure as
+	// "required".
+	repo, err := resolveRepo()
+	if err != nil {
+		if inPlace {
+			return "", "", fmt.Errorf("--here requires a git repository to attach to: %w", err)
+		}
+		return "", "", err
+	}
+	workspace := repo.WorkspacePath()
+
+	if err := requireGitRepoWorkspace(workspace); err != nil {
+		return "", "", err
+	}
+
+	// Fail fast on the reserved root-agent title (#1106) before any daemon
+	// round trip, through the daemon's own refusal rather than a copy of its
+	// message: what is reserved is the derived tmux name, not the spelling (#3732).
+	if err := session.ReservedTitleRefusalFor(createTitle, workspace); err != nil {
+		return "", "", err
+	}
+
+	// Best-effort per-repo pre-check to fail fast on duplicate titles
+	// before we spend time creating a tmux session and git worktree we'd
+	// just have to tear down. The authoritative race-safe check still
+	// happens inside the daemon under the per-repo file lock.
+	// repoHasLiveInstanceTitle skips archived rows so a create targeting
+	// a title held only by an archived session reaches the daemon, which
+	// reclaims the title (renameArchivedForReuseLocked).
+	exists, err := repoHasLiveInstanceTitle(repo.ID, createTitle)
+	if err != nil {
+		return "", "", err
+	}
+	if exists {
+		return "", "", (fmt.Errorf("session with title %q already exists", createTitle))
+	}
+
+	cfg, err := config.ResolveConfigForRepo(repo)
+	if err != nil {
+		return "", "", err
+	}
+
+	program := createProgramFlag
+	if program == "" {
+		program = cfg.DefaultProgram
+	} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
+		return "", "", err
+	}
+	// Validate --backend up front so a typo fails on the client with a clear
+	// message rather than after a daemon round trip (#1592 Phase 4 PR3). An
+	// empty flag defers to the repo's `backend` config key.
+	if _, err := session.ParseBackendKind(createBackendFlag); err != nil {
+		return "", "", err
+	}
+	if inPlace && createBackendFlag != "" && createBackendFlag != config.BackendLocal {
+		return "", "", (fmt.Errorf("--here runs in the local working tree and is incompatible with --backend %s", createBackendFlag))
+	}
+
+	// Backend resolution now runs BEFORE preflight, because it decides
+	// whether preflight applies at all (#2592): a docker/ssh/hook session
+	// runs tmux and the agent inside the sandbox, so refusing the create
+	// for a missing local `claude` blocks a session that would have
+	// worked. The RAW flag goes in, not the parsed kind —
+	// ParseBackendKind turns "" into BackendLocal, and passing that
+	// through would override the repo's `backend` key with a default the
+	// user never typed.
+	local, err := session.LocalPrereqsRequired(session.InstanceOptions{
+		Backend: session.BackendKind(createBackendFlag),
+	}, workspace)
+	if err != nil {
+		return "", "", err
+	}
+	if local {
+		if err := preflightLocalSession(&cfg.Config, program); err != nil {
+			return "", "", err
+		}
+	}
+
+	// Validate the account BEFORE the daemon makes a worktree and starts tmux.
+	// The shim lookup stays as the fail-closed final check, but it runs in the
+	// pane and deliberately prints only a generic message, so a typo'd account
+	// would otherwise fail after mutation with nothing naming the cause or the
+	// fix (#3051 review).
+	if createAccountFlag != "" {
+		home, herr := config.GetConfigDir()
+		if herr != nil {
+			return "", "", herr
+		}
+		if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag); aerr != nil {
+			return "", "", aerr
+		}
+	}
+	return workspace, program, nil
 }

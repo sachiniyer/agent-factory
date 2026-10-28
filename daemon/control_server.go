@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -446,6 +447,9 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	if err := validateCreateProgram(req.Program); err != nil {
 		return err
 	}
+	// A remote client sends the project path as typed; expand ~ against this
+	// daemon's home before anything resolves it.
+	req.RepoPath = config.ExpandTilde(strings.TrimSpace(req.RepoPath))
 	req.Program = trimProgramEnumIfBare(req.Program)
 	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)
