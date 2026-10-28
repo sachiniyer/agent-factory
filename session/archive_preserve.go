@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Archive without publishing (#5571 W8.5). The default archive of an ssh/sandbox
@@ -110,6 +112,11 @@ func (i *Instance) ArchiveSandboxPreserving() (ArchivedWorkspaceData, error) {
 		}
 	}
 	loc := ArchivedWorkspaceData{Host: host, Dir: dir}
+	// The agent is stopped, so nothing can refresh the synced account any more:
+	// write it back, then remove it from the host. The skipped teardown is what
+	// normally does this (the reap), and an archive that keeps the workspace must
+	// not keep the credentials with it (W8.5: "synced credentials are removed").
+	i.releaseSyncedAccount()
 	// The skipped teardown is what normally stops the ssh transport; without this
 	// each archived session would keep its ssh process, forwarded port and
 	// supervisor (re-dialling if the link drops) until the daemon exits.
@@ -144,19 +151,44 @@ func (i *Instance) RestoreRefusedForPreservedWorkspace() error {
 	return fmt.Errorf("session %q was archived without pushing: its work is preserved at %s, and restoring from a preserved workspace is not available yet (#5571 W8.6); the work is untouched, and you can push it from the host", i.Title, where)
 }
 
+// sandboxProvisioner is this session's provisioner, or nil for a backend with none.
+func (i *Instance) sandboxProvisioner() *sandboxProvisioner {
+	switch b := i.currentBackend().(type) {
+	case *sandboxBackend:
+		return b.provisioner
+	case *sshBackend:
+		return b.provisioner
+	}
+	return nil
+}
+
+// releaseSyncedAccount writes the session's synced account back to the registry
+// and removes it from the host (W7.3's teardownAccount), for a path that keeps the
+// workspace but must not keep the credentials. Best-effort and logged, exactly like
+// the reap path: a failed write-back never blocks the archive, and the reap of the
+// archived row later removes the session directory — credentials included — as the
+// backstop. A session with no synced account does nothing.
+func (i *Instance) releaseSyncedAccount() {
+	p := i.sandboxProvisioner()
+	if p == nil {
+		return
+	}
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if p.account == nil {
+		return
+	}
+	if err := p.account.teardownAccount(sshShortStepTimeout); err != nil {
+		log.WarningLog.Printf("archive of %q: removing the synced account from %q: %v", i.Title, p.sessionDir, err)
+	}
+}
+
 // stopRemoteTransport stops the session's ssh tunnel and its supervisor without
 // reaping anything on the host. The provisioner's cleanup identity is untouched,
 // so a later kill of the archived row still reaps the directory (stopTunnel is
 // idempotent, which reap relies on for retries).
 func (i *Instance) stopRemoteTransport() {
-	b := i.currentBackend()
-	var p *sandboxProvisioner
-	switch b := b.(type) {
-	case *sandboxBackend:
-		p = b.provisioner
-	case *sshBackend:
-		p = b.provisioner
-	}
+	p := i.sandboxProvisioner()
 	if p == nil {
 		return
 	}
