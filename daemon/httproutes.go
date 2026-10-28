@@ -160,6 +160,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/CheckHost",
+		Description: "Probe a listed host (or every listed host) for the tools a sandbox session needs and record its readiness. Refuses a name outside the global host list.",
+		requestType: reflect.TypeOf(CheckHostRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CheckHost) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/ListPrograms",
 		Description: "List the agent programs a session can be created with, and the program an unspecified create defaults to.",
 		requestType: reflect.TypeOf(ListProgramsRequest{}),
