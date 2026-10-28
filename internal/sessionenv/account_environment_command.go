@@ -481,7 +481,7 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 // per enclosing env word (#4966).
 func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	strace := isAccountCommandName(words[0], "strace")
-	if strace && straceOptionsRefused(words[1:], names) {
+	if strace && straceOptionsRefused(words[1:], names, memo) {
 		return true
 	}
 	return wrapperTailHidesAccountAssignment(words[1:], strace, names, memo)
@@ -516,6 +516,12 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 // reports how many words it consumed.
 func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) (int, bool) {
 	word := words[0]
+	if isAccountCommandName(word, "strace") && straceOptionRunRefused(words[1:], names, false, memo) {
+		// A strace in an unrecognized wrapper's — or another strace's — child
+		// command position gets the same option-run judgement the outermost one
+		// does (#5033); the recognized wrappers reach it through the default arm.
+		return 1, true
+	}
 	if isAccountCommandName(word, "env") {
 		// A nested env only mutates the child it execs; requireCommand
 		// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's

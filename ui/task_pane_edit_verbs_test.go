@@ -57,6 +57,7 @@ func TestTaskPaneTextFocusStop(t *testing.T) {
 		taskFocusTriggerValue: "TriggerValue",
 		taskFocusPrompt:       "Prompt",
 		taskFocusTarget:       "Target",
+		taskFocusHost:         "Host",
 		taskFocusPath:         "Path",
 	}
 	verbStops := map[int]string{
@@ -129,7 +130,8 @@ func TestTaskPaneEditModeVerbGlyphsTypeIntoTextFields(t *testing.T) {
 		{"Name", 0, func(tp *TaskPane) { tp.editName.SetValue("") }, func(tp *TaskPane) string { return tp.editName.Value() }, cron},
 		{"Prompt", 3, func(tp *TaskPane) { tp.editPrompt.SetValue("") }, func(tp *TaskPane) string { return tp.editPrompt.Value() }, cron},
 		{"Target", 4, func(tp *TaskPane) { tp.editTarget.SetValue("") }, func(tp *TaskPane) string { return tp.editTarget.Value() }, cron},
-		{"Path", 7, func(tp *TaskPane) { tp.editPath.SetValue("") }, func(tp *TaskPane) string { return tp.editPath.Value() }, cron},
+		{"Host", 7, func(tp *TaskPane) { tp.editHost.SetValue("") }, func(tp *TaskPane) string { return tp.editHost.Value() }, cron},
+		{"Path", 8, func(tp *TaskPane) { tp.editPath.SetValue("") }, func(tp *TaskPane) string { return tp.editPath.Value() }, cron},
 		{"Watch", 2, func(tp *TaskPane) { tp.editWatch.SetValue("") }, func(tp *TaskPane) string { return tp.editWatch.Value() }, watch},
 		{"MaxRuns", 6, func(tp *TaskPane) { tp.editMaxRuns.SetValue("") }, func(tp *TaskPane) string { return tp.editMaxRuns.Value() }, watch},
 	}
@@ -186,8 +188,8 @@ func TestTaskPaneEditModeCronTriggerValueDoesNotFireVerbs(t *testing.T) {
 // selector/button stop r runs, x toggles, and D is a no-op in-pane (the app
 // layer confirms it — see app/task_confirmation_test.go).
 func TestTaskPaneEditModeVerbsReachableAtSelectorStops(t *testing.T) {
-	// (Name→Trigger=1, OnComplete=5, Program=8, Save=9; the MaxRuns stop sits
-	// between OnComplete and Path and is a text stop only for cap-carrying
+	// (Name→Trigger=1, OnComplete=5, Program=9, Save=10; the MaxRuns stop sits
+	// between OnComplete and Host and is a text stop only for cap-carrying
 	// watch tasks, so it keeps verbs for this cron task)
 	selectorStops := []struct {
 		name string
@@ -195,8 +197,8 @@ func TestTaskPaneEditModeVerbsReachableAtSelectorStops(t *testing.T) {
 	}{
 		{"Trigger", 1},
 		{"OnComplete", 5},
-		{"Program", 8},
-		{"Save", 9},
+		{"Program", 9},
+		{"Save", 10},
 	}
 	for _, sc := range selectorStops {
 		t.Run(sc.name, func(t *testing.T) {

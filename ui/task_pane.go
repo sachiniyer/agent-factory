@@ -51,6 +51,7 @@ const (
 	taskFocusTarget
 	taskFocusOnComplete // spawned-session lifecycle: keep | archive | kill (#2595)
 	taskFocusMaxRuns    // watch-task in-flight session cap (#4180)
+	taskFocusHost       // listed host sessions are placed on (#5571 W6.3)
 	taskFocusPath
 	taskFocusProgram
 	taskFocusSave
@@ -83,7 +84,11 @@ type TaskPane struct {
 	// input like Target, rendered only while the shape can carry a cap
 	// (task.CapApplies) — otherwise its row carries the reason instead.
 	editMaxRuns textinput.Model
-	editPath    textinput.Model
+	// editHost is the listed host the task's sessions are placed on, by NAME. Free
+	// text rather than a picker: the store refuses a name outside the global host
+	// list with the same message every surface gives, so a typo cannot be saved.
+	editHost textinput.Model
+	editPath textinput.Model
 	// Program selector state. editProgramOptions is the list of choices shown
 	// inline (index 0 is always the "use config default" entry, followed by
 	// tmux.SupportedPrograms). Per-task Program is restricted to the agent
@@ -216,6 +221,12 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	watch.CharLimit = 256
 	watch.Blur()
 
+	host := textinput.New()
+	host.Placeholder = "(repo backend · a name from your hosts list)"
+	host.PlaceholderStyle = taskPlaceholderStyle
+	host.CharLimit = 64
+	host.Blur()
+
 	target := textinput.New()
 	target.Placeholder = "(new session per run)"
 	target.PlaceholderStyle = taskPlaceholderStyle
@@ -238,6 +249,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 		prompt.SetValue(tsk.Prompt)
 		watch.SetValue(tsk.WatchCmd)
 		target.SetValue(tsk.TargetSession)
+		host.SetValue(tsk.Host)
 		path.SetValue(tsk.ProjectPath)
 		if tsk.MaxConcurrentRuns > 0 {
 			// 0 stores as "unlimited" and seeds an empty field — the same
@@ -268,6 +280,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	s.editWatch = watch
 	s.editTarget = target
 	s.editMaxRuns = maxRuns
+	s.editHost = host
 	s.editPath = path
 	s.focusIndex = taskFocusName
 	s.editError = ""
@@ -453,6 +466,8 @@ type TaskDraft struct {
 	// (#4180): 0 for unlimited, and 0 as well when the draft's shape cannot
 	// carry one. See TaskPane.capValue.
 	MaxConcurrentRuns int
+	// Host is the listed host name the task's sessions are placed on, or "".
+	Host string
 }
 
 // ConsumePendingCreate returns the submitted create data and clears the pending flag.
@@ -469,6 +484,7 @@ func (s *TaskPane) ConsumePendingCreate() TaskDraft {
 		Program:           s.programValue(),
 		OnComplete:        s.onCompleteValue(),
 		MaxConcurrentRuns: s.capValue(),
+		Host:              strings.TrimSpace(s.editHost.Value()),
 	}
 }
 

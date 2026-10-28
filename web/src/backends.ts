@@ -37,6 +37,24 @@ export interface BackendOption {
    *  listener/auth posture (#5571 W3.1). Not a precondition: the backend stays
    *  selectable; the text is the same refusal the create path degrades with. */
   callback_unavailable_reason?: string;
+  /** What af last learned about the remote host behind a sandbox backend:
+   *  "ready" | "stale" | "unprobed" | "blocked" (#5571 W2.3). */
+  readiness?: string;
+  /** Advisory beside a selectable backend whose host verdict is stale or not
+   *  yet probed — never a block (a create re-checks the host live). */
+  note?: string;
+}
+
+/** One host of the operator's global list as the daemon reports it
+ *  (daemon.HostOption, #5571 W6.3). */
+export interface HostOption {
+  /** What createSession sends back as `host`. */
+  name: string;
+  /** The host's ssh destination, shown for orientation only. */
+  address?: string;
+  status: BackendAvailability;
+  /** Actionable reason whenever `status` is not "available". */
+  reason?: string;
 }
 
 /** The daemon's per-repo backend catalog (daemon.ListBackendsResponse). */
@@ -50,6 +68,21 @@ export interface BackendCatalog {
   default_status: BackendAvailability;
   /** Why the default is not usable, naming the offending value and its file. */
   default_reason?: string;
+  /** Every host in the operator's global list, with whether a create picking it
+   *  would work right now. Absent when none are configured. */
+  hosts?: HostOption[];
+  /** The configured default_host; applies when a create picks no host. */
+  default_host?: string;
+}
+
+/** Prefix of a host row's <option> value. A host pick shares the backend <select>
+ *  (one runtime choice, as in the TUI); backend names never contain ":" so the
+ *  prefix cannot collide with one, and createSession turns it into `host`. */
+export const HOST_VALUE_PREFIX = "host:";
+
+/** The listed-host name behind a choice value, or "" when it is not a host row. */
+export function hostFromChoiceValue(value: string): string {
+  return value.startsWith(HOST_VALUE_PREFIX) ? value.slice(HOST_VALUE_PREFIX.length) : "";
 }
 
 /** The sentinel value of the "repo default" choice. It is the EMPTY STRING on
@@ -100,10 +133,13 @@ export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] 
   // only on an AVAILABLE choice — backendSelectable gates on status, never on
   // reason, so the notice stays advisory ("this session will have no af
   // callback") instead of looking like a block (#5571 W3.1).
-  const callbackAdvisory = (opt: BackendOption | undefined): string =>
-    opt?.status === "available" && opt.callback_unavailable_reason
-      ? CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason
-      : "";
+  const callbackAdvisory = (opt: BackendOption | undefined): string => {
+    if (opt?.status !== "available") return "";
+    const parts: string[] = [];
+    if (opt.note) parts.push(`Host ${opt.note}`);
+    if (opt.callback_unavailable_reason) parts.push(CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason);
+    return parts.join(" · ");
+  };
 
   const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
   const choices: BackendChoice[] = [
@@ -131,6 +167,20 @@ export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] 
       label: opt.label,
       status: opt.status,
       reason: opt.status === "available" ? callbackAdvisory(opt) : (opt.reason ?? ""),
+    });
+  }
+  // One row per listed host, after the backends: the daemon's answer verbatim, so
+  // an unusable host is listed with its reason and blocked on submit, never hidden
+  // and never offered (#5571 W6.3).
+  for (const h of catalog.hosts ?? []) {
+    const parts = [`host: ${h.name}`];
+    if (h.address) parts[0] += ` (${h.address})`;
+    if (h.name === catalog.default_host) parts[0] += " · default";
+    choices.push({
+      value: HOST_VALUE_PREFIX + h.name,
+      label: parts[0],
+      status: h.status,
+      reason: h.status === "available" ? "" : (h.reason ?? ""),
     });
   }
   return choices;

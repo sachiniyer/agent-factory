@@ -344,6 +344,19 @@ func paneWorkingDirectory() string {
 	return dir
 }
 
+// agentServerArgv0 is the argv[0] the re-exec'd agent-server keeps. On Linux
+// os.Executable resolves symlinks, so a sandbox session whose <sessionDir>/af
+// links into the shared binary cache would otherwise re-exec as the cache path
+// and the reaper's argv[0] identity check (remotePIDIdentityKillScript) would
+// no longer recognise the server (#5571 W2.2). An absolute original spelling is
+// preserved; anything else falls back to the resolved executable.
+func agentServerArgv0(executable string) string {
+	if len(os.Args) > 0 && strings.HasPrefix(os.Args[0], "/") {
+		return os.Args[0]
+	}
+	return executable
+}
+
 func agentServerExecInvocation(args []string) error {
 	if err := stampPaneRootPid(); err != nil {
 		return err
@@ -374,5 +387,5 @@ func agentServerExecInvocation(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve current af executable: %w", err)
 	}
-	return processExec(executable, append([]string{executable}, serverArgs...), environ)
+	return processExec(executable, append([]string{agentServerArgv0(executable)}, serverArgs...), environ)
 }

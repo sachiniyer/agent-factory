@@ -25,6 +25,10 @@ const MASTER_WORKFLOWS = [
   // Since slim PR CI (#5615) the heavy jobs (macOS, systemd, perf) run only on
   // master's pr.yml, and a GITHUB_TOKEN merge fires no push to run them (#5674).
   "pr.yml",
+  // Advisory like the heavy suites (not in VERIFY_WORKFLOWS), but master must
+  // still exercise the sandbox path after every batch: a GITHUB_TOKEN merge
+  // fires no push, so without this entry it never ran again.
+  "sandbox-e2e.yml",
   "tui-driver-selftest.yml",
   "web-selftest.yml",
 ];
@@ -442,6 +446,9 @@ function shouldDebounce({ eventName, triggerUpdatedAt, runs, runId }) {
     if (PENDING_STATUSES.has(r.status)) {
       return { skip: true, reason: `run ${r.id} is already queued and will read newer state` };
     }
+    // A run that was itself debounced (or halted) completed "success" having
+    // read nothing, so it cannot vouch for this trigger (#5786).
+    if (r.readState !== true) continue;
     const started = Date.parse(r.run_started_at || r.created_at);
     if (Number.isFinite(triggered) && Number.isFinite(started) && started > triggered) {
       return { skip: true, reason: `run ${r.id} started ${r.run_started_at || r.created_at}, after the triggering run completed (${triggerUpdatedAt})` };
@@ -450,16 +457,44 @@ function shouldDebounce({ eventName, triggerUpdatedAt, runs, runId }) {
   return { skip: false, reason: "no merger run started after the triggering run completed" };
 }
 
+// Whether a finished merger run reached the "Merge ready PRs" step, i.e. read
+// merge state and acted on it. The run's own conclusion cannot say: a debounced
+// run ends "success" with every later step skipped. A failed jobs read answers
+// false — the caller then proceeds, never skips, so a read failure costs at
+// most one redundant run (#5786).
+const MERGE_STEP_NAME = "Merge ready PRs";
+async function runReadState(github, owner, repo, run) {
+  try {
+    const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+      owner, repo, run_id: run.id, per_page: 100,
+    });
+    return jobs.some((job) => (job.steps || []).some((step) =>
+      step.name === MERGE_STEP_NAME && (step.conclusion === "success" || step.conclusion === "failure")));
+  } catch (error) {
+    return false;
+  }
+}
+
 async function checkDebounce({ github, core, context }) {
   if (context.eventName !== "workflow_run") return core.setOutput("skip", "false");
   const { owner, repo } = context.repo;
   const res = await github.rest.actions.listWorkflowRuns({
     owner, repo, workflow_id: "auto-merge.yml", per_page: 10,
   });
+  const triggerUpdatedAt = context.payload.workflow_run && context.payload.workflow_run.updated_at;
+  const triggered = Date.parse(triggerUpdatedAt);
+  // Only runs that could make us defer need their jobs read: completed ones
+  // that started after the trigger. Pending ones are not read yet by definition.
+  const runs = await Promise.all(res.data.workflow_runs.map(async (r) => {
+    const started = Date.parse(r.run_started_at || r.created_at);
+    const candidate = r.id !== context.runId && r.status === "completed" && r.conclusion !== "cancelled" &&
+      Number.isFinite(triggered) && Number.isFinite(started) && started > triggered;
+    return candidate ? { ...r, readState: await runReadState(github, owner, repo, r) } : r;
+  }));
   const verdict = shouldDebounce({
     eventName: context.eventName,
-    triggerUpdatedAt: context.payload.workflow_run && context.payload.workflow_run.updated_at,
-    runs: res.data.workflow_runs,
+    triggerUpdatedAt,
+    runs,
     runId: context.runId,
   });
   core.notice(`${verdict.skip ? "Debounced" : "Proceeding"}: ${verdict.reason}.`);
@@ -630,6 +665,7 @@ async function reportBroken({ github, core, context, merged }) {
 }
 
 module.exports = {
+  runReadState,
   checkHalt, checkDebounce, shouldDebounce, settleBroken, mergeAll, reportBroken,
   workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,

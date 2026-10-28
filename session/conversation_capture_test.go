@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -1106,4 +1108,47 @@ func TestWaitForPromptReceipt_WhitespaceOnlyPromptIsUndecidable(t *testing.T) {
 		require.ErrorIs(t, err, ErrPromptReceiptUndecidable,
 			"a whitespace-only prompt (%q) must be refused as undecidable, not matched or timed out", prompt)
 	}
+}
+
+// Capture keys on the directory the launch command actually runs the agent in,
+// as af composed it — not the worktree (#5861). `env -C /elsewhere codex` writes
+// a rollout whose metadata cwd is /elsewhere.
+func TestLaunchCaptureWorkingDirFollowsEnvChdir(t *testing.T) {
+	worktree := t.TempDir()
+	elsewhere := t.TempDir()
+
+	assert.Equal(t, pathutil.ResolveForCompare(worktree), pathutil.ResolveForCompare(LaunchCaptureWorkingDir("codex", worktree)),
+		"a plain command runs in the worktree")
+	assert.Equal(t, pathutil.ResolveForCompare(elsewhere),
+		pathutil.ResolveForCompare(LaunchCaptureWorkingDir("env -C "+elsewhere+" codex", worktree)),
+		"env -C moves the effective directory")
+	assert.Equal(t, pathutil.ResolveForCompare(elsewhere),
+		pathutil.ResolveForCompare(LaunchCaptureWorkingDir("env --chdir="+elsewhere+" codex", worktree)))
+	assert.Empty(t, LaunchCaptureWorkingDir("cd /tmp && codex", worktree),
+		"a chdir af does not model leaves correlation unscoped, never the worktree")
+	assert.Empty(t, LaunchCaptureWorkingDir("env -C \"$X\" codex", worktree), "a dynamic chdir is unprovable")
+}
+
+func TestCaptureAgentConversation_CodexUnderEnvChdirCorrelatesByEffectiveDir(t *testing.T) {
+	codexHome := t.TempDir()
+	worktree := t.TempDir()
+	elsewhere := t.TempDir()
+	program := "env -C " + elsewhere + " codex"
+	const rollout = "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl"
+
+	// Anti-vacuous: keyed on the WORKTREE (the defect), the rollout the agent
+	// wrote in its effective directory is never found.
+	before := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, worktree)
+	writeCodexRolloutFileWithCwd(t, codexHome, rollout, elsewhere)
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, before, 0)
+	require.NoError(t, err)
+	require.False(t, conv.HasID(), "correlating against the worktree misses an env -C launch")
+
+	// Keyed on the effective directory it is captured.
+	codexHome2 := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome2, LaunchCaptureWorkingDir(program, worktree))
+	writeCodexRolloutFileWithCwd(t, codexHome2, rollout, elsewhere)
+	conv, err = CaptureAgentConversation(tmux.ProgramCodex, snap, time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
 }

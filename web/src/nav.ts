@@ -63,7 +63,7 @@ export interface NavContext {
    *  tab 0, and the 1-9 keys no-op on the already-active tab. */
   activeTab: number;
   /** Whether the selected session supports user tab management (false for remote
-   *  sessions, whose tabs are fixed by hook config). Gates `t`/`w`. */
+   *  sessions, whose roster belongs to the runtime's agent-server). Gates `t`/`w`. */
   /** Whether this session may gain a NEW tab of at least one kind — the daemon's
    *  per-kind answer, not a backend-type guess (#3060). */
   tabManagement: boolean;

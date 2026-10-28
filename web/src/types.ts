@@ -361,6 +361,9 @@ export interface OnCompleteOption {
  */
 export interface TaskData {
   on_complete?: string;
+  /** Listed host (global `hosts`) the sessions this task creates are placed on;
+   *  absent means the repo's backend decides (#5571 W6.3). */
+  host?: string;
   id: string;
   name?: string;
   prompt: string;
@@ -438,6 +441,8 @@ export interface TaskData {
  */
 export interface TaskUpdate {
   on_complete?: string;
+  /** "" clears the pick; absent leaves it alone. */
+  host?: string;
   name?: string;
   prompt?: string;
   cron_expr?: string;
@@ -691,6 +696,31 @@ export interface RegisterAccountResponse {
   /** What the agent's credential-root variable relocates, and anything af could
    *  not verify about the directory. Never about a credential's contents. */
   notices?: string[];
+}
+
+/** One agent's line of the QuotaReport (daemon/control_types_quota.go): the
+ *  four columns `af quota` prints, rendered server-side so every surface shows
+ *  the daemon's own words (#2983). The strings are the content — no client
+ *  re-derives them from codes. */
+export interface QuotaAgentRow {
+  program: string;
+  quota: string;
+  observed: string;
+  sessions: number;
+  limited_sessions: number;
+  /** RFC3339; absent when the parked limit carried no reset time. */
+  reset_at?: string;
+  /** The row's sentence — reset times included — rendered at serve time. */
+  detail: string;
+}
+
+/** QuotaReportResponse (daemon/control_types_quota.go). */
+export interface QuotaReportResponse {
+  agents: QuotaAgentRow[];
+  /** Completeness caveats (record files that could not be read or parsed).
+   *  Shown when present — an incomplete report that hides them reads as
+   *  authoritative. */
+  warnings?: string[];
 }
 
 /** AccountLoginResponse (daemon/control_types_accounts.go). */

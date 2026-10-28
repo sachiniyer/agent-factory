@@ -145,9 +145,21 @@ func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
 }
 
 func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
-	err := s.rc.call("/v1/agent/launch", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup}
+	// Send the recorded conversation so a launch resumes exactly it (#5571 W7.2).
+	// The server resumes it only where its own store still holds it.
+	if s.inst != nil {
+		if conv := s.inst.AgentConversation(); conv.HasID() {
+			req.Conversation = &conv
+		}
+	}
+	var resp agentLaunchResp
+	err := s.rc.call("/v1/agent/launch", req, &resp)
 	if err == nil {
 		s.idNative() // warm the feature advertisement (#5571 W4.5)
+		if s.inst != nil && resp.Conversation != nil {
+			s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
+		}
 	}
 	return err
 }
@@ -179,6 +191,11 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 	captured := resp.Updated || resp.HasPrompt || resp.Baseline || resp.Content != ""
 	if resp.Captured != nil {
 		captured = *resp.Captured
+	}
+	// The server captures a conversation the provider only exposes after launch
+	// (a Codex rollout) and reports it on later polls (#5571 W7.2).
+	if s.inst != nil && resp.Conversation != nil {
+		s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
 	}
 	return Observation{
 		Updated:     resp.Updated,
@@ -216,6 +233,17 @@ func (s *remoteAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapsho
 // (false, nil — authoritative) from "the sandbox never answered" (false, err —
 // UNKNOWN). Swallowing the error into a bare false made a transport blip
 // indistinguishable from a dead agent, and callers re-provisioned on it (#1794).
+// WorkspaceFacts asks the agent-server to measure its workspace (W8.2). A server
+// predating the route answers 404, which surfaces as an error: the caller reports
+// the workspace as unmeasured, never as clean.
+func (s *remoteAgentServer) WorkspaceFacts() (WorkspaceFacts, error) {
+	var facts WorkspaceFacts
+	if err := s.rc.call("/v1/agent/workspace-facts", struct{}{}, &facts); err != nil {
+		return WorkspaceFacts{}, err
+	}
+	return facts, nil
+}
+
 func (s *remoteAgentServer) Alive() (bool, error) {
 	var resp agentAliveResp
 	if err := s.rc.call("/v1/agent/alive", struct{}{}, &resp); err != nil {
@@ -300,6 +328,36 @@ func (s *remoteAgentServer) Resize(tab int, rows, cols uint16) error {
 }
 
 // trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
+// StopPreservingWorkspace stops the remote agent and closes this side's data
+// plane without running the runtime teardown, so the workspace stays on its host
+// (#5571 W8.5).
+func (s *remoteAgentServer) StopPreservingWorkspace() error {
+	s.mu.Lock()
+	s.closed = true
+	brokers := s.brokers
+	s.brokers = nil
+	idBrokers := s.idBrokers
+	s.idBrokers = nil
+	s.mu.Unlock()
+	for _, br := range brokers {
+		br.close()
+	}
+	for _, br := range idBrokers {
+		br.close()
+	}
+	s.closeRelays()
+	if err := s.rc.call("/v1/agent/stop", struct{}{}, nil); err != nil {
+		// The agent was not proven stopped, so the session carries on: lift the
+		// latch so the next subscribe, input or resize dials a fresh broker rather
+		// than failing "is being terminated" for as long as the row lives (#5869).
+		s.mu.Lock()
+		s.closed = false
+		s.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
 func (s *remoteAgentServer) Kill(_ bool) error {
 	// Tear every tab's data plane down first (closing each remote WS so subscribers
 	// see io.EOF), latch closed under the same lock that snapshots the brokers so a
@@ -347,7 +405,7 @@ func (s *remoteAgentServer) Archive() (string, error) {
 }
 
 // deadRemoteAgentServer is the AgentServer for a remote-workspace instance
-// (docker/ssh/hook) whose runtime wiring has been torn down: remoteClient is nil,
+// (docker/ssh/sandbox/hook) whose runtime wiring has been torn down: remoteClient is nil,
 // so there is no live `af agent-server` to reach. AgentServer() returns it — never
 // a localAgentServer — for such an instance (#2005): a remote backend's data-plane
 // methods delegate back to i.AgentServer(), so a localAgentServer wrapping one
@@ -809,6 +867,14 @@ func splitHTTPBaseURL(raw string) (httpBase, wsBase string, err error) {
 
 type agentLifecycleReq struct {
 	FirstTimeSetup bool `json:"first_time_setup"`
+	// Conversation is the daemon's recorded conversation for a launch to resume
+	// (#5571 W7.2). Absent for a first launch and for a pre-field server.
+	Conversation *AgentConversationData `json:"conversation,omitempty"`
+}
+
+// agentLaunchResp carries back the conversation the server launched or resumed.
+type agentLaunchResp struct {
+	Conversation *AgentConversationData `json:"conversation,omitempty"`
 }
 
 type agentSnapshotResp struct {
@@ -822,6 +888,9 @@ type agentSnapshotResp struct {
 	// review): nil resolves to the legacy contract — an all-false frame is
 	// unconfirmed, positive evidence marks the capture real.
 	Captured *bool `json:"captured,omitempty"`
+	// Conversation is the conversation identity the server has for the agent, once
+	// it has one (#5571 W7.2).
+	Conversation *AgentConversationData `json:"conversation,omitempty"`
 }
 
 type agentPreviewReq struct {

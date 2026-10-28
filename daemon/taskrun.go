@@ -85,11 +85,17 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 	// A nonempty target survives byte-identical, so the lookup below is unchanged:
 	// only an all-whitespace value moves, and it moves to "no target session".
 	target := task.CanonicalTargetSession(t.TargetSession)
+	if target == "" && t.SandboxOwner != "" {
+		// A sandbox-created task never spawns a session: that would run on the
+		// daemon host. Skip the run with a recorded reason, never fall back.
+		return "", false, notAttempted(sandboxRefusal("task %s was created by a sandbox and has no target session; it never starts one", t.ID))
+	}
 	if target == "" {
 		data, err := createSessionForTask(CreateSessionRequest{
 			TitleBase:  task.TaskRunBaseTitle(*t),
 			RepoPath:   t.ProjectPath,
 			Program:    t.Program,
+			Host:       t.Host,
 			Prompt:     prompt,
 			TaskRepoID: t.RepoID,
 			TaskOrigin: true,
@@ -148,9 +154,13 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 		Title:      target,
 		RepoPath:   t.ProjectPath,
 		Program:    t.Program,
+		Host:       t.Host,
 		Prompt:     prompt,
 		TaskRepoID: t.RepoID,
 		TaskOrigin: true,
+		// Re-checked at the daemon boundary on EVERY firing, and a missing target
+		// is never created (#5571 W3.5).
+		SandboxOwner: t.SandboxOwner,
 		// An automated delivery (cron fire or watch event): hold it while a TUI is
 		// attached to the target so it never pastes into and submits the user's
 		// in-progress input (#1586). The caller decides how a hold is handled.

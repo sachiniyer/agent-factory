@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -274,4 +277,19 @@ func TestProgramErrorDisplaysOpencode(t *testing.T) {
 	if strings.Contains(err.Error(), `program "opencode" is not installed`) {
 		t.Errorf("ProgramError() = %q, took the unsupported-agent fallback — opencode must be in tmux.SupportedPrograms", err.Error())
 	}
+}
+
+// #5779: a relative program override resolves against the session's directory,
+// not the checking process's cwd.
+func TestLocalSessionPrereqsAtResolvesRelativeOverrideInWorkdir(t *testing.T) {
+	if _, err := CheckTmux(); err != nil {
+		t.Skip("tmux not available")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "bin"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bin", "claude"), []byte("#!/bin/sh\n"), 0o755))
+	cfg := &config.Config{ProgramOverrides: map[string]string{"claude": "bin/claude"}}
+
+	require.NoError(t, LocalSessionPrereqsAt(cfg, "claude", dir))
+	require.Error(t, LocalSessionPrereqsAt(cfg, "claude", t.TempDir()), "a directory without bin/claude must be refused")
 }

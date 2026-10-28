@@ -28,6 +28,7 @@ import { asForm, field, modalChrome, type ModalHandle, projectLabel } from "./mo
 import { icon, type IconName } from "./icon.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
 import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron, previewIsRedundant } from "./schedule.js";
+import type { HostOption } from "./backends.js";
 import type { OnCompleteOption, TaskData } from "./types.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 
@@ -45,6 +46,8 @@ export interface AddTaskInput {
   /** The watch-task concurrency cap, already parsed to the stored int: 0 for
    *  unlimited, and 0 when the submitted shape cannot carry one (#4180). */
   maxConcurrentRuns?: number;
+  /** A listed host name, or "" for the repo's backend (#5571 W6.3). */
+  host?: string;
   program: string;
 }
 
@@ -79,7 +82,10 @@ function genTaskId(): string {
   return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
 
-/** Builds a task.Task from the add-form input: a fresh id + created_at, exactly one
+/** (An unpicked host is "" — Go's omitempty zero — which the daemon stores as no
+ *  host at all.)
+ *
+ *  Builds a task.Task from the add-form input: a fresh id + created_at, exactly one
  *  trigger set per `trigger`, and enabled=true (a new task is armed). The daemon
  *  re-validates the trigger/prompt/program contract (task.AddTask). */
 export function buildTask(input: AddTaskInput): TaskData {
@@ -95,6 +101,7 @@ export function buildTask(input: AddTaskInput): TaskData {
       // Same shape gate as on_complete above: a cap the task cannot carry is
       // stored as 0 (unlimited), never a value ValidateTrigger refuses (#4180).
       capUnavailableReason(input.trigger, input.targetSession) === null ? input.maxConcurrentRuns ?? 0 : 0,
+    host: (input.host ?? "").trim(),
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
@@ -922,6 +929,9 @@ function taskFormModal(opts: {
    *  project change: the program a repo defaults to is a per-repo fact. */
   loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
   loadOnComplete: () => Promise<OnCompleteOption[]>;
+  /** Fetches the listed hosts for a project (ListBackends.hosts). Re-run on every
+   *  project change: availability is a per-repo fact (#5571 W6.3). */
+  loadHosts: (repoPath: string) => Promise<HostOption[]>;
   onSubmit: (input: AddTaskInput) => void;
   onCancel: () => void;
 }): ModalHandle {
@@ -1055,6 +1065,57 @@ function taskFormModal(opts: {
     onCompleteHint.textContent = "Choices unavailable · current value kept.";
   });
 
+  // The host field (#5571 W6.3): the listed hosts the daemon reports for this
+  // project, never a list here. "Repo backend" (empty) is the default and sends no
+  // host; an unusable host is shown with the daemon's reason and cannot be chosen.
+  // A seeded host the catalog no longer lists is carried through as a choice so an
+  // unrelated edit never silently clears it.
+  const hostSelect = h("select", { class: "af-input" });
+  hostSelect.setAttribute("aria-label", "Host");
+  const hostHint = h("span", { class: "af-modal-hint", id: "af-task-host-hint" });
+  hostSelect.setAttribute("aria-describedby", hostHint.id);
+  const keepHost = opts.seed?.host ?? "";
+  let hostOptions: HostOption[] = [];
+  const renderHosts = (): void => {
+    const previous = hostSelect.value || keepHost;
+    hostSelect.replaceChildren(h("option", { value: "" }, "Repo backend"));
+    for (const o of hostOptions) {
+      const opt = h("option", { value: o.name }, o.status === "available" ? o.name : `${o.name} — unavailable`);
+      if (o.status !== "available") opt.disabled = true;
+      hostSelect.append(opt);
+    }
+    if (keepHost !== "" && !hostOptions.some((o) => o.name === keepHost)) {
+      hostSelect.append(h("option", { value: keepHost }, keepHost));
+    }
+    hostSelect.value = previous;
+    if (hostSelect.value !== previous) hostSelect.value = "";
+    const chosen = hostOptions.find((o) => o.name === hostSelect.value);
+    hostHint.textContent = chosen && chosen.status !== "available" ? (chosen.reason ?? "") : "";
+  };
+  const hostField = field("Host", hostSelect);
+  hostField.append(hostHint);
+  renderHosts();
+  hostSelect.addEventListener("change", renderHosts);
+  let hostSeq = 0;
+  const loadHostsFor = (repoPath: string): void => {
+    const seq = ++hostSeq;
+    void opts
+      .loadHosts(repoPath)
+      .then((hosts) => {
+        if (seq !== hostSeq) return;
+        hostOptions = hosts;
+        renderHosts();
+      })
+      .catch(() => {
+        if (seq !== hostSeq) return;
+        // An unreachable catalog costs the user the choice, never the task.
+        hostOptions = [];
+        renderHosts();
+        hostHint.textContent = "Hosts unavailable · current value kept.";
+      });
+  };
+  projectSelect.addEventListener("change", () => loadHostsFor(projectSelect.value));
+
   // The program field (#1970). Its options come from the daemon, never from a list
   // here, so an agent added server-side shows up with no change to the web.
   const programSelect = h("select", { class: "af-input" });
@@ -1127,6 +1188,7 @@ function taskFormModal(opts: {
   // Kicked off after the seed so the catalog's re-render preserves the seeded
   // program as the current selection rather than clobbering it with the default.
   loadProgramsFor(projectSelect.value);
+  loadHostsFor(projectSelect.value);
   syncOnComplete();
   syncCap();
 
@@ -1142,6 +1204,7 @@ function taskFormModal(opts: {
     onCompleteReasonField,
     capField,
     capReasonField,
+    hostField,
     field("Program", programSelect),
   );
 
@@ -1197,6 +1260,7 @@ function taskFormModal(opts: {
       targetSession: targetInput.value.trim(),
       onComplete: onCompleteSelect.value,
       maxConcurrentRuns,
+      host: hostSelect.value,
       program: programSelect.value,
     });
   });
@@ -1215,6 +1279,7 @@ export function addTaskModal(
     onCancel: () => void;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
     loadOnComplete: () => Promise<OnCompleteOption[]>;
+    loadHosts: (repoPath: string) => Promise<HostOption[]>;
   },
 ): ModalHandle {
   return taskFormModal({
@@ -1224,6 +1289,7 @@ export function addTaskModal(
     defaultProject,
     loadPrograms: callbacks.loadPrograms,
     loadOnComplete: callbacks.loadOnComplete,
+    loadHosts: callbacks.loadHosts,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });
@@ -1240,6 +1306,7 @@ export function editTaskModal(
     onCancel: () => void;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
     loadOnComplete: () => Promise<OnCompleteOption[]>;
+    loadHosts: (repoPath: string) => Promise<HostOption[]>;
   },
 ): ModalHandle {
   return taskFormModal({
@@ -1250,6 +1317,7 @@ export function editTaskModal(
     seed: task,
     loadPrograms: callbacks.loadPrograms,
     loadOnComplete: callbacks.loadOnComplete,
+    loadHosts: callbacks.loadHosts,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });

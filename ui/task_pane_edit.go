@@ -60,9 +60,15 @@ func (s *TaskPane) validateForm() (string, int) {
 	if rawPath == "" {
 		return "project path is required", taskFocusPath
 	}
-	absPath, err := config.ResolveUserPath(rawPath)
+	absPath, err := ResolveTaskProjectPath(rawPath)
 	if err != nil {
 		return fmt.Sprintf("invalid path: %v", err), taskFocusPath
+	}
+	if isRemoteTaskTarget() {
+		// The path is on the daemon's host: this machine's git cannot vouch for
+		// it, and the daemon refuses a non-repository when it takes the task.
+		s.editPath.SetValue(absPath)
+		return "", -1
 	}
 	if err := git.CheckGitRepo(absPath); err != nil {
 		if config.RepoProbeUnanswered(err) {
@@ -93,7 +99,7 @@ func (s *TaskPane) textFocusStop() bool {
 // current shape carries a run cap, which decides if the cap row is a text stop.
 func textStopAt(focusIndex int, capApplies bool) bool {
 	switch focusIndex {
-	case taskFocusName, taskFocusTriggerValue, taskFocusPrompt, taskFocusTarget, taskFocusPath:
+	case taskFocusName, taskFocusTriggerValue, taskFocusPrompt, taskFocusTarget, taskFocusHost, taskFocusPath:
 		return true
 	case taskFocusMaxRuns:
 		// The cap row is a live text input only when the shape carries one;
@@ -203,7 +209,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			// relative value behaves the same when the scheduler fires
 			// as it does in the TUI trigger (#641, #924). validateForm
 			// already normalized editPath, so this is idempotent.
-			absPath, err := config.ResolveUserPath(s.editPath.Value())
+			absPath, err := ResolveTaskProjectPath(s.editPath.Value())
 			if err != nil {
 				s.editError = fmt.Sprintf("invalid path: %v", err)
 				s.editErrorField = taskFocusPath
@@ -216,6 +222,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.tasks[s.selectedIdx].TargetSession = s.editTarget.Value()
 			s.tasks[s.selectedIdx].OnComplete = s.onCompleteValue()
 			s.tasks[s.selectedIdx].MaxConcurrentRuns = s.capValue()
+			s.tasks[s.selectedIdx].Host = strings.TrimSpace(s.editHost.Value())
 			s.tasks[s.selectedIdx].ProjectPath = absPath
 			s.tasks[s.selectedIdx].Program = s.programValue()
 			s.markTaskDirty(s.tasks[s.selectedIdx].ID)
@@ -247,6 +254,8 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			if s.capApplies() {
 				s.editMaxRuns, _ = s.editMaxRuns.Update(msg)
 			}
+		case taskFocusHost:
+			s.editHost, _ = s.editHost.Update(msg)
 		case taskFocusPath:
 			s.editPath, _ = s.editPath.Update(msg)
 		case taskFocusProgram:
@@ -320,6 +329,7 @@ func (s *TaskPane) updateEditFocus() {
 	s.editWatch.Blur()
 	s.editTarget.Blur()
 	s.editMaxRuns.Blur()
+	s.editHost.Blur()
 	s.editPath.Blur()
 	// The schedule picker is active only while it is the focused trigger value
 	// on a cron task; blur it otherwise so its raw-cron cursor stays hidden.
@@ -338,6 +348,8 @@ func (s *TaskPane) updateEditFocus() {
 		s.editTarget.Focus()
 	case taskFocusMaxRuns:
 		s.editMaxRuns.Focus()
+	case taskFocusHost:
+		s.editHost.Focus()
 	case taskFocusPath:
 		s.editPath.Focus()
 	}
@@ -376,6 +388,7 @@ func (s *TaskPane) renderEditMode() string {
 	s.editWatch.Width = inputWidth
 	s.editTarget.Width = inputWidth
 	s.editMaxRuns.Width = inputWidth
+	s.editHost.Width = inputWidth
 	s.editPath.Width = inputWidth
 
 	// The prompt's role depends on the trigger: cron tasks require it, watch
@@ -485,6 +498,12 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString("\n")
 	b.WriteString(fieldErr(taskFocusMaxRuns))
 	markEnd(taskFocusMaxRuns)
+	markStart(taskFocusHost)
+	b.WriteString(label("Host:"))
+	b.WriteString(s.editHost.View())
+	b.WriteString("\n")
+	b.WriteString(fieldErr(taskFocusHost))
+	markEnd(taskFocusHost)
 	markStart(taskFocusPath)
 	b.WriteString(label("Path:"))
 	b.WriteString(s.editPath.View())

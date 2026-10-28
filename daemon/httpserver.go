@@ -190,7 +190,10 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	_, recErr := wl.reconcile(manager.Config())
 	manager.configApplyMu.Unlock()
 	if recErr != nil {
-		log.WarningLog.Printf("daemon web listener(s): %v", recErr)
+		log.WarningLog.Printf("daemon web listener(s): %v — retrying in the background", recErr)
+		// A startup bind that lost a race (tailnet IP not assigned yet) is retried
+		// with capped backoff instead of staying down until a restart (#5571 W9.9).
+		wl.retryFailedBinds()
 	}
 
 	// The dedicated sandbox callback endpoint (#5571 W3.4). Non-fatal like the
@@ -203,12 +206,14 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		log.WarningLog.Printf("daemon sandbox callback endpoint disabled: %v", epErr)
 	} else {
 		sandboxEP = ep
+		manager.setSandboxEndpointSocket(epPath)
 	}
 
 	var closeOnce sync.Once
 	var closeErr error
 	return func() error {
 		closeOnce.Do(func() {
+			manager.setSandboxEndpointSocket("")
 			_ = sandboxEP.close()
 			// Stop route admission before closing the listeners. Close cancels
 			// context-aware calls immediately; the request drain below joins every

@@ -156,6 +156,9 @@ func (i *Instance) recordArchivePush(branch string) {
 	defer i.mu.Unlock()
 	changed := i.Branch != branch
 	i.Branch = branch
+	// A push archive publishes the branch and reaps the host directory, so the
+	// work now lives on origin (#5571 W8.5).
+	i.archivedWorkspace = &ArchivedWorkspaceData{Host: i.Host, Pushed: true, Branch: branch}
 	if branch != "" && !i.archivePushCompleted {
 		i.archivePushCompleted = true
 		changed = true
@@ -226,6 +229,12 @@ func recoverSandbox(i *Instance) error {
 // branch, so the new sandbox clones the pushed state back; on success the new
 // backend + remote agent-server endpoint + teardown replace the old (dead) ones.
 func (i *Instance) reprovisionRemote() error {
+	// Backstop for every route that re-provisions (restore, Lost recovery, the
+	// restore loop): replacing the runtime reaps its host directory, which for a row
+	// archived without a push is the only copy of the work (#5571 W8.5).
+	if err := i.RestoreRefusedForPreservedWorkspace(); err != nil {
+		return err
+	}
 	// Bound the hook's lifetime to this attempt: clear it on every exit so a
 	// hook registered for this call cannot survive to fire on a later call.
 	// After a successful reap (below) the hook is already taken and fired, so
@@ -238,18 +247,28 @@ func (i *Instance) reprovisionRemote() error {
 	backend := i.backend
 	accountName := i.Account
 	spec := ProvisionSpec{
-		RepoRoot:              i.Path,
-		Title:                 i.Title,
-		Program:               i.Program,
-		CloneURL:              originRemoteURL(i.Path),
-		RestoreBranch:         i.Branch,
+		RepoRoot:      i.Path,
+		Title:         i.Title,
+		Program:       i.Program,
+		CloneURL:      originRemoteURL(i.Path),
+		RestoreBranch: i.Branch,
+		// The replacement agent-server must land on the SAME branch the fetch
+		// just materialized, not re-derive one from its own branch_prefix
+		// (#5571 W2.4).
+		Branch:                i.Branch,
 		Host:                  i.Host,
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 	}
 	i.mu.RUnlock()
+	spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(spec.RepoRoot)
 	if backend == nil {
 		return fmt.Errorf("cannot re-provision session %q: no backend on record", i.Title)
 	}
+	policy, perr := agentPolicyFor(spec.RepoRoot, nil)
+	if perr != nil {
+		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, perr)
+	}
+	spec.AgentPolicy = policy
 	kind, err := backendKindForType(backend.Type())
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
@@ -293,12 +312,36 @@ func (i *Instance) reprovisionRemote() error {
 	// would refuse a handoff-scoped pin whose registry is not the recorded
 	// enum's (#4430 review round 4), and restore cannot drift onto ambient
 	// credentials.
-	if kind.CarriesAccount() && strings.TrimSpace(accountName) != "" {
+	if accountCarried(kind, i.Path, i.Host) && strings.TrimSpace(accountName) != "" {
 		account, accountErr := selectAccountInNamespace(scopedAgent, accountName)
 		if accountErr != nil {
 			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
 		}
 		spec.Account = account
+		// The agent command is proven against the account BEFORE anything is
+		// reaped, like the persisted-account checks around it: a program override
+		// that changed since the session was created must leave the recoverable
+		// runtime intact, not delete it and then refuse the replacement.
+		if kind == BackendSSH {
+			rc, rcErr := resolveRepoConfig(i.Path)
+			if rcErr != nil {
+				return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, rcErr)
+			}
+			check := spec
+			if verr := validateRemoteAccountProgram(rc, &check); verr != nil {
+				return fmt.Errorf("cannot re-provision session %q: %w", i.Title, verr)
+			}
+		}
+	} else if strings.TrimSpace(accountName) != "" {
+		// A session recorded under an account is relaunched under THAT account or
+		// not at all (#5571 W7.4). The target can no longer carry it — its host is
+		// not in the global host list any more — and replacing the sandbox anyway
+		// would run the session on the host's own login (or another account) while
+		// the row still reports this one. Refused BEFORE anything is reaped, so the
+		// old runtime stays recoverable.
+		return fmt.Errorf("cannot re-provision session %q: it runs under account %q, but its target %s is not a host in the global host list, so the account cannot be synced; "+
+			"re-add the host under [hosts.<name>] (it is recorded as %q) or clear the session's account, rather than restoring it under another identity",
+			i.Title, accountName, string(kind), i.Host)
 	}
 	rt, err := ResolveRuntime(kind)
 	if err != nil {
