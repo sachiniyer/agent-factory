@@ -250,6 +250,31 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"grep -E 'CODEX_HOME=' /etc/environment", false},
 		{"strace -E FOO=1 codex", false},
 		{"strace --env=PORT=3000 codex", false},
+		// #5033: the attached forms stay refused when the VALUE (or the whole
+		// operand) carries an expansion the walk cannot prove — the literal
+		// NAME in the word's Lit prefix still decides, and an unprovable
+		// operand fails closed like the separate-word form does.
+		{"strace -ECODEX_HOME=$V codex", true},
+		{"strace --env=CODEX_HOME=$V codex", true},
+		{"strace -ECODEX_HOME=\"$V\" codex", true},
+		{"strace -E$V codex", true},
+		{"strace --env=$V codex", true},
+		{"strace -E$V=/other codex", true},
+		{"xargs strace -ECODEX_HOME=$V codex", true},
+		{"nice strace --env=CODEX_HOME=$V codex", true},
+		// A short-option cluster reaches -E after its flags (verified against
+		// the installed strace: -fECODEX_HOME=/o sets it in the child).
+		{"strace -fECODEX_HOME=/other codex", true},
+		{"strace -qqECODEX_HOME=/other codex", true},
+		{"strace -fECODEX_HOME=$V codex", true},
+		{"strace -fE CODEX_HOME=/other codex", true},
+		{"strace -fE codex", false},
+		{"strace -fEPORT=1 codex", false},
+		// Control: the same expansions on a name af does not own, and the
+		// non-strace spelling, stay allowed.
+		{"strace -EPORT=$V codex", false},
+		{"strace --env=PORT=$V codex", false},
+		{"grep -ECODEX_HOME=$V /etc/environment", false},
 		// An option word whose value is a denied NAME= assignment mutates the
 		// child's environment even when the option is not strace's.
 		{"unrecognized --setenv=CODEX_HOME=/other codex", true},

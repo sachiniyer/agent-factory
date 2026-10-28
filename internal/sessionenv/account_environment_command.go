@@ -519,6 +519,11 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		return 1, envCallMutatesAccountEnvironment(words[1:], names, true, memo)
 	}
 	literal, ok := literalShellWord(word)
+	if !ok && strace && stracePrefixMutates(word, names) {
+		// The option word itself is judged before the unprovable-word path
+		// below, which only reads the words AFTER it (#5033).
+		return 1, true
+	}
 	if !ok {
 		// An unprovable tail word can itself expand to `env` (or to a
 		// multiword `env NAME=value` after word splitting); judge the
@@ -552,8 +557,23 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 			}
 			value, ok := literalShellWord(words[1])
 			return 2, !ok || accountEnvironmentOperandDenied(value, names)
-		case strings.HasPrefix(literal, "-E"):
-			return 1, accountEnvironmentOperandDenied(literal[2:], names)
+		case strings.HasPrefix(literal, "--env="):
+			return 1, accountEnvironmentOperandDenied(literal[len("--env="):], names)
+		case !strings.HasPrefix(literal, "--"):
+			// A short-option cluster reaches -E after its flags
+			// (`-fECODEX_HOME=/o`), and getopt hands the rest of the word to
+			// -E as its operand — so judge from the first E, not the word start.
+			if i := strings.IndexByte(literal, 'E'); i > 0 {
+				if operand := literal[i+1:]; operand != "" {
+					return 1, accountEnvironmentOperandDenied(operand, names)
+				}
+				// A trailing -E takes the NEXT word (`-fE CODEX_HOME=/o`).
+				if len(words) < 2 {
+					return 1, true
+				}
+				value, ok := literalShellWord(words[1])
+				return 2, !ok || accountEnvironmentOperandDenied(value, names)
+			}
 		}
 	}
 	// An unrecognized wrapper may expose options that mutate its
@@ -566,4 +586,37 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		return 1, accountEnvironmentOperandDenied(value, names)
 	}
 	return 1, false
+}
+
+// stracePrefixMutates judges a strace option word that carries an expansion by
+// the literal text before its first non-literal part. strace's -E/--env takes
+// var[=val], so a literal NAME ahead of the `=` decides on its own whatever
+// the value expands to (`-ECODEX_HOME=$V` refuses, `-EPORT=$V` does not). A
+// prefix that stops before the `=` leaves the NAME unprovable, so it refuses
+// exactly like the separate-word form's `!ok` arm — as does a prefix that
+// could still grow into `--env=` or `-E` (`-$x`, `--en$x`), which the shell
+// resolves only at run time. A word that opens with an expansion has no prefix
+// to judge and stays with the caller's `env` hypothesis.
+func stracePrefixMutates(word *syntax.Word, names map[string]struct{}) bool {
+	var prefix strings.Builder
+	for _, part := range word.Parts {
+		if !appendLiteralShellPart(&prefix, part) {
+			break
+		}
+	}
+	text := prefix.String()
+	if text == "" || !strings.HasPrefix(text, "-") {
+		return false
+	}
+	operand, isEnv := strings.CutPrefix(text, "--env=")
+	if !isEnv && !strings.HasPrefix(text, "--") {
+		// -E anywhere in a short-option cluster takes the rest of the word.
+		if i := strings.IndexByte(text, 'E'); i > 0 {
+			operand, isEnv = text[i+1:], true
+		}
+	}
+	if isEnv {
+		return !strings.Contains(operand, "=") || accountEnvironmentOperandDenied(operand, names)
+	}
+	return strings.HasPrefix("--env=", text)
 }
