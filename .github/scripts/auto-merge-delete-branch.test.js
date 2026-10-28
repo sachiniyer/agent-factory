@@ -2,11 +2,13 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { branchDeletionDecision, mergeAll } = require('./auto-merge.js');
 
-const pr = (over = {}) => ({ number: 7, headRefName: 'feat-x', isCrossRepository: false, ...over });
+const MERGED = 'a'.repeat(40);
+const pr = (over = {}) => ({ number: 7, headRefOid: MERGED, headRefName: 'feat-x', isCrossRepository: false, ...over });
 const decide = (over = {}) => branchDeletionDecision({
   pr: pr(over.pr), defaultBranch: 'master',
   branch: 'branch' in over ? over.branch : { protected: false },
-  stackedOpenPrs: over.stacked || 0,
+  blockingOpenPrs: over.stacked || 0,
+  ...('tip' in over ? { tip: over.tip } : {}),
 });
 
 test('same-repo, unprotected, unstacked head branch is deleted', () => {
@@ -26,12 +28,18 @@ test('a branch used as the base of an open PR is kept (stacked PR)', () => {
   const d = decide({ stacked: 1 });
   assert.equal(d.delete, false); assert.match(d.reason, /base/);
 });
+test('tip moved after merge -> kept; tip equal (any case) -> deleted (P1)', () => {
+  const moved = decide({ tip: 'b'.repeat(40) });
+  assert.equal(moved.delete, false); assert.match(moved.reason, /tip moved/);
+  assert.equal(decide({ tip: '' }).delete, false);
+  assert.deepEqual(decide({ tip: MERGED.toUpperCase() }), { delete: true });
+});
 test('an already-deleted branch is skipped', () => {
   assert.match(decide({ branch: null }).reason, /gone/);
 });
 
 // End to end through mergeAll: which branches get a deleteRef call.
-function world(prs, { protectedNames = [], stackedBases = [], gone = [] } = {}) {
+function world(prs, { protectedNames = [], stackedBases = [], gone = [], movedTips = [], headPrs = [] } = {}) {
   const deleted = [];
   const github = {
     deleted,
@@ -56,9 +64,9 @@ function world(prs, { protectedNames = [], stackedBases = [], gone = [] } = {}) 
       },
       pulls: {
         merge: async () => ({ data: { sha: 'f'.repeat(40) } }),
-        list: async ({ base }) => ({ data: stackedBases.includes(base) ? [{ number: 99 }] : [] }),
+        list: async ({ base, head }) => ({ data: (base && stackedBases.includes(base)) || (head && headPrs.includes(head.split(':')[1])) ? [{ number: 99 }] : [] }),
       },
-      git: { deleteRef: async ({ ref }) => { deleted.push(ref); } },
+      git: { getRef: async ({ ref }) => ({ data: { object: { sha: movedTips.includes(ref.replace('heads/', '')) ? 'd'.repeat(40) : 'a'.repeat(40) } } }), deleteRef: async ({ ref }) => { deleted.push(ref); } },
     },
   };
   return github;
@@ -78,8 +86,8 @@ function core() {
 test('mergeAll deletes only eligible merged head branches', async () => {
   delete process.env.AUTO_MERGE_BATCH_SIZE; process.env.USING_PAT = 'true';
   const github = world(
-    [open(1, 'plain'), open(2, 'forked', { isCrossRepository: true }), open(3, 'prot'), open(4, 'stack'), open(5, 'vanished')],
-    { protectedNames: ['prot'], stackedBases: ['stack'], gone: ['vanished'] },
+    [open(1, 'plain'), open(2, 'forked', { isCrossRepository: true }), open(3, 'prot'), open(4, 'stack'), open(5, 'vanished'), open(6, 'moved'), open(8, 'headless')],
+    { protectedNames: ['prot'], stackedBases: ['stack'], gone: ['vanished'], movedTips: ['moved'], headPrs: ['headless'] },
   );
   await mergeAll({ github, core: core(), context: { repo: { owner: 'o', repo: 'r' } } });
   delete process.env.USING_PAT;

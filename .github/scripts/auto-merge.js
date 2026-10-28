@@ -173,18 +173,31 @@ function isTruncated(conn) {
 
 // Head-branch cleanup. GitHub applies delete_branch_on_merge only to merges made
 // by a user token, not GITHUB_TOKEN, so the merger deletes the branch itself.
-// Returns {delete: true} or {delete: false, reason}. `branch` is the repos.getBranch
-// payload (null when the branch is already gone); `stackedOpenPrs` is the number
-// of open PRs using the branch as their BASE (deleting it would close them).
-function branchDeletionDecision({ pr, defaultBranch, branch, stackedOpenPrs }) {
+// The tip re-read and the open-PR checks are ported from deleteMergedHeadRef in
+// auto-gate.js. Returns {delete: true} or {delete: false, reason}.
+//   branch          repos.getBranch payload (null when already gone)
+//   blockingOpenPrs open PRs based ON the branch (deleting closes them) or whose
+//                   HEAD is the branch (deleting leaves them headless)
+//   tip             branch tip re-read immediately before the delete; undefined
+//                   until read. It must equal the merged head: a push after the
+//                   merge is work master does not have, and that ref may be its
+//                   only copy.
+function branchDeletionDecision({ pr, defaultBranch, branch, blockingOpenPrs, stackedOpenPrs, tip }) {
   if (pr.isCrossRepository) return { delete: false, reason: "fork head — never touched" };
   const name = pr.headRefName;
   if (!name) return { delete: false, reason: "no head ref name" };
   if (name === defaultBranch || name === BASE) return { delete: false, reason: "default branch" };
   if (!branch) return { delete: false, reason: "branch already gone" };
   if (branch.protected) return { delete: false, reason: "protected branch" };
-  if (stackedOpenPrs > 0) {
-    return { delete: false, reason: `${stackedOpenPrs} open PR(s) use it as their base` };
+  const blocking = blockingOpenPrs ?? stackedOpenPrs ?? 0;
+  if (blocking > 0) {
+    return { delete: false, reason: `${blocking} open PR(s) use it as their base or head` };
+  }
+  if (tip !== undefined && String(tip).toLowerCase() !== String(pr.headRefOid).toLowerCase()) {
+    return {
+      delete: false,
+      reason: `tip moved after merge (${tip || "unreadable"}, merged ${pr.headRefOid}) — carries work this merge did not take`,
+    };
   }
   return { delete: true };
 }
@@ -199,19 +212,36 @@ async function deleteMergedBranch({ github, core, owner, repo, pr, defaultBranch
         if (error.status !== 404) throw error;
       }
     }
-    const stacked = branch
-      ? (await github.rest.pulls.list({ owner, repo, state: "open", base: pr.headRefName, per_page: 1 })).data.length
-      : 0;
-    const decision = branchDeletionDecision({ pr, defaultBranch, branch, stackedOpenPrs: stacked });
+    let blocking = 0;
+    if (branch) {
+      const [dependents, siblings] = await Promise.all([
+        github.rest.pulls.list({ owner, repo, state: "open", base: pr.headRefName, per_page: 1 }),
+        // The merged PR is closed by now, so an open head-PR here is a different one.
+        github.rest.pulls.list({ owner, repo, state: "open", head: `${owner}:${pr.headRefName}`, per_page: 1 }),
+      ]);
+      blocking = dependents.data.length + siblings.data.length;
+    }
+    const first = branchDeletionDecision({ pr, defaultBranch, branch, blockingOpenPrs: blocking });
+    if (!first.delete) {
+      core.info(`#${pr.number}: keeping branch ${pr.headRefName} (${first.reason})`);
+      return;
+    }
+    // LAST read before the delete: the REST delete takes no expected OID, so
+    // ordering is the only lever against a push landing in between.
+    const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${pr.headRefName}` });
+    const tip = String((ref && ref.data && ref.data.object && ref.data.object.sha) || "");
+    const decision = branchDeletionDecision({ pr, defaultBranch, branch, blockingOpenPrs: blocking, tip });
     if (!decision.delete) {
-      core.info(`#${pr.number}: keeping branch ${pr.headRefName} (${decision.reason})`);
+      core.notice(`Keeping ${pr.headRefName} (#${pr.number}): ${decision.reason}.`);
       return;
     }
     await github.rest.git.deleteRef({ owner, repo, ref: `heads/${pr.headRefName}` });
     core.notice(`Deleted merged branch ${pr.headRefName} (#${pr.number}).`);
   } catch (error) {
-    // Cleanup is best-effort: never fail or undo a merge over it.
-    core.warning(`#${pr.number}: could not delete branch ${pr.headRefName}: ${error.message}`);
+    // Best-effort. 404/422: already gone or the ref moved under us — nothing to prune.
+    const status = Number(error && (error.status || (error.response && error.response.status)));
+    const msg = status === 404 || status === 422 ? "nothing to prune" : "could not delete";
+    core.warning(`#${pr.number}: ${msg} branch ${pr.headRefName}: ${error.message}`);
   }
 }
 
