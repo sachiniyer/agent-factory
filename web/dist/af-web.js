@@ -14548,7 +14548,12 @@ var SplitView = class {
     const paneHost = el("div", "af-pane-host");
     const overlay = el("div", "af-drop-overlay");
     container.append(head, paneHost, overlay);
-    container.addEventListener("mousedown", () => this.focusPane(leaf.id));
+    container.addEventListener("mousedown", (e) => {
+      this.onPaneMouseDown(leaf.id);
+      if (!paneHost.contains(e.target)) {
+        e.preventDefault();
+      }
+    });
     const pane = {
       leafId: leaf.id,
       container,
@@ -14992,6 +14997,19 @@ var SplitView = class {
     pane.overlay.className = "af-drop-overlay";
   }
   // --- internal: focus + status ---------------------------------------------
+  /** Click-to-focus (#1694, #4341). focusPane only moves the bookkeeping; the DOM
+   *  focus handoff lives in refocus(), so a click that does not reach xterm's own
+   *  textarea (the pane header) must go through both or the highlight and the
+   *  keyboard disagree. A click on the pane that already holds focus is left to
+   *  xterm: re-focusing here would steal the keyboard from rail mode on every
+   *  click of an already-selected pane. */
+  onPaneMouseDown(leafId) {
+    if (this.focusedId === leafId) {
+      return;
+    }
+    this.focusPane(leafId);
+    this.refocus();
+  }
   focusPane(leafId) {
     if (this.focusedId === leafId) {
       return;

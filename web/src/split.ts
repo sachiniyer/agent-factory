@@ -1038,7 +1038,14 @@ export class SplitView {
 
     // Click-to-focus (#1694): mousedown fires before xterm's textarea focus, so the
     // pane is the focused one by the time keys flow.
-    container.addEventListener("mousedown", () => this.focusPane(leaf.id));
+    container.addEventListener("mousedown", (e) => {
+      this.onPaneMouseDown(leaf.id);
+      // A header click lands on non-focusable chrome, whose default action would
+      // blur the textarea refocus() just focused. Keep the keyboard where we put it.
+      if (!paneHost.contains(e.target as Node | null)) {
+        e.preventDefault();
+      }
+    });
 
     const pane: Pane = {
       leafId: leaf.id,
@@ -1795,6 +1802,20 @@ export class SplitView {
   }
 
   // --- internal: focus + status ---------------------------------------------
+
+  /** Click-to-focus (#1694, #4341). focusPane only moves the bookkeeping; the DOM
+   *  focus handoff lives in refocus(), so a click that does not reach xterm's own
+   *  textarea (the pane header) must go through both or the highlight and the
+   *  keyboard disagree. A click on the pane that already holds focus is left to
+   *  xterm: re-focusing here would steal the keyboard from rail mode on every
+   *  click of an already-selected pane. */
+  private onPaneMouseDown(leafId: string): void {
+    if (this.focusedId === leafId) {
+      return;
+    }
+    this.focusPane(leafId);
+    this.refocus();
+  }
 
   private focusPane(leafId: string): void {
     if (this.focusedId === leafId) {
