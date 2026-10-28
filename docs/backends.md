@@ -835,6 +835,15 @@ config, so the host's own login is neither read nor replaced.
   workspaces and synced credentials, exactly as local worktrees share one user
   today. A Unix user per session is a later hardening, not part of this contract.
 
+**Operator-selected agent config.** The global-only `sandbox_agent_config` key
+(`agent:file` entries from a closed set: `claude:settings.json`, `claude:CLAUDE.md`,
+`claude:.claude.json`, `codex:config.toml`, `codex:AGENTS.md`) lists agent
+personalization af places in that same scope — read from the operator's own agent
+home on the daemon machine, written beside the synced credentials, one way, and
+removed with them. It applies only on a listed host and only to an account-scoped
+session; a repository can never set it. A copied codex `config.toml` is rewritten to
+the file credential store so it cannot override the session's account.
+
 Not yet built: fanning a refresh out to every live session on the same account
 (providers that rotate refresh tokens log the others out), write-back on a timer or
 after a daemon restart, and admitting `--account` and `default_accounts` off-box

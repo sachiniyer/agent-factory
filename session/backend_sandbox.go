@@ -288,6 +288,9 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.syncAccountIn(sshProvisionStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
+	if err := w.syncAgentConfigIn(sshProvisionStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
 	p.account = w
 	// Reached only past the pre-launch steps (clone, binary copy, callback env),
 	// so a startAgentServer failure here is not the pre-launch empty-PID case: a

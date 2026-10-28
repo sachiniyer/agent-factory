@@ -231,6 +231,12 @@ type Config struct {
 	// daemon's environment. Values are looked up only when a session starts and
 	// are never written to config, argv, or logs.
 	SessionEnvPassthrough []string `json:"session_env_passthrough,omitempty" toml:"session_env_passthrough,omitempty"`
+	// SandboxAgentConfig is the operator's chosen agent personalization to place in
+	// a sandbox session's account scope on a LISTED host (#5571 W7.7): entries of
+	// the form "<agent>:<file>" from a closed set (settings.json, CLAUDE.md,
+	// .claude.json, config.toml, AGENTS.md). Global-only, like sandbox.ssh: a
+	// repository must never choose what af copies off the daemon box or where.
+	SandboxAgentConfig []string `json:"sandbox_agent_config,omitempty" toml:"sandbox_agent_config,omitempty"`
 	// DockerMountAgentCredentials, when true, lets a docker-backend session
 	// bind-mount the daemon user's on-disk credential file for THAT session's
 	// agent (only) read-only into the container, so a containerised agent can

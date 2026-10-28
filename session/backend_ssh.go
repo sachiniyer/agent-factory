@@ -133,6 +133,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// nothing else. A repository-chosen [ssh] target never earns it.
 	if listed != nil {
 		spec.AccountSyncHost = hostName
+		spec.AgentConfigFiles = append([]string(nil), cfg.SandboxAgentConfig...)
 	}
 	var sshCfg config.SSHConfig
 	posture := cfg.SSHHostKeyVerification

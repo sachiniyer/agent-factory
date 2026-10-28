@@ -161,6 +161,10 @@ type ProvisionSpec struct {
 	// never from a repository's own config. Empty with a non-empty Account means
 	// the target is not licensed and the provision refuses rather than send.
 	AccountSyncHost string
+	// AgentConfigFiles is the operator's sandbox_agent_config selection (#5571
+	// W7.7), as "<agent>:<file>" entries, copied from the global config by the ssh
+	// runtime. It is placed only where AccountSyncHost licenses a sync.
+	AgentConfigFiles []string
 	// SessionEnvPassthrough contains exact global-only variable names approved
 	// for the agent. Sandboxed runtimes pass names, never values, to their
 	// version-matched agent-server.
