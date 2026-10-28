@@ -304,6 +304,14 @@ func backendLabel(kind session.BackendKind, cfg *config.ResolvedConfig) string {
 // their sessions would land on a backend they never chose.
 func defaultFor(backends []BackendOption, cfg *config.ResolvedConfig, cfgErr error, repoRoot string) (string, BackendAvailability, string) {
 	kind, kerr := session.BackendKindFor(session.InstanceOptions{}, repoRoot)
+	if kerr != nil && cfgErr != nil {
+		// The repo's config exists but could not be resolved, so a create with no
+		// explicit backend REFUSES (#5801) rather than guessing local. That is not
+		// "unavailable" (a checked precondition that failed) but "could not be
+		// evaluated", like the per-backend rows, and the user can still choose a
+		// backend explicitly (local reads no repo config) while they fix the file.
+		return "", BackendUnknown, kerr.Error()
+	}
 	if kerr != nil {
 		// Reached only when the config LOADED and named a backend we do not
 		// recognize (BackendKindFor falls back to local on a resolve failure). Name
