@@ -2661,14 +2661,21 @@ Fails if the session is not restorable, or if its origin repository is gone.
 The restored worktree path is printed on success.
 
 For a sandbox session (docker/ssh/hook) whose sandbox still ANSWERS but whose
-agent is gone, restore first pushes the sandbox's work to origin, because
-recovery re-clones from there and anything unpushed would be destroyed. If that
-push fails, or if af cannot tell whether the sandbox is gone or merely
-unreachable, the restore REFUSES and the session stays recoverable.
+agent is gone, restore relaunches the agent in place: the sandbox's
+agent-server stops the agent and starts it again in its existing workspace,
+so the branch, the tree and any uncommitted work are untouched, and nothing
+is pushed, reaped, re-cloned or re-provisioned. A sandbox whose agent-server
+does not advertise the relaunch feature on /v1/health (an older build, before
+the relaunch route existed) falls back to replacing the sandbox: that pushes
+its work to origin first, because recovery re-clones from there and anything
+unpushed would be destroyed. If that push fails, or if af cannot tell whether
+the sandbox is gone or merely unreachable, the restore REFUSES and the session
+stays recoverable.
 
---force-reap replaces the sandbox anyway, without the push. It discards whatever
-that sandbox has not pushed, so it is for a sandbox you know is expendable. It
-applies to this one session and this one command; there is no global equivalent.
+--force-reap replaces the sandbox anyway, skipping the relaunch and the push.
+It discards whatever that sandbox has not pushed, so it is for a sandbox you
+know is expendable. It applies to this one session and this one command; there
+is no global equivalent.
 
 ```
 af sessions restore <title> [flags]
