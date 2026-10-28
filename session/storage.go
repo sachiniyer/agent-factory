@@ -116,6 +116,16 @@ type InstanceData struct {
 	// row that reloads INERT drops it on load instead: no automatic retry can
 	// reach that row, so the record would report an armed retry forever.
 	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
+	// Unreachable projects a live remote-probe outage (#5571 W1.3): the
+	// daemon's observation stopped being answered at Since, and Error is the
+	// last transport failure — collapsed, bounded, and token-redacted before it
+	// was stored on the record, so it is safe to ride every client surface. It
+	// is an observation flag, not a liveness: it coexists with Running/Ready/
+	// Lost and suppresses the destructive lifecycle verbs for the flag's
+	// duration. Projection-only like IdleReason above: ForStorage scrubs it so
+	// a restarted daemon re-derives the claim from its own probes rather than
+	// inheriting an outage it never observed.
+	Unreachable *UnreachableData `json:"unreachable,omitempty"`
 
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
 	// pane churn. Callers capture it before sending so churn racing the delivery is
@@ -147,6 +157,17 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunInterrupted records that the run ended interrupted by a runtime
+	// replacement — Lost-restore respawn or load-time re-spawn — rather than on
+	// an agent-idle completion edge (#4222). Persisted because the daemon's
+	// startup reconcile must recognize the row: a pending fire marker that
+	// still names it describes an occurrence that was never delivered to the
+	// replacement runtime, so adopting the row as the fire's product would
+	// misreport the interrupted run as started and discharge a prompt that was
+	// never replayed. omitempty + additive: an older record decodes to false —
+	// indistinguishable from a normally-ended run, which is the pre-fix
+	// reading and matches it.
+	TaskRunInterrupted bool `json:"task_run_interrupted,omitempty"`
 	// TaskRunFailurePending records that the run ended failed (initial prompt
 	// proven undelivered, #5278) and the task's errored status has not yet been
 	// acknowledged as written (#5646). omitempty + additive: an older record
@@ -311,23 +332,19 @@ type InstanceData struct {
 	// respawns from them. Additive + omitempty on the TabData.ID rollforward
 	// precedent: records written before this field simply have none.
 	PendingTabCleanup []TabCleanupData `json:"pending_tab_cleanup,omitempty"`
-	// RebuildTeardownPending records that a recovery rebuilt this session's
-	// worktree at a new identity while sessions bound to it still answered
-	// has-session, and that the teardown of those stale panes has not been
-	// confirmed complete. A rebuild committed before the failure is durable
-	// state; the next attempt cannot re-derive it from os.Stat (the rebuilt
-	// directory exists), so the obligation to remove the pre-rebuild panes —
-	// whose cwd is the deleted inode and can never be inside the new checkout
-	// — must persist too (#5370, #5371 review). Set at rebuild commit, cleared
-	// only after every bound name and cleanup handle is confirmed gone.
+	// RebuildTeardownPending records that a recovery rebuilt this worktree at a
+	// new identity while sessions bound to it still answered has-session, and
+	// the teardown of those stale panes is unconfirmed. The next attempt cannot
+	// re-derive a committed rebuild from os.Stat (the rebuilt directory
+	// exists), so the obligation to remove the pre-rebuild panes — whose cwd is
+	// the deleted inode — persists (#5370, #5371 review). Set at rebuild commit,
+	// cleared only once every bound name and cleanup handle is confirmed gone.
 	RebuildTeardownPending bool `json:"rebuild_teardown_pending,omitempty"`
 	// RebuildTeardownOriginalStartupStateUnknown is a storage-only rollback
-	// fence. A current reader removes it before interpreting the row; the
-	// previous release ignores it and sees StartupStateUnknown, which keeps a
-	// row whose rebuild teardown is unconfirmed from being driven — an older
-	// reader would otherwise find the rebuilt worktree present, skip the
-	// rebuild path, reattach the pane bound to the deleted inode, and mark it
-	// Running (#5370 through the rollback door; #5371 review).
+	// fence: a current reader removes it before interpreting the row, while the
+	// previous release sees StartupStateUnknown and leaves the row undriven —
+	// it would otherwise find the rebuilt worktree present, skip the rebuild,
+	// reattach the deleted-inode pane, and mark it Running (#5370, #5371 review).
 	RebuildTeardownOriginalStartupStateUnknown *bool `json:"rebuild_teardown_original_startup_state_unknown,omitempty"`
 	// AgentConversation mirrors the Agent tab's provider conversation id for
 	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
