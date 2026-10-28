@@ -99,6 +99,11 @@ type ProvisionSpec struct {
 	// value from repo config or the sandbox. Empty means the credential has no
 	// carrier and the provisioner opens no -R.
 	CallbackSocket string
+	// CallbackRef is the opaque reference CallbackToken derives from (#5571
+	// W3.6). It is not a secret; the provisioner persists it with the runtime
+	// identity so a restarted daemon can re-derive and re-register the same
+	// credential for the still-running sandbox.
+	CallbackRef string
 	// CallbackRevalidate re-checks the minted credential's posture INSIDE
 	// provisioning, at the last step that can still keep a dead credential out
 	// of the launched agent-server's environment — after the clone/binary

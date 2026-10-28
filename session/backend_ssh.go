@@ -254,6 +254,8 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			RemoteAddr:         p.remoteAddr,
 			AgentServerVersion: p.agentServerVersion,
 			TokenRef:           p.tokenRef,
+			CallbackRef:        p.callbackRef,
+			CallbackReverse:    p.callbackReverse(),
 		},
 	}
 	// The pin fields are written together, because which of them is safe to write

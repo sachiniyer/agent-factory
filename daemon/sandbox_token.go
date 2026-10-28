@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 )
 
 // The sandbox callback credential (#2999).
@@ -27,14 +29,19 @@ import (
 //     this small because every route worth giving a sandbox is parameterised by a
 //     host path or a session id, which route-level allowlisting cannot constrain
 //     to the caller's own; that waits on binding the credential to its session;
-//   - IN MEMORY ONLY, so a daemon restart invalidates every outstanding sandbox
-//     credential. A long-running sandbox loses callback until it is
-//     re-provisioned, which is the right side to fail on: a restart is exactly
-//     when a credential minted by the previous process should stop working.
+//   - DERIVED, NOT STORED (#5571 W3.6): the registry is memory-only, but the
+//     secret is HMAC(runtime-identity key, session id, ref), so a row persists
+//     only the non-secret ref. A restarted daemon re-derives and re-registers the
+//     very secret a still-running sandbox holds (adopt, driven by the reattach),
+//     and nothing is re-delivered. Without the key it cannot be re-derived, so a
+//     lost key fails closed rather than minting a stranger. Neither a listener
+//     rebind nor a require_token change revokes it: the credential's carrier is
+//     the dedicated sandbox endpoint (W3.4), which neither touches.
 //
 // It is deliberately NOT written to disk beside the operator token. There is no
 // `af sandbox-token show`, and nothing renders one: the only copy outside this
-// registry is the one injected into the sandbox that owns it.
+// registry is the one injected into the sandbox that owns it; the row stores
+// only the ref it derives from.
 
 // sandboxTokenRegistry maps live sandbox credentials to the session that owns
 // them. Zero value is usable.
@@ -63,12 +70,46 @@ type sandboxTokenRegistry struct {
 // mint issues a fresh credential for sessionID, replacing and thereby revoking
 // any credential that session already held.
 func (r *sandboxTokenRegistry) mint(sessionID string) (string, error) {
+	secret, _, err := r.mintDerived(sessionID)
+	return secret, err
+}
+
+// mintDerived is mint plus the opaque ref the credential derives from (#5571
+// W3.6). The secret is not random: it is HMAC(runtime-identity key, session id,
+// ref), so the row can persist only the ref and a restarted daemon re-derives
+// and re-registers the very secret the sandbox already holds (adopt).
+func (r *sandboxTokenRegistry) mintDerived(sessionID string) (secret, ref string, err error) {
 	if strings.TrimSpace(sessionID) == "" {
-		return "", fmt.Errorf("cannot mint a sandbox callback token without a session id")
+		return "", "", fmt.Errorf("cannot mint a sandbox callback token without a session id")
 	}
-	secret, err := generateToken()
+	if ref, err = runtimetoken.NewTokenRef(); err != nil {
+		return "", "", fmt.Errorf("cannot mint a sandbox callback token: %w", err)
+	}
+	if secret, err = r.adopt(sessionID, ref, true); err != nil {
+		return "", "", err
+	}
+	return secret, ref, nil
+}
+
+// adopt registers the credential derived from ref for sessionID, replacing any
+// the session already held, and returns it. ensureKey creates the key when
+// absent (a fresh mint); a restart passes false, because a key that is gone
+// means the credential the sandbox holds can no longer be re-derived and
+// inventing a new one would only mint a stranger.
+func (r *sandboxTokenRegistry) adopt(sessionID, ref string, ensureKey bool) (string, error) {
+	var key []byte
+	var err error
+	if ensureKey {
+		key, err = runtimetoken.EnsureKey()
+	} else {
+		key, err = runtimetoken.LoadKey()
+	}
 	if err != nil {
-		return "", fmt.Errorf("cannot mint a sandbox callback token: %w", err)
+		return "", fmt.Errorf("cannot derive a sandbox callback token: %w", err)
+	}
+	secret, err := runtimetoken.DeriveCallbackToken(key, sessionID, ref)
+	if err != nil {
+		return "", err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -115,22 +156,16 @@ func (r *sandboxTokenRegistry) revoke(sessionID string) {
 }
 
 // revokeAll drops every outstanding sandbox credential and reports how many it
-// dropped, for the caller's log line.
+// dropped, advancing the invalidation fence a mint compares across its window.
 //
-// The control listener rebinding is the one event that calls this (#3012 review).
-// A callback credential is inseparable from the endpoint it was minted for: the
-// URL is baked into the sandbox's environment file at provision time and nothing
-// rewrites it, so when bindWebLocked moves the listener and closes the old one,
-// every already-running sandbox is left calling an address that no longer answers
-// while its token stays valid. Leaving it valid buys nothing — the sandbox cannot
-// reach the daemon to use it — and costs the ability to say what happened.
-//
-// This is the same rule the registry already documents for a daemon restart:
-// credentials do not survive the listener they were issued against. Revoking makes
-// the capability's disappearance explicit and logged, instead of a silent
-// connection failure inside a sandbox nobody is watching. It is a MITIGATION, not
-// the fix — the fix is a stable advertised callback endpoint that a rebind does not
-// move, which is recorded on #2999.
+// Since #5571 W3.6 nothing in the daemon calls this: it used to run on a
+// listener rebind, teardown, unexpected death and require_token going false,
+// because the callback rode that listener. It now rides the dedicated sandbox
+// endpoint, which none of those events touch, so revoking on them only cut
+// working callbacks. The primitive and its fence stay as the one way to void the
+// whole registry at once (an endpoint rebind, a key rotation) so such an event
+// cannot be reinvented per call site; removing the fence with the session-side
+// revalidation hook it feeds is a follow-up.
 func (r *sandboxTokenRegistry) revokeAll() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -197,7 +232,7 @@ func (m *Manager) mintSandboxCallbackFenced(fence uint64, sessionID string) (san
 	// -> revokeAll -> registry lock) and is a deadlock waiting to happen. Refusing
 	// costs a create the operator can retry; the alternative is a session that looks
 	// provisioned with a callback that never connects.
-	token, err := m.sandboxTokens.mint(sessionID)
+	token, ref, err := m.sandboxTokens.mintDerived(sessionID)
 	if err != nil {
 		return sandboxGrant{}, err
 	}
@@ -205,7 +240,7 @@ func (m *Manager) mintSandboxCallbackFenced(fence uint64, sessionID string) (san
 		m.sandboxTokens.revoke(sessionID)
 		return sandboxGrant{}, errSandboxCallbackInvalidated(url)
 	}
-	return sandboxGrant{URL: url, Token: token, Socket: socket, fence: fence}, nil
+	return sandboxGrant{URL: url, Token: token, Ref: ref, Socket: socket, fence: fence}, nil
 }
 
 // sandboxEndpointOrRefusal returns the socket the running endpoint listens on,
@@ -240,6 +275,9 @@ func (m *Manager) callbackUnavailableReason() string {
 type sandboxGrant struct {
 	URL   string
 	Token string
+	// Ref is the opaque reference Token derives from; the row persists it so a
+	// restarted daemon can re-register the same credential (W3.6).
+	Ref string
 	// Socket is the endpoint socket the -R forward for URL terminates on.
 	Socket string
 	// fence is the registry's invalidation count at the moment this grant's inputs

@@ -172,6 +172,11 @@ type sandboxProvisioner struct {
 	forward     string
 	localAddr   string
 	reverseFwds []string
+	// callbackRef is the reference the granted callback credential derives from
+	// (W3.6). It persists with the runtime identity, together with the -R spec in
+	// reverseFwds, so a reattach after a daemon restart re-registers the credential
+	// and re-establishes the same forward. Empty when no callback was granted.
+	callbackRef string
 
 	reapMu  sync.Mutex
 	reaped  bool
@@ -260,9 +265,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		callbackLost = carrierLost
 	}
 	p.reapMu.Lock()
-	p.reverseFwds = nil
+	p.reverseFwds, p.callbackRef = nil, ""
 	if reverse != "" {
 		p.reverseFwds = []string{reverse}
+		p.callbackRef = w.spec.CallbackRef
 	}
 	p.reapMu.Unlock()
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
@@ -330,6 +336,8 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 				RemoteAddr:         p.remoteAddr,
 				AgentServerVersion: p.agentServerVersion,
 				TokenRef:           p.tokenRef,
+				CallbackRef:        p.callbackRef,
+				CallbackReverse:    p.callbackReverse(),
 			},
 		},
 		Endpoint: endpoint,
