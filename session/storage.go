@@ -306,6 +306,10 @@ type InstanceData struct {
 	Account string `json:"account,omitempty"`
 	// Host is the listed host the session was placed on (#5571 W6.3); additive.
 	Host string `json:"host,omitempty"`
+	// ArchivedWorkspace says where an archived off-box session's work lives
+	// (#5571 W8.5): the preserved directory on its host, or the pushed branch.
+	// Absent on every row archived before the field, and on live rows.
+	ArchivedWorkspace *ArchivedWorkspaceData `json:"archived_workspace,omitempty"`
 	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
 	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
 	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`

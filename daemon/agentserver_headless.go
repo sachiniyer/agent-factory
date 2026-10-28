@@ -441,6 +441,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
 	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
+	mux.HandleFunc("/v1/agent/stop", rpcHandler(hs.StopPreserving))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -832,6 +833,26 @@ func (hs *headlessServer) Archive(_ struct{}, resp *agentArchiveResponse) error 
 		return err
 	}
 	resp.Branch = branch
+	return nil
+}
+
+// StopPreserving stops the agent and its tabs and leaves the workspace on disk
+// (#5571 W8.5): archive without publishing. The process then exits, since nothing
+// is left for it to serve; its shutdown path kills a workspace it no longer holds,
+// which is a no-op.
+func (hs *headlessServer) StopPreserving(_ struct{}, resp *agentOKResponse) error {
+	stopper, ok := hs.as.(session.WorkspaceStopper)
+	if !ok {
+		return session.ErrPreserveUnsupported
+	}
+	if err := stopper.StopPreservingWorkspace(); err != nil {
+		return err
+	}
+	resp.OK = true
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	}()
 	return nil
 }
 

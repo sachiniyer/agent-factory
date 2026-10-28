@@ -754,6 +754,7 @@ func init() {
 	// can imply that it affects the always-destructive kill operation.
 	sessionsKillCmd.Flags().Bool("force", false, "Deprecated no-op, accepted for compatibility: kill always destroys the session (use 'af sessions archive' to keep it restorable)")
 	sessionsArchiveCmd.Flags().BoolVar(&sessionsArchiveSelf, "self", false, "Archive the current session (resolved via whoami); use from inside a session when your work is done")
+	sessionsArchiveCmd.Flags().BoolVar(&sessionsArchivePush, "push", false, "Push an ssh/sandbox session's branch to origin before archiving. Without it nothing is published: the agent stops and the workspace stays on its host (docker and hook sessions always push)")
 
 	sessionsHandoffCmd.Flags().StringVar(&sessionsHandoffTo, "to", "", "Agent to hand the session off to (one of "+tmux.SupportedProgramsString()+")")
 	sessionsHandoffCmd.Flags().StringVar(&sessionsHandoffBrief, "brief", "", "Mission for the incoming agent, replacing the session's stored prompt")

@@ -156,6 +156,9 @@ func (i *Instance) recordArchivePush(branch string) {
 	defer i.mu.Unlock()
 	changed := i.Branch != branch
 	i.Branch = branch
+	// A push archive publishes the branch and reaps the host directory, so the
+	// work now lives on origin (#5571 W8.5).
+	i.archivedWorkspace = &ArchivedWorkspaceData{Host: i.Host, Pushed: true, Branch: branch}
 	if branch != "" && !i.archivePushCompleted {
 		i.archivePushCompleted = true
 		changed = true

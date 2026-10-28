@@ -25,7 +25,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/SuggestSessionName` | — | Suggest a random, readable session name (adjective-noun) not used by any live session, for the create form's autocreate placeholder. |
 | `POST` | `/v1/Snapshot` | `repo_id`, `live`, `statuses`, `created_after`, `limit` | List sessions from the daemon's authoritative in-memory state, with optional live/status, created-after, and limit filters applied before transfer (empty repo_id = all repos). |
 | `POST` | `/v1/KillSession` | `title`, `repo_id`, `id` | Tear down a session: kill its tmux/agent and remove its worktree and record. |
-| `POST` | `/v1/ArchiveSession` | `title`, `repo_id`, `id` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it. |
+| `POST` | `/v1/ArchiveSession` | `title`, `repo_id`, `id`, `push` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it. |
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id`, `id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
 | `POST` | `/v1/PruneSessions` | `repo_id`, `all`, `older_than` | Dry-run listing for `af sessions prune`: reports which old archived sessions a reclaim would remove and the allocated bytes each would free. Strictly read-only. |
 | `POST` | `/v1/RestoreSession` | `title`, `repo_id`, `id`, `expected_daemon_boot_id`, `force_reap` | Restore an archived, Lost, or Dead session; an optional expected daemon boot ID refuses before admission if the process changed. |

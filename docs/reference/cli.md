@@ -2065,8 +2065,11 @@ With --self, archive the current session (resolved via whoami) instead of a
 named one — use it from inside a session when your work is done. --self and a
 <title> argument are mutually exclusive.
 
-Sandboxes publish work before removal; restore recreates them from the published
-branch. In-place (--here) sessions cannot be archived because af does not own
+An ssh or sandbox session publishes nothing by default: the agent stops and the
+workspace stays on its host, owned by the archived row, and the output names where
+(archived_workspace). Pass --push to push the branch to origin first; docker and
+hook sessions always push. Restoring a session archived without a push is not
+available yet (#5571 W8.6) — the work is untouched on the host. In-place (--here) sessions cannot be archived because af does not own
 their worktree. Local archives print the relocated worktree path on success.
 
 ```
@@ -2077,6 +2080,7 @@ af sessions archive [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--push` |  | Push an ssh/sandbox session's branch to origin before archiving. Without it nothing is published: the agent stops and the workspace stays on its host (docker and hook sessions always push) |
 | `--self` |  | Archive the current session (resolved via whoami); use from inside a session when your work is done |
 
 **Global flags**

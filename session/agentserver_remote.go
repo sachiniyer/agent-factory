@@ -300,6 +300,27 @@ func (s *remoteAgentServer) Resize(tab int, rows, cols uint16) error {
 }
 
 // trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
+// StopPreservingWorkspace stops the remote agent and closes this side's data
+// plane without running the runtime teardown, so the workspace stays on its host
+// (#5571 W8.5).
+func (s *remoteAgentServer) StopPreservingWorkspace() error {
+	s.mu.Lock()
+	s.closed = true
+	brokers := s.brokers
+	s.brokers = nil
+	idBrokers := s.idBrokers
+	s.idBrokers = nil
+	s.mu.Unlock()
+	for _, br := range brokers {
+		br.close()
+	}
+	for _, br := range idBrokers {
+		br.close()
+	}
+	s.closeRelays()
+	return s.rc.call("/v1/agent/stop", struct{}{}, nil)
+}
+
 func (s *remoteAgentServer) Kill(_ bool) error {
 	// Tear every tab's data plane down first (closing each remote WS so subscribers
 	// see io.EOF), latch closed under the same lock that snapshots the brokers so a

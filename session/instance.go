@@ -388,6 +388,9 @@ type Instance struct {
 	// runtime cleanup handle, which a teardown clears: restore and recovery
 	// re-provision from this so a pick never silently moves to another machine.
 	Host string `json:"host,omitempty"`
+	// archivedWorkspace records where this archived off-box session's work lives
+	// (#5571 W8.5); nil for a live row or one archived before the field.
+	archivedWorkspace *ArchivedWorkspaceData
 	// accountAgent is the agent namespace Account was selected in. It must be
 	// durable rather than re-derived at refresh time: a program_overrides edit
 	// after the pin can resolve the recorded Program to a different agent's

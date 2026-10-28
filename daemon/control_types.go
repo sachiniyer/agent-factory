@@ -185,12 +185,22 @@ type ArchiveSessionRequest struct {
 	// follow-up). Retained TUI actions send it; one-shot CLI callers resolve by
 	// {Title, RepoID}.
 	ID string `json:"id"`
+	// Push publishes an off-box session's branch to origin before its sandbox is
+	// reaped. The default (false) publishes nothing: the agent stops and the
+	// workspace stays on its host, owned by the archived row (#5571 W8.5).
+	// docker and hook sessions keep no host directory to leave in place, so they
+	// push whatever this says.
+	Push bool `json:"push,omitempty"`
 }
 
 type ArchiveSessionResponse struct {
 	OK bool `json:"ok"`
 	// ArchivedPath is the new on-disk location of the relocated worktree.
 	ArchivedPath string `json:"archived_path"`
+	// ArchivedWorkspace says where an off-box session's work lives after the
+	// archive: the preserved directory on its host, or the pushed branch (#5571
+	// W8.5). Absent for a local archive.
+	ArchivedWorkspace *session.ArchivedWorkspaceData `json:"archived_workspace,omitempty"`
 	// Warning is the FLAT, pre-#3036 wire field, retained for the one direction
 	// the envelope structurally cannot serve: gob encodes the embedded
 	// MutationOutcome as a NESTED field, so a NEWER daemon answering an OLDER

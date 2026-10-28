@@ -564,6 +564,21 @@ func (s *localAgentServer) Archive() (string, error) {
 }
 
 // trustLiveGeneration is threaded straight to Backend.Kill (#3413).
+// StopPreservingWorkspace stops the agent and every tab and leaves the workspace
+// in place (#5571 W8.5): the same data-plane teardown as Kill, then a tab
+// teardown that keeps the worktree.
+func (s *localAgentServer) StopPreservingWorkspace() error {
+	s.mu.Lock()
+	s.closed = true
+	brokers := s.brokers
+	s.brokers = nil
+	s.mu.Unlock()
+	for _, br := range brokers {
+		br.close()
+	}
+	return s.inst.teardownTabs(teardownKill{keepWorkspace: true})
+}
+
 func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	// Tear every tab's data plane down first so the clientless captures stop and
 	// each subscriber's NextEvent returns io.EOF, then kill the underlying session.
