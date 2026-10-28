@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -101,7 +102,7 @@ func (w *sandboxWorkspace) syncAccountIn(timeout time.Duration) error {
 	if err != nil || !apply {
 		return err
 	}
-	archive, n, err := buildAccountArchive(w.spec.Account.Dir, accountCredentialRel[w.spec.Account.Agent])
+	archive, n, err := buildAccountArchive(w.spec.Account.Dir, accountCredentialRel[w.spec.Account.Agent], accountScopeSeed(w.spec.Account.Agent))
 	if err != nil {
 		return err
 	}
@@ -191,7 +192,7 @@ func (w *sandboxWorkspace) teardownAccount(timeout time.Duration) error {
 	}
 }
 
-func buildAccountArchive(dir string, rels []string) ([]byte, int, error) {
+func buildAccountArchive(dir string, rels []string, seed map[string][]byte) ([]byte, int, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	n := 0
@@ -213,6 +214,22 @@ func buildAccountArchive(dir string, rels []string) ([]byte, int, error) {
 			return nil, 0, err
 		}
 		n++
+	}
+	// Minimal per-agent scope seed — never a credential, and never read from the
+	// account's own settings.
+	seedNames := make([]string, 0, len(seed))
+	for name := range seed {
+		seedNames = append(seedNames, name)
+	}
+	sort.Strings(seedNames)
+	for _, name := range seedNames {
+		data := seed[name]
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
+			return nil, 0, err
+		}
+		if _, err := tw.Write(data); err != nil {
+			return nil, 0, err
+		}
 	}
 	if err := tw.Close(); err != nil {
 		return nil, 0, err
@@ -320,4 +337,74 @@ func (w *sandboxWorkspace) accountLaunchGuard() string {
 	return fmt.Sprintf("{ [ \"$%s\" = %s ] && { %s; }; } || { echo %s >&2; exit 1; }; ",
 		name, shellQuote(scope), strings.Join(has, " || "),
 		shellQuote("af: the session's account scope is not in place; refusing to start the agent under any other identity"))
+}
+
+// validateRemoteAccountProgram applies the account boundary's command-shape half to
+// the program a sandbox will run, with the daemon's own resolution — the program the
+// agent-server is told to launch. It is the docker path's check, for the same
+// reason: af must never hand an account's credentials to a program it did not
+// choose, and a command that sets an identity variable itself, or that af cannot
+// prove is a direct invocation of the agent, does not qualify.
+//
+// The executable resolves on the HOST, a filesystem the daemon cannot inspect, so
+// af's own built-in executable identity is NOT granted across that boundary (a bare
+// agent name is independently provable; a daemon-qualified path fails closed). The
+// ambient environment is empty here by design: the host's own is scrubbed at launch
+// (accountScrubEnv), and the daemon's says nothing about it.
+func validateRemoteAccountProgram(cfg *config.ResolvedConfig, spec *ProvisionSpec) error {
+	// What the sandbox is told to launch: the daemon's configured program with af's
+	// own auto-detected executable path rewritten to the bare agent name (W2.1) —
+	// the daemon's path means nothing on another filesystem. Whether the ORIGINAL
+	// command is af's built-in detected override is what vouches for the one
+	// argument af appended to it.
+	original := config.ResolveProgram(&cfg.Config, spec.Program)
+	resolved := remoteProgramForHost(cfg, spec.Program)
+	if err := refuseAccountAgentDrift(spec.Account.Name, spec.Account.Agent, resolved); err != nil {
+		return fmt.Errorf("backend=ssh: %w", err)
+	}
+	proof := accountLaunchProof(resolved, resolved, builtInProgramOverride(cfg, spec.Program, original), nil, "")
+	hostExecutable := proof.TrustedExecutable
+	spec.Account.TrustedExecutable = ""
+	spec.Account.GeneratedArgs = proof.GeneratedArgs
+	if _, err := sessionenv.ApplyAccount([]string{}, resolved, spec.Account); err != nil {
+		if hostExecutable != "" && sessionenv.IsAccountCommandValidationError(err) {
+			return fmt.Errorf("backend=ssh: resolved program names host executable %q, whose identity cannot be established on the sandbox host: %w", hostExecutable, err)
+		}
+		return fmt.Errorf("backend=ssh: %w", err)
+	}
+	return nil
+}
+
+// accountPassthroughNames are the variables an account-scoped remote launch must
+// carry through the environment filters: the scoped config variable and every
+// identity name accountScrubEnv defines empty, derived from sessionenv's per-agent
+// tables rather than listed here. Empty for a session with no account.
+func (w *sandboxWorkspace) accountPassthroughNames() []string {
+	configVar, _, ok := w.accountEnv()
+	if !ok {
+		return nil
+	}
+	names := []string{configVar}
+	for _, name := range sessionenv.AccountIdentityNames(w.spec.Account.Agent) {
+		if name != configVar {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// accountScopeSeed is the minimal, non-credential configuration a fresh account
+// scope needs to start without asking for input. Gemini shows its authentication
+// picker unless security.auth.selectedType is set, and af sets it when it registers
+// an account locally (agentaccount's selectGeminiGoogleLogin); a scope seeded with
+// only credential files would wait for a manual choice on every provision. Only the
+// Google-login selection is written — an API-key or Vertex selection is an ambient
+// identity af never chooses — and nothing else from the account's settings.
+func accountScopeSeed(agent string) map[string][]byte {
+	if agent != tmux.ProgramGemini {
+		return nil
+	}
+	return map[string][]byte{
+		".gemini/settings.json": []byte(`{"security":{"auth":{"selectedType":"oauth-personal"}}}` + "\n"),
+	}
 }

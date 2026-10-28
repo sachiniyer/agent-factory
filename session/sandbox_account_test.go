@@ -274,3 +274,66 @@ func TestAgentServerLaunchScriptCarriesTheGuardBetweenIdentityAndStart(t *testin
 	_ = plain.startAgentServer(time.Second)
 	assert.NotContains(t, plain.shell.(*recordingShell).scripts[0], "account scope")
 }
+
+// An empty identity pin must survive BOTH environment filters. FilterForCommand
+// drops a name that is not allowed for the agent — gemini's
+// GOOGLE_APPLICATION_CREDENTIALS only passes behind a cloud selector, and the
+// scrub empties those selectors — so without naming the pins as explicit extras a
+// project .env could put a service-account identity back.
+func TestGeminiIdentityPinsSurviveTheLaunchFilters(t *testing.T) {
+	acct := writeAccount(t, "gemini", "gemini-cred")
+	w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "gemini",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+	// What the launch shell exports after sourcing the identity file.
+	env := []string{"PATH=/usr/bin", "GOOGLE_APPLICATION_CREDENTIALS=", "GOOGLE_GENAI_USE_VERTEXAI=",
+		"GOOGLE_GENAI_USE_GCA=", "GEMINI_API_KEY=", "GOOGLE_API_KEY=", "GEMINI_CLI_HOME=" + w.AccountDir()}
+	pins := []string{"GOOGLE_APPLICATION_CREDENTIALS=", "GOOGLE_GENAI_USE_VERTEXAI=", "GOOGLE_GENAI_USE_GCA=", "GEMINI_API_KEY=", "GOOGLE_API_KEY="}
+
+	// Control: the filter alone drops the pin that is only allowed behind a selector.
+	bare := sessionenv.FilterForCommand(env, "gemini", "gemini", nil)
+	assert.NotContains(t, bare, "GOOGLE_APPLICATION_CREDENTIALS=", "premise: the filter drops the empty pin")
+
+	extras := w.accountPassthroughNames()
+	filtered := sessionenv.FilterForCommand(env, "gemini", "gemini", extras)
+	for _, pin := range pins {
+		assert.Contains(t, filtered, pin, "%s must stay present AND empty through the filter", pin)
+	}
+	assert.Contains(t, filtered, "GEMINI_CLI_HOME="+w.AccountDir(), "and the scoped variable keeps its value")
+
+	// The names are derived from sessionenv's tables, not listed in the provisioner,
+	// and they ride the agent-server command as extras and --session-env.
+	cmd, err := w.agentServerCommand()
+	require.NoError(t, err)
+	for _, name := range sessionenv.AccountIdentityNames("gemini") {
+		assert.Contains(t, cmd, name)
+	}
+
+	plain := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", spec: ProvisionSpec{Title: "t"}}
+	assert.Empty(t, plain.accountPassthroughNames())
+}
+
+// A fresh gemini scope must start without the authentication picker: the Google-login
+// selection is seeded, and nothing else from the account's own settings travels.
+func TestGeminiScopeIsSeededWithTheGoogleLoginSelectionOnly(t *testing.T) {
+	acct := writeAccount(t, "gemini", "gemini-cred")
+	require.NoError(t, os.MkdirAll(filepath.Join(acct.Dir, ".gemini"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(acct.Dir, ".gemini", "settings.json"),
+		[]byte(`{"mcpServers":{"secret-tool":{"command":"x"}},"theme":"dark"}`), 0o600))
+	w := workspaceOn(t, acct, "box1")
+	require.NoError(t, w.syncAccountIn(time.Minute))
+
+	got, err := os.ReadFile(filepath.Join(w.AccountDir(), ".gemini", "settings.json"))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"security":{"auth":{"selectedType":"oauth-personal"}}}`, string(got))
+	assert.NotContains(t, string(got), "secret-tool", "the account's own settings are never copied")
+
+	// A claude scope gets no seed.
+	claude := workspaceOn(t, writeAccount(t, "claude", testSecretA), "box1")
+	require.NoError(t, claude.syncAccountIn(time.Minute))
+	assert.NoFileExists(t, filepath.Join(claude.AccountDir(), ".gemini", "settings.json"))
+
+	// The seed is not a credential: write-back never reads it.
+	n, err := w.pullAccountBack(time.Minute)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -219,4 +220,56 @@ func TestDefaultHostIsPinnedForAnAccountScopedSession(t *testing.T) {
 	require.NoError(t, inst.reprovisionRemote())
 	assert.Equal(t, f.accountDir, f.spec.Account.Dir, "the account still goes to the recorded listed host")
 	assert.Equal(t, "box1", f.spec.Host)
+}
+
+// af must never hand an account's credentials to a program it did not choose. A
+// program_overrides command that sets an identity variable itself (or that af
+// cannot prove is a direct invocation of the agent) is refused BEFORE anything is
+// synced — and before the host is contacted.
+func TestUnprovenAgentCommandIsRefusedBeforeAnySync(t *testing.T) {
+	f := newListedFixture(t, oneListedHost)
+	for name, override := range map[string]string{
+		"sets the config dir itself": "CLAUDE_CONFIG_DIR=/other claude",
+		"a wrapper af cannot prove":  "./run-claude.sh",
+		"a daemon-qualified path":    "/home/daemon/bin/claude",
+		"undeclared extra arguments": "claude --some-flag",
+		"a different agent entirely": "codex",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Hosts = oneListedHost
+			cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: override}
+			require.NoError(t, config.SaveConfig(cfg))
+
+			spec := ProvisionSpec{
+				RepoRoot: f.repo, Title: "t", Program: tmux.ProgramClaude, Host: "box1",
+				CloneURL: "https://example.invalid/fixture.git",
+				Account:  sessionenv.Account{Agent: tmux.ProgramClaude, Name: "work", Dir: f.accountDir},
+			}
+			_, err := sshRuntime{}.Provision(spec)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "backend=ssh")
+			assert.Contains(t, err.Error(), `"work"`, "the actionable message names the account, as the local path does")
+			assert.NotContains(t, err.Error(), "dial", "the host must not have been contacted")
+		})
+	}
+
+	// Control: the bare agent name passes the shape check (provisioning then fails
+	// later, on the unreachable host — not on the account).
+	cfg := config.DefaultConfig()
+	cfg.Hosts = oneListedHost
+	require.NoError(t, config.SaveConfig(cfg))
+	spec := ProvisionSpec{
+		RepoRoot: f.repo, Title: "t", Program: tmux.ProgramClaude, Host: "box1",
+		CloneURL: "https://example.invalid/fixture.git",
+		Account:  sessionenv.Account{Agent: tmux.ProgramClaude, Name: "work", Dir: f.accountDir},
+	}
+	require.NoError(t, validateRemoteAccountProgram(mustResolve(t, f.repo), &spec))
+}
+
+func mustResolve(t *testing.T, repo string) *config.ResolvedConfig {
+	t.Helper()
+	cfg, err := resolveRepoConfig(repo)
+	require.NoError(t, err)
+	return cfg
 }

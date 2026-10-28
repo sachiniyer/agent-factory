@@ -520,7 +520,12 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	// W7.3: the account's own variable reaches the agent-server and, through
 	// --session-env, the agent — pointing it at the session-scoped account dir.
 	// The VALUE lives in the 0600 identity env file, never in argv.
-	if name, _, ok := w.accountEnv(); ok {
+	// The scoped variable AND every identity name the launch defines empty (see
+	// accountScrubEnv): the filters drop a name that is not allowed, and an empty
+	// pin that vanishes lets the agent's own late environment source (gemini's
+	// .env) put an identity back. Naming them as explicit extras keeps each present
+	// and empty through BOTH filters — the agent-server's re-exec and the pane's.
+	for _, name := range w.accountPassthroughNames() {
 		args = append(args, "--session-env", name)
 		extras = append(extras, name)
 	}
