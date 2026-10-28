@@ -197,7 +197,7 @@ func vscodeAccountEnvironment(agent, account string, extras []string) ([]string,
 // too. /proc/<pid>/environ is fixed at exec and can never be shed, so a
 // code-server stamped with a session marker is attributed to that session
 // forever: once that session dies, `af doctor --fix` matches the marker plus the
-// home and KILLS the editor as a leaked process (doctor/checks.go). Scrubbing the
+// home and KILLS the editor as a leaked process (doctor/checks_processes.go). Scrubbing the
 // markers keeps a daemon-owned editor out of that attribution entirely.
 //
 // (The tmux teardown reaper is a separate mechanism and never sees this child at
