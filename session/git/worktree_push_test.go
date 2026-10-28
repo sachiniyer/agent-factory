@@ -348,3 +348,48 @@ func TestSnapshotAndPushBranch_DivergedHeadStillFailsWithoutStranding(t *testing
 	assert.Equal(t, tipC, branchTip(t, wt, "HEAD"), "no snapshot commit may be stranded by a refused push")
 	assert.NotEmpty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")), "the dirty work stays uncommitted for the retry")
 }
+
+// TestSnapshotAndPushBranch_BehindOnlyDirtyNeverTouchesSharedStash: with the
+// user's merge.autoStash / rebase.autoStash enabled, a fast-forward of a dirty
+// worktree whose edits CONFLICT with the incoming commits makes git save the
+// local changes onto refs/stash — a stack shared by every linked worktree
+// (CLAUDE.md "Git hygiene in a shared repo"). The fast-forward must disable
+// autostash so af never writes to, or later pops from, it. A
+// reference-transaction hook records any refs/stash update.
+func TestSnapshotAndPushBranch_BehindOnlyDirtyNeverTouchesSharedStash(t *testing.T) {
+	sandboxHome(t)
+	gw, _, tipA, tipB := behindOriginRepo(t, "root/behind-autostash")
+	wt := gw.GetWorktreePath()
+	runGit(t, wt, "config", "merge.autoStash", "true")
+	runGit(t, wt, "config", "rebase.autoStash", "true")
+
+	// Origin's tip edits a.txt; the sandbox, still at A, edits it differently.
+	runGit(t, wt, "checkout", "-q", tipB)
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a remote"), 0o644))
+	runGit(t, wt, "commit", "-qam", "B2")
+	runGit(t, wt, "push", "origin", "HEAD:refs/heads/root/behind-autostash")
+	runGit(t, wt, "checkout", "-q", "-B", "root/behind-autostash", tipA)
+
+	hooks := filepath.Join(strings.TrimSpace(runGitOut(t, wt, "rev-parse", "--git-common-dir")), "hooks")
+	if !filepath.IsAbs(hooks) {
+		hooks = filepath.Join(wt, hooks)
+	}
+	require.NoError(t, os.MkdirAll(hooks, 0o755))
+	trace := filepath.Join(t.TempDir(), "stash-writes")
+	hook := "#!/bin/sh\nif grep -q 'refs/stash' ; then echo touched >> '" + trace + "'; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(hooks, "reference-transaction"), []byte(hook), 0o755))
+
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a local"), 0o644))
+	_, err := gw.SnapshotAndPushBranch()
+	require.Error(t, err, "overlapping local edits cannot be fast-forwarded")
+
+	assert.NoFileExists(t, trace, "the archive must never write refs/stash")
+	assert.Equal(t, "a local", mustRead(t, filepath.Join(wt, "a.txt")), "the local edit stays in the tree, uncommitted")
+}
+
+func mustRead(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	require.NoError(t, err)
+	return string(b)
+}

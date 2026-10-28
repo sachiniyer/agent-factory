@@ -110,8 +110,11 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 		}
 		// Dirty: fast-forward onto origin's tip, carrying the working tree, so the
 		// snapshot lands on top of it. If the uncommitted changes overlap the
-		// incoming ones git refuses, and the push below reports the condition.
-		if _, err := g.runGitCommand(g.worktreePath, "merge", "--ff-only", "FETCH_HEAD"); err != nil {
+		// incoming ones git refuses. Autostash is disabled explicitly: a user's
+		// merge.autoStash=true would otherwise save the local edits onto refs/stash
+		// on a conflicting re-apply, and refs/stash is ONE stack shared by every
+		// linked worktree of the repo, so af must never write to (or pop from) it.
+		if _, err := g.runGitCommand(g.worktreePath, "-c", "merge.autoStash=false", "-c", "rebase.autoStash=false", "merge", "--ff-only", "--no-autostash", "FETCH_HEAD"); err != nil {
 			return "", g.annotateGitWriteError(fmt.Errorf("HEAD is behind origin's %q and uncommitted changes overlap the incoming commits, so it cannot be fast-forwarded before the archive snapshot (nothing was committed; resolve in the sandbox and retry): %w", branch, err), probeDir)
 		}
 	}
