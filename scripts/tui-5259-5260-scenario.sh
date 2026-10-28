@@ -19,11 +19,15 @@
 # screen — or keeps hiding them after it scrolls back in.
 #
 # Both legs run in THIS sandbox against binaries built inside it:
-#   af.master — git archive of origin/master, the control that MUST show the
-#               bugs (proves the scenario can detect them)
+#   af.master — git archive of the pinned pre-fix revision (the parent of #5261),
+#               the control that MUST show the bugs (proves the scenario can
+#               detect them). Pinned because origin/master carries the fix now.
+#               testbox.sh scenario archives the SHA below in place of
+#               origin/master.
 #   af        — the playtest entry's branch build, which must NOT
 # Provenance (git SHAs + sha256sums) is recorded first so every capture can be
 # tied to exact code.
+AF_CONTROL_SHA=765d00c8cbe3f09e87e2c6e867fe72ee8daf963d
 set -euo pipefail
 
 # shellcheck source=/dev/null

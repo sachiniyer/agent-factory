@@ -52,7 +52,9 @@ func TestSandboxRunPassesTheScriptAsOneArgument(t *testing.T) {
 	require.NoError(t, err)
 	got := string(out)
 	assert.Contains(t, got, "argc=1", "the remote script must arrive as exactly one argv element, not split on spaces")
-	assert.Contains(t, got, `last=echo 'a b' && ls "/tmp/x y"`, "and must arrive byte-for-byte")
+	// Wrapped as an explicit `sh -c '<script>'` so the remote login shell (fish,
+	// csh) never parses the script itself (#5571 W2.9).
+	assert.Contains(t, got, "last="+remoteShScript(`echo 'a b' && ls "/tmp/x y"`), "and must arrive byte-for-byte inside the explicit sh -c")
 }
 
 // TestSandboxRunKeepsOperatorQuoting pins the other half: the operator's own

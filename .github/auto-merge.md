@@ -11,14 +11,19 @@ API economy is a hard requirement (the Actions `GITHUB_TOKEN` quota starved the 
 
 ## After a merge
 
-`GITHUB_TOKEN` merges do not fire push workflows, so after a run that merged anything the workflow dispatches `build.yml`, `docs.yml` (with `verify_sha`), `lint.yml`, `tui-driver-selftest.yml` and `web-selftest.yml` once on `master`. It then runs the **composition check** on the new head — `go build ./...`, `go vet ./...`, `scripts/lint-file-length.sh`. On failure it opens (or comments on) one issue titled `master broken by merge batch <sha>` and refuses further merges. Each later run re-checks master and closes the issue once it passes. Fix forward on master.
+`GITHUB_TOKEN` merges do not fire push workflows, so after a run that merged anything the workflow dispatches `build.yml`, `docs.yml` (with `verify_sha`), `lint.yml`, `pr.yml` (the master-only heavy jobs since #5615), `tui-driver-selftest.yml` and `web-selftest.yml` once on `master`. It then runs the **composition check** on the new head — `go build ./...`, `go vet ./...`, `scripts/lint-file-length.sh`. On failure it opens (or comments on) one issue titled `master broken by merge batch <sha>` and refuses further merges. Each later run re-checks master and closes the issue once it passes. Fix forward on master.
 
-## Halt conditions
+## Batch, then verify
 
-Merging is refused (and resumes automatically) when:
+Under continuous merging every master Build is cancelled by the next push (`cancel-in-progress`), so "the latest completed run" reads a stale success. The merger therefore only merges onto a master head that has been verified:
 
-- an open `master broken by merge batch <sha>` issue exists and master still fails the composition check; or
-- master's most recent **completed** `Build` or `Lint` workflow run (`build.yml` / `lint.yml`; cancelled and skipped runs are ignored) concluded `failure`. One `actions/runs?branch=master&status=completed` call per run; the job summary names the run that caused the halt. This catches composed breaks the Go-only composition check cannot (e.g. test expectations a sibling PR invalidated). It clears once a later master run passes — re-dispatch the workflow on master to speed that up. A fix-forward PR labelled `fix-master` (Build + Lint still required on its head) is exempt from this halt, so a red master can always be repaired through the merger.
+1. It reads master HEAD and queries `build.yml` and `lint.yml` runs **for that head SHA**.
+2. Per workflow: any `success` → ok; else any `failure`/`timed_out` → red; else any queued/in-progress → wait; else (all cancelled, or a push that never ran it) → no live run.
+3. Both ok → merge, at most `AUTO_MERGE_BATCH_SIZE` PRs (repository variable, default 8). Either red → **halt** (the job summary names the run). Either waiting → exit without merging; the `workflow_run` trigger on Build/Lint wakes the merger again when it finishes. No live run → `workflow_dispatch` it on master and wait.
+
+A PR labelled `fix-master` (Build + Lint still required on its head) is exempt from the red halt, so a red master can always be repaired through the merger.
+
+Other halt: an open `master broken by merge batch <sha>` issue while master still fails the composition check.
 
 ## Workflow-touching PRs and `AUTO_MERGE_TOKEN`
 

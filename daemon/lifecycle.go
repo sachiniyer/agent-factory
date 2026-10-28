@@ -89,6 +89,13 @@ type daemonLifecycle struct {
 	// probation. It gates mutation ADMISSION; transactionID is kept for the whole
 	// boot as the supervisor's IDENTITY (#1947), so the two never conflate.
 	released bool
+	// releaseRequested records a release that arrived while the instance restore
+	// was still running. markRestoreComplete applies it, so released still
+	// implies restored and admission never opens over a half-loaded manager —
+	// but the supervisor's single approve call is accepted instead of refused,
+	// which used to fail the actor until its restart budget ran out and wedge
+	// the upgrade permanently (#5693).
+	releaseRequested bool
 	// quiescing is set when this daemon has authorized an upgrade activation and is
 	// handing off. It closes admission (the daemon is about to exit) and drives the
 	// reported DaemonPhaseQuiescing so a stuck hand-off is visible, not silent.
@@ -128,16 +135,24 @@ func generateDaemonBootID() (string, error) {
 	return hex.EncodeToString(random), nil
 }
 
-// markRestoreComplete moves an upgrade launch into probation. A normal launch
-// remains warming until RunDaemon has armed its scheduler, watchers, and poll
-// loop; a restored Manager is not by itself a fully ready daemon.
+// markRestoreComplete moves an upgrade launch into probation — or straight to
+// DaemonPhaseHandoffPending when its supervisor's release already arrived during
+// the restore (#5693). A normal launch remains warming until RunDaemon has armed
+// its scheduler, watchers, and poll loop; a restored Manager is not by itself a
+// fully ready daemon.
 func (l *daemonLifecycle) markRestoreComplete() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.restored = true
-	if l.transactionID != "" {
-		l.phase = DaemonPhaseUpgradeProbation
+	if l.transactionID == "" {
+		return
 	}
+	if l.releaseRequested {
+		l.released = true
+		l.phase = DaemonPhaseHandoffPending
+		return
+	}
+	l.phase = DaemonPhaseUpgradeProbation
 }
 
 func (l *daemonLifecycle) markReady() error {
@@ -186,6 +201,16 @@ func (l *daemonLifecycle) markQuiescing() {
 // so reporting it ready would let a skipped or failed post-commit hand-off pass as
 // a healthy daemon. The distinct phase keeps the readiness surfaces honest while
 // admission opens.
+//
+// A release that arrives BEFORE the instance restore completes is accepted and
+// deferred, not refused (#5693): markRestoreComplete applies it, and until then
+// the phase stays warming and admission stays closed. The supervisor sends it
+// once, right after Commit — the irreversible verdict — and a refusal failed the
+// whole recovery actor, whose only retry is a service-manager restart budget
+// sized for a crash loop, not for a slow restore. The supervisor is the PREVIOUS
+// binary, so whether it waits for restore before approving is out of this
+// binary's hands; accepting the early release is what keeps any supervisor from
+// wedging this candidate.
 func (l *daemonLifecycle) releaseUpgradeProbation(expectedTransactionID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -200,7 +225,8 @@ func (l *daemonLifecycle) releaseUpgradeProbation(expectedTransactionID string) 
 		return nil // idempotent: already released for this transaction
 	}
 	if !l.restored {
-		return fmt.Errorf("cannot release upgrade probation before instance restore completes")
+		l.releaseRequested = true // applied by markRestoreComplete
+		return nil
 	}
 	l.released = true
 	l.phase = DaemonPhaseHandoffPending
