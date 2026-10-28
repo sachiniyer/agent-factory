@@ -14,8 +14,25 @@ import "fmt"
 // same critical section. An ordinal resolved from an earlier snapshot is never
 // applied to the live roster (#2200).
 func (i *Instance) CloseTabByID(tabID string) error {
+	return i.closeTabByID(tabID, "")
+}
+
+// CloseTabByIDIfGen is CloseTabByID that closes only the INCARNATION gen names:
+// the generation is compared in the same critical section that removes the row,
+// so a close retried against a reused id can never take down a newer tab
+// between a check and the act (#5996). A mismatch is ErrTabGone — the
+// incarnation asked about no longer exists. An empty gen is an unconditional
+// close.
+func (i *Instance) CloseTabByIDIfGen(tabID, gen string) error {
+	return i.closeTabByID(tabID, gen)
+}
+
+func (i *Instance) closeTabByID(tabID, gen string) error {
 	i.mu.Lock()
 	idx, exists := i.tabIndexByIDLocked(tabID)
+	if exists && gen != "" && i.Tabs[idx].gen != gen {
+		exists = false
+	}
 	if !exists {
 		i.mu.Unlock()
 		return fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)

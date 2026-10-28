@@ -145,7 +145,7 @@ func (i *Instance) PendingRemoteTabClose() []RemoteTabCleanupData {
 // nothing to reconcile. The status sweep calls it per off-box instance; it runs
 // no network call under i.mu and a failed roster read changes nothing, so every
 // step simply waits for the next sweep.
-func (i *Instance) ReconcileOffBoxTabs() {
+func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 	i.mu.RLock()
 	rs := i.remoteTabServerCachedLocked()
 	work := len(i.pendingRemoteClose) > 0 || len(i.tabCreateIntents) > 0
@@ -158,39 +158,66 @@ func (i *Instance) ReconcileOffBoxTabs() {
 		}
 	}
 	remote := i.capabilitiesLocked().Workspace == WorkspaceRemote
+	hasClient := i.remoteClient != nil
 	i.mu.RUnlock()
-	if rs == nil || !remote || !work {
-		return
+	if !remote || !work {
+		return false
+	}
+	if rs == nil && hasClient {
+		// After a restart nothing has built the agent-server yet, and a pending
+		// close must not wait on an unrelated operation to do it. Built only with
+		// a live client: a client-less row would cache a dead server.
+		rs, _ = i.AgentServer().(*remoteAgentServer)
+	}
+	if rs == nil {
+		return false
 	}
 	// Warm the advertisement: after a daemon restart nothing has asked yet, and a
 	// pending close must not wait on an unrelated operation to learn the tab API.
 	rs.idNative()
 	if !rs.hasFeatureCached(tabAPIFeature) {
-		return
+		return false
 	}
 	roster, err := rs.rc.tabs()
 	if err != nil {
-		return
+		return false
 	}
 	byID := make(map[string]TabData, len(roster))
 	for _, td := range roster {
 		byID[td.ID] = td
 	}
-	i.retryPendingRemoteClose(rs, byID)
-	if i.applyOffBoxRoster(byID) {
+	changed = i.retryPendingRemoteClose(rs, byID)
+	rosterChanged, adopted := i.applyOffBoxRoster(byID)
+	for _, id := range adopted {
+		// An adopted replacement may reuse a closed id: lift its terminal mark, as
+		// the create path does, so its stream is usable (#5963).
+		rs.clearTabGone(id)
+	}
+	if rosterChanged {
 		i.markLoadRuntimeReplaced()
 	}
+	// The caller persists and publishes on true: nothing else writes a change the
+	// sweep discovers, and a stable session would otherwise keep showing a missing
+	// tab or a running command until an unrelated write.
+	return changed || rosterChanged
 }
 
-// retryPendingRemoteClose spends each pending close against the roster just
-// read. The roster is authoritative: an id it lacks, or holds under another
-// incarnation, is already closed; an id it holds is closed now, and the record
-// is retired only on the sandbox's confirmation.
-func (i *Instance) retryPendingRemoteClose(rs *remoteAgentServer, byID map[string]TabData) {
+// retryPendingRemoteClose spends each pending close. The generation check is the
+// SANDBOX's, made atomically with the removal (the conditional close), so a
+// retry cannot close a newer incarnation of a reused id between a check and the
+// act (#5996). ErrTabGone — the id is absent, or held by another incarnation —
+// confirms the recorded tab is already gone. The record is retired only on the
+// sandbox's answer.
+//
+// A record with no generation (the sandbox had not reported one) cannot be
+// fenced, so it falls back to the roster just read: closed only if the id is
+// still present. That residual check-then-act exists solely for tabs created
+// before generations; every tab a current sandbox creates carries one.
+func (i *Instance) retryPendingRemoteClose(rs *remoteAgentServer, byID map[string]TabData) (retired bool) {
 	for _, h := range i.PendingRemoteTabClose() {
-		td, present := byID[h.TabID]
-		if present && (h.Gen == "" || td.Gen == "" || td.Gen == h.Gen) {
-			if cerr := rs.rc.closeTab(h.TabID); cerr != nil && !errors.Is(cerr, ErrTabGone) {
+		_, present := byID[h.TabID]
+		if h.Gen != "" || present {
+			if cerr := rs.rc.closeTab(h.TabID, h.Gen); cerr != nil && !errors.Is(cerr, ErrTabGone) {
 				log.WarningLog.Printf("session %q: close of sandbox tab %q is still unconfirmed and will be retried: %v", i.Title, h.TabID, cerr)
 				continue
 			}
@@ -199,7 +226,9 @@ func (i *Instance) retryPendingRemoteClose(rs *remoteAgentServer, byID map[strin
 		i.retireRemoteCloseLocked(&h)
 		i.mu.Unlock()
 		log.InfoLog.Printf("session %q: sandbox tab %q close confirmed", i.Title, h.TabID)
+		retired = true
 	}
+	return retired
 }
 
 // applyOffBoxRoster adopts the tabs uncertain creates started and stamps exit
@@ -207,10 +236,9 @@ func (i *Instance) retryPendingRemoteClose(rs *remoteAgentServer, byID map[strin
 // is the same incarnation (id AND gen) and records no ending yet, so a
 // replacement tab under a reused id never inherits its predecessor's (#5960).
 // Reports whether anything durable changed.
-func (i *Instance) applyOffBoxRoster(byID map[string]TabData) bool {
+func (i *Instance) applyOffBoxRoster(byID map[string]TabData) (changed bool, adopted []string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	changed := false
 	for key, in := range i.tabCreateIntents {
 		td, ok := byID[in.id]
 		if !ok {
@@ -224,6 +252,7 @@ func (i *Instance) applyOffBoxRoster(byID map[string]TabData) bool {
 			})
 			i.touchLocked()
 			changed = true
+			adopted = append(adopted, in.id)
 		}
 		delete(i.tabCreateIntents, key)
 	}
@@ -240,5 +269,5 @@ func (i *Instance) applyOffBoxRoster(byID map[string]TabData) bool {
 		i.touchLocked()
 		changed = true
 	}
-	return changed
+	return changed, adopted
 }

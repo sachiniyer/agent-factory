@@ -64,13 +64,22 @@ func newLifecycleSandbox(t *testing.T) (*lifecycleSandbox, *Instance) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		sb.mu.Lock()
 		down := sb.closeDown
-		if !down {
+		// The generation is compared HERE, with the removal, the way the real
+		// agent-server does it (#5996): a mismatch is tab_gone, never a close.
+		td, held := sb.tabs[req.ID]
+		gone := !held || (req.Gen != "" && td.Gen != req.Gen)
+		if !down && !gone {
 			sb.closeCalls = append(sb.closeCalls, req.ID)
 			delete(sb.tabs, req.ID)
 		}
 		sb.mu.Unlock()
 		if down {
 			hangUp(w)
+			return
+		}
+		if gone {
+			ws.encode(w, map[string]any{"data": nil, "error": map[string]any{
+				"message": "tab gone", "code": "tab_gone"}})
 			return
 		}
 		ws.encode(w, map[string]any{"data": map[string]any{}, "error": nil})
@@ -361,4 +370,61 @@ func TestCloseTabStagesCleanupBeforeTeardown(t *testing.T) {
 	// A confirmed teardown retires the reservation.
 	require.NoError(t, inst.settleRemovedTab(removed, handle, nil))
 	assert.Empty(t, inst.PendingTabCleanup())
+}
+
+// A pending close persisted for a SANDBOX row survives a restart and is retried:
+// the restore branch for sandbox backends is not the local one, and the record
+// is the only handle on a command still running there (#5996, property 5).
+func TestPendingRemoteCloseSurvivesRestartForSandboxBackends(t *testing.T) {
+	for _, backend := range []string{"sandbox", "ssh", "docker", "remote"} { // "remote" is the hook backend's persisted type
+		t.Run(backend, func(t *testing.T) {
+			sb, live := newLifecycleSandbox(t)
+			tab, err := live.AddProcessTabWithID("", "serve", "")
+			require.NoError(t, err)
+			sb.mu.Lock()
+			sb.closeDown = true
+			sb.mu.Unlock()
+			require.Error(t, live.CloseTabByID(tab.ID))
+			stored := live.ToInstanceData()
+			require.Len(t, stored.PendingRemoteTabClose, 1)
+
+			// A daemon restart: the row is rebuilt from storage as this backend.
+			stored.BackendType = backend
+			restored, err := FromInstanceData(stored)
+			require.NoError(t, err)
+			require.Equal(t, stored.PendingRemoteTabClose, restored.PendingRemoteTabClose(),
+				"the pending close must be restored for every off-box backend")
+
+			// Reattach hands the row a live client; the sweep then retries it.
+			sb.mu.Lock()
+			sb.closeDown = false
+			sb.mu.Unlock()
+			restored.mu.Lock()
+			restored.remoteClient = live.remoteClient
+			restored.started = true
+			restored.mu.Unlock()
+			restored.ReconcileOffBoxTabs()
+			assert.Empty(t, restored.PendingRemoteTabClose(), "retried and confirmed after the restart")
+			assert.Equal(t, []string{tab.ID}, sb.closed())
+		})
+	}
+}
+
+// The generation check runs on the sandbox, atomically with the removal: a
+// retried close for an older incarnation finds a newer tab under the id and
+// closes nothing (#5996).
+func TestCloseTabByIDIfGenFencesTheIncarnation(t *testing.T) {
+	inst, _ := raceMockInstance(t, "af_ifgen", func() {})
+	tab, err := inst.AddProcessTab("worker", "")
+	require.NoError(t, err)
+	require.NotEmpty(t, tab.gen)
+
+	err = inst.CloseTabByIDIfGen(tab.ID, "an-older-incarnation")
+	require.ErrorIs(t, err, ErrTabGone)
+	_, still := inst.TabIndexByID(tab.ID)
+	assert.True(t, still, "a mismatched generation must leave the newer tab running")
+
+	require.NoError(t, inst.CloseTabByIDIfGen(tab.ID, tab.gen))
+	_, still = inst.TabIndexByID(tab.ID)
+	assert.False(t, still)
 }

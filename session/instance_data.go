@@ -753,8 +753,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// retries the kill, and a spawn reserves against them, but no tab is
 		// rebuilt from a tombstone.
 		instance.pendingTabCleanup = restoredTabCleanup(data.PendingTabCleanup)
-		instance.pendingRemoteClose = restoredRemoteClose(data.PendingRemoteTabClose)
 	}
+	// Pending off-box closes belong to the sandbox backends the branch above never
+	// reaches (#5996): restored for every backend so a restart cannot drop the only
+	// handle on a command still running in a sandbox.
+	instance.pendingRemoteClose = restoredRemoteClose(data.PendingRemoteTabClose)
 
 	// Every return below hands back a row no automatic restore can reach —
 	// inert (started=false), Archived rather than Lost, or vetoed by

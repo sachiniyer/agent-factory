@@ -157,7 +157,7 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 		// The session was killed or archived while the sandbox spawned the tab;
 		// close it there so it does not outlive the roster that would own it. An
 		// unconfirmed close is recorded, not just reported (#5957).
-		if cerr := rs.rc.closeTab(id); cerr != nil && !errors.Is(cerr, ErrTabGone) {
+		if cerr := rs.rc.closeTab(id, td.Gen); cerr != nil && !errors.Is(cerr, ErrTabGone) {
 			i.mu.Lock()
 			i.pendingRemoteClose = append(i.pendingRemoteClose, RemoteTabCleanupData{TabID: id, Gen: td.Gen})
 			i.touchLocked()
@@ -190,7 +190,7 @@ func (i *Instance) closeOffBoxTab(tab *Tab) error {
 	if rs == nil || !rs.hasFeatureCached(tabAPIFeature) {
 		return fmt.Errorf("failed to close tab %q: the session's sandbox is not connected; the close is pending", tab.Name)
 	}
-	if err := rs.rc.closeTab(tab.ID); err != nil && !errors.Is(err, ErrTabGone) {
+	if err := rs.rc.closeTab(tab.ID, tab.gen); err != nil && !errors.Is(err, ErrTabGone) {
 		return fmt.Errorf("failed to close tab %q: %w", tab.Name, err)
 	}
 	return nil
