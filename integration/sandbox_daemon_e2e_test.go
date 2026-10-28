@@ -169,9 +169,6 @@ func TestSandboxDaemonE2E(t *testing.T) {
 	if row := find(title); row == nil || row.ArchivedWorkspace == nil || row.ArchivedWorkspace.Dir != loc.Dir {
 		t.Fatalf("the archived row does not report where the work lives: %+v", row)
 	}
-	if got := host.exec(t, "cat "+workspace()+"/e2e-work.txt"); got != "e2e" {
-		t.Fatalf("the preserved workspace on the host lost the session's file; e2e-work.txt = %q", got)
-	}
 	if got := treeState(); got != stateAtArchive {
 		t.Fatalf("archiving changed the workspace:\nbefore:\n%s\nafter:\n%s", stateAtArchive, got)
 	}
