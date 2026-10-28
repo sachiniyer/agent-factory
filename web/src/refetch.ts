@@ -90,8 +90,17 @@ export interface FencedRefetchSpec<T> {
   /** The installed credential. `null` is disconnected and no request goes out; ""
    *  is the authorized tokenless credential (#1696) and is a normal token here. */
   readToken: () => string | null;
-  /** The single RPC this projection reads. */
-  fetch: (token: string) => Promise<T>;
+  /** The single RPC this projection reads. When timeoutMs is set the request
+   *  also receives an AbortSignal; a fetch that ignores it simply settles late
+   *  and is disowned by the expiry fence below. */
+  fetch: (token: string, signal?: AbortSignal) => Promise<T>;
+  /** Bounds each request. fetch carries no deadline of its own, so without this
+   *  a read the daemon accepts and never answers holds a per-origin connection
+   *  slot open for the life of the page — and a caller that retries (a conflict
+   *  timer, a mutation's settle refetch) piles up one more each round (#4888
+   *  review). On expiry the request is aborted and disowned: a late answer can
+   *  still resolve the promise but commits nothing. */
+  timeoutMs?: number;
   /** Commits the answer. Called only for the newest request, and only while the
    *  credential it was issued under is still installed. */
   commit: (value: T) => void;
@@ -115,9 +124,27 @@ export function createFencedRefetcher<T>(spec: FencedRefetchSpec<T>): FencedRefe
         return Promise.resolve();
       }
       const request = gate.begin();
-      const isNewest = (): boolean => request.isCurrent() && spec.readToken() === tok;
+      // The timeout's own fence: an expired request cannot commit even when it
+      // still looks newest — the gate only sees requests that began after it,
+      // and nothing newer may ever begin.
+      let expired = false;
+      const isNewest = (): boolean => !expired && request.isCurrent() && spec.readToken() === tok;
+      let controller: AbortController | undefined;
+      // ReturnType — DOM says number, Node says Timeout; the clear call takes
+      // either, and this file runs under both.
+      let bound: ReturnType<typeof setTimeout> | undefined;
+      if (spec.timeoutMs !== undefined) {
+        controller = new AbortController();
+        const own = controller;
+        // globalThis, not window: refetch.ts also runs under node:test, where
+        // no window exists — and the same timers do anyway.
+        bound = globalThis.setTimeout(() => {
+          expired = true;
+          own.abort();
+        }, spec.timeoutMs);
+      }
       return spec
-        .fetch(tok)
+        .fetch(tok, controller?.signal)
         .then((value) => {
           if (isNewest()) {
             spec.commit(value);
@@ -126,6 +153,11 @@ export function createFencedRefetcher<T>(spec: FencedRefetchSpec<T>): FencedRefe
         .catch((error: unknown) => {
           if (isNewest() && !options?.silent) {
             spec.onError?.(error);
+          }
+        })
+        .finally(() => {
+          if (bound !== undefined) {
+            globalThis.clearTimeout(bound);
           }
         });
     },

@@ -42,6 +42,12 @@ type Project struct {
 	// highest-priority path (a live session, the active workspace). Whether a
 	// rebind MOVED the record is judged against this, never the display root.
 	RegistryRoot string
+	// RegistryCheckoutID is the checkout marker the registration recorded —
+	// the second half of the guarded rebind's observed pair (#4822 spec). A
+	// reclone at the same path mints a new marker, so root spelling alone
+	// cannot see the checkout the picker displayed being replaced. Empty on a
+	// pre-marker record, which a guarded rebind always refuses.
+	RegistryCheckoutID string
 	// MissingPath marks a registry-backed row whose recorded root the registry
 	// reports absent (path_exists=false) — the checkout moved or was recloned,
 	// which is exactly what rebind repairs.
@@ -209,6 +215,15 @@ func (p *ProjectPickerOverlay) SelectedProject() (Project, bool) {
 	return Project{}, false
 }
 
+// Projects exposes the picker's current row set — for callers verifying what a
+// conflict merge produced, where a single highlighted row cannot describe the
+// split a RepoID-changing rebind leaves behind.
+func (p *ProjectPickerOverlay) Projects() []Project {
+	out := make([]Project, len(p.all))
+	copy(out, p.all)
+	return out
+}
+
 // HighlightedProject names the existing row under the cursor, excluding the
 // add-project and rebind-path fields so typing a path never dispatches a
 // destructive shortcut.
@@ -281,6 +296,25 @@ func (p *ProjectPickerOverlay) SetRebindError(msg string) {
 	// user can correct the path and resubmit.
 	p.rebindPending = false
 	p.rebindErr = msg
+}
+
+// SetRebindConflict answers the in-flight rebind with the daemon's "rebound
+// elsewhere" refusal (#4822): another rebind moved the registration after this
+// picker read it. projects is the caller's just-refreshed project list, and the
+// open picker is REBUILT from it rather than patched in place — the conflict
+// moved the registration, so the row's Root, RepoID, name and missing-path
+// state are all stale, and an Esc back to a list still showing them would let
+// Enter select a checkout the registry no longer records (#4888 review).
+// The rebind target is re-read from the rebuilt list too: its fresh
+// RegistryRoot is what the re-armed form's next submission expects, so Enter
+// retries against the root the user was just told rather than being refused
+// again on the root it was opened with. A target whose record vanished keeps
+// its last row — resubmitting against a deleted registration fails
+// definitively, as it should.
+func (p *ProjectPickerOverlay) SetRebindConflict(msg string, projects []Project) {
+	p.all = projects
+	p.reseatAfterConflictRebuild()
+	p.SetRebindError(msg)
 }
 
 // SetRebindDenied refuses rebind before it can submit, carrying the refusal
