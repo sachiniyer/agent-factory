@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -115,6 +116,46 @@ type ListBackendsResponse struct {
 	// DefaultReason explains a DefaultStatus that is not available, naming the
 	// offending value and the file it is in.
 	DefaultReason string `json:"default_reason,omitempty"`
+	// Hosts is every host in the operator's global host list, sorted by name, with
+	// whether a create picking it (CreateSessionRequest.Host) would work right now
+	// (W6.3). Absent when no hosts are configured. Reason follows the same rule as
+	// BackendOption.Reason.
+	Hosts []HostOption `json:"hosts,omitempty"`
+	// DefaultHost is the configured default_host, which applies when a create picks
+	// no host and resolves to the ssh backend with no repo [ssh] host. Empty when unset.
+	DefaultHost string `json:"default_host,omitempty"`
+}
+
+// HostOption is one listed host and whether this repo can place a session on it.
+type HostOption struct {
+	// Name is what a client sends back as CreateSessionRequest.Host.
+	Name string `json:"name"`
+	// Address is the host's ssh destination, shown for orientation only.
+	Address string              `json:"address"`
+	Status  BackendAvailability `json:"status"`
+	Reason  string              `json:"reason,omitempty"`
+}
+
+// hostCatalog answers for the operator's host list. An unreadable config is
+// reported as unknown per host rather than by omitting them.
+func hostCatalog(cfg *config.ResolvedConfig, cfgErr error, repoRoot string) []HostOption {
+	if cfgErr != nil || cfg == nil || len(cfg.Hosts) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Hosts))
+	for name := range cfg.Hosts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]HostOption, 0, len(names))
+	for _, name := range names {
+		opt := HostOption{Name: name, Address: cfg.Hosts[name].Host, Status: BackendAvailable}
+		if err := session.HostUnusableReason(name, cfg, repoRoot); err != nil {
+			opt.Status, opt.Reason = BackendUnavailable, err.Error()
+		}
+		out = append(out, opt)
+	}
+	return out
 }
 
 // ListBackends reports the selectable runtimes for a repo, and which backend an
@@ -141,6 +182,10 @@ func (s *controlServer) ListBackends(req ListBackendsRequest, resp *ListBackends
 	}
 	resp.Backends = backendCatalog(config.SupportedBackends, cfg, cfgErr, workspace, callbackReason)
 	resp.Default, resp.DefaultStatus, resp.DefaultReason = defaultFor(resp.Backends, cfg, cfgErr, workspace)
+	resp.Hosts = hostCatalog(cfg, cfgErr, workspace)
+	if cfgErr == nil && cfg != nil {
+		resp.DefaultHost = cfg.DefaultHost
+	}
 	return nil
 }
 

@@ -173,3 +173,18 @@ func TestControlServer_RebindProject_UsesTheNormalizedPath(t *testing.T) {
 	require.Len(t, projects, 1)
 	assert.Equal(t, filepath.Clean(target), projects[0].Root)
 }
+
+// TestControlServer_RebindProjectGuardedRefusesAnEmptyPair pins the guarded
+// method's own contract (#4888 review): the method name is the capability —
+// its existence proves the precondition is implemented — so it must refuse a
+// request that carries NEITHER expected field rather than degrade into the
+// unguarded last-writer-wins the plain RebindProject method already provides.
+func TestControlServer_RebindProjectGuardedRefusesAnEmptyPair(t *testing.T) {
+	cs := &controlServer{}
+	var resp RebindProjectResponse
+	err := cs.RebindProjectGuarded(RebindProjectRequest{ID: "prj_x", Path: "/new"}, &resp)
+	require.Error(t, err, "a guarded-method call with no precondition must refuse")
+	assert.Contains(t, err.Error(), "expected_root",
+		"the refusal names the missing precondition fields")
+	assert.False(t, resp.OK)
+}

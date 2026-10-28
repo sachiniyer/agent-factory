@@ -138,6 +138,13 @@ func TestControlServerSnapshot_ReportsAndScopesSkippedRepos(t *testing.T) {
 	sandboxCtx := withSandboxOwner(context.Background(), "any-session-id")
 	require.NoError(t, cs.snapshot(sandboxCtx, SnapshotRequest{}, &resp))
 	require.Empty(t, resp.SkippedRepos, "a sandbox must not learn which repos were dropped (operator identity)")
+	require.Equal(t, "any-session-id", resp.Caller, "a sandbox credential's snapshot names the session it is bound to (#5571 W3.2)")
+
+	// An operator credential binds no session: Caller stays empty so existing
+	// clients and the tmux-name path are unaffected.
+	resp = SnapshotResponse{}
+	require.NoError(t, cs.snapshot(context.Background(), SnapshotRequest{}, &resp))
+	require.Empty(t, resp.Caller)
 }
 
 // skippedRepoIDs asserts on the repo IDs carried by a Snapshot's skipped set.

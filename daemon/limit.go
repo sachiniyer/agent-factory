@@ -397,7 +397,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		if manual && (originalLiveness == session.LiveRunning || originalLiveness == session.LiveReady) {
 			// The pending manual transaction is the recovery obligation. A healthy
 			// handoff must never manufacture quota evidence for the selected account.
-			return instance.Transition(session.ObserveLiveness(originalLiveness))
+			// Bookkeeping after a refused respawn, not a pane observation: the observe
+			// path's rebuild-teardown guard would park LiveLost (#5371 review).
+			return instance.RestoreLivenessUnderResumeFence(originalLiveness)
 		}
 		return m.reparkLimitUnderResumeFence(instance, resetAt)
 	}
@@ -687,6 +689,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		instance.SetRelocationSettleNotify(func(i *session.Instance) error {
 			return m.persistInstanceErr(repoID, i)
 		})
+		// Rebuild-teardown obligation must be durable; nil notify refuses (#5371).
+		instance.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
+		instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error { return m.stopVSCodeForInstance(key, i.ID) })
 		if accountSwap != nil {
 			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
 			if rerr == nil {

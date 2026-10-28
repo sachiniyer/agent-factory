@@ -79,6 +79,40 @@ type Instance struct {
 	// It gates only the automatic retry loop; an explicit restore may replace the
 	// runtime and clear it at the live boundary.
 	lostRestoreFailure LostRestoreFailure
+	// rebuildTeardownPending records that a recovery rebuilt the worktree at a
+	// new identity but did not finish tearing down the sessions that survived
+	// the deletion. `rebuilt` inside respawnWithConversation is re-derived per
+	// attempt from os.Stat, which sees the rebuilt directory on the retry and
+	// reports false — without this flag a partial teardown would let the next
+	// attempt reattach the stale pane and ConfirmLive it (#5371 review). Set
+	// when the rebuild commits, cleared only after every bound session and
+	// pending-cleanup handle is confirmed gone.
+	rebuildTeardownPending bool
+	// rebuildTeardownPendingOwed marks that the in-memory flag's current value
+	// is NOT durably backed: a transition attempted the persist callback and it
+	// failed, or ran without one installed. A value only skips the checkpoint
+	// when it is the durable one — an owed value must re-fire the notify on the
+	// next matching call rather than letting the rebuild proceed on a flag a
+	// restart would reload differently (#5371 review).
+	rebuildTeardownPendingOwed bool
+	// rebuildTeardownStopRuntimes is the daemon-installed "stop what no tmux
+	// session owns" callback the rebuild teardown must run before it may
+	// believe the worktree is clear: the supervised VS Code editor and any
+	// post-worktree hook runner hold a cwd inside the checkout while carrying
+	// no tab.tmux and no AF_SESSION marker, so the tmux snapshot cannot see
+	// them and the occupancy check would find them as strangers (#5371
+	// review). Same installation contract as rebuildTeardownNotify — nil on a
+	// teardown path means an entry point was missed, and it fails closed.
+	rebuildTeardownStopRuntimes func(*Instance) error
+	// rebuildTeardownNotify is the daemon-installed persist callback fired on
+	// every rebuildTeardownPending transition, so a durable obligation and its
+	// durable discharge both land before the code that depends on them runs —
+	// the clear must be on disk before a replacement pane spawns, or a daemon
+	// exit in that window reloads a stale `true` and tears the FRESH panes
+	// down as though they belonged to the deleted worktree (#5371 review).
+	// In-memory only: the flag matters only inside Recover, and every Recover
+	// entry point installs it anew.
+	rebuildTeardownNotify func(*Instance) error
 	// lostRestoreWait is the durable non-terminal counterpart: the loop's last
 	// failure was environmental, so an automatic retry is still armed behind a
 	// capped backoff instead of the terminal budget being spent (#5295).
@@ -185,6 +219,14 @@ type Instance struct {
 	// lands between the edge and the stamp, which would otherwise leave the task
 	// reading "started" forever for a run that provably failed.
 	taskRunFailurePending bool
+	// taskRunPromptBound records that this run's prompt boundary was bound at
+	// least once — the initial prompt reached a verdict that could have
+	// delivered (#5644). ClearIdleEvidence retires the boundary itself when a
+	// runtime is replaced (handoff), but the bound bit stays: a later
+	// PromptNotDelivered on a replacement mission is NOT the initial delivery
+	// failing, and only a never-bound run may be ended failed by it. Persisted
+	// while the run is in flight, with the boundary it qualifies.
+	taskRunPromptBound bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.
@@ -341,6 +383,11 @@ type Instance struct {
 	// spend the wrong quota while still displaying the account it was created
 	// with.
 	Account string `json:"account,omitempty"`
+	// Host names the listed host (global `hosts`, #5571 W6.3) this session was
+	// placed on, or empty when none was picked. Persisted independently of the
+	// runtime cleanup handle, which a teardown clears: restore and recovery
+	// re-provision from this so a pick never silently moves to another machine.
+	Host string `json:"host,omitempty"`
 	// accountAgent is the agent namespace Account was selected in. It must be
 	// durable rather than re-derived at refresh time: a program_overrides edit
 	// after the pin can resolve the recorded Program to a different agent's

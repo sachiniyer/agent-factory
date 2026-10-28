@@ -180,6 +180,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d = d.restoreMissingAccountSwapMissionEvidence()
 	d = d.projectPendingAccountSwapForPreviousRelease()
 	d = d.projectPendingHandoffForPreviousRelease()
+	d = d.projectRebuildTeardownForPreviousRelease()
 	// Older binaries ignore ArchiveReport, but the previous release understands
 	// the inert/ownership fields and relocation recovery. Together they refuse
 	// restore and explicit kill instead of publishing an incomplete tree or

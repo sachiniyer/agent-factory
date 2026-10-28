@@ -241,6 +241,40 @@ test("#3659 no credential issues no request, and the tokenless sentinel is a cre
   assert.deepEqual(tokenless.tokens, [""], '"" is the authorized tokenless credential (#1696), not "no token"');
 });
 
+test("#4888 a hung fetch is aborted on its bound and its late answer commits nothing", async () => {
+  const committed: string[] = [];
+  const surfaced: unknown[] = [];
+  const signals: Array<AbortSignal | undefined> = [];
+  const resolvers: Array<() => void> = [];
+  const refetcher = createFencedRefetcher<string>({
+    readToken: () => "tok",
+    fetch: (_token, signal) => {
+      signals.push(signal);
+      return new Promise<string>((resolve) => {
+        resolvers.push(() => resolve("late"));
+      });
+    },
+    timeoutMs: 5,
+    commit: (value) => committed.push(value),
+    onError: (error) => surfaced.push(error),
+  });
+
+  refetcher.refresh();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(signals[0]?.aborted, true, "the bound must abort a request that never answered");
+
+  resolvers[0]();
+  await settle();
+  assert.deepEqual(committed, [], "an expired request's answer is disowned, not committed");
+  assert.deepEqual(surfaced, [], "the abort itself is an expiry, not a reportable failure");
+
+  // The bound disowns the request; it does not poison the refetcher.
+  refetcher.refresh();
+  resolvers[1]();
+  await settle();
+  assert.deepEqual(committed, ["late"], "the next refresh still commits");
+});
+
 test("request generations reject an older completion for the same token", () => {
   const gate = createLatestRequestGate();
   const older = gate.begin();
