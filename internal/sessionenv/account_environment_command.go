@@ -546,7 +546,7 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 	}
 	if strace {
 		switch {
-		case literal == "-E" || literal == "--env":
+		case literal == "-E" || straceEnvLongName(literal):
 			// strace's env option takes var[=val] as a separate word and
 			// injects or REMOVES the variable in the traced child's
 			// environment — the same mutation the env arm refuses, in
@@ -557,8 +557,11 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 			}
 			value, ok := literalShellWord(words[1])
 			return 2, !ok || accountEnvironmentOperandDenied(value, names)
-		case strings.HasPrefix(literal, "--env="):
-			return 1, accountEnvironmentOperandDenied(literal[len("--env="):], names)
+		case strings.HasPrefix(literal, "--") && strings.Contains(literal, "="):
+			name, operand, _ := strings.Cut(literal, "=")
+			if straceEnvLongName(name) {
+				return 1, accountEnvironmentOperandDenied(operand, names)
+			}
 		case !strings.HasPrefix(literal, "--"):
 			// A short-option cluster reaches -E after its flags
 			// (`-fECODEX_HOME=/o`), and getopt hands the rest of the word to
@@ -608,7 +611,11 @@ func stracePrefixMutates(word *syntax.Word, names map[string]struct{}) bool {
 	if text == "" || !strings.HasPrefix(text, "-") {
 		return false
 	}
-	operand, isEnv := strings.CutPrefix(text, "--env=")
+	var operand string
+	isEnv := false
+	if name, rest, found := strings.Cut(text, "="); found && straceEnvLongName(name) {
+		operand, isEnv = rest, true
+	}
 	if !isEnv && !strings.HasPrefix(text, "--") {
 		// -E anywhere in a short-option cluster takes the rest of the word.
 		if i := strings.IndexByte(text, 'E'); i > 0 {
@@ -618,5 +625,14 @@ func stracePrefixMutates(word *syntax.Word, names map[string]struct{}) bool {
 	if isEnv {
 		return !strings.Contains(operand, "=") || accountEnvironmentOperandDenied(operand, names)
 	}
-	return strings.HasPrefix("--env=", text)
+	return strings.HasPrefix("--env=", text) || (!strings.Contains(text, "=") && straceEnvLongName(text))
+}
+
+// straceEnvLongName reports whether word is --env or an abbreviation of it:
+// strace parses long options with getopt_long, which accepts any unambiguous
+// prefix, so `--en=CODEX_HOME=/o` sets the variable under the installed
+// strace. Three or more characters are treated as --env (fail closed — `--e`
+// would be ambiguous to getopt, and refusing it costs nothing real).
+func straceEnvLongName(word string) bool {
+	return len(word) >= 3 && strings.HasPrefix("--env", word)
 }

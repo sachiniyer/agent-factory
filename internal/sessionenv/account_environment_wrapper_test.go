@@ -270,6 +270,14 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace -fE CODEX_HOME=/other codex", true},
 		{"strace -fE codex", false},
 		{"strace -fEPORT=1 codex", false},
+		// getopt_long accepts unambiguous prefixes (verified: strace
+		// --en=CODEX_HOME=/o sets it in the child).
+		{"strace --en=CODEX_HOME=/other codex", true},
+		{"strace --e=CODEX_HOME=/other codex", true},
+		{"strace --en CODEX_HOME=/other codex", true},
+		{"strace --en=CODEX_HOME=$V codex", true},
+		{"strace --en$x codex", true},
+		{"strace --en=PORT=1 codex", false},
 		// Control: the same expansions on a name af does not own, and the
 		// non-strace spelling, stay allowed.
 		{"strace -EPORT=$V codex", false},
