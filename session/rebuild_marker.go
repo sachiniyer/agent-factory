@@ -1,6 +1,8 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,8 +24,45 @@ import (
 // presence means "a teardown is owed"; a restarted agent-server reads it and
 // re-arms the obligation before anything else can respawn.
 
-// RebuildTeardownMarkerName is the marker's file name inside the session dir.
-const RebuildTeardownMarkerName = "rebuild-teardown.pending"
+// The marker is keyed by the SESSION's identity, never by the directory it sits
+// in (#5842). A provisioned agent-server runs from <sessionDir>/af, so its
+// directory is private to it — but one launched from an INSTALLED af (a supported
+// remote-hook mode) resolves to the shared install directory, and a fixed file name
+// there would be one marker for every agent-server on the host: one session's arm
+// would be read as another's obligation, and one's discharge would delete the
+// other's. Each session holds its own file, so N sessions on one host hold N
+// independent obligations.
+
+// rebuildTeardownMarkerPrefix and Suffix frame the per-session marker file name.
+const (
+	rebuildTeardownMarkerPrefix = "rebuild-teardown-"
+	rebuildTeardownMarkerSuffix = ".pending"
+)
+
+// RebuildTeardownKey is the stable per-session key for the marker: a digest of the
+// workspace path and the session title, the two facts an agent-server is started
+// with that together name one session on one host.
+func RebuildTeardownKey(repoPath, title string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(repoPath) + "\x00" + title))
+	return hex.EncodeToString(sum[:8])
+}
+
+// RebuildTeardownMarkerName is the marker's file name for a session key.
+func RebuildTeardownMarkerName(key string) string {
+	return rebuildTeardownMarkerPrefix + key + rebuildTeardownMarkerSuffix
+}
+
+func validMarkerKey(key string) bool {
+	if key == "" || len(key) > 64 {
+		return false
+	}
+	for _, r := range key {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 // InstallDurableRebuildTeardown installs the checkpoint and runtime-stop
 // callbacks a rebuilding respawn requires, backed by a marker file in dir, and
@@ -32,11 +71,14 @@ const RebuildTeardownMarkerName = "rebuild-teardown.pending"
 // The runtime stop is a no-op here by design: it exists to stop what no tmux
 // session carries — the daemon-supervised VS Code editor — and the in-sandbox
 // agent-server supervises none (the editor, when any, is the driving daemon's).
-func (i *Instance) InstallDurableRebuildTeardown(dir string) error {
+func (i *Instance) InstallDurableRebuildTeardown(dir, key string) error {
 	if dir == "" {
 		return fmt.Errorf("rebuild teardown marker needs a session directory")
 	}
-	marker := filepath.Join(dir, RebuildTeardownMarkerName)
+	if !validMarkerKey(key) {
+		return fmt.Errorf("rebuild teardown marker needs a session key (RebuildTeardownKey), got %q", key)
+	}
+	marker := filepath.Join(dir, RebuildTeardownMarkerName(key))
 	i.SetRebuildTeardownNotify(func(inst *Instance) error {
 		if inst.RebuildTeardownPending() {
 			return writeMarkerDurable(marker)

@@ -84,6 +84,10 @@ func (u TaskUpdate) IsEmpty() bool {
 		u.ProjectPath == nil && u.Program == nil && u.Enabled == nil
 }
 
+// ApplyTo is apply for callers outside the package that keep a local copy of a
+// task and must advance it by a patch the daemon accepted.
+func (u TaskUpdate) ApplyTo(t Task) Task { return u.apply(t) }
+
 // apply merges the non-nil fields of u onto t and returns the result. It never
 // touches CreatedAt, LastRunAt, LastRunStatus, or DroppedEvents, so a merge onto
 // the freshly-loaded record preserves those daemon-owned values automatically.

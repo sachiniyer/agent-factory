@@ -12,7 +12,11 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-func markerPath(dir string) string { return filepath.Join(dir, RebuildTeardownMarkerName) }
+var testKey = RebuildTeardownKey("/ws/a", "t")
+
+func markerPath(dir string) string { return markerPathFor(dir, testKey) }
+
+func markerPathFor(dir, key string) string { return filepath.Join(dir, RebuildTeardownMarkerName(key)) }
 
 // The sandbox-side instance can make the arm durable: before this, the very first
 // SetRebuildTeardownPending(true) of a relaunch refused (#5824).
@@ -23,7 +27,7 @@ func TestDurableRebuildTeardownMarkerArmsAndDischarges(t *testing.T) {
 	require.Error(t, inst.SetRebuildTeardownPending(true), "premise: with no callback installed the arm is refused")
 	inst = &Instance{Title: "t"}
 
-	require.NoError(t, inst.InstallDurableRebuildTeardown(dir))
+	require.NoError(t, inst.InstallDurableRebuildTeardown(dir, testKey))
 	require.NoError(t, inst.SetRebuildTeardownPending(true))
 	info, err := os.Stat(markerPath(dir))
 	require.NoError(t, err, "the arm must be on disk before the rebuild it guards")
@@ -38,21 +42,21 @@ func TestDurableRebuildTeardownMarkerArmsAndDischarges(t *testing.T) {
 func TestDurableRebuildTeardownSurvivesARestart(t *testing.T) {
 	dir := t.TempDir()
 	first := &Instance{Title: "t"}
-	require.NoError(t, first.InstallDurableRebuildTeardown(dir))
+	require.NoError(t, first.InstallDurableRebuildTeardown(dir, testKey))
 	require.NoError(t, first.SetRebuildTeardownPending(true))
 	// ...the agent-server dies here, mid-rebuild.
 
 	second := &Instance{Title: "t"}
 	require.False(t, second.RebuildTeardownPending(), "premise: a fresh process knows nothing")
-	require.NoError(t, second.InstallDurableRebuildTeardown(dir))
+	require.NoError(t, second.InstallDurableRebuildTeardown(dir, testKey))
 	assert.True(t, second.RebuildTeardownPending(), "the owed teardown must be restored from the marker")
 	assert.FileExists(t, markerPath(dir))
 
 	// A marker that is not a regular file is not guessed at.
 	bad := t.TempDir()
 	require.NoError(t, os.Mkdir(markerPath(bad), 0o700))
-	assert.Error(t, (&Instance{Title: "t"}).InstallDurableRebuildTeardown(bad))
-	assert.Error(t, (&Instance{Title: "t"}).InstallDurableRebuildTeardown(""))
+	assert.Error(t, (&Instance{Title: "t"}).InstallDurableRebuildTeardown(bad, testKey))
+	assert.Error(t, (&Instance{Title: "t"}).InstallDurableRebuildTeardown("", testKey))
 }
 
 // The property of #5824: a relaunch on a sandbox whose worktree was deleted
@@ -111,7 +115,7 @@ func TestRelaunchRebuildsADeletedWorktreeOnTheRecordedBranch(t *testing.T) {
 
 			markerDir := t.TempDir()
 			if install {
-				require.NoError(t, inst.InstallDurableRebuildTeardown(markerDir))
+				require.NoError(t, inst.InstallDurableRebuildTeardown(markerDir, testKey))
 			}
 			// The exact call relaunchLocalAgent makes once the stop is confirmed.
 			err = inst.currentBackend().(*LocalBackend).Respawn(inst)
@@ -128,5 +132,43 @@ func TestRelaunchRebuildsADeletedWorktreeOnTheRecordedBranch(t *testing.T) {
 			assert.NoFileExists(t, markerPath(markerDir), "the teardown obligation is discharged once the rebuild settles")
 			assert.False(t, inst.RebuildTeardownPending())
 		})
+	}
+}
+
+// #5842: two sessions whose agent-servers share one directory (an installed af, not
+// a per-session staged binary) hold two independent obligations. One's arm is not
+// the other's, and clearing one leaves the other.
+func TestRebuildTeardownMarkersAreIndependentPerSession(t *testing.T) {
+	shared := t.TempDir() // the installed binary's directory, common to both
+	keyA, keyB := RebuildTeardownKey("/ws/a", "feature"), RebuildTeardownKey("/ws/b", "feature")
+	require.NotEqual(t, keyA, keyB, "the same title in two workspaces is two sessions")
+	require.NotEqual(t, keyA, RebuildTeardownKey("/ws/a", "other"), "two titles in one workspace are two sessions")
+	require.Equal(t, keyA, RebuildTeardownKey("/ws/a/", "feature"), "the key is stable across spellings of one path")
+
+	a, b := &Instance{Title: "feature"}, &Instance{Title: "feature"}
+	require.NoError(t, a.InstallDurableRebuildTeardown(shared, keyA))
+	require.NoError(t, b.InstallDurableRebuildTeardown(shared, keyB))
+
+	// Each arms its own obligation.
+	require.NoError(t, a.SetRebuildTeardownPending(true))
+	require.NoError(t, b.SetRebuildTeardownPending(true))
+	assert.FileExists(t, markerPathFor(shared, keyA))
+	assert.FileExists(t, markerPathFor(shared, keyB))
+
+	// Clearing A leaves B's obligation intact.
+	require.NoError(t, a.SetRebuildTeardownPending(false))
+	assert.NoFileExists(t, markerPathFor(shared, keyA))
+	assert.FileExists(t, markerPathFor(shared, keyB), "A's discharge must not delete B's owed teardown")
+
+	// A restart of A does not inherit B's obligation; a restart of B recovers its own.
+	a2, b2 := &Instance{Title: "feature"}, &Instance{Title: "feature"}
+	require.NoError(t, a2.InstallDurableRebuildTeardown(shared, keyA))
+	assert.False(t, a2.RebuildTeardownPending(), "A must not read B's marker as its own")
+	require.NoError(t, b2.InstallDurableRebuildTeardown(shared, keyB))
+	assert.True(t, b2.RebuildTeardownPending(), "B's obligation survives A's activity and B's own restart")
+
+	// A key is required: a missing or hostile one is refused rather than guessed.
+	for _, bad := range []string{"", "../x", "NOTHEX", "a/b"} {
+		assert.Error(t, (&Instance{Title: "t"}).InstallDurableRebuildTeardown(shared, bad), "%q", bad)
 	}
 }

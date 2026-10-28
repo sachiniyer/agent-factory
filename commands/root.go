@@ -54,11 +54,18 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 		// keeps the usage/flag help on flag-PARSE errors (which fail before this
 		// hook runs) while suppressing it for genuine runtime errors across every
 		// subcommand, since cobra checks the root command's SilenceUsage (#1749).
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			cmd.Root().SilenceUsage = true
+			// Before anything else runs: a verb that can only act on THIS machine
+			// refuses a remote target here, rather than answering about the wrong
+			// host (W9.4). See targetclass.go for the table.
+			if err := refuseLocalOnlyUnderRemoteTarget(cmd); err != nil {
+				return err
+			}
 			if configWarningsToStderr(cmd) {
 				config.SetInteractiveWarningWriter(os.Stderr)
 			}
+			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -429,6 +436,7 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(targetCmd)
+	rootCmd.AddCommand(hostsCmd)
 	rootCmd.AddCommand(accountsCmd)
 	rootCmd.AddCommand(quotaCmd)
 	rootCmd.AddCommand(api.SessionsCmd)

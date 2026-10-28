@@ -3,6 +3,7 @@ package task
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -113,7 +114,15 @@ type Task struct {
 	// migration on purpose: the backfill would have to shell out to git for
 	// every task inside the tasks.json load path, and rows pick the field up as
 	// they are next written anyway.
-	RepoID        string     `json:"repo_id,omitempty"`
+	RepoID string `json:"repo_id,omitempty"`
+	// SandboxOwner is the id of the sandbox session whose credential created this
+	// task (#5571 W3.5). It is durable provenance the DAEMON writes — a sandbox's
+	// own value is overwritten — and every delivery re-checks against it: the
+	// target must still be an existing off-box session in the owner's project, and
+	// the delivery never auto-creates. Empty for every operator-created task.
+	// UpdateTask is refused to a sandbox credential, so it cannot be edited away
+	// by the agent it constrains.
+	SandboxOwner  string     `json:"sandbox_owner,omitempty"`
 	Program       string     `json:"program"`
 	Enabled       bool       `json:"enabled"`
 	CreatedAt     time.Time  `json:"created_at"`
@@ -343,6 +352,12 @@ func AddTask(t Task) error {
 	return err
 }
 
+// ErrTaskIDExists is returned when an add names the ID of a task already in the
+// store. The store refuses it atomically, under the tasks-file lock: an append
+// that shadowed an existing row would let a second record re-arm, replace or
+// impersonate the first (#5571 W3.5, Codex P1 on #5823).
+var ErrTaskIDExists = errors.New("a task with this id already exists")
+
 // AddTaskChecked is AddTask with a final pre-commit validator. The validator
 // runs after RepoID derivation and trigger validation, under the tasks-file
 // lock, so an error guarantees that no task was appended. It must not shell out
@@ -396,6 +411,11 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
+		}
+		for i := range tasks {
+			if tasks[i].ID == t.ID {
+				return fmt.Errorf("%w: %q", ErrTaskIDExists, t.ID)
+			}
 		}
 		if validate != nil {
 			if err := validate(t); err != nil {

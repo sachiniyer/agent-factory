@@ -30,8 +30,16 @@ func TestProbeOne_ReportsTheProbeAndSkipsAnInFlightHost(t *testing.T) {
 		return session.HostCheck{Reachable: true, Complete: true}, nil
 	})
 	r := probeOne(context.Background(), probeHostsFn, "one-probe", nil, "")
-	assert.True(t, r.Probed && r.Reachable)
+	assert.True(t, r.Probed && r.Reachable && r.Complete)
 	assert.Equal(t, []string{"one-probe"}, *called)
+
+	// An incomplete answer is carried through, never flattened to complete (#5841).
+	stubProbe(t, func(string) (session.HostCheck, error) {
+		return session.HostCheck{Reachable: true, Complete: false}, nil
+	})
+	r = probeOne(context.Background(), probeHostsFn, "incomplete-probe", nil, "")
+	assert.True(t, r.Probed && r.Reachable)
+	assert.False(t, r.Complete)
 
 	require.True(t, daemonHostProbes.tryAcquire("busy-probe"))
 	defer daemonHostProbes.release("busy-probe")

@@ -42,7 +42,7 @@ func TestPollPersistsALateReportedConversation(t *testing.T) {
 	require.Nil(t, persistedConversation(), "anti-vacuous: nothing persisted yet")
 
 	conv := session.AgentConversationData{Agent: "codex", ID: "019a3333-aaaa-bbbb-cccc-ddddeeeeffff", CaptureKind: session.ConversationCaptureCodexRollout}
-	require.True(t, inst.RecordReportedConversation(conv))
+	require.True(t, inst.RecordReportedConversationForTest(conv))
 	require.True(t, inst.ConversationUnpersisted())
 
 	// No liveness change, no reset change, no checkpoint: only the report.
