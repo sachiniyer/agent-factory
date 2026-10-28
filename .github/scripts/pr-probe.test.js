@@ -73,6 +73,7 @@ test("a normal PR reports exactly the check names it reported before probe mode"
       "Test (systemd, ${{ matrix.os }})",
       "Web",
       "Web and performance scope",
+      "TUI driver selftest",
       "Web selftest",
       "Performance and visual baselines",
       "Test (macOS)",
