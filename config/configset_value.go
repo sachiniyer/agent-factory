@@ -231,6 +231,12 @@ func validateStructuredConfigValue(key string, field reflect.Value) error {
 				return fmt.Errorf("limit_patterns.%s is not a valid regular expression: %w", agent, err)
 			}
 		}
+	case "hosts":
+		for name, entry := range field.Interface().(map[string]HostConfig) {
+			if err := ValidateHostEntry(name, entry); err != nil {
+				return err
+			}
+		}
 	case "keys":
 		overrides, err := normalizeKeyOverrides(field.Interface().(map[string]any), "af config set keys")
 		if err != nil {

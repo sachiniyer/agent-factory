@@ -33,11 +33,16 @@ func (s *Sidebar) syncFromStore() {
 	// override no longer folds anything — it only suppresses the ▾ marker the
 	// header fallback keys on, leaving an adoptable row that looks unselected
 	// (#4755 review). Clear the dead override on the transition; the
-	// pointer-keyed check also drops it across a #765 same-title swap.
+	// session-identity check also drops it across a #765 same-title swap (a new
+	// ID) but not across a same-session pointer replacement (#5651), which
+	// re-points the override at the replacement instead.
 	if s.treeCollapsed != nil {
 		if sel := s.proj.GetSelectedInstance(); sel == nil ||
-			sel != s.treeCollapsed || sel.ShownArchived() {
+			!sameSession(sel, s.treeCollapsed) || sel.ShownArchived() {
 			s.treeCollapsed = nil
+			s.rebuildVisibleItems()
+		} else if sel != s.treeCollapsed {
+			s.treeCollapsed = sel
 			s.rebuildVisibleItems()
 		}
 	}
@@ -516,7 +521,7 @@ func (s *Sidebar) tryMoveVerticalNavStop(dir int) bool {
 		if dir > 0 {
 			instances := s.proj.GetInstances()
 			if s.treeCollapsed != nil && sel.ItemIndex >= 0 && sel.ItemIndex < len(instances) &&
-				s.treeCollapsed == instances[sel.ItemIndex] {
+				sameSession(s.treeCollapsed, instances[sel.ItemIndex]) {
 				if s.moveCursorToNextInstanceRow() {
 					return true
 				}

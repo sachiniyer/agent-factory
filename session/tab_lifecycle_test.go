@@ -628,7 +628,17 @@ func TestToInstanceData_StagedRowsNeverOccupyTheAgentSlot(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, instance.Tabs, "premise: the pre-Launch state, nothing drained")
 
-	round := instance.ToInstanceData()
+	// W4.7: the SNAPSHOT projection publishes the staged row behind an implicit
+	// agent row, so a Lost/inert client still sees the roster — but the agent
+	// stays at index 0 and the staged web tab never occupies it.
+	projection := instance.ToInstanceData()
+	require.Len(t, projection.Tabs, 2)
+	require.Equal(t, TabKindAgent, projection.Tabs[0].Kind, "the agent slot stays the agent")
+	require.Equal(t, "https://example.com/app", projection.Tabs[1].URL)
+
+	// Durable storage is unchanged: the ordered roster stays empty and the
+	// staged row is persisted outside it, or it is lost.
+	round := projection.ForStorage()
 	require.Empty(t, round.Tabs, "no row may occupy the agent slot while the roster is empty")
 	require.Len(t, round.PendingTabs, 1, "but the staged row is still persisted, or it is lost")
 	require.Equal(t, "https://example.com/app", round.PendingTabs[0].URL)
