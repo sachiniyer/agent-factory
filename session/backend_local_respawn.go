@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -226,6 +227,15 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			// a deleted worktree is the expected permanent-failure shape, and the
 			// restore loop's escalation log should say so.
 			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
+		}
+		// Refuse BEFORE tearing anything down when no rebuild can follow: the
+		// teardown below exists to clear stale panes out of the way of a
+		// rebuilt checkout, and a rebuild that is bound to fail would kill a
+		// still-running agent for nothing — leaving the row with neither a pane
+		// nor a worktree, where refusing leaves it Lost with its panes intact.
+		if refusal := missingWorktreeRebuildRefusal(i, gw, resume, resolvedProgram); refusal != nil {
+			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir,
+				Err: fmt.Errorf("%w (%w)", err, refusal)}
 		}
 		// Arm the teardown obligation BEFORE the rebuild commits. A daemon exit
 		// between the rebuild landing the directory and a later arm would reload
@@ -580,6 +590,36 @@ func (i *Instance) teardownStalePanesForRebuild(workDir string, committed bool, 
 	if err := i.SetRebuildTeardownPending(false); err != nil {
 		return markRecoverRebuilt(committed, fmt.Errorf(
 			"recover: could not make the completed stale-pane teardown durable: %w", err))
+	}
+	return nil
+}
+
+// missingWorktreeRebuildRefusal says why a missing worktree cannot be rebuilt by
+// either path in respawnWithConversation, or nil when one can be attempted. The
+// branch rebuild needs the recorded branch; the fresh rebuild needs it gone AND
+// an exact recorded conversation to resume, and refuses otherwise. It reads git
+// refs and the recorded conversation only — no tmux, no checkout write — so it
+// can run before the stale-pane teardown that a rebuild requires (#5371).
+func missingWorktreeRebuildRefusal(i *Instance, gw *git.GitWorktree, resume bool, program string) error {
+	if gw.IsExternalWorktree() {
+		return fmt.Errorf("af never rebuilds an external worktree")
+	}
+	branch := gw.GetBranchName()
+	if strings.TrimSpace(branch) == "" {
+		return fmt.Errorf("the session records no branch to rebuild from")
+	}
+	exists, ok := gw.BranchExists(branch)
+	if !ok {
+		return fmt.Errorf("could not tell whether branch %s still exists", branch)
+	}
+	if exists {
+		return nil
+	}
+	if !resume {
+		return fmt.Errorf("branch %s is gone, and a fresh rebuild is only allowed when resuming the recorded conversation", branch)
+	}
+	if _, ok := prepareExactResumeConversation(i, program); !ok {
+		return fmt.Errorf("branch %s is gone and no recorded conversation id can resume into a fresh rebuild", branch)
 	}
 	return nil
 }
