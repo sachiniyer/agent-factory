@@ -7248,6 +7248,26 @@ async function fetchPreviewOrigin(sessionId, tabId, token2) {
     return "";
   }
 }
+async function fetchEditorPortOrigin(sessionId, token2) {
+  const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
+  const headers = {};
+  if (token2 !== "") {
+    headers.Authorization = `Bearer ${token2}`;
+  }
+  try {
+    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    if (!resp.ok) {
+      return null;
+    }
+    const env = await resp.json();
+    if (env?.error != null || !env?.data?.origin || !env?.data?.bootstrap_url) {
+      return null;
+    }
+    return { origin: env.data.origin, bootstrapUrl: env.data.bootstrap_url };
+  } catch {
+    return null;
+  }
+}
 async function probeWebTab(path, token2, timeoutMs) {
   const headers = {};
   if (token2 !== "") {
@@ -14887,9 +14907,20 @@ var SplitView = class {
     };
     const external = !proxied;
     let previewSrcOnce = null;
+    let editorPortBootstrap = false;
+    let editorPortOpenHref = "";
     const resolvePreviewSrc = (fresh) => {
-      if (fresh) {
+      if (fresh || editorPortBootstrap) {
         previewSrcOnce = null;
+        editorPortBootstrap = false;
+        editorPortOpenHref = "";
+      }
+      if (previewSrcOnce === null && isVSCode && mayUsePreviewOrigin && !this.archived && !canUsePreviewOrigin(window.location)) {
+        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then((r) => {
+          editorPortBootstrap = r !== null;
+          editorPortOpenHref = r?.origin ?? "";
+          return r?.bootstrapUrl ?? "";
+        });
       }
       if (previewSrcOnce === null) {
         previewSrcOnce = mayUsePreviewOrigin && !this.archived && canUsePreviewOrigin(window.location) ? fetchPreviewOrigin(sessionId, realId, this.token ?? "").then(async (origin) => {
@@ -14924,8 +14955,9 @@ var SplitView = class {
       const base = previewSrc !== "" ? previewSrc : src;
       frame.setAttribute("sandbox", webSandbox(isVSCode, previewSrc !== ""));
       if (previewSrc !== "") {
-        open.href = previewSrc;
-        fbLink.href = previewSrc;
+        const openTo = editorPortOpenHref !== "" ? editorPortOpenHref : previewSrc;
+        open.href = openTo;
+        fbLink.href = openTo;
       } else {
         open.href = openHref;
         fbLink.href = openHref;

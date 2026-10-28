@@ -181,6 +181,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	// socket in place (webListeners.reconcile, below in ApplyConfig).
 	"network.listen_addr":            func(a, b *config.Config) bool { return a.ListenAddr != b.ListenAddr },
 	"network.preview_listen_addr":    func(a, b *config.Config) bool { return a.PreviewListenAddr != b.PreviewListenAddr },
+	"network.editor_origin_ports":    func(a, b *config.Config) bool { return a.EditorOriginPorts != b.EditorOriginPorts },
 	"network.require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
 	"network.require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
 	"network.cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
