@@ -217,15 +217,32 @@ func shadowedLiteralChildTailMutates(words []*syntax.Word, names map[string]stru
 
 // laterLiteralChildSuffixMutates judges each suffix of words that begins at a
 // literal verdict word. A non-literal word is skipped: it is an argument, not
-// the command the wrapper runs, so it is not an exec boundary.
+// the command the wrapper runs, so it is not an exec boundary. Every words slice
+// in one validation is a suffix of the call's Args, so words[0] names the answer
+// and memo.literalChildTails holds it for every position already scanned: the
+// scan stops at the first cached position or the first mutating suffix, and each
+// position it passed has that same answer, so no position is scanned twice
+// (Codex P2 on #5711 — nested option interpretations returned one long tail
+// once each).
 func laterLiteralChildSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	for i := range words {
-		if _, literal := literalShellWord(words[i]); !literal {
-			continue
+	answer := false
+	scanned := 0
+	for scanned < len(words) {
+		if cached, seen := memo.literalChildTails[words[scanned]]; seen {
+			answer = cached
+			break
 		}
-		if accountChildTailSuffixStartsVerdict(words[i]) && judgeShadowedChildSuffix(words[i:], names, memo) {
-			return true
+		if _, literal := literalShellWord(words[scanned]); literal &&
+			accountChildTailSuffixStartsVerdict(words[scanned]) &&
+			judgeShadowedChildSuffix(words[scanned:], names, memo) {
+			answer = true
+			scanned++
+			break
 		}
+		scanned++
 	}
-	return false
+	for _, word := range words[:scanned] {
+		memo.literalChildTails[word] = answer
+	}
+	return answer
 }
