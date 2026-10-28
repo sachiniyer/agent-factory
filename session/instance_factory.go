@@ -307,12 +307,11 @@ func reapUnusableSandbox(title string, res ProvisionResult, cause error, retain 
 // ForceRemote hook selector; otherwise the repo's `backend` config key, which
 // defaults to local.
 //
-// The config read is best-effort for the DEFAULT (no explicit selection) path:
-// a path that is not a git repo, or a repo with no readable config, falls back
-// to local so a local session is never blocked by config resolution here (the
-// same posture as before Phase 4, where this factory read no config for a local
-// session). A config that loads but declares an invalid backend value surfaces
-// that error — misconfiguration should fail the create, not silently run local.
+// On the DEFAULT (no explicit selection) path a path that is not a git repo, or
+// a repo with no in-repo config or no `backend` key, resolves to local. A repo
+// whose config exists but cannot be resolved FAILS the create with that error
+// (#5801): the backend is undeterminable, and guessing local would run the agent
+// somewhere other than the isolation the repo chose.
 func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, error) {
 	if opts.Host != "" {
 		// A host pick is an ssh placement. An explicit backend that is not ssh
@@ -328,9 +327,18 @@ func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, erro
 	if opts.ForceRemote {
 		return BackendHook, nil
 	}
-	cfg, err := resolveRepoConfig(absPath)
+	// Not a git repo: there is no in-repo config to read, so local as ever.
+	repo, err := config.RepoFromPath(absPath)
 	if err != nil {
 		return BackendLocal, nil
+	}
+	// A repo whose config EXISTS but cannot be resolved (a TOML syntax error
+	// anywhere in it, an invalid value) has an undeterminable backend. Falling
+	// back to local would run an agent the repo isolated (docker/ssh) on the
+	// daemon host with no error, so refuse with the config error (#5801).
+	cfg, err := config.ResolveConfigForRepo(repo)
+	if err != nil {
+		return "", fmt.Errorf("cannot determine the backend for %s: its configuration could not be resolved, and creating the session on the local machine instead could bypass the isolation the repo asks for — fix the config and retry: %w", absPath, err)
 	}
 	return ParseBackendKind(cfg.Backend)
 }
