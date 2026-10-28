@@ -2243,6 +2243,9 @@
           "force_remote": {
             "ok": "Compatibility-only wire selector; the TUI uses the creation form backend field instead (#4017)."
           },
+          "validate_first": {
+            "ok": "Opt-in for clients that cannot run the host-owned create checks themselves (the remote CLI). The TUI validates account and preflight client-side on the daemon's own host, so it does not ask the daemon to repeat them (#5744)."
+          },
           "in_place": {
             "gap": "session.create.opt.inplace"
           },
@@ -2641,6 +2644,9 @@
         },
         "force_remote": {
           "ok": "The web reaches the hook backend explicitly via backend='hook' — its picker never emits force_remote, and the explicit backend wins over the legacy selector (session/instance_factory.go). Same reason the CLI's force_remote cell is `ok`."
+        },
+        "validate_first": {
+          "ok": "Opt-in used by the remote CLI, which cannot run the host-owned account and preflight checks itself; the web's pickers offer only accounts and backends the daemon already reported, so it does not need the daemon to repeat them (#5744)."
         }
       },
       "CreateTab": {

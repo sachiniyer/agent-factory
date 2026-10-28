@@ -71,6 +71,12 @@ type CreateSessionRequest struct {
 	// intact. Incompatible with ForceRemote.
 	InPlace     bool `json:"in_place"`
 	ForceRemote bool `json:"force_remote"`
+	// ValidateFirst asks the daemon to run the create's host-owned checks —
+	// the explicit account against ITS registry and the backend-aware local
+	// prerequisites — before the title is reserved. A remote client cannot run
+	// them (they are answers about the daemon's host), and reserving first can
+	// rename an existing archive for a create that is then refused (#5744).
+	ValidateFirst bool `json:"validate_first,omitempty"`
 	// Backend explicitly selects the session's runtime (the `--backend` create
 	// flag): one of local|docker|ssh|hook. Empty resolves from the repo's
 	// `backend` config key, defaulting to local.
