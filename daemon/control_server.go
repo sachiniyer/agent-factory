@@ -450,7 +450,20 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	}
 	// A remote client sends the project path as typed; expand ~ against this
 	// daemon's home before anything resolves it.
-	req.RepoPath = config.ExpandTilde(strings.TrimSpace(req.RepoPath))
+	// A still-relative path would resolve against the DAEMON's working directory
+	// and could silently pick a different checkout, so it is refused (#5743).
+	if strings.TrimSpace(req.RepoPath) != "" {
+		resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
+		if err != nil {
+			return err
+		}
+		req.RepoPath = resolved
+	}
+	if req.ValidateFirst {
+		if err := validateCreateFirst(req); err != nil {
+			return err
+		}
+	}
 	req.Program = trimProgramEnumIfBare(req.Program)
 	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)

@@ -372,6 +372,13 @@ func TestAgentServerProgramAcceptsOnlyGeneratedGrammar(t *testing.T) {
 	if got, ok := agentServerProgram(withEnv); !ok || got != "claude" {
 		t.Fatalf("generated default handoff with session env = (%q, %v), want (claude, true)", got, ok)
 	}
+	withBranch := append(append([]string(nil), withProgram...), "--branch", "af/my-session")
+	if got, ok := agentServerProgram(withBranch); !ok || got != "opencode --model test" {
+		t.Fatalf("handoff with the daemon-named branch = (%q, %v), want (opencode command, true)", got, ok)
+	}
+	if _, ok := agentServerProgram(append(append([]string(nil), base...), "--branch")); ok {
+		t.Fatal("--branch without a value must be rejected")
+	}
 	malformed := append(append([]string(nil), base...), "--program-resolved")
 	if got, ok := agentServerProgram(malformed); ok || got != "" {
 		t.Fatalf("malformed handoff = (%q, %v), want no program", got, ok)

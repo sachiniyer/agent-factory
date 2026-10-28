@@ -296,11 +296,17 @@ func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName
 // naming must not independently reload a restart-required value after its caller
 // has already performed collision checks against a frozen snapshot.
 func NewGitWorktree(repoPath string, sessionName string, branchPrefix string) (tree *GitWorktree, branchname string, err error) {
+	return NewGitWorktreeNamed(repoPath, sessionName, BranchForTitle(branchPrefix, sessionName))
+}
+
+// NewGitWorktreeNamed is NewGitWorktree for a caller that has already chosen the
+// exact branch name — the daemon naming it for an off-box session so the
+// sandbox does not re-derive it from its own host's config (#5571 W2.4).
+func NewGitWorktreeNamed(repoPath string, sessionName string, branchName string) (tree *GitWorktree, branchname string, err error) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load config: %w", err)
 	}
-	branchName := BranchForTitle(branchPrefix, sessionName)
 
 	// Convert repoPath to absolute path
 	absPath, err := filepath.Abs(repoPath)

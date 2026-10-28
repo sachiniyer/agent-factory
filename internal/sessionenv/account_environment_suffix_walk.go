@@ -68,6 +68,12 @@ type operandTailMemo struct {
 	// started in this validation. It is shared by pointer so every copy of
 	// the memo draws on one budget; see shadowedChildTailMutates.
 	childJudgements *int
+	// straceRunWork counts the words strace option-run scans have visited in
+	// this validation (a stat: each position is judged once).
+	straceRunWork *int
+	// straceRuns memoizes strace option-run verdicts per position; see
+	// straceOptionRunRefused.
+	straceRuns map[straceRunKey]straceRunVerdict
 }
 
 func newOperandTailMemo() operandTailMemo {
@@ -93,6 +99,8 @@ func newOperandTailMemo() operandTailMemo {
 		xargsNestedAny:         map[xargsMarkerKey]bool{},
 		childTails:             map[*syntax.Word]bool{},
 		childJudgements:        new(int),
+		straceRunWork:          new(int),
+		straceRuns:             map[straceRunKey]straceRunVerdict{},
 	}
 }
 

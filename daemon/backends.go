@@ -80,6 +80,16 @@ type BackendOption struct {
 	// create cannot disagree. Set only on kinds that inject a callback; empty
 	// when a callback would be delivered.
 	CallbackUnavailableReason string `json:"callback_unavailable_reason,omitempty"`
+	// Readiness and Note describe what af last learned about the REMOTE host
+	// behind a sandbox backend (#5571 W2.3): "ready", "stale", "unprobed" or
+	// "blocked". They come from the verdict cached by af's last real contact
+	// with the host, so this RPC still dials nothing. A stale or unprobed host
+	// stays selectable (a create re-runs the live check, and blocking would make
+	// the first contact impossible) but is never presented as plain available:
+	// clients render Note beside the backend. Empty for backends with no remote
+	// host.
+	Readiness string `json:"readiness,omitempty"`
+	Note      string `json:"note,omitempty"`
 }
 
 // ListBackendsResponse is the catalog for one repo.
@@ -241,7 +251,28 @@ func backendOptionFor(kind session.BackendKind, cfg *config.ResolvedConfig, cfgE
 		return opt
 	}
 	opt.Status = BackendAvailable
+	applyHostReadiness(&opt, kind, cfg)
 	return opt
+}
+
+// applyHostReadiness folds the cached remote-host verdict into a sandbox
+// option. Only a FRESH blocking verdict makes the backend unavailable — the
+// reason is the same text a create would fail with.
+func applyHostReadiness(opt *BackendOption, kind session.BackendKind, cfg *config.ResolvedConfig) {
+	if kind != session.BackendSandbox || cfg == nil {
+		return
+	}
+	r := session.ReadHostReadiness(cfg.SandboxSSH)
+	opt.Readiness = string(r.State)
+	switch r.State {
+	case session.HostReadinessBlocked:
+		opt.Status = BackendUnavailable
+		opt.Reason = r.Reason + " (" + r.Describe() + "; a create re-checks the host)"
+	case session.HostReadinessReady:
+		// plain available
+	default:
+		opt.Note = r.Describe()
+	}
 }
 
 // backendLabel turns the daemon's resolved repo config into presentation text so

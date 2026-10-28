@@ -314,3 +314,53 @@ func TestSandboxReapScriptExpectedUsesResolvedSessionDir(t *testing.T) {
 	assert.NotContains(t, script, "/root/.af-sessions/",
 		"and must NOT carry the unresolved mktemp spelling, or the identity check mismatches")
 }
+
+// W1.7: a SIGTERM the agent-server takes ~1s to honour must not be escalated to
+// SIGKILL after 0.3s — the process should exit on its own terms.
+func TestRemotePIDIdentityKillScriptGivesSlowSIGTERMTimeToTakeEffect(t *testing.T) {
+	resolvedAfPath := filepath.Join(testguard.CanonicalTempDir(t), "session", "af")
+	require.NoError(t, os.MkdirAll(filepath.Dir(resolvedAfPath), 0o755))
+
+	proc := exec.Command("/bin/sh", "-c", `trap 'sleep 1; exit 0' TERM; while :; do sleep 0.1; done`)
+	proc.Args[0] = resolvedAfPath
+	require.NoError(t, proc.Start())
+	waited := make(chan error, 1)
+	go func() { waited <- proc.Wait() }() // reap promptly so the exit is not a zombie
+	t.Cleanup(func() { _ = proc.Process.Kill() })
+	require.True(t, pidAlive(proc.Process.Pid))
+
+	out, err := exec.Command("sh", "-c", remotePIDIdentityKillScript(strconv.Itoa(proc.Process.Pid), resolvedAfPath, "")).CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	select {
+	case werr := <-waited:
+		assert.NoError(t, werr, "the process must exit by its own SIGTERM handler, not be SIGKILLed after 0.3s")
+	case <-time.After(5 * time.Second):
+		t.Fatal("process never exited")
+	}
+}
+
+// A server that ignores SIGTERM must still be reaped: the kill script waits out
+// the grace window, escalates to SIGKILL, and exits 0 only once it has SEEN the
+// process die (#5571 W1.7) — never on a process it merely stopped watching.
+// Ported from the closed #5633, adapted to the tokenRef-aware script.
+func TestRemotePIDIdentityKillScriptEscalatesToKillWhenTermIgnored(t *testing.T) {
+	afPath := filepath.Join(testguard.CanonicalTempDir(t), "session", "af")
+	require.NoError(t, os.MkdirAll(filepath.Dir(afPath), 0o755))
+	cmd := exec.Command("sh", "-c", `trap '' TERM; while :; do sleep 0.2; done`)
+	cmd.Args[0] = afPath
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+	pid := cmd.Process.Pid
+	require.True(t, pidAlive(pid), "premise: the process must be alive")
+
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+	out, err := exec.Command("sh", "-c", remotePIDIdentityKillScript(strconv.Itoa(pid), afPath, "")).CombinedOutput()
+	require.NoError(t, err, "a SIGTERM-ignoring server is killed and confirmed gone: %s", out)
+	require.Error(t, <-waited, "the process must have died by signal")
+}
