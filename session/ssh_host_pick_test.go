@@ -93,3 +93,48 @@ func TestInstanceDataRoundTripsHostPick(t *testing.T) {
 		t.Fatalf("ToInstanceData dropped Host: %q", data.Host)
 	}
 }
+
+// Create (chooseListedHost), the catalog (HostUnusableReason) and the
+// default-host stand-in (BackendConfigError) answer one question, so they agree
+// on every entry shape (#5745).
+func TestListedHostPredicateAgreesAcrossSurfaces(t *testing.T) {
+	restore := SetLookPathForTest(func(string) (string, error) { return "/usr/bin/ssh", nil })
+	defer restore()
+	cases := []struct {
+		name  string
+		entry config.HostConfig
+		ok    bool
+	}{
+		{"plain", config.HostConfig{Host: "a.example"}, true},
+		{"ipv6", config.HostConfig{Host: "::1"}, true},
+		{"embedded port conflicts with port field", config.HostConfig{Host: "box.example:2222", Port: 22}, false},
+		{"embedded port", config.HostConfig{Host: "box.example:2222"}, false},
+		{"use_ssh_config", config.HostConfig{Host: "a.example", UseSSHConfig: true}, false},
+		{"option shaped", config.HostConfig{Host: "-oProxyCommand=x"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := resolvedWithHosts(map[string]config.HostConfig{"h": tc.entry}, "h", nil)
+			_, _, createErr := chooseListedHost("h", cfg)
+			defaultErr := BackendConfigError(BackendSSH, cfg)
+			catalogErr := HostUnusableReason("h", cfg, t.TempDir())
+			assert.Equal(t, tc.ok, createErr == nil, "create: %v", createErr)
+			assert.Equal(t, tc.ok, defaultErr == nil, "default-host stand-in: %v", defaultErr)
+			if !tc.ok {
+				require.Error(t, catalogErr)
+				assert.Contains(t, catalogErr.Error(), createErr.Error(), "the catalog reports create's own reason")
+			}
+		})
+	}
+}
+
+// A default host whose key is unreadable is not usable: the catalog must check
+// the host's identity file, not the repo's (absent) one.
+func TestBackendUnusableReasonChecksDefaultHostIdentity(t *testing.T) {
+	restore := SetLookPathForTest(func(string) (string, error) { return "/usr/bin/ssh", nil })
+	defer restore()
+	cfg := resolvedWithHosts(map[string]config.HostConfig{"h": {Host: "a.example", IdentityFile: "/nonexistent/af-key"}}, "h", nil)
+	err := BackendUnusableReason(BackendSSH, cfg, t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "identity_file", "the key is named, not the (also absent) origin")
+}
