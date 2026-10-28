@@ -173,11 +173,11 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 				// reads the repoID-keyed storage map and so recovers what the
 				// snapshot dropped. The error message keeps the
 				// human-readable repo Paths the user passes to --repo.
-				repoIDs, repoPaths, gaps, err := diskRepoPathsForTitle(title, paths)
+				repoIDs, repoPaths, unreadable, corrupted, err := diskRepoPathsForTitle(title, paths)
 				if err == nil && len(repoIDs) > 1 {
 					return nil, "", session.AmbiguousTitleError(title, repoPaths)
 				}
-				notice = warnIncompleteTitleWidening(title, gaps, err)
+				notice = warnIncompleteTitleWidening(title, unreadable, corrupted, err)
 			}
 			return &matches[0], notice, nil
 		}
@@ -670,6 +670,19 @@ func resolveAttachTarget(title string) (string, string, error) {
 	return instance.Title, repoID, nil
 }
 
+// closeLogForOutputMode is the deferred close for commands whose success path
+// returns nil without going through jsonOut (attach hands the terminal over, so
+// it writes no envelope). Under --json stderr must stay empty on success, so the
+// free-form "wrote logs to ..." note is suppressed; the bare path still prints it
+// (#5649).
+func closeLogForOutputMode() {
+	if envelopeOutput {
+		log.CloseQuiet()
+		return
+	}
+	log.Close()
+}
+
 var sessionsAttachCmd = &cobra.Command{
 	Use:   "attach <title>",
 	Short: "Attach to a session's terminal",
@@ -677,7 +690,7 @@ var sessionsAttachCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
-		defer log.Close()
+		defer closeLogForOutputMode()
 
 		title, repoID, err := resolveAttachTarget(args[0])
 		if err != nil {

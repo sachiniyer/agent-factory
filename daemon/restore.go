@@ -115,6 +115,16 @@ func (m *Manager) RestoreSession(req RestoreSessionRequest) (string, session.Ins
 		path, restoreErr := m.restoreLostOrDeadSession(repoID, title, instance, req.ForceReap)
 		return path, resolved, restoreErr
 	default:
+		// A flagged live row is the case the plain refusal misdiagnoses: the
+		// session may be perfectly healthy and af simply cannot reach it, so
+		// restore is neither needed nor able to verify that. Name the outage and
+		// the remedy rather than implying a state problem (#5571 W1.3).
+		if u := instance.UnreachableSnapshot(); u != nil {
+			return "", session.InstanceData{}, fmt.Errorf(
+				"cannot restore session %q: its sandbox has been unreachable for %s (%s) — the session is still marked live, and af retries the connection automatically. "+
+					"Retry when the row recovers; if its work is expendable, kill and recreate it instead",
+				title, unreachableAge(u), u.Error)
+		}
 		return "", session.InstanceData{}, fmt.Errorf("session %q is not archived, lost, or dead", title)
 	}
 }
@@ -312,12 +322,14 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// really lost and healing the row delivers exactly what was asked for, without
 	// the destruction. A user who genuinely wants a new sandbox kills and
 	// recreates (#1794).
-	switch m.remoteSandboxLiveness(instance) {
+	switch m.remoteSandboxLivenessForOperator(instance) {
 	case probeAlive:
 		m.info().Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 		instance.ClearLostRestoreFailure()
 		instance.ClearLostRestoreWait()
+		// The probe answered: transport evidence, so the outage flag retires too.
+		instance.ClearUnreachable()
 		// Both of these are per-runtime state and both are filed under the session's
 		// stable identity, never under the repo/title `key` above (#2868).
 		stateKey := stableSessionKey(repoID, instance)
@@ -380,7 +392,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	case probeAbsent:
 		// af's own not-provisioned sentinel: nothing to preserve, so replacement is
 		// unconditional. The only arm that licenses that.
+		// It is also an ANSWER — definitive, not silence — so any outage flag a
+		// prior transport failure left behind retires here.
+		instance.ClearUnreachable()
 	case probeAnsweredDead:
+		// The probe answered: the transport works, so the outage flag retires
+		// regardless of what the answer says about the agent (#5571 W1.3).
+		instance.ClearUnreachable()
 		// It ANSWERED: the agent is gone, the sandbox is not. Push its work to origin
 		// before anything replaces it, and refuse outright if that push does not
 		// land — the same order and the same refusal ArchiveSandbox uses.

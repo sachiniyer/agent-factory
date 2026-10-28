@@ -82,12 +82,17 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Keyed on the ref, with the nightly schedule in its own group so a landing
-  # master push cannot cancel the nightly run that Build is waiting on.
-  # A newer master push supersedes a stale push run (the tip is the question; a
-  # burst of merges verifies the last one). merge_group refs are unique per queue
-  # entry, so nothing there is cancelled by another entry.
-  group: web-selftest-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
+  # Three kinds of run share the ref refs/heads/master and must not cancel each
+  # other (#5660): this workflow's own push run, a pr.yml reusable call
+  # (schedule, merge_group, dispatch), and a manual dispatch of this workflow.
+  # In a called workflow `github.workflow` is the CALLER's name, so it tells the
+  # first two apart without a second input; the event adds the nightly and
+  # dispatch lanes. Within one lane a newer master push supersedes a stale run
+  # (the tip is the question; a burst of merges verifies the last one), and a
+  # superseded run is always replaced by a newer run of the same lane — a push
+  # that matches no `paths:` filter starts no run and so cancels none. merge_group
+  # refs are unique per queue entry, so entries never cancel each other.
+  group: web-selftest-${{ github.workflow == 'Web selftest' && 'standalone' || 'called' }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-nightly' || '' }}${{ github.event_name == 'workflow_dispatch' && '-dispatch' || '' }}
   cancel-in-progress: true
 
 # Read-only: checks out source and runs the harness in a container. It never
