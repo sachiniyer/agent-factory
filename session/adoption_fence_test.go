@@ -143,7 +143,7 @@ func productionAgentServerRuntimes() []adoptionRuntime {
 		},
 		{
 			name:     "remote",
-			idNative: false,
+			idNative: true,
 			build: func(t *testing.T) (*Instance, AgentServer) {
 				// Built the way agentServerLocked builds it (agentserver_local.go), against
 				// a server that answers the send-prompt route. The data-plane calls fail —
