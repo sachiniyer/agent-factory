@@ -285,6 +285,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		// say so on the instance so the injected guidance stops teaching them
 		// (#5571 W3.1).
 		CallbackUnavailable: os.Getenv("AF_DAEMON_URL") == "" || os.Getenv("AF_DAEMON_TOKEN") == "",
+		// The daemon holds this session as a remote workspace and admits its tabs
+		// accordingly; the injected guidance must match (#5571 W3.3).
+		HostedRemotely: true,
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,

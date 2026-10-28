@@ -137,6 +137,11 @@ type InstanceOptions struct {
 	// daemon-side create path instead learns the reason from the mint itself
 	// and arrives through ProvisionResult.CallbackUnavailable.
 	CallbackUnavailable bool
+	// HostedRemotely declares this instance runs inside a sandbox the daemon
+	// treats as a remote workspace (set by the in-sandbox agent-server), so its
+	// guidance reflects the remote runtime's tab admission rather than the local
+	// capabilities it happens to execute on (#5571 W3.3).
+	HostedRemotely bool
 }
 
 // backendFactory provisions the already-resolved runtime for a new Instance,
@@ -606,6 +611,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		remoteClient:          remoteClient,
 		runtimeTeardown:       res.Teardown,
 		callbackUnavailable:   callbackUnavailableReasonFor(opts, res),
+		hostedRemotely:        opts.HostedRemotely,
 	}, nil
 }
 
