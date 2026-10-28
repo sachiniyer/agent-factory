@@ -34,8 +34,13 @@ type acctSwapServer struct {
 	can        bool
 	canErr     error
 	failAfter  error // returned after a successful rotation, to exercise restore
-	calls      int
-	atCall     struct{ live, next string }
+	// loseResponse is a transport failure AFTER the host rotated: the work is done
+	// and the answer is lost. loseBefore is one before anything ran. afterRotate
+	// lets a test damage the host between the two.
+	loseResponse, loseBefore error
+	afterRotate              func()
+	calls                    int
+	atCall                   struct{ live, next string }
 }
 
 func (s *acctSwapServer) CanSwapAccount() (bool, error) { return s.can, s.canErr }
@@ -44,12 +49,21 @@ func (s *acctSwapServer) SwapAccountInPlace() (string, error) {
 	s.calls++
 	s.atCall.live = readOrEmpty(filepath.Join(s.live, credFile))
 	s.atCall.next = readOrEmpty(filepath.Join(s.next, credFile))
+	if s.loseBefore != nil {
+		return "", s.loseBefore
+	}
 	rot, err := newScopeRotation(tmux.ProgramClaude)
 	if err != nil {
 		return "", err
 	}
 	if err := rot.rotate(); err != nil {
 		return "", err
+	}
+	if s.afterRotate != nil {
+		s.afterRotate()
+	}
+	if s.loseResponse != nil {
+		return "", s.loseResponse
 	}
 	if s.failAfter != nil {
 		if rbErr := rot.restore(); rbErr != nil {
@@ -348,4 +362,99 @@ func TestScopeRotationRefusesAScopeAfDidNotMake(t *testing.T) {
 		_, err := newScopeRotation("aider")
 		require.Error(t, err)
 	})
+}
+
+// --- transport failure mid-swap (reconciliation) ---
+
+// The call's response is lost AFTER the host rotated. The session must come to
+// record the account the host actually runs, not "still the old one".
+func TestSwapOffBoxAccountLostResponseAfterRotationRecordsTheNewAccount(t *testing.T) {
+	f := newSwapFixture(t)
+	f.refreshOnHost(t, "work-refreshed-on-host")
+	f.srv.loseResponse = errors.New("remote agent-server: POST /v1/agent/swap-account: context deadline exceeded")
+
+	res, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.NoError(t, err)
+	assert.True(t, res.Reconciled, "the outcome was learned from the host, not assumed")
+
+	acct, _ := f.inst.AccountSelection()
+	assert.Equal(t, "alt", acct, "recorded identity matches the running one")
+	assert.Equal(t, secretAlt, f.hostCred(t, "account"))
+	assert.NoDirExists(t, f.w.PrevAccountDir())
+	assert.Equal(t, "work-refreshed-on-host", readOrEmpty(f.workReg), "A's refresh still came home")
+
+	// Teardown must not push B's credentials over A's registry copy.
+	require.NoError(t, f.w.teardownAccount(time.Minute))
+	assert.Equal(t, "work-refreshed-on-host", readOrEmpty(f.workReg))
+}
+
+func TestSwapOffBoxAccountLostResponseBeforeRotationKeepsTheOldAccount(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.loseBefore = errors.New("remote agent-server: POST /v1/agent/swap-account: connection reset")
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate, "the host showed the old account live: that is a fact, not a guess")
+	acct, _ := f.inst.AccountSelection()
+	assert.Equal(t, "work", acct)
+	assert.Equal(t, secretWork, f.hostCred(t, "account"))
+	assert.NoDirExists(t, f.w.NextAccountDir())
+	assert.False(t, f.inst.StartupStateUnknown())
+}
+
+// When the host cannot say which account it runs, none is asserted: the session is
+// fenced, and nothing is written back from a scope of unknown identity.
+func TestSwapOffBoxAccountUnknownHostStateAssertsNeitherAccount(t *testing.T) {
+	f := newSwapFixture(t)
+	f.refreshOnHost(t, "work-refreshed-on-host")
+	f.srv.loseResponse = errors.New("transport: connection reset")
+	f.srv.afterRotate = func() { _ = os.RemoveAll(f.w.PrevAccountDir()) } // neither marker remains
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
+	acct, _ := f.inst.AccountSelection()
+	assert.Equal(t, "work", acct, "the row is not moved to an account the host was not shown to run")
+	assert.True(t, f.inst.StartupStateUnknown(), "and it is not presented as healthy on the old one")
+	require.NoError(t, f.w.teardownAccount(time.Minute))
+	assert.Equal(t, secretWork, readOrEmpty(f.workReg), "no write-back from an unknown scope")
+}
+
+func TestSwapOffBoxAccountUnreadableHostIsUnknownToo(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.loseResponse = errors.New("transport: connection reset")
+	p := f.inst.currentBackend().(*sshBackend).provisioner
+	real := p.runCommandFn
+	p.runCommandFn = func(d time.Duration, script string, stdin io.Reader, c bool) ([]byte, error) {
+		if indexOf(script, "echo outgoing") >= 0 {
+			return nil, errors.New("ssh: connection refused")
+		}
+		return real(d, script, stdin, c)
+	}
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
+	assert.True(t, f.inst.StartupStateUnknown())
+}
+
+// A refusal the agent-server itself returned is a definite answer; one that says
+// it could not restore the scope is not.
+func TestSwapOffBoxAccountServerAnswersAreClassified(t *testing.T) {
+	assert.False(t, swapOutcomeIndeterminate(&agentAnsweredError{err: errors.New("no staged account")}))
+	assert.True(t, swapOutcomeIndeterminate(&agentAnsweredError{err: errors.New("x; " + accountScopeIndeterminate)}))
+	assert.True(t, swapOutcomeIndeterminate(errors.New("context deadline exceeded")))
+}
+
+// The in-sandbox swap restarts the SAME agent, which the handoff validation
+// refuses everywhere unless the account swap says that is what it is doing.
+func TestSameAgentRestartIsAdmittedOnlyForTheAccountSwap(t *testing.T) {
+	inst := &Instance{Title: "s", Program: tmux.ProgramClaude}
+	require.ErrorContains(t, inst.ValidateHandoffTarget(tmux.ProgramClaude), "already running")
+	inst.restartingSameAgent = true
+	assert.NoError(t, inst.ValidateHandoffTarget(tmux.ProgramClaude))
+	assert.NoError(t, func() error {
+		inst.mu.RLock()
+		defer inst.mu.RUnlock()
+		return inst.validateHandoffTargetLocked(tmux.ProgramClaude, tmux.ProgramClaude)
+	}(), "the record and swap boundaries read the same allowance")
+	inst.restartingSameAgent = false
+	require.ErrorContains(t, inst.ValidateHandoffTarget(tmux.ProgramClaude), "already running", "and it is not left open")
 }

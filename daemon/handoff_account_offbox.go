@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -66,6 +67,13 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 	}
 	res, err := instance.SwapOffBoxAccount(to, false)
 	if err != nil {
+		if errors.Is(err, session.ErrAccountSwapIndeterminate) {
+			// The host's account could not be established: the row stays fenced as
+			// startup-unknown and nothing here asserts either account.
+			_ = m.persistSettlement(repoID, key, instance)
+			_ = instance.Transition(session.AbortHandoff())
+			return HandoffSessionResponse{}, &mutationCommittedError{err: err}
+		}
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, err
 	}
@@ -75,20 +83,38 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 	if override := strings.TrimSpace(req.Brief); override != "" {
 		instance.SetPrompt(override)
 	}
+	// The replacement fence stays raised through the notice's submission: until
+	// the new agent has its task, a status poll that sees its idle composer must
+	// not read the run as finished. Whatever the delivery's outcome, the fence is
+	// lowered after it.
+	noticeErr := m.finishOffBoxNotice(instance, outgoing, res, session.HandoffReasonManual)
 	if err := instance.Transition(session.CommitHandoff()); err != nil {
-		return response, &mutationCommittedError{err: err}
+		return response, &mutationCommittedError{err: errors.Join(noticeErr, err)}
 	}
 	if err := m.persistSettlement(repoID, key, instance); err != nil {
-		return response, &mutationCommittedError{err: err}
+		return response, &mutationCommittedError{err: errors.Join(noticeErr, err)}
 	}
-	if err := m.deliverOffBoxAccountNotice(instance, outgoing, res, session.HandoffReasonManual); err != nil {
-		return response, &mutationCommittedError{err: err}
-	}
-	if res.CleanupErr != nil {
-		return response, &mutationCommittedError{err: fmt.Errorf("account handoff of %q completed, but %w; the credentials are removed with the session at the latest", instance.Title, res.CleanupErr)}
+	if noticeErr != nil {
+		return response, &mutationCommittedError{err: noticeErr}
 	}
 	m.info().Printf("handoff: session %q moved from %s to %s", instance.Title, accountSwapIdentity(outgoing, res.From), accountSwapIdentity(outgoing, res.To))
 	return response, nil
+}
+
+// finishOffBoxNotice delivers the replacement's notice unless the swap was only
+// reconciled (its response was lost, so the new agent's start is unconfirmed), and
+// folds a credential-cleanup failure into the result.
+func (m *Manager) finishOffBoxNotice(instance *session.Instance, agent string, res session.OffBoxAccountSwap, reason string) error {
+	var errs []error
+	if res.Reconciled {
+		errs = append(errs, fmt.Errorf("the swap of %q to account %q completed on the host but its response was lost, so the new agent's start is unconfirmed and no notice was sent; check the session and relaunch it if it is not running", instance.Title, res.To))
+	} else if err := m.deliverOffBoxAccountNotice(instance, agent, res, reason); err != nil {
+		errs = append(errs, err)
+	}
+	if res.CleanupErr != nil {
+		errs = append(errs, fmt.Errorf("account handoff of %q completed, but %w; the credentials are removed with the session at the latest", instance.Title, res.CleanupErr))
+	}
+	return errors.Join(errs...)
 }
 
 // commitOffBoxAccountSwap is commitNewAccountSwapIdentity for a sandbox session: the
@@ -112,12 +138,17 @@ func (m *Manager) commitOffBoxAccountSwap(instance *session.Instance, scheduled 
 
 // tryOffBoxAccountSwap runs the in-place swap when the session is a listed-host
 // sandbox and reports nil, nil when it is not (the caller takes the local path).
-func (m *Manager) tryOffBoxAccountSwap(instance *session.Instance, scheduled *autoAccountSwap, global *config.Config) (*session.OffBoxAccountSwap, error) {
+func (m *Manager) tryOffBoxAccountSwap(instance *session.Instance, scheduled *autoAccountSwap, global *config.Config, fallbackEligible *bool) (*session.OffBoxAccountSwap, error) {
 	if scheduled.manual || !instance.OffBoxAccountHandoffApplies() {
 		return nil, nil
 	}
 	res, err := m.commitOffBoxAccountSwap(instance, scheduled, global)
 	if err != nil {
+		if errors.Is(err, session.ErrAccountSwapIndeterminate) {
+			// An ordinary same-account retry would relaunch into a scope whose
+			// account is unknown.
+			*fallbackEligible = false
+		}
 		return nil, err
 	}
 	return &res, nil
@@ -129,17 +160,17 @@ func (m *Manager) tryOffBoxAccountSwap(instance *session.Instance, scheduled *au
 func (m *Manager) finishOffBoxFailover(repoID, key string, instance *session.Instance, swap *autoAccountSwap, res session.OffBoxAccountSwap) error {
 	m.noteRuntimeReplaced(repoID, instance)
 	instance.ClearLimitReached()
+	// The limit-resume fence is still raised while the notice is submitted, so a
+	// poll cannot read the fresh agent's idle composer as a finished run.
+	noticeErr := m.finishOffBoxNotice(instance, swap.agent, res, session.HandoffReasonUsageLimit)
 	if err := instance.Transition(session.ConfirmLive()); err != nil {
-		return &mutationCommittedError{err: err}
+		return &mutationCommittedError{err: errors.Join(noticeErr, err)}
 	}
 	if err := m.persistSettlement(repoID, key, instance); err != nil {
-		return &mutationCommittedError{err: err}
+		return &mutationCommittedError{err: errors.Join(noticeErr, err)}
 	}
-	if err := m.deliverOffBoxAccountNotice(instance, swap.agent, res, session.HandoffReasonUsageLimit); err != nil {
-		return &mutationCommittedError{err: err}
-	}
-	if res.CleanupErr != nil {
-		return &mutationCommittedError{err: fmt.Errorf("limit failover of %q completed, but %w; the credentials are removed with the session at the latest", instance.Title, res.CleanupErr)}
+	if noticeErr != nil {
+		return &mutationCommittedError{err: noticeErr}
 	}
 	m.info().Printf("limit failover: session %q moved from %s to %s", instance.Title, accountSwapIdentity(swap.agent, res.From), accountSwapIdentity(swap.agent, res.To))
 	return nil

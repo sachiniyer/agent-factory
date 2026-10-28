@@ -53,6 +53,58 @@ const (
 // AccountSwapFeature is exported for the agent-server's /v1/health advertisement.
 const AccountSwapFeature = accountSwapFeature
 
+// accountScopeIndeterminate marks an error from the sandbox that could not say
+// which account its scope holds. It is carried in the message because the error
+// envelope has no type; the driving daemon reconciles on it.
+const accountScopeIndeterminate = "the account scope on the host is in an unknown state"
+
+// ErrAccountSwapIndeterminate reports a swap whose outcome on the host could not
+// be established. The session records no account it cannot show the host runs, is
+// marked startup-unknown so nothing relaunches into it, and writes nothing back.
+var ErrAccountSwapIndeterminate = errors.New("the host's account could not be established after the swap")
+
+// scopeState is what the host's directories say about a swap.
+type scopeState int
+
+const (
+	scopeUnknown  scopeState = iota
+	scopeOutgoing            // account.next staged, nothing rotated: the old account is live
+	scopeIncoming            // account.prev holds the old scope: the new account is live
+)
+
+// probeScopeState reads the host afresh (a new shell, not the lost call) and
+// reports which account its live scope holds, from the rotation's own markers.
+func (w *sandboxWorkspace) probeScopeState(timeout time.Duration) scopeState {
+	next, prev := shellQuote(w.NextAccountDir()), shellQuote(w.PrevAccountDir())
+	script := "if [ -d " + next + " ] && [ ! -d " + prev + " ]; then echo outgoing; " +
+		"elif [ ! -d " + next + " ] && [ -d " + prev + " ]; then echo incoming; else echo unknown; fi"
+	out, err := w.shell.Run(timeout, script, nil, false)
+	if err != nil {
+		return scopeUnknown
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "outgoing":
+		return scopeOutgoing
+	case "incoming":
+		return scopeIncoming
+	}
+	return scopeUnknown
+}
+
+// agentAnsweredError marks an error the agent-server itself returned: it ran the
+// request and said no. Anything else (a lost response, a timeout) leaves the
+// outcome on the host open.
+type agentAnsweredError struct{ err error }
+
+func (e *agentAnsweredError) Error() string { return e.err.Error() }
+func (e *agentAnsweredError) Unwrap() error { return e.err }
+
+// swapOutcomeIndeterminate is whether err leaves the host's scope undetermined.
+func swapOutcomeIndeterminate(err error) bool {
+	var answered *agentAnsweredError
+	return !errors.As(err, &answered) || strings.Contains(err.Error(), accountScopeIndeterminate)
+}
+
 // ErrAccountSwapUnsupported reports an agent-server that cannot rotate its account
 // scope: older than the route, or a runtime with no live server. Nothing has been
 // stopped or sent when it is returned.
@@ -124,6 +176,10 @@ func (w *sandboxWorkspace) removePrevAccount(timeout time.Duration) error {
 // OffBoxAccountSwap is what a completed account handoff reports.
 type OffBoxAccountSwap struct {
 	From, To string
+	// Reconciled is set when the swap's response was lost and the host showed the
+	// new account live: the account is recorded, but the new agent's start is not
+	// confirmed.
+	Reconciled bool
 	// WrittenBack counts the outgoing account's credential files whose refresh
 	// came back to the registry.
 	WrittenBack int
@@ -256,8 +312,24 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 		return res, err
 	}
 	program, err := sw.SwapAccountInPlace()
+	if err != nil && swapOutcomeIndeterminate(err) {
+		// The call may have completed on the host with its response lost. What the
+		// session records must be what the host runs, so ask the host.
+		switch w.probeScopeState(sshShortStepTimeout) {
+		case scopeIncoming:
+			res.Reconciled, err, program = true, nil, ""
+		case scopeOutgoing:
+			// Nothing rotated (or it was put back): fall through as a refusal.
+		default:
+			// Neither account can be asserted. Nothing is written back from a scope
+			// of unknown identity, and nothing relaunches into it.
+			w.syncedVersion = nil
+			i.MarkStartupStateUnknown()
+			return res, fmt.Errorf("handing %q off to account %q: %w: %w (the call failed: %v)", i.Title, next.Name, ErrAccountSwapIndeterminate, errors.New(accountScopeIndeterminate), err)
+		}
+	}
 	if err != nil {
-		// The agent-server restored the scope, so the staged copy is dead weight
+		// The host kept the old account, so the staged copy is dead weight
 		// holding credentials: remove it.
 		if rmErr := w.discardAccountNext(sshShortStepTimeout); rmErr != nil {
 			log.WarningLog.Printf("account handoff of %q: %v", i.Title, rmErr)
@@ -324,12 +396,20 @@ func (i *Instance) swapAccountInPlace() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	i.mu.Lock()
+	i.restartingSameAgent = true
+	i.mu.Unlock()
+	defer func() {
+		i.mu.Lock()
+		i.restartingSameAgent = false
+		i.mu.Unlock()
+	}()
 	program, err := i.swapAgentInPlaceWith(agent, rot.rotate)
 	if err != nil {
 		// The scope may have been rotated before the start failed; leave it as A so
 		// a retry or a relaunch finds the identity the row still records.
 		if rbErr := rot.restore(); rbErr != nil {
-			err = fmt.Errorf("%w (and the account scope could not be put back: %v; the session's account on the host may not match the one it records)", err, rbErr)
+			err = fmt.Errorf("%w (and the account scope could not be put back: %v; %s)", err, rbErr, accountScopeIndeterminate)
 		}
 		return "", err
 	}
@@ -431,6 +511,10 @@ type accountSwapResp struct {
 func (s *remoteAgentServer) SwapAccountInPlace() (string, error) {
 	var resp accountSwapResp
 	if err := s.rc.callWithin("/v1/agent/swap-account", struct{}{}, &resp, AgentRelaunchCallTimeout); err != nil {
+		var answered *agentAnswered
+		if errors.As(err, &answered) {
+			return "", &agentAnsweredError{err: err}
+		}
 		return "", err
 	}
 	return resp.Program, nil

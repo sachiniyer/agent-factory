@@ -484,7 +484,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		lockErr := config.WithProjectConfigLockForRoot(root, func() error {
 			lockEntered = true
 			var err error
-			if offBox, err = m.tryOffBoxAccountSwap(instance, accountSwap, liveConfig); offBox != nil || err != nil {
+			if offBox, err = m.tryOffBoxAccountSwap(instance, accountSwap, liveConfig, &fallbackEligible); offBox != nil || err != nil {
 				return err
 			}
 			fallbackEligible, err = m.commitNewAccountSwapIdentity(
