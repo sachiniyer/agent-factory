@@ -127,6 +127,14 @@ type sandboxProvisioner struct {
 	// reported back in the startup banner (#5571 W2.1). Empty until the banner
 	// arrives; remoteAgentBackend falls back to the wire program without it.
 	hostProgram string
+	// launchAttempted records that provision() reached the startAgentServer
+	// call. An empty remotePID after that point is not the "nothing to signal"
+	// pre-launch case (a clone/binary-copy failure before startAgentServer, where
+	// no nohup'd server exists): the launch ran, and a wrapper that suppressed
+	// `echo $!` left no PID to reap by even though the agent-server may still be
+	// detached and running. reap() uses this to fail closed on an empty post-launch
+	// PID rather than `rm -rf`-ing the workspace of a possibly-running server.
+	launchAttempted bool
 
 	// The reattach half of the runtime identity (#5571 W1.1), recorded at
 	// provision so the backend's cleanup handle — and therefore the persisted
@@ -242,7 +250,13 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
+	// Reached only past the pre-launch steps (clone, binary copy, callback env),
+	// so a startAgentServer failure here is not the pre-launch empty-PID case: a
+	// nohup'd agent-server may have started even when the captured PID is empty or
+	// garbage. Set the flag before the call so the reap refuses on either.
+	p.launchAttempted = true
 	if err := w.startAgentServer(sshShortStepTimeout); err != nil {
+		p.remotePID = w.RemotePID
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	p.remotePID = w.RemotePID
@@ -594,6 +608,26 @@ func (p *sandboxProvisioner) reap() error {
 	if p.sessionDir == "" {
 		p.reaped = true
 		return nil
+	}
+
+	if p.remotePID != "" && !positivePID(p.remotePID) {
+		reapErr := fmt.Errorf("%w: backend=%s: refusing to reap %q with invalid remote PID %q — the agent-server may still be running; inspect before retrying",
+			ErrWorkspaceStateUnknown, p.label(), p.sessionDir, p.remotePID)
+		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
+		return reapErr
+	}
+	// A launch that returned no PID at all is not the pre-launch empty-PID path
+	// (a clone or binary-copy failure, where no nohup'd server exists): the
+	// nohup ran, and a wrapper that suppressed `echo $!` left the agent-server
+	// detached with no PID to reap by. The empty-PID branch of reapScript would
+	// `rm -rf` the session dir without a kill and latch a clean reap, leaking the
+	// server. Refuse the same way an unverifiable non-empty PID does: no latch, no
+	// removal, the record is retained for retry/manual inspection.
+	if p.launchAttempted && p.remotePID == "" {
+		reapErr := fmt.Errorf("%w: backend=%s: refusing to reap %q after a launch returned no remote PID — the agent-server may still be running; inspect before retrying",
+			ErrWorkspaceStateUnknown, p.label(), p.sessionDir)
+		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
+		return reapErr
 	}
 
 	nonce, nonceErr := sandboxReapNonce()
