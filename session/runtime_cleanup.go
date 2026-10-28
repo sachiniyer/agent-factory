@@ -52,6 +52,10 @@ type SandboxRuntimeCleanupData struct {
 	RemoteAddr         string `json:"remote_addr,omitempty"`
 	AgentServerVersion string `json:"agent_server_version,omitempty"`
 	TokenRef           string `json:"token_ref,omitempty"`
+	// LaunchScript is the command that started the agent-server (W1.4), so a
+	// crashed one can be relaunched after proof it is dead. No secret in it: the
+	// token and callback credential live in the 0600 env files it sources.
+	LaunchScript string `json:"launch_script,omitempty"`
 	// CallbackRef and CallbackReverse are the callback half of the runtime
 	// identity (#5571 W3.6): the reference the sandbox's callback credential
 	// derives from and the `-R` spec its forward uses. Neither is a secret — the
@@ -123,6 +127,7 @@ type SSHRuntimeCleanupData struct {
 	RemoteAddr         string `json:"remote_addr,omitempty"`
 	AgentServerVersion string `json:"agent_server_version,omitempty"`
 	TokenRef           string `json:"token_ref,omitempty"`
+	LaunchScript       string `json:"launch_script,omitempty"`
 	// CallbackRef and CallbackReverse are the callback half of the runtime
 	// identity (#5571 W3.6): the reference the sandbox's callback credential
 	// derives from and the `-R` spec its forward uses. Neither is a secret — the
@@ -351,6 +356,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		p.remoteAddr = data.SSH.RemoteAddr
 		p.agentServerVersion = data.SSH.AgentServerVersion
 		p.tokenRef = data.SSH.TokenRef
+		p.launchScript = data.SSH.LaunchScript
 		p.restoreCallbackIdentity(data.SSH.CallbackRef, data.SSH.CallbackReverse)
 		// The accept-new store is prepared inside each ATTEMPT, never here: this
 		// function composes a closure while persisted instances are being loaded,
@@ -388,6 +394,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 			remoteAddr:         data.Sandbox.RemoteAddr,
 			agentServerVersion: data.Sandbox.AgentServerVersion,
 			tokenRef:           data.Sandbox.TokenRef,
+			launchScript:       data.Sandbox.LaunchScript,
 		}
 		p.restoreCallbackIdentity(data.Sandbox.CallbackRef, data.Sandbox.CallbackReverse)
 		teardown := p.reap

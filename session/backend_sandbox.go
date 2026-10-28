@@ -161,7 +161,11 @@ type sandboxProvisioner struct {
 	//	remoteAddr         the agent-server's loopback address on the sandbox
 	//	                   (the banner's addr) — the -L forward's destination.
 	//	agentServerVersion the version the remote binary reported in its banner.
-	tokenRef           string
+	tokenRef string
+	// launchScript is the exact command that started the agent-server, persisted
+	// so a crashed one can be relaunched from the row alone (W1.4). It names the
+	// session dir's env files and flags, never a secret.
+	launchScript       string
 	remoteAddr         string
 	agentServerVersion string
 
@@ -326,7 +330,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		p.remotePID = w.RemotePID
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
-	p.remotePID = w.RemotePID
+	p.remotePID, p.launchScript = w.RemotePID, w.launchScript
 	banner, err := w.readBanner(sshBannerPollTimeout, sshBannerPollInterval, sshShortStepTimeout)
 	if err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
@@ -379,6 +383,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 				RemoteAddr:         p.remoteAddr,
 				AgentServerVersion: p.agentServerVersion,
 				TokenRef:           p.tokenRef,
+				LaunchScript:       p.launchScript,
 				CallbackRef:        p.callbackRef,
 				CallbackReverse:    p.callbackReverse(),
 			},

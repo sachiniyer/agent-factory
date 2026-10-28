@@ -275,6 +275,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			RemoteAddr:         p.remoteAddr,
 			AgentServerVersion: p.agentServerVersion,
 			TokenRef:           p.tokenRef,
+			LaunchScript:       p.launchScript,
 			CallbackRef:        p.callbackRef,
 			CallbackReverse:    p.callbackReverse(),
 		},

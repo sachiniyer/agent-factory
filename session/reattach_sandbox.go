@@ -66,36 +66,71 @@ func (i *Instance) ReattachSandbox() error {
 	// sandbox's env file rewritten — the credential is re-derived, not reissued.
 	callbackLost := i.restoreCallbackForReattach(p)
 
-	var localAddr string
-	if p.startTunnelFn != nil {
-		localAddr, err = p.startTunnelFn(p.remoteAddr)
-	} else {
-		// The old connection died with the daemon; a socket its sshd left behind
-		// would fail the -R bind (ExitOnForwardFailure) for good.
-		if p.callbackForwardPersisted() {
-			p.clearStaleCallbackSocket()
+	// dial opens the transport to the recorded address and asks the agent-server
+	// whether it is alive. aliveErr separates "the server did not answer over a
+	// working transport" (restartable) from a transport that never opened.
+	dial := func() (endpoint *AgentServerEndpoint, rc *remoteAgentClient, aliveErr, err error) {
+		var localAddr string
+		if p.startTunnelFn != nil {
+			localAddr, err = p.startTunnelFn(p.remoteAddr)
+		} else {
+			// The old connection died with the daemon; a socket its sshd left behind
+			// would fail the -R bind (ExitOnForwardFailure) for good.
+			if p.callbackForwardPersisted() {
+				p.clearStaleCallbackSocket()
+			}
+			var note string
+			localAddr, _, note, err = p.openTunnelForReattach()
+			if err == nil && note != "" && callbackLost == "" {
+				callbackLost = note
+			}
 		}
-		var note string
-		localAddr, _, note, err = p.openTunnelForReattach()
-		if err == nil && note != "" && callbackLost == "" {
-			callbackLost = note
+		if err != nil {
+			p.abandonUnadoptedTunnel()
+			return nil, nil, nil, err
 		}
+		endpoint = &AgentServerEndpoint{URL: "http://" + localAddr, Token: token}
+		rc, err = newRemoteAgentClient(*endpoint, i.Title)
+		if err != nil {
+			p.abandonUnadoptedTunnel()
+			return nil, nil, nil, err
+		}
+		// The derived token is what proves identity: only the agent-server launched
+		// with this session's file-supplied token accepts it.
+		if _, aerr := (&remoteAgentServer{rc: rc}).Alive(); aerr != nil {
+			p.abandonUnadoptedTunnel()
+			return nil, nil, aerr, nil
+		}
+		return endpoint, rc, nil, nil
 	}
+	endpoint, _, aliveErr, err := dial()
 	if err != nil {
-		p.abandonUnadoptedTunnel()
 		return fmt.Errorf("reattach %q: %w", i.Title, err)
 	}
-	endpoint := &AgentServerEndpoint{URL: "http://" + localAddr, Token: token}
-	rc, err := newRemoteAgentClient(*endpoint, i.Title)
-	if err != nil {
-		p.abandonUnadoptedTunnel()
-		return fmt.Errorf("reattach %q: %w", i.Title, err)
-	}
-	// The derived token is what proves identity: only the agent-server launched
-	// with this session's file-supplied token accepts it.
-	if _, err := (&remoteAgentServer{rc: rc}).Alive(); err != nil {
-		p.abandonUnadoptedTunnel()
-		return fmt.Errorf("reattach %q: the agent-server did not answer: %w", i.Title, err)
+	restarted := false
+	if aliveErr != nil {
+		// The host answered over a working transport but the agent-server did not:
+		// relaunch it if — and only if — the host proves it dead (W1.4).
+		if rerr := p.restartAgentServer(token); rerr != nil {
+			return fmt.Errorf("reattach %q: the agent-server did not answer: %w (not restarted: %v)", i.Title, aliveErr, rerr)
+		}
+		restarted = true
+		log.InfoLog.Printf("sandbox runtime: session %q: restarted its crashed agent-server (pid %s, %s)", i.Title, p.remotePID, p.remoteAddr)
+		var rc *remoteAgentClient
+		if endpoint, rc, aliveErr, err = dial(); err != nil || aliveErr != nil {
+			return fmt.Errorf("reattach %q: the restarted agent-server did not answer: %w", i.Title, errors.Join(err, aliveErr))
+		}
+		// The surviving tmux session is adopted through the ordinary restore path
+		// (firstTimeSetup=false reattaches a live session and only re-spawns one
+		// that is gone), so a pane that outlived the crash keeps its agent.
+		srv := &remoteAgentServer{rc: rc}
+		if aerr := errors.Join(srv.Provision(false), srv.Launch(false)); aerr != nil {
+			p.abandonUnadoptedTunnel()
+			// Left running it would be a live server nothing adopted, which the next
+			// reattach would mistake for healthy; stop it so that attempt restarts.
+			_, _ = p.Run(sshShortStepTimeout, remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef), nil, true)
+			return fmt.Errorf("reattach %q: adopting the restarted agent-server failed: %w", i.Title, aerr)
+		}
 	}
 
 	// Re-verify under i.mu that the row is still the one this attempt probed: a
@@ -104,6 +139,11 @@ func (i *Instance) ReattachSandbox() error {
 	// the replacement and point the row at a reaped runtime.
 	i.mu.Lock()
 	stillCurrent := i.remoteClient == nil && i.backend == b && !i.userKilled && i.liveness != LiveArchived
+	if restarted {
+		// The restart changed the PID and address the persisted handle names; the
+		// new server is live and adopted whether or not this attempt binds it.
+		refreshRuntimeIdentity(b, p)
+	}
 	i.mu.Unlock()
 	if !stillCurrent {
 		p.abandonUnadoptedTunnel()
