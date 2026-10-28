@@ -244,12 +244,16 @@ only needs the workspace tooling:
   the probe finds a non-root default user — a root-default image on a
   non-account session skips the chown entirely, so a host directory
   bind-mounted at `/root` or `/workspace` is never re-owned and a HOME set via
-  `run_args` stays in effect. `find` runs only when the non-account HOME chown
-  has a bind mount to prune (an agent-credential mount, or a `run_args` bind
-  beneath `/root`): the recursive chown prunes each such mount so it neither
-  re-owns the operator's host files (a read-write bind) nor EROFS-aborts on a
-  read-only one, and `find` is the tool that walks HOME with that prune list.
-  `chown` runs with `-h` in that form so a symlink the image ships under `/root`
+  `run_args` stays in effect. Before chowning, af reads the container's own mount table
+  (`/proc/self/mountinfo`, via `cat`, `cd` and `pwd -P`) and never lets the
+  recursive chown cross into **any** mount point at or under HOME — however it
+  was created (`-v`, `--mount`, `--volumes-from`, `--tmpfs`, an image `VOLUME`,
+  an agent-credential mount) — so it neither re-owns the operator's host files
+  (a read-write bind) nor EROFS-aborts on a read-only one. `find` walks HOME with
+  that prune list when there is at least one such mount; with none it is a plain
+  `chown -R`. A mount point at HOME or `/workspace` itself is left alone. If the
+  mount table cannot be read or understood, provisioning fails with an error
+  naming it rather than chowning blind. `chown` runs with `-h` in that form so a symlink the image ships under `/root`
   is re-owned itself, not its target outside HOME. These entries and `cat` were
   already required and simply missing from this list (#3602 review); busybox and
   coreutils each provide all of them.
