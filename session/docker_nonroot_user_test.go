@@ -517,37 +517,6 @@ func TestChownRecursiveScript_PruneMatchesMetacharactersLiterally(t *testing.T) 
 	assert.Contains(t, listed, filepath.Join(root, "weird", "inner"), "a pattern-lookalike sibling is still chowned")
 }
 
-func TestMountPointsAtOrUnder(t *testing.T) {
-	table := strings.Join([]string{
-		mountinfoLine(1, "/", "overlay"),
-		mountinfoLine(2, "/root/cache", "ext4"),
-		mountinfoLine(3, "/root/with space/x[1]", "ext4"),
-		mountinfoLine(4, "/rootfs-lookalike", "ext4"), // shares the prefix, not under /root
-		mountinfoLine(5, "/root/cache", "ext4"),       // duplicate (stacked mount)
-		mountinfoLine(6, "/opt/other", "ext4"),
-		mountinfoLine(7, "/root/tmp/", "tmpfs"),
-		mountinfoLine(8, "/proc", "proc"),
-	}, "\n")
-	got, err := mountPointsAtOrUnder(table, "/root")
-	require.NoError(t, err)
-	assert.Equal(t, []string{"/root/cache", "/root/with space/x[1]", "/root/tmp"}, got,
-		"every mount point under HOME, decoded and de-duplicated; siblings sharing the prefix are not under it")
-
-	got, err = mountPointsAtOrUnder(mountinfoLine(1, "/", "overlay")+"\n"+mountinfoLine(2, "/root", "ext4"), "/root")
-	require.NoError(t, err)
-	assert.Equal(t, []string{"/root"}, got, "a mount AT home is reported too")
-
-	for name, bad := range map[string]string{
-		"empty":          "",
-		"no root mount":  mountinfoLine(2, "/root/cache", "ext4"),
-		"short line":     mountinfoLine(1, "/", "overlay") + "\n36 35 98:0",
-		"relative mount": mountinfoLine(1, "/", "overlay") + "\n9 1 0:9 / rel rw - ext4 s rw",
-	} {
-		_, err := mountPointsAtOrUnder(bad, "/root")
-		assert.Error(t, err, name+": an unusable mount table must be an error, never an empty prune set")
-	}
-}
-
 // TestPrepareNonAccountUser_PrunesEveryMountUnderHome is the property behind
 // the #5424 rounds: whatever created a mount under HOME — -v, --mount,
 // --volumes-from, --tmpfs, an image-declared VOLUME, af's read-only credential
@@ -590,20 +559,6 @@ func TestPrepareNonAccountUser_NoMountUnderHome_RecursesPlainly(t *testing.T) {
 	assert.NotContains(t, joined, "find")
 }
 
-// A mount AT home (docker run -v /host:/root) or AT the workspace is the
-// operator's directory: neither it nor its subtree is re-owned.
-func TestPrepareNonAccountUser_MountAtHomeOrWorkspaceIsNeverChowned(t *testing.T) {
-	var calls [][]string
-	t.Cleanup(SetDockerExecForTest(nonRootDockerStub(&calls, dockerContainerHome, dockerWorkspaceDir)))
-	p := &dockerProvisioner{containerID: "cid"}
-	require.NoError(t, p.prepareNonAccountUser())
-	joined := strings.Join(findExecCall(calls, "--user 0:0", "-prune"), " ")
-	assert.Contains(t, joined, "-path "+shellQuote(dockerContainerHome), "home is itself a mount: find prunes it")
-	assert.NotContains(t, joined, "chown -R")
-	assert.NotContains(t, joined, " chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
-		"a bind mounted AT the workspace is not shallow-chowned either")
-}
-
 // Fail closed: with no trustworthy mount table the chown is refused, never
 // guessed — a missing prune set would let a recursive chown cross a host mount.
 func TestPrepareNonAccountUser_UnreadableMountTableRefusesTheChown(t *testing.T) {
@@ -635,4 +590,83 @@ func TestPrepareNonAccountUser_UnreadableMountTableRefusesTheChown(t *testing.T)
 			assert.Empty(t, p.containerUser, "the user must not be recorded when the chown was refused")
 		})
 	}
+}
+
+func TestMountPointHelpers(t *testing.T) {
+	table := strings.Join([]string{
+		mountinfoLine(1, "/", "overlay"),
+		mountinfoLine(2, "/root/cache", "ext4"),
+		mountinfoLine(3, "/root/with space/x[1]", "ext4"),
+		mountinfoLine(4, "/rootfs-lookalike", "ext4"), // shares the prefix, not under /root
+		mountinfoLine(5, "/root/cache", "ext4"),       // duplicate (stacked mount)
+		mountinfoLine(6, "/opt/other", "ext4"),
+		mountinfoLine(7, "/root/tmp/", "tmpfs"),
+		mountinfoLine(8, "/data", "ext4"),
+	}, "\n")
+	points, err := parseMountPoints(table)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/root/cache", "/root/with space/x[1]", "/root/tmp"}, mountPointsUnder(points, "/root"),
+		"every mount strictly beneath HOME, decoded and de-duplicated; a sibling sharing the prefix is not beneath it")
+
+	assert.Equal(t, "/", enclosingMount(points, "/root"), "a directory on the container's own filesystem is enclosed by the root mount")
+	assert.Equal(t, "/data", enclosingMount(points, "/data/home"), "a directory beneath a mount is enclosed by it")
+	assert.Equal(t, "/data", enclosingMount(points, "/data"), "a mount point is enclosed by itself")
+	assert.Equal(t, "/root/cache", enclosingMount(points, "/root/cache/deep/er"))
+	assert.Equal(t, "/", enclosingMount(points, "/rootfs-lookalike2"), "a sibling sharing a mount's name prefix is not inside it")
+
+	for name, bad := range map[string]string{
+		"empty":          "",
+		"no root mount":  mountinfoLine(2, "/root/cache", "ext4"),
+		"short line":     mountinfoLine(1, "/", "overlay") + "\n36 35 98:0",
+		"relative mount": mountinfoLine(1, "/", "overlay") + "\n9 1 0:9 / rel rw - ext4 s rw",
+	} {
+		_, err := parseMountPoints(bad)
+		assert.Error(t, err, name+": an unusable mount table must be an error, never an empty prune set")
+	}
+}
+
+// HOME or the workspace AT or BENEATH any mount other than the container's own
+// root filesystem — a host bind however it was created — is not af's to re-own:
+// nothing is chowned there, and the reason is logged (#5424 review).
+func TestPrepareNonAccountUser_HomeInsideAnEnclosingMountIsNeverChowned(t *testing.T) {
+	t.Run("home symlinked into a bind-mounted parent", func(t *testing.T) {
+		var calls [][]string
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+			calls = append(calls, append([]string(nil), args...))
+			if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+				return []byte(dockerNonRootImageUser + "\n"), nil
+			}
+			if isMountTableExec(args) {
+				// /root -> /data/home, with a host bind at /data; workspace is on the root fs.
+				return []byte("/data/home\n" + dockerWorkspaceDir + "\n" +
+					mountinfoLine(1, "/", "overlay") + "\n" + mountinfoLine(2, "/data", "ext4") + "\n"), nil
+			}
+			return nil, nil
+		}))
+		p := &dockerProvisioner{containerID: "cid"}
+		require.NoError(t, p.prepareNonAccountUser())
+		joined := strings.Join(findExecCall(calls, "--user 0:0", "mkdir -p "+shellQuote(dockerContainerHome)), " ")
+		assert.NotContains(t, joined, "chown -R", "HOME is inside a host bind: no recursive chown")
+		assert.NotContains(t, joined, "find ", "HOME is inside a host bind: no chown of any kind")
+		assert.NotContains(t, joined, "/data/home")
+		assert.Contains(t, joined, "chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
+			"the workspace is on the container's root filesystem and is still chowned")
+	})
+	t.Run("home and workspace are themselves mounts", func(t *testing.T) {
+		var calls [][]string
+		t.Cleanup(SetDockerExecForTest(nonRootDockerStub(&calls, dockerContainerHome, dockerWorkspaceDir)))
+		p := &dockerProvisioner{containerID: "cid"}
+		require.NoError(t, p.prepareNonAccountUser())
+		joined := strings.Join(findExecCall(calls, "--user 0:0", "mkdir -p "+shellQuote(dockerContainerHome)), " ")
+		assert.NotContains(t, joined, "chown", "a bind AT home/workspace is the operator's directory: nothing is re-owned")
+	})
+	t.Run("workspace beneath a bind", func(t *testing.T) {
+		var calls [][]string
+		t.Cleanup(SetDockerExecForTest(nonRootDockerStub(&calls, "/workspace")))
+		p := &dockerProvisioner{containerID: "cid"}
+		require.NoError(t, p.prepareNonAccountUser())
+		joined := strings.Join(findExecCall(calls, "--user 0:0", "mkdir -p "+shellQuote(dockerContainerHome)), " ")
+		assert.Contains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome))
+		assert.NotContains(t, joined, " chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir))
+	})
 }

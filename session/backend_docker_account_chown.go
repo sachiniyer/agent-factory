@@ -3,8 +3,9 @@ package session
 import (
 	"fmt"
 	"path"
-	"slices"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The recursive HOME chown must never cross into a mount point under HOME,
@@ -14,7 +15,7 @@ import (
 // through a read-only one aborts provisioning with EROFS (#5424 review).
 // Deriving "what is a mount" by parsing run_args kept missing spellings, so the
 // set is read from the container's own kernel mount table at chown time
-// instead (mountPointsAtOrUnder), and provisioning fails closed when that table
+// instead (parseMountPoints), and provisioning fails closed when that table
 // cannot be read or trusted.
 
 // unescapeMountinfo decodes the octal escapes (\040 for a space, \011, \012,
@@ -54,14 +55,13 @@ func octalByte(s string) (byte, bool) {
 	return byte(v), true
 }
 
-// mountPointsAtOrUnder parses /proc/self/mountinfo text and returns every mount
-// point equal to root or beneath it, cleaned and de-duplicated. It errors —
-// callers must then refuse to chown — when the table is unusable: empty, a line
-// without a mount-point field, or no "/" mount at all (a real container's table
-// always has one, so its absence means the text is not a mount table).
-func mountPointsAtOrUnder(mountinfo, root string) ([]string, error) {
-	root = path.Clean(root)
-	var found []string
+// parseMountPoints parses /proc/self/mountinfo text into the cleaned, de-duplicated
+// list of mount points. It errors — callers must then refuse to chown — when the
+// table is unusable: a line without a mount-point field, or no "/" mount at all
+// (a real container's table always has one, so its absence means the text is not
+// a mount table). An empty table is therefore an error too.
+func parseMountPoints(mountinfo string) ([]string, error) {
+	var points []string
 	sawRoot := false
 	seen := map[string]bool{}
 	for _, line := range strings.Split(mountinfo, "\n") {
@@ -79,15 +79,44 @@ func mountPointsAtOrUnder(mountinfo, root string) ([]string, error) {
 		if mp == "/" {
 			sawRoot = true
 		}
-		if (mp == root || strings.HasPrefix(mp, root+"/")) && !seen[mp] {
+		if !seen[mp] {
 			seen[mp] = true
-			found = append(found, mp)
+			points = append(points, mp)
 		}
 	}
 	if !sawRoot {
 		return nil, fmt.Errorf("mountinfo has no root mount")
 	}
-	return found, nil
+	return points, nil
+}
+
+// mountPointsUnder returns the mount points strictly beneath root (a mount AT
+// root is reported by enclosingMount instead).
+func mountPointsUnder(points []string, root string) []string {
+	root = path.Clean(root)
+	var found []string
+	for _, mp := range points {
+		if mp != root && strings.HasPrefix(mp, root+"/") {
+			found = append(found, mp)
+		}
+	}
+	return found
+}
+
+// enclosingMount returns the mount point that contains p: the longest mount
+// point equal to p or a path prefix of it. For a directory on the container's
+// own filesystem that is "/". Anything else means p lives inside another mount
+// — a host bind, a volume, a tmpfs — however it was created, and is not af's to
+// re-own.
+func enclosingMount(points []string, p string) string {
+	p = path.Clean(p)
+	best := "/"
+	for _, mp := range points {
+		if (mp == p || strings.HasPrefix(p, mp+"/")) && len(mp) > len(best) {
+			best = mp
+		}
+	}
+	return best
 }
 
 // chownRecursiveScript returns a shell snippet that chowns every entry under
@@ -216,19 +245,24 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	if err != nil {
 		return err
 	}
-	prune, err := mountPointsAtOrUnder(mounts, realHome)
+	points, err := parseMountPoints(mounts)
 	if err != nil {
-		return dockerStepErr(fmt.Errorf("backend=docker: refusing to chown the session HOME for the image's default user %s: the container mount table is unusable: %w", owner, err), dockerOpLocal)
-	}
-	workspaceMounts, err := mountPointsAtOrUnder(mounts, realWorkspace)
-	if err != nil {
-		return dockerStepErr(fmt.Errorf("backend=docker: refusing to chown the session workspace for the image's default user %s: the container mount table is unusable: %w", owner, err), dockerOpLocal)
+		return dockerStepErr(fmt.Errorf("backend=docker: refusing to chown the session HOME and workspace for the image's default user %s: the container mount table is unusable: %w", owner, err), dockerOpLocal)
 	}
 	steps := []string{fmt.Sprintf("mkdir -p %s %s", shellQuote(home), shellQuote(workspace))}
-	// A mount point AT home (or at the workspace) is not af's to re-own either:
-	// the prune list already contains it, so find skips it and its subtree.
-	steps = append(steps, chownRecursiveScript(realHome, owner, prune))
-	if !slices.Contains(workspaceMounts, path.Clean(realWorkspace)) {
+	// Only a directory whose containing mount is the container's own root
+	// filesystem is af's to re-own. One AT or BENEATH any other mount (a host
+	// bind, a volume, a tmpfs — including via a symlinked HOME, which the resolved
+	// path above sees through) would have the chown land on files the container
+	// does not own, so it is skipped and reported, never attempted.
+	if mp := enclosingMount(points, realHome); mp != "/" {
+		log.WarningLog.Printf("docker session HOME %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure it is writable by that user", realHome, mp, owner)
+	} else {
+		steps = append(steps, chownRecursiveScript(realHome, owner, mountPointsUnder(points, realHome)))
+	}
+	if mp := enclosingMount(points, realWorkspace); mp != "/" {
+		log.WarningLog.Printf("docker session workspace %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure it is writable by that user", realWorkspace, mp, owner)
+	} else {
 		steps = append(steps, fmt.Sprintf("chown %s %s", owner, shellQuote(realWorkspace)))
 	}
 	out, err = p.docker(dockerShortStepTimeout,

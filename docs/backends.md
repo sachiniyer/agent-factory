@@ -251,7 +251,7 @@ only needs the workspace tooling:
   an agent-credential mount) — so it neither re-owns the operator's host files
   (a read-write bind) nor EROFS-aborts on a read-only one. `find` walks HOME with
   that prune list when there is at least one such mount; with none it is a plain
-  `chown -R`. A mount point at HOME or `/workspace` itself is left alone. If the
+  `chown -R`. Only a directory whose containing mount is the container's own root filesystem is chowned: if HOME or `/workspace` is itself a mount, or lives beneath one (a host bind, a volume, a tmpfs, or a symlinked HOME that resolves into one), af skips that chown and logs why. If the
   mount table cannot be read or understood, provisioning fails with an error
   naming it rather than chowning blind. `chown` runs with `-h` in that form so a symlink the image ships under `/root`
   is re-owned itself, not its target outside HOME. These entries and `cat` were
