@@ -200,7 +200,7 @@ real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the config
 directory, so without it a session would authenticate as whoever that key belongs
 to while every visible signal reported the selected account.
 
-Account-scoped sessions run on the local backend, the docker backend, or an ssh
+Account-scoped sessions need tmux 3.2 or newer and run on the local backend, the docker backend, or an ssh
 session placed on a host in the global host list (--host <name>). On a listed host
 af syncs the session's account — only its credential files — into that session's
 own directory on the host, never the remote user's global agent config, writes
