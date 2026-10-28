@@ -582,16 +582,5 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 // `nohup claude "$ARGS"` launch, so the dynamic-boundary reading stays open
 // (see #5034) and the literal payloads the report names are closed here.
 func childTailBuriesMutation(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	if len(words) < 2 {
-		return false
-	}
-	for i := 1; i < len(words); i++ {
-		if _, literal := literalShellWord(words[i]); !literal {
-			continue
-		}
-		if accountChildTailSuffixStartsVerdict(words[i]) && judgeShadowedChildSuffix(words[i:], names, memo) {
-			return true
-		}
-	}
-	return false
+	return len(words) > 1 && laterLiteralChildSuffixMutates(words[1:], names, memo)
 }
