@@ -71,6 +71,9 @@ func LoadConfig() (*Config, error) {
 // change which bytes this load parsed, and so does not change what the running
 // daemon is serving.
 func LoadConfigWithDigest() (*Config, ConfigDigest, error) {
+	if policy := activeAgentPolicy(); policy != nil {
+		return policy.globalConfig(), ConfigDigest{}, nil
+	}
 	var digest ConfigDigest
 	cfg, err := loadConfig(&digest)
 	if err != nil {

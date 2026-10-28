@@ -27,6 +27,7 @@ var (
 	agentServerRepo            string
 	agentServerTitle           string
 	agentServerBranch          string
+	agentServerPolicyFile      string
 	agentServerProgram         string
 	agentServerProgramResolved bool
 	agentServerSessionEnv      []string
@@ -74,6 +75,7 @@ branch before shutdown), not this server's.`,
 			RepoPath:              repo,
 			Title:                 agentServerTitle,
 			Branch:                agentServerBranch,
+			PolicyFile:            agentServerPolicyFile,
 			Program:               agentServerProgram,
 			ProgramResolved:       agentServerProgramResolved,
 			SessionEnvPassthrough: agentServerSessionEnv,
@@ -112,6 +114,8 @@ func init() {
 		"Session title for the workspace (required)")
 	agentServerCmd.Flags().StringVar(&agentServerBranch, "branch", "",
 		"Exact git branch for the workspace's worktree (default: derived from branch_prefix and the title)")
+	agentServerCmd.Flags().StringVar(&agentServerPolicyFile, "policy-file", "",
+		"Operator policy file written by the provisioning daemon; when set, this server reads no config from the host's af home")
 	agentServerCmd.Flags().StringVar(&agentServerProgram, "program", "",
 		"Agent program to run (default: the configured default_program)")
 	agentServerCmd.Flags().BoolVar(&agentServerProgramResolved, "program-resolved", false,

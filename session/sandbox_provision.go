@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -413,6 +414,21 @@ func (w *sandboxWorkspace) writeCallbackEnv(timeout time.Duration) error {
 	return nil
 }
 
+// writePolicy writes spec.AgentPolicy over stdin with umask 077, like the
+// callback env: the policy names hook commands, which the operator may not want
+// world-readable on a shared host. No-op without a policy.
+func (w *sandboxWorkspace) writePolicy(timeout time.Duration) error {
+	if len(w.spec.AgentPolicy) == 0 {
+		return nil
+	}
+	script := "umask 077 && cat > " + shellQuote(w.PolicyPath())
+	out, err := w.shell.Run(timeout, script, bytes.NewReader(w.spec.AgentPolicy), false)
+	if err != nil {
+		return fmt.Errorf("writing the sandbox operator policy failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // startAgentServer launches `af agent-server` headless on the remote, detached
 // (setsid where available, plus nohup) with its banner + log redirected to
 // files, bound to 127.0.0.1:0, and captures the background PID.
@@ -484,6 +500,9 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	}
 	if branch := strings.TrimSpace(w.spec.Branch); branch != "" {
 		args = append(args, "--branch", branch)
+	}
+	if len(w.spec.AgentPolicy) > 0 {
+		args = append(args, "--policy-file", w.PolicyPath())
 	}
 	// AF_TOKEN_REF rides the handoff's per-invocation extras — the one channel
 	// that reaches THIS process's exec-time environment — rather than
@@ -570,6 +589,12 @@ func (w *sandboxWorkspace) BannerPath() string    { return w.SessionDir + "/" + 
 func (w *sandboxWorkspace) CallbackEnvPath() string { return w.SessionDir + "/" + sshCallbackEnvName }
 
 const sshCallbackEnvName = "af-callback.env"
+
+// PolicyPath is the 0600 file holding the daemon-resolved operator policy the
+// agent-server reads instead of this host's config (#5571 W2.5).
+func (w *sandboxWorkspace) PolicyPath() string { return w.SessionDir + "/" + sshPolicyName }
+
+const sshPolicyName = "af-policy.json"
 
 // IdentityEnvPath is the 0600 env file holding only AF_TOKEN_REF — the launch
 // sources it unconditionally so the token reference lands in the agent-server's

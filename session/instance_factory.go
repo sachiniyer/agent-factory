@@ -192,6 +192,11 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		spec.CloneURL = originRemoteURL(absPath)
 		spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(absPath)
 		spec.Branch = daemonBranchForTitle(opts)
+		policy, perr := agentPolicyFor(absPath, opts.BranchPrefix)
+		if perr != nil {
+			return ProvisionResult{}, perr
+		}
+		spec.AgentPolicy = policy
 	}
 	// Mint through the SHARED helper, which the replacement path uses too, so the
 	// two cannot diverge on which kinds get a credential or on what a refusal

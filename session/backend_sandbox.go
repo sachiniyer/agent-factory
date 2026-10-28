@@ -273,6 +273,9 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		p.callbackSocket = w.CallbackSocketPath()
 	}
 	p.reapMu.Unlock()
+	if err := w.writePolicy(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}

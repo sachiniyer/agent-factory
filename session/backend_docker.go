@@ -449,6 +449,9 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.copyAfBinary(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
+	if err := p.copyPolicy(); err != nil {
+		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
+	}
 	if err := p.startAgentServer(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
@@ -692,6 +695,40 @@ func (p *dockerProvisioner) copyAfBinary() error {
 	return nil
 }
 
+// dockerPolicyPath is where the daemon-resolved operator policy lands in the
+// container (#5571 W2.5).
+const dockerPolicyPath = "/tmp/af-policy.json"
+
+// copyPolicy places spec.AgentPolicy in the container for the agent-server to
+// read instead of the image's own config. docker cp lands it root-owned, and a
+// BYO image may run the agent as another uid, so it is made world-readable: the
+// file holds hook commands and program names, no credential, and the container
+// is the session's own.
+func (p *dockerProvisioner) copyPolicy() error {
+	if len(p.spec.AgentPolicy) == 0 {
+		return nil
+	}
+	tmp, err := os.CreateTemp("", "af-policy-*.json")
+	if err != nil {
+		return dockerStepErr(fmt.Errorf("backend=docker: staging the operator policy failed: %w", err), dockerOpLocal)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(p.spec.AgentPolicy); err != nil {
+		_ = tmp.Close()
+		return dockerStepErr(fmt.Errorf("backend=docker: staging the operator policy failed: %w", err), dockerOpLocal)
+	}
+	if err := tmp.Close(); err != nil {
+		return dockerStepErr(fmt.Errorf("backend=docker: staging the operator policy failed: %w", err), dockerOpLocal)
+	}
+	if out, err := p.docker(dockerShortStepTimeout, "cp", tmp.Name(), p.containerID+":"+dockerPolicyPath); err != nil {
+		return fmt.Errorf("backend=docker: copying the operator policy into the container failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	if out, err := p.execSh(dockerShortStepTimeout, "chmod 644 "+shellQuote(dockerPolicyPath)); err != nil {
+		return dockerStepErr(fmt.Errorf("backend=docker: chmod on the operator policy failed: %s: %w", strings.TrimSpace(string(out)), err), dockerOpChmod)
+	}
+	return nil
+}
+
 // startAgentServer launches `af agent-server` headless in the container,
 // detached, with its stdout banner + stderr redirected to files. It binds
 // :<port> (all interfaces) so the published host port forwards to it. The
@@ -734,6 +771,9 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	}
 	if branch := strings.TrimSpace(p.spec.Branch); branch != "" {
 		args = append(args, "--branch", branch)
+	}
+	if len(p.spec.AgentPolicy) > 0 {
+		args = append(args, "--policy-file", dockerPolicyPath)
 	}
 	// This is an execution binding, not a path proof. The copied af enters a
 	// dedicated mode that derives the allowlist from these exact args and execs

@@ -134,6 +134,10 @@ type ProvisionSpec struct {
 	// re-deriving it from the host's own config, and the instance records it at
 	// create (#5571 W2.4). Empty leaves the agent-server to derive it.
 	Branch string
+	// AgentPolicy is the daemon-resolved operator policy (config.AgentPolicy as
+	// JSON) the runtime writes beside the session for the agent-server to read
+	// instead of its own host's config (#5571 W2.5). Empty means none.
+	AgentPolicy []byte
 	// SeedBundlePath, when set, seeds the sandbox workspace from a local git
 	// bundle (a W7.9 session move) instead of only a fresh clone: after cloning,
 	// the bundle is streamed to the sandbox and SeedRefs are fetched from it as
