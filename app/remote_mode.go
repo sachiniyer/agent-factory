@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -79,20 +80,74 @@ type remoteCache struct {
 	tasks          []task.Task
 	tasksErr       error
 	tasksLoaded    bool
+	// seq counts acknowledged (or possibly-landed) task mutations. A poll captures
+	// it when it STARTS and its task list is applied only if it is unchanged when
+	// the result lands: a read that began before a mutation was acknowledged can
+	// carry the state from before it, and applying that would resurrect a deleted
+	// row, undo an edit, or hide a create until the next poll. A poll that began
+	// after the acknowledgement reads a daemon that already holds the write.
+	seq uint64
 }
 
-func (c *remoteCache) apply(r *remoteReads) {
+// apply installs one poll's reads. The project registry always applies; the
+// task list applies only when no task mutation was acknowledged since the poll
+// began (readSeq is the seq captured at its start).
+func (c *remoteCache) apply(r *remoteReads, readSeq uint64) {
 	if r == nil {
 		return
 	}
-	c.projectsErr, c.tasksErr = r.projectsErr, r.tasksErr
+	c.projectsErr = r.projectsErr
 	if r.projectsErr == nil {
 		c.projects, c.projectsLoaded = r.projects, true
 	}
+	if readSeq != c.seq {
+		return // older than an acknowledged mutation: keep the newer cache
+	}
+	c.tasksErr = r.tasksErr
 	if r.tasksErr == nil {
 		c.tasks, c.tasksLoaded = r.tasks, true
 	}
 }
+
+// noteTaskStored records a create or update the daemon acknowledged: rec is the
+// stored record when the daemon returned it, else the caller's best local
+// reconstruction. The cache is replaced at once, so the reload that follows the
+// mutation sees the mutation.
+func (c *remoteCache) noteTaskStored(rec task.Task) {
+	c.seq++
+	next := make([]task.Task, 0, len(c.tasks)+1)
+	replaced := false
+	for _, t := range c.tasks {
+		if t.ID == rec.ID {
+			next = append(next, rec)
+			replaced = true
+			continue
+		}
+		next = append(next, t)
+	}
+	if !replaced {
+		next = append(next, rec)
+	}
+	c.tasks = next
+}
+
+// noteTaskRemoved records a delete the daemon acknowledged.
+func (c *remoteCache) noteTaskRemoved(id string) {
+	c.seq++
+	next := make([]task.Task, 0, len(c.tasks))
+	for _, t := range c.tasks {
+		if t.ID != id {
+			next = append(next, t)
+		}
+	}
+	c.tasks = next
+}
+
+// noteTaskMutationUncertain is for a mutation that may or may not have landed:
+// the cache cannot be advanced, but every poll already in flight is now older
+// than the write it may have missed, so none of them may overwrite what the next
+// poll will read.
+func (c *remoteCache) noteTaskMutationUncertain() { c.seq++ }
 
 // fetchRemoteReads reads the target's registry and tasks concurrently under one
 // deadline of remoteReadTimeout, derived from parent (the model's lifetime
@@ -139,7 +194,10 @@ func (m *home) activeTasks(repoRoot, repoID string) ([]task.Task, error) {
 		return nil, nil
 	}
 	if !m.remote.tasksLoaded {
-		return nil, m.remote.tasksErr
+		if m.remote.tasksErr != nil {
+			return nil, m.remote.tasksErr
+		}
+		return nil, errors.New("the task list has not been read from the daemon yet")
 	}
 	return filterTasksToProject(m.remote.tasks, repoRoot, repoID), nil
 }
@@ -270,4 +328,99 @@ func (m *home) buildRemoteProjectList(data []session.InstanceData) ([]overlay.Pr
 // of THIS machine that the target never reads.
 func errRemoteHooksSave() error {
 	return fmt.Errorf("post-worktree hooks live in the project's checkout on the daemon at %s — edit .agent-factory/config.toml there; the TUI will not write a copy on this machine", apiclient.RemoteTargetURL())
+}
+
+// taskMutationAck carries the record the daemon returned for the LAST task
+// create/update, from the seam to the call site that acknowledges it. The seams
+// keep their error-only signatures (the app tests stub them), and — like the
+// seams — it is read and written only on the event loop. nil means the daemon
+// did not say (an older daemon, or a committed-with-warning reply); the caller
+// then advances the cache from what it sent instead.
+type taskMutationAck struct{ record *task.Task }
+
+var taskAck taskMutationAck
+
+// The note* hooks run right after each task mutation's daemon call and advance
+// the remote cache from the mutation's OWN result (W9.7 follow-up). In local mode
+// they do nothing: tasks.json is re-read from disk, which already holds the
+// write. A definitive refusal changes nothing; a committed or successful write
+// updates the cache now; an outcome that may have landed only poisons the polls
+// already in flight.
+
+func (m *home) noteRemoteCreate(sent task.Task, err error) {
+	if !isRemoteTarget() {
+		return
+	}
+	ack := taskAck.record
+	taskAck = taskMutationAck{}
+	switch {
+	case err == nil || apiclient.IsMutationCommitted(err):
+		rec := sent
+		if ack != nil {
+			rec = *ack
+		}
+		m.remote.noteTaskStored(rec)
+	case mutationMayHaveLanded(err):
+		m.remote.noteTaskMutationUncertain()
+	}
+}
+
+func (m *home) noteRemoteUpdate(id string, update task.TaskUpdate, err error) {
+	if !isRemoteTarget() {
+		return
+	}
+	ack := taskAck.record
+	taskAck = taskMutationAck{}
+	switch {
+	case err == nil || apiclient.IsMutationCommitted(err):
+		if ack != nil {
+			m.remote.noteTaskStored(*ack)
+			return
+		}
+		// The daemon did not return the merged record (a committed-with-warning
+		// reply carries no body): advance the cached copy by the patch it accepted.
+		for _, t := range m.remote.tasks {
+			if t.ID == id {
+				m.remote.noteTaskStored(update.ApplyTo(t))
+				return
+			}
+		}
+		m.remote.noteTaskMutationUncertain()
+	case mutationMayHaveLanded(err):
+		m.remote.noteTaskMutationUncertain()
+	}
+}
+
+func (m *home) noteRemoteRemove(id string, err error) {
+	if !isRemoteTarget() {
+		return
+	}
+	switch {
+	case err == nil || apiclient.IsMutationCommitted(err):
+		m.remote.noteTaskRemoved(id)
+	case mutationMayHaveLanded(err):
+		m.remote.noteTaskMutationUncertain()
+	}
+}
+
+// remoteHooksReadOnlyReason is shown in the hooks pane for a remote target, so the
+// edit keys are inert instead of producing an edit no save can ever commit.
+func remoteHooksReadOnlyReason() string {
+	return "Hooks live in the project's checkout on the daemon host — edit .agent-factory/config.toml there."
+}
+
+// discardUnsavedPaneEdits drops every unsaved edit the content panes hold —
+// hooks back to what is stored, the task pane back to the list as last read — so
+// a save that cannot succeed never traps the user in the TUI.
+func (m *home) discardUnsavedPaneEdits() {
+	m.hooksPane.Discard()
+	sp := m.automations.TaskPane()
+	sp.ResetTasks(m.store.GetTasks())
+}
+
+// takePendingPaneNotice drains the one-shot notice a save left for the user.
+func (m *home) takePendingPaneNotice() string {
+	n := m.pendingPaneNotice
+	m.pendingPaneNotice = ""
+	return n
 }

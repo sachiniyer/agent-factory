@@ -44,6 +44,13 @@ type AddTaskRequest struct {
 }
 type AddTaskResponse struct {
 	OK bool `json:"ok"`
+	// Task is the record as stored — ID, expanded ProjectPath and bound RepoID
+	// included (W9.7 follow-up). A client that keeps a local view of the task
+	// list updates it from THIS, not from the request it sent, so a path the
+	// daemon expanded or a binding it resolved is the one the client scopes by.
+	// Absent from daemons that predate it, and from a committed-with-warning
+	// reply (an error carries no body).
+	Task *task.Task `json:"task,omitempty"`
 	MutationOutcome
 }
 
