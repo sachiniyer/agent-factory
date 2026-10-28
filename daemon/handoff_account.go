@@ -58,6 +58,12 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	if !tmux.IsSupportedProgram(target) {
 		return HandoffSessionResponse{}, fmt.Errorf("unknown agent %q", target)
 	}
+	// Refused up front for a sandbox session, before anything stops: moving an
+	// account across a sandbox boundary is W7.4/W7.6, and the in-place agent
+	// handoff must not be reachable with an account in play.
+	if err := instance.RefuseOffBoxAccountHandoff(); err != nil {
+		return HandoffSessionResponse{}, err
+	}
 	if !instance.Capabilities().Handoff {
 		return HandoffSessionResponse{}, session.ErrHandoffUnsupported
 	}
