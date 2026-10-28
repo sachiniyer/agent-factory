@@ -116,19 +116,29 @@ func (i *Instance) ReattachSandbox() error {
 		}
 		restarted = true
 		log.InfoLog.Printf("sandbox runtime: session %q: restarted its crashed agent-server (pid %s, %s)", i.Title, p.remotePID, p.remoteAddr)
+		// A restarted server that this attempt cannot adopt is stopped, not left:
+		// a later reattach would find it responsive and take the bind-only path,
+		// skipping adoption for good. The new PID/address are still persisted so
+		// the next attempt proves THAT process dead and restarts again.
+		abortRestart := func() {
+			_, _ = p.Run(sshShortStepTimeout, remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef), nil, true)
+			i.mu.Lock()
+			refreshRuntimeIdentity(b, p)
+			i.mu.Unlock()
+		}
 		var rc *remoteAgentClient
 		if endpoint, rc, aliveErr, err = dial(); err != nil || aliveErr != nil {
+			abortRestart()
 			return fmt.Errorf("reattach %q: the restarted agent-server did not answer: %w", i.Title, errors.Join(err, aliveErr))
 		}
-		// The surviving tmux session is adopted through the ordinary restore path
-		// (firstTimeSetup=false reattaches a live session and only re-spawns one
-		// that is gone), so a pane that outlived the crash keeps its agent.
+		// The surviving workspace is adopted through the ordinary restore path
+		// (firstTimeSetup=false): Provision re-derives and proves the worktree
+		// handle before Launch reattaches a live tmux session or re-spawns one
+		// that is gone, so a pane that outlived the crash keeps its agent.
 		srv := &remoteAgentServer{rc: rc}
 		if aerr := errors.Join(srv.Provision(false), srv.Launch(false)); aerr != nil {
 			p.abandonUnadoptedTunnel()
-			// Left running it would be a live server nothing adopted, which the next
-			// reattach would mistake for healthy; stop it so that attempt restarts.
-			_, _ = p.Run(sshShortStepTimeout, remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef), nil, true)
+			abortRestart()
 			return fmt.Errorf("reattach %q: adopting the restarted agent-server failed: %w", i.Title, aerr)
 		}
 	}

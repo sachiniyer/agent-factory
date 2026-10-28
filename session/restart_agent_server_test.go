@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,8 @@ type crashedHost struct {
 	scripts   []string
 	lifecycle []string
 	probe     string
+	// failDial makes the transport refuse to open once the server was restarted.
+	failDial bool
 }
 
 func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner, *crashedHost) {
@@ -62,6 +65,12 @@ func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner,
 	var dialed []string
 	p.startTunnelFn = func(addr string) (string, error) {
 		dialed = append(dialed, addr)
+		h.mu.Lock()
+		refuse := h.failDial && h.restarted
+		h.mu.Unlock()
+		if refuse {
+			return "", errors.New("transient dial failure")
+		}
 		return srv.Listener.Addr().String(), nil
 	}
 	t.Cleanup(func() {
@@ -162,4 +171,22 @@ func TestAgentServerProbeNeverKillsAndAgreesWithTheReapOnIdentity(t *testing.T) 
 	prelude := remotePIDIdentityFuncs("4242", "/s/af", "ref")
 	assert.True(t, strings.HasPrefix(probe, prelude) && strings.HasPrefix(kill, prelude),
 		"the probe and the reap share one definition of 'this row's agent-server'")
+}
+
+// A restarted server this attempt cannot reach is stopped and its identity
+// persisted: left running it would answer the next reattach's probe, which would
+// then bind it without ever adopting the surviving session.
+func TestReattachStopsAnUnadoptedRestartWhenTheSecondDialFails(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	p.launchScript = "echo relaunched & echo $!"
+	h.failDial = true
+
+	err := inst.ReattachSandbox()
+	require.Error(t, err)
+	assert.True(t, h.ran("kill \"$pid\""), "the unadopted server is stopped")
+	assert.Empty(t, h.lifecycle, "no adoption was attempted")
+	assert.Nil(t, inst.remoteClient)
+	cleanup := inst.backend.(*sandboxBackend).cleanup
+	assert.Equal(t, "4343", cleanup.RemotePID, "the persisted identity follows the restart so a retry probes the right process")
+	assert.Equal(t, "127.0.0.1:9999", cleanup.RemoteAddr)
 }
