@@ -627,12 +627,13 @@ func (s *controlServer) archiveSession(ctx context.Context, req *ArchiveSessionR
 	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
 	// commits it, and publishes the full projection inside its operation lock. That
 	// keeps lifecycle event order identical to operation order (#2680).
-	archivedPath, _, err := s.manager.ArchiveSession(*req)
+	archivedPath, archived, err := s.manager.ArchiveSession(*req)
 	if !resp.record(err) {
 		return err
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
+	resp.ArchivedWorkspace = archived.ArchivedWorkspace
 	return nil
 }
 

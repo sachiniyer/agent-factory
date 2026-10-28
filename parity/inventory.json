@@ -2086,6 +2086,7 @@
       "af sessions --json": "cli.json-envelope",
       "af sessions --repo": "project.switch",
       "af sessions archive --help": "meta.discovery",
+      "af sessions archive --push": "session.archive",
       "af sessions archive --self": "session.archive",
       "af sessions attach --help": "meta.discovery",
       "af sessions backends --help": "meta.discovery",
@@ -2303,6 +2304,13 @@
           },
           "host": {
             "gap": "session.create.opt.host"
+          }
+        }
+      },
+      "ArchiveSessionRequest": {
+        "tui": {
+          "push": {
+            "ok": "Opt-in: the default archive preserves the workspace and publishes nothing (W8.5); publishing the branch before the sandbox is reaped is an explicit CLI choice (`sessions archive --push`). The TUI and web archive actions take the default until the restore half (W8.6) makes the pushed path a pickable choice."
           }
         }
       },
@@ -2705,6 +2713,11 @@
         },
         "validate_first": {
           "ok": "Opt-in used by the remote CLI, which cannot run the host-owned account and preflight checks itself; the web's pickers offer only accounts and backends the daemon already reported, so it does not need the daemon to repeat them (#5744)."
+        }
+      },
+      "ArchiveSession": {
+        "push": {
+          "ok": "Opt-in: the default archive preserves the workspace and publishes nothing (W8.5); publishing the branch before the sandbox is reaped is an explicit CLI choice (`sessions archive --push`). The TUI and web archive actions take the default until the restore half (W8.6) makes the pushed path a pickable choice."
         }
       },
       "CreateTab": {

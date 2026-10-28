@@ -47,6 +47,7 @@ var (
 		return client.PruneSessions(req)
 	}
 	sessionsArchiveSelf     bool
+	sessionsArchivePush     bool
 	sendPromptViaDaemon     = routedSendPrompt
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
 	createTabViaDaemon      = routedCreateTab

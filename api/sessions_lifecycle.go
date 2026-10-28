@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The three session-lifecycle verbs — kill, archive, restore — moved out of
@@ -95,8 +96,11 @@ With --self, archive the current session (resolved via whoami) instead of a
 named one — use it from inside a session when your work is done. --self and a
 <title> argument are mutually exclusive.
 
-Sandboxes publish work before removal; restore recreates them from the published
-branch. In-place (--here) sessions cannot be archived because af does not own
+An ssh or sandbox session publishes nothing by default: the agent stops and the
+workspace stays on its host, owned by the archived row, and the output names where
+(archived_workspace). Pass --push to push the branch to origin first; docker and
+hook sessions always push. Restoring a session archived without a push is not
+available yet (#5571 W8.6) — the work is untouched on the host. In-place (--here) sessions cannot be archived because af does not own
 their worktree. Local archives print the relocated worktree path on success.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -169,7 +173,7 @@ their worktree. Local archives print the relocated worktree path on success.`,
 
 		// --self's reason for existing: same SIGHUP shield as kill (#5182).
 		defer ignoreTeardownHangup()()
-		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
+		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID, Push: sessionsArchivePush})
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
@@ -181,8 +185,32 @@ their worktree. Local archives print the relocated worktree path on success.`,
 		if warning != "" {
 			result["warning"] = warning
 		}
+		// Where an off-box session's work lives: the preserved directory on its
+		// host, or the pushed branch (#5571 W8.5). Best-effort, from the archived
+		// row; a local archive has none and the key is absent.
+		if loc := archivedWorkspaceOf(repoID, sessionID, title); loc != nil {
+			result["archived_workspace"] = loc
+		}
 		return jsonOut(result)
 	},
+}
+
+// archivedWorkspaceOf reads back where an archived off-box session's work lives.
+// Best-effort: any read failure just omits the additive field.
+func archivedWorkspaceOf(repoID, sessionID, title string) *session.ArchivedWorkspaceData {
+	rows, _, err := snapshotViaDaemon(daemon.SnapshotRequest{RepoID: repoID})
+	if err != nil {
+		return nil
+	}
+	for _, d := range rows {
+		if d.ArchivedWorkspace == nil {
+			continue
+		}
+		if (sessionID != "" && d.ID == sessionID) || (sessionID == "" && d.Title == title) {
+			return d.ArchivedWorkspace
+		}
+	}
+	return nil
 }
 
 var sessionsRestoreCmd = &cobra.Command{

@@ -372,6 +372,10 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// to diagnose the session shape, and unlike ordinary snapshots instances.json
 	// carries it specifically so teardown can resume after restart.
 	d.RuntimeCleanup = nil
+	// ArchivedWorkspace names the host alias, the session directory on that host
+	// and the branch of a preserved off-box workspace (#5571 W8.5). Whether the
+	// archive published is diagnosable from the archive report; the locators are not.
+	d.ArchivedWorkspace = nil
 	if d.Title != "" {
 		d.Title = redactedMarker
 	}
