@@ -37,6 +37,11 @@ type HostCheckResult struct {
 	Error     string   `json:"error,omitempty"`
 	Problems  []string `json:"problems,omitempty"`
 	Warnings  []string `json:"warnings,omitempty"`
+	// Complete is true only when git, tmux and gh each gave a recognised answer.
+	// A reachable host with Complete false answered something af could not read,
+	// so it is unknown, not ready (#5841). Absent from an older daemon's reply,
+	// which therefore also reads as unknown.
+	Complete bool `json:"complete"`
 	// Readiness is the cached verdict after the probe: ready | blocked | stale |
 	// unprobed.
 	Readiness string `json:"readiness"`
@@ -87,7 +92,7 @@ func probeOne(name string, hosts map[string]config.HostConfig, posture string) H
 	if err != nil {
 		res.Error = err.Error()
 	} else {
-		res.Reachable, res.Error, res.Problems, res.Warnings = c.Reachable, c.Error, c.Problems, c.Warnings
+		res.Reachable, res.Error, res.Problems, res.Warnings, res.Complete = c.Reachable, c.Error, c.Problems, c.Warnings, c.Complete
 	}
 	res.Readiness = string(session.ReadHostReadiness(session.HostReadinessKey(name)).State)
 	return res
