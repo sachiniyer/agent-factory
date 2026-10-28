@@ -3,44 +3,91 @@ package session
 import (
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 )
 
-// credentialMountTargets returns the in-container destinations of the
-// read-only agent-credential bind mounts (docker.mount_agent_credentials,
-// #2194) that fall under home — the single files agentCredentialMounts
-// bind-mounts at dockerContainerHome/<rel>. Each `-v` entry of mounts is the
-// pair ("-v", "host:container:mode"); host and container are absolute unix
-// paths with no colons, so the container destination is the segment between
-// the last two colons. Only strict descendants of home are returned: the
-// credential always mounts under the non-account session home, and pruning
-// home itself would skip the whole chown.
-func credentialMountTargets(mounts []string, home string) []string {
-	var targets []string
-	for i := 0; i+1 < len(mounts); i++ {
-		if mounts[i] != "-v" {
+// The recursive HOME chown must never cross into a mount point under HOME,
+// however the mount was created (docker.run_args -v/--mount/--volumes-from/
+// --tmpfs, an image-declared VOLUME, the af-managed credential binds): a
+// recursive chown through a host bind re-owns the operator's host files, and
+// through a read-only one aborts provisioning with EROFS (#5424 review).
+// Deriving "what is a mount" by parsing run_args kept missing spellings, so the
+// set is read from the container's own kernel mount table at chown time
+// instead (mountPointsAtOrUnder), and provisioning fails closed when that table
+// cannot be read or trusted.
+
+// unescapeMountinfo decodes the octal escapes (\040 for a space, \011, \012,
+// \134) the kernel uses in mountinfo path fields.
+func unescapeMountinfo(field string) string {
+	if !strings.Contains(field, `\`) {
+		return field
+	}
+	var b strings.Builder
+	for i := 0; i < len(field); i++ {
+		if field[i] == '\\' && i+4 <= len(field) {
+			if v, ok := octalByte(field[i+1 : i+4]); ok {
+				b.WriteByte(v)
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(field[i])
+	}
+	return b.String()
+}
+
+func octalByte(s string) (byte, bool) {
+	if len(s) != 3 {
+		return 0, false
+	}
+	var v int
+	for _, c := range []byte(s) {
+		if c < '0' || c > '7' {
+			return 0, false
+		}
+		v = v*8 + int(c-'0')
+	}
+	if v > 255 {
+		return 0, false
+	}
+	return byte(v), true
+}
+
+// mountPointsAtOrUnder parses /proc/self/mountinfo text and returns every mount
+// point equal to root or beneath it, cleaned and de-duplicated. It errors —
+// callers must then refuse to chown — when the table is unusable: empty, a line
+// without a mount-point field, or no "/" mount at all (a real container's table
+// always has one, so its absence means the text is not a mount table).
+func mountPointsAtOrUnder(mountinfo, root string) ([]string, error) {
+	root = path.Clean(root)
+	var found []string
+	sawRoot := false
+	seen := map[string]bool{}
+	for _, line := range strings.Split(mountinfo, "\n") {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		spec := mounts[i+1]
-		last := strings.LastIndexByte(spec, ':')
-		if last < 0 {
-			continue
+		fields := strings.Fields(line)
+		if len(fields) < 7 {
+			return nil, fmt.Errorf("unparseable mountinfo line %q", line)
 		}
-		body := spec[:last]
-		sep := strings.LastIndexByte(body, ':')
-		if sep < 0 {
-			continue
+		mp := path.Clean(unescapeMountinfo(fields[4]))
+		if !strings.HasPrefix(mp, "/") {
+			return nil, fmt.Errorf("unparseable mountinfo mount point %q", fields[4])
 		}
-		container := body[sep+1:]
-		if container == "" || home == "" {
-			continue
+		if mp == "/" {
+			sawRoot = true
 		}
-		container = path.Clean(container)
-		if strings.HasPrefix(container, home+"/") {
-			targets = append(targets, container)
+		if (mp == root || strings.HasPrefix(mp, root+"/")) && !seen[mp] {
+			seen[mp] = true
+			found = append(found, mp)
 		}
 	}
-	return targets
+	if !sawRoot {
+		return nil, fmt.Errorf("mountinfo has no root mount")
+	}
+	return found, nil
 }
 
 // chownRecursiveScript returns a shell snippet that chowns every entry under
@@ -93,152 +140,123 @@ func findLiteralPattern(p string) string {
 	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`, "]", `\]`).Replace(p)
 }
 
-// volumeBindContainer reports the container destination of a -v / --volume
-// value ("host:container[:mode]") when that value is a bind mount — a host
-// source that is an absolute path — and ok=false for a named or anonymous
-// volume. Only a bind mount lands host files at the container path, so only it
-// is pruned from the recursive HOME chown: a named volume ("name:container")
-// or an anonymous volume ("container") is docker-managed and writable, a
-// chown into it is harmless, and the home is left to the plain recursive chown.
-// The container path is the segment between the last two colons (mode last,
-// container before it); host and container are absolute unix paths with no
-// colons, so this split is unambiguous. An empty container or a value without
-// a host:container pair (a bare anonymous-volume path) is not a bind.
-func volumeBindContainer(spec string) (container string, ok bool) {
-	last := strings.LastIndexByte(spec, ':')
-	if last < 0 {
-		return "", false // -v container, an anonymous volume: no host
-	}
-	body := spec[:last]
-	sep := strings.LastIndexByte(body, ':')
-	var host string
-	if sep < 0 {
-		// host:container (no mode): the only colon separates host from container.
-		host = body
-		container = spec[last+1:]
-	} else {
-		// host:container:mode: host is before sep, container between sep and last.
-		host = body[:sep]
-		container = body[sep+1:]
-	}
-	if container == "" || !volumeSourceIsHostPath(host) {
-		return "", false // a named/anonymous volume, not a host-source bind
-	}
-	return container, true
-}
-
-// volumeSourceIsHostPath reports whether the source half of a -v spec names a
-// host path rather than a volume. A volume name cannot start with "/" or ".",
-// so an absolute path and — since Docker Engine 23 — a relative one ("./cache",
-// "../cache", "." or "..") are both host binds.
-func volumeSourceIsHostPath(source string) bool {
-	return strings.HasPrefix(source, "/") || strings.HasPrefix(source, "./") ||
-		strings.HasPrefix(source, "../") || source == "." || source == ".."
-}
-
-// mountBindContainer reports the container destination of a --mount value when
-// that value is a bind mount ("type=bind,..."), reusing the account path's
-// CSV field parsing so a quoted field such as `"dst=/root/cache"` is read the
-// way Docker reads it. A --mount without type=bind (type=volume, type=tmpfs,
-// or no type) is not a host bind and is not pruned: a volume is docker-managed
-// and writable, and a tmpfs is in-memory, so a chown into either is harmless.
-// The destination key is matched case-insensitively (Docker lowercases it), so
-// DST=/root/cache mounts exactly where dst= does.
-func mountBindContainer(spec string) (container string, ok bool) {
-	var isBind bool
-	for _, field := range dockerMountFields(spec) {
-		key, val, _ := strings.Cut(field, "=")
-		switch strings.ToLower(key) {
-		case "type":
-			isBind = strings.EqualFold(val, "bind")
-		case "dst", "destination", "target":
-			container = val
-		}
-	}
-	if !isBind || container == "" {
-		return "", false
-	}
-	return container, true
-}
-
-// bindMountTargets returns the in-container destinations of the bind mounts
-// that docker.run_args installs under home, so the recursive HOME chown can
-// prune them the way it prunes the af-managed credential mounts. A repo-
-// controlled run_args entry can bind a host directory beneath /root
-// ("-v /host/cache:/root/cache"), and a recursive chown that descends into it
-// either re-owns the operator's host files (a read-write bind) or fails with
-// EROFS (a read-only bind), so each must be pruned (#5424 review). Named and
-// anonymous volumes are docker-managed and writable, so a chown into one is
-// harmless and they are left to the plain recursive chown; only host-source
-// bind mounts (-v/--volume with an absolute host, or --mount type=bind) are
-// pruned. Only strict descendants of home are returned; a bind at home itself
-// is not, since pruning home would skip the whole chown.
+// prepareNonAccountUser mirrors prepareAccountUser for a session with no
+// credential account. A BYO image may set a non-root `USER` directive (a common
+// hardening practice), and the container is launched with HOME=dockerContainerHome
+// (/root). Without this step every provisioning exec runs as that non-root
+// default user while HOME is root-owned (mode 0700), so the first
+// `git config --global` fails with "could not lock config file
+// /root/.gitconfig: Permission denied" and the session is rejected at create
+// time with a diagnostic that points at git, not at the forced /root HOME
+// against the image's non-root USER.
 //
-// The -v/--volume and --mount forms and their =/attached spellings are read
-// the way the run_args validator reads them, including a -v hidden behind
-// another option in a combined short option such as -tv, so a bind mounted
-// that way is pruned too. --tmpfs is not a host bind and is not pruned.
-func bindMountTargets(args []string, home string) []string {
-	if home == "" {
+// It probes the image's default user by running `id -u`/`id -g` with no --user
+// override, so the image's USER directive resolves via the image's own
+// /etc/passwd (a name like `dev`, a bare uid, or a uid:gid pair all resolve to a
+// numeric uid:gid this way). It then recursively chowns HOME (a non-root BYO
+// image may ship root-owned descendants such as /root/.codex or /root/.config
+// with mode 0700, and a shallow chown of the top-level dir alone leaves those
+// unreadable by the selected uid) and creates+chowns /workspace as root
+// (0:0) to that uid. Subsequent provisioning execs (configureGit,
+// cloneWorkspace) and the agent-server itself run as that user via
+// sessionExecOptions, with a HOME it can now write to.
+//
+// A root-default image (probe reports uid 0, on either side of the gid) is the
+// exception: it returns early with containerUser unset, because preparation
+// would REGRESS it twice over.
+// The chown is not a no-op when docker.run_args bind-mounts a host directory at
+// /root or /workspace — it would re-own the operator's host files. And a set
+// containerUser makes sessionExecOptions force `-e HOME=/root` on every exec,
+// overriding a HOME the operator set via run_args (docker exec -e wins over the
+// container's configured env). With containerUser left unset every exec runs as
+// the image's default user with the container's inherited env — the exact
+// behavior non-account sessions had before this step existed — and the clone
+// creates /workspace itself, as it always has.
+func (p *dockerProvisioner) prepareNonAccountUser() error {
+	if p.spec.Account.Dir != "" {
 		return nil
 	}
-	var targets []string
-	add := func(container string) {
-		// Docker records path.Clean(target) as the mount destination, so a
-		// trailing slash or "." segment names the same directory find visits.
-		container = path.Clean(container)
-		if strings.HasPrefix(container, home+"/") {
-			targets = append(targets, container)
-		}
+	out, err := p.docker(dockerShortStepTimeout,
+		"exec", p.containerID, "sh", "-c", `echo "$(id -u):$(id -g)"`)
+	if err != nil {
+		// The id probe is a read-only exec — the only data-root writes are
+		// dockerd's privileged exec bookkeeping, never an unprivileged
+		// container-side write — so the failure carries the daemon-write
+		// class, matching prepareAccountUser's stat probe and reserving
+		// dockerOpRootExec for the subsequent mkdir+chown.
+		return dockerStepErr(fmt.Errorf("backend=docker: cannot identify the image's default user: %s: %w", strings.TrimSpace(string(out)), err), dockerOpDaemonWrite)
 	}
-	apply := func(kind byte, value string) {
-		switch kind {
-		case 'v':
-			if c, ok := volumeBindContainer(value); ok {
-				add(c)
-			}
-		case 'm':
-			if c, ok := mountBindContainer(value); ok {
-				add(c)
-			}
-		}
+	owner, err := parseContainerOwner(string(out))
+	if err != nil {
+		// af failed to read the engine's answer — nothing reached a writer.
+		return dockerStepErr(fmt.Errorf("backend=docker: cannot identify the image's default user: %w", err), dockerOpLocal)
 	}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-v" || arg == "--volume":
-			if i+1 < len(args) {
-				i++
-				apply('v', args[i])
-			}
-		case arg == "--mount":
-			if i+1 < len(args) {
-				i++
-				apply('m', args[i])
-			}
-		case strings.HasPrefix(arg, "--volume="):
-			apply('v', strings.TrimPrefix(arg, "--volume="))
-		case strings.HasPrefix(arg, "--mount="):
-			apply('m', strings.TrimPrefix(arg, "--mount="))
-		case strings.HasPrefix(arg, "-v="):
-			apply('v', strings.TrimPrefix(arg, "-v="))
-		case strings.HasPrefix(arg, "-v") && len(arg) > 2:
-			apply('v', strings.TrimPrefix(arg, "-v"))
-		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
-			// A combined short option such as -tv /host:/root/cache, whose -v
-			// mounts a host file the way -v alone does. Reuse the pflag walk the
-			// run_args validator uses so a -v behind another option is still
-			// read; the index deliberately does NOT advance past the value, for
-			// the same reason the validator's doesn't (the value may belong to
-			// an earlier option in the cluster, and a real --mount written next
-			// would otherwise be skipped).
-			_ = dockerCheckShorthandCluster(arg, args, i, "v",
-				func(_ byte, value string) error {
-					apply('v', value)
-					return nil
-				},
-				"a non-account session", "the -v")
-		}
+	// UID 0 is root regardless of the gid — a `USER 0:<gid>` directive probes
+	// as 0:<gid>, and uid 0 needs no writable-HOME/workspace preparation. The
+	// comparison is on the uid alone so every root-default image takes the
+	// no-preparation path.
+	if uid, _, _ := strings.Cut(owner, ":"); uid == "0" {
+		return nil
 	}
-	return targets
+	// The home is chowned recursively (-R) rather than shallowly: a non-root
+	// BYO image may ship root-owned descendants under /root (e.g. /root/.codex
+	// or /root/.config with mode 0700), and a shallow chown of the top-level
+	// directory leaves those unreadable and unwritable by the selected uid,
+	// so the agent later cannot read or update its existing configuration.
+	//
+	// The chown must never cross into a mount point, however it was created
+	// (-v, --mount, --volumes-from, --tmpfs, an image VOLUME, af's read-only
+	// credential binds): through a host bind it would re-own the operator's
+	// files, through a read-only one it would abort with EROFS (#5424 review).
+	// So the pruned set is the container's own kernel mount table, read as root
+	// right before the chown, not a parse of docker run arguments; and if that
+	// table cannot be read or trusted the chown is refused, not guessed.
+	home, workspace := p.sessionHome(), dockerWorkspaceDir
+	realHome, realWorkspace, mounts, err := p.readMountTable(home, workspace)
+	if err != nil {
+		return err
+	}
+	prune, err := mountPointsAtOrUnder(mounts, realHome)
+	if err != nil {
+		return dockerStepErr(fmt.Errorf("backend=docker: refusing to chown the session HOME for the image's default user %s: the container mount table is unusable: %w", owner, err), dockerOpLocal)
+	}
+	workspaceMounts, err := mountPointsAtOrUnder(mounts, realWorkspace)
+	if err != nil {
+		return dockerStepErr(fmt.Errorf("backend=docker: refusing to chown the session workspace for the image's default user %s: the container mount table is unusable: %w", owner, err), dockerOpLocal)
+	}
+	steps := []string{fmt.Sprintf("mkdir -p %s %s", shellQuote(home), shellQuote(workspace))}
+	// A mount point AT home (or at the workspace) is not af's to re-own either:
+	// the prune list already contains it, so find skips it and its subtree.
+	steps = append(steps, chownRecursiveScript(realHome, owner, prune))
+	if !slices.Contains(workspaceMounts, path.Clean(realWorkspace)) {
+		steps = append(steps, fmt.Sprintf("chown %s %s", owner, shellQuote(realWorkspace)))
+	}
+	out, err = p.docker(dockerShortStepTimeout,
+		"exec", "--user", "0:0", p.containerID, "sh", "-c", strings.Join(steps, " && "))
+	if err != nil {
+		return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare a writable HOME and workspace for the image's default user %s: %s: %w",
+			owner, strings.TrimSpace(string(out)), err), dockerOpRootExec)
+	}
+	p.containerUser = owner
+	return nil
+}
+
+// readMountTable creates the session HOME and workspace as root, then returns
+// their symlink-resolved paths and the container's own /proc/self/mountinfo, in
+// one exec so both describe the same mount namespace. The exec shares the
+// container's mount namespace, so the table lists every mount however it was
+// made. An unreadable table is an error: callers must not chown without it.
+func (p *dockerProvisioner) readMountTable(home, workspace string) (realHome, realWorkspace, mountinfo string, err error) {
+	out, err := p.docker(dockerShortStepTimeout,
+		"exec", "--user", "0:0", p.containerID, "sh", "-c",
+		`mkdir -p -- "$1" "$2" && cd -- "$1" && pwd -P && cd -- "$2" && pwd -P && cat /proc/self/mountinfo`,
+		"sh", home, workspace)
+	if err != nil {
+		return "", "", "", dockerStepErr(fmt.Errorf("backend=docker: cannot read the container mount table, so the session HOME is not chowned (a chown cannot be proven to stay off host mounts): %s: %w", strings.TrimSpace(string(out)), err), dockerOpRootExec)
+	}
+	lines := strings.SplitN(string(out), "\n", 3)
+	if len(lines) < 3 || !strings.HasPrefix(lines[0], "/") || !strings.HasPrefix(lines[1], "/") || strings.TrimSpace(lines[2]) == "" {
+		return "", "", "", dockerStepErr(fmt.Errorf("backend=docker: the container mount table answer was not understood, so the session HOME is not chowned: %q", strings.TrimSpace(string(out))), dockerOpLocal)
+	}
+	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), lines[2], nil
 }

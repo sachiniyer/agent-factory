@@ -68,6 +68,8 @@ func fakeNonRootImageDockerAnswers(t *testing.T, calls *[][]string, imageUser st
 			case strings.Contains(joined, "id -u"):
 				// prepareNonAccountUser's probe of the image's default USER.
 				return []byte(imageUser + "\n"), nil
+			case strings.Contains(joined, "/proc/self/mountinfo"):
+				return mountTableAnswer(), nil
 			case strings.Contains(joined, "cat "+dockerBannerPath):
 				return []byte(`{"addr":":8000","token":"test-only","title":"non-root-image"}`), nil
 			}
@@ -75,6 +77,43 @@ func fakeNonRootImageDockerAnswers(t *testing.T, calls *[][]string, imageUser st
 		default:
 			return nil, fmt.Errorf("unexpected docker call: %v", args)
 		}
+	}
+}
+
+// mountinfoLine renders one /proc/self/mountinfo line for mountPoint, escaping
+// space/tab/newline/backslash in octal the way the kernel does.
+func mountinfoLine(id int, mountPoint, fstype string) string {
+	esc := strings.NewReplacer(" ", `\040`, "\t", `\011`, "\n", `\012`, `\`, `\134`).Replace(mountPoint)
+	return fmt.Sprintf("%d 1 0:%d / %s rw,relatime - %s src rw", id, id, esc, fstype)
+}
+
+// mountTableAnswer is the fake container's answer to readMountTable's exec: the
+// resolved home and workspace, then a mountinfo with a root mount plus
+// mountPoints.
+func mountTableAnswer(mountPoints ...string) []byte {
+	lines := []string{dockerContainerHome, dockerWorkspaceDir, mountinfoLine(1, "/", "overlay")}
+	for i, mp := range mountPoints {
+		lines = append(lines, mountinfoLine(10+i, mp, "ext4"))
+	}
+	return []byte(strings.Join(lines, "\n") + "\n")
+}
+
+func isMountTableExec(args []string) bool {
+	return len(args) > 0 && args[0] == "exec" && strings.Contains(strings.Join(args, " "), "/proc/self/mountinfo")
+}
+
+// nonRootDockerStub answers the id probe with the non-root image user and the
+// mount-table read with mountPoints, recording every call.
+func nonRootDockerStub(calls *[][]string, mountPoints ...string) func(context.Context, []string, ...string) ([]byte, error) {
+	return func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		*calls = append(*calls, append([]string(nil), args...))
+		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+			return []byte(dockerNonRootImageUser + "\n"), nil
+		}
+		if isMountTableExec(args) {
+			return mountTableAnswer(mountPoints...), nil
+		}
+		return nil, nil
 	}
 }
 
@@ -340,13 +379,7 @@ func TestDockerProvision_NonAccount_ProbeFailure_RefusesCreate(t *testing.T) {
 // /workspace is freshly created by mkdir -p, so its chown stays shallow.
 func TestPrepareNonAccountUser_ChownsHomeRecursively(t *testing.T) {
 	var calls [][]string
-	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
-			return []byte(dockerNonRootImageUser + "\n"), nil
-		}
-		return nil, nil
-	}))
+	t.Cleanup(SetDockerExecForTest(nonRootDockerStub(&calls)))
 	p := &dockerProvisioner{containerID: "cid"}
 	require.NoError(t, p.prepareNonAccountUser())
 
@@ -416,35 +449,6 @@ func TestPrepareNonAccountUser_OwnerReadCarriesDaemonWriteClass(t *testing.T) {
 		"a failed owner READ attempted no unprivileged write — it is dockerd bookkeeping, not a session writer")
 }
 
-// TestCredentialMountTargets pins the parser that extracts the in-container
-// destinations of the read-only agent-credential bind mounts (#2194) that
-// fall under the session home. Each `-v` entry is a "host:container:mode"
-// pair; host and container are absolute unix paths with no colons, so the
-// container destination is the segment between the last two colons. Only
-// strict descendants of home are returned — credentials mount under
-// /root/<rel> for a non-account session, never at /root itself.
-func TestCredentialMountTargets(t *testing.T) {
-	mounts := []string{
-		"-v", "/host/.codex/auth.json:" + dockerContainerHome + "/.codex/auth.json:ro",
-		"-v", "/host/.claude/.credentials.json:" + dockerContainerHome + "/.claude/.credentials.json:ro,z",
-		// A mount NOT under home is dropped.
-		"-v", "/host/other:/opt/other:ro",
-	}
-	targets := credentialMountTargets(mounts, dockerContainerHome)
-	assert.Equal(t, []string{
-		dockerContainerHome + "/.codex/auth.json",
-		dockerContainerHome + "/.claude/.credentials.json",
-	}, targets)
-
-	// home itself is never a prune target: a credential never mounts at
-	// /root, and pruning home would skip the whole chown.
-	assert.Empty(t, credentialMountTargets(
-		[]string{"-v", "/h:" + dockerContainerHome + ":ro"}, dockerContainerHome),
-		"home itself must not be pruned — the chown must still chown it")
-	assert.Empty(t, credentialMountTargets(nil, dockerContainerHome),
-		"no mounts -> no targets")
-}
-
 // TestChownRecursiveScript pins the two shapes the recursive HOME chown
 // takes: a bare `chown -R` when no bind mount lands under the home, and a
 // `find -prune` that skips each read-only credential file (or a run_args bind)
@@ -477,195 +481,6 @@ func TestChownRecursiveScript(t *testing.T) {
 		"the prune form never uses chown -R, which would descend into the read-only mount")
 }
 
-// TestPrepareNonAccountUser_PrunesCredentialMountsFromRecursiveChown pins
-// the fix for the read-only credential mount regression (#5424 review): when
-// docker.mount_agent_credentials is on, the agent's credential file is
-// bind-mounted read-only under /root at `docker run`, before this step. The
-// recursive HOME chown must prune that mount — a `chown -R` that descends
-// into it fails with EROFS and aborts provisioning before the agent can read
-// its credential. The image-shipped parent dirs (.codex, .claude, …) are
-// still chowned so the agent can read and update them, and /workspace stays a
-// shallow chown because mkdir -p just created it.
-func TestPrepareNonAccountUser_PrunesCredentialMountsFromRecursiveChown(t *testing.T) {
-	credTarget := dockerContainerHome + "/.codex/auth.json"
-	var calls [][]string
-	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
-			return []byte(dockerNonRootImageUser + "\n"), nil
-		}
-		return nil, nil
-	}))
-	p := &dockerProvisioner{
-		containerID: "cid",
-		credentialMounts: []string{
-			"-v", "/host/.codex/auth.json:" + credTarget + ":ro",
-		},
-	}
-	require.NoError(t, p.prepareNonAccountUser())
-
-	chown := findExecCall(calls, "--user 0:0", "chown")
-	require.NotNil(t, chown, "prepareNonAccountUser must chown HOME and /workspace as root; calls=%v", calls)
-	joined := strings.Join(chown, " ")
-	require.Contains(t, joined, "mkdir -p "+shellQuote(dockerContainerHome)+" "+shellQuote(dockerWorkspaceDir),
-		"HOME and /workspace must be created; call=%v", chown)
-	// The recursive HOME chown prunes the credential mount instead of a
-	// bare chown -R, which would descend into the read-only bind and EROFS.
-	require.Contains(t, joined, "find "+shellQuote(dockerContainerHome),
-		"HOME chown uses find so the credential mount can be pruned; call=%v", chown)
-	require.Contains(t, joined, "-path "+shellQuote(credTarget),
-		"the credential mount target must be a prune path; call=%v", chown)
-	require.Contains(t, joined, "-prune",
-		"the credential mount must be pruned, not chowned; call=%v", chown)
-	require.NotContains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome),
-		"a bare recursive chown would EROFS the read-only credential mount; call=%v", chown)
-	// /workspace is freshly created by mkdir -p, so its chown stays shallow.
-	require.Contains(t, joined, "chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
-		"/workspace must still be shallow-chowned; call=%v", chown)
-	require.NotContains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
-		"/workspace is freshly created; its chown must stay shallow; call=%v", chown)
-	require.Equal(t, dockerNonRootImageUser, p.containerUser,
-		"containerUser must record the probed uid:gid; calls=%v", calls)
-}
-
-// TestPrepareNonAccountUser_NoCredentialMount_RecursesPlainly pins that
-// without a credential mount the HOME chown keeps its simple `chown -R`
-// form — no find/prune overhead, and existing assertions about the recursive
-// chown (TestPrepareNonAccountUser_ChownsHomeRecursively) still hold.
-func TestPrepareNonAccountUser_NoCredentialMount_RecursesPlainly(t *testing.T) {
-	var calls [][]string
-	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
-			return []byte(dockerNonRootImageUser + "\n"), nil
-		}
-		return nil, nil
-	}))
-	p := &dockerProvisioner{containerID: "cid"} // no credentialMounts
-	require.NoError(t, p.prepareNonAccountUser())
-	chown := findExecCall(calls, "--user 0:0", "chown")
-	require.NotNil(t, chown, "prepareNonAccountUser must chown as root; calls=%v", calls)
-	joined := strings.Join(chown, " ")
-	require.Contains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome),
-		"with no credential mount the HOME chown stays a plain chown -R; call=%v", chown)
-	require.NotContains(t, joined, "find",
-		"find is only needed when a credential mount must be pruned; call=%v", chown)
-}
-
-// TestVolumeBindContainer pins the -v/--volume value parser that
-// bindMountTargets uses to distinguish a host-source bind mount (whose
-// recursive HOME chown must be pruned) from a named or anonymous volume
-// (docker-managed, writable, left to the plain chown). The container
-// destination is the segment between the last two colons, matching
-// credentialMountTargets; only an absolute host source is a bind.
-func TestVolumeBindContainer(t *testing.T) {
-	// A bind mount: absolute host source, container under home, ro.
-	c, ok := volumeBindContainer("/host/cache:" + dockerContainerHome + "/cache:ro")
-	require.True(t, ok, "an absolute host source is a bind mount")
-	assert.Equal(t, dockerContainerHome+"/cache", c)
-
-	// The mode may carry a relabel suffix (":ro,z"); the container is still
-	// the segment between the last two colons.
-	c, ok = volumeBindContainer("/host/.codex:" + dockerContainerHome + "/.codex:ro,z")
-	require.True(t, ok)
-	assert.Equal(t, dockerContainerHome+"/.codex", c)
-
-	// A named volume (name:container) is NOT a bind — the host source is not
-	// an absolute path, so a chown into it is harmless and it is not pruned.
-	_, ok = volumeBindContainer("myvol:" + dockerContainerHome + "/vol")
-	assert.False(t, ok, "a named volume is docker-managed and not pruned")
-
-	// An anonymous volume (bare container path, no colon) is not a bind.
-	_, ok = volumeBindContainer(dockerContainerHome + "/vol")
-	assert.False(t, ok, "an anonymous volume is not a bind")
-
-	// An empty container destination is not a bind.
-	_, ok = volumeBindContainer("/host::ro")
-	assert.False(t, ok)
-}
-
-// TestMountBindContainer pins the --mount value parser: only type=bind with a
-// destination under home is pruned, so a type=volume or type=tmpfs --mount is
-// left to the plain recursive chown (it is docker-managed and writable).
-func TestMountBindContainer(t *testing.T) {
-	// A bind mount with a quoted dst is read the way Docker reads it.
-	c, ok := mountBindContainer(`type=bind,src=/host/cache,dst=` + dockerContainerHome + `/cache`)
-	require.True(t, ok)
-	assert.Equal(t, dockerContainerHome+"/cache", c)
-
-	// destination= and target= are the same as dst= (case-insensitive key).
-	c, ok = mountBindContainer("type=bind,source=/host/x,target=" + dockerContainerHome + "/x")
-	require.True(t, ok)
-	assert.Equal(t, dockerContainerHome+"/x", c)
-
-	c, ok = mountBindContainer("type=bind,DST=" + dockerContainerHome + "/y")
-	require.True(t, ok, "DST is matched case-insensitively, the target is not")
-	assert.Equal(t, dockerContainerHome+"/y", c)
-
-	// A volume mount is docker-managed and not pruned.
-	_, ok = mountBindContainer("type=volume,src=myvol,dst=" + dockerContainerHome + "/vol")
-	assert.False(t, ok, "a volume mount is not a host bind")
-
-	// A tmpfs mount is in-memory and not pruned.
-	_, ok = mountBindContainer("type=tmpfs,dst=" + dockerContainerHome + "/tmp")
-	assert.False(t, ok, "a tmpfs mount is not a host bind")
-}
-
-// TestBindMountTargets pins the run_args bind-mount extraction: every form
-// that docker.run_args can use to install a host bind under the session home
-// is pruned, while a bind outside home, a named/anonymous volume, and a tmpfs
-// --mount are not.
-func TestBindMountTargets(t *testing.T) {
-	target := dockerContainerHome + "/cache"
-	args := []string{
-		// -v with a separate value.
-		"-v", "/host/cache:" + target + ":ro",
-		// --volume with an attached =value.
-		"--volume=/host/x:" + dockerContainerHome + "/x",
-		// --mount type=bind.
-		"--mount", "type=bind,src=/host/y,dst=" + dockerContainerHome + "/y",
-		// A mount NOT under home is dropped.
-		"-v", "/host/other:/opt/other:ro",
-		// A named volume under home is not a bind and is not pruned.
-		"-v", "myvol:" + dockerContainerHome + "/vol",
-		// An anonymous volume under home is not a bind.
-		"-v", dockerContainerHome + "/anon",
-		// A type=volume --mount under home is not pruned.
-		"--mount", "type=volume,src=myvol,dst=" + dockerContainerHome + "/vol2",
-	}
-	got := bindMountTargets(args, dockerContainerHome)
-	assert.Equal(t, []string{
-		target,
-		dockerContainerHome + "/x",
-		dockerContainerHome + "/y",
-	}, got, "only host-source binds under home are pruned; a named/anonymous volume is not a bind")
-
-	// Docker Engine 23+ accepts a relative host path as a bind source; it is a
-	// host bind, not a named volume, and must be pruned like an absolute one.
-	got = bindMountTargets([]string{
-		"-v", "./cache:" + target,
-		"-v", "../up:" + dockerContainerHome + "/up:ro",
-		"-v", ".:" + dockerContainerHome + "/dot",
-		"-v", "cache:" + dockerContainerHome + "/named",
-	}, dockerContainerHome)
-	assert.Equal(t, []string{target, dockerContainerHome + "/up", dockerContainerHome + "/dot"}, got,
-		"relative host-path sources are binds; a bare name is a volume")
-
-	// A -v hidden behind another option in a combined short option (e.g. -tv)
-	// is still read by the pflag walk the run_args validator uses, so a bind
-	// mounted that way is pruned too.
-	got = bindMountTargets([]string{"-tv", "/host/cache:" + target + ":ro"}, dockerContainerHome)
-	assert.Equal(t, []string{target}, got,
-		"a -v behind a boolean option in a combined short option is still pruned")
-
-	// home itself is never a prune target: a bind over /root skips the whole
-	// chown, and is a different configuration af does not support pruning.
-	assert.Empty(t, bindMountTargets([]string{"-v", "/host:" + dockerContainerHome + ":ro"}, dockerContainerHome),
-		"home itself must not be pruned — the chown must still chown it")
-	assert.Empty(t, bindMountTargets(nil, dockerContainerHome),
-		"no run_args -> no targets")
-}
-
 // TestChownRecursiveScript_PrunesWithChownH pins that the find form uses
 // `chown -h` so a symlink the image ships under /root is re-owned itself
 // rather than its target outside HOME, while a plain `chown` would
@@ -677,122 +492,6 @@ func TestChownRecursiveScript_PrunesWithChownH(t *testing.T) {
 		"the prune form chowns with -h so symlinks are not dereferenced")
 	assert.NotContains(t, script, "chown -R",
 		"the prune form never uses chown -R")
-}
-
-// TestPrepareNonAccountUser_PrunesRunArgsBindMounts pins that a docker.run_args
-// bind beneath the session home is pruned from the recursive HOME chown, so a
-// read-write bind is not re-owned to the container uid and a read-only bind
-// does not EROFS-abort provisioning — symmetric with the credential-mount
-// prune (#5424 review). A named or anonymous volume in run_args is NOT pruned,
-// because a chown into a docker-managed volume is harmless.
-func TestPrepareNonAccountUser_PrunesRunArgsBindMounts(t *testing.T) {
-	bindTarget := dockerContainerHome + "/cache"
-	var calls [][]string
-	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
-			return []byte(dockerNonRootImageUser + "\n"), nil
-		}
-		return nil, nil
-	}))
-	p := &dockerProvisioner{
-		containerID: "cid",
-		runArgs: []string{
-			"-v", "/host/cache:" + bindTarget + ":ro",
-			"--volume=/host/x:" + dockerContainerHome + "/x",
-			"--mount", "type=bind,src=/host/y,dst=" + dockerContainerHome + "/y",
-			// A named volume under home is docker-managed and stays in the chown.
-			"-v", "myvol:" + dockerContainerHome + "/vol",
-			// A bind NOT under home is not pruned.
-			"-v", "/host/other:/opt/other:ro",
-		},
-	}
-	require.NoError(t, p.prepareNonAccountUser())
-
-	chown := findExecCall(calls, "--user 0:0", "chown")
-	require.NotNil(t, chown, "prepareNonAccountUser must chown HOME and /workspace as root; calls=%v", calls)
-	joined := strings.Join(chown, " ")
-	require.Contains(t, joined, "find "+shellQuote(dockerContainerHome),
-		"a run_args bind under home makes the HOME chown use find so it can be pruned; call=%v", chown)
-	for _, prune := range []string{bindTarget, dockerContainerHome + "/x", dockerContainerHome + "/y"} {
-		require.Contains(t, joined, "-path "+shellQuote(prune),
-			"each run_args bind under home must be a prune path; call=%v", chown)
-	}
-	require.Contains(t, joined, "-prune",
-		"the run_args binds must be pruned, not chowned; call=%v", chown)
-	require.Contains(t, joined, "-exec chown -h "+dockerNonRootImageUser+" {} +",
-		"the prune form chowns with -h so symlinks are not dereferenced; call=%v", chown)
-	// A named volume under home is NOT pruned — it is docker-managed and a
-	// chown into it is harmless — so it must not appear as a -path in the
-	// prune list.
-	require.NotContains(t, joined, "-path "+shellQuote(dockerContainerHome+"/vol"),
-		"a named volume under home is not a bind and must not be pruned; call=%v", chown)
-	require.NotContains(t, joined, "-path "+shellQuote(dockerContainerHome+"/anon"),
-		"an anonymous volume is not a bind and must not be pruned; call=%v", chown)
-	// /workspace stays a shallow chown.
-	require.Contains(t, joined, "chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
-		"/workspace must still be shallow-chowned; call=%v", chown)
-	require.Equal(t, dockerNonRootImageUser, p.containerUser,
-		"containerUser must record the probed uid:gid; calls=%v", calls)
-}
-
-// TestPrepareNonAccountUser_PrunesCredentialAndRunArgsBindTogether pins that
-// the credential mount and a run_args bind under home are both pruned, and a
-// run_args bind that coincides with the credential mount is not duplicated.
-func TestPrepareNonAccountUser_PrunesCredentialAndRunArgsBindTogether(t *testing.T) {
-	credTarget := dockerContainerHome + "/.codex/auth.json"
-	runTarget := dockerContainerHome + "/cache"
-	var calls [][]string
-	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
-			return []byte(dockerNonRootImageUser + "\n"), nil
-		}
-		return nil, nil
-	}))
-	p := &dockerProvisioner{
-		containerID: "cid",
-		credentialMounts: []string{
-			"-v", "/host/.codex/auth.json:" + credTarget + ":ro",
-		},
-		runArgs: []string{
-			"-v", "/host/cache:" + runTarget + ":rw",
-			// The same path as the credential mount — must not be duplicated.
-			"-v", "/host/dup:" + credTarget + ":ro",
-		},
-	}
-	require.NoError(t, p.prepareNonAccountUser())
-
-	chown := findExecCall(calls, "--user 0:0", "chown")
-	require.NotNil(t, chown, "prepareNonAccountUser must chown as root; calls=%v", calls)
-	joined := strings.Join(chown, " ")
-	require.Contains(t, joined, "-path "+shellQuote(credTarget),
-		"the credential mount target must be a prune path; call=%v", chown)
-	require.Contains(t, joined, "-path "+shellQuote(runTarget),
-		"the run_args bind target must be a prune path; call=%v", chown)
-	// The duplicated credential target (also in runArgs) must appear exactly
-	// once in the prune list.
-	count := strings.Count(joined, "-path "+shellQuote(credTarget))
-	require.Equal(t, 1, count, "a path in both credentialMounts and runArgs is deduped; call=%v", chown)
-}
-
-// TestBindMountTargets_NormalizesDestinations: Docker records
-// path.Clean(target), so a trailing slash or dot segment names the same mount
-// find visits; an uncleaned prune path would never match and the chown would
-// descend into the bind (#5424 review).
-func TestBindMountTargets_NormalizesDestinations(t *testing.T) {
-	got := bindMountTargets([]string{
-		"-v", "/host/a:" + dockerContainerHome + "/cache/",
-		"-v", "/host/b:" + dockerContainerHome + "/x/./y",
-		"--mount", "type=bind,src=/host/c,dst=" + dockerContainerHome + "/z//",
-		// Escapes home once cleaned: not under home, so not returned.
-		"-v", "/host/d:" + dockerContainerHome + "/../etc",
-	}, dockerContainerHome)
-	assert.Equal(t, []string{
-		dockerContainerHome + "/cache",
-		dockerContainerHome + "/x/y",
-		dockerContainerHome + "/z",
-	}, got)
 }
 
 // TestChownRecursiveScript_PruneMatchesMetacharactersLiterally runs the generated
@@ -816,4 +515,124 @@ func TestChownRecursiveScript_PruneMatchesMetacharactersLiterally(t *testing.T) 
 	assert.NotContains(t, listed, "we?rd*", "the literal ?/* mount is pruned")
 	assert.Contains(t, listed, filepath.Join(root, "cache1", "inner"), "a pattern-lookalike sibling is still chowned")
 	assert.Contains(t, listed, filepath.Join(root, "weird", "inner"), "a pattern-lookalike sibling is still chowned")
+}
+
+func TestMountPointsAtOrUnder(t *testing.T) {
+	table := strings.Join([]string{
+		mountinfoLine(1, "/", "overlay"),
+		mountinfoLine(2, "/root/cache", "ext4"),
+		mountinfoLine(3, "/root/with space/x[1]", "ext4"),
+		mountinfoLine(4, "/rootfs-lookalike", "ext4"), // shares the prefix, not under /root
+		mountinfoLine(5, "/root/cache", "ext4"),       // duplicate (stacked mount)
+		mountinfoLine(6, "/opt/other", "ext4"),
+		mountinfoLine(7, "/root/tmp/", "tmpfs"),
+		mountinfoLine(8, "/proc", "proc"),
+	}, "\n")
+	got, err := mountPointsAtOrUnder(table, "/root")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/root/cache", "/root/with space/x[1]", "/root/tmp"}, got,
+		"every mount point under HOME, decoded and de-duplicated; siblings sharing the prefix are not under it")
+
+	got, err = mountPointsAtOrUnder(mountinfoLine(1, "/", "overlay")+"\n"+mountinfoLine(2, "/root", "ext4"), "/root")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/root"}, got, "a mount AT home is reported too")
+
+	for name, bad := range map[string]string{
+		"empty":          "",
+		"no root mount":  mountinfoLine(2, "/root/cache", "ext4"),
+		"short line":     mountinfoLine(1, "/", "overlay") + "\n36 35 98:0",
+		"relative mount": mountinfoLine(1, "/", "overlay") + "\n9 1 0:9 / rel rw - ext4 s rw",
+	} {
+		_, err := mountPointsAtOrUnder(bad, "/root")
+		assert.Error(t, err, name+": an unusable mount table must be an error, never an empty prune set")
+	}
+}
+
+// TestPrepareNonAccountUser_PrunesEveryMountUnderHome is the property behind
+// the #5424 rounds: whatever created a mount under HOME — -v, --mount,
+// --volumes-from, --tmpfs, an image-declared VOLUME, af's read-only credential
+// bind — the kernel's mount table lists it, so the recursive chown never crosses
+// into it, with no knowledge of how docker run was spelled.
+func TestPrepareNonAccountUser_PrunesEveryMountUnderHome(t *testing.T) {
+	mounts := []string{
+		dockerContainerHome + "/.codex/auth.json", // af credential bind (single file, ro)
+		dockerContainerHome + "/cache",            // -v /host:/root/cache
+		dockerContainerHome + "/shared",           // --volumes-from donor's bind
+		dockerContainerHome + "/data",             // image-declared VOLUME
+		dockerContainerHome + "/scratch",          // --tmpfs
+		dockerContainerHome + "/odd dir/x[1]*",    // spaces and find metacharacters
+		"/opt/elsewhere",                          // not under HOME: not pruned
+	}
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(nonRootDockerStub(&calls, mounts...)))
+	p := &dockerProvisioner{containerID: "cid"}
+	require.NoError(t, p.prepareNonAccountUser())
+
+	chown := findExecCall(calls, "--user 0:0", "-prune")
+	require.NotNil(t, chown, "a mount under HOME must switch the chown to the pruning form; calls=%v", calls)
+	joined := strings.Join(chown, " ")
+	for _, m := range mounts[:6] {
+		assert.Contains(t, joined, "-path "+shellQuote(findLiteralPattern(m)), "mount %q must be pruned", m)
+	}
+	assert.NotContains(t, joined, "/opt/elsewhere", "a mount outside HOME is irrelevant to the HOME chown")
+	assert.NotContains(t, joined, "chown -R", "a recursive chown would cross into the mounts")
+	assert.Contains(t, joined, "-exec chown -h "+dockerNonRootImageUser)
+	assert.Contains(t, joined, "chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir))
+}
+
+func TestPrepareNonAccountUser_NoMountUnderHome_RecursesPlainly(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(nonRootDockerStub(&calls, "/opt/elsewhere", "/proc")))
+	p := &dockerProvisioner{containerID: "cid"}
+	require.NoError(t, p.prepareNonAccountUser())
+	joined := strings.Join(findExecCall(calls, "--user 0:0", "chown"), " ")
+	assert.Contains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome))
+	assert.NotContains(t, joined, "find")
+}
+
+// A mount AT home (docker run -v /host:/root) or AT the workspace is the
+// operator's directory: neither it nor its subtree is re-owned.
+func TestPrepareNonAccountUser_MountAtHomeOrWorkspaceIsNeverChowned(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(nonRootDockerStub(&calls, dockerContainerHome, dockerWorkspaceDir)))
+	p := &dockerProvisioner{containerID: "cid"}
+	require.NoError(t, p.prepareNonAccountUser())
+	joined := strings.Join(findExecCall(calls, "--user 0:0", "-prune"), " ")
+	assert.Contains(t, joined, "-path "+shellQuote(dockerContainerHome), "home is itself a mount: find prunes it")
+	assert.NotContains(t, joined, "chown -R")
+	assert.NotContains(t, joined, " chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
+		"a bind mounted AT the workspace is not shallow-chowned either")
+}
+
+// Fail closed: with no trustworthy mount table the chown is refused, never
+// guessed — a missing prune set would let a recursive chown cross a host mount.
+func TestPrepareNonAccountUser_UnreadableMountTableRefusesTheChown(t *testing.T) {
+	for name, answer := range map[string]func() ([]byte, error){
+		"exec fails":     func() ([]byte, error) { return []byte("sh: cat: not found"), errors.New("exit status 127") },
+		"empty answer":   func() ([]byte, error) { return nil, nil },
+		"garbage answer": func() ([]byte, error) { return []byte("/root\n/workspace\nnot a mount table\n"), nil },
+		"no root mount": func() ([]byte, error) {
+			return []byte("/root\n/workspace\n" + mountinfoLine(2, "/proc", "proc") + "\n"), nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls [][]string
+			t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+				calls = append(calls, append([]string(nil), args...))
+				if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+					return []byte(dockerNonRootImageUser + "\n"), nil
+				}
+				if isMountTableExec(args) {
+					return answer()
+				}
+				return nil, nil
+			}))
+			p := &dockerProvisioner{containerID: "cid"}
+			err := p.prepareNonAccountUser()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "mount table")
+			assert.Nil(t, findExecCall(calls, "chown"), "no chown may run without a usable mount table; calls=%v", calls)
+			assert.Empty(t, p.containerUser, "the user must not be recorded when the chown was refused")
+		})
+	}
 }

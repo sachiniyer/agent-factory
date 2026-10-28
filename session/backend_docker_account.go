@@ -7,7 +7,6 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -833,106 +832,6 @@ func (p *dockerProvisioner) prepareContainerUser() error {
 		return p.prepareAccountUser()
 	}
 	return p.prepareNonAccountUser()
-}
-
-// prepareNonAccountUser mirrors prepareAccountUser for a session with no
-// credential account. A BYO image may set a non-root `USER` directive (a common
-// hardening practice), and the container is launched with HOME=dockerContainerHome
-// (/root). Without this step every provisioning exec runs as that non-root
-// default user while HOME is root-owned (mode 0700), so the first
-// `git config --global` fails with "could not lock config file
-// /root/.gitconfig: Permission denied" and the session is rejected at create
-// time with a diagnostic that points at git, not at the forced /root HOME
-// against the image's non-root USER.
-//
-// It probes the image's default user by running `id -u`/`id -g` with no --user
-// override, so the image's USER directive resolves via the image's own
-// /etc/passwd (a name like `dev`, a bare uid, or a uid:gid pair all resolve to a
-// numeric uid:gid this way). It then recursively chowns HOME (a non-root BYO
-// image may ship root-owned descendants such as /root/.codex or /root/.config
-// with mode 0700, and a shallow chown of the top-level dir alone leaves those
-// unreadable by the selected uid) and creates+chowns /workspace as root
-// (0:0) to that uid. Subsequent provisioning execs (configureGit,
-// cloneWorkspace) and the agent-server itself run as that user via
-// sessionExecOptions, with a HOME it can now write to.
-//
-// A root-default image (probe reports uid 0, on either side of the gid) is the
-// exception: it returns early with containerUser unset, because preparation
-// would REGRESS it twice over.
-// The chown is not a no-op when docker.run_args bind-mounts a host directory at
-// /root or /workspace — it would re-own the operator's host files. And a set
-// containerUser makes sessionExecOptions force `-e HOME=/root` on every exec,
-// overriding a HOME the operator set via run_args (docker exec -e wins over the
-// container's configured env). With containerUser left unset every exec runs as
-// the image's default user with the container's inherited env — the exact
-// behavior non-account sessions had before this step existed — and the clone
-// creates /workspace itself, as it always has.
-func (p *dockerProvisioner) prepareNonAccountUser() error {
-	if p.spec.Account.Dir != "" {
-		return nil
-	}
-	out, err := p.docker(dockerShortStepTimeout,
-		"exec", p.containerID, "sh", "-c", `echo "$(id -u):$(id -g)"`)
-	if err != nil {
-		// The id probe is a read-only exec — the only data-root writes are
-		// dockerd's privileged exec bookkeeping, never an unprivileged
-		// container-side write — so the failure carries the daemon-write
-		// class, matching prepareAccountUser's stat probe and reserving
-		// dockerOpRootExec for the subsequent mkdir+chown.
-		return dockerStepErr(fmt.Errorf("backend=docker: cannot identify the image's default user: %s: %w", strings.TrimSpace(string(out)), err), dockerOpDaemonWrite)
-	}
-	owner, err := parseContainerOwner(string(out))
-	if err != nil {
-		// af failed to read the engine's answer — nothing reached a writer.
-		return dockerStepErr(fmt.Errorf("backend=docker: cannot identify the image's default user: %w", err), dockerOpLocal)
-	}
-	// UID 0 is root regardless of the gid — a `USER 0:<gid>` directive probes
-	// as 0:<gid>, and uid 0 needs no writable-HOME/workspace preparation. The
-	// comparison is on the uid alone so every root-default image takes the
-	// no-preparation path.
-	if uid, _, _ := strings.Cut(owner, ":"); uid == "0" {
-		return nil
-	}
-	// The home is chowned recursively (-R) rather than shallowly: a non-root
-	// BYO image may ship root-owned descendants under /root (e.g. /root/.codex
-	// or /root/.config with mode 0700), and a shallow chown of the top-level
-	// directory leaves those unreadable and unwritable by the selected uid,
-	// so the agent later cannot read or update its existing configuration.
-	// /workspace is freshly created by mkdir -p above, so it has no existing
-	// descendants and a shallow chown is enough.
-	//
-	// The recursive chown prunes the read-only agent-credential bind mounts
-	// (docker.mount_agent_credentials, #2194): they land as single files under
-	// the session home (/root/<rel>) at `docker run`, before this step, and a
-	// `chown -R` that descends into one fails with EROFS and aborts
-	// provisioning before the agent can read its credential (#5424 review).
-	// The mounted file's own host ownership is already correct, so skipping
-	// it loses nothing; the image-shipped parent dirs (.codex, .claude, …)
-	// are still chowned so the agent can read and update them.
-	//
-	// It also prunes any bind mounts docker.run_args installs under home: a
-	// read-write bind would re-own the operator's host files to the container
-	// uid, and a read-only bind EROFS-aborts the chown before the agent starts.
-	// A named or anonymous volume is docker-managed and writable, so
-	// bindMountTargets leaves it to the plain recursive chown (#5424 review).
-	home := p.sessionHome()
-	prune := credentialMountTargets(p.credentialMounts, home)
-	for _, target := range bindMountTargets(p.runArgs, home) {
-		if !slices.Contains(prune, target) {
-			prune = append(prune, target)
-		}
-	}
-	homeChown := chownRecursiveScript(home, owner, prune)
-	script := fmt.Sprintf("mkdir -p %s %s && %s && chown %s %s",
-		shellQuote(home), shellQuote(dockerWorkspaceDir), homeChown, owner, shellQuote(dockerWorkspaceDir))
-	out, err = p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, "sh", "-c", script)
-	if err != nil {
-		return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare a writable HOME and workspace for the image's default user %s: %s: %w",
-			owner, strings.TrimSpace(string(out)), err), dockerOpRootExec)
-	}
-	p.containerUser = owner
-	return nil
 }
 
 // prepareAccountUser asks the mounted directory who owns it in the container's
