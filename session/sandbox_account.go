@@ -208,6 +208,13 @@ func accountArchiveLimit(agent string) int64 {
 //     account is never resurrected. The check and the replacement happen under one
 //     lock per registry file.
 func (w *sandboxWorkspace) writeBackAccount(timeout time.Duration) (accountWriteBack, error) {
+	return w.writeBackAccountFrom(w.AccountDir(), timeout)
+}
+
+// writeBackAccountFrom is writeBackAccount for a scope directory other than the
+// live one: the account handoff reads the OUTGOING account from the directory it
+// was rotated to, with the same allowlist, bound, validation and CAS.
+func (w *sandboxWorkspace) writeBackAccountFrom(dir string, timeout time.Duration) (accountWriteBack, error) {
 	var res accountWriteBack
 	apply, err := w.accountSyncApplies()
 	if err != nil || !apply {
@@ -225,7 +232,7 @@ func (w *sandboxWorkspace) writeBackAccount(timeout time.Duration) (accountWrite
 	// was read ("padding with zeros", exit 1) fails the whole read instead of
 	// arriving as a structurally valid archive (#5902). There is no limiter in the
 	// pipeline to mask it — the bound is enforced locally, as the stream is read.
-	script := "cd " + shellQuote(w.AccountDir()) + " 2>/dev/null || exit 0; " +
+	script := "cd " + shellQuote(dir) + " 2>/dev/null || exit 0; " +
 		"list=$(for f in " + strings.Join(quoted, " ") + "; do [ -f \"$f\" ] && printf '%s\\n' \"$f\"; done); " +
 		"[ -n \"$list\" ] || exit 0; printf '%s\\n' \"$list\" | tar -cf - -T -"
 	var out []byte

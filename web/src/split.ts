@@ -34,6 +34,7 @@ import {
   type TabDropResult,
   type Edge,
   findLeaf,
+  focusSuccessorAfterDrop,
   type LayoutNode,
   type LeafNode,
   leafCount,
@@ -52,7 +53,7 @@ import {
   tabsRebound,
   validate,
 } from "./layout.js";
-import { fetchPreviewOrigin, pauseStatusPoll, probeWebTab } from "./api.js";
+import { fetchEditorPortOrigin, fetchPreviewOrigin, pauseStatusPoll, probeWebTab } from "./api.js";
 import type { HoldAction } from "./delivery_hold.js";
 import { icon } from "./icon.js";
 // isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
@@ -853,7 +854,14 @@ export class SplitView {
 
     // Keep a valid focus.
     if (!this.focusedId || !wanted.has(this.focusedId)) {
-      this.focusedId = desired[0]?.id ?? null;
+      // A focused leaf dropped out-of-band hands the keyboard to the pane that grew
+      // into its region (closePane's sibling rule, #5983), read from the tree the DOM
+      // was last built from — never the root-first leaf of an unrelated branch.
+      const successor =
+        this.focusedId && this.builtTree
+          ? focusSuccessorAfterDrop(this.builtTree, this.focusedId, wanted)
+          : null;
+      this.focusedId = successor ?? desired[0]?.id ?? null;
     }
 
     // Rebuild the split wrappers, inserting the persistent containers. Containers now
@@ -1435,15 +1443,32 @@ export class SplitView {
     // mirror — unchanged from every release before this one, and the only thing that
     // works through a single forwarded port.
     let previewSrcOnce: Promise<string> | null = null;
+    // The editor-port origin (W5.2) answers with a SINGLE-USE bootstrap URL, so it is
+    // re-asked on every load; its plain origin is what "Open" should hand the user.
+    let editorPortBootstrap = false;
+    let editorPortOpenHref = "";
     const resolvePreviewSrc = (fresh: boolean): Promise<string> => {
-      if (fresh) {
-        // A user-initiated ↻ / Retry re-asks. `preview_listen_addr` applies LIVE
+      if (fresh || editorPortBootstrap) {
+        // A user-initiated ↻ / Retry re-asks. An editor-port bootstrap URL is
+        // single-use (W5.2), so it is never replayed: every load asks again. `preview_listen_addr` applies LIVE
         // (#2480), so between two loads of the SAME pane the listener may have moved
         // port or been turned off — and a cached answer would keep pointing the frame
         // at a dead port instead of falling back to the mirror or picking up the new
         // one. Re-asking is what ↻ already means for the liveness probe and the cache
         // buster; the origin is the third thing "give me the current page" covers.
         previewSrcOnce = null;
+        editorPortBootstrap = false;
+        editorPortOpenHref = "";
+      }
+      if (previewSrcOnce === null && isVSCode && mayUsePreviewOrigin && !this.archived && !canUsePreviewOrigin(window.location)) {
+        // A remote viewer resolves *.localhost to its own machine, so the per-session
+        // label cannot partition its editor storage. When the operator declared a port
+        // pool, the editor gets its own port on the front-door host instead.
+        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then((r) => {
+          editorPortBootstrap = r !== null;
+          editorPortOpenHref = r?.origin ?? "";
+          return r?.bootstrapUrl ?? "";
+        });
       }
       if (previewSrcOnce === null) {
         previewSrcOnce =
@@ -1505,8 +1530,9 @@ export class SplitView {
       // address that actually renders the app correctly, so "Open" must hand the user
       // that one rather than the mirror it was built from.
       if (previewSrc !== "") {
-        open.href = previewSrc;
-        fbLink.href = previewSrc;
+        const openTo = editorPortOpenHref !== "" ? editorPortOpenHref : previewSrc;
+        open.href = openTo;
+        fbLink.href = openTo;
       } else {
         open.href = openHref;
         fbLink.href = openHref;

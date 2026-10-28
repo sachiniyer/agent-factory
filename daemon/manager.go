@@ -111,6 +111,10 @@ type Manager struct {
 	// not do per-session work (#2743 review).
 	editorLabels *editorLabelIndex
 
+	// editorPorts serves per-session editor origins to remote viewers from the
+	// network.editor_origin_ports pool (W5.2); see editor_port_origin.go.
+	editorPorts *editorPortOrigins
+
 	// limitDetector is the resolved usage-limit matcher set (#1146), built from
 	// cfg.LimitPatterns (it compiles the override regexes) and reused across poll
 	// ticks. Held behind an atomic pointer so ApplyConfig can rebuild it in place
@@ -811,6 +815,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		previewOrigins:            newPreviewOriginRegistry(),
 		editorOriginSecret:        editorSecret,
 		editorLabels:              newEditorLabelIndex(),
+		editorPorts:               newEditorPortOrigins(),
 		pollReloadCh:              make(chan struct{}, 1),
 		ready:                     make(chan struct{}),
 		lifecycle:                 lifecycle,

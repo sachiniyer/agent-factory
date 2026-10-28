@@ -127,6 +127,7 @@ var globalConfigReadOrder = []string{
 	"network.require_loopback_token",
 	"network.allow_unauthenticated_network",
 	"network.preview_listen_addr",
+	"network.editor_origin_ports",
 	"network.cors_allowed_origins",
 	"daemon_poll_interval",
 	"watcher_events_per_minute",
@@ -525,6 +526,9 @@ Settable keys:
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
+  network.editor_origin_ports  port pool for per-session VS Code editor origins, e.g. "9100-9119" or "9100,9105-9107", or ""
+                             to disable (default ""). Each session's editor gets one loopback port, kept across restarts;
+                             expose the same ports behind your front door (tailscale serve --https=<port>). Next daemon start.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
   watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,

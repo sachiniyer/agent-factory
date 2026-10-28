@@ -583,6 +583,14 @@ func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.
 // doJSON is callWithin's plumbing generalized over the HTTP method: GET
 // /v1/health is the one non-POST route on the wire, and it shares the same
 // token, envelope, and error-code reconstruction. A nil req sends no body.
+// agentAnswered wraps an error the agent-server returned in its envelope — it ran
+// the request and refused — as opposed to a transport failure, which leaves the
+// request's effect unknown. The message is unchanged.
+type agentAnswered struct{ err error }
+
+func (e *agentAnswered) Error() string { return e.err.Error() }
+func (e *agentAnswered) Unwrap() error { return e.err }
+
 func (c *remoteAgentClient) doJSON(method, path string, req, resp any, timeout time.Duration) error {
 	var body io.Reader
 	if req != nil {
@@ -649,7 +657,7 @@ func (c *remoteAgentClient) doJSON(method, path string, req, resp any, timeout t
 			// classes above (#5571 W4.3).
 			err = fmt.Errorf("%s: %w", env.Error.Message, ErrTabGone)
 		}
-		return err
+		return &agentAnswered{err: err}
 	}
 	if resp != nil {
 		if err := json.Unmarshal(env.Data, resp); err != nil {
