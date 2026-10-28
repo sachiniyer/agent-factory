@@ -355,6 +355,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		// The daemon holds this session as a remote workspace and admits its tabs
 		// accordingly; the injected guidance must match (#5571 W3.3).
 		HostedRemotely: true,
+		// What /v1/health tells the daemon this server speaks; the guidance
+		// follows it rather than a static floor (#5878).
+		AdvertisedFeatures: agentServerWireFeatures,
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,

@@ -152,6 +152,12 @@ type InstanceOptions struct {
 	// guidance reflects the remote runtime's tab admission rather than the local
 	// capabilities it happens to execute on (#5571 W3.3).
 	HostedRemotely bool
+	// AdvertisedFeatures is the /v1/health feature list the hosting
+	// agent-server advertises to the daemon. A hosted instance renders its
+	// guidance from what is advertised, not from a static per-backend floor
+	// (#5878): the daemon admits shell and process tabs only for a sandbox that
+	// advertises "tab-api".
+	AdvertisedFeatures []string
 }
 
 // backendFactory provisions the already-resolved runtime for a new Instance,
@@ -682,6 +688,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		runtimeTeardown:       res.Teardown,
 		callbackUnavailable:   callbackUnavailableReasonFor(opts, res),
 		hostedRemotely:        opts.HostedRemotely,
+		advertisedFeatures:    opts.AdvertisedFeatures,
 	}, nil
 }
 
