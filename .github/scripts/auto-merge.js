@@ -347,6 +347,51 @@ async function findBrokenIssue(github, owner, repo) {
   return res.data.items.find((i) => i.title.startsWith(BROKEN_TITLE_PREFIX)) || null;
 }
 
+// workflow_run debounce. The run evaluating this is itself running, and the
+// `auto-merge` concurrency group allows one running run, so any other run it finds
+// is OLDER: it read state from before the event that triggered this one. Skipping
+// on "something ran recently" therefore throws away new state (a master Build that
+// completed seconds after a merger run said "not yet verified"). A trigger may be
+// skipped only when the run it defers to is guaranteed to read state at least as
+// new as the event:
+//   - another merger run STARTED AFTER the triggering run completed
+//     (`workflow_run.updated_at`), or
+//   - a newer merger run is already queued (it has not read anything yet).
+// Anything else proceeds. `runs` is the newest-first listWorkflowRuns result.
+const PENDING_STATUSES = new Set(["queued", "waiting", "pending", "requested"]);
+
+function shouldDebounce({ eventName, triggerUpdatedAt, runs, runId }) {
+  if (eventName !== "workflow_run") return { skip: false, reason: "not a workflow_run trigger" };
+  const triggered = Date.parse(triggerUpdatedAt);
+  for (const r of runs) {
+    if (r.id === runId || r.conclusion === "cancelled") continue;
+    if (PENDING_STATUSES.has(r.status)) {
+      return { skip: true, reason: `run ${r.id} is already queued and will read newer state` };
+    }
+    const started = Date.parse(r.run_started_at || r.created_at);
+    if (Number.isFinite(triggered) && Number.isFinite(started) && started > triggered) {
+      return { skip: true, reason: `run ${r.id} started ${r.run_started_at || r.created_at}, after the triggering run completed (${triggerUpdatedAt})` };
+    }
+  }
+  return { skip: false, reason: "no merger run started after the triggering run completed" };
+}
+
+async function checkDebounce({ github, core, context }) {
+  if (context.eventName !== "workflow_run") return core.setOutput("skip", "false");
+  const { owner, repo } = context.repo;
+  const res = await github.rest.actions.listWorkflowRuns({
+    owner, repo, workflow_id: "auto-merge.yml", per_page: 10,
+  });
+  const verdict = shouldDebounce({
+    eventName: context.eventName,
+    triggerUpdatedAt: context.payload.workflow_run && context.payload.workflow_run.updated_at,
+    runs: res.data.workflow_runs,
+    runId: context.runId,
+  });
+  core.notice(`${verdict.skip ? "Debounced" : "Proceeding"}: ${verdict.reason}.`);
+  core.setOutput("skip", verdict.skip ? "true" : "false");
+}
+
 // Step 1: is merging halted by an open broken-master issue?
 async function checkHalt({ github, core, context }) {
   const { owner, repo } = context.repo;
@@ -506,7 +551,7 @@ async function reportBroken({ github, core, context, merged }) {
 }
 
 module.exports = {
-  checkHalt, settleBroken, mergeAll, reportBroken,
+  checkHalt, checkDebounce, shouldDebounce, settleBroken, mergeAll, reportBroken,
   workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
   isTruncated, ACK_RE, branchDeletionDecision,
