@@ -827,7 +827,7 @@ capabilities — `Archive` and `Recover` are both supported. All four are declar
 off-box in one place (`backendProvisionsOffBox`), and all four share a single
 capability declaration, so none of them can differ from the others here without
 that being a deliberate change. Parity is not total: they declare
-`TabManagement` and `Handoff` off, which is why an off-box session carries only
+`TabManagement` off (and `Handoff`, which an ssh or sandbox session's agent-server lifts when it advertises `agent-swap`), which is why an off-box session carries only
 its agent tab plus any external HTTPS web tabs (the one metadata-only kind
 admitted off-box). A **Lost** sandbox session (one whose
 sandbox answered that its agent is gone) is reachable, so recovery **relaunches

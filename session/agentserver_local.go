@@ -49,6 +49,9 @@ type localAgentServer struct {
 	closed bool
 	// relaunch collapses overlapping Relaunch requests onto one attempt (W7.1).
 	relaunch relaunchFlight
+	// agentOpMu serializes the operations that replace the agent process — a
+	// relaunch and an agent swap — so two of them never interleave (W7.1/W7.5).
+	agentOpMu sync.Mutex
 }
 
 // AgentServer returns the cached agent-server for this instance's runtime (#1592
