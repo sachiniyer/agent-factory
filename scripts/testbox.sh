@@ -463,6 +463,12 @@ fi
 #   * A tmpfs root is root-owned 0755 unless mode= is given — the scenario's
 #     filler and the session worktree are written by `dev`, so mode=1777 (or
 #     uid=1000 where supported) is required for the fill to work.
+# A scenario that cannot run without the mount declares it with a literal
+# `AF_TESTBOX_TMPFS_DEFAULT=<dest>[:<opts>]` line, so `testbox.sh scenario <it>`
+# works with no hand-set environment. An explicit AF_TESTBOX_TMPFS still wins.
+if [ -z "${AF_TESTBOX_TMPFS:-}" ] && [ "${1:-}" = scenario ] && [ -f "$REPO_ROOT/${2:-}" ]; then
+    AF_TESTBOX_TMPFS="$(sed -n 's/^AF_TESTBOX_TMPFS_DEFAULT=//p' "$REPO_ROOT/$2" | head -1)"
+fi
 if [ -n "${AF_TESTBOX_TMPFS:-}" ]; then
     RUN_FLAGS+=(--tmpfs "$AF_TESTBOX_TMPFS")
 fi

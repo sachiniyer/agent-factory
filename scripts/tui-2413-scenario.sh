@@ -34,7 +34,7 @@ run_at() {
     # to do with this fix. af_open_pane already synced on `x hide pane`.
     af_send Enter
     af_wait_for 'Interactive pane' "$AF_DRIVER_TIMEOUT" 'first-run interactive help'
-    af_wait_for 'return to navigation' "$AF_DRIVER_TIMEOUT" 'the help line that names ctrl+]'
+    af_wait_for 'to navigate' "$AF_DRIVER_TIMEOUT" 'the help line that names ctrl+]'
 
     # The user does what the screen just told them to do.
     af_send 'C-]'

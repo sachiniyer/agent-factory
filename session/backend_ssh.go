@@ -243,6 +243,11 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			// composes its command from this, in a fresh process, which is the
 			// constraint that ruled out a ControlMaster multiplex (#3086).
 			HostKeyVerification: posture,
+			// And the reattach identity the shared provisioner recorded (#5571
+			// W1.1) — see SandboxRuntimeCleanupData for the contract.
+			RemoteAddr:         p.remoteAddr,
+			AgentServerVersion: p.agentServerVersion,
+			TokenRef:           p.tokenRef,
 		},
 	}
 	// The pin fields are written together, because which of them is safe to write

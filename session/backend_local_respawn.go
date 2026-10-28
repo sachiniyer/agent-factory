@@ -292,6 +292,11 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	}
 	if restoreResult == tmux.RestoreRespawned {
 		i.setRuntimeLaunch(declarationBase, ts)
+		// A respawn produced a replacement process: the run-end classifier at
+		// ConfirmLive reads this verdict to interrupt a still-in-flight task
+		// run rather than let the fresh agent's first idle edge complete it
+		// (#4222).
+		i.markAgentRuntimeReplaced(true)
 		// af just recreated the missing worktree AND started a fresh agent pane
 		// in it, which is the one event that makes a worktree-missing row
 		// deliverable again (#5102). Both halves matter: a pathname reappearing
@@ -304,8 +309,15 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// Restore established only that the persisted tmux name exists. The pane
 		// root's recorded (pid, start-time) identity decides whether it still
 		// names the launch AF recorded — a match keeps the claim, anything else
-		// retires it.
-		i.clearRuntimeProgramForUnverifiedReattach(ts)
+		// retires it. The verification verdict is what answers the task-run
+		// question (#4222): a pane that cannot prove it is the prompted agent
+		// cannot have its idle edge reported as a finished run — including when
+		// there was no claim left to retire (legacy record, or evidence an
+		// earlier unverified reattach cleared before its recovery failed), so
+		// the verdict must not be read off whether the clear had work to do.
+		// One probe settles both so they cannot disagree about the pane.
+		verified, _ := i.settleReattachVerification(ts)
+		i.markAgentRuntimeReplaced(!verified)
 	}
 	if err := b.setupTabs(i); err != nil {
 		return finishRecoverTabFailure(i.Title, rebuilt, restoreResult, ts, err)

@@ -27,6 +27,7 @@ import {
   operatorKind,
   rowStatus,
   rowTitle,
+  unreachableDetail,
   sessionWarningText,
 } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
@@ -206,6 +207,37 @@ test("title prefixes match render.go precedence", () => {
     ),
     "[model changed] [lost] [remote] w",
     "the diagnostic remains outermost when state and backend prefixes coexist",
+  );
+  // [unreachable] is a complete-pair-only, static marker — it sits just inside
+  // [model changed], mirroring render.go (#5571 W1.3).
+  assert.equal(
+    rowTitle(sess({
+      title: "w", liveness: Liveness.Lost, backend_type: "remote",
+      unreachable: { since: "2026-08-10T12:00:00Z", error: "dial tcp: i/o timeout" },
+    })),
+    "[unreachable] [lost] [remote] w",
+  );
+  assert.equal(
+    rowTitle(sess({ title: "w", unreachable: { error: "no since" } })),
+    "w",
+    "a half-formed projection earns no marker",
+  );
+});
+
+test("unreachable detail mirrors the TUI outage line", () => {
+  const now = new Date("2026-08-10T15:00:00Z");
+  assert.equal(
+    unreachableDetail(
+      sess({ unreachable: { since: "2026-08-10T14:57:00Z", error: "ssh: connection reset" } }),
+      now,
+    ),
+    "unreachable 3m ago · ssh: connection reset",
+  );
+  assert.equal(unreachableDetail(sess({}), now), "");
+  assert.equal(
+    unreachableDetail(sess({ unreachable: { since: "bad", error: "down" } }), now),
+    "",
+    "an unparseable since renders nothing rather than half a claim",
   );
 });
 

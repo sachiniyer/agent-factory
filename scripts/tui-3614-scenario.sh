@@ -206,7 +206,7 @@ drive_overlay_background() {
     _af_log "=== overlay: the modal must not erase background left of itself (#723) ==="
 
     local width zwj_row plain_row found=""
-    for width in 200 190 180 210 170 160; do
+    for width in $(seq 90 1 200); do
         af_resize "$width" 40 || return 1
         af_ensure_nav
         zwj_row="$(_tree_row_of "$ANCHOR_HEAD")"
@@ -217,22 +217,33 @@ drive_overlay_background() {
         af_capture | sed -n "${zwj_row}p"   | grep -qF '●' || continue
         af_capture | sed -n "${plain_row}p" | grep -qF '●' || continue
 
-        af_send '?'
-        af_wait_for 'Managing:|Workspace:' "$AF_DRIVER_TIMEOUT" 'help overlay' || return 1
+        af_send '/'
+        af_wait_for 'Search sessions' "$AF_DRIVER_TIMEOUT" 'search overlay' || return 1
         # The control decides whether this width can discriminate: if the modal
         # covers the dot column, BOTH rows lose their dot and a pass below would
         # mean nothing.
-        if af_capture | sed -n "${plain_row}p" | grep -qF '●'; then
-            found="$width"
-            break
+        # The control row keeps its dot AND that dot sits within one cluster's
+        # width (6 cells) left of the modal's edge: only there can the old
+        # rune-wise prefix cut have blanked it. A dot far from the modal survives
+        # every implementation, so passing there would prove nothing.
+        local screen modal_line dot_col modal_col
+        screen="$(af_capture)"
+        if printf '%s\n' "$screen" | sed -n "${plain_row}p" | grep -qF '●'; then
+            modal_line="$(printf '%s\n' "$screen" | grep -m1 '╭' || true)"
+            dot_col="$(_cell_col "$(printf '%s\n' "$screen" | sed -n "${plain_row}p")" '●')"
+            modal_col="$(_cell_col "$modal_line" '╭')"
+            if [ "$modal_col" -gt "$dot_col" ] && [ "$((modal_col - dot_col))" -le 7 ]; then
+                found="$width"
+                break
+            fi
         fi
         af_send Escape
-        af_wait_gone 'Managing:' "$AF_DRIVER_TIMEOUT" 'help overlay closed' || return 1
+        af_wait_gone 'Search sessions' "$AF_DRIVER_TIMEOUT" 'search overlay closed' || return 1
     done
 
     if [ -z "$found" ]; then
         af_capture >&2
-        _af_fail "no terminal width in the sweep leaves the ● dot as background beside the help \
+        _af_fail "no terminal width in the sweep leaves the ● dot as background beside the search \
 overlay, so this check cannot discriminate. Re-derive the geometry (the dot must sit LEFT of the \
 modal and within one cluster's width of it) rather than deleting the check — a vacuous pass here \
 is how #723 stayed closed for three months."
@@ -248,7 +259,7 @@ columns: its ● dot is gone while the plain control row kept its own (#723)"
     _af_log "=== overlay: PASS at ${found} columns (clustered row kept its background dot; plain row is the control) ==="
 
     af_send Escape
-    af_wait_gone 'Managing:' "$AF_DRIVER_TIMEOUT" 'help overlay closed' || return 1
+    af_wait_gone 'Search sessions' "$AF_DRIVER_TIMEOUT" 'search overlay closed' || return 1
 }
 
 # --- zones: the #3585 contract must still hold ------------------------------
@@ -264,7 +275,7 @@ drive_confirmation_zone() {
     af_focus_tree || return 1
 
     for _ in $(seq 1 12); do
-        if af_capture | grep -qE "▾[[:space:]]+${ANCHOR_HEAD}" && af_capture | grep -qF 'D kill'; then
+        if af_capture | grep -qE "▾[[:space:]]+${ANCHOR_HEAD}" && af_capture | grep -qF 'D delete'; then
             break
         fi
         af_send j
@@ -274,7 +285,7 @@ drive_confirmation_zone() {
     af_wait_for 'to cancel|esc cancel' "$AF_DRIVER_TIMEOUT" 'kill confirmation' || return 1
 
     local needle row line col
-    needle='to cancel'
+    needle='esc cancel'
     row="$(_row_of "$needle")"
     [ -n "$row" ] || { _af_fail "confirmation instruction row not found"; return 1; }
     line="$(af_capture | sed -n "${row}p")"

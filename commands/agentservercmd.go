@@ -75,6 +75,9 @@ branch before shutdown), not this server's.`,
 			Program:               agentServerProgram,
 			ProgramResolved:       agentServerProgramResolved,
 			SessionEnvPassthrough: agentServerSessionEnv,
+			// Self-reported so the banner carries it — the provisioning daemon
+			// persists it as the session's agent-server generation (#5571 W1.1).
+			Version: version,
 		}, cmd.OutOrStdout())
 	},
 }
