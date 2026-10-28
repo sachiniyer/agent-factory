@@ -341,7 +341,8 @@ var hostsRemoveCmd = &cobra.Command{
 	Use:   "remove <name>",
 	Short: "Drop a host from the list",
 	Long: `Remove <name> from the saved hosts. Sessions already running on it keep
-running; only new sessions can no longer pick it. A host that is the default is
+running: each one carries its own connection settings, so a tunnel re-dial or a
+daemon restart does not need the entry; only new sessions can no longer pick it. A host that is the default is
 refused unless you pass --clear-default.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
