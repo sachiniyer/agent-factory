@@ -640,7 +640,15 @@ inherit it. A local token is never copied to the SSH host implicitly.
 - The repo must have an `origin` remote the **remote host** can clone from
   (GitHub for a real repo; a `file://` path for a self-contained test).
 
-### Checking a listed host
+### Adding and checking a listed host
+
+`af hosts add <name> [user@]host[:port]` saves the host (the same entry
+`af config set hosts` writes) and probes it in one step; `af hosts list`,
+`af hosts check [name]` and `af hosts remove <name>` complete the group. You own
+connectivity (a tailnet, a VPN, your ssh key): af opens no tunnel and edits no
+ssh config, and a host that is unreachable or missing a tool is still saved, with
+the fix printed and a non-zero exit so a script notices. These verbs act on this
+machine's host list and daemon, so they refuse a remote `--daemon-url`.
 
 A host in the global `hosts` list is probed for `git`, `tmux` (3.2 or newer) and
 `gh` without creating a session on it. `af doctor` shows one row per listed host

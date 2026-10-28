@@ -110,10 +110,16 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // and (since #3052) `backend = "ssh"` alike. There is no persistent client: every
 // step is its own `ssh` invocation, so the only long-lived child is the tunnel.
 type sandboxProvisioner struct {
-	spec    ProvisionSpec
-	sshCmd  string
-	afBin   string
-	program string
+	spec   ProvisionSpec
+	sshCmd string
+	// readinessKey is where this provisioner's prerequisite probe records its
+	// verdict. Empty means the ssh command, the key an unnamed sandbox.ssh host
+	// has always used; a session on a LISTED host sets HostReadinessKey(name) so
+	// create, CheckHost and the supervisor refresh all write the one key the
+	// catalog reads (#5840).
+	readinessKey string
+	afBin        string
+	program      string
 	// sandboxBinary is the operator's sandbox.binary override — a daemon-local
 	// af build to stream instead of the daemon's own binary or a release
 	// fetch (#5571 W2.2). Empty in production means "platform selection".
@@ -208,11 +214,20 @@ type sandboxProvisioner struct {
 	startTunnelFn func(remoteAddr string) (localAddr string, err error)
 }
 
+// hostReadinessKey is the readiness-cache key this provisioner's probe records
+// under: the listed host's canonical key when it has one, else the ssh command.
+func (p *sandboxProvisioner) hostReadinessKey() string {
+	if p.readinessKey != "" {
+		return p.readinessKey
+	}
+	return p.sshCmd
+}
+
 func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	w := &sandboxWorkspace{shell: p, spec: p.spec, program: p.program}
 	// Before anything is created on the host: a missing tool refuses the create
 	// with its fix instead of failing a later step half-provisioned (#5571 W2.3).
-	if err := w.checkHostPrereqs(p.sshCmd, sshShortStepTimeout); err != nil {
+	if err := w.checkHostPrereqs(p.hostReadinessKey(), sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
