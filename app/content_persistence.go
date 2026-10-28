@@ -16,7 +16,19 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	// match disk; abort the quit and surface the error so the user sees the
 	// dropped edit instead of losing it silently on the way out.
 	if err := m.saveContentPaneState(); err != nil {
-		return m, m.handleError(err)
+		// The first refusal aborts the quit and says why. An identical failure on
+		// the very next quit means the user chose to leave: a save that keeps
+		// failing must not make the TUI impossible to exit, so the unsaved edits
+		// are discarded and the quit goes through (#5860).
+		if m.quitSaveFailure != err.Error() {
+			m.quitSaveFailure = err.Error()
+			return m, m.handleError(fmt.Errorf("%w — press the quit key again to discard the unsaved edits and quit", err))
+		}
+		m.discardUnsavedPaneEdits()
+	}
+	m.quitSaveFailure = ""
+	if notice := m.takePendingPaneNotice(); notice != "" {
+		return m, m.showTransientMessage(notice)
 	}
 	// The save may have dropped a draft whose task was deleted (#4798). Its
 	// notice is otherwise raised by the next snapshot poll, which never comes
@@ -80,9 +92,12 @@ func (m *home) saveContentPaneState() error {
 
 	hp := m.hooksPane
 	if hp.IsDirty() && isRemoteTarget() {
-		// Refuse rather than write a local file the target never reads. The pane
-		// stays dirty (the #1001 rule), so the edit survives for the user to copy.
-		saveErr = errors.Join(saveErr, errRemoteHooksSave())
+		// No save can ever commit this edit (the pane is read-only remotely, so this
+		// is a safety net for one that got dirty anyway). Returning an error would
+		// abort quit and every task action on every attempt (#5860), so discard it,
+		// say so once, and carry on: nothing is lost that could have been kept.
+		hp.Discard()
+		m.pendingPaneNotice = errRemoteHooksSave().Error() + " — the unsaved hook edit was discarded"
 	} else if hp.IsDirty() {
 		// Hook edits are written to the in-repo .agent-factory/config.json —
 		// the canonical location for post_worktree_commands since #800. The
@@ -158,7 +173,9 @@ func (m *home) saveContentPaneState() error {
 		retargetCandidates = append(retargetCandidates, retargetCandidate{edit.ID, name, *edit.Update.ProjectPath})
 	}
 	for _, edit := range sp.ConsumeDirty() {
-		if err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect); err != nil {
+		err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect)
+		m.noteRemoteUpdate(edit.ID, edit.Update, err)
+		if err != nil {
 			if updateProvedTaskDeleted(err, edit.ID) {
 				// Another writer deleted the task (`af tasks remove`), so no
 				// retry can ever land this edit; retaining it retried the save
@@ -208,7 +225,9 @@ func (m *home) saveContentPaneState() error {
 		// tsk is the record as the pane displayed it; pin its project binding
 		// so a delete authorized under this project cannot land on a task
 		// another client rebound elsewhere while the pane was open (#3230).
-		if err := removeTaskThroughDaemon(tsk.ID, task.ExpectProject(tsk)); err != nil {
+		err := removeTaskThroughDaemon(tsk.ID, task.ExpectProject(tsk))
+		m.noteRemoteRemove(tsk.ID, err)
+		if err != nil {
 			if apiclient.IsMutationCommitted(err) {
 				// The durable removal landed and the reload below will project
 				// it. Keep the schedule failure visible without telling the user
