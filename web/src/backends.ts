@@ -37,6 +37,12 @@ export interface BackendOption {
    *  listener/auth posture (#5571 W3.1). Not a precondition: the backend stays
    *  selectable; the text is the same refusal the create path degrades with. */
   callback_unavailable_reason?: string;
+  /** What af last learned about the remote host behind a sandbox backend:
+   *  "ready" | "stale" | "unprobed" | "blocked" (#5571 W2.3). */
+  readiness?: string;
+  /** Advisory beside a selectable backend whose host verdict is stale or not
+   *  yet probed — never a block (a create re-checks the host live). */
+  note?: string;
 }
 
 /** The daemon's per-repo backend catalog (daemon.ListBackendsResponse). */
@@ -100,10 +106,13 @@ export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] 
   // only on an AVAILABLE choice — backendSelectable gates on status, never on
   // reason, so the notice stays advisory ("this session will have no af
   // callback") instead of looking like a block (#5571 W3.1).
-  const callbackAdvisory = (opt: BackendOption | undefined): string =>
-    opt?.status === "available" && opt.callback_unavailable_reason
-      ? CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason
-      : "";
+  const callbackAdvisory = (opt: BackendOption | undefined): string => {
+    if (opt?.status !== "available") return "";
+    const parts: string[] = [];
+    if (opt.note) parts.push(`Host ${opt.note}`);
+    if (opt.callback_unavailable_reason) parts.push(CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason);
+    return parts.join(" · ");
+  };
 
   const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
   const choices: BackendChoice[] = [
