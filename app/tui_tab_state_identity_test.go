@@ -446,16 +446,30 @@ func TestSwapSameTitle_PartialRosterThenTabArrives(t *testing.T) {
 	}))
 	require.Equal(t, "b", recreated.GetTabs()[h.store.ActiveTab()].Name)
 
-	// A later poll: "a" now exists on the daemon's row (same CreatedAt, so an
-	// in-place update, not another swap).
-	recreated.AddTabForTest("a", session.TabKindShell)
-	recreated.GetTabs()[2].ID = "fresh-a"
+	// A later poll: "a" now exists on the daemon's row (same ID and CreatedAt, so
+	// an in-place update, not another swap). It must arrive through the SNAPSHOT:
+	// `recreated` is the live instance in the TUI projection now, so adding the tab
+	// to it directly would put "a" in updateInstanceFromSnapshot's oldKeys and the
+	// roster-change branch (active-tab remap + cursor sync) this test claims to pin
+	// would never run (#5729). The daemon's row is a separate instance whose data
+	// carries the new roster.
+	require.Len(t, recreated.GetTabs(), 2, "precondition: the live row has not seen 'a' yet")
+	daemonRow := instanceWithFakeBackend(t, "dup")
+	daemonRow.ID = recreated.ID
+	daemonRow.CreatedAt = recreated.CreatedAt
+	addSwapTabs(t, daemonRow, "fresh", "agent", "b", "a")
 	h.reconcileSnapshot([]session.InstanceData{
-		first.ToInstanceData(), recreated.ToInstanceData(), last.ToInstanceData(),
+		first.ToInstanceData(), daemonRow.ToInstanceData(), last.ToInstanceData(),
 	})
-	require.Same(t, recreated, h.sidebar.GetSelectedInstance())
+	require.Same(t, recreated, h.sidebar.GetSelectedInstance(), "the row updated in place")
+	require.Len(t, recreated.GetTabs(), 3, "the snapshot delivered 'a' as a genuinely new key")
+	assert.Equal(t, "a", recreated.GetTabs()[2].Name)
 	assert.Equal(t, "b", recreated.GetTabs()[h.store.ActiveTab()].Name,
 		"a tab arriving after the swap must not move the active tab")
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab, "the cursor stays on a tab row")
+	assert.Equal(t, "b", recreated.GetTabs()[sel.TabIndex].Name,
+		"a tab arriving after the swap must not drag the cursor off 'b'")
 }
 
 // TestSwapSameTitle_TabReorderedWithOpenPane is the second pane-open repro: the
