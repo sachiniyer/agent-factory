@@ -47,6 +47,8 @@ type localAgentServer struct {
 	// capture goroutine on a session that is already being torn down and never gets
 	// closed — the #1632 leak). ensureBroker refuses once closed.
 	closed bool
+	// relaunch collapses overlapping Relaunch requests onto one attempt (W7.1).
+	relaunch relaunchFlight
 }
 
 // AgentServer returns the cached agent-server for this instance's runtime (#1592

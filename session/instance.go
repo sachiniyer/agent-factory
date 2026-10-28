@@ -28,8 +28,12 @@ type Instance struct {
 	// replacement invalidates it before later manager bookkeeping, which orders a
 	// predecessor side effect either wholly before the replacement or drops it.
 	agentObservationGeneration atomic.Uint64
-	liveBoundaryMu             sync.Mutex
-	liveBoundary               *runtimeLiveBoundary
+	// forceSandboxReplacement is the operator's explicit "replace this sandbox"
+	// intent (`sessions restore --force-reap`) for the recovery in flight; it makes
+	// recovery skip the in-place relaunch. See relaunchOrRecoverSandbox.
+	forceSandboxReplacement atomic.Bool
+	liveBoundaryMu          sync.Mutex
+	liveBoundary            *runtimeLiveBoundary
 	// ID is the instance's stable identity (#1195): a random UUID minted once at
 	// NewInstance, persisted, and never mutated. The reconcile uses it to tell
 	// "same session" from "title reused" (#765) without leaning on CreatedAt

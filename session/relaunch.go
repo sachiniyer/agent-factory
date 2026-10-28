@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -85,7 +86,20 @@ func (i *Instance) RelaunchInPlace() error {
 // relaunch failure is returned as is: the sandbox answered, its workspace may
 // hold unpushed work, and replacing it would destroy that.
 func relaunchOrRecoverSandbox(i *Instance) error {
-	err := i.RelaunchInPlace()
+	return decideRecovery(i, (*Instance).RelaunchInPlace, recoverSandbox)
+}
+
+// decideRecovery is relaunchOrRecoverSandbox with its two actions injected, so
+// the policy — not the provisioning — can be tested.
+func decideRecovery(i *Instance, relaunch, replace func(*Instance) error) error {
+	// An explicit --force-reap is a request to REPLACE the sandbox: honouring it
+	// by relaunching would retain exactly the work the operator asked to discard,
+	// and an unreachable sandbox would fail the relaunch's health probe and never
+	// reach the replacement the flag promises.
+	if i.forceSandboxReplacement.Load() {
+		return replace(i)
+	}
+	err := relaunch(i)
 	if err == nil {
 		// The agent process is a new one even though the workspace is the same
 		// (#4222): stamp it before the live edge so the run-end classifier can
@@ -95,10 +109,15 @@ func relaunchOrRecoverSandbox(i *Instance) error {
 		return nil
 	}
 	if relaunchFallsBackToReprovision(err) {
-		return recoverSandbox(i)
+		return replace(i)
 	}
 	return fmt.Errorf("relaunching the agent in place for session %q: %w", i.Title, err)
 }
+
+// SetForceSandboxReplacement records the operator's explicit intent to replace
+// the sandbox (`sessions restore --force-reap`) for the recovery about to run.
+// The caller clears it when the recovery returns.
+func (i *Instance) SetForceSandboxReplacement(force bool) { i.forceSandboxReplacement.Store(force) }
 
 // relaunchFallsBackToReprovision is the whole list of reasons a failed relaunch
 // may be followed by re-provisioning: the runtime cannot relaunch at all, or
@@ -110,8 +129,58 @@ func relaunchFallsBackToReprovision(err error) bool {
 }
 
 // Relaunch is the sandbox-side implementation: the in-sandbox agent-server's
-// local runtime.
-func (s *localAgentServer) Relaunch() error { return s.inst.relaunchLocalAgent() }
+// local runtime. Overlapping requests collapse onto one attempt (relaunchFlight).
+func (s *localAgentServer) Relaunch() error { return s.relaunchWith(s.inst.relaunchLocalAgent) }
+
+// relaunchWith runs one relaunch through the single-flight guard.
+func (s *localAgentServer) relaunchWith(run func() error) error { return s.relaunch.do(run) }
+
+// relaunchFlight makes a relaunch ONE serialized operation across its whole
+// stop/start. The route discards request cancellation, so a daemon that timed
+// out and retried while the first relaunch is still running would otherwise run
+// a second one concurrently — stopping the replacement the first just started,
+// or racing its startup. A request that arrives mid-flight JOINS the running
+// attempt and returns its result, the same shape as the headless archive route.
+// A request after it finished is a new relaunch.
+type relaunchFlight struct {
+	mu     sync.Mutex
+	active *relaunchAttempt
+}
+
+type relaunchAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+// relaunchJoinTimeout bounds how long a joiner waits for the running attempt;
+// the leader is bounded by the same call budget the driving daemon applies.
+var relaunchJoinTimeout = AgentRelaunchCallTimeout
+
+func (f *relaunchFlight) do(run func() error) error {
+	f.mu.Lock()
+	if a := f.active; a != nil {
+		f.mu.Unlock()
+		select {
+		case <-a.done:
+			return a.err
+		case <-time.After(relaunchJoinTimeout):
+			return errors.New("relaunch: a relaunch of this agent is still running; not starting a second one beside it")
+		}
+	}
+	a := &relaunchAttempt{done: make(chan struct{})}
+	f.active = a
+	f.mu.Unlock()
+
+	defer func() {
+		f.mu.Lock()
+		f.active = nil
+		f.mu.Unlock()
+		close(a.done)
+	}()
+	a.err = errors.New("relaunch: attempt aborted before it finished")
+	a.err = run()
+	return a.err
+}
 
 // CanRelaunch is always true for the local runtime: it owns the tmux session.
 func (s *localAgentServer) CanRelaunch() (bool, error) { return true, nil }
@@ -145,19 +214,21 @@ func (i *Instance) relaunchLocalAgent() error {
 	if err != nil {
 		return fmt.Errorf("relaunch: cannot tell whether %q's agent is running: %w", i.Title, err)
 	}
-	if alive {
-		state, blind, closeErr := ts.CloseAndWaitForPaneExitReportingBlindness()
-		if state == tmux.PaneStateKnown && blind {
-			return fmt.Errorf("relaunch: %q's agent session vanished without its pane ever being observed, so a detached child may still be writing the workspace; not starting a replacement", i.Title)
-		}
-		if state == tmux.PaneStateUnknown {
-			return fmt.Errorf("relaunch: cannot confirm %q's agent stopped (%v); not starting a replacement, because two agents writing the workspace at once would corrupt the work in it", i.Title, closeErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("relaunch: failed to stop the agent for %q: %w", i.Title, closeErr)
-		}
+	return stopThenRespawn(i.Title, ts, alive, func() error { return b.Respawn(i) })
+}
+
+// stopThenRespawn is the order that makes a relaunch safe: the stop runs FIRST
+// and EVERY time — even when the agent session is already gone, because tmux can
+// no longer enumerate a vanished session's children but the AF_SESSION marker
+// outlives it, and the stop's survivor sweep reads that. A child still running
+// after its session died makes the stop refuse; skipping the stop for a dead
+// session would start a replacement beside that child. The respawn runs only
+// when the stop is confirmed.
+func stopThenRespawn(title string, ts paneStopper, wasAlive bool, respawn func() error) error {
+	if err := confirmAgentStopped(title, ts, wasAlive); err != nil {
+		return err
 	}
-	return b.Respawn(i)
+	return respawn()
 }
 
 // --- remote client ---
@@ -184,4 +255,34 @@ func (s *remoteAgentServer) Relaunch() error {
 func (s *deadRemoteAgentServer) Relaunch() error { return s.err() }
 func (s *deadRemoteAgentServer) CanRelaunch() (bool, error) {
 	return false, s.err()
+}
+
+// paneStopper is the tmux session's confirmed-stop, narrowed so the decision
+// below can be tested without tmux.
+type paneStopper interface {
+	CloseAndWaitForPaneExitReportingBlindness() (tmux.PaneState, bool, error)
+}
+
+// confirmAgentStopped stops the agent's session and returns nil only when it
+// has positive evidence that nothing from it is still running. wasAlive says
+// whether the session was running before the stop.
+//
+//   - an unconfirmed stop, or survivors found by the sweep, refuse: two agents
+//     writing one tree is unrecoverable in a way a retry is not;
+//   - a session that VANISHED with no pane observed is the normal shape of a
+//     dead agent, and its survivor sweep already ran inside the stop, so it
+//     proceeds — but the same shape for an agent that was just running means a
+//     detached child may still be writing, and refuses.
+func confirmAgentStopped(title string, ts paneStopper, wasAlive bool) error {
+	state, blind, closeErr := ts.CloseAndWaitForPaneExitReportingBlindness()
+	if state == tmux.PaneStateUnknown {
+		return fmt.Errorf("relaunch: cannot confirm %q's agent stopped (%v); not starting a replacement, because two agents writing the workspace at once would corrupt the work in it", title, closeErr)
+	}
+	if state == tmux.PaneStateKnown && blind && wasAlive {
+		return fmt.Errorf("relaunch: %q's agent session vanished without its pane ever being observed, so a detached child may still be writing the workspace; not starting a replacement", title)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("relaunch: failed to stop the agent for %q: %w", title, closeErr)
+	}
+	return nil
 }

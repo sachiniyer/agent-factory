@@ -488,6 +488,10 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
 		return m.stopVSCodeForInstance(key, i.ID)
 	})
+	// --force-reap asks for the sandbox to be REPLACED; the in-place relaunch
+	// would keep the work it asked to discard (W7.1).
+	instance.SetForceSandboxReplacement(force)
+	defer instance.SetForceSandboxReplacement(false)
 	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
