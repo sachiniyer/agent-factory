@@ -11,6 +11,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -156,4 +157,69 @@ func TestRoutedCreateSetsValidateFirst(t *testing.T) {
 	_, err := routedCreateSession(daemon.CreateSessionRequest{Title: "a", RepoPath: "/srv/x"})
 	require.NoError(t, err)
 	require.Equal(t, true, got["validate_first"])
+}
+
+// W9.3: tab and project verbs reach the targeted daemon, send daemon-host paths
+// as typed, and read the daemon's registry rather than this machine's.
+func TestRoutedTabAndProjectVerbsReachRemoteTarget(t *testing.T) {
+	var mu sync.Mutex
+	hits := map[string]json.RawMessage{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		mu.Lock()
+		hits[r.URL.Path] = raw
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/v1/CreateTab":
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.CreateTabResponse{Name: "shell-1"}))
+		case "/v1/ListProjects":
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.ListProjectsResponse{
+				Projects: []config.Project{{ID: "prj_remote", Root: "/srv/box/alpha"}}}))
+		case "/v1/RegisterProject":
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.RegisterProjectResponse{
+				OK: true, Project: config.Project{ID: "prj_remote", Root: "/srv/box/alpha"}}))
+		default:
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(map[string]any{}))
+		}
+	}))
+	defer srv.Close()
+
+	oldURL := apiclient.FlagDaemonURL
+	apiclient.FlagDaemonURL = srv.URL
+	t.Cleanup(func() { apiclient.FlagDaemonURL = oldURL })
+	// A seeded local registry must never be read for a remote list.
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	created, err := routedCreateTab(daemon.CreateTabRequest{Title: "a", Shell: true})
+	require.NoError(t, err)
+	require.Equal(t, "shell-1", created.Name)
+
+	projects, err := routedListProjects()
+	require.NoError(t, err)
+	require.Len(t, projects, 1)
+	require.Equal(t, "/srv/box/alpha", projects[0].Root, "the list is the daemon's registry")
+
+	path, err := projectArgPath("~/src/alpha")
+	require.NoError(t, err)
+	require.Equal(t, "~/src/alpha", path, "sent as typed, never expanded against the caller's home")
+	_, err = routedRegisterProject(daemon.RegisterProjectRequest{Path: path})
+	require.NoError(t, err)
+
+	_, err = projectArgPath("relative/alpha")
+	require.ErrorContains(t, err, "must be absolute")
+
+	_, _, err = resolveProjectDeleteTarget(nil)
+	require.ErrorContains(t, err, "required against the daemon")
+	req, name, err := resolveProjectDeleteTarget([]string{"/srv/box/alpha"})
+	require.NoError(t, err)
+	require.Equal(t, "/srv/box/alpha", req.RepoPath)
+	require.Equal(t, "alpha", name)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, route := range []string{"CreateTab", "ListProjects", "RegisterProject"} {
+		require.Contains(t, hits, "/v1/"+route)
+	}
+	require.JSONEq(t, `{"path":"~/src/alpha"}`, string(hits["/v1/RegisterProject"]))
 }

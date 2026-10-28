@@ -195,7 +195,7 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 	// empty repoID preserves the all-repo search; a non-empty one confines the
 	// session lookup to that repo so a same-titled session in another repo
 	// never receives the tab.
-	repoID, err := resolveRepoID()
+	repoID, err := resolveRepoIDForLookup()
 	if err != nil {
 		return jsonError(err)
 	}
@@ -263,7 +263,7 @@ func runTabDelete(cmd *cobra.Command, args []string) error {
 	// repoID preserves the all-repo search; a non-empty one confines the
 	// session lookup to that repo so a same-titled session in another repo
 	// never loses a tab.
-	repoID, err := resolveRepoID()
+	repoID, err := resolveRepoIDForLookup()
 	if err != nil {
 		return jsonError(err)
 	}
@@ -337,7 +337,7 @@ func runTabRename(cmd *cobra.Command, args []string) error {
 	// empty repoID preserves the all-repo search; a non-empty one confines the
 	// session lookup to that repo so a same-titled session in another repo never
 	// has a tab renamed out from under it.
-	repoID, err := resolveRepoID()
+	repoID, err := resolveRepoIDForLookup()
 	if err != nil {
 		return jsonError(err)
 	}
@@ -401,7 +401,7 @@ func runTabReorder(cmd *cobra.Command, args []string) error {
 	}
 
 	// Honor --repo scoping (#891 class), mirroring the other tab verbs.
-	repoID, err := resolveRepoID()
+	repoID, err := resolveRepoIDForLookup()
 	if err != nil {
 		return jsonError(err)
 	}
