@@ -437,10 +437,13 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.prepareContainerUser(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpRootExec)
 	}
-	if err := p.configureGit(); err != nil {
+	if err := p.trustWorkspaceDirectories(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	if err := p.cloneWorkspace(); err != nil {
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
+	}
+	if err := p.configureGit(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
 	if err := p.copyAfBinary(); err != nil {
@@ -596,14 +599,24 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 	return sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
 }
 
-// configureGit sets a git identity and marks every directory safe inside the
-// container so the clone + worktree creation (which run as root over a possibly
-// foreign-owned bind mount) don't trip on "dubious ownership" or a missing
-// committer identity.
+// trustWorkspaceDirectories marks every directory safe in the CONTAINER's own
+// global git config, so the agent-server's worktree work over a possibly
+// foreign-owned bind mount does not trip on "dubious ownership". The config
+// lives in the container's home, not the operator's, so W2.7's rule about the
+// host's gitconfig does not apply; it runs before the clone, as it always did.
+func (p *dockerProvisioner) trustWorkspaceDirectories() error {
+	out, err := p.execSessionSh(dockerShortStepTimeout, `git config --global --add safe.directory "*"`)
+	if err != nil {
+		return fmt.Errorf("backend=docker: git config in container failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// configureGit writes the committer identity into the clone's repo-local git
+// config inside the container. It runs after the clone and writes no global
+// identity (#5571 W2.7).
 func (p *dockerProvisioner) configureGit() error {
-	script := `git config --global user.email "af@agent-factory.local" && ` +
-		`git config --global user.name "Agent Factory" && ` +
-		`git config --global --add safe.directory "*"`
+	script := gitIdentityCommand(dockerWorkspaceDir, p.spec.GitUserName, p.spec.GitUserEmail)
 	out, err := p.execSessionSh(dockerShortStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=docker: git config in container failed: %s: %w", strings.TrimSpace(string(out)), err)

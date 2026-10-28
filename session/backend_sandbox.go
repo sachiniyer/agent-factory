@@ -212,10 +212,12 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	w.resolveSessionDirSymlinks(sshShortStepTimeout)
 	p.sessionDir = w.SessionDir
-	if err := w.configureGit(sshShortStepTimeout); err != nil {
+	// The identity is repo-local (#5571 W2.7), so it is written after the clone
+	// that creates the repository.
+	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
-	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
+	if err := w.configureGit(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	// The binary stage is platform-aware (#5571 W2.2): probe the host's uname,

@@ -182,13 +182,11 @@ func (w *sandboxWorkspace) resolveSessionDirSymlinks(timeout time.Duration) {
 	}
 }
 
-// configureGit sets a git identity and marks every directory safe on the remote
-// so the clone + worktree creation don't trip on "dubious ownership" or a missing
-// committer identity.
+// configureGit writes the committer identity into the clone's repo-local git
+// config. It runs AFTER the clone and never writes the remote user's global
+// config (#5571 W2.7).
 func (w *sandboxWorkspace) configureGit(timeout time.Duration) error {
-	script := `git config --global user.email "af@agent-factory.local" && ` +
-		`git config --global user.name "Agent Factory" && ` +
-		`git config --global --add safe.directory "*"`
+	script := gitIdentityCommand(w.WorkspacePath(), w.spec.GitUserName, w.spec.GitUserEmail)
 	out, err := w.shell.Run(timeout, script, nil, true)
 	if err != nil {
 		return fmt.Errorf("git config on the remote failed (is git installed there?): %s: %w", strings.TrimSpace(string(out)), err)

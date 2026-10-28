@@ -123,6 +123,11 @@ type ProvisionSpec struct {
 	// Only off-box runtimes (docker/ssh/hook) honor it; the in-process local
 	// runtime never clones, so it is a no-op there.
 	RestoreBranch string
+	// GitUserName and GitUserEmail are the operator's committer identity on the
+	// daemon host, written into the off-box workspace's repo-local git config
+	// (#5571 W2.7). Empty falls back to a placeholder identity.
+	GitUserName  string
+	GitUserEmail string
 	// Branch is the git branch the daemon named for this session (its frozen
 	// branch_prefix over the title). Off-box runtimes hand it to the
 	// agent-server so the in-sandbox worktree uses exactly this name instead of
