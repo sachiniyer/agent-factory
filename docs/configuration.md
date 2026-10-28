@@ -206,11 +206,12 @@ The built-in allowlist keeps the pieces sessions need:
   `CLAUDE_CODE_USE_*` selector is exported or is a literal assignment in the
   resolved command (for example,
   `program_overrides.claude = "CLAUDE_CODE_USE_BEDROCK=1 claude"`). A
-  command-local selector is trusted only when the entire command is one literal
-  Claude invocation (optionally through `env` or `exec`). Compound commands,
-  redirects, arbitrary wrappers, and
-  dynamic words require exporting the selector before starting af, or explicitly
-  listing the provider credential names. Codex gets
+  command-local selector is trusted only when the command up to and including
+  the agent name is one literal Claude invocation (optionally through `env` or
+  `exec`) and any arguments after the agent are static text (a literal or
+  ANSI-C `$'…'` quote). Compound commands, redirects, arbitrary wrappers, and
+  dynamic words require exporting the selector before starting af, or
+  explicitly listing the provider credential names. Codex gets
   `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_HOME`,
   `CODEX_SQLITE_HOME`, and its CA path; Gemini gets Gemini/Google API keys, and
   gets Google Cloud's credentials (`GOOGLE_APPLICATION_CREDENTIALS`,
