@@ -3,12 +3,19 @@ package git
 import (
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // archiveSnapshotMessage labels the WIP commit SnapshotAndPushBranch makes for
 // uncommitted work at archive time. It is deliberately recognizable so a user
 // who restores the session sees why the extra commit exists.
 const archiveSnapshotMessage = "af: pre-archive snapshot (uncommitted work)"
+
+// archiveMergeMessage labels the merge commit archive makes when the sandbox HEAD
+// and origin's session branch diverged but combine cleanly (#5407).
+const archiveMergeMessage = "af: merge origin's session branch into the pre-archive snapshot"
 
 // SnapshotAndPushBranch makes the session's branch durable on origin (#1592
 // Phase 4 PR6/PR7) — the archive-side primitive for the disposable off-box
@@ -34,9 +41,11 @@ const archiveSnapshotMessage = "af: pre-archive snapshot (uncommitted work)"
 // loss once the sandbox is reaped. Pushing HEAD makes the actual working-tree
 // state durable on the session branch regardless of which branch/HEAD the
 // worktree is on. Restore re-clones this branch, so it recovers that state. The
-// push is a plain (non-force) push, so a genuinely divergent HEAD is rejected by
-// origin and surfaces as an error here rather than silently overwriting or losing
-// history.
+// push is a plain (non-force) push, so origin's history is never overwritten:
+// when HEAD and origin's branch have diverged (or HEAD sits behind it and just
+// took a snapshot), the two are merged in memory and the merge is pushed as a
+// fast-forward, or — on conflicts — HEAD goes to a side branch whose name is
+// returned for restore to clone (publishArchiveHead, #5407).
 //
 // The push runs under the network timeout (a stalled or auth-prompting origin
 // must not hang the archive forever). Credentials are the sandbox image's/host's
@@ -89,36 +98,6 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// rather than `all` because we only need that boolean: `normal` reports an
 	// untracked directory as one `?? dir/` entry instead of walking every file
 	// beneath it, which is the same answer for less work on a big tree.
-	// Reconcile with origin BEFORE the snapshot commit (#5407). A HEAD that is an
-	// ancestor of origin's session branch (an agent ran `git reset --hard HEAD~1`
-	// or checked out an older commit) would otherwise be rejected as a
-	// non-fast-forward push AFTER the snapshot commit already landed locally,
-	// stranding it inside a sandbox that is about to be reaped. Behind-only is
-	// recoverable: nothing on origin would be overwritten.
-	behind, diverged := g.classifyAgainstOrigin(branch)
-	if diverged {
-		// Neither side contains the other: the plain push below can only be
-		// rejected. Refuse BEFORE snapshotting so the uncommitted work stays in the
-		// tree for the operator's retry rather than becoming a stranded local
-		// commit that later retries skip over.
-		return "", g.annotateGitWriteError(fmt.Errorf("HEAD has diverged from origin's %q (neither is an ancestor of the other), so the archive push would be rejected; nothing was committed — reconcile the branches in the sandbox and retry", branch), probeDir)
-	}
-	if behind {
-		if clean, err := g.isTreeClean(); err == nil && clean {
-			// Origin already holds every commit HEAD has: nothing to push.
-			return branch, nil
-		}
-		// Dirty: fast-forward onto origin's tip, carrying the working tree, so the
-		// snapshot lands on top of it. If the uncommitted changes overlap the
-		// incoming ones git refuses. Autostash is disabled explicitly: a user's
-		// merge.autoStash=true would otherwise save the local edits onto refs/stash
-		// on a conflicting re-apply, and refs/stash is ONE stack shared by every
-		// linked worktree of the repo, so af must never write to (or pop from) it.
-		if _, err := g.runGitCommand(g.worktreePath, "-c", "merge.autoStash=false", "-c", "rebase.autoStash=false", "merge", "--ff-only", "--no-autostash", "FETCH_HEAD"); err != nil {
-			return "", g.annotateGitWriteError(fmt.Errorf("HEAD is behind origin's %q and uncommitted changes overlap the incoming commits, so it cannot be fast-forwarded before the archive snapshot (nothing was committed; resolve in the sandbox and retry): %w", branch, err), probeDir)
-		}
-	}
-
 	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return "", g.annotateGitWriteError(fmt.Errorf("failed to check worktree status before archive push: %w", err), probeDir)
@@ -136,57 +115,107 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 		}
 	}
 
-	// Push the CURRENT HEAD (which now carries the snapshot commit, if any) to the
-	// session branch on origin, under the network timeout. Pushing HEAD rather than
-	// the stored branch name means the actual working-tree state is what becomes
-	// durable even if the agent left HEAD on a different branch or detached (#1721);
-	// a non-fast-forward divergence is rejected by origin and surfaces here rather
-	// than silently dropping the work. A "src refspec ..." or auth failure surfaces
-	// here too, with git's stderr folded in.
-	refspec := "HEAD:refs/heads/" + branch
-	if out, err := g.runGitNetworkCommand(g.worktreePath, "push", "origin", refspec); err != nil {
-		return "", g.annotateGitWriteError(fmt.Errorf("failed to push branch %q to origin (archive stores durable state on GitHub): %s: %w",
-			branch, strings.TrimSpace(out), err), probeDir)
-	}
-	return branch, nil
+	// The snapshot is captured: HEAD now carries the work exactly as the worktree
+	// holds it under its CURRENT ignore rules. Everything below only reads and
+	// publishes commits — the working tree and index are never rewritten
+	// (#5407), because for a sandbox the workspace is destroyed after archive and
+	// anything not in the pushed commits is lost.
+	return g.publishArchiveHead(branch, probeDir)
 }
 
-// classifyAgainstOrigin fetches origin's session branch (best effort, under the
-// network timeout) and compares HEAD to it. behind is true when HEAD is a strict
-// ancestor of origin's tip; diverged when neither is an ancestor of the other.
-// Any failure to fetch or resolve (no such branch on origin yet, unreachable
-// origin) reports neither, leaving the push to surface its own error.
-func (g *GitWorktree) classifyAgainstOrigin(branch string) (behind, diverged bool) {
+// publishArchiveHead makes HEAD durable on origin without touching the working
+// tree, classifying it against origin's current session branch (#5407):
+//
+//   - origin's branch missing or unreachable, or HEAD ahead of it: a plain
+//     fast-forward push of HEAD (the pre-existing path; the push reports its own
+//     error, with git's stderr).
+//   - HEAD already contained in origin's branch (it sits behind, nothing to
+//     snapshot): origin holds every commit, so there is nothing to push, and the
+//     branch must not move backwards.
+//   - diverged (this includes a behind HEAD that just took a snapshot commit): if
+//     HEAD and origin's tip combine cleanly in memory (git merge-tree, no
+//     worktree), push that merge as a fast-forward of the session branch;
+//     otherwise push HEAD to a side branch (<branch>-af-archive-<utc timestamp>)
+//     that nothing else writes, and return THAT name — the caller records the
+//     returned branch as the one restore clones back, so the work is found.
+//     Only a failing side push fails the archive.
+func (g *GitWorktree) publishArchiveHead(branch, probeDir string) (string, error) {
+	push := func(src, dst string) error {
+		refspec := src + ":refs/heads/" + dst
+		if out, err := g.runGitNetworkCommand(g.worktreePath, "push", "origin", refspec); err != nil {
+			return g.annotateGitWriteError(fmt.Errorf("failed to push branch %q to origin (archive stores durable state on GitHub): %s: %w",
+				dst, strings.TrimSpace(out), err), probeDir)
+		}
+		return nil
+	}
+
+	head, tip := g.revParse("HEAD"), g.fetchOriginTip(branch)
+	switch {
+	case head == "" || tip == "" || head == tip || g.isAncestor(tip, head):
+		// Push HEAD itself so the actual working-tree state is what becomes durable
+		// even if the agent left HEAD on a different branch or detached (#1721).
+		if err := push("HEAD", branch); err != nil {
+			return "", err
+		}
+		return branch, nil
+	case g.isAncestor(head, tip):
+		return branch, nil
+	}
+
+	if merged, ok := g.mergeCommitWithoutWorktree(head, tip); ok {
+		if err := push(merged, branch); err != nil {
+			return "", err
+		}
+		return branch, nil
+	}
+	side := fmt.Sprintf("%s-af-archive-%s", branch, time.Now().UTC().Format("20060102T150405Z"))
+	if err := push("HEAD", side); err != nil {
+		return "", err
+	}
+	log.WarningLog.Printf("archive of %q: HEAD cannot be combined with origin's branch without conflicts; the work was pushed to %q instead and the session will restore from it", branch, side)
+	return side, nil
+}
+
+func (g *GitWorktree) revParse(rev string) string {
+	out, err := g.runGitCommand(g.worktreePath, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// fetchOriginTip fetches origin's session branch (best effort, under the network
+// timeout) and returns its tip, or "" when it cannot be fetched or resolved.
+// Fetching writes only objects and FETCH_HEAD, never the worktree.
+func (g *GitWorktree) fetchOriginTip(branch string) string {
 	if _, err := g.runGitNetworkCommand(g.worktreePath, "fetch", "origin", "refs/heads/"+branch); err != nil {
-		return false, false
+		return ""
 	}
-	head, err := g.runGitCommand(g.worktreePath, "rev-parse", "HEAD")
-	if err != nil {
-		return false, false
-	}
-	tip, err := g.runGitCommand(g.worktreePath, "rev-parse", "FETCH_HEAD")
-	if err != nil {
-		return false, false
-	}
-	head, tip = strings.TrimSpace(head), strings.TrimSpace(tip)
-	if head == tip {
-		return false, false
-	}
-	if _, err := g.runGitCommand(g.worktreePath, "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"); err == nil {
-		return true, false
-	}
-	if _, err := g.runGitCommand(g.worktreePath, "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD"); err == nil {
-		return false, false // ahead: a plain fast-forward push
-	}
-	return false, true
+	return g.revParse("FETCH_HEAD")
 }
 
-// isTreeClean reports whether the worktree has nothing to snapshot, using the
-// same config-independent status gate as the snapshot itself (#2101).
-func (g *GitWorktree) isTreeClean() (bool, error) {
-	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
+func (g *GitWorktree) isAncestor(ancestor, descendant string) bool {
+	_, err := g.runGitCommand(g.worktreePath, "merge-base", "--is-ancestor", ancestor, descendant)
+	return err == nil
+}
+
+// mergeCommitWithoutWorktree merges head and tip entirely in the object
+// database (git merge-tree --write-tree, git >= 2.38) and returns a merge commit
+// with parents head and tip, or ok=false on conflicts, on an older git, or on any
+// error. The working tree and index are not read or written.
+func (g *GitWorktree) mergeCommitWithoutWorktree(head, tip string) (string, bool) {
+	out, err := g.runGitCommand(g.worktreePath, "merge-tree", "--write-tree", head, tip)
 	if err != nil {
-		return false, err
+		return "", false
 	}
-	return strings.TrimSpace(status) == "", nil
+	tree, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
+	tree = strings.TrimSpace(tree)
+	if tree == "" {
+		return "", false
+	}
+	commit, err := g.runGitCommand(g.worktreePath, "commit-tree", tree, "-p", head, "-p", tip, "-m", archiveMergeMessage)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(commit), true
 }

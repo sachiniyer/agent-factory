@@ -293,10 +293,32 @@ func behindOriginRepo(t *testing.T, branch string) (gw *GitWorktree, bare, tipA,
 	return gw, bare, tipA, tipB
 }
 
+// commitOnOrigin makes a commit on origin's branch from outside the sandbox
+// (another clone), the way a teammate or an earlier session would.
+func commitOnOrigin(t *testing.T, bare, branch string, files map[string]string) string {
+	t.Helper()
+	clone := filepath.Join(t.TempDir(), "other")
+	require.NoError(t, exec.Command("git", "clone", "-q", "--branch", branch, bare, clone).Run())
+	runGit(t, clone, "config", "user.email", "o@agent-factory.local")
+	runGit(t, clone, "config", "user.name", "Other")
+	for name, body := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(clone, name), []byte(body), 0644))
+	}
+	runGit(t, clone, "add", "-A")
+	runGit(t, clone, "commit", "-m", "from origin")
+	runGit(t, clone, "push", "origin", "HEAD:refs/heads/"+branch)
+	return branchTip(t, clone, "HEAD")
+}
+
+func treeFiles(t *testing.T, repo, rev string) string {
+	t.Helper()
+	return runGitOut(t, repo, "ls-tree", "-r", "--name-only", rev)
+}
+
 // TestSnapshotAndPushBranch_BehindOnlyCleanHeadIsAlreadyDurable: a clean HEAD that
 // is an ancestor of origin's session branch has nothing to push — origin already
-// holds every commit — so the archive must succeed instead of aborting on a
-// non-fast-forward rejection (#5407).
+// holds every commit — so the archive succeeds instead of aborting on a
+// non-fast-forward rejection, and origin's tip never moves backwards (#5407).
 func TestSnapshotAndPushBranch_BehindOnlyCleanHeadIsAlreadyDurable(t *testing.T) {
 	sandboxHome(t)
 	gw, bare, _, tipB := behindOriginRepo(t, "root/behind-clean")
@@ -307,68 +329,58 @@ func TestSnapshotAndPushBranch_BehindOnlyCleanHeadIsAlreadyDurable(t *testing.T)
 	assert.Equal(t, tipB, branchTip(t, bare, "refs/heads/root/behind-clean"), "origin's tip must not move backwards")
 }
 
-// TestSnapshotAndPushBranch_BehindOnlyDirtyHeadFastForwardsThenSnapshots: with
-// uncommitted work on a behind-only HEAD, the worktree is fast-forwarded onto
-// origin's tip (carrying the dirty tree) before the snapshot commit, so the push
-// is a plain fast-forward and the work is not stranded in the sandbox (#5407).
-func TestSnapshotAndPushBranch_BehindOnlyDirtyHeadFastForwardsThenSnapshots(t *testing.T) {
+// TestSnapshotAndPushBranch_BehindDirtyMergesWithoutTouchingTheWorktree: uncommitted
+// work on a behind HEAD is captured in the snapshot FIRST, then merged with
+// origin's tip in the object database and pushed as a fast-forward. The sandbox
+// working tree is never rewritten — origin's b.txt does not appear in it (#5407).
+func TestSnapshotAndPushBranch_BehindDirtyMergesWithoutTouchingTheWorktree(t *testing.T) {
 	sandboxHome(t)
 	gw, bare, _, tipB := behindOriginRepo(t, "root/behind-dirty")
 	wt := gw.GetWorktreePath()
 	require.NoError(t, os.WriteFile(filepath.Join(wt, "dirty.txt"), []byte("uncommitted"), 0644))
 
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/behind-dirty", got)
+
+	pushed := branchTip(t, bare, "refs/heads/root/behind-dirty")
+	runGit(t, bare, "merge-base", "--is-ancestor", tipB, pushed) // fast-forward of origin's tip
+	files := treeFiles(t, bare, pushed)
+	assert.Contains(t, files, "dirty.txt", "the uncommitted work is in what origin holds")
+	assert.Contains(t, files, "b.txt", "origin's own commits are kept")
+	assert.NoFileExists(t, filepath.Join(wt, "b.txt"), "the archive must not rewrite the sandbox working tree")
+}
+
+// An untracked file that the INCOMING .gitignore would ignore must still be in the
+// snapshot: the work is recorded under the worktree's current ignore rules before
+// anything else happens (#5407).
+func TestSnapshotAndPushBranch_UntrackedFileSurvivesAnIncomingIgnoreRule(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, _ := behindOriginRepo(t, "root/ignore-rule")
+	wt := gw.GetWorktreePath()
+	commitOnOrigin(t, bare, "root/ignore-rule", map[string]string{".gitignore": "secret.txt\n"})
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "secret.txt"), []byte("my work"), 0644))
+
 	_, err := gw.SnapshotAndPushBranch()
 	require.NoError(t, err)
 
-	pushed := branchTip(t, bare, "refs/heads/root/behind-dirty")
-	assert.Equal(t, branchTip(t, wt, "HEAD"), pushed)
-	assert.NotEqual(t, tipB, pushed, "the snapshot commit advanced origin")
-	runGit(t, bare, "merge-base", "--is-ancestor", tipB, pushed)
-	assert.Contains(t, runGitOut(t, bare, "show", "--name-only", "--format=", pushed), "dirty.txt")
+	pushed := branchTip(t, bare, "refs/heads/root/ignore-rule")
+	assert.Contains(t, treeFiles(t, bare, pushed), "secret.txt", "the untracked file must be in the pushed snapshot")
+	assert.Equal(t, "my work", strings.TrimSpace(runGitOut(t, bare, "show", pushed+":secret.txt")))
 }
 
-// TestSnapshotAndPushBranch_DivergedHeadStillFailsWithoutStranding: a genuinely
-// divergent HEAD must still be refused, and the refusal must not leave a snapshot
-// commit behind that a retry then skips (#5407).
-func TestSnapshotAndPushBranch_DivergedHeadStillFailsWithoutStranding(t *testing.T) {
+// With merge.autoStash / rebase.autoStash enabled the archive must still never
+// write refs/stash — a stack shared by every linked worktree (CLAUDE.md "Git
+// hygiene in a shared repo"). The path performs no merge or rebase on the working
+// tree at all; a reference-transaction hook records any refs/stash update, even a
+// transient push-then-pop.
+func TestSnapshotAndPushBranch_NeverTouchesTheSharedStash(t *testing.T) {
 	sandboxHome(t)
-	gw, bare, tipA, tipB := behindOriginRepo(t, "root/diverged")
-	wt := gw.GetWorktreePath()
-	require.NoError(t, os.WriteFile(filepath.Join(wt, "c.txt"), []byte("c"), 0644))
-	runGit(t, wt, "add", "-A")
-	runGit(t, wt, "commit", "-m", "C")
-	require.NoError(t, os.WriteFile(filepath.Join(wt, "dirty.txt"), []byte("uncommitted"), 0644))
-	tipC := branchTip(t, wt, "HEAD")
-	_ = tipA
-
-	_, err := gw.SnapshotAndPushBranch()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "diverged")
-	assert.Equal(t, tipB, branchTip(t, bare, "refs/heads/root/diverged"))
-	assert.Equal(t, tipC, branchTip(t, wt, "HEAD"), "no snapshot commit may be stranded by a refused push")
-	assert.NotEmpty(t, strings.TrimSpace(runGitOut(t, wt, "status", "--porcelain")), "the dirty work stays uncommitted for the retry")
-}
-
-// TestSnapshotAndPushBranch_BehindOnlyDirtyNeverTouchesSharedStash: with the
-// user's merge.autoStash / rebase.autoStash enabled, a fast-forward of a dirty
-// worktree whose edits CONFLICT with the incoming commits makes git save the
-// local changes onto refs/stash — a stack shared by every linked worktree
-// (CLAUDE.md "Git hygiene in a shared repo"). The fast-forward must disable
-// autostash so af never writes to, or later pops from, it. A
-// reference-transaction hook records any refs/stash update.
-func TestSnapshotAndPushBranch_BehindOnlyDirtyNeverTouchesSharedStash(t *testing.T) {
-	sandboxHome(t)
-	gw, _, tipA, tipB := behindOriginRepo(t, "root/behind-autostash")
+	gw, bare, _, _ := behindOriginRepo(t, "root/autostash")
 	wt := gw.GetWorktreePath()
 	runGit(t, wt, "config", "merge.autoStash", "true")
 	runGit(t, wt, "config", "rebase.autoStash", "true")
-
-	// Origin's tip edits a.txt; the sandbox, still at A, edits it differently.
-	runGit(t, wt, "checkout", "-q", tipB)
-	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a remote"), 0o644))
-	runGit(t, wt, "commit", "-qam", "B2")
-	runGit(t, wt, "push", "origin", "HEAD:refs/heads/root/behind-autostash")
-	runGit(t, wt, "checkout", "-q", "-B", "root/behind-autostash", tipA)
+	commitOnOrigin(t, bare, "root/autostash", map[string]string{"a.txt": "a remote"})
 
 	hooks := filepath.Join(strings.TrimSpace(runGitOut(t, wt, "rev-parse", "--git-common-dir")), "hooks")
 	if !filepath.IsAbs(hooks) {
@@ -379,12 +391,51 @@ func TestSnapshotAndPushBranch_BehindOnlyDirtyNeverTouchesSharedStash(t *testing
 	hook := "#!/bin/sh\nif grep -q 'refs/stash' ; then echo touched >> '" + trace + "'; fi\nexit 0\n"
 	require.NoError(t, os.WriteFile(filepath.Join(hooks, "reference-transaction"), []byte(hook), 0o755))
 
-	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a local"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a local"), 0o644)) // conflicts with origin's edit
 	_, err := gw.SnapshotAndPushBranch()
-	require.Error(t, err, "overlapping local edits cannot be fast-forwarded")
-
+	require.NoError(t, err)
 	assert.NoFileExists(t, trace, "the archive must never write refs/stash")
-	assert.Equal(t, "a local", mustRead(t, filepath.Join(wt, "a.txt")), "the local edit stays in the tree, uncommitted")
+	assert.Equal(t, "a local", strings.TrimSpace(mustRead(t, filepath.Join(wt, "a.txt"))), "the sandbox working tree is untouched")
+}
+
+// A divergence that does not combine cleanly (both sides edited a.txt) must not
+// fail the archive and must not lose the work: HEAD goes to a side branch that
+// nothing else writes, the session branch on origin is left exactly as it was,
+// and the side branch's name is returned so the caller records it for restore.
+func TestSnapshotAndPushBranch_ConflictingDivergenceGoesToASideBranch(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, _ := behindOriginRepo(t, "root/conflict")
+	wt := gw.GetWorktreePath()
+	tipOrigin := commitOnOrigin(t, bare, "root/conflict", map[string]string{"a.txt": "a remote"})
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("a local"), 0o644))
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err, "a conflicting divergence must not fail the archive and strand the work")
+	assert.True(t, strings.HasPrefix(got, "root/conflict-af-archive-"), "the returned branch names the side ref, got %q", got)
+	assert.Equal(t, tipOrigin, branchTip(t, bare, "refs/heads/root/conflict"), "origin's session branch is left exactly as it was")
+	side := branchTip(t, bare, "refs/heads/"+got)
+	assert.Equal(t, branchTip(t, wt, "HEAD"), side)
+	assert.Equal(t, "a local", strings.TrimSpace(runGitOut(t, bare, "show", side+":a.txt")), "the local work is on the side branch")
+}
+
+// A committed divergence that merges cleanly is pushed as a fast-forward of the
+// session branch (no side branch).
+func TestSnapshotAndPushBranch_CleanDivergenceMergesAndFastForwards(t *testing.T) {
+	sandboxHome(t)
+	gw, bare, _, tipB := behindOriginRepo(t, "root/diverged")
+	wt := gw.GetWorktreePath()
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "c.txt"), []byte("c"), 0644))
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-m", "C")
+
+	got, err := gw.SnapshotAndPushBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "root/diverged", got)
+	pushed := branchTip(t, bare, "refs/heads/root/diverged")
+	runGit(t, bare, "merge-base", "--is-ancestor", tipB, pushed)
+	files := treeFiles(t, bare, pushed)
+	assert.Contains(t, files, "b.txt")
+	assert.Contains(t, files, "c.txt")
 }
 
 func mustRead(t *testing.T, p string) string {
