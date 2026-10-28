@@ -291,6 +291,10 @@ type DeliverPromptRequest struct {
 	RepoPath string `json:"repo_path"`
 	Program  string `json:"program"`
 	Prompt   string `json:"prompt"`
+	// Host picks a listed host for the session this call CREATES when the target
+	// does not exist (#5571 W6.3); ignored when the prompt lands in an existing
+	// session. Same semantics and validation as CreateSessionRequest.Host.
+	Host string `json:"host,omitempty"`
 	// TaskRepoID is the task's retained project binding. Like CreateSession's
 	// TaskID, it is daemon-internal provenance carried over GOB and excluded from
 	// HTTP/JSON so a client cannot forge task authority. DeliverPrompt compares it
@@ -626,6 +630,12 @@ type PingResponse struct {
 	// default backend, so a client sending a host pick must see true here first.
 	// Older daemons omit the field and decode as false.
 	HostPick bool `json:"host_pick,omitempty"`
+	// DeliverHostPick and TaskHost are the same capability for the other two wire
+	// fields a pick rides on: DeliverPromptRequest.Host (send-prompt --create) and
+	// Task.Host / TaskUpdate.Host. Separate bits because a daemon from between the
+	// two releases honors one and silently drops the other.
+	DeliverHostPick bool `json:"deliver_host_pick,omitempty"`
+	TaskHost        bool `json:"task_host,omitempty"`
 	// (The guarded-rebind capability is its wire method instead of a Ping bit —
 	// #4888 review: RebindProjectGuarded exists only on daemons that enforce
 	// the expected_root/expected_checkout_id pair, so a guarded send is refused

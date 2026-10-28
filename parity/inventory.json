@@ -729,7 +729,7 @@
       },
       "verdict": "real-gap",
       "issue": "#5571",
-      "notes": "W6.3 of the sandbox-parity epic. The wire field (CreateSessionRequest.Host) and the CLI flag landed first; ListBackends already returns the per-host catalog (hosts, default_host) for the pickers. The TUI naming-form picker and the web New-session select are the remaining W6.3 surfaces, tracked on #5571 and claimed in its W6.3 plan comment; when they land, flip those cells to yes and delete the two field_coverage gap declarations for `host`."
+      "notes": "W6.3 of the sandbox-parity epic. The wire field (CreateSessionRequest.Host) and the CLI flags (`sessions create --host`, `sessions send-prompt --create --host`, via DeliverPromptRequest.Host) landed first; ListBackends already returns the per-host catalog (hosts, default_host) for the pickers. The TUI naming-form picker and the web New-session select are the remaining W6.3 surfaces, tracked on #5571 and claimed in its W6.3 plan comment; when they land, flip those cells to yes and delete the two field_coverage gap declarations for `host`."
     },
     {
       "id": "session.create.opt.inplace",
@@ -1440,6 +1440,25 @@
       "notes": "Both halves shipped: #3960 added the TUI On done selector and #3961 added the web add/edit picker, closing #3959. All surfaces offer task.OnCompleteValues() in canonical order; the web receives values and shared task.OnCompleteHint consequences through ListOnComplete, and the TUI uses the same hint function. Create and update send the selected verb, with the task store canonicalizing keep to empty. Target-session tasks render the inapplicability reason instead of a live selector. The web preserves an existing policy on catalog failure and shows the failure beneath the field."
     },
     {
+      "id": "task.host",
+      "title": "Place the sessions a task creates on a listed host (global `hosts`)",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go af tasks add/update --host -> task.Task.Host / TaskUpdate.Host; the daemon's task store refuses a name outside the global host list (task/host.go validateTaskHost) and daemon/taskrun.go sends it as CreateSessionRequest.Host / DeliverPromptRequest.Host"
+      },
+      "verdict": "real-gap",
+      "issue": "#5571",
+      "notes": "W6.3 of the sandbox-parity epic. The task field, its validation against the global host list and the run path landed with the CLI; the TUI task form and web task modal remain, tracked on #5571 in the W6.3 plan comment. When they land, flip those cells to yes and delete the four field_coverage gap declarations for `host`."
+    },
+    {
       "id": "task.remove",
       "title": "Remove a task",
       "tui": {
@@ -2086,6 +2105,7 @@
       "af sessions send-prompt --all": "session.send-prompt.broadcast",
       "af sessions send-prompt --all-repos": "session.send-prompt.broadcast",
       "af sessions send-prompt --create": "session.send-prompt",
+      "af sessions send-prompt --host": "session.create.opt.host",
       "af sessions send-prompt --help": "meta.discovery",
       "af sessions send-prompt --include-root": "session.send-prompt.broadcast",
       "af sessions send-prompt --program": "session.send-prompt",
@@ -2133,6 +2153,7 @@
       "af tasks --repo": "project.switch",
       "af tasks add --cron": "task.add",
       "af tasks add --help": "meta.discovery",
+      "af tasks add --host": "task.host",
       "af tasks add --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks add --name": "task.add",
       "af tasks add --on-complete": "task.on-complete",
@@ -2150,6 +2171,7 @@
       "af tasks update --cron": "task.edit",
       "af tasks update --enabled": "task.toggle",
       "af tasks update --help": "meta.discovery",
+      "af tasks update --host": "task.host",
       "af tasks update --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks update --name": "task.edit",
       "af tasks update --on-complete": "task.on-complete",
@@ -2444,6 +2466,9 @@
           "task.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
           },
+          "task.host": {
+            "gap": "task.host"
+          },
           "task.repo_id": {
             "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
           }
@@ -2477,6 +2502,9 @@
           },
           "update.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
+          },
+          "update.host": {
+            "gap": "task.host"
           },
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
@@ -2674,6 +2702,9 @@
         },
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
+        },
+        "update.host": {
+          "gap": "task.host"
         }
       },
       "AddTask": {
@@ -2733,6 +2764,9 @@
         },
         "task.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
+        },
+        "task.host": {
+          "gap": "task.host"
         },
         "task.repo_id": {
           "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
