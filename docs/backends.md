@@ -389,6 +389,19 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 3. It streams the `af` binary onto the remote and starts an **`af agent-server`**
    bound to `127.0.0.1:0` (a random loopback port — never exposed on the remote's
    public interface), behind the same bearer-token protocol (plain HTTP).
+
+   The bearer token is **per-session**: the daemon derives it from a 0600
+   `sandbox-runtime-key` in its own AF home plus a per-session nonce, and writes
+   it to `af-server-token` (0600) in the session directory, where the remote
+   `af agent-server` reads it — beside its own binary, never through a flag or
+   an environment variable, so nothing the agent-server spawns can inherit it.
+   The session record persists the agent-server's address and version and the
+   nonce reference (`token_ref`) — never the token — so the identity a reattach
+   or a cleanup needs survives a daemon restart. The reference also rides in the
+   agent-server's own environment as `AF_TOKEN_REF` so a host-side
+   `/proc/<pid>/environ` probe can bind the live process to the record; it is
+   the one variable that probe may read, and it never reaches agent or shell
+   panes.
 4. It opens an **SSH local-forward tunnel** from a daemon-local loopback port to
    that remote port and drives the agent-server over `http://127.0.0.1:<localport>`.
    Attach, preview, prompts, and the live terminal stream all flow through the one

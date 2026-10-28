@@ -517,6 +517,9 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		_ = inst.Transition(session.ObserveLiveness(session.LiveRunning))
 		inst.ClearLostRestoreFailure()
 		inst.ClearLostRestoreWait()
+		// The answered probe is transport evidence: the outage flag retires
+		// with the mark it was explaining (#5571 W1.3).
+		inst.ClearUnreachable()
 		// Clear before the persist, same ordering rule as the recovery path below:
 		// the answered probe already ended the loss episode, and leaving the stale
 		// count in place across a disk write lets a blip in that window re-mark the
@@ -550,11 +553,15 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// so there is nothing to preserve and the replacement is unconditional. This
 		// is the ONLY arm that licenses that, which is why the sentinel and a
 		// transport failure had to stop being the same verdict (#2923).
+		// An answer — definitive, not silence — also retires the outage flag.
+		inst.ClearUnreachable()
 		m.mu.Lock()
 		st.remoteUnknownAttempts = 0
 		st.nextAttempt = time.Time{}
 		m.mu.Unlock()
 	case probeAnsweredDead:
+		// It answered — transport evidence, so the outage flag retires too.
+		inst.ClearUnreachable()
 		// It ANSWERED. The agent is gone but the sandbox is reachable, so whatever it
 		// never pushed is still there — and recovery re-clones from origin, which
 		// would destroy it. Push first, and refuse to replace anything if that push
