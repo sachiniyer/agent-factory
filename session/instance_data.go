@@ -31,7 +31,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Status:                   i.statusLocked(),
 		Liveness:                 i.liveness,
 		InFlightOp:               i.inFlightOp,
-		LifecycleAction:          lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil),
+		LifecycleAction:          lifecycleActionFor(i.ID, i.Title, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil),
 		CanKill:                  canKillFor(i.ID, i.inFlightOp),
 		CanHandoff:               i.canHandoffLocked(),
 		CurrentAgent:             i.currentAgentNameLocked(),
@@ -173,6 +173,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// on this row inherit a boundary it never crossed.
 		data.TaskRunTurnObservedAt = i.taskRunTurnObservedAt
 		data.TaskRunPromptAttemptAt = i.taskRunPromptAttemptAt
+		data.TaskRunPromptBound = i.taskRunPromptBound
 	}
 
 	// An archived row cannot owe its own teardown — reaching Archived IS the
@@ -214,7 +215,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// them visible only in the snapshot projection, behind an implicit agent row.
 	// ForStorage restores snapshotStorageTabs before writing instances.json, so
 	// durability keeps using PendingTabs and never reintroduces the index-0 bug.
-	if i.liveness == LiveArchived && len(i.pendingMetadataTabs) > 0 {
+	if len(i.pendingMetadataTabs) > 0 {
 		data.snapshotTabsProjected = true
 		data.snapshotStorageTabs = data.Tabs
 		data.Tabs = append([]TabData(nil), data.Tabs...)
@@ -478,6 +479,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// next run's delivery window.
 		taskRunTurnObservedAt:    taskRunTurnObservedAtFromData(data),
 		taskRunPromptAttemptAt:   taskRunAttemptAt,
+		taskRunPromptBound:       data.TaskRunActive && data.TaskRunPromptBound,
 		limitResetAt:             data.LimitResetAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
@@ -526,6 +528,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// archived, or startup-unknown row keeps its own outcome instead.
 	if instance.taskRunActive && taskRunAttemptAt.IsZero() &&
 		data.LastPromptDeliveryStatus == PromptNotDelivered &&
+		!data.TaskRunPromptBound &&
 		!instance.userKilled && !instance.startupStateUnknown && liveness != LiveArchived {
 		instance.taskRunActive = false
 		instance.taskRunIdleEdgeHeld = false

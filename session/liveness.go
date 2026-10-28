@@ -148,9 +148,16 @@ func opIsTeardown(op InFlightOp) bool {
 // a worktree the daemon cannot reach, and Restore's live recheck would refuse
 // — both verbs fail on press exactly like the #2500 fence above, so the flag
 // hides them for the outage's duration while Kill stays available.
-func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap, unreachable bool) LifecycleAction {
+func lifecycleActionFor(id, title string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap, unreachable bool) LifecycleAction {
 	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning || op == OpRestoring ||
 		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap || unreachable {
+		return LifecycleActionNone
+	}
+	// The daemon refuses archive and restore of the reserved root session
+	// unconditionally (daemon/archive.go, daemon/restore.go), so projecting either
+	// verb offers a control that can never succeed (#5406). Same shared-predicate
+	// treatment as the handoff refusal (#2436).
+	if IsReservedTitle(title) {
 		return LifecycleActionNone
 	}
 	switch liveness {
@@ -208,7 +215,7 @@ func canKillFor(id string, op InFlightOp) bool {
 func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil)
+	return lifecycleActionFor(i.ID, i.Title, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil)
 }
 
 // CanKill reports whether interactive clients may offer explicit teardown for

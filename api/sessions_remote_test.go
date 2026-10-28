@@ -100,3 +100,25 @@ func TestBackendsRepoPathRemoteRequiresRepoAsTyped(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "~/src/proj", got)
 }
+
+// W9.2: a remote create sends the daemon-host path exactly as typed and runs no
+// client-side disk resolution; --repo is required.
+func TestRemoteCreateInputsSendsPathAsTyped(t *testing.T) {
+	oldURL, oldRepo, oldProg := apiclient.FlagDaemonURL, repoFlag, createProgramFlag
+	apiclient.FlagDaemonURL = "http://box:8443"
+	t.Cleanup(func() { apiclient.FlagDaemonURL, repoFlag, createProgramFlag = oldURL, oldRepo, oldProg })
+
+	repoFlag = ""
+	_, _, err := remoteCreateInputs(false)
+	require.ErrorContains(t, err, "--repo is required")
+
+	repoFlag, createProgramFlag = "~/srv/does/not/exist/here", ""
+	ws, prog, err := remoteCreateInputs(false)
+	require.NoError(t, err)
+	require.Equal(t, "~/srv/does/not/exist/here", ws)
+	require.Empty(t, prog, "empty program defers to the daemon's default_program")
+
+	createProgramFlag = "not-an-agent"
+	_, _, err = remoteCreateInputs(false)
+	require.Error(t, err)
+}

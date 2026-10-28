@@ -141,6 +141,14 @@ func TestDocsDeployChanged(t *testing.T) {
 			t.Fatalf("got %q", got)
 		}
 	})
+	t.Run("an older, already-deployed verify_sha does not hide a newer pending docs commit (#5688)", func(t *testing.T) {
+		// verify_sha=c1 is deployed; c2 (docs) is pending; the run builds c3.
+		gh := fakeGH(t, []string{"2 " + c1}, map[string]string{"2": "success"})
+		got, _ := runDocsScript(t, repo, gh, "EVENT_NAME=workflow_dispatch", "DEPLOY_DOCS=auto", "VERIFY_SHA="+c1, "EVENT_SHA="+c3)
+		if got != "docs_changed=true" {
+			t.Fatalf("got %q; want docs_changed=true", got)
+		}
+	})
 	t.Run("forced dispatch values pass through", func(t *testing.T) {
 		got, _ := runDocsScript(t, repo, fakeGH(t, nil, nil), "EVENT_NAME=workflow_dispatch", "DEPLOY_DOCS=true", "EVENT_SHA="+c3)
 		if got != "docs_changed=true" {

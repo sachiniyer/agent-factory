@@ -12,8 +12,11 @@ like a local one. Tab admission follows what each kind needs: shell/process tabs
 need a local PTY and process, and VS Code needs a daemon-side worktree/editor, so
 those remain local-only. A metadata-only web tab spawns neither and can be added
 to an off-box session (docker, ssh, sandbox, hook) when its target is an external
-HTTPS URL. Loopback targets still need an agent-side relay and are refused for
-now; plain HTTP cannot be framed by the HTTPS web UI. Admitted remote web tabs
+HTTPS URL, or a loopback address (including `--port`): the daemon's web-tab proxy
+reaches the workspace's own `127.0.0.1:<port>` through the agent-server's port
+relay over the session's existing connection, so the tab shows the dev server
+running inside the sandbox, never a daemon-host port. Plain HTTP external URLs
+cannot be framed by the HTTPS web UI. Admitted remote web tabs
 can be closed, renamed, and reordered like local web tabs.
 
 | Backend | Where the agent runs | Selected with |
@@ -683,7 +686,7 @@ repo on your infra, starts an **`af agent-server`** there, and echoes that
 server's authed endpoint (`{url, token}`); the daemon then
 drives the session over that `ws://` stream — so a hook session matches a local,
 docker, or ssh one on attach, type, resize, preview, archive/restore, and kill.
-Like the other off-box backends it admits only external HTTPS web tabs; shell,
+Like the other off-box backends it admits web tabs (external HTTPS, or loopback via the port relay); shell,
 process, and VS Code tabs need a daemon-side worktree.
 
 ```json

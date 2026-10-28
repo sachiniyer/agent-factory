@@ -572,9 +572,7 @@ func (m *Manager) RefreshStatuses() {
 	}
 	m.refreshWorktreesMissing(probes)
 
-	for _, e := range entries {
-		m.refreshInstanceStatusPublishingOutage(e.repoID, e.instance)
-	}
+	m.refreshStatusProbes(probes)
 	lastStatusSweepNs.Store(int64(nowFunc().Sub(sweepStart)))
 }
 

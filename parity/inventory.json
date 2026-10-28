@@ -2313,6 +2313,12 @@
           "task.last_run_status": {
             "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
           },
+          "task.last_run_id": {
+            "ok": "Scheduler-owned run identity, never a client input: the daemon records which run last_run_status describes (task.RecordRunStatus) so a stale writer cannot overwrite a newer run. A surface setting it would be lying about history."
+          },
+          "task.last_run_started_at": {
+            "ok": "Scheduler-owned run identity, never a client input: the daemon records which run last_run_status describes (task.RecordRunStatus) so a stale writer cannot overwrite a newer run. A surface setting it would be lying about history."
+          },
           "task.dropped_events": {
             "ok": "Daemon-owned watch-delivery history (#4357): the supervisor advances it only when the per-minute source cap discards an event, and task.AddTaskChecked clears any client-supplied value. A surface setting it would forge loss that did not occur."
           },
@@ -2362,6 +2368,12 @@
           },
           "task.last_run_status": {
             "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
+          },
+          "task.last_run_id": {
+            "ok": "Scheduler-owned run identity, never a client input: the daemon records which run last_run_status describes (task.RecordRunStatus) so a stale writer cannot overwrite a newer run. A surface setting it would be lying about history."
+          },
+          "task.last_run_started_at": {
+            "ok": "Scheduler-owned run identity, never a client input: the daemon records which run last_run_status describes (task.RecordRunStatus) so a stale writer cannot overwrite a newer run. A surface setting it would be lying about history."
           },
           "task.dropped_events": {
             "ok": "Daemon-owned watch-delivery history (#4357): the supervisor advances it only when the per-minute source cap discards an event, and task.AddTaskChecked clears any client-supplied value. A surface setting it would forge loss that did not occur."
@@ -2640,6 +2652,12 @@
         },
         "task.last_run_status": {
           "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run. A surface setting it would be lying about history."
+        },
+        "task.last_run_id": {
+          "ok": "Scheduler-owned run identity, never a client input: the daemon records which run last_run_status describes (task.RecordRunStatus) so a stale writer cannot overwrite a newer run. A surface setting it would be lying about history."
+        },
+        "task.last_run_started_at": {
+          "ok": "Scheduler-owned run identity, never a client input: the daemon records which run last_run_status describes (task.RecordRunStatus) so a stale writer cannot overwrite a newer run. A surface setting it would be lying about history."
         },
         "task.dropped_events": {
           "ok": "Daemon-owned watch-delivery history (#4357): the supervisor advances it only when the per-minute source cap discards an event, and task.AddTaskChecked clears any client-supplied value. A surface setting it would forge loss that did not occur."
