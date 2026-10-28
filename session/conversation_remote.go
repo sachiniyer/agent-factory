@@ -14,6 +14,20 @@ import (
 // says it launched, and sends the recorded id back when it asks for a launch, so
 // a restore comes up on the same conversation instead of the provider's latest.
 
+// persistedConversationOf is the agent conversation a stored row recorded: the
+// agent tab's own, else the mirror every row carries.
+func persistedConversationOf(data InstanceData) AgentConversationData {
+	for idx, td := range data.Tabs {
+		if idx == 0 && td.Conversation != nil && td.Conversation.HasID() {
+			return *td.Conversation
+		}
+	}
+	if data.AgentConversation != nil && data.AgentConversation.HasID() {
+		return *data.AgentConversation
+	}
+	return AgentConversationData{}
+}
+
 // SetResumeConversation asks the NEXT launch of this instance to come up on conv
 // instead of a fresh conversation — the same request a root-agent heal makes
 // through InstanceOptions.ResumeConversation. Like that request it is honored
@@ -59,5 +73,33 @@ func (i *Instance) RecordReportedConversation(conv AgentConversationData) bool {
 	// Kept apart from Tabs[0]: a launch report arrives before the daemon-side
 	// agent tab is seeded, and the seeding step applies it.
 	i.reportedConversation = conv
-	return i.setAgentConversationLocked(conv)
+	changed := i.setAgentConversationLocked(conv)
+	if changed {
+		i.conversationUnpersisted = true
+	}
+	return changed
+}
+
+// ConversationUnpersisted reports whether a reported conversation identity is
+// still memory-only (#5826).
+func (i *Instance) ConversationUnpersisted() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.conversationUnpersisted
+}
+
+// MarkConversationPersisted records that a whole-row write carrying persisted
+// has landed. It clears the pending flag only when the conversation that was
+// written is the one now held: an identity reported after the written snapshot
+// was taken stays pending and is written on the next tick.
+func (i *Instance) MarkConversationPersisted(persisted AgentConversationData) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	current := i.reportedConversation
+	if len(i.Tabs) > 0 {
+		current = i.Tabs[0].Conversation
+	}
+	if current == persisted {
+		i.conversationUnpersisted = false
+	}
 }
