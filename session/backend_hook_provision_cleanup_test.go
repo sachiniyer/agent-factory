@@ -76,6 +76,9 @@ func TestHookProvisionFailureRemovesKnownHostsDirectory(t *testing.T) {
 					return []byte("/remote/session\n"), nil
 				case 4:
 					return nil, provisionErr
+				case 5:
+					// remoteCapacityEvidence: the failure-path write probe passes.
+					return []byte("AF_CAPACITY_OK\n"), nil
 				default:
 					// reap requires the remote challenge transformed to uppercase.
 					return []byte(strings.ToUpper(script)), nil
@@ -88,7 +91,7 @@ func TestHookProvisionFailureRemovesKnownHostsDirectory(t *testing.T) {
 		_, err := p.provisionHost()
 		require.Error(t, err)
 		assert.ErrorIs(t, err, provisionErr)
-		assert.Equal(t, 5, calls, "the partial workspace must be reaped before returning")
+		assert.Equal(t, 6, calls, "the partial workspace must be reaped before returning")
 		assert.NoDirExists(t, dir, "the pin leaked after the transport stopped and reaped")
 	})
 }
