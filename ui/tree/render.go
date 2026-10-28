@@ -456,6 +456,14 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if archiveWarning != "" {
 		titleText = "[archive incomplete] " + titleText
 	}
+	// An unreachable row (#5571 W1.3) keeps full contrast like [lost]: the
+	// session is expected back, and the marker — deliberately STATIC text, not
+	// an animated indicator — says only that af's view of it is unverified.
+	// It sits just inside [model changed]: the outage explains why every other
+	// prefix on the row may be stale.
+	if i.UnreachableSnapshot() != nil {
+		titleText = "[unreachable] " + titleText
+	}
 	// A verified post-safety-dialog model change is orthogonal to liveness: the
 	// session can keep working and otherwise look healthy. Add it LAST so it is
 	// the outermost prefix; narrow rails retain the reason before lower-priority
@@ -544,7 +552,21 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	description := branch
 	restoreFailed := false
 	restoreWaiting := false
-	if reason, restoreFailure, restoreWait, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
+	unreachableRow := false
+	if u := i.UnreachableSnapshot(); u != nil {
+		// The outage detail outranks branch and idle detail alike: it explains
+		// why every other fact on the row may be stale, so it leads like a
+		// restore outcome does and the branch trails it (#5571 W1.3).
+		detail := fmt.Sprintf("unreachable %s · %s", formatPaneChurnAge(u.Since, r.now())+" ago", u.Error)
+		if branch != "" {
+			description = detail + " · " + branch
+		} else {
+			description = detail
+		}
+		unreachableRow = true
+		descS = descS.Foreground(archiveWarningColor)
+	}
+	if reason, restoreFailure, restoreWait, churnAt := i.IdleReasonDetailSnapshot(); !unreachableRow && reason != session.IdleReasonNone {
 		detail := idleReasonDetail(reason, churnAt, r.now())
 		if reason == session.IdleReasonRestoreGaveUp && restoreFailure != nil {
 			detail = restoreFailure.Detail()
@@ -582,7 +604,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
 	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
 	// widths (#1772 review).
-	if !selected && !expanded && archiveWarning == "" && callbackWarning == "" && !restoreFailed && !restoreWaiting {
+	if !selected && !expanded && archiveWarning == "" && callbackWarning == "" && !restoreFailed && !restoreWaiting && !unreachableRow {
 		description = ""
 	}
 	branchWidth := runewidth.StringWidth(description)

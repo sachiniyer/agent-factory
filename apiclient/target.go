@@ -38,6 +38,16 @@ func resolveTarget() (daemonURL, token string) {
 	return
 }
 
+// HasDaemonToken reports whether the client will present a daemon credential:
+// the --token flag, falling back to AF_DAEMON_TOKEN, exactly as resolveTarget
+// merges them. Callers that branch on "am I authenticated as a sandbox" must ask
+// this rather than read the environment, or a flag-supplied credential takes the
+// unauthenticated path (#5747).
+func HasDaemonToken() bool {
+	_, token := resolveTarget()
+	return token != ""
+}
+
 // IsRemoteTarget reports whether a remote daemon target is configured (a non-empty
 // --daemon-url / AF_DAEMON_URL). Callers use it to skip local-daemon lifecycle
 // (EnsureDaemon spawns a LOCAL daemon — meaningless when the daemon is remote) and
