@@ -540,6 +540,7 @@ func TestNewInstanceRecordsOnlyTheBranchTheRuntimeUsed(t *testing.T) {
 			instance.mu.RLock()
 			defer instance.mu.RUnlock()
 			assert.Equal(t, tc.want, instance.Branch)
+			assert.Equal(t, tc.want != "", instance.branchUnpushed, "a name af chose at create is not yet a pushed checkpoint")
 		})
 	}
 }

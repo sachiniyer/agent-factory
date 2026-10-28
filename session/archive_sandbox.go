@@ -156,6 +156,7 @@ func (i *Instance) recordArchivePush(branch string) {
 	defer i.mu.Unlock()
 	changed := i.Branch != branch
 	i.Branch = branch
+	i.branchUnpushed = false
 	// A push archive publishes the branch and reaps the host directory, so the
 	// work now lives on origin (#5571 W8.5).
 	i.archivedWorkspace = &ArchivedWorkspaceData{Host: i.Host, Pushed: true, Branch: branch}
@@ -780,16 +781,17 @@ func (i *Instance) RestoreWouldDiscardUnpushedWork() bool {
 }
 
 // restoreCheckpointLocked is the branch a replacement sandbox may fetch from
-// origin: the one a push archive proved is there (recordArchivePush). The
-// displayed i.Branch is the NAME the session works on and may never have been
-// pushed, and a runtime fetches a non-empty RestoreBranch unconditionally — so
-// handing it the bare name would make a never-pushed session fail every
-// replacement and stay Lost (#5972). Empty means there is no checkpoint, and
-// the replacement is created fresh on the (unchanged) session branch name.
-// The caller holds i.mu.
+// origin. The displayed i.Branch is the NAME the session works on and, for a
+// session created by this af, may never have been pushed; a runtime fetches a
+// non-empty RestoreBranch unconditionally, so handing it that bare name would
+// fail every replacement and leave the session Lost (#5972). Only the marked
+// exception is withheld: a row an older af wrote never carries the mark, and
+// there a recorded branch could only have come from a push, so it stays
+// restorable. Empty means the replacement is created fresh on the unchanged
+// session branch name. The caller holds i.mu.
 func (i *Instance) restoreCheckpointLocked() string {
-	if w := i.archivedWorkspace; w != nil && w.Pushed {
-		return strings.TrimSpace(w.Branch)
+	if i.branchUnpushed {
+		return ""
 	}
-	return ""
+	return strings.TrimSpace(i.Branch)
 }

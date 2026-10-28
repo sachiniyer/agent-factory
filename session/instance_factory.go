@@ -660,7 +660,8 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		Title:        opts.Title,
 		// The daemon-named branch of an off-box session, known from the first
 		// frame rather than after the first push (#5571 W2.4). Empty for local.
-		Branch: res.Branch,
+		Branch:         res.Branch,
+		branchUnpushed: res.Branch != "",
 		// A task delivery's run begins here and ends when the agent goes idle
 		// (#1892). Only a task-spawned session has a run to bound; a user's session
 		// is never counted against a cap.

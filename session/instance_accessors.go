@@ -175,11 +175,10 @@ func (i *Instance) SetSandboxBranch(branch string) {
 		i.Branch = branch
 		i.touchLocked()
 	}
-	// The caller learned this name from a push that just landed, so it is also
-	// the durable restore checkpoint: the ref a replacement may fetch (#5972).
-	// The name alone is not — it is known from create, before any push.
-	if branch != "" && (i.archivedWorkspace == nil || !i.archivedWorkspace.Pushed || i.archivedWorkspace.Branch != branch) {
-		i.archivedWorkspace = &ArchivedWorkspaceData{Host: i.Host, Pushed: true, Branch: branch}
+	// The caller learned this name from a push that just landed, so it is a
+	// restore checkpoint now, not just a chosen name (#5972).
+	if branch != "" && i.branchUnpushed {
+		i.branchUnpushed = false
 		i.touchLocked()
 	}
 }

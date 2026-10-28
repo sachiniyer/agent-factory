@@ -410,19 +410,18 @@ func TestReprovisionRemote_ConfirmedReapDropsDischargedCleanupHandle(t *testing.
 // TestReprovisionRemote_ForwardsThePersistedBranch proves the replacement
 // agent-server is told the exact branch name the session works on, rather than
 // re-deriving one from its own branch_prefix (#5571 W2.4) — and that the restore
-// FETCH is requested only for a branch a push archive proved is on origin
-// (#5972). A never-pushed session keeps its name but asks for no fetch: a
-// non-empty RestoreBranch is fetched unconditionally, so the bare name would
-// fail every replacement and leave the session Lost.
+// FETCH is withheld only for a name af chose and has not seen pushed (#5972): a
+// non-empty RestoreBranch is fetched unconditionally, so the bare name would fail
+// every replacement of a never-pushed session and leave it Lost. A row an older
+// af wrote has no such mark and keeps fetching its branch, as it always did.
 func TestReprovisionRemote_ForwardsThePersistedBranch(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		archived    *ArchivedWorkspaceData
+		unpushed    bool
 		wantRestore string
 	}{
-		{"never pushed", nil, ""},
-		{"archive recorded a failed push", &ArchivedWorkspaceData{Pushed: false, Branch: "root/s"}, ""},
-		{"push archive proved the ref", &ArchivedWorkspaceData{Pushed: true, Branch: "root/s"}, "root/s"},
+		{"named at create, never pushed", true, ""},
+		{"legacy record: a recorded branch was a pushed one", false, "root/s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got ProvisionSpec
@@ -430,11 +429,11 @@ func TestReprovisionRemote_ForwardsThePersistedBranch(t *testing.T) {
 			defer SetRuntimeForTest(BackendDocker, func() Runtime { return rt })()
 
 			i := &Instance{
-				Title:             "s",
-				Path:              t.TempDir(),
-				Branch:            "root/s",
-				archivedWorkspace: tc.archived,
-				backend:           &dockerBackend{containerID: "old"},
+				Title:          "s",
+				Path:           t.TempDir(),
+				Branch:         "root/s",
+				branchUnpushed: tc.unpushed,
+				backend:        &dockerBackend{containerID: "old"},
 			}
 			_ = i.reprovisionRemote()
 			assert.Equal(t, tc.wantRestore, got.RestoreBranch)
@@ -443,15 +442,31 @@ func TestReprovisionRemote_ForwardsThePersistedBranch(t *testing.T) {
 	}
 }
 
+// A row written by an older af has no branch_unpushed key: loaded from its
+// stored JSON it must still restore its pushed branch (#5972 review).
+func TestReprovisionRemote_LegacyStoredRecordStillRestores(t *testing.T) {
+	var data InstanceData
+	require.NoError(t, json.Unmarshal([]byte(`{"title":"s","path":"`+t.TempDir()+`","branch":"root/s","backend_type":"docker"}`), &data))
+	require.False(t, data.BranchUnpushed)
+	i, err := FromInstanceData(data)
+	require.NoError(t, err)
+	var got ProvisionSpec
+	rt := &orderedReprovisionRuntime{got: &got, err: fmt.Errorf("stop after provision")}
+	defer SetRuntimeForTest(BackendDocker, func() Runtime { return rt })()
+	i.backend = &dockerBackend{containerID: "old"}
+	_ = i.reprovisionRemote()
+	assert.Equal(t, "root/s", got.RestoreBranch)
+}
+
 // #5972: the push recovery performs before replacing a reachable sandbox
-// reports the branch through SetSandboxBranch; that push is the proof a
-// replacement may fetch it, and it must survive a restart of the daemon.
+// reports the branch through SetSandboxBranch; that push turns a chosen name
+// into a checkpoint, and the change survives a stored round trip.
 func TestReprovisionRemote_PushRecoveryRecordsTheCheckpoint(t *testing.T) {
 	var got ProvisionSpec
 	rt := &orderedReprovisionRuntime{got: &got, err: fmt.Errorf("stop after provision")}
 	defer SetRuntimeForTest(BackendDocker, func() Runtime { return rt })()
 
-	i := &Instance{Title: "s", Path: t.TempDir(), Branch: "root/s", backend: &dockerBackend{containerID: "old"}}
+	i := &Instance{Title: "s", Path: t.TempDir(), Branch: "root/s", branchUnpushed: true, backend: &dockerBackend{containerID: "old"}}
 	_ = i.reprovisionRemote()
 	require.Empty(t, got.RestoreBranch, "control: the create-time name is not a checkpoint")
 
