@@ -289,9 +289,6 @@ func (w *sandboxWorkspace) writeRuntimeIdentity(timeout time.Duration) error {
 	return nil
 }
 
-// startAgentServer launches `af agent-server` headless on the remote, detached
-// via nohup with its banner + log redirected to files, bound to 127.0.0.1:0, and
-// captures the background PID.
 // revalidateCallbackBeforeEnv re-checks the minted credential at the LAST step
 // that can still keep a dead grant out of the launched agent-server's
 // environment (#5571 W3.1, PR #5577 review): once the env file is written and
@@ -342,6 +339,9 @@ func (w *sandboxWorkspace) writeCallbackEnv(timeout time.Duration) error {
 	return nil
 }
 
+// startAgentServer launches `af agent-server` headless on the remote, detached
+// (setsid where available, plus nohup) with its banner + log redirected to
+// files, bound to 127.0.0.1:0, and captures the background PID.
 func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	filteredInner, err := w.agentServerCommand()
 	if err != nil {
@@ -352,7 +352,15 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	// filter (PATH rides the allowlist) and in-sandbox `af` commands work
 	// (#5571 W2.2, AR-02 PATH half). The VAR=val prefix sits inside the launch
 	// command, left of nohup, so the `& echo $!` tail is undisturbed.
-	launch := fmt.Sprintf("PATH=%s:\"$PATH\" nohup %s >%s 2>%s </dev/null & echo $!",
+	// setsid, when the host has it, moves the agent-server into its own session
+	// (#5571 W1.4): it then outlives the provisioning ssh session's teardown,
+	// whose SIGHUP/session-kill nohup alone does not survive under
+	// KillUserProcesses=yes. It is a plain background child of this
+	// non-interactive shell — never a process-group leader — so setsid execs in
+	// place rather than forking, and `$!` below is still the agent-server's own
+	// PID, which the reap-side argv[0] identity check depends on. Hosts without
+	// setsid (macOS) keep the nohup-only launch.
+	launch := fmt.Sprintf("d=; if command -v setsid >/dev/null 2>&1; then d=setsid; fi; PATH=%s:\"$PATH\" nohup $d %s >%s 2>%s </dev/null & echo $!",
 		shellQuote(w.SessionDir), filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
 	// The runtime-identity env is unconditional — every W1.1 provision writes
 	// af-identity.env before this point. AF_TOKEN_REF must land in the

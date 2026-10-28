@@ -537,9 +537,12 @@ func (m *Menu) addInstanceOptions() {
 	// that actually work: number-jump (#988). R joins the gated set for
 	// consistency: a remote roster's agent tab refuses the rename, and the
 	// handler still answers a web tab there without the hint.
-	tabGroup := []keys.KeyName{keys.KeyNewTab, keys.KeyCloseTab, keys.KeyRenameTab}
-	if m.instance != nil && !m.instance.Capabilities().TabManagement {
-		tabGroup = nil
+	var tabGroup []keys.KeyName
+	if m.instance == nil || m.instance.Capabilities().TabManagement {
+		tabGroup = append(tabGroup, keys.KeyNewTab)
+	}
+	if m.instance == nil || m.instance.TabRosterMutable() {
+		tabGroup = append(tabGroup, keys.KeyCloseTab, keys.KeyRenameTab)
 	}
 	// </> move the current tab within the roster (session.tab.reorder, #1813).
 	// It shares `t`/`w`'s gates: the TUI only mutates rosters it keeps current,
@@ -549,8 +552,7 @@ func (m *Menu) addInstanceOptions() {
 	// daemon refuses outright to keep the archived roster intact for restore.
 	// The hint exists only when a move does: the agent tab is pinned to slot 0,
 	// so a second movable tab must be present before either direction can act.
-	if m.instance != nil && m.instance.Capabilities().TabManagement &&
-		!m.instance.IsArchived() && m.instance.TabCount() >= 3 {
+	if m.instance != nil && m.instance.TabRosterMutable() && m.instance.TabCount() >= 3 {
 		tabGroup = append(tabGroup, keys.KeyMoveTabLeft, keys.KeyMoveTabRight)
 	}
 	tabGroup = append(tabGroup, keys.KeyJumpTab)

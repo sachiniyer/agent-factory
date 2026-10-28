@@ -262,7 +262,18 @@ func (s *controlServer) TriggerTask(req TriggerTaskRequest, resp *TriggerTaskRes
 		return err
 	}
 	if err := RunTask(req.ID, req.Expect); err != nil {
-		return err
+		// A committed auto-create inside RunTask's deliver path (#3357) durably
+		// recorded its session/workspace, so the marker must survive the net/rpc
+		// hop that would otherwise flatten it to a plain rpc.ServerError string.
+		// The legacy task-CRUD prefixes do not cover a trigger's deliver outcome,
+		// so callDaemon could not reclassify it; record it in the envelope so the
+		// CommittedOutcome() carrier check reconstructs it the way CreateSession,
+		// KillSession, and DeliverPrompt already do. A genuine failure returns
+		// unchanged.
+		if !resp.record(err) {
+			return err
+		}
+		return nil
 	}
 	resp.OK = true
 	return nil
