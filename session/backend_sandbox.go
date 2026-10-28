@@ -164,6 +164,10 @@ type sandboxProvisioner struct {
 	forward     string
 	localAddr   string
 	reverseFwds []string
+	// callbackSocket is the sandbox-side socket the -R slot creates, removed
+	// before a re-dial so a socket file a killed sshd left behind cannot make the
+	// bind fail forever (the client would otherwise retry a dead path).
+	callbackSocket string
 
 	reapMu  sync.Mutex
 	reaped  bool
@@ -257,8 +261,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	p.reapMu.Lock()
 	p.reverseFwds = nil
+	p.callbackSocket = ""
 	if reverse != "" {
 		p.reverseFwds = []string{reverse}
+		p.callbackSocket = w.CallbackSocketPath()
 	}
 	p.reapMu.Unlock()
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {

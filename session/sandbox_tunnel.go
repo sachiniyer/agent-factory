@@ -696,6 +696,7 @@ func (p *sandboxProvisioner) superviseTunnel() {
 				timer.Stop()
 				return
 			}
+			p.clearStaleCallbackSocket()
 			next, err := p.provisionTunnelChild()
 			switch {
 			case errors.Is(err, errTunnelOwnerStopped):
@@ -756,4 +757,19 @@ func (p *sandboxProvisioner) superviseTunnel() {
 			m.noteEvent(err)
 		}
 	}
+}
+
+// clearStaleCallbackSocket removes the callback carrier left on the sandbox by a
+// connection that died without sshd unlinking it, so the re-dial binds the SAME
+// path (the in-sandbox client's URL never changes). Best-effort: if the host
+// cannot be reached the re-dial fails too and the loop comes back around. The
+// path is the session's own, inside its 0700 directory.
+func (p *sandboxProvisioner) clearStaleCallbackSocket() {
+	p.reapMu.Lock()
+	sock := p.callbackSocket
+	p.reapMu.Unlock()
+	if sock == "" {
+		return
+	}
+	_, _ = p.Run(sshShortStepTimeout, "rm -f -- "+shellQuote(sock), nil, true)
 }
