@@ -256,6 +256,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"UnsetConfigValue":       blockedDuringProbation,
 	"SpawnConfigAgent":       blockedDuringProbation,
 	"RebindProject":          blockedDuringProbation,
+	"SetProjectColor":        blockedDuringProbation,
 	"RebindProjectGuarded":   blockedDuringProbation,
 	// AccountLogin registers a credential directory in the daemon host's
 	// agent-factory home and starts a process on it (#3384). Both halves are

@@ -157,6 +157,13 @@ func fakeDockerCapacityProbe(t *testing.T, infoPayload []byte,
 				return []byte("engine-capacity-test\n"), nil
 			}
 		}
+		// The non-account provision probes the image's default USER via `id
+		// -u`/`id -g`; a root default (0:0) makes prepareNonAccountUser a
+		// no-op so these capacity probes reach the step each case targets
+		// instead of failing on an unparseable probe.
+		if args[0] == "exec" && containsArg(args, "id -u") {
+			return []byte("0:0\n"), nil
+		}
 		return dispatch(args)
 	}))
 	return calls
@@ -1129,4 +1136,70 @@ func TestAccountOwnerRead_NeverBorrowsBavail(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, syscall.ENOSPC),
 		"a read-only exec failure cannot borrow the reserved-block window: %v", err)
+}
+
+// TestDockerOpWriteRoots_IncludesNonAccountHome pins that a root exec's
+// write roots are scoped to the session that actually performs it: a
+// non-account root exec writes the session home (dockerContainerHome,
+// /root) plus /workspace, and an account root exec writes the account
+// mounts (dockerAccountHome, dockerAccountRuntimeHome) plus /workspace.
+// prepareNonAccountUser never writes /af-home or /af-account, so an
+// unrelated bind or volume at either account path cannot make a
+// non-account root exec borrow the Bavail window (#5424 review);
+// symmetrically, prepareAccountUser never writes /root, so an unrelated
+// /root bind cannot make an account root exec borrow the window.
+// /workspace is a root-exec write root on both paths because each
+// prepare step mkdir+chowns it as root.
+func TestDockerOpWriteRoots_IncludesNonAccountHome(t *testing.T) {
+	nonAccount := &dockerProvisioner{spec: ProvisionSpec{Title: "non-account"}}
+	roots := nonAccount.dockerOpWriteRoots(dockerOpRootExec)
+	assert.Contains(t, roots, dockerContainerHome,
+		"a non-account root exec writes the session home (/root); it must be a root-exec write root so a /root bind can borrow the Bavail window")
+	assert.Contains(t, roots, dockerWorkspaceDir,
+		"a non-account root exec also mkdir+chowns /workspace; it must be a root-exec write root")
+	assert.NotContains(t, roots, dockerAccountHome,
+		"a non-account root exec never writes /af-account; an unrelated bind there must not borrow the Bavail window")
+	assert.NotContains(t, roots, dockerAccountRuntimeHome,
+		"a non-account root exec never writes /af-home; an unrelated bind there must not borrow the Bavail window")
+
+	account := &dockerProvisioner{spec: ProvisionSpec{Title: "account",
+		Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: "/af-account"}}}
+	accountRoots := account.dockerOpWriteRoots(dockerOpRootExec)
+	assert.NotContains(t, accountRoots, dockerContainerHome,
+		"an account root exec never writes /root; an unrelated /root bind must not borrow the Bavail window")
+	assert.Contains(t, accountRoots, dockerWorkspaceDir,
+		"an account root exec mkdir+chowns /workspace; it must be a root-exec write root")
+	assert.Contains(t, accountRoots, dockerAccountHome,
+		"an account root exec writes the mounted account home; it must be a root-exec write root")
+	assert.Contains(t, accountRoots, dockerAccountRuntimeHome,
+		"an account root exec writes the account runtime home; it must be a root-exec write root")
+	assert.Contains(t, account.dockerOpWriteRoots(dockerOpSessionExec), dockerWorkspaceDir,
+		"session execs still write the workspace")
+}
+
+// TestDockerOpWriteRoots_ChmodIsAfBinaryPath pins that copyAfBinary's root
+// chmod is its own operation class whose single write root is the copied `af`
+// binary path (/usr/local/bin/af) — not the home/workspace/account paths the
+// prepare steps' root execs write. A chmod failure's capacity verdict may
+// only be borrowed by a bind covering the binary, never by an unrelated bind
+// at the home or workspace the chmod never touched; symmetrically, a bind at
+// /usr/local/bin that a chmod failure DID write through is now recognized
+// (#5424 review).
+func TestDockerOpWriteRoots_ChmodIsAfBinaryPath(t *testing.T) {
+	for _, p := range []*dockerProvisioner{
+		{spec: ProvisionSpec{Title: "non-account"}},
+		{spec: ProvisionSpec{Title: "account", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: "/af-account"}}},
+	} {
+		roots := p.dockerOpWriteRoots(dockerOpChmod)
+		assert.Equal(t, []string{dockerAfBinaryPath}, roots,
+			"the chmod writes a single path — the copied af binary — regardless of session kind; call=%v", roots)
+		assert.NotContains(t, roots, dockerContainerHome,
+			"the chmod never writes /root; an unrelated /root bind must not borrow the Bavail window for a chmod failure")
+		assert.NotContains(t, roots, dockerWorkspaceDir,
+			"the chmod never writes /workspace; an unrelated /workspace bind must not borrow the Bavail window for a chmod failure")
+		assert.NotContains(t, roots, dockerAccountHome,
+			"the chmod never writes /af-account; an unrelated bind there must not borrow the Bavail window for a chmod failure")
+		assert.NotContains(t, roots, dockerAccountRuntimeHome,
+			"the chmod never writes /af-home; an unrelated bind there must not borrow the Bavail window for a chmod failure")
+	}
 }

@@ -29,6 +29,7 @@ import {
   deleteProject,
   registerProject,
   rebindProject,
+  setProjectColor,
   type RegisteredProject,
   errorText,
   explainConfig,
@@ -143,6 +144,7 @@ import {
   type KillableSession,
   type NewTabKind,
 } from "./ui.js";
+import { createLatestWriter } from "./project_color_writes.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
 import type { AccountsResponse, SessionData, SkippedRepo, TaskData, WireEvent } from "./types.js";
 
@@ -1204,19 +1206,52 @@ function openDeleteProject(root: string, label: string): void {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root, tok)
-          .then(() => { if (modal === m) closeModal(); })
-          .catch((e) => {
-            if (isMutationCommittedError(e)) {
-              if (modal === m) closeModal();
-              requestResync();
-              refreshRegisteredProjects();
-              surfaceTabError(e);
-              return;
+        const connection = connectionGeneration;
+        void projectColorWriter.cancel(root).then(async () => {
+          if (!isCurrentConnection(connection, tok)) return;
+          // A registration whose outcome never reached us can still commit
+          // daemon-side: a delete sent now would run first as a no-op and the
+          // registration would land after it. Re-drive the idempotent call so
+          // the registration is determinate before the delete.
+          const learned = projectColorRegistrations.get(root);
+          if (learned && "uncertain" in learned) {
+            try {
+              await registerProject(root, tok);
+            } catch (e) {
+              if (!isMutationCommittedError(e) && isMutationOutcomeUncertain(e)) {
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(new Error(`The project registration outcome could not be confirmed. ${errorText(e)}`));
+                return;
+              }
+              // Committed or determinately refused: either way the record's
+              // fate is settled, so the delete is safe to send.
             }
-            m.setBusy(false);
-            m.setError(errorText(e));
-          });
+            projectColorRegistrations.delete(root);
+          }
+          // The registration recovery await may outlive the credential it ran
+          // under: re-fence so a disconnect or re-login cannot let the delete
+          // land with the old token.
+          if (!isCurrentConnection(connection, tok)) return;
+          return deleteProject(root, tok)
+            .then(() => {
+              projectColorRegistrations.delete(root);
+              if (modal === m) closeModal();
+            })
+            .catch((e) => {
+              if (isMutationCommittedError(e)) {
+                projectColorRegistrations.delete(root);
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(e);
+                return;
+              }
+              m.setBusy(false);
+              m.setError(errorText(e));
+            });
+        });
       },
       onCancel: closeModal,
     }),
@@ -2440,6 +2475,22 @@ const projectsRefetcher = createFencedRefetcher({
 
 /** Commits a fenced registry read, reconciling the selected project against it. */
 function commitRegisteredProjects(projects: RegisteredProject[]): void {
+  // The authoritative list settles what a learned registration became: a settled
+  // id the registry no longer holds was deleted or rebound away, so a later write
+  // must re-register instead of failing on the stale id; an uncertain outcome the
+  // registry now names is determinate and takes the recorded id.
+  const byRoot = new Map(projects.map((p) => [p.root, p.id]));
+  for (const [root, learned] of projectColorRegistrations) {
+    if ("uncertain" in learned) {
+      const id = byRoot.get(root);
+      if (id !== undefined) projectColorRegistrations.set(root, { id });
+    } else if (byRoot.get(root) !== learned.id) {
+      // The registry must still map THIS root to the learned id: an id that
+      // survives only under another root means this one was rebound away, and
+      // the stale mapping would write the next color onto the rebound project.
+      projectColorRegistrations.delete(root);
+    }
+  }
   const selectedProject = reconcileProject(
     store.get().sessions,
     store.get().tasks,
@@ -2452,6 +2503,53 @@ function commitRegisteredProjects(projects: RegisteredProject[]): void {
 
 function refreshRegisteredProjects(): void {
   projectsRefetcher.refresh();
+}
+
+/** What the writer learned about a root's durable registration. A settled id
+ *  feeds later queued writes — a choice captured before the first write
+ *  registered the project must not call registerProject again, or a rebind in
+ *  between would register the old root as a second project. An uncertain one
+ *  gates a following delete until registerProject makes it determinate. */
+const projectColorRegistrations = new Map<string, { id: string } | { uncertain: true }>();
+
+/** Sets a project's color. A project known only from its sessions has no registry
+ *  record to hold a color, so it is registered first (idempotent on the daemon).
+ *  Each choice is fenced to the connection and credential it was made under, and
+ *  keeps the project id it was made for, so a rebind cannot turn it into a new
+ *  registration of the old root. Deleting the project cancels it (openDeleteProject). */
+const projectColorWriter = createLatestWriter<{ color: string; tok: string; connection: number; projectId: string | null }>(
+  async (root, { color, tok, connection, projectId: known }) => {
+    const current = (): boolean => isCurrentConnection(connection, tok);
+    if (!current()) return;
+    const learned = projectColorRegistrations.get(root);
+    const projectId = known ?? (learned && "id" in learned ? learned.id : null) ?? await (async () => {
+      try {
+        const project = await registerProject(root, tok);
+        projectColorRegistrations.set(root, { id: project.id });
+        return project.id;
+      } catch (e) {
+        if (isMutationOutcomeUncertain(e)) projectColorRegistrations.set(root, { uncertain: true });
+        throw e;
+      }
+    })();
+    if (!current()) return;
+    await setProjectColor(projectId, color, tok);
+    if (current()) refreshRegisteredProjects();
+  },
+  (e: unknown, _root, { tok, connection }) => {
+    if (isCurrentConnection(connection, tok)) surfaceMutationError(e);
+  },
+);
+
+function isCurrentConnection(connection: number, tok: string): boolean {
+  return connection === connectionGeneration && token === tok;
+}
+
+function doSetProjectColor(root: string, color: string): void {
+  const tok = token;
+  if (tok === null) return;
+  const projectId = store.get().registeredProjects.find((r) => r.root === root)?.id ?? null;
+  void projectColorWriter.set(root, { color, tok, connection: connectionGeneration, projectId });
 }
 
 /** Debounced registry refetch for a burst of projects.changed events, mirroring
@@ -2602,7 +2700,14 @@ function doTriggerTask(task: TaskData): void {
   }
   void triggerTask(task, tok)
     .then(refreshTasks)
-    .catch((e) => surfaceTabError(e));
+    .catch((e) => {
+      // A committed run (auto-created session, start unconfirmed) still moved
+      // last-run: refetch, and show the warning rather than a plain success.
+      if (isMutationCommittedError(e)) {
+        refreshTasks();
+      }
+      surfaceTabError(e);
+    });
 }
 
 /**
@@ -2862,6 +2967,7 @@ const actions = {
   deleteProject: openDeleteProject,
   addProject: openAddProject,
   rebindProject: openRebindProject,
+  setProjectColor: doSetProjectColor,
   setTheme,
 };
 

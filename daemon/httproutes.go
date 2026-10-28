@@ -285,6 +285,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/SetProjectColor",
+		Description: "Set or clear (empty color) the display color of a registered project (id, a prj_… registry id) — a hex color such as #2f5fd8 that web clients use for the session frame and the favicon.",
+		requestType: reflect.TypeOf(SetProjectColorRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetProjectColor) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/RebindProjectGuarded",
 		Description: "Guarded twin of RebindProject: requires expected_root or expected_checkout_id and exists only on daemons that enforce the pair — a daemon predating it answers the marked 404, which clients map to an upgrade refusal rather than letting the precondition drop silently.",
 		requestType: reflect.TypeOf(RebindProjectRequest{}),

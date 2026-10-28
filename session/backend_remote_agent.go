@@ -18,10 +18,10 @@ type remoteAgentBackend struct {
 	resolvedProgram string
 }
 
-// Capabilities reports the common off-box runtime contract. Tab management is
-// false because the AgentServer's tab API is data-plane only: it can drive an
-// existing tab but cannot create the daemon-side git worktree required for a
-// new one (#1874).
+// Capabilities reports the common off-box runtime contract. TabManagement is the
+// static floor (false): a sandbox whose agent-server advertises the tab API
+// lifts it per instance in Instance.capabilitiesLocked (#5571 W4.5), because the
+// answer depends on the sandbox's build, not on the backend type (#1874).
 func (b *remoteAgentBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
