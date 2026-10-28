@@ -819,8 +819,14 @@ that being a deliberate change. Parity is not total: they declare
 `TabManagement` and `Handoff` off, which is why an off-box session carries only
 its agent tab plus any external HTTPS web tabs (the one metadata-only kind
 admitted off-box). A **Lost** sandbox session (one whose
-sandbox answered that its agent is gone) is reachable, so recovery pushes its
-work to `origin` before replacing it (anything unpushed would be destroyed by
+sandbox answered that its agent is gone) is reachable, so recovery **relaunches
+the agent in place**: the sandbox's agent-server stops the agent (if it is still
+running) and starts it again in its existing workspace with the provider's resume.
+The branch, the tree and any uncommitted work are untouched, and nothing is pushed,
+reaped, re-cloned or re-provisioned. The same relaunch serves `retry-limit` on a
+dead agent. A sandbox built before the relaunch route existed (it advertises the
+`relaunch` feature on `/v1/health`) falls back to replacing the sandbox: recovery
+then pushes its work to `origin` first (anything unpushed would be destroyed by
 the re-clone) — and refuses to replace if that push fails. Unreachability alone
 is not death — it does not mark a sandbox Lost, and restore refuses to replace a
 sandbox it cannot reach.
