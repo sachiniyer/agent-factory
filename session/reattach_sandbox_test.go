@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
@@ -14,6 +15,15 @@ import (
 
 func reattachFixture(t *testing.T, srvToken string) (*Instance, *sandboxProvisioner) {
 	t.Helper()
+	inst, p, _ := reattachFixtureStops(t, srvToken, false)
+	return inst, p
+}
+
+// reattachFixtureStops is reattachFixture whose stand-in agent-server also serves
+// /v1/agent/stop, counting the calls and failing them when failStop is set.
+func reattachFixtureStops(t *testing.T, srvToken string, failStop bool) (*Instance, *sandboxProvisioner, *atomic.Int32) {
+	t.Helper()
+	stops := &atomic.Int32{}
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	key, err := runtimetoken.EnsureKey()
 	require.NoError(t, err)
@@ -32,6 +42,14 @@ func reattachFixture(t *testing.T, srvToken string) (*Instance, *sandboxProvisio
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": agentAliveResp{Alive: true}})
 	})
+	mux.HandleFunc("/v1/agent/stop", func(w http.ResponseWriter, r *http.Request) {
+		stops.Add(1)
+		if failStop {
+			http.Error(w, "stop is not implemented", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]bool{"ok": true}})
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
@@ -46,7 +64,7 @@ func reattachFixture(t *testing.T, srvToken string) (*Instance, *sandboxProvisio
 	// the server's address, so the probe reaches the stand-in agent-server.
 	p.startTunnelFn = func(string) (string, error) { return srv.Listener.Addr().String(), nil }
 	inst := &Instance{Title: "reattach me", liveness: LiveLost, backend: backend, runtimeTeardown: teardown}
-	return inst, p
+	return inst, p, stops
 }
 
 func TestReattachSandboxBindsALiveAgentServerWithoutProvisioning(t *testing.T) {
