@@ -539,9 +539,8 @@ it still binds and serves the tokenless network posture its config asks for —
 the *running* daemon is the one that decides. If `af daemon status` shows a
 listener `bound` on a network address, take that at face value and restart the
 daemon (`af daemon restart`) so the refusing build owns the socket. Guarding a
-newer CLI's writes to an *older* remote daemon, the upgrade supervisor's
-listener expectations, and live-vs-disk drift reporting in `af daemon status`
-and `af doctor` are tracked as follow-ups (#5183, #5184, #5185).
+newer CLI's writes to an *older* remote daemon and live-vs-disk drift reporting
+in `af daemon status` and `af doctor` are tracked as follow-ups (#5184, #5185).
 
 On a network you fully trust — a private Tailscale tailnet, a locked-down VPN —
 a tokenless listener may feel reasonable, and `network.allow_unauthenticated_network = true`
