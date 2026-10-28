@@ -14,6 +14,14 @@
 #                      only this is set — see the fallback at the bottom.
 set -eu
 
+# AF_SSH and AF_SSH_FULL are SHELL command lines: an option may carry quotes
+# (-o "ProxyCommand=nc -X connect -x proxy:8080 %h %p"). Expanding them unquoted
+# splits on every space and ignores the quotes, so run them through sh -c with the
+# remaining arguments forwarded as positional parameters, which is how af runs the
+# same command itself.
+af_ssh()      { sh -c "$AF_SSH \"\$@\"" af-ssh "$@"; }
+af_ssh_full() { sh -c "$AF_SSH_FULL \"\$@\"" af-ssh-full "$@"; }
+
 spec=$(cat)
 field() { printf '%s' "$spec" | python3 -c 'import json,sys; print(json.load(sys.stdin)["'"$1"'"])'; }
 src=$(field source_worktree)
@@ -22,7 +30,7 @@ if [ -z "${AF_SSH_DEST:-}" ]; then
   # Free-form target: rsync -e cannot be used, so pipe tar over AF_SSH_FULL.
   for f in "$src"/.env*; do
     [ -f "$f" ] || continue
-    tar -C "$src" -c "$(basename "$f")" | $AF_SSH_FULL "tar -C '$dest' -x"
+    tar -C "$src" -c "$(basename "$f")" | af_ssh_full "tar -C '$dest' -x"
   done
   exit 0
 fi
@@ -35,7 +43,7 @@ done
 
 # 2. A credentials file outside the repo (adjust to taste).
 if [ -f "$HOME/.config/myservice/credentials.json" ]; then
-  $AF_SSH "$AF_SSH_DEST" 'mkdir -p ~/.config/myservice && chmod 700 ~/.config/myservice'
+  af_ssh "$AF_SSH_DEST" 'mkdir -p ~/.config/myservice && chmod 700 ~/.config/myservice'
   rsync -a -e "$AF_SSH" "$HOME/.config/myservice/credentials.json" "$AF_SSH_DEST:.config/myservice/"
 fi
 
