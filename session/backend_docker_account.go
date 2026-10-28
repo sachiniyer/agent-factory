@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -908,8 +909,20 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	// The mounted file's own host ownership is already correct, so skipping
 	// it loses nothing; the image-shipped parent dirs (.codex, .claude, …)
 	// are still chowned so the agent can read and update them.
+	//
+	// It also prunes any bind mounts docker.run_args installs under home: a
+	// read-write bind would re-own the operator's host files to the container
+	// uid, and a read-only bind EROFS-aborts the chown before the agent starts.
+	// A named or anonymous volume is docker-managed and writable, so
+	// bindMountTargets leaves it to the plain recursive chown (#5424 review).
 	home := p.sessionHome()
-	homeChown := chownRecursiveScript(home, owner, credentialMountTargets(p.credentialMounts, home))
+	prune := credentialMountTargets(p.credentialMounts, home)
+	for _, target := range bindMountTargets(p.runArgs, home) {
+		if !slices.Contains(prune, target) {
+			prune = append(prune, target)
+		}
+	}
+	homeChown := chownRecursiveScript(home, owner, prune)
 	script := fmt.Sprintf("mkdir -p %s %s && %s && chown %s %s",
 		shellQuote(home), shellQuote(dockerWorkspaceDir), homeChown, owner, shellQuote(dockerWorkspaceDir))
 	out, err = p.docker(dockerShortStepTimeout,
