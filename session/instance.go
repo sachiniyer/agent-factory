@@ -455,6 +455,11 @@ type Instance struct {
 	// session ends up with is whatever the launch plan committed to Tabs[0].
 	carriedConversation AgentConversationData
 
+	// reportedConversation is the last conversation a remote agent-server reported
+	// (RecordReportedConversation), held until the daemon-side agent tab exists to
+	// carry it. Guarded by mu.
+	reportedConversation AgentConversationData
+
 	// carriedTabs is the tab roster a PREVIOUS record held, to be rebuilt onto
 	// this instance once its agent tab is live (#2628). It has the same single
 	// caller as carriedConversation — the root-agent heal, the one path that

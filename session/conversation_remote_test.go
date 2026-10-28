@@ -1,0 +1,129 @@
+package session
+
+import (
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+var claudeConv = AgentConversationData{Agent: tmux.ProgramClaude, ID: "0f8d1c2e-1111-4222-8333-444455556666", CaptureKind: ConversationCaptureInjected}
+
+// Launch sends the daemon's recorded conversation and records the one the
+// server reports back (#5571 W7.2).
+func TestRemoteLaunchSendsAndRecordsTheConversation(t *testing.T) {
+	reported := AgentConversationData{Agent: tmux.ProgramCodex, ID: "019a0000-aaaa-bbbb-cccc-ddddeeeeffff", CaptureKind: ConversationCaptureCodexRollout}
+	srv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true}).
+		route("/v1/agent/launch", map[string]any{"ok": true, "conversation": reported})
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	inst := &Instance{Title: "sb", Tabs: []*Tab{newRemoteAgentTab()}}
+	inst.Tabs[0].Conversation = claudeConv
+	s := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: inst}
+
+	require.NoError(t, s.Launch(true))
+
+	srv.mu.Lock()
+	body := srv.bodies["/v1/agent/launch"]
+	srv.mu.Unlock()
+	conv, ok := body["conversation"].(map[string]any)
+	require.True(t, ok, "the recorded conversation must ride the launch request: %v", body)
+	assert.Equal(t, claudeConv.ID, conv["id"])
+	assert.Equal(t, tmux.ProgramClaude, conv["agent"])
+	assert.Equal(t, reported, inst.AgentConversation(), "the conversation the server launched is the one recorded")
+}
+
+// A server that predates the field reports nothing; that never erases a record.
+func TestRemoteLaunchWithoutReportKeepsTheRecord(t *testing.T) {
+	srv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true}).
+		route("/v1/agent/launch", map[string]any{"ok": true})
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+	inst := &Instance{Title: "sb", Tabs: []*Tab{newRemoteAgentTab()}}
+	inst.Tabs[0].Conversation = claudeConv
+	s := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: inst}
+
+	require.NoError(t, s.Launch(true))
+	assert.Equal(t, claudeConv, inst.AgentConversation())
+
+	// No record and nothing to send: the field is absent from the request.
+	fresh := &Instance{Title: "sb2", Tabs: []*Tab{newRemoteAgentTab()}}
+	s = &remoteAgentServer{rc: srv.client(t, ts.URL), inst: fresh}
+	require.NoError(t, s.Launch(true))
+	srv.mu.Lock()
+	_, sent := srv.bodies["/v1/agent/launch"]["conversation"]
+	srv.mu.Unlock()
+	assert.False(t, sent)
+}
+
+// A conversation the server captures after launch (Codex) arrives on a later
+// snapshot and is recorded on the daemon's row.
+func TestRemoteSnapshotRecordsALateConversation(t *testing.T) {
+	late := AgentConversationData{Agent: tmux.ProgramCodex, ID: "019a1111-aaaa-bbbb-cccc-ddddeeeeffff", CaptureKind: ConversationCaptureCodexRollout}
+	srv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true}).
+		route("/v1/agent/snapshot", map[string]any{"updated": true, "content": "x", "conversation": late})
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+	inst := &Instance{Title: "sb", Tabs: []*Tab{newRemoteAgentTab()}}
+	s := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: inst}
+
+	_, err := s.Snapshot()
+	require.NoError(t, err)
+	assert.Equal(t, late, inst.AgentConversation())
+}
+
+// A launch report that arrives before the agent tab exists is applied when the
+// backend seeds the tab.
+func TestReportedConversationBeforeTabExists(t *testing.T) {
+	inst := &Instance{Title: "sb"}
+	assert.False(t, inst.RecordReportedConversation(AgentConversationData{}), "an empty report is a no-op")
+	inst.RecordReportedConversation(claudeConv)
+	assert.Empty(t, inst.Tabs)
+
+	b := &remoteAgentBackend{}
+	inst.agentSrv = &fakeLaunchServer{}
+	require.NoError(t, b.Launch(inst, true))
+	assert.Equal(t, claudeConv, inst.AgentConversation())
+}
+
+type fakeLaunchServer struct{ AgentServer }
+
+func (*fakeLaunchServer) Launch(bool) error { return nil }
+
+// Resume is offered only where this host's provider store holds the transcript:
+// a fresh sandbox's store does not hold the old one's history, and a resume flag
+// for an id the provider cannot find makes the agent exit on launch.
+func TestConversationResumableHere(t *testing.T) {
+	assert.False(t, ConversationResumableHere("claude", t.TempDir(), AgentConversationData{}), "no id")
+	assert.False(t, ConversationResumableHere("aider", t.TempDir(), AgentConversationData{Agent: "aider", ID: "x"}), "an agent af cannot inspect")
+
+	work := t.TempDir()
+	cfg := t.TempDir()
+	program := "CLAUDE_CONFIG_DIR=" + cfg + " claude"
+	assert.False(t, ConversationResumableHere(program, work, claudeConv), "no transcript on this host")
+
+	configDir, launchDir, err := claudeTranscriptLaunchContext(program, work)
+	require.NoError(t, err)
+	dir := filepath.Join(configDir, "projects", claudeProjectName(launchDir))
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, claudeConv.ID+".jsonl"), []byte("{}\n"), 0o600))
+	assert.True(t, ConversationResumableHere(program, work, claudeConv), "the transcript is here")
+}
+
+// SetResumeConversation feeds the launch planner the existing carry path.
+func TestSetResumeConversationPlansAResume(t *testing.T) {
+	inst := &Instance{ID: "id-1"}
+	inst.SetResumeConversation(claudeConv)
+	rewritten, conv := planCreateConversation(inst, "claude")
+	assert.Contains(t, rewritten, "--resume "+claudeConv.ID)
+	assert.Equal(t, claudeConv, conv)
+}
