@@ -519,12 +519,12 @@ invocation".
 
 **A successful swap is a TRANSIENT state.** Park, decide, tear down and replace
 takes about four seconds, so polling for `liveness_name=limit-reached` on the
-path that MOVES is a race the scenario loses. Assert the durable facts instead —
-`account`, `account_auto_selected`, and the daemon's own
-`auto-resumed limit-blocked session … on claude account "…"` line — and keep the
-limit-state assertion for the paths where af must NOT move, where the wall is
-where the session stays. The stand-in walls every identity except the swap
-target for exactly that reason.
+path that MOVES is a race the scenario loses. Wait for the durable facts
+instead — `account`, `account_auto_selected`, and the daemon's own
+`auto-resumed limit-blocked session … on claude account "…"` line, which lands
+a few seconds after the fields — and keep the limit-state assertion for the
+paths where af must NOT move, where the wall is where the session stays. The
+stand-in walls every identity except the swap target for exactly that reason.
 
 For "the replacement really runs as the account", ask the LIVE process rather
 than matching its startup line: enter the pane and echo `$CLAUDE_CONFIG_DIR`. A
