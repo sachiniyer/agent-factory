@@ -2634,11 +2634,13 @@ the session (auto-suffixed -2, -3, …). So the name you pass is not always the
 name you get — the resolved tab name is printed on success, and that is the one
 the other tab verbs address.
 
-For remote sessions, only external HTTPS web tabs are admitted. That kind is
-metadata-only: it needs no PTY and spawns no process in the missing daemon-side
-worktree. Shell, process, and VS Code tabs still require local runtime/worktree
-resources, while loopback web targets still need a relay through the off-box
-agent and plain HTTP cannot be framed by an HTTPS Agent Factory UI.
+For remote sessions, web tabs are admitted. That kind is metadata-only: it needs
+no PTY and spawns no process. An external HTTPS URL is iframed
+directly, and a loopback target (including --port) is served from the session's
+own workspace through the agent-server's port relay, so it shows what listens on
+that port in the sandbox rather than on the daemon host. Plain-HTTP external URLs
+cannot be framed by an HTTPS Agent Factory UI. Shell, process, and VS Code tabs
+still require local runtime/worktree resources.
 
 ```
 af sessions tab-create <title> [flags]
