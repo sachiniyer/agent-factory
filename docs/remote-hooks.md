@@ -290,7 +290,7 @@ Because the session is driven through a real `af agent-server`, a remote-hook se
 
 ## Archive & restore
 
-Durability lives in **GitHub, not the sandbox** (the epic's push/pull-branch model), identical to docker/ssh:
+Durability lives in **GitHub, not the sandbox** (the epic's push/pull-branch model), identical to docker (an `ssh`/`sandbox` session preserves its workspace by default instead):
 
 - **Archive** pushes the session branch to `origin`, then runs `delete_cmd` to reap the sandbox. The instance record persists (branch, backend, repo) — restorable.
 - **Restore / recover** re-runs `launch_cmd` (with `--branch <archived-branch>`) to re-provision a fresh sandbox that clones the pushed state back, then restarts the agent. Your `launch_cmd` must fetch/checkout `--branch` when it is set (see the recipe).
