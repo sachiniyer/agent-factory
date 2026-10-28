@@ -2548,6 +2548,11 @@ gets one more Enter only when it is exactly the single paste chip bound to this
 delivery and nothing in the composer changed; every other staged shape is
 reported sent-unverified. It is never re-pasted.
 
+If --create made the session but could not confirm its start, the command still
+exits 0: the JSON carries a warning, the status stays could-not-confirm, and
+stderr says the session was created. Do not retry; inspect it with
+'af sessions list'.
+
 With --all, broadcast a single prompt to every live session in scope:
 
     af sessions send-prompt --all "<prompt>"
