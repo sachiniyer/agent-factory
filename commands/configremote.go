@@ -169,12 +169,11 @@ func configWriteLocation(path string) string {
 	return prettyPath(path)
 }
 
-// globalConfigSetIf is globalConfigSet with the host-table compare-and-set
-// (daemon.SetConfigValueRequest.IfCurrent). Local daemon or no daemon only: the
-// conditional write is for `af hosts`, which is local-only.
-func globalConfigSetIf(key, value string, ifCurrent *string) (daemon.SetConfigValueResponse, error) {
+// globalHostsEdit applies one per-entry host-table edit through the local
+// daemon (or the local file when none is running). Local only: `af hosts` is.
+func globalHostsEdit(edit config.HostsEdit) (daemon.SetConfigValueResponse, error) {
 	if apiclient.IsRemoteTarget() {
-		return daemon.SetConfigValueResponse{}, fmt.Errorf("a conditional config write is local-only")
+		return daemon.SetConfigValueResponse{}, fmt.Errorf("a host-list edit is local-only")
 	}
-	return daemon.SetGlobalConfigValueIf(key, value, ifCurrent)
+	return daemon.EditGlobalHosts(edit)
 }

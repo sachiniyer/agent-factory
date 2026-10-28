@@ -19,30 +19,30 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 )
 
-// --- #5855: the read-modify-write is atomic against concurrent writers ---
+// --- #5855: the read-modify-write is one hold of the config file lock ---
 
 // useRealHostStore points the host-list seams at a real config.toml in a temp
-// home, so the writes go through the real file lock and compare-and-set.
+// home, so edits go through the real exclusive file lock.
 func useRealHostStore(t *testing.T) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	_, err := config.LoadConfig() // materialize config.toml
 	require.NoError(t, err)
-	pl, ps, pw := hostsLoad, hostsConfigSet, hostsWriteIf
+	pl, pe, ps := hostsLoad, hostsEditApply, hostsConfigSet
+	hostsEditApply = func(e config.HostsEdit) (daemon.SetConfigValueResponse, error) {
+		r, _, err := config.EditGlobalHosts(e)
+		return daemon.SetConfigValueResponse{Result: r}, err
+	}
 	hostsConfigSet = func(k, v string) (daemon.SetConfigValueResponse, error) {
 		r, err := config.SetGlobalConfigValue(k, v)
 		return daemon.SetConfigValueResponse{Result: r}, err
 	}
-	hostsWriteIf = func(k, v string, ifc *string) (daemon.SetConfigValueResponse, error) {
-		r, _, err := config.SetGlobalConfigValueIfWithDigest(k, v, ifc)
-		return daemon.SetConfigValueResponse{Result: r}, err
-	}
-	t.Cleanup(func() { hostsLoad, hostsConfigSet, hostsWriteIf = pl, ps, pw })
+	t.Cleanup(func() { hostsLoad, hostsEditApply, hostsConfigSet = pl, pe, ps })
 }
 
-func TestMutateHosts_ConcurrentAddsAllSurvive(t *testing.T) {
+func TestApplyHostsEdit_ConcurrentAddsAllSurvive(t *testing.T) {
 	useRealHostStore(t)
-	const n = 12
+	const n = 24
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
@@ -50,95 +50,79 @@ func TestMutateHosts_ConcurrentAddsAllSurvive(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- mutateHosts(func(hosts map[string]config.HostConfig, _ string) error {
-				if _, ok := hosts[name]; ok {
-					return errors.New("exists")
-				}
-				hosts[name] = config.HostConfig{Host: name + ".example"}
-				return nil
-			})
+			entry := config.HostConfig{Host: name + ".example"}
+			errs <- applyHostsEdit(config.HostsEdit{Op: config.HostsEditAdd, Name: name, Host: &entry})
 		}()
 	}
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		require.NoError(t, err)
+		require.NoError(t, err, "a writer must wait for the lock, never fail under contention")
 	}
 	hosts, _, err := loadGlobalHosts()
 	require.NoError(t, err)
-	assert.Len(t, hosts, n, "every concurrent add must survive; a lost update drops entries")
+	assert.Len(t, hosts, n, "every concurrent add must survive")
 }
 
-func TestMutateHosts_ConcurrentAddAndRemoveNeitherLosesNorResurrects(t *testing.T) {
+func TestApplyHostsEdit_ConcurrentAddRemoveAndConfigSetNeitherLoseNorResurrect(t *testing.T) {
 	useRealHostStore(t)
-	require.NoError(t, mutateHosts(func(h map[string]config.HostConfig, _ string) error {
-		h["keep"], h["drop"] = config.HostConfig{Host: "keep.example"}, config.HostConfig{Host: "drop.example"}
-		return nil
-	}))
+	for _, n := range []string{"keep", "drop"} {
+		e := config.HostConfig{Host: n + ".example"}
+		require.NoError(t, applyHostsEdit(config.HostsEdit{Op: config.HostsEditAdd, Name: n, Host: &e}))
+	}
 	var wg sync.WaitGroup
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 8; i++ {
 		name := fmt.Sprintf("new%d", i)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			require.NoError(t, mutateHosts(func(h map[string]config.HostConfig, _ string) error {
-				h[name] = config.HostConfig{Host: name + ".example"}
-				return nil
-			}))
+			e := config.HostConfig{Host: name + ".example"}
+			require.NoError(t, applyHostsEdit(config.HostsEdit{Op: config.HostsEditAdd, Name: name, Host: &e}))
 		}()
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		require.NoError(t, mutateHosts(func(h map[string]config.HostConfig, _ string) error {
-			delete(h, "drop")
-			return nil
-		}))
+		require.NoError(t, applyHostsEdit(config.HostsEdit{Op: config.HostsEditRemove, Name: "drop"}))
+	}()
+	// An unrelated `af config set` takes the same lock and must not lose either.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := config.SetGlobalConfigValue("default_program", "claude")
+		require.NoError(t, err)
 	}()
 	wg.Wait()
 	hosts, _, err := loadGlobalHosts()
 	require.NoError(t, err)
 	assert.Contains(t, hosts, "keep")
 	assert.NotContains(t, hosts, "drop", "a concurrent add must not resurrect a removed host")
-	assert.Len(t, hosts, 7)
-}
-
-func TestMutateHosts_ConflictRedoesTheEditAgainstTheFreshTable(t *testing.T) {
-	f := &hostsFake{hosts: map[string]config.HostConfig{}}
-	installHostsFake(t, f)
-	calls := 0
-	err := mutateHosts(func(h map[string]config.HostConfig, _ string) error {
-		calls++
-		if calls == 1 {
-			// Another writer lands between this edit's read and its write.
-			f.hosts["theirs"] = config.HostConfig{Host: "theirs.example"}
-		}
-		h["mine"] = config.HostConfig{Host: "mine.example"}
-		return nil
-	})
+	assert.Len(t, hosts, 9)
+	cfg, err := config.LoadConfig()
 	require.NoError(t, err)
-	assert.Equal(t, 2, calls)
-	assert.Contains(t, f.hosts, "theirs")
-	assert.Contains(t, f.hosts, "mine")
+	assert.Equal(t, "claude", cfg.DefaultProgram)
 }
 
-func TestMutateHosts_ADuplicateAddedMeanwhileIsRefusedNotOverwritten(t *testing.T) {
-	f := &hostsFake{hosts: map[string]config.HostConfig{}}
-	installHostsFake(t, f)
-	calls := 0
-	err := mutateHosts(func(h map[string]config.HostConfig, _ string) error {
-		calls++
-		if calls == 1 {
-			f.hosts["box1"] = config.HostConfig{Host: "other.example"}
-		}
-		if _, ok := h["box1"]; ok {
-			return errors.New("already listed")
-		}
-		h["box1"] = config.HostConfig{Host: "mine.example"}
-		return nil
-	})
+func TestApplyHostsEdit_DuplicateAndDefaultAreDecidedInsideTheLock(t *testing.T) {
+	useRealHostStore(t)
+	e := config.HostConfig{Host: "a.example"}
+	require.NoError(t, applyHostsEdit(config.HostsEdit{Op: config.HostsEditAdd, Name: "a", Host: &e}))
+	err := applyHostsEdit(config.HostsEdit{Op: config.HostsEditAdd, Name: "a", Host: &config.HostConfig{Host: "other.example"}})
 	require.Error(t, err)
-	assert.Equal(t, "other.example", f.hosts["box1"].Host, "the concurrent winner is untouched")
+	assert.Contains(t, err.Error(), "already listed")
+	hosts, _, _ := loadGlobalHosts()
+	assert.Equal(t, "a.example", hosts["a"].Host, "the existing entry is untouched")
+
+	_, err = hostsConfigSet("default_host", "a")
+	require.NoError(t, err)
+	err = applyHostsEdit(config.HostsEdit{Op: config.HostsEditRemove, Name: "a"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--clear-default")
+
+	require.NoError(t, applyHostsEdit(config.HostsEdit{Op: config.HostsEditRemove, Name: "a", ClearDefault: true}))
+	hosts, def, _ := loadGlobalHosts()
+	assert.Empty(t, hosts)
+	assert.Empty(t, def, "the default is cleared in the same lock hold as the removal")
 }
 
 // --- #5854: with --json every outcome is one envelope on stdout ---

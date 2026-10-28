@@ -1,15 +1,12 @@
 package commands
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -45,7 +42,7 @@ var (
 	hostsRemoveClearDefault   bool
 	hostsCheckProbe           = daemon.CheckHost
 	hostsConfigSet            = globalConfigSet
-	hostsWriteIf              = globalConfigSetIf
+	hostsEditApply            = globalHostsEdit
 	hostsLoad                 = loadGlobalHosts
 	hostsPosture              = globalHostKeyPosture
 	errHostsNotReady          = errors.New("the host is saved but not ready to run a session")
@@ -141,40 +138,16 @@ func parseHostDestination(dest string) (config.HostConfig, error) {
 	return h, nil
 }
 
-// hostsMutateAttempts bounds the re-read/redo loop of a conflicted edit.
-const hostsMutateAttempts = 8
-
-// mutateHosts is the host list's read-modify-write. The read happens outside the
-// config file lock, so the write is conditional on the table still being the one
-// edit saw (config.SetGlobalConfigValueIfWithDigest compares inside the lock).
-// When another writer got there first nothing is written and the whole edit —
-// including the caller's own exists/absent check — is redone against the fresh
-// table, so concurrent add, remove and `af config set hosts` never lose a write
-// (#5855). edit may be called several times and must be idempotent.
-func mutateHosts(edit func(hosts map[string]config.HostConfig, def string) error) error {
-	for attempt := 0; attempt < hostsMutateAttempts; attempt++ {
-		hosts, def, err := hostsLoad()
-		if err != nil {
-			return fmt.Errorf("cannot read the host list: %w", err)
-		}
-		snapshot := config.HostsSnapshot(hosts)
-		if err := edit(hosts, def); err != nil {
-			return err
-		}
-		raw, err := json.Marshal(hosts)
-		if err != nil {
-			return err
-		}
-		_, err = hostsWriteIf("hosts", string(raw), &snapshot)
-		if err == nil {
-			return nil
-		}
-		if !strings.Contains(err.Error(), config.ErrConfigChangedConcurrently) {
-			return err
-		}
-		time.Sleep(time.Duration(5+rand.Intn(25)) * time.Millisecond)
-	}
-	return fmt.Errorf("the host list kept changing under this edit (%d attempts); nothing was written. Retry in a moment", hostsMutateAttempts)
+// applyHostsEdit sends one per-entry edit of the host list to the writer, which
+// performs the read, the exists/default checks and the write as ONE
+// read-modify-write under the exclusive config file lock (config.EditGlobalHosts).
+// Concurrent add, remove and `af config set` block on that lock and run one after
+// the other, so none is lost and none retries (#5855). The CLI never reads the
+// table and writes it back itself: the write is made by the daemon, another
+// process, so the CLI could not hold the lock across its own read.
+func applyHostsEdit(edit config.HostsEdit) error {
+	_, err := hostsEditApply(edit)
+	return err
 }
 
 // hostsFailJSON ends a failed command. With --json the error rides in the one
@@ -243,13 +216,7 @@ its fix. The entry is kept either way; use --no-check to skip the probe.`,
 		if err := config.ValidateHostEntry(name, entry); err != nil {
 			return hostsFailJSON(cmd, err)
 		}
-		if err := mutateHosts(func(hosts map[string]config.HostConfig, _ string) error {
-			if _, exists := hosts[name]; exists {
-				return fmt.Errorf("host %q is already listed; remove it first with `af hosts remove %s`, or probe it with `af hosts check %s`", name, name, name)
-			}
-			hosts[name] = entry
-			return nil
-		}); err != nil {
+		if err := applyHostsEdit(config.HostsEdit{Op: config.HostsEditAdd, Name: name, Host: &entry}); err != nil {
 			return hostsFailJSON(cmd, err)
 		}
 		result := hostsAddResult{Name: name, Host: entry}
@@ -451,24 +418,7 @@ refused unless you pass --clear-default.`,
 			return hostsFailJSON(cmd, err)
 		}
 		name := strings.TrimSpace(args[0])
-		if err := mutateHosts(func(hosts map[string]config.HostConfig, def string) error {
-			if err := config.ValidateHostPick(hosts, name); err != nil {
-				return err
-			}
-			if def == name {
-				if !hostsRemoveClearDefault {
-					return fmt.Errorf("host %q is the default_host; pass --clear-default to remove it and clear the default, or point default_host elsewhere first (`af config set default_host <name>`)", name)
-				}
-				// Idempotent, so a conflicted attempt may repeat it. It must land
-				// before the list shrinks: `config set` refuses a list that dangles
-				// the default.
-				if _, err := hostsConfigSet("default_host", ""); err != nil {
-					return fmt.Errorf("could not clear default_host: %w", err)
-				}
-			}
-			delete(hosts, name)
-			return nil
-		}); err != nil {
+		if err := applyHostsEdit(config.HostsEdit{Op: config.HostsEditRemove, Name: name, ClearDefault: hostsRemoveClearDefault}); err != nil {
 			return hostsFailJSON(cmd, err)
 		}
 		if hostsJSONFlag {

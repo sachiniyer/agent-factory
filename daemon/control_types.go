@@ -646,10 +646,9 @@ type PingResponse struct {
 	// two releases honors one and silently drops the other.
 	DeliverHostPick bool `json:"deliver_host_pick,omitempty"`
 	TaskHost        bool `json:"task_host,omitempty"`
-	// ConfigSetIf: the daemon honors SetConfigValueRequest.IfCurrent. An older
-	// daemon drops the field and would write unconditionally, so a conditional
-	// write must see true here first.
-	ConfigSetIf bool `json:"config_set_if,omitempty"`
+	// ConfigHostsEdit: the daemon honors SetConfigValueRequest.HostsEdit. An older
+	// daemon drops the field, so an edit must see true here first.
+	ConfigHostsEdit bool `json:"config_hosts_edit,omitempty"`
 	// (The guarded-rebind capability is its wire method instead of a Ping bit —
 	// #4888 review: RebindProjectGuarded exists only on daemons that enforce
 	// the expected_root/expected_checkout_id pair, so a guarded send is refused
@@ -816,14 +815,13 @@ type ExplainConfigResponse struct {
 type SetConfigValueRequest struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
-	// IfCurrent, for the `hosts` key only, makes the write conditional: the JSON
-	// snapshot of the host table the caller based its edit on (config.HostsSnapshot).
-	// The daemon compares it inside the config file lock and refuses with
-	// config.ErrConfigChangedConcurrently if the table moved, so a per-entry edit is
-	// a real read-modify-write (#5855). Nil (omitted) is the unconditional write.
-	// A daemon that predates it would ignore the field, so a client must read
-	// PingResponse.ConfigSetIf first.
-	IfCurrent *string `json:"if_current,omitempty"`
+	// HostsEdit, with Key "hosts", asks the daemon to apply ONE per-entry edit to
+	// the host table (add or remove) as a single read-modify-write under the config
+	// file lock, instead of replacing the whole table from a copy the client read
+	// earlier (#5855). Value is ignored then. Nil (omitted) is the ordinary write.
+	// A daemon that predates it would ignore the field and write the (empty) Value,
+	// so a client must read PingResponse.ConfigHostsEdit first.
+	HostsEdit *config.HostsEdit `json:"hosts_edit,omitempty"`
 }
 type SetConfigValueResponse struct {
 	// Result is config.SetResult verbatim — key, canonical value, path, and

@@ -65,7 +65,7 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.HostPick = true
 	resp.DeliverHostPick = true
 	resp.TaskHost = true
-	resp.ConfigSetIf = true
+	resp.ConfigHostsEdit = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
@@ -288,7 +288,7 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	result, wroteDigest, err := config.SetGlobalConfigValueIfWithDigest(req.Key, req.Value, req.IfCurrent)
+	result, wroteDigest, err := writeGlobalConfig(req)
 	if err != nil {
 		return err
 	}

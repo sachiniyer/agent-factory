@@ -656,8 +656,9 @@ and a later step did not finish, `data` carries the entry or the probe result
 and `error.code` says which: `mutation_committed` (saved, but the probe or the
 default pick could not run) or `host_not_ready` (saved and probed, not ready
 yet). The exit code is non-zero in both. Concurrent `add`, `remove` and
-`af config set hosts` never lose each other's change: the edit is re-read and
-redone if the table moved while it was being prepared.
+`af config set` never lose each other's change: the edit is applied by the
+writer as one read-modify-write under the exclusive config file lock, so
+concurrent writers wait their turn instead of failing or retrying.
 
 A host in the global `hosts` list is probed for `git`, `tmux` (3.2 or newer) and
 `gh` without creating a session on it. `af doctor` shows one row per listed host

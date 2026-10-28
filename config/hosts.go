@@ -1,10 +1,8 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/netip"
-	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -227,29 +225,4 @@ func ValidateHostsInTOML(data []byte) error {
 		return nil // a parse error is the final gate's to report, with its own wording
 	}
 	return ValidateHosts(raw.Hosts, raw.DefaultHost)
-}
-
-// HostsSnapshot is the canonical JSON of a host table, the value a conditional
-// hosts write is compared against (SetGlobalConfigValueIfWithDigest).
-func HostsSnapshot(hosts map[string]HostConfig) string {
-	if len(hosts) == 0 {
-		return "{}"
-	}
-	raw, _ := json.Marshal(hosts)
-	return string(raw)
-}
-
-// hostsEqualSnapshot reports whether snapshot, decoded the way this binary
-// reads a host table, equals current. Decoding rather than comparing text keeps
-// the check correct across a client and daemon that disagree about which fields
-// exist: both sides drop what they do not know.
-func hostsEqualSnapshot(snapshot string, current map[string]HostConfig) bool {
-	var want map[string]HostConfig
-	if err := json.Unmarshal([]byte(snapshot), &want); err != nil {
-		return false
-	}
-	if len(want) == 0 && len(current) == 0 {
-		return true
-	}
-	return reflect.DeepEqual(want, current)
 }
