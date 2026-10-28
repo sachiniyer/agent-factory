@@ -96,14 +96,10 @@ STANDIN
 # It deliberately writes NO program_overrides, and deletes the play-test config
 # the sandbox shipped with, because the account boundary will not scope a program
 # it cannot prove af itself chose. `trustBase` (session/program_resolution.go) is
-# true only when the effective program_overrides entry is BYTE-FOR-BYTE af's own
-# detected built-in, and af detects the stand-in above as
-# the quoted $HOME/bin/claude followed by --dangerously-skip-permissions. Writing
-# the bare path instead — the obvious thing, and what the first draft of this
-# scenario did — is a different string, so the base arguments stop being declared
-# and every candidate
-# is refused with "could not be proven to be a direct claude invocation". Letting
-# the built-in win is what makes this sandbox able to exercise the feature at all.
+# true only when the effective program_overrides entry parses to the same argv
+# as af's own detected built-in, and af detects the stand-in above as the quoted
+# $HOME/bin/claude followed by --dangerously-skip-permissions. Letting the
+# built-in win is what makes this sandbox able to exercise the feature at all.
 #
 # TOML rather than JSON because af materializes config.toml on first run and reads
 # it in preference afterwards: a stale program_overrides left there outranks
