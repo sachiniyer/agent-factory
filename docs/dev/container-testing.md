@@ -309,9 +309,10 @@ tui-driver` drops you into a live driven session. See
 
 GitHub's `TUI driver selftest` workflow runs the same
 `scripts/testbox.sh selftest` container entry point after TUI-scoped pushes to
-`master` and on manual dispatch. Auto Gate also re-dispatches it after every
-later merge because the gate's `GITHUB_TOKEN` suppresses push workflows;
-dispatch intentionally ignores the path filter. This #4000 step-1 run is a
+`master` and on manual dispatch. The auto-merger (`.github/auto-merge.md`)
+also re-dispatches it after every later merge because the merger's
+`GITHUB_TOKEN` suppresses push workflows; dispatch intentionally ignores the
+path filter. This #4000 step-1 run is a
 post-merge signal, not a pull-request gate; a failure uploads the driver's
 console transcript from the runner.
 
@@ -365,18 +366,20 @@ committed numbers, CI margins, and the explicit golden-update command.
 
 ## What CI runs where
 
-Per-PR CI (`pr.yml`, `pull_request`) runs only the fast, high-signal jobs: Lint,
-the Linux `Test` job, `Web`, `Registry-free image build` and `Build`. The heavy
-jobs — `Test (macOS)`, `Test (systemd, …)`, `Web selftest` and `Performance and
-visual baselines` — do **not** run on a pull request. They run on a push to
-master, on the nightly schedule (04:37 UTC), on `merge_group` and on
-`workflow_dispatch`, so a regression they catch is named on master (or in the
-merge queue) rather than blocking each PR.
+Per-PR CI (`pr.yml`, `pull_request`) runs the fast, high-signal jobs — Lint,
+the Linux `Test` job, `Web`, `Registry-free image build` and `Build` — plus the
+`Performance and visual baselines` and `TUI driver selftest` jobs when the PR
+touches that job's surface (the `web-selftest-scope` job decides from the
+changed-file list; a skipped call is `skipped`, which `Build` counts as
+success). The always-off-PR heavy jobs — `Test (macOS)`, `Test (systemd, …)`
+and `Web selftest` — run on a push to master, on the nightly schedule (04:37
+UTC), on `merge_group` and on `workflow_dispatch`, so a regression they catch
+is named on master (or in the merge queue) rather than blocking each PR.
 
-`Build` stays honest because it still lists every job in `needs`: on a PR the
-heavy jobs are skipped by design (the scope job emits `heavy=false`), while on
-any other event `Build` fails unless macOS, systemd and perf succeeded, so a
-skip can never stand in for a pass on master. A master push also runs
+`Build` stays honest because it still lists every job in `needs`: on a PR an
+out-of-scope heavy job is `skipped` by design while `Build` runs; on any other
+event `Build` fails unless macOS, systemd and perf succeeded, so a skip can
+never stand in for a pass on master. A master push also runs
 `web-selftest.yml` directly (path-filtered), which is why `pr.yml` skips its own
 `Web selftest` call on `push` only. Push workflows cancel a superseded run
 (`concurrency` keyed on workflow + ref), so a burst of merges verifies the tip.

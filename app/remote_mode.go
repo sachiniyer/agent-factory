@@ -109,38 +109,52 @@ func (c *remoteCache) apply(r *remoteReads, readSeq uint64) {
 	}
 }
 
-// noteTaskStored records a create or update the daemon acknowledged: rec is the
-// stored record when the daemon returned it, else the caller's best local
-// reconstruction. The cache is replaced at once, so the reload that follows the
-// mutation sees the mutation.
-func (c *remoteCache) noteTaskStored(rec task.Task) {
-	c.seq++
-	next := make([]task.Task, 0, len(c.tasks)+1)
-	replaced := false
-	for _, t := range c.tasks {
-		if t.ID == rec.ID {
-			next = append(next, rec)
-			replaced = true
-			continue
+// taskRowKey is a task row's identity in the cache: its project binding AND its
+// ID. A task ID is the store's key, but the store tolerates legacy duplicate IDs
+// (two rows, often in different projects), and a mutation acts on exactly one of
+// them — so a cache keyed on the ID alone would rewrite, or delete, the rows it
+// never touched (#5900). project is the row's ProjectPath, the same binding a
+// mutation's ProjectExpectation pins.
+type taskRowKey struct{ project, id string }
+
+func rowKeyOf(t task.Task) taskRowKey { return taskRowKey{project: t.ProjectPath, id: t.ID} }
+
+// indexOfRow is the first cached row with key k, or -1. First, because the store
+// updates and removes the first row carrying an ID.
+func (c *remoteCache) indexOfRow(k taskRowKey) int {
+	for i, t := range c.tasks {
+		if rowKeyOf(t) == k {
+			return i
 		}
-		next = append(next, t)
 	}
-	if !replaced {
+	return -1
+}
+
+// noteTaskStored records a create or update the daemon acknowledged: rec is the
+// stored record (or the caller's best reconstruction) and prev names the row the
+// mutation targeted — rec's own key for a create. Only that row is replaced; a
+// row that shares the ID in another project is left exactly as it was. The cache
+// is replaced at once, so the reload that follows the mutation sees the mutation.
+func (c *remoteCache) noteTaskStored(prev taskRowKey, rec task.Task) {
+	c.seq++
+	next := append([]task.Task(nil), c.tasks...)
+	if i := c.indexOfRow(prev); i >= 0 {
+		next[i] = rec
+	} else {
 		next = append(next, rec)
 	}
 	c.tasks = next
 }
 
-// noteTaskRemoved records a delete the daemon acknowledged.
-func (c *remoteCache) noteTaskRemoved(id string) {
+// noteTaskRemoved records a delete the daemon acknowledged: the one row k.
+func (c *remoteCache) noteTaskRemoved(k taskRowKey) {
 	c.seq++
-	next := make([]task.Task, 0, len(c.tasks))
-	for _, t := range c.tasks {
-		if t.ID != id {
-			next = append(next, t)
-		}
+	i := c.indexOfRow(k)
+	if i < 0 {
+		return
 	}
-	c.tasks = next
+	next := append([]task.Task(nil), c.tasks[:i]...)
+	c.tasks = append(next, c.tasks[i+1:]...)
 }
 
 // noteTaskMutationUncertain is for a mutation that may or may not have landed:
@@ -359,13 +373,15 @@ func (m *home) noteRemoteCreate(sent task.Task, err error) {
 		if ack != nil {
 			rec = *ack
 		}
-		m.remote.noteTaskStored(rec)
+		m.remote.noteTaskStored(rowKeyOf(rec), rec)
 	case mutationMayHaveLanded(err):
 		m.remote.noteTaskMutationUncertain()
 	}
 }
 
-func (m *home) noteRemoteUpdate(id string, update task.TaskUpdate, err error) {
+// noteRemoteUpdate advances the cache after an edit. expect is the project the
+// pane displayed the task in, which with the ID names the row the daemon edited.
+func (m *home) noteRemoteUpdate(id string, update task.TaskUpdate, expect task.ProjectExpectation, err error) {
 	if !isRemoteTarget() {
 		return
 	}
@@ -373,34 +389,53 @@ func (m *home) noteRemoteUpdate(id string, update task.TaskUpdate, err error) {
 	taskAck = taskMutationAck{}
 	switch {
 	case err == nil || apiclient.IsMutationCommitted(err):
+		prev, found := m.remote.targetRow(id, expect)
 		if ack != nil {
-			m.remote.noteTaskStored(*ack)
+			if !found {
+				prev = rowKeyOf(*ack)
+			}
+			m.remote.noteTaskStored(prev, *ack)
 			return
 		}
 		// The daemon did not return the merged record (a committed-with-warning
-		// reply carries no body): advance the cached copy by the patch it accepted.
-		for _, t := range m.remote.tasks {
-			if t.ID == id {
-				m.remote.noteTaskStored(update.ApplyTo(t))
-				return
-			}
+		// reply carries no body): advance the cached row by the patch it accepted.
+		if !found {
+			m.remote.noteTaskMutationUncertain()
+			return
 		}
-		m.remote.noteTaskMutationUncertain()
+		cached := m.remote.tasks[m.remote.indexOfRow(prev)]
+		// The patch changes the definition, but the schedule-health fields on the
+		// cached row (armed state, next fire, lateness) were observed for the OLD
+		// definition. Carrying them forward would show live times for a cron that
+		// is no longer the task's, so they are marked unknown until a poll that
+		// began after this write observes the new one (#5899).
+		m.remote.noteTaskStored(prev, update.ApplyTo(cached).WithScheduleHealthUnknown())
 	case mutationMayHaveLanded(err):
 		m.remote.noteTaskMutationUncertain()
 	}
 }
 
-func (m *home) noteRemoteRemove(id string, err error) {
+func (m *home) noteRemoteRemove(tsk task.Task, err error) {
 	if !isRemoteTarget() {
 		return
 	}
 	switch {
 	case err == nil || apiclient.IsMutationCommitted(err):
-		m.remote.noteTaskRemoved(id)
+		m.remote.noteTaskRemoved(rowKeyOf(tsk))
 	case mutationMayHaveLanded(err):
 		m.remote.noteTaskMutationUncertain()
 	}
+}
+
+// targetRow is the cached row an id+expectation addresses: the first row with the
+// ID, in the expected project when the expectation pins one.
+func (c *remoteCache) targetRow(id string, expect task.ProjectExpectation) (taskRowKey, bool) {
+	for _, t := range c.tasks {
+		if t.ID == id && (!expect.Enforce || t.ProjectPath == expect.ProjectPath) {
+			return rowKeyOf(t), true
+		}
+	}
+	return taskRowKey{}, false
 }
 
 // remoteHooksReadOnlyReason is shown in the hooks pane for a remote target, so the

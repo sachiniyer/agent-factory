@@ -164,7 +164,11 @@ func TestSandboxScope_SnapshotIsTheOwnersProjectOnly(t *testing.T) {
 	// Anti-vacuous: the operator sees every project.
 	assert.Equal(t, []string{"foreign", "local-one", "me", "peer"}, titlesOf(snap("operator-token").Instances))
 
+	assert.Nil(t, snap("operator-token").Capabilities, "an operator credential reads its capabilities from /v1/health, so Snapshot adds none")
+
 	got := snap(f.secret)
+	require.NotNil(t, got.Capabilities, "a sandbox credential is denied /v1/health, so the host-pick capability rides on the Snapshot it is admitted to (#5892)")
+	assert.True(t, got.Capabilities.HostPick)
 	assert.Equal(t, []string{"local-one", "me", "peer"}, titlesOf(got.Instances), "the project's sessions, and no other project's")
 	assert.Equal(t, f.me.ID, got.Caller)
 	for _, d := range got.Instances {

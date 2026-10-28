@@ -148,3 +148,26 @@ func TestSandboxCallbackRestoreRefusesWithoutTheKey(t *testing.T) {
 	_, statErr := os.Stat(keyPath)
 	assert.True(t, os.IsNotExist(statErr), "a failed restore must not write a replacement key")
 }
+
+// A restore whose callback endpoint is not bound registers nothing and says why
+// (#5897): sshd would accept the persisted -R to a socket nobody listens on, so
+// reporting the callback restored would leave every call dead.
+func TestSandboxCallbackRestoreRefusesWhileTheEndpointIsDown(t *testing.T) {
+	m := applyConfigTestManager(t)
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	cred, err := newSandboxCredentials(m, "sess-a").Mint()
+	require.NoError(t, err)
+	m.sandboxTokens.revokeAll()
+
+	m.setSandboxEndpointSocket("") // the endpoint failed to bind on this start
+	err = newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), errSandboxEndpointDown().Error())
+	_, ok := m.sandboxTokens.sessionFor(cred.Token)
+	assert.False(t, ok, "no credential may be registered for a callback path that is dead")
+
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	require.NoError(t, newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref))
+	_, ok = m.sandboxTokens.sessionFor(cred.Token)
+	assert.True(t, ok, "control: with the endpoint bound the same restore registers")
+}

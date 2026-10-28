@@ -180,14 +180,17 @@ Open a rail row’s **…** menu for **Archive** and **Delete session**. Other a
 reveal the menu on hover or keyboard focus. Archive and Delete session each open a confirmation:
 
 - **Archive** tears down a local session's terminal and moves its worktree into
-  the archive. For Docker, SSH, or remote-hook sessions, it pushes the branch to
-  origin and tears down the remote sandbox; there is no local worktree to move.
+  the archive. Docker and remote-hook sessions push the branch to `origin` and
+  tear down the remote sandbox (no local worktree to move); an SSH or sandbox
+  session stops the agent and leaves the workspace on its host.
 - **Restore**, in the archive action's place on an archived row, moves a local
   worktree back and respawns the agent. A local restore starts at once, with no
   confirmation: a dialog shows its progress and offers **Retry restore** if the
   daemon refuses it. For a remote session, it asks for confirmation first, then
   provisions a fresh sandbox from the pushed branch and relaunches the agent; the
-  old sandbox's conversation does not return. Reveal **Archived** in the filter first.
+  old sandbox's conversation does not return. Restoring an SSH or sandbox session
+  archived without a push is refused for now (its workspace stays on its host).
+  Reveal **Archived** in the filter first.
 - **Delete session** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.
