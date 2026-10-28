@@ -570,28 +570,8 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 
 // childTailBuriesMutation scans the tail a modeled wrapper returns for a
 // LITERAL buried suffix a PATH-shadowed wrapper (`shift N; exec "$@"`) would
-// promote to the executed command, as unwrapIonice and unwrapTaskset do for
-// their own tails (#4708). The five siblings returned the tail unscanned, so
-// `nice echo a a a xargs --process-slot-var CODEX_HOME codex` passed where the
-// same payload under ionice was refused (#5034). words[0] is the child command
+// promote to the executed command (#4708, #5034). words[0] is the child command
 // the main walk judges next; the scan covers what follows it.
-//
-// Only literal boundaries are judged. ionice also treats a non-literal word as
-// a possible boundary, which refuses every `ionice codex "$PROMPT"`; applying
-// that to nohup, nice, timeout, setsid and stdbuf would refuse the ordinary
-// `nohup claude "$ARGS"` launch, so the dynamic-boundary reading stays open
-// (see #5034) and the literal payloads the report names are closed here.
 func childTailBuriesMutation(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	if len(words) < 2 {
-		return false
-	}
-	for i := 1; i < len(words); i++ {
-		if _, literal := literalShellWord(words[i]); !literal {
-			continue
-		}
-		if accountChildTailSuffixStartsVerdict(words[i]) && judgeShadowedChildSuffix(words[i:], names, memo) {
-			return true
-		}
-	}
-	return false
+	return len(words) > 1 && laterLiteralChildSuffixMutates(words[1:], names, memo)
 }

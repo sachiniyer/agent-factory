@@ -164,7 +164,7 @@ func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, me
 	// the child-tail scan drops the childless PID bound the selector and
 	// terminal branches keep — a command may take any number of operands, so
 	// the tail's length is not a mutation.
-	if shadowedChildTailMutates(words[1:], names, memo) {
+	if shadowedLiteralChildTailMutates(words[1:], names, memo) {
 		return nil, true
 	}
 	return words[1:], false
