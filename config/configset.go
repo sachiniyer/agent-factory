@@ -163,8 +163,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// Free-form: any ssh invocation the operator already uses. Its usability is
 	// checked at create time (BackendConfigError), like ssh.host — not here.
 	"sandbox.ssh": {kind: cfgString, section: "sandbox"},
-	// Daemon-local path streamed to every remote host — free-form like
-	// sandbox.ssh; a missing/unreadable/unexecutable file surfaces at create.
+	// Daemon-local path streamed to remote hosts; a bad file surfaces at create.
 	"sandbox.binary": {kind: cfgString, section: "sandbox"},
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
