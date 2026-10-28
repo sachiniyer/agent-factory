@@ -75,6 +75,9 @@ type CreateSessionRequest struct {
 	// flag): one of local|docker|ssh|hook. Empty resolves from the repo's
 	// `backend` config key, defaulting to local.
 	Backend string `json:"backend,omitempty"`
+	// Host picks a listed host (the global `hosts` table) for the session — the
+	// `--host` create flag. It selects the ssh runtime; empty means no pick.
+	Host string `json:"host,omitempty"`
 
 	// allowReserved lets the daemon's own root-agent ensure loop (#1106)
 	// create the reserved "root" title that reserveCreate rejects for

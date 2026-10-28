@@ -1,6 +1,8 @@
 package session
 
 import (
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -88,4 +90,66 @@ func sshCommandForHost(h config.HostConfig, globalPosture, dialAddr string, dial
 	}
 	parts = append(parts, shellQuote(host))
 	return strings.Join(parts, " "), nil
+}
+
+// chooseListedHost resolves which listed host a create uses: the named pick, or
+// else — only when the repo supplies no [ssh] host of its own — the global
+// default_host. It returns a nil host for "use the repo's [ssh] settings".
+//
+// An unknown name is refused with the configured names, before any remote state
+// exists. A host that opts into ssh_config is refused here too: this path
+// composes with -F none, and the sandbox transport that honors the opt-in is a
+// later slice, so accepting it would silently ignore the operator's choice.
+func chooseListedHost(pick string, cfg *config.ResolvedConfig) (string, *config.HostConfig, error) {
+	name := strings.TrimSpace(pick)
+	if name == "" {
+		if cfg.SSH != nil && strings.TrimSpace(cfg.SSH.Host) != "" {
+			return "", nil, nil
+		}
+		name = cfg.DefaultHost
+	}
+	if name == "" {
+		return "", nil, nil
+	}
+	entry, ok := cfg.Hosts[name]
+	if !ok {
+		return "", nil, fmt.Errorf("backend=ssh: host %q is not in the host list %v; add it under [hosts.%s] in the global config or pick a listed host",
+			name, sortedHostNames(cfg.Hosts), name)
+	}
+	if entry.UseSSHConfig {
+		return "", nil, fmt.Errorf("backend=ssh: host %q sets use_ssh_config, which sessions cannot use yet (this path composes ssh itself); remove use_ssh_config for this host", name)
+	}
+	return name, &entry, nil
+}
+
+func sortedHostNames(hosts map[string]config.HostConfig) []string {
+	names := make([]string, 0, len(hosts))
+	for n := range hosts {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// HostUnusableReason reports why a create picking the listed host name would
+// fail right now, or nil when every locally checkable precondition passes. It is
+// the choose-time twin of chooseListedHost + sshRuntime.Provision, so a picker
+// never offers a host a create will refuse. It dials nothing.
+func HostUnusableReason(name string, cfg *config.ResolvedConfig, repoRoot string) error {
+	if cfg == nil {
+		return fmt.Errorf("the config could not be read")
+	}
+	if _, listed, err := chooseListedHost(name, cfg); err != nil {
+		return err
+	} else if listed == nil {
+		return fmt.Errorf("host %q is not in the host list", name)
+	} else if _, err := lookPath("ssh"); err != nil {
+		return sshCLIMissingError(err)
+	} else if err := verifySSHIdentityFile(sshConfigForHost(*listed)); err != nil {
+		return err
+	}
+	if originRemoteURL(repoRoot) == "" {
+		return missingOriginError(BackendSSH, repoRoot)
+	}
+	return nil
 }

@@ -74,6 +74,13 @@ func BackendConfigError(kind BackendKind, cfg *config.ResolvedConfig) error {
 			return fmt.Errorf("backend=docker requires docker.image to be set in this repo's %s (the container image that carries git + tmux + the agent CLIs; the `af` binary is copied in automatically)", backendConfigFile(cfg))
 		}
 	case BackendSSH:
+		// A default_host stands in for the repo's [ssh] section (W6.3); chooseListedHost
+		// is the create-time half of the same rule.
+		if cfg != nil && (cfg.SSH == nil || strings.TrimSpace(cfg.SSH.Host) == "") && cfg.DefaultHost != "" {
+			if _, ok := cfg.Hosts[cfg.DefaultHost]; ok {
+				return nil
+			}
+		}
 		if cfg == nil || cfg.SSH == nil || strings.TrimSpace(cfg.SSH.Host) == "" {
 			return fmt.Errorf("backend=ssh requires ssh.host to be set in this repo's %s (the remote host the session's workspace + agent run on)", backendConfigFile(cfg))
 		}

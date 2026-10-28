@@ -383,6 +383,11 @@ type Instance struct {
 	// spend the wrong quota while still displaying the account it was created
 	// with.
 	Account string `json:"account,omitempty"`
+	// Host names the listed host (global `hosts`, #5571 W6.3) this session was
+	// placed on, or empty when none was picked. Persisted independently of the
+	// runtime cleanup handle, which a teardown clears: restore and recovery
+	// re-provision from this so a pick never silently moves to another machine.
+	Host string `json:"host,omitempty"`
 	// accountAgent is the agent namespace Account was selected in. It must be
 	// durable rather than re-derived at refresh time: a program_overrides edit
 	// after the pin can resolve the recorded Program to a different agent's

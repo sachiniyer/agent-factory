@@ -181,6 +181,12 @@ func remoteCreateInputs(inPlace bool) (workspace, program string, err error) {
 	if _, err := session.ParseBackendKind(createBackendFlag); err != nil {
 		return "", "", err
 	}
+	if createHostFlag != "" && createBackendFlag != "" && createBackendFlag != config.BackendSSH {
+		return "", "", fmt.Errorf("--host places the session on a listed host over ssh and is incompatible with --backend %s; drop one of them", createBackendFlag)
+	}
+	if inPlace && createHostFlag != "" {
+		return "", "", fmt.Errorf("--here runs in the local working tree and is incompatible with --host")
+	}
 	if inPlace && createBackendFlag != "" && createBackendFlag != config.BackendLocal {
 		return "", "", fmt.Errorf("--here runs in the local working tree and is incompatible with --backend %s", createBackendFlag)
 	}
