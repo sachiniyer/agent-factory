@@ -16,7 +16,10 @@ import (
 // own token. Neither may read the other's, and the host-wide cache directory is
 // never consulted.
 func TestSuppliedAgentServerTokenIsKeyedToTheSessionLaunchPath(t *testing.T) {
-	root := t.TempDir()
+	// Resolved at creation: the product compares resolved paths, and macOS
+	// hands out /var/... for what is really /private/var/... (#5903).
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	cache := filepath.Join(root, "bin")
 	require.NoError(t, os.MkdirAll(cache, 0o755))
 	shared := filepath.Join(cache, "af-1.0.328-linux-amd64")
