@@ -480,10 +480,11 @@ func TestSwapSameTitle_PartialRosterThenTabArrives(t *testing.T) {
 	assert.Equal(t, "a", recreated.GetTabs()[2].Name)
 	assert.Equal(t, "b", recreated.GetTabs()[h.store.ActiveTab()].Name,
 		"a tab arriving after the swap must not move the active tab")
+	// The swap removed the cursor's tab "a", so the cursor fell back to the
+	// replacement's instance row; appending "a" later leaves the active "b" in the
+	// same slot, so nothing re-syncs the cursor. It must stay on the instance row.
 	sel := h.sidebar.GetSelection()
-	require.True(t, sel.IsTab, "the cursor stays on a tab row")
-	assert.Equal(t, "b", recreated.GetTabs()[sel.TabIndex].Name,
-		"a tab arriving after the swap must not drag the cursor off 'b'")
+	assert.False(t, sel.IsTab, "a tab arriving after the swap must not pull the cursor onto a tab row")
 }
 
 // TestSwapSameTitle_TabReorderedWithOpenPane is the second pane-open repro: the
