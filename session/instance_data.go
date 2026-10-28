@@ -214,7 +214,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// them visible only in the snapshot projection, behind an implicit agent row.
 	// ForStorage restores snapshotStorageTabs before writing instances.json, so
 	// durability keeps using PendingTabs and never reintroduces the index-0 bug.
-	if i.liveness == LiveArchived && len(i.pendingMetadataTabs) > 0 {
+	if len(i.pendingMetadataTabs) > 0 {
 		data.snapshotTabsProjected = true
 		data.snapshotStorageTabs = data.Tabs
 		data.Tabs = append([]TabData(nil), data.Tabs...)

@@ -176,11 +176,10 @@ func TestMoveTab_DaemonErrorLeavesRoster(t *testing.T) {
 	assert.Contains(t, h.errBox.String(), "tab is gone")
 }
 
-// TestMoveTab_RemoteRefuses keeps `</>` behind the same TabManagement gate as
-// `t`/`w`: the snapshot's ReconcileTabsFromData skips off-box backends, so a
-// move there could diverge from a second client's roster with nothing to heal
-// it. The refusal is a local notice — the daemon itself would allow it.
-func TestMoveTab_RemoteRefuses(t *testing.T) {
+// TestMoveTab_RemoteAdmitted: `</>` is gated on what the daemon admits (any
+// non-archived roster), not on TabManagement, so a sandbox row's tab move
+// reaches the daemon (W4.6).
+func TestMoveTab_RemoteAdmitted(t *testing.T) {
 	h, alpha := multiTabHome(t)
 	alpha.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
 	require.False(t, alpha.Capabilities().TabManagement, "precondition: remote backend has no tab management")
@@ -190,10 +189,7 @@ func TestMoveTab_RemoteRefuses(t *testing.T) {
 
 	pressNav(t, h, ">")
 
-	require.Empty(t, *reqs, "an off-box roster never reaches the daemon")
-	require.Equal(t, []string{"agent", "shell", "shell-2", "shell-3"}, tabNames(alpha))
-	h.errBox.SetSize(200, 1)
-	assert.Contains(t, h.errBox.String(), "off-box")
+	require.Len(t, *reqs, 1, "an off-box roster is movable: the daemon admits it")
 }
 
 // TestMoveTab_ArchivedRefuses pins the roster-freeze invariant: the daemon
