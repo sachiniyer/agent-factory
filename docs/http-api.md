@@ -441,7 +441,7 @@ work. The vocabulary is closed:
 | `usage-limit` | The session is parked at a [usage-limit wall](usage-limits.md). |
 | `process-exited` | The agent process is gone — the row's liveness is Lost or Dead. |
 | `restore-gave-up` | The process is gone and automatic Lost-session recovery has stopped — either it exhausted its failed-attempt budget, or it confirmed enough restore-and-die cycles to conclude the agent cannot stay up. See `lost_restore_failure` below for the two verdicts. |
-| `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a machine-level resource condition such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
+| `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a condition outside the session itself, such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
 | `recreate-pending` | A recognized recreate notice is waiting, unacknowledged, on the root session. |
 | `prompt-not-delivered` | The last prompt send observed that the prompt did not arrive. |
 | `delivery-unconfirmed` | The last send ended `sent-unverified` or `could-not-confirm` (uncertainty, not failure — see `SendPrompt` above), and no pane change has been observed since. |
