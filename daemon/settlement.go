@@ -88,6 +88,17 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 // those in-memory observations, while this settlement makes the fence safe.
 func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
 	m.noteRuntimeReplaced(repoID, instance)
+	// A restore landing on a replacement runtime ends a still-in-flight task
+	// run as interrupted (#4222). The end belongs in THIS settlement: the
+	// transition's own interrupt lands only in memory, and a daemon exit
+	// between this boundary write and the post-recovery persist would
+	// otherwise reload TaskRunActive=true on the replacement's own verified
+	// identity — verified, because this write is exactly what published it —
+	// and let its first idle edge complete the run for on_complete. Scoped to
+	// OpRestoring by the callee; a limit-resume boundary replays the prompt.
+	// The stamp stays one-shot so the post-recovery noteRuntimeReplaced
+	// reports the outcome exactly once.
+	instance.InterruptTaskRunForRestoreBoundary()
 	if err := m.persistSettlement(repoID, key, instance); err != nil {
 		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", err)
 	}

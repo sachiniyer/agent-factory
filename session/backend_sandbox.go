@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -96,11 +97,6 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
-		// Probe BEFORE the reap: removing the partial workspace frees space and
-		// could mask the very condition being measured (#5382 item 1).
-		if evidence := p.remoteCapacityEvidence(err); evidence != nil {
-			err = errors.Join(err, evidence)
-		}
 		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
 	return res, nil
@@ -131,6 +127,28 @@ type sandboxProvisioner struct {
 	// reported back in the startup banner (#5571 W2.1). Empty until the banner
 	// arrives; remoteAgentBackend falls back to the wire program without it.
 	hostProgram string
+	// launchAttempted records that provision() reached the startAgentServer
+	// call. An empty remotePID after that point is not the "nothing to signal"
+	// pre-launch case (a clone/binary-copy failure before startAgentServer, where
+	// no nohup'd server exists): the launch ran, and a wrapper that suppressed
+	// `echo $!` left no PID to reap by even though the agent-server may still be
+	// detached and running. reap() uses this to fail closed on an empty post-launch
+	// PID rather than `rm -rf`-ing the workspace of a possibly-running server.
+	launchAttempted bool
+
+	// The reattach half of the runtime identity (#5571 W1.1), recorded at
+	// provision so the backend's cleanup handle — and therefore the persisted
+	// row — carries everything reattach and reap need:
+	//
+	//	tokenRef           the opaque nonce the row stores; the daemon's
+	//	                   runtime-identity key derives the agent-server's
+	//	                   expected bearer token from it. Never the token.
+	//	remoteAddr         the agent-server's loopback address on the sandbox
+	//	                   (the banner's addr) — the -L forward's destination.
+	//	agentServerVersion the version the remote binary reported in its banner.
+	tokenRef           string
+	remoteAddr         string
+	agentServerVersion string
 
 	// tunnel is the currently published generation of the supervised ssh
 	// transport (#5571 W1.2): nil between a death and its re-dial, and after
@@ -168,10 +186,18 @@ type sandboxProvisioner struct {
 	// runCommandFn is a per-instance seam so a test can drive the traps below
 	// without a real sshd. Production leaves it nil.
 	runCommandFn func(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error)
+	// startTunnelFn is the same kind of seam for the -L child: a provision()
+	// test substitutes it rather than needing a real forward. nil ⇒ startTunnel.
+	startTunnelFn func(remoteAddr string) (localAddr string, err error)
 }
 
 func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	w := &sandboxWorkspace{shell: p, spec: p.spec, program: p.program}
+	// Before anything is created on the host: a missing tool refuses the create
+	// with its fix instead of failing a later step half-provisioned (#5571 W2.3).
+	if err := w.checkHostPrereqs(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxErr(err)
+	}
 	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
@@ -195,6 +221,28 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := p.verifyCopiedBinary(); err != nil {
 		return ProvisionResult{}, err
 	}
+	// Mint the session's runtime identity BEFORE the agent-server launches
+	// (#5571 W1.1): the derived token reaches it only through the 0600 file
+	// beside its binary, and the ref is what the row persists so a restart can
+	// re-derive the credential. Minting needs the daemon's runtime-identity key
+	// in AF_HOME — an unwritable home fails the provision HERE rather than
+	// stranding an agent-server whose expected token nobody recorded.
+	ref, err := runtimetoken.NewTokenRef()
+	if err != nil {
+		return ProvisionResult{}, p.sandboxErr(err)
+	}
+	key, err := runtimetoken.EnsureKey()
+	if err != nil {
+		return ProvisionResult{}, p.sandboxErr(err)
+	}
+	token, err := runtimetoken.DeriveAgentServerToken(key, ref)
+	if err != nil {
+		return ProvisionResult{}, p.sandboxErr(err)
+	}
+	p.tokenRef, w.tokenRef, w.agentServerToken = ref, ref, token
+	if err := w.writeRuntimeIdentity(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxErr(err)
+	}
 	// Re-check the callback credential at the LAST step that can still keep a
 	// dead grant out of the launched agent-server's environment (#5571 W3.1,
 	// PR #5577 review — see revalidateCallbackBeforeEnv for why this point).
@@ -202,7 +250,13 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
+	// Reached only past the pre-launch steps (clone, binary copy, callback env),
+	// so a startAgentServer failure here is not the pre-launch empty-PID case: a
+	// nohup'd agent-server may have started even when the captured PID is empty or
+	// garbage. Set the flag before the call so the reap refuses on either.
+	p.launchAttempted = true
 	if err := w.startAgentServer(sshShortStepTimeout); err != nil {
+		p.remotePID = w.RemotePID
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	p.remotePID = w.RemotePID
@@ -210,6 +264,20 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
+	// The banner must echo the credential we supplied. Any other value means the
+	// remote agent-server did not read af-server-token — the streamed binary was
+	// stale or foreign — and would gate on a different, shared ambient
+	// credential, which is exactly the credential-confusion this exists to
+	// remove. The message names the file, never either token.
+	if banner.Token != token {
+		return ProvisionResult{}, p.sandboxErr(fmt.Errorf(
+			"the remote agent-server reported a different bearer token than the session-scoped one provisioned for it; the streamed binary did not read %s",
+			runtimetoken.TokenFileName))
+	}
+	// The banner's addr is the agent-server's own loopback port on the sandbox —
+	// the destination a reattach's -L forward re-dials — and its version is the
+	// remote binary's self-report. Both persist with the cleanup handle.
+	p.remoteAddr, p.agentServerVersion = banner.Addr, banner.Version
 	// The banner's program is the command the HOST resolved and bound — the
 	// true runtime evidence (#5108); the wire value is only its pre-resolution
 	// form, kept as the fallback for a banner from an older agent-server.
@@ -222,7 +290,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		return ProvisionResult{}, err
 	}
 
-	endpoint := &AgentServerEndpoint{URL: "http://" + localAddr, Token: banner.Token}
+	// The endpoint presents the token WE minted — identical to the banner's per
+	// the check above, but the provenance matters: the daemon must never adopt
+	// a credential the remote happened to report.
+	endpoint := &AgentServerEndpoint{URL: "http://" + localAddr, Token: token}
 	teardown := p.reap
 	log.InfoLog.Printf("sandbox runtime: session %q running via %q (dir %s), agent-server tunneled at %s",
 		p.spec.Title, p.sshCmd, p.sessionDir, endpoint.URL)
@@ -235,9 +306,12 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.hostProgram},
 			provisioner:        p,
 			cleanup: &SandboxRuntimeCleanupData{
-				SSHCommand: p.sshCmd,
-				SessionDir: p.sessionDir,
-				RemotePID:  p.remotePID,
+				SSHCommand:         p.sshCmd,
+				SessionDir:         p.sessionDir,
+				RemotePID:          p.remotePID,
+				RemoteAddr:         p.remoteAddr,
+				AgentServerVersion: p.agentServerVersion,
+				TokenRef:           p.tokenRef,
 			},
 		},
 		Endpoint: endpoint,
@@ -314,8 +388,18 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 // buildRunCommand composes the child. Split out so the WaitDelay rule below is
 // exercised by a test against the real constructor rather than a restatement of
 // it.
+// remoteShScript wraps a provisioning or reap script as an explicit POSIX
+// `sh -c` invocation. ssh hands its command argument to the remote account's
+// LOGIN shell, so a bare script is parsed by fish or csh when that is what the
+// account uses — and every `&&`, `$(...)`, `$!` and `mktemp -d "$HOME/..."` in
+// these scripts is POSIX. The wrapper is a single-quoted word, which fish and
+// POSIX shells both read the same way (#5571 W2.9).
+func remoteShScript(script string) string {
+	return "sh -c " + shellQuote(script)
+}
+
 func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string, stdin io.Reader) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "sh", "-c", p.sshCmd+` "$@"`, "af-sandbox", script)
+	cmd := exec.CommandContext(ctx, "sh", "-c", p.sshCmd+` "$@"`, "af-sandbox", remoteShScript(script))
 	cmd.Stdin = stdin
 	// Its own process group, so the deadline tears down the whole tree rather
 	// than the `sh` alone. exec.CommandContext's default Cancel kills only the
@@ -400,6 +484,9 @@ func (p *sandboxProvisioner) verifyCopiedBinary() error {
 // can serve as one, registered for the daemon-exit stop, and env-stamped for
 // the next daemon's ownership-proven sweep.
 func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
+	if p.startTunnelFn != nil {
+		return p.startTunnelFn(remoteAddr)
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", fmt.Errorf("backend=%s: opening a local port for the tunnel failed: %w", p.label(), err)
@@ -478,6 +565,13 @@ func waitForSandboxTunnelWithin(label, localAddr string, timeout, poll time.Dura
 }
 
 func (p *sandboxProvisioner) reapProvisionFailure(provisionErr error) error {
+	// Probe BEFORE the reap: removing the partial workspace frees space and
+	// could mask the very condition being measured (#5382 item 1). Doing it here
+	// — the one failure path sandbox, ssh and hook provisioning all share —
+	// keeps the classification identical across them (#5686).
+	if evidence := p.remoteCapacityEvidence(provisionErr); evidence != nil {
+		provisionErr = errors.Join(provisionErr, evidence)
+	}
 	reapErr := p.reap()
 	if reapErr == nil {
 		return provisionErr
@@ -514,6 +608,26 @@ func (p *sandboxProvisioner) reap() error {
 	if p.sessionDir == "" {
 		p.reaped = true
 		return nil
+	}
+
+	if p.remotePID != "" && !positivePID(p.remotePID) {
+		reapErr := fmt.Errorf("%w: backend=%s: refusing to reap %q with invalid remote PID %q — the agent-server may still be running; inspect before retrying",
+			ErrWorkspaceStateUnknown, p.label(), p.sessionDir, p.remotePID)
+		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
+		return reapErr
+	}
+	// A launch that returned no PID at all is not the pre-launch empty-PID path
+	// (a clone or binary-copy failure, where no nohup'd server exists): the
+	// nohup ran, and a wrapper that suppressed `echo $!` left the agent-server
+	// detached with no PID to reap by. The empty-PID branch of reapScript would
+	// `rm -rf` the session dir without a kill and latch a clean reap, leaking the
+	// server. Refuse the same way an unverifiable non-empty PID does: no latch, no
+	// removal, the record is retained for retry/manual inspection.
+	if p.launchAttempted && p.remotePID == "" {
+		reapErr := fmt.Errorf("%w: backend=%s: refusing to reap %q after a launch returned no remote PID — the agent-server may still be running; inspect before retrying",
+			ErrWorkspaceStateUnknown, p.label(), p.sessionDir)
+		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
+		return reapErr
 	}
 
 	nonce, nonceErr := sandboxReapNonce()
@@ -644,7 +758,7 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	if p.remotePID == "" {
 		return removeAndConfirm, expect
 	}
-	kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName)
+	kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef)
 	// A SUBSHELL, not a { } group. The identity-kill script ends in `exit 0` when
 	// the process is already gone — the common case after a clean shutdown — and a
 	// group command runs in the CURRENT shell, so that exit terminated the whole

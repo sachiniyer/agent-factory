@@ -39,9 +39,9 @@ func (m *Manager) refreshStatusProbes(targets []worktreeProbeTarget) {
 			remote = append(remote, t)
 			continue
 		}
-		m.refreshInstanceStatus(t.repoID, t.instance)
+		m.refreshInstanceStatusPublishingOutage(t.repoID, t.instance)
 	}
-	fanOutRemoteProbes(remote, m.refreshInstanceStatus, func() (func(), bool) {
+	fanOutRemoteProbes(remote, m.refreshInstanceStatusPublishingOutage, func() (func(), bool) {
 		if _, ok := m.beginBackgroundMutation(); !ok {
 			return nil, false
 		}
