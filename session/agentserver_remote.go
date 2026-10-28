@@ -216,6 +216,17 @@ func (s *remoteAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapsho
 // (false, nil — authoritative) from "the sandbox never answered" (false, err —
 // UNKNOWN). Swallowing the error into a bare false made a transport blip
 // indistinguishable from a dead agent, and callers re-provisioned on it (#1794).
+// WorkspaceFacts asks the agent-server to measure its workspace (W8.2). A server
+// predating the route answers 404, which surfaces as an error: the caller reports
+// the workspace as unmeasured, never as clean.
+func (s *remoteAgentServer) WorkspaceFacts() (WorkspaceFacts, error) {
+	var facts WorkspaceFacts
+	if err := s.rc.call("/v1/agent/workspace-facts", struct{}{}, &facts); err != nil {
+		return WorkspaceFacts{}, err
+	}
+	return facts, nil
+}
+
 func (s *remoteAgentServer) Alive() (bool, error) {
 	var resp agentAliveResp
 	if err := s.rc.call("/v1/agent/alive", struct{}{}, &resp); err != nil {

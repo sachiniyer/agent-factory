@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -338,4 +339,15 @@ func TestAgentServerServesNoWebShell(t *testing.T) {
 	// The 404 must tell a human where the UI actually is, not just "unknown route".
 	require.Contains(t, string(body), "serves no web UI")
 	require.Contains(t, string(body), "http://localhost:8443")
+}
+
+func TestHeadlessWorkspaceFactsMissingWorkspace(t *testing.T) {
+	hs := &headlessServer{inst: &session.Instance{Path: filepath.Join(t.TempDir(), "gone")}}
+	var facts session.WorkspaceFacts
+	if err := hs.WorkspaceFacts(struct{}{}, &facts); err != nil {
+		t.Fatal(err)
+	}
+	if facts.Exists {
+		t.Fatalf("a deleted workspace must report Exists=false, got %+v", facts)
+	}
 }

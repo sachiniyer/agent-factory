@@ -435,6 +435,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/snapshot", rpcHandler(hs.Snapshot))
 	mux.HandleFunc("/v1/agent/preview", rpcHandler(hs.Preview))
 	mux.HandleFunc("/v1/agent/alive", rpcHandler(hs.Alive))
+	mux.HandleFunc("/v1/agent/workspace-facts", rpcHandler(hs.WorkspaceFacts))
 	mux.HandleFunc("/v1/agent/send-prompt", rpcHandler(hs.SendPrompt))
 	// Compatibility tripwire for older daemons. The behavior is gone, but an
 	// old caller gets migration guidance instead of a successful no-op.
@@ -772,6 +773,16 @@ func (hs *headlessServer) tabStore() (tabKeeper, error) {
 		return nil, fmt.Errorf("this agent-server has no tab roster")
 	}
 	return hs.tabs, nil
+}
+
+// WorkspaceFacts measures this server's workspace for the daemon's kill
+// confirmation (#5571 W8.2). Read-only: git status/rev-list/for-each-ref/reflog.
+func (hs *headlessServer) WorkspaceFacts(_ struct{}, resp *session.WorkspaceFacts) error {
+	if hs.inst == nil {
+		return fmt.Errorf("this agent-server has no workspace")
+	}
+	*resp = session.MeasureWorkspace(hs.inst.Path)
+	return nil
 }
 
 type agentAliveResponse struct {

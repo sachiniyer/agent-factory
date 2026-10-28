@@ -46,6 +46,15 @@ func (c *Client) KillSession(ctx context.Context, req daemon.KillSessionRequest)
 	return c.callCtx(ctx, "KillSession", req, &daemon.KillSessionResponse{})
 }
 
+// WorkspaceFacts asks the daemon to measure an off-box session's workspace for
+// its kill confirmation (#5571 W8.2). It takes a ctx because the measurement
+// crosses to another host and the kill dialog waits on it.
+func (c *Client) WorkspaceFacts(ctx context.Context, req daemon.WorkspaceFactsRequest) (daemon.WorkspaceFactsResponse, error) {
+	var resp daemon.WorkspaceFactsResponse
+	err := c.callCtx(ctx, "WorkspaceFacts", req, &resp)
+	return resp, err
+}
+
 // ArchiveSession asks the daemon to archive a session (#1028) and returns the
 // relocated worktree's new path.
 func (c *Client) ArchiveSession(req daemon.ArchiveSessionRequest) (string, error) {
