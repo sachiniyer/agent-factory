@@ -104,3 +104,47 @@ func TestWebListenerRetryEndsWhenListenerIsConfiguredOff(t *testing.T) {
 	}, 5*time.Second, 5*time.Millisecond)
 	require.False(t, m.lifecycle.snapshot().listeners.TCPBound)
 }
+
+// A retry and a live config apply must never interleave: the retry's config
+// snapshot and its reconcile are one step under configApplyMu, the lock
+// ApplyConfig holds across its own swap + reconcile. Hold that lock as an
+// in-flight apply would, swap the config to "listener off" under it, and check
+// the retry neither binds while the apply is in flight (the old interleave let it
+// reconcile a config captured before the apply) nor resurrects the old address
+// afterwards.
+func TestWebListenerRetryIsSerializedWithConfigApply(t *testing.T) {
+	m, wl, calls := retryTestListeners(t, 0)
+	// First bind fails so the retry starts; every later attempt would succeed,
+	// which is what makes a stale-config bind observable.
+	var failNext atomic.Bool
+	failNext.Store(true)
+	realListen := wl.listenTCP
+	wl.listenTCP = func(network, address string) (net.Listener, error) {
+		if failNext.Swap(false) {
+			calls.Add(1)
+			return nil, errors.New("listen tcp: cannot assign requested address")
+		}
+		calls.Add(1)
+		return realListen(network, address)
+	}
+	_, err := wl.reconcile(m.Config())
+	require.Error(t, err)
+
+	m.configApplyMu.Lock() // an ApplyConfig is in flight
+	attempts := calls.Load()
+	wl.retryFailedBinds()
+	time.Sleep(150 * time.Millisecond) // many backoff ticks (5-20ms each)
+	require.Equal(t, attempts, calls.Load(),
+		"the retry must not bind while a config apply holds configApplyMu")
+
+	off := *m.Config()
+	off.ListenAddr = ""
+	m.live.Store(&off)
+	m.configApplyMu.Unlock()
+
+	require.Eventually(t, func() bool { return !m.lifecycle.snapshot().listeners.BindRetrying },
+		5*time.Second, 5*time.Millisecond)
+	require.False(t, m.lifecycle.snapshot().listeners.TCPBound,
+		"the retry must apply the config the apply stored, not bind the one it captured earlier")
+	require.Equal(t, attempts, calls.Load(), "no bind attempt for a listener configured off")
+}

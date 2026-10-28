@@ -193,7 +193,15 @@ func (wl *webListeners) retryFailedBinds() {
 				return
 			case <-timer.C:
 			}
+			// The config snapshot and the reconcile are ONE step under
+			// configApplyMu, the lock ApplyConfig holds across its own swap +
+			// reconcile. Without it a retry could capture config A, let an apply
+			// store and reconcile B, then bind A over it and exit, leaving the
+			// obsolete address serving. Lock order matches ApplyConfig:
+			// configApplyMu, then wl.mu inside reconcile.
+			wl.manager.configApplyMu.Lock()
 			_, err := wl.reconcile(wl.manager.Config())
+			wl.manager.configApplyMu.Unlock()
 			if err == nil {
 				log.InfoLog.Printf("daemon listener bind recovered after %d retr%s", attempt, map[bool]string{true: "y", false: "ies"}[attempt == 1])
 				return
