@@ -642,8 +642,12 @@ inherit it. A local token is never copied to the SSH host implicitly.
 CI runs `TestSandboxDaemonE2E` (`.github/workflows/sandbox-e2e.yml`, on every master
 push and nightly): a real daemon on a default config drives a `backend = "sandbox"`
 session against a containerized sshd host through its own RPCs (create, prompt,
-preview, tab, archive, restore, kill, and a task-fired create). `make
-backend-sandbox-e2e` runs it by hand; it is not a routine local gate.
+preview, tab, archive, restore, kill, and a task-fired create).
+`TestSandboxDisruptionsE2E` then hits one live session three times: a daemon
+restart (same agent-server process, roster and conversation, no re-provision), a
+killed ssh connection (reconnects with no operator action) and a host restart
+(the committed work is recovered). `make backend-sandbox-e2e` runs both by hand;
+it is not a routine local gate.
 
 `make backend-ssh-roundtrip` runs the real end-to-end SSH round-trips on a host
 with Docker: it stands up a throwaway `sshd`+git+tmux container as the ssh target
