@@ -434,6 +434,16 @@ func (c *Client) RegisterProject(path string) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// SetProjectColor sets or clears (empty color) a registered project's display
+// color through the daemon — the single writer. HTTP twin of SetProjectColor.
+func (c *Client) SetProjectColor(req daemon.SetProjectColorRequest) (config.Project, error) {
+	var resp daemon.SetProjectColorResponse
+	if err := c.call("SetProjectColor", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
 // RebindProject moves a registered project's stable identity to the checkout at
 // path through the daemon — the single writer (#960) — which resolves the path
 // on its own filesystem, refuses a root another project owns, and publishes
