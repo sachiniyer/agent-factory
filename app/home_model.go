@@ -35,6 +35,9 @@ type home struct {
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
+	// remote caches the target's registry and tasks in remote mode (W9.7); the
+	// poll refreshes it off the event loop.
+	remote remoteCache
 	// projectPathResolutions retains successful Git identity lookups across the
 	// 750ms Projects poll. It is event-loop-owned like the rest of home state.
 	projectPathResolutions map[string]projectPathResolution
@@ -604,6 +607,11 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 	h.restoreTUIViewStateOnLaunch()
 	// Populate the sidebar's Projects section from the cross-repo discovery so it
 	// renders (collapsed) at launch with the active project marked.
+	if isRemoteTarget() {
+		// Pre-loop (bubbletea has not started), bounded by remoteReadTimeout: seeds
+		// the cache the first render reads. Every later refresh is the poll's.
+		h.remote.apply(fetchRemoteReads(ctx))
+	}
 	h.refreshSidebarProjects()
 	// In registry mode (launched outside a repo, #2477) the session tree is empty
 	// — there is no active project — so land focus on the Projects section, the

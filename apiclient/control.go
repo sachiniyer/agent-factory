@@ -514,8 +514,14 @@ func (c *Client) SendPrompt(req daemon.SendPromptRequest) (session.PromptDeliver
 // config.ListProjects run on the daemon's host), so a remote `af projects list`
 // describes the targeted machine rather than this one.
 func (c *Client) ListProjects() ([]config.Project, error) {
+	return c.ListProjectsContext(context.Background())
+}
+
+// ListProjectsContext is ListProjects bound to ctx, for a caller (the TUI's
+// poll) that must be able to abandon the read.
+func (c *Client) ListProjectsContext(ctx context.Context) ([]config.Project, error) {
 	var resp daemon.ListProjectsResponse
-	if err := c.call("ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
+	if err := c.callCtx(ctx, "ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Projects, nil
