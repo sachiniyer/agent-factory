@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,7 +12,19 @@ import (
 
 func (i *Instance) RepoName() (string, error) {
 	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
-		return "", fmt.Errorf("remote instances do not have a local repo")
+		// An off-box row owns no local worktree, but the daemon records which
+		// project it belongs to; that identity is what a multi-repo rail
+		// disambiguates by (W8.8).
+		i.mu.RLock()
+		repoPath := i.repoIdentityPath
+		if repoPath == "" {
+			repoPath = i.Path
+		}
+		i.mu.RUnlock()
+		if repoPath == "" {
+			return "", fmt.Errorf("remote instance has no recorded repo")
+		}
+		return filepath.Base(filepath.Clean(repoPath)), nil
 	}
 	i.mu.RLock()
 	started := i.started
