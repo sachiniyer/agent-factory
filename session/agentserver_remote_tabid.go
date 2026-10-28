@@ -125,22 +125,28 @@ func (s *remoteAgentServer) SubscribeTab(tabID string, since Seq) (PTYSubscripti
 }
 
 func (s *remoteAgentServer) InputTab(tabID string, b []byte) error {
-	if !s.nativeFor(tabID) {
-		idx, err := s.ordinalOf(tabID)
-		if err != nil {
-			return err
-		}
-		return s.Input(idx, b)
-	}
+	// The adoption mark comes first on both planes (#3865): it is taken before
+	// the tab id is even looked at, so a write that finds no tab still counts.
 	if err := s.noteAdoption(); err != nil {
 		return err
 	}
-	br, err := s.ensureBrokerByID(tabID)
+	var (
+		br  *ptyBroker
+		err error
+	)
+	if s.nativeFor(tabID) {
+		br, err = s.ensureBrokerByID(tabID)
+	} else {
+		var idx int
+		if idx, err = s.ordinalOf(tabID); err == nil {
+			br, err = s.ensureBroker(idx)
+		}
+	}
 	if err != nil {
 		return err
 	}
 	err = br.input(b)
-	if errors.Is(err, ErrTabGone) {
+	if errors.Is(err, ErrTabGone) && s.nativeFor(tabID) {
 		s.dropBrokerByID(tabID, br)
 	}
 	return err
