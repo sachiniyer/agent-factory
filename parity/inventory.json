@@ -1662,7 +1662,7 @@
       "id": "proposal.agent-workflow",
       "title": "Start or attach a session to a proposal and sync its edits",
       "tui": {
-        "status": "no",
+        "status": "n/a",
         "pointer": ""
       },
       "web": {
@@ -1675,13 +1675,13 @@
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Not yet: proposal mode step 2a (docs/dev/proposals/proposal-mode/api.md) puts these verbs on daemon routes, which the CLI calls and the web can call. Step 2b adds the web Docs tab, which start and attach open beside the agent; step 3 adds push from that tab. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
+      "notes": "Step 2a (docs/dev/proposals/proposal-mode/api.md) put these verbs on daemon routes, which the CLI calls and the web can call. The remaining gap is web-only: step 2b adds the web Docs tab, which start and attach open beside the agent. The tui cell is n/a rather than a gap: goals.md's non-goals state 'The TUI does not get an editor. The Docs tab is web only.', so the TUI has no proposal-editing analogue by design; future.md's read-only TUI view is a different, later capability, not this one."
     },
     {
       "id": "proposal.docs",
       "title": "List, read and edit the docs of a proposal",
       "tui": {
-        "status": "no",
+        "status": "n/a",
         "pointer": ""
       },
       "web": {
@@ -1694,14 +1694,14 @@
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Not yet: proposal mode step 2a adds the daemon routes (docs/dev/proposals/proposal-mode/api.md) and moves this CLI onto them. SaveProposalDoc, the three-way human save, has no CLI verb: it is for the web editor. Step 2b adds the web Docs tab (doc strip, live-preview editor, add-doc menu) over those routes. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
+      "notes": "Step 2a added the daemon routes (docs/dev/proposals/proposal-mode/api.md) and moved this CLI onto them. SaveProposalDoc, the three-way human save, has no CLI verb: it is for the web editor. The remaining gap is web-only: step 2b adds the web Docs tab (doc strip, live-preview editor, add-doc menu) over those routes. The tui cell is n/a rather than a gap: goals.md lists a TUI editor as a non-goal, and future.md's read-only TUI view is a different, later capability — it would flip this cell to partial for the read half if it lands, not to yes."
     },
     {
       "id": "proposal.docs-tab",
       "title": "Open the Docs tab of a proposal beside the agent",
       "tui": {
-        "status": "no",
-        "pointer": "ui/tab_pane.go docsTabPlaceholder"
+        "status": "n/a",
+        "pointer": "ui/tab_pane.go:582 docsTabPlaceholder"
       },
       "web": {
         "status": "no",
@@ -1713,13 +1713,13 @@
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Proposal mode step 2a adds the docs tab kind (session.TabKindDocs) and creates it from af proposal start and attach. Step 2b renders it in the web UI as the proposal editor. The TUI shows a placeholder that says the tab is web only: goals.md lists a TUI editor as a non-goal."
+      "notes": "Step 2a added the docs tab kind (session.TabKindDocs), created by af proposal start/attach; step 2b renders it in the web UI as the proposal editor — the remaining gap is that web cell. The tui cell is n/a: goals.md lists a TUI editor as a non-goal ('The Docs tab is web only'), and the TUI's handling of an existing docs tab IS docsTabPlaceholder — a pane that says so and hands the user `af proposal path <slug>` for a terminal view, which is the surface's designed analogue rather than a missing editor."
     },
     {
       "id": "proposal.push",
       "title": "Send the user's proposal edits to the agent as a prompt",
       "tui": {
-        "status": "no",
+        "status": "n/a",
         "pointer": ""
       },
       "web": {
@@ -1732,7 +1732,7 @@
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Proposal mode step 3a (docs/dev/proposals/proposal-mode/api.md, Push) adds the daemon push: auto mode sends the unseen edits 10 s after the last human save when the agent is Ready. The CLI sets the mode and sends now. Step 3b adds the web push chip (mode switch, countdown, Hold, Send now) over these routes. HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown, and the next save releases it. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal."
+      "notes": "Step 3a (docs/dev/proposals/proposal-mode/api.md, Push) added the daemon push: auto mode sends the unseen edits 10 s after the last human save when the agent is Ready; the CLI sets the mode and sends now. Step 3b adds the web push chip (mode switch, countdown, Hold, Send now) over these routes — the remaining gap is that web cell. HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown, and the next save releases it. The tui cell is n/a: goals.md lists a TUI editor as a non-goal, and with no TUI proposal edits there is nothing for a TUI push affordance to send."
     }
   ],
   "ledger": {
