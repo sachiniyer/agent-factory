@@ -85,18 +85,22 @@ func (m *Manager) authorizeSandboxSession(owner, id, title string, selfOnly bool
 		// (whoami, archive --self). Never "any".
 		id = owner
 	}
-	inst, repoID, _, _, _, err := m.resolveActionSession(id, title, proj.repoID)
-	if err != nil {
-		return sandboxProject{}, nil, err
+	// ONE answer for everything outside the credential's scope: a session that
+	// does not exist, one in another project, one that runs on the daemon host,
+	// an ambiguous title. A different message (or a different "not found") per
+	// case would be an existence oracle across projects.
+	unavailable := func() error {
+		return sandboxRefusal("that session is not available to this credential")
 	}
-	if inst == nil || repoID != proj.repoID {
-		return sandboxProject{}, nil, sandboxRefusal("that session is not in this credential's project")
+	inst, repoID, _, _, _, err := m.resolveActionSession(id, title, proj.repoID)
+	if err != nil || inst == nil || repoID != proj.repoID {
+		return sandboxProject{}, nil, unavailable()
 	}
 	if selfOnly && inst.ID != owner {
 		return sandboxProject{}, nil, sandboxRefusal("this verb acts on the credential's own session only")
 	}
 	if !offBoxBackendType(instanceBackendType(inst)) {
-		return sandboxProject{}, nil, sandboxRefusal("that session runs on the daemon host")
+		return sandboxProject{}, nil, unavailable()
 	}
 	return proj, inst, nil
 }
@@ -283,25 +287,26 @@ func (s *controlServer) addTaskScoped(ctx context.Context, req AddTaskRequest, r
 	return s.addTask(ctx, req, resp)
 }
 
-// sandboxTaskInProject reports whether t belongs to the owner's project.
+// sandboxTaskInProject reports whether t belongs to the owner's project. It keys
+// on the task's retained RepoID — the project's identity — and never on its
+// path, which can be rebound or reused. A task with no retained RepoID is not
+// provably in any project and fails closed.
 func sandboxTaskInProject(t task.Task, proj sandboxProject) bool {
-	if t.RepoID != "" {
-		return t.RepoID == proj.repoID
-	}
-	return taskRepoIDForValidation(t.ProjectPath) == proj.repoID
+	return t.RepoID != "" && t.RepoID == proj.repoID
 }
 
 func (s *controlServer) listTasksScoped(ctx context.Context, req ListTasksRequest, resp *ListTasksResponse) error {
-	if err := s.ListTasks(req, resp); err != nil {
-		return err
-	}
 	owner, ok := sandboxOwner(ctx)
 	if !ok {
-		return nil
+		return s.ListTasks(req, resp)
 	}
+	// Scope first: a credential that is not tracked learns nothing from the
+	// scheduler's own state.
 	proj, err := s.manager.sandboxProjectOf(owner)
 	if err != nil {
-		resp.Tasks = nil
+		return err
+	}
+	if err := s.ListTasks(req, resp); err != nil {
 		return err
 	}
 	kept := make([]task.Task, 0, len(resp.Tasks))
@@ -342,15 +347,13 @@ func (s *controlServer) removeTaskScoped(ctx context.Context, req RemoveTaskRequ
 		if err != nil {
 			return err
 		}
+		// Scope before existence, with one answer: a task that does not exist,
+		// belongs to another project, or is a watch task is the same refusal, so
+		// the id space is not an oracle. Keyed on the task's retained RepoID (the
+		// project identity), never on its path.
 		t, err := task.GetTask(req.ID)
-		if err != nil {
-			return err
-		}
-		if !sandboxTaskInProject(*t, proj) {
-			return sandboxRefusal("that task is not in this credential's project")
-		}
-		if strings.TrimSpace(t.WatchCmd) != "" {
-			return sandboxRefusal("watch tasks are not managed from a sandbox")
+		if err != nil || !sandboxTaskInProject(*t, proj) || strings.TrimSpace(t.WatchCmd) != "" {
+			return sandboxRefusal("that task is not available to this credential")
 		}
 	}
 	return s.RemoveTask(req, resp)

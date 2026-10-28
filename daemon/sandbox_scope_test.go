@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -304,7 +305,19 @@ func TestSandboxScope_TasksDeliverPromptsInsideTheProject(t *testing.T) {
 	// ListTasks / RemoveTask see only the owner's project, never a watch task.
 	path := f.me.Path
 	mine := task.Task{ID: "t-mine", Prompt: "p", CronExpr: "0 * * * *", TargetSession: "peer", ProjectPath: path, RepoID: f.repoA}
-	foreign := task.Task{ID: "t-foreign", Prompt: "p", CronExpr: "0 * * * *", TargetSession: "foreign", ProjectPath: path, RepoID: f.repoB}
+	// The store derives a task's RepoID from its project path, so another
+	// project's task needs a path in another real repository.
+	otherPath := setupControlRepo(t)
+	otherRepo, err := config.RepoFromPath(otherPath)
+	require.NoError(t, err)
+	require.NotEqual(t, f.repoA, otherRepo.ID, "anti-vacuous: a genuinely different project identity")
+	foreign := task.Task{ID: "t-foreign", Prompt: "p", CronExpr: "0 * * * *", TargetSession: "foreign", ProjectPath: otherPath}
+	// Same PATH as the owner but a different project identity is not a shape the
+	// store can produce; the scope keys on the retained RepoID in any case.
+	assert.False(t, sandboxTaskInProject(task.Task{ProjectPath: path, RepoID: f.repoB}, sandboxProject{repoID: f.repoA, path: path}),
+		"scope keys on the project identity, never the path")
+	assert.False(t, sandboxTaskInProject(task.Task{ProjectPath: path}, sandboxProject{repoID: f.repoA, path: path}),
+		"a task with no retained identity fails closed")
 	watch := task.Task{ID: "t-watch", Prompt: "p", WatchCmd: "./w.sh", ProjectPath: path, RepoID: f.repoA}
 	for _, tk := range []task.Task{mine, foreign, watch} {
 		require.NoError(t, task.AddTask(tk))
@@ -320,6 +333,38 @@ func TestSandboxScope_TasksDeliverPromptsInsideTheProject(t *testing.T) {
 
 	f.assertRefused(t, "/v1/RemoveTask", `{"id":"t-foreign"}`, "another project's task")
 	f.assertRefused(t, "/v1/RemoveTask", `{"id":"t-watch"}`, "watch tasks are not managed from a sandbox")
+	f.assertRefused(t, "/v1/RemoveTask", `{"id":"no-such-task"}`, "a task that does not exist")
+	// ONE answer for all three: the id space is not an existence oracle.
+	_, a := f.call(t, f.secret, "/v1/RemoveTask", `{"id":"t-foreign"}`)
+	_, b := f.call(t, f.secret, "/v1/RemoveTask", `{"id":"t-watch"}`)
+	_, c := f.call(t, f.secret, "/v1/RemoveTask", `{"id":"no-such-task"}`)
+	assert.Equal(t, a, b)
+	assert.Equal(t, a, c)
+	still, gerr := task.GetTask("t-foreign")
+	require.NoError(t, gerr, "a refused removal must leave the other project's task")
+	assert.NotNil(t, still)
+}
+
+// A session outside the credential's scope and one that does not exist are the
+// same refusal, byte for byte: no existence oracle across projects, for
+// SendPrompt, ArchiveSession and AddTask alike.
+func TestSandboxScope_OutOfScopeAndNonexistentAreIndistinguishable(t *testing.T) {
+	f := newScopeFixture(t)
+	for _, tc := range []struct{ route, tmpl string }{
+		{"/v1/SendPrompt", `{"prompt":"hi","title":"%s"}`},
+		{"/v1/ArchiveSession", `{"title":"%s"}`},
+		{"/v1/AddTask", `{"prompt":"p","cron_expr":"* * * * *","target_session":"%s"}`},
+	} {
+		var bodies []string
+		for _, title := range []string{"foreign", "does-not-exist", "local-one"} {
+			code, out := f.call(t, f.secret, tc.route, fmt.Sprintf(tc.tmpl, title))
+			assert.Contains(t, out, scopeRefusal, "%s %s", tc.route, title)
+			assert.NotContains(t, out, "not found", "%s %s must not say whether the session exists", tc.route, title)
+			bodies = append(bodies, fmt.Sprintf("%d %s", code, out))
+		}
+		assert.Equal(t, bodies[0], bodies[1], "%s: another project's session vs nonexistent", tc.route)
+		assert.Equal(t, bodies[0], bodies[2], "%s: a daemon-host session vs nonexistent", tc.route)
+	}
 }
 
 func TestSandboxScope_DeniedRoutesNeverReachAHandler(t *testing.T) {
@@ -435,6 +480,7 @@ func TestSandboxTaskDeliveryNeverCreatesItsTarget(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), scopeRefusal)
+	assert.NotContains(t, err.Error(), "not found", "a missing target answers like an out-of-scope one")
 	f.mgr.mu.Lock()
 	assert.Equal(t, before, len(f.mgr.instances))
 	f.mgr.mu.Unlock()
@@ -567,9 +613,9 @@ func TestSandboxTaskDeliveryIsPinnedToTheAuthorizedSessionID(t *testing.T) {
 
 	// And the send, addressed by A's ID with the guard, never resolves the title
 	// to B: it is skipped with the not-delivered marker.
-	_, err = f.mgr.SendPromptWithStatus(SendPromptRequest{
-		ID: idA, Title: "peer", RepoID: f.repoA, Prompt: "x", TaskOrigin: true, Guard: guard,
-	})
+	_, err = f.mgr.sendPromptGuarded(SendPromptRequest{
+		ID: idA, Title: "peer", RepoID: f.repoA, Prompt: "x", TaskOrigin: true,
+	}, guard)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), notDeliveredMarker)
 

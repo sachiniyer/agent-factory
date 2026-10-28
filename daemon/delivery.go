@@ -297,11 +297,12 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 		send := SendPromptRequest{
 			Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
 		}
+		var guard func(*session.Instance, string) error
 		if req.SandboxOwner != "" {
 			send.ID = sandboxTargetID
-			send.Guard = m.sandboxDeliveryGuard(sandboxTargetID, repo.ID)
+			guard = m.sandboxDeliveryGuard(sandboxTargetID, repo.ID)
 		}
-		deliveryStatus, err := m.SendPromptWithStatus(send)
+		deliveryStatus, err := m.sendPromptGuarded(send, guard)
 		if err != nil {
 			if errors.Is(err, errTargetLimitReached) {
 				return TaskStatusLimitParked, session.PromptNotDelivered, false, nil

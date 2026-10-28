@@ -432,6 +432,15 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 // It performs no extra wait: local tmux and remote agent-server paths return
 // the observation their existing submit already made.
 func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, error) {
+	return m.sendPromptGuarded(req, nil)
+}
+
+// sendPromptGuarded is SendPromptWithStatus with an optional send guard. The
+// guard runs under the target's op lock on the instance the send is about to
+// reach and may refuse it; a sandbox-created task uses it to pin the delivery to
+// the session it authorized (#5571 W3.5). It is an argument, not a request
+// field: the request is wire data and stays comparable.
+func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *session.Instance, repoID string) error) (session.PromptDeliveryStatus, error) {
 	if req.Prompt == "" {
 		return session.PromptCouldNotConfirm, fmt.Errorf("prompt is required")
 	}
@@ -485,8 +494,8 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	if instance.IsTearingDown() {
 		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
 	}
-	if req.Guard != nil {
-		if gerr := req.Guard(instance, repoID); gerr != nil {
+	if guard != nil {
+		if gerr := guard(instance, repoID); gerr != nil {
 			return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("%w; %s", gerr, notDeliveredMarker))
 		}
 	}
