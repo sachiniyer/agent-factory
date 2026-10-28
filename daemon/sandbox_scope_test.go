@@ -353,7 +353,7 @@ func TestSandboxScope_OutOfScopeAndNonexistentAreIndistinguishable(t *testing.T)
 	for _, tc := range []struct{ route, tmpl string }{
 		{"/v1/SendPrompt", `{"prompt":"hi","title":"%s"}`},
 		{"/v1/ArchiveSession", `{"title":"%s"}`},
-		{"/v1/AddTask", `{"prompt":"p","cron_expr":"* * * * *","target_session":"%s"}`},
+		{"/v1/AddTask", `{"task":{"prompt":"p","cron_expr":"* * * * *","target_session":"%s"}}`},
 	} {
 		var bodies []string
 		for _, title := range []string{"foreign", "does-not-exist", "local-one"} {
