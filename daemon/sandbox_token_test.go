@@ -70,59 +70,35 @@ func TestSandboxTokenRegistry_SessionsDoNotShareCredentials(t *testing.T) {
 // The scope is what stops a compromised sandbox owning the host, so the denials
 // are asserted by name rather than by counting.
 func TestSandboxAllowedPath_DeniesTheOperatorOnlyVerbs(t *testing.T) {
-	// The scope was EMPTY throughout #3012 — no route could be admitted while the
-	// credential was unbound — and #3056 admits exactly one, Snapshot, because its
-	// handler now narrows to the caller's own session. Admission alone is still not
-	// authorization: TestEverySandboxRouteEnforcesAnOwnerConstraint is what holds
-	// the two together, and this assertion only pins which routes are in the table.
+	// The exact scope table is pinned by TestSandboxScopeTableIsPinned
+	// (sandbox_scope_test.go, W3.5); this keeps the by-name denials of the verbs
+	// whose authority a sandbox must never hold, whatever else joins the scope.
 	assert.True(t, sandboxAllowedPath("/v1/Snapshot"),
-		"Snapshot is admitted under #3056 because its handler constrains to sandboxOwner(ctx); if it is being "+
+		"Snapshot is admitted because its handler constrains to the caller's project; if it is being "+
 			"withdrawn, remove its entry from sandboxConstrainedRoutes too")
-	assert.Len(t, sandboxAllowedPaths, 1,
-		"the scope grew without this test noticing: every entry needs its own handler-side owner constraint, so a "+
-			"new one is a deliberate decision, never a default")
 	for _, path := range []string{
 		// DeliverPrompt runs instructions through every agent on the machine.
 		"/v1/DeliverPrompt",
-		// CreateSession names NO session and reaches the same authority anyway, by
-		// creating the target itself: repo_path, backend, program and prompt are
-		// all caller-supplied, so the default/local backend starts an attacker's
-		// agent on the HOST (#3012 review). This one is why the rule is "cannot
-		// gain host authority" rather than "cannot name a session".
-		"/v1/CreateSession",
-		// These three NAME a session, so admitting them without a per-route owner
-		// constraint reproduces DeliverPrompt one agent at a time: SendPrompt and
-		// CreateTab take a session id directly, and AddTask reaches one through
-		// Task.TargetSession. Snapshot used to be listed here as the enumeration
-		// that made them aimable; #3056 admitted it precisely because its handler
-		// now enforces the constraint these three still lack. Give them one and
-		// they can join it — that is the whole point of the contract.
-		"/v1/SendPrompt",
-		"/v1/CreateTab",
-		"/v1/AddTask",
 		// Read-only, and still host reconnaissance: ListProjects returns the
 		// operator's absolute project roots and ListDirectory walks the daemon's
-		// filesystem at an arbitrary path. The Add-project picker that consumes
-		// ListDirectory (#2788) is the operator's own client on the operator's own
-		// token, so denying it here costs nothing that works today.
+		// filesystem at an arbitrary path.
 		"/v1/ListProjects",
 		"/v1/ListDirectory",
 		// The same oracle, quieter: both take a caller-supplied repo_path and
-		// answer through config.RepoFromPath, which wraps git's own stderr — so a
-		// guessed path comes back distinguishable as missing, permission-denied,
-		// or not-a-repo. Confirming a path is weaker than enumerating one; it is
-		// still the operator's layout, and admitting it would be an exception
-		// carved into the rule for convenience.
+		// answer through config.RepoFromPath, which wraps git's own stderr.
 		"/v1/ListBackends",
 		"/v1/ListPrograms",
-		// Parameterless, and still an oracle: it avoids live titles across ALL
-		// repos, and the sandbox holds the finite wordlist in the af binary af put
-		// there, so sampling reveals which combinations are persistently taken.
+		// Parameterless, and still an oracle across ALL repos' live titles.
 		"/v1/SuggestSessionName",
 		"/v1/SetConfigValue",
 		"/v1/UnsetConfigValue",
 		"/v1/DeleteProject",
 		"/v1/KillSession",
+		// W3.5: a task patch, trigger or restart can turn a prompt-delivery task
+		// into one that runs on the daemon host.
+		"/v1/UpdateTask",
+		"/v1/TriggerTask",
+		"/v1/RestartTask",
 	} {
 		assert.Falsef(t, sandboxAllowedPath(path), "%s must never be reachable with a sandbox credential", path)
 	}

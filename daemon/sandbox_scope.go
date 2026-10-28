@@ -1,0 +1,310 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
+)
+
+// The sandbox credential's project-bounded scope (#5571 W3.5).
+//
+// A sandbox session's in-sandbox `af` gets the verbs a local agent's af has,
+// bounded to the PROJECT its session belongs to. The route table
+// (HTTPRoute.sandboxAllowed) only admits a path; every handler below also
+// enforces its constraint from sandboxOwner(ctx), and sandboxConstrainedRoutes
+// names each one so a test pins both directions.
+//
+// Two properties hold for everything admitted:
+//
+//   - Project bound. The target is resolved the way the unscoped handler would
+//     resolve it, then required to live in the owner's project (the repo ID of the
+//     owner's own row). The sandbox never names a repo: its request's repo_id and
+//     repo_path are replaced by the owner's, because a sandbox does not know (and
+//     must not learn) the daemon host's layout.
+//   - Nothing executes on the daemon box. Prompts and archives are accepted only
+//     for sessions that themselves run off-box; created sessions go to a listed
+//     host; tasks must deliver a prompt to such a session. Watch tasks (whose
+//     scripts run on the daemon host), other accounts, and local sessions are out.
+//
+// The operator (unix socket, operator token) carries no sandbox owner and is
+// delegated to the unscoped handler untouched.
+
+var (
+	errSandboxOutOfScope = errors.New("not permitted for a sandbox credential")
+)
+
+func sandboxRefusal(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errSandboxOutOfScope, fmt.Sprintf(format, args...))
+}
+
+// instanceBackendType is the persisted backend type of a tracked session. A
+// package var so a test can place sessions on a backend without provisioning one.
+var instanceBackendType = func(i *session.Instance) string { return i.ToInstanceData().BackendType }
+
+// offBoxBackendType reports whether a persisted backend type runs its workspace
+// off the daemon box.
+func offBoxBackendType(t string) bool {
+	switch t {
+	case "ssh", "sandbox", "docker", "remote":
+		return true
+	}
+	return false
+}
+
+// sandboxProject is the project a credential owner's session belongs to.
+type sandboxProject struct {
+	repoID string
+	path   string
+}
+
+// sandboxProjectOf finds the owner's own tracked row and returns its project.
+func (m *Manager) sandboxProjectOf(owner string) (sandboxProject, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inst, rid := m.trackedSessionByIDLocked(owner)
+	if inst == nil {
+		return sandboxProject{}, sandboxRefusal("the credential's session is no longer tracked")
+	}
+	return sandboxProject{repoID: rid, path: inst.Path}, nil
+}
+
+// authorizeSandboxSession resolves the session a sandbox request names and
+// returns its canonical identity, refusing anything outside the owner's project,
+// anything not running off-box, and (selfOnly) anything but the owner itself.
+func (m *Manager) authorizeSandboxSession(owner, id, title string, selfOnly bool) (sandboxProject, *session.Instance, error) {
+	proj, err := m.sandboxProjectOf(owner)
+	if err != nil {
+		return sandboxProject{}, nil, err
+	}
+	if id == "" && strings.TrimSpace(title) == "" {
+		// A request naming nothing means "this session" to the in-sandbox CLI
+		// (whoami, archive --self). Never "any".
+		id = owner
+	}
+	inst, repoID, _, _, _, err := m.resolveActionSession(id, title, proj.repoID)
+	if err != nil {
+		return sandboxProject{}, nil, err
+	}
+	if inst == nil || repoID != proj.repoID {
+		return sandboxProject{}, nil, sandboxRefusal("that session is not in this credential's project")
+	}
+	if selfOnly && inst.ID != owner {
+		return sandboxProject{}, nil, sandboxRefusal("this verb acts on the credential's own session only")
+	}
+	if !offBoxBackendType(instanceBackendType(inst)) {
+		return sandboxProject{}, nil, sandboxRefusal("that session runs on the daemon host")
+	}
+	return proj, inst, nil
+}
+
+// --- session verbs -----------------------------------------------------------
+
+func (s *controlServer) sendPromptScoped(ctx context.Context, req SendPromptRequest, resp *SendPromptResponse) error {
+	if owner, ok := sandboxOwner(ctx); ok {
+		proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, false)
+		if err != nil {
+			return err
+		}
+		req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
+		req.TaskOrigin = false
+	}
+	return s.SendPrompt(req, resp)
+}
+
+func (s *controlServer) archiveSessionScoped(ctx context.Context, req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+	if owner, ok := sandboxOwner(ctx); ok {
+		proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, false)
+		if err != nil {
+			return err
+		}
+		req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
+	}
+	return s.archiveSession(ctx, req, resp)
+}
+
+// --- tab verbs: the credential's own session only ---------------------------
+
+func (s *controlServer) createTabScoped(ctx context.Context, req CreateTabRequest, resp *CreateTabResponse) error {
+	if owner, ok := sandboxOwner(ctx); ok {
+		// A process or shell tab runs inside the sandbox. A web tab's localhost
+		// target is proxied by the daemon and a VS Code tab is served by a daemon
+		// managed code-server — both land on the daemon host — and a docs tab
+		// reads the daemon's proposal store. None is admitted.
+		if err := checkSandboxTabKind(req); err != nil {
+			return err
+		}
+		proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, true)
+		if err != nil {
+			return err
+		}
+		req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
+	}
+	return s.CreateTab(req, resp)
+}
+
+// checkSandboxTabKind admits process and shell tabs only.
+func checkSandboxTabKind(req CreateTabRequest) error {
+	if k := strings.TrimSpace(req.Kind); (k != "" && k != "shell" && k != "process") ||
+		req.URL != "" || req.Port != 0 || req.Proposal != "" {
+		return sandboxRefusal("only process and shell tabs can be created from a sandbox (web, VS Code and docs tabs are served by the daemon host)")
+	}
+	return nil
+}
+
+func (s *controlServer) closeTabScoped(ctx context.Context, req CloseTabRequest, resp *CloseTabResponse) error {
+	if owner, ok := sandboxOwner(ctx); ok {
+		proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, true)
+		if err != nil {
+			return err
+		}
+		req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
+	}
+	return s.closeTab(ctx, req, resp)
+}
+
+func (s *controlServer) renameTabScoped(ctx context.Context, req RenameTabRequest, resp *RenameTabResponse) error {
+	if owner, ok := sandboxOwner(ctx); ok {
+		proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, true)
+		if err != nil {
+			return err
+		}
+		req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
+	}
+	return s.RenameTab(req, resp)
+}
+
+func (s *controlServer) reorderTabScoped(ctx context.Context, req ReorderTabRequest, resp *ReorderTabResponse) error {
+	if owner, ok := sandboxOwner(ctx); ok {
+		proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, true)
+		if err != nil {
+			return err
+		}
+		req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
+	}
+	return s.ReorderTab(req, resp)
+}
+
+// --- CreateSession: listed hosts only, project default account only ---------
+
+func (s *controlServer) createSessionScoped(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error {
+	if owner, ok := sandboxOwner(ctx); ok {
+		proj, err := s.manager.sandboxProjectOf(owner)
+		if err != nil {
+			return err
+		}
+		if err := checkSandboxCreate(req); err != nil {
+			return err
+		}
+		// The project is the owner's, never the caller's: the sandbox's own
+		// working directory is not a path on this host.
+		req.RepoPath = proj.path
+	}
+	return s.createSession(ctx, req, resp)
+}
+
+// checkSandboxCreate is the create-shape rule for a sandbox caller.
+func checkSandboxCreate(req CreateSessionRequest) error {
+	if strings.TrimSpace(req.Host) == "" {
+		return sandboxRefusal("a sandbox creates sessions on a listed host only (--host); it cannot start one on the daemon box")
+	}
+	if b := strings.TrimSpace(req.Backend); b != "" && b != "ssh" {
+		return sandboxRefusal("a sandbox creates sessions through a listed host (the ssh runtime), not backend %q", b)
+	}
+	if req.InPlace {
+		return sandboxRefusal("--here attaches the daemon host's own working tree")
+	}
+	if strings.TrimSpace(req.Account) != "" {
+		return sandboxRefusal("a sandbox cannot select an account; its sessions use the project default")
+	}
+	return nil
+}
+
+// --- tasks: prompt-delivery tasks on the project's own off-box sessions ------
+
+// checkSandboxTaskShape is the task-shape rule for a sandbox caller.
+func checkSandboxTaskShape(t task.Task) error {
+	if strings.TrimSpace(t.WatchCmd) != "" {
+		return sandboxRefusal("watch tasks run a script on the daemon host and cannot be created from a sandbox")
+	}
+	if strings.TrimSpace(t.CronExpr) == "" {
+		return sandboxRefusal("only cron tasks can be created from a sandbox")
+	}
+	if strings.TrimSpace(t.TargetSession) == "" {
+		return sandboxRefusal("a sandbox task must deliver its prompt to an existing session (target_session); spawning one runs on the daemon host")
+	}
+	return nil
+}
+
+func (s *controlServer) addTaskScoped(ctx context.Context, req AddTaskRequest, resp *AddTaskResponse) error {
+	if owner, ok := sandboxOwner(ctx); ok {
+		t := req.Task
+		if err := checkSandboxTaskShape(t); err != nil {
+			return err
+		}
+		proj, inst, err := s.manager.authorizeSandboxSession(owner, "", t.TargetSession, false)
+		if err != nil {
+			return err
+		}
+		t.TargetSession = inst.Title
+		t.ProjectPath, t.RepoID, t.Host = proj.path, "", ""
+		t.OnComplete = ""
+		req.Task = t
+		req.Actor = fmt.Sprintf("sandbox session %s", owner)
+	}
+	return s.addTask(ctx, req, resp)
+}
+
+// sandboxTaskInProject reports whether t belongs to the owner's project.
+func sandboxTaskInProject(t task.Task, proj sandboxProject) bool {
+	if t.RepoID != "" {
+		return t.RepoID == proj.repoID
+	}
+	return taskRepoIDForValidation(t.ProjectPath) == proj.repoID
+}
+
+func (s *controlServer) listTasksScoped(ctx context.Context, req ListTasksRequest, resp *ListTasksResponse) error {
+	if err := s.ListTasks(req, resp); err != nil {
+		return err
+	}
+	owner, ok := sandboxOwner(ctx)
+	if !ok {
+		return nil
+	}
+	proj, err := s.manager.sandboxProjectOf(owner)
+	if err != nil {
+		resp.Tasks = nil
+		return err
+	}
+	kept := make([]task.Task, 0, len(resp.Tasks))
+	for _, t := range resp.Tasks {
+		if sandboxTaskInProject(t, proj) {
+			kept = append(kept, t)
+		}
+	}
+	resp.Tasks = kept
+	return nil
+}
+
+func (s *controlServer) removeTaskScoped(ctx context.Context, req RemoveTaskRequest, resp *RemoveTaskResponse) error {
+	if owner, ok := sandboxOwner(ctx); ok {
+		proj, err := s.manager.sandboxProjectOf(owner)
+		if err != nil {
+			return err
+		}
+		t, err := task.GetTask(req.ID)
+		if err != nil {
+			return err
+		}
+		if !sandboxTaskInProject(*t, proj) {
+			return sandboxRefusal("that task is not in this credential's project")
+		}
+		if strings.TrimSpace(t.WatchCmd) != "" {
+			return sandboxRefusal("watch tasks are not managed from a sandbox")
+		}
+	}
+	return s.RemoveTask(req, resp)
+}
