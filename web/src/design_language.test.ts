@@ -8,7 +8,9 @@ const srcRoot = dirname(fileURLToPath(import.meta.url));
 
 test("web components contain no raw colors outside the theme mechanism", () => {
   const files = readdirSync(srcRoot)
-    .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts") && name !== "terminal_ansi.ts")
+    // project_color.ts holds user-chosen project colors and the favicon's own ink,
+    // which are data painted into an image, not themed chrome.
+    .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts") && name !== "terminal_ansi.ts" && name !== "project_color.ts")
     .sort();
   const rawColor = /["'`]#(?:[\da-fA-F]{3}|[\da-fA-F]{4}|[\da-fA-F]{6}|[\da-fA-F]{8})["'`]|rgba?\(/g;
   const violations: string[] = [];

@@ -461,13 +461,24 @@ func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
 		"readBanner() timeout diagnostic log read should run as the account owner; calls=%v", calls)
 }
 
-// TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged pins the other half
-// of the fix: a non-account (daemon-user) session has no containerUser, so
-// sessionExecOptions() returns nil and readBanner() must issue a plain
-// `docker exec <container> cat <banner>` with no --user flag. The account-owner
-// path must not leak a --user into ordinary daemon sessions, where it would
-// either name a nonexistent uid or shadow the image's default USER.
-func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
+// TestDockerAccount_ReadBannerRunsAsTheImageDefaultUser pins the non-account
+// half of the readBanner security-context rule after the non-root-USER fix.
+// A non-account (daemon-user) session used to leave containerUser empty, so
+// sessionExecOptions() returned nil and readBanner() issued a plain
+// `docker exec <container> cat <banner>` that ran as the image's default USER.
+// That was the bug for a BYO image whose USER is non-root: provisioning had
+// already failed at `git config --global` against a root-owned /root, and even
+// if it had not, the banner read/write security contexts disagreed.
+//
+// prepareNonAccountUser now probes the image's default USER and records it in
+// containerUser, so sessionExecOptions() returns `--user <uid:gid> -e HOME=/root`
+// for a non-account session too. readBanner() and startAgentServer() therefore
+// run as the SAME image-default user, matching the account path's contract
+// (writer == reader). For a root-default image the probe reports 0:0 and the
+// behavior is unchanged from before; for a non-root image the read now runs as
+// that user with a HOME it owns, so a banner written with a restrictive umask
+// stays readable to the same uid that wrote it.
+func TestDockerAccount_ReadBannerRunsAsTheImageDefaultUser(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	// A local engine so the non-account pre-run locality guard passes without a
 	// docker call; this test exercises the banner-read exec, not the remote-engine
@@ -495,7 +506,15 @@ func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
 			return []byte("127.0.0.1:49152\n"), nil
 		case "exec":
 			joined := strings.Join(args, " ")
-			if strings.Contains(joined, "cat "+dockerBannerPath) {
+			switch {
+			case strings.Contains(joined, "id -u"):
+				// prepareNonAccountUser's probe of the image's default USER.
+				// This fake image defaults to a non-root user 1000:1000, the
+				// scenario the bug report reproduces.
+				return []byte("1000:1000\n"), nil
+			case isMountTableExec(args):
+				return mountTableAnswer(), nil
+			case strings.Contains(joined, "cat "+dockerBannerPath):
 				return []byte(`{"addr":":8000","token":"test-only","title":"non-account"}`), nil
 			}
 			return nil, nil
@@ -511,8 +530,13 @@ func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
 		Backend: BackendDocker,
 	})
 	require.NoError(t, err)
-	// No account → no --user flag on any exec; the banner read is plain
-	// `exec <container> cat <banner>`, matching the pre-account behavior.
+	// The fix probes the image's default user and runs every subsequent exec
+	// (provisioning, agent-server, banner read) as that user with HOME=/root.
+	// A non-root image-default user must therefore reach the banner read with
+	// --user 1000:1000 and HOME=/root, NOT the pre-fix plain exec that ran as
+	// the image default with no explicit --user and would have failed before
+	// reaching readBanner at all.
+	foundBannerReadAsImageUser := false
 	for _, call := range calls {
 		if len(call) < 2 || call[0] != "exec" {
 			continue
@@ -521,9 +545,14 @@ func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
 		if !strings.Contains(joined, "cat "+dockerBannerPath) {
 			continue
 		}
-		require.NotContains(t, joined, "--user",
-			"non-account readBanner() must not carry a --user flag; calls=%v", calls)
+		require.Contains(t, joined, "--user 1000:1000",
+			"non-account readBanner() must run as the image's default user after the fix; calls=%v", calls)
+		require.Contains(t, joined, "HOME=/root",
+			"non-account readBanner() keeps HOME=/root (the credential-mount anchor); calls=%v", calls)
+		foundBannerReadAsImageUser = true
 	}
+	require.True(t, foundBannerReadAsImageUser,
+		"readBanner() was never invoked; the non-account provision did not reach it; calls=%v", calls)
 }
 
 // TestDockerAccount_RejectsProtectedMountTargetsInAnyFieldCase pins the Docker

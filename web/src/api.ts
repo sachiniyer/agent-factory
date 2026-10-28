@@ -707,6 +707,8 @@ export interface RegisteredProject {
   root: string;
   relative_root: string;
   path_exists: boolean;
+  /** The user-chosen display color (#rrggbb); absent when none is set. */
+  color?: string;
   /** The repository identity this project RESOLVED to (config.Project.RepoID,
    *  `repo_id` on the wire) — a short hex hash from config.RepoIDFromRoot, NOT the
    *  registry `id` (`prj_...`). Empty for a record written before this field
@@ -805,6 +807,14 @@ export async function rebindProject(
     return resp.project;
   }
   const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", request, token);
+  return resp.project;
+}
+
+/** Sets (or, with "", clears) a registered project's display color (mirrors
+ *  `af projects color`). The daemon normalizes it to #rrggbb and emits
+ *  projects.changed, so every open client repaints from the refetched registry. */
+export async function setProjectColor(id: string, color: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("SetProjectColor", { id, color }, token);
   return resp.project;
 }
 

@@ -32,11 +32,18 @@ type ProgramExecutable struct {
 	Opaque bool
 }
 
-// LocateProgramExecutable finds the executable word of one literal simple
-// command, looking through leading assignments, the exec builtin and an env
-// wrapper. It returns ErrNoProgramExecutable when the command is only
-// assignments or empty, and ErrProgramNotLiteral when it is not one literal
-// call (a pipeline, a dynamic word).
+// LocateProgramExecutable finds the executable word of one simple command,
+// looking through leading assignments, the exec builtin and an env wrapper. It
+// returns ErrNoProgramExecutable when the command is only assignments or empty,
+// ErrProgramNotLiteral when it is not one simple call (a pipeline), and
+// ErrProgramDynamic when the executable word, or the PATH it is looked up in,
+// is computed at run time.
+//
+// Only what decides WHICH program runs has to be literal: the leading words up
+// to and including the executable, and a PATH assignment. Arguments after the
+// executable, and the values of other assignments, may be dynamic — they cannot
+// change which file runs (#5767). The grant paths keep callIsLiteral's strict
+// reading; this is resolution only.
 func LocateProgramExecutable(command string) (ProgramExecutable, error) {
 	if strings.TrimSpace(command) == "" {
 		return ProgramExecutable{}, ErrNoProgramExecutable
@@ -48,31 +55,47 @@ func LocateProgramExecutable(command string) (ProgramExecutable, error) {
 		}
 		return ProgramExecutable{}, ErrProgramNotLiteral
 	}
-	if !callIsLiteral(call) {
-		return ProgramExecutable{}, ErrProgramNotLiteral
-	}
 	var out ProgramExecutable
 	for _, assign := range call.Assigns {
-		if assign.Name != nil && assign.Name.Value == "PATH" {
-			value, _ := literalShellWord(assign.Value)
-			out.PATH, out.HasPATH = value, true
+		if assign == nil || assign.Name == nil || assign.Name.Value != "PATH" {
+			continue
 		}
+		value, literal := "", false
+		if assign.Value != nil && !assign.Append && assign.Index == nil && assign.Array == nil {
+			value, literal = literalShellWord(assign.Value)
+		}
+		if !literal {
+			return ProgramExecutable{}, ErrProgramDynamic
+		}
+		out.PATH, out.HasPATH = value, true
 	}
 	words, _ := stripExecPrefix(call.Args)
 	if len(words) == 0 {
 		return ProgramExecutable{}, ErrNoProgramExecutable
 	}
-	args, ok := literalCommandArgs(words)
-	if !ok {
-		return ProgramExecutable{}, ErrProgramNotLiteral
+	args := make([]string, len(words))
+	dynamic := make([]bool, len(words))
+	for i, word := range words {
+		if value, ok := literalShellWord(word); ok {
+			args[i] = value
+			continue
+		}
+		args[i], dynamic[i] = dynamicWordPlaceholder(word), true
 	}
 	idx := 0
-	if isEnvExecutableByBase(args[0]) {
+	if !dynamic[0] && isEnvExecutableByBase(args[0]) {
 		invocation, err := envcommand.Parse(args[1:], envcommand.Policy{AllowAssignments: true})
 		if err != nil || invocation.CommandIndex < 0 {
 			return ProgramExecutable{}, ErrProgramNotLiteral
 		}
 		idx = 1 + invocation.CommandIndex
+		// A computed word in front of the executable is harmless only as the
+		// value of an assignment; as an option operand it could name anything.
+		for i := 1; i < idx; i++ {
+			if dynamic[i] && !strings.HasSuffix(args[i], "="+dynamicMark) {
+				return ProgramExecutable{}, ErrProgramDynamic
+			}
+		}
 		if invocation.ClearEnvironment || invocation.Chdir != "" {
 			out.Opaque = true
 		}
@@ -84,13 +107,52 @@ func LocateProgramExecutable(command string) (ProgramExecutable, error) {
 				out.Opaque = true
 				continue
 			}
+			if strings.Contains(m.Value, dynamicMark) {
+				return ProgramExecutable{}, ErrProgramDynamic
+			}
 			out.PATH, out.HasPATH = m.Value, true
 		}
 	}
 	word := words[idx]
 	out.Name = args[idx]
 	out.Start, out.End = int(word.Pos().Offset()), int(word.End().Offset())
+	if dynamic[idx] {
+		// Offsets stay filled so a caller can tell a computed path-shaped word
+		// ($HOME/bin/claude) from a computed bare name ($AGENT).
+		out.Name = ""
+		return out, ErrProgramDynamic
+	}
 	return out, nil
+}
+
+const dynamicMark = "\x00dynamic"
+
+// dynamicWordPlaceholder stands in for a word whose value is computed at run
+// time when env's operands are parsed. A word that starts NAME= keeps that
+// shape — env treats it as an assignment whatever the value expands to — so
+// its name, and only its name, is known.
+func dynamicWordPlaceholder(word *syntax.Word) string {
+	if len(word.Parts) > 0 {
+		if lit, ok := word.Parts[0].(*syntax.Lit); ok {
+			if name, _, found := strings.Cut(lit.Value, "="); found && validAssignmentName(name) {
+				return name + "=" + dynamicMark
+			}
+		}
+	}
+	return dynamicMark
+}
+
+func validAssignmentName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 var (
@@ -99,6 +161,9 @@ var (
 	// ErrProgramNotLiteral: the command is not one literal simple call, so no
 	// word can be named as its executable without guessing.
 	ErrProgramNotLiteral = errors.New("the command is not one literal simple command")
+	// ErrProgramDynamic: the executable word, or the PATH it is looked up in,
+	// is computed at run time. The returned offsets, when set, locate the word.
+	ErrProgramDynamic = errors.New("the executable word or its PATH is computed at run time")
 )
 
 // onlyAssignments reports whether command parses as one statement made of

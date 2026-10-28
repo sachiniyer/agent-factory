@@ -339,6 +339,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "move_cmd",
+		Type:       "string",
+		Default:    `""`,
+		Purpose:    "Script af runs on the daemon host when moving a live local session to a sandbox (`af sessions move`): spec as JSON on stdin, AF_SSH / AF_SSH_DEST / AF_SSH_FULL in the environment · empty means no script · global-only: af executes it with the session's environment in reach, so a repository must never choose it — a checked-in value is rejected at load.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "worktree_root",
 		Type:       "string",
 		Default:    WorktreeRootSibling,

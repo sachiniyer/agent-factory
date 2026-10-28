@@ -68,6 +68,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"default_accounts":               EffectAppliedLive,
 	"session_env_passthrough":        EffectAppliedLive,
 	"on_archive_command":             EffectAppliedLive,
+	"move_cmd":                       EffectAppliedLive,
 	"worktree_root":                  EffectAppliedLive,
 	"vscode_server_binary":           EffectAppliedLive,
 	"daemon_poll_interval":           EffectAppliedLive,
