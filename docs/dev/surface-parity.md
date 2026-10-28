@@ -62,7 +62,7 @@ the web does.
 |---|---|---|---|
 | Title, program | yes | yes | yes |
 | Initial prompt | yes | yes | yes |
-| Backend (docker/ssh/hook) | yes | yes | yes |
+| Backend (docker/ssh/sandbox/hook) | yes | yes | yes |
 | Force-remote (hook) | yes | yes | yes |
 | Account (`--account`) | yes | yes | yes |
 | In-place (`--here`) | **no** | **no** | yes |

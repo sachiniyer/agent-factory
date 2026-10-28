@@ -708,7 +708,9 @@ the `ssh` backend stages it — platform-probed, cached under
 >   making the address the destination: that forces a `HostKeyAlias`, and no alias
 >   value satisfies both a plain `[name]:port` entry and a certificate principal.
 >
-> Tracked in #3086, which is deliberately left open for this half.
+> The `sandbox.ssh` half was closed as won't-fix in #3086 (2026-08-11): af cannot
+> know which word of your command is the host, so the two workarounds above are
+> the supported answer.
 
 ---
 
@@ -822,6 +824,40 @@ work to `origin` before replacing it (anything unpushed would be destroyed by
 the re-clone) — and refuses to replace if that push fails. Unreachability alone
 is not death — it does not mark a sandbox Lost, and restore refuses to replace a
 sandbox it cannot reach.
+
+### Host requirements, credentials and restarts
+
+What the sandbox host needs, and what af does to it:
+
+- **Tools.** `git`, `tmux` and a POSIX `sh` on the
+  non-interactive `PATH` of the ssh login (af sends its provisioning scripts as
+  one ssh argument that the remote login shell parses). The static `af` binary
+  af copies over also has to run there: see the glibc rule under
+  [Docker](#docker-backend) for the dynamic build.
+- **Git identity is rewritten.** Provisioning runs `git config --global`
+  on the host to set `user.name` "Agent Factory" and `user.email`
+  `af@agent-factory.local`, and adds `safe.directory "*"`. That is the host
+  user's global git config, so point `sandbox.ssh` at a user whose global git
+  identity you do not mind changing.
+- **Credentials.** The clone uses value-free GitHub credentials: no token value is
+  written into the clone's config. The per-session agent-server token goes
+  through stdin into a `0600` file in the session directory, never through argv
+  or the environment of a process the agent starts.
+- **Callback credential.** For the agent inside the sandbox to call back into
+  the daemon (`AF_DAEMON_URL`/`AF_DAEMON_TOKEN`), the daemon needs
+  `network.require_token = true` and a `network.listen_addr` that is a literal,
+  non-loopback IP the sandbox can reach, with a listener actually accepting on it.
+  When that is not the case the create is **not** refused: the session is created
+  without a callback credential and the reason is reported (`callback_unavailable_reason`
+  in the backend picker). Only the `/v1/Snapshot` route is admitted for this
+  credential, answering with the caller's own session.
+- **Daemon restart.** The agent-server is started with `nohup`, so it
+  outlives a daemon restart on the host, and on start the daemon reattaches
+  to it: it re-dials the tunnel and rebinds the same agent-server, with no
+  re-provision. A row that cannot be reattached (no persisted runtime identity,
+  or the agent-server is gone) stays Lost, and recovery pushes its work to
+  `origin`, then re-provisions a fresh sandbox from the branch. An unreachable
+  host alone is not death and never triggers that replacement.
 
 ### What survives, and what doesn't
 

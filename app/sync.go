@@ -805,9 +805,10 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileRootRecreateContext(d.RootRecreateContext) {
 		changed = true
 	}
-	// Backends without user-managed tabs (the off-box docker/ssh/hook runtimes)
-	// have a tab list their runtime owns — a single agent tab, fixed at Launch —
-	// so there is nothing for the snapshot to reconcile against. Skipping is a
+	// Backends without user-managed tabs (the off-box docker/ssh/sandbox/hook
+	// runtimes) have a tab list their runtime owns: the agent tab, plus any
+	// metadata-only external web tabs the daemon admits (#3062). There is no
+	// local tmux session behind those for the snapshot to reconcile against. Skipping is a
 	// no-op rather than a behavior change: ReconcileTabsFromData already returns
 	// early for an instance with no local worktree, which is every sandbox
 	// instance (#1874).
