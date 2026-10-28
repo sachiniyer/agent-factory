@@ -235,11 +235,31 @@ only needs the workspace tooling:
 - **`cat`** — reads the agent-server's startup banner, and, for an
   account-scoped session, the container's own `/proc/1/mountinfo` when af
   verifies the account boundary (#3598).
-- **`stat`**, **`mkdir`** and **`chown`** — account-scoped sessions ONLY: af asks
-  the mounted account who owns it, then prepares a writable HOME for that same
-  uid. A session with no `--account` never runs these. Both these entries and
-  `cat` were already required and simply missing from this list (#3602 review);
-  busybox and coreutils each provide all of them.
+- **`stat`**, **`mkdir`**, **`chown`**, **`find`** and **`id`** — af probes the container's
+  default user and prepares a writable HOME and `/workspace` for that uid, so a
+  BYO image that sets a non-root `USER` directive (a common hardening practice)
+  provisions the same way a root-default image does. An account-scoped session
+  probes the **mounted account**'s owner; a session with no `--account` probes
+  the **image**'s default `USER` (`id -u`/`id -g`), and af chowns HOME and
+  `/workspace` to that uid as root before provisioning as that user. `stat` is
+  account-only (it reads the mounted directory's owner); `id` runs on every
+  non-account session, and `mkdir`/`chown` run on an account session or when
+  the probe finds a non-root default user — a root-default image on a
+  non-account session skips the chown entirely, so a host directory
+  bind-mounted at `/root` or `/workspace` is never re-owned and a HOME set via
+  `run_args` stays in effect. Before chowning, af reads the container's own mount table
+  (`/proc/self/mountinfo`, via `cat`, `cd` and `pwd -P`) and never lets the
+  recursive chown cross into **any** mount point at or under HOME — however it
+  was created (`-v`, `--mount`, `--volumes-from`, `--tmpfs`, an image `VOLUME`,
+  an agent-credential mount) — so it neither re-owns the operator's host files
+  (a read-write bind) nor EROFS-aborts on a read-only one. `find` walks HOME with
+  that prune list when there is at least one such mount; with none it is a plain
+  `chown -R`. Only a directory whose containing mount is the container's own root filesystem is chowned: if HOME or `/workspace` is itself a mount, or lives beneath one (a host bind, a volume, a tmpfs, or a symlinked HOME that resolves into one), af skips that chown and logs why. If the
+  mount table cannot be read or understood, provisioning fails with an error
+  naming it rather than chowning blind. `chown` runs with `-h` in that form so a symlink the image ships under `/root`
+  is re-owned itself, not its target outside HOME. These entries and `cat` were
+  already required and simply missing from this list (#3602 review); busybox and
+  coreutils each provide all of them.
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
 - A libc/architecture compatible with the daemon's `af` binary. The copied-in
   binary is the **daemon's own executable**, and the release artifacts
