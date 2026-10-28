@@ -202,6 +202,13 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		return m, nil
 	}
 	m.projectPickerOverlay.SetDegraded(degraded)
+	// The rows installed below replace the counts the picker opened with, so
+	// the snapshot half's health must travel with them: a conflict-time fetch
+	// that failed leaves unconfirmed counts (a cross-repo rebind even adds a
+	// zero-count row), and the D gate reads this flag before it lets a
+	// delete-project confirmation claim "no live sessions" (#4888 review). A
+	// fetch that answered rebuilds the counts, so it clears the flag.
+	m.projectPickerOverlay.SetSnapshotDegraded(msg.fetchErr != nil)
 	// The re-armed form names the root the rebuilt ROW carries — the read the
 	// picker installs — so the message and the retry's expected root always
 	// describe the same record. A record gone from the snapshot falls back to

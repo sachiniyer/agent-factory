@@ -1,6 +1,9 @@
 package overlay
 
-import "sort"
+import (
+	"path/filepath"
+	"sort"
+)
 
 // MergePreservingSessionRows merges a fresh registry-side project list into
 // rows whose session snapshot never answered (#4888 review): projects then
@@ -131,6 +134,20 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 			// failed, so they carry over from the row it replaces.
 			fresh.SessionCount = row.SessionCount
 			fresh.InPlaceCount = row.InPlaceCount
+			// So does the navigable workspace when the record's root is
+			// missing. A healthy build ranks a live session workspace above an
+			// unproven registry root, which is how the old row came to show a
+			// Root other than its RegistryRoot; the failed snapshot only lost
+			// that session source. Falling back to the missing path would
+			// point the sidebar and picker at a directory that is not there
+			// (#4888 review). A fresh Root that a higher-priority source (the
+			// active workspace, root_agents) still supplies is left alone.
+			if fresh.MissingPath && row.Root != "" &&
+				filepath.Clean(row.Root) != filepath.Clean(row.RegistryRoot) &&
+				filepath.Clean(fresh.Root) == filepath.Clean(fresh.RegistryRoot) {
+				fresh.Root = row.Root
+				fresh.Name = row.Name
+			}
 			merged = append(merged, fresh)
 			seenRepoIDs[fresh.RepoID] = true
 			seenRoots[fresh.Root] = true

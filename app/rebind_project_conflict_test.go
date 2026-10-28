@@ -380,3 +380,44 @@ func TestRebindConflictWithADegradedRegistryKeepsRegistryRows(t *testing.T) {
 		"the healthy session half still installs its live row")
 	assert.Equal(t, 1, liveRow.SessionCount, "live counts come from the landed snapshot")
 }
+
+// TestRebindConflictRefreshCarriesSnapshotHealthToTheDeleteGate pins the #4888
+// review finding on the conflict refresh: the rows it installs replace the
+// counts the picker opened with, so the snapshot half's health must replace the
+// picker's snapshot-degraded flag too — the flag the D (delete project) gate
+// reads before a confirmation may claim "no live sessions". A picker opened on
+// a healthy snapshot whose conflict-time fetch fails holds unconfirmed counts
+// (the cross-repo split even adds a zero-count row), so the gate must close; a
+// fetch that answered recounts every row, so a gate an earlier failure closed
+// reopens.
+func TestRebindConflictRefreshCarriesSnapshotHealthToTheDeleteGate(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		openDegraded bool
+		fetchErr     error
+		want         bool
+	}{
+		{name: "a failed conflict-time fetch closes the gate", openDegraded: false, fetchErr: errors.New("daemon snapshot unavailable"), want: true},
+		{name: "a fetch that answered reopens it", openDegraded: true, fetchErr: nil, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, id := activeRebindHome(t)
+			displayed := h.projectPickerOverlay
+			displayed.SetSnapshotDegraded(tc.openDegraded)
+			_, err := config.RebindProject(id, initTestGitRepo(t)) // another client, meanwhile
+			require.NoError(t, err)
+			stubRebindCAS(t)
+			t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+				return nil, tc.fetchErr
+			}))
+
+			_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+			require.NotNil(t, cmd)
+			h.Update(cmd())
+
+			require.False(t, displayed.RebindPending(), "precondition: the conflict reply was applied")
+			assert.Equal(t, tc.want, displayed.SnapshotDegraded(),
+				"the delete gate must follow the health of the snapshot behind the counts now displayed")
+		})
+	}
+}
