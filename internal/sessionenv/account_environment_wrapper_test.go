@@ -165,9 +165,6 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		// only its own process's environment and execs nothing, so the tail
 		// assignment overrides no running agent.
 		"strace env CODEX_HOME=/other",
-		// A dynamic tail word could expand to `env`, but with no command word
-		// after the assignment the result is still print mode.
-		"strace $W CODEX_HOME=/other",
 		// xargs with a literal command whose argv cannot reach env: items and
 		// substitutions land in the command's own arguments.
 		"xargs",
@@ -269,6 +266,16 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace -fECODEX_HOME=$V codex", true},
 		{"strace -fE CODEX_HOME=/other codex", true},
 		{"strace -fE codex", false},
+		// An operand-taking option consumes the REST of the cluster (Codex P1
+		// on #5701): -oECODEX_HOME=x is -o with a file name, not -E.
+		{"strace -oECODEX_HOME=x codex", false},
+		{"strace -fsECODEX_HOME=x codex", false},
+		{"strace -pECODEX_HOME=x codex", false},
+		{"strace -fE CODEX_HOME=/other codex", true},
+		// A dynamic word in option position could expand to -E… (word
+		// splitting) and make the next word the traced command, so a trailing
+		// NAME= word is that command's argument, not print mode.
+		{"strace $W CODEX_HOME=/other", true},
 		{"strace -fEPORT=1 codex", false},
 		// getopt_long accepts unambiguous prefixes (verified: strace
 		// --en=CODEX_HOME=/o sets it in the child).
@@ -278,6 +285,24 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace --en=CODEX_HOME=$V codex", true},
 		{"strace --en$x codex", true},
 		{"strace --en=PORT=1 codex", false},
+		// Inversion (#5033 review): strace's own option words are admitted only
+		// when positively recognized. Unknown long options and abbreviations
+		// refuse; known-safe options and their operands stay allowed.
+		{"strace --bogus codex", true},
+		{"strace --enx=CODEX_HOME=/other codex", true},
+		{"strace --en CODEX_HOME=/other codex", true},
+		{"strace --e=CODEX_HOME=/other codex", true},
+		{"strace -fy$x codex", true},
+		{"strace -Q codex", true},
+		{"strace $opt codex", true},
+		{"strace --output=$F codex", false},
+		{"strace --output=trace.log --follow-forks codex", false},
+		{"strace --trace=openat codex", false},
+		{"strace -f -o trace.log codex --model x", false},
+		{"strace -ff -s 200 -e trace=network -o\"$LOG\" codex", false},
+		{"strace -p 1234 codex", false},
+		{"strace -- codex", false},
+		{"strace -E PORT codex", false},
 		// Control: the same expansions on a name af does not own, and the
 		// non-strace spelling, stay allowed.
 		{"strace -EPORT=$V codex", false},
