@@ -57,9 +57,7 @@ func (i *Instance) ArchivedWorkspace() *ArchivedWorkspaceData {
 // session's runtime, or "" when the backend keeps no such directory (docker and
 // hook have nothing af can leave in place and reattach).
 func (i *Instance) preservedSessionDir() string {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	provider, ok := i.backend.(runtimeCleanupProvider)
+	provider, ok := i.currentBackend().(runtimeCleanupProvider)
 	if !ok {
 		return ""
 	}
@@ -151,9 +149,7 @@ func (i *Instance) RestoreRefusedForPreservedWorkspace() error {
 // so a later kill of the archived row still reaps the directory (stopTunnel is
 // idempotent, which reap relies on for retries).
 func (i *Instance) stopRemoteTransport() {
-	i.mu.RLock()
-	b := i.backend
-	i.mu.RUnlock()
+	b := i.currentBackend()
 	var p *sandboxProvisioner
 	switch b := b.(type) {
 	case *sandboxBackend:
