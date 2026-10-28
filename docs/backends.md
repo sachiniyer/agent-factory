@@ -628,6 +628,12 @@ inherit it. A local token is never copied to the SSH host implicitly.
 
 ### Testing
 
+CI runs `TestSandboxDaemonE2E` (`.github/workflows/sandbox-e2e.yml`, on every master
+push and nightly): a real daemon on a default config drives a `backend = "sandbox"`
+session against a containerized sshd host through its own RPCs (create, prompt,
+preview, tab, archive, restore, kill, and a task-fired create). `make
+backend-sandbox-e2e` runs it by hand; it is not a routine local gate.
+
 `make backend-ssh-roundtrip` runs the real end-to-end SSH round-trips on a host
 with Docker: it stands up a throwaway `sshd`+git+tmux container as the ssh target
 (no external host, no dependency on the box's own sshd), creates a session on the

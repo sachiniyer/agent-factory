@@ -6867,7 +6867,10 @@ async function updateTask(task, update, token2) {
 }
 async function triggerTask(task, token2) {
   requireTaskID(task.id, "trigger a task");
-  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+  const result = await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 async function removeTask(task, token2) {
   requireTaskID(task.id, "remove a task");
@@ -20597,7 +20600,12 @@ function doTriggerTask(task) {
   if (tok === null) {
     return;
   }
-  void triggerTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void triggerTask(task, tok).then(refreshTasks).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      refreshTasks();
+    }
+    surfaceTabError(e);
+  });
 }
 function doRetryLimit() {
   const sel = selectedSession2();
