@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -170,4 +171,28 @@ func TestAgentServerWithoutAStableIDStopsNothing(t *testing.T) {
 	require.NoError(t, hs.stopEditor())
 	_, err := hs.ensureEditor()
 	require.Error(t, err)
+}
+
+// A missing editor on a REMOTE session names the session's host and the install step
+// for that host, not the local hint that points at the daemon's machine.
+func TestRemoteEditorMissingMessageNamesTheHost(t *testing.T) {
+	err := error(&remoteEditorMissingError{host: "build-box"})
+	msg := err.Error()
+	assert.Contains(t, msg, `"build-box"`)
+	assert.Contains(t, msg, "not installed on this session's host")
+	assert.Contains(t, msg, "Install it on that host")
+	assert.NotEqual(t, vscodeInstallHint, msg)
+	assert.ErrorIs(t, err, errVSCodeBinaryMissing, "still reads as a missing editor to callers that only ask that")
+
+	// An unnamed backend (docker, hook, legacy sandbox.ssh) still says it is the host.
+	assert.Contains(t, remoteEditorInstallHint(""), "this session's host")
+	assert.NotContains(t, remoteEditorInstallHint(""), `""`)
+
+	// The notice page the pane renders carries it, escaped.
+	rec := httptest.NewRecorder()
+	var missing *remoteEditorMissingError
+	require.True(t, errors.As(err, &missing))
+	writeVSCodeNoticePage(rec, missing.Error())
+	assert.Contains(t, rec.Body.String(), "build-box")
+	assert.NotContains(t, rec.Body.String(), "set vscode_server_binary in config.toml)", "not the local hint")
 }

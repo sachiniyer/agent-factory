@@ -238,6 +238,13 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 		// a failure: render the install hint INTO the pane (the iframe shows this
 		// document) rather than an error page, and log nothing — this resolves on
 		// every request, so an error log here would spam once per asset fetch.
+		// A relayed editor missing on the session's HOST names that host and its
+		// install step: the local hint below would send the user to the wrong machine.
+		var remoteMissing *remoteEditorMissingError
+		if errors.As(err, &remoteMissing) {
+			writeVSCodeNoticePage(w, remoteMissing.Error())
+			return
+		}
 		if errors.Is(err, errVSCodeBinaryMissing) {
 			writeVSCodeNoticePage(w, vscodeInstallHint)
 			return

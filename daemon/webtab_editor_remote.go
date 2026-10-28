@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -49,7 +50,7 @@ func (m *Manager) remoteEditorTarget(instance *session.Instance, repoID, title s
 	case agentproto.EditorStateStarting:
 		return webTabTarget{Kind: kind}, errVSCodeStarting
 	case agentproto.EditorStateMissing:
-		return webTabTarget{Kind: kind}, fmt.Errorf("%w on this session's host: %s", errVSCodeBinaryMissing, st.Message)
+		return webTabTarget{Kind: kind}, &remoteEditorMissingError{host: instance.Host}
 	default:
 		return webTabTarget{Kind: kind}, fmt.Errorf("the workspace editor reported unknown state %q", st.State)
 	}
@@ -100,4 +101,29 @@ func (m *Manager) stopRemoteEditor(instance *session.Instance) {
 	if err := er.StopEditor(ctx); err != nil {
 		m.warn().Printf("remote editor of session id %q was not stopped on tab close (it stops with the session): %v", instance.ID, err)
 	}
+}
+
+// remoteEditorMissingError reports that the editor binary is not installed on an
+// off-box session's HOST. It unwraps to errVSCodeBinaryMissing so callers that only
+// ask "is the editor missing" still match, but the proxy checks for this type first:
+// the local install hint sends the user to fix the daemon's machine, which is the
+// wrong one here.
+type remoteEditorMissingError struct {
+	host string // the named host (global `hosts`), or "" for an unnamed backend
+}
+
+func (e *remoteEditorMissingError) Error() string { return remoteEditorInstallHint(e.host) }
+func (e *remoteEditorMissingError) Unwrap() error { return errVSCodeBinaryMissing }
+
+// remoteEditorInstallHint is the text a remote session's VS Code pane shows when
+// the host has no editor. It names the host and gives the install step for THAT
+// machine; the local hint stays for local sessions.
+func remoteEditorInstallHint(host string) string {
+	where := "this session's host"
+	if h := strings.TrimSpace(host); h != "" {
+		where = fmt.Sprintf("this session's host %q", h)
+	}
+	return "code-server is not installed on " + where + " — the editor runs there, not on the machine running af. " +
+		"Install it on that host: https://github.com/coder/code-server#install " +
+		"(or set vscode_server_binary in config.toml on that host)"
 }
