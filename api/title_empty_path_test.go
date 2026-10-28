@@ -41,7 +41,7 @@ func TestDiskRepoPathsForTitle_CountsDistinctReposByRepoIDNotPath(t *testing.T) 
 	saveOneRepoInstances(t, "repo-alpha", session.InstanceData{Title: "foo", Path: "", BackendType: "docker"})
 	saveOneRepoInstances(t, "repo-beta", session.InstanceData{Title: "foo", Path: "", BackendType: "docker"})
 
-	repoIDs, repoPaths, gaps, err := diskRepoPathsForTitle("foo", nil)
+	repoIDs, repoPaths, gaps, _, err := diskRepoPathsForTitle("foo", nil)
 	if err != nil {
 		t.Fatalf("diskRepoPathsForTitle: %v", err)
 	}

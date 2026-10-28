@@ -70,7 +70,7 @@ drive_account_field() {
     # The title names the AGENT, which is the one property a create-time picker
     # owes the user: this list is scoped to the program on the form.
     af_wait_for 'Select claude account' "$AF_DRIVER_TIMEOUT" 'account field opened' || return 1
-    af_wait_for 'Ambient identity' "$AF_DRIVER_TIMEOUT" 'ambient row is first' || return 1
+    af_wait_for "Use the agent's own login" "$AF_DRIVER_TIMEOUT" 'ambient row is first' || return 1
     af_wait_for "$SIGNED_IN_ACCOUNT" "$AF_DRIVER_TIMEOUT" 'a registered account is listed' || return 1
     # Constraint 3: a not-logged-in account is LISTED and says so. A round trip that
     # returned nothing, or one that hid the row, fails here.
@@ -138,7 +138,14 @@ drive_account_field() {
         'the daemon answered about the account it was sent' || return 1
     _af_log 'assert OK: the picked account reached the daemon on the create request'
 
-    # The next create starts on the ambient identity — no leak.
+    # The daemon refused, so the app keeps the input for a retry (by design: the
+    # account rides in the retained draft). Return to that form, abandon it, and
+    # only then ask for a fresh one: the next create starts on the ambient
+    # identity — no leak.
+    af_send Escape
+    af_wait_for 'submit name' "$AF_DRIVER_TIMEOUT" 'the retained form returns' || return 1
+    af_send C-c
+    af_wait_gone 'submit name' "$AF_DRIVER_TIMEOUT" 'retained form abandoned' || return 1
     af_send n
     af_wait_for 'submit name' "$AF_DRIVER_TIMEOUT" 'second naming form' || return 1
     screen="$(af_capture)"
@@ -181,7 +188,7 @@ drive_account_field_at_80_cols() {
 
     af_send C-o
     af_wait_for 'Select claude account' "$AF_DRIVER_TIMEOUT" 'account field opens at 80 cols' || return 1
-    af_wait_for 'Ambient identity' "$AF_DRIVER_TIMEOUT" 'ambient row at 80 cols' || return 1
+    af_wait_for "Use the agent's own login" "$AF_DRIVER_TIMEOUT" 'ambient row at 80 cols' || return 1
     # The overlay's own bottom hint proves it painted in full inside the pane: an
     # overlay wider or taller than the terminal loses its last rows to the clamp
     # (the #1998 class).

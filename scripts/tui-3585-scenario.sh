@@ -98,7 +98,7 @@ af_select_zwj() {
     local i
     for i in $(seq 1 12); do
         if af_capture | grep -qE "▾[[:space:]]+${ANCHOR_HEAD}"; then
-            af_capture | grep -qF 'D kill' && return 0
+            af_capture | grep -qF 'D delete' && return 0
         fi
         af_send j
         sleep "$AF_DRIVER_POLL"
@@ -120,7 +120,7 @@ drive_confirmation_zone() {
     af_wait_for 'to cancel|esc cancel' "$AF_DRIVER_TIMEOUT" 'kill confirmation' || return 1
 
     local needle row line col
-    needle='to cancel'
+    needle='esc cancel'
     row="$(_row_of "$needle")"
     [ -n "$row" ] || { _af_fail "confirmation instruction row not found"; return 1; }
     line="$(af_capture | sed -n "${row}p")"
