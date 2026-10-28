@@ -3,15 +3,22 @@ package session
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -101,11 +108,11 @@ func (w *sandboxWorkspace) syncAccountIn(timeout time.Duration) error {
 	if err != nil || !apply {
 		return err
 	}
-	archive, n, err := buildAccountArchive(w.spec.Account.Dir, accountCredentialRel[w.spec.Account.Agent])
+	archive, versions, err := buildAccountArchive(w.spec.Account.Dir, accountCredentialRel[w.spec.Account.Agent])
 	if err != nil {
 		return err
 	}
-	if n == 0 {
+	if len(versions) == 0 {
 		return fmt.Errorf("account %q has no credential file to sync under %s (has it been logged in?)", w.spec.Account.Name, w.spec.Account.Dir)
 	}
 	dir := shellQuote(w.AccountDir())
@@ -113,6 +120,10 @@ func (w *sandboxWorkspace) syncAccountIn(timeout time.Duration) error {
 	if out, err := w.shell.Run(timeout, script, bytes.NewReader(archive), true); err != nil {
 		return fmt.Errorf("syncing account %q to the host failed: %s: %w", w.spec.Account.Name, strings.TrimSpace(string(out)), err)
 	}
+	// The version this session synced in, per file: the baseline every later
+	// write-back is judged against (accountVersion). Recorded only once the host
+	// holds the files.
+	w.syncedVersion = versions
 	return nil
 }
 
@@ -120,42 +131,154 @@ func (w *sandboxWorkspace) syncAccountIn(timeout time.Duration) error {
 // the registry copy when one changed — a refresh the agent wrote there. Only the
 // allowlisted names are accepted, whatever the host's archive contains.
 func (w *sandboxWorkspace) pullAccountBack(timeout time.Duration) (changed int, err error) {
+	res, err := w.writeBackAccount(timeout)
+	return res.Written, err
+}
+
+// accountWriteBack is what one write-back did.
+type accountWriteBack struct {
+	// Written is how many credential files replaced the registry copy.
+	Written int
+	// Skipped names the files the host changed but that were NOT written, and why —
+	// the registry moved on since this session synced it in (another session
+	// refreshed it), or this process holds no sync-in baseline for it.
+	Skipped []string
+}
+
+// accountVersion is the version identity of one credential file: a digest of its
+// content. Content, not a timestamp or a counter: it is what the file IS, it
+// cannot be spoofed by a clock, and two sessions that synced the same file hold
+// the same version.
+func accountVersion(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// accountArchiveLimit is the hard byte bound on a write-back stream: every file
+// the agent's scope may hold at its per-file cap, plus tar's block overhead. The
+// archive is read UNDER this bound — the command is killed the moment it is
+// crossed — never buffered first, so a hostile host cannot grow the daemon past it.
+func accountArchiveLimit(agent string) int64 {
+	n := int64(len(accountCredentialRel[agent]))
+	return n*(accountSyncMaxFileBytes+2048) + 2048 + 1024
+}
+
+// writeBackAccount reads the credential files back from the host and replaces the
+// registry copy — as a versioned compare-and-swap, from a bounded stream.
+//
+//   - BOUNDED: the host is untrusted (W7.3's own design), so its stdout is read with
+//     a hard byte limit while it streams; past the limit the command is killed and
+//     the write-back refused (ErrOutputOverLimit). A truncated or malformed archive
+//     is refused whole, and nothing is written until every entry has parsed.
+//   - VERSIONED: each file is judged against the version THIS session synced in. A
+//     file the host did not change is not a refresh and is never written — a stale
+//     snapshot is not news (#5864).
+//   - COMPARE-AND-SWAP: a changed file replaces the registry copy only while the
+//     registry still holds the version this session synced in. If another session
+//     refreshed it first, or the account was removed, the write is skipped and
+//     logged: a stale snapshot can never overwrite a fresher one, and a removed
+//     account is never resurrected. The check and the replacement happen under one
+//     lock per registry file.
+func (w *sandboxWorkspace) writeBackAccount(timeout time.Duration) (accountWriteBack, error) {
+	var res accountWriteBack
 	apply, err := w.accountSyncApplies()
 	if err != nil || !apply {
-		return 0, err
+		return res, err
 	}
 	rels := accountCredentialRel[w.spec.Account.Agent]
+	limit := accountArchiveLimit(w.spec.Account.Agent)
 	quoted := make([]string, 0, len(rels))
 	for _, rel := range rels {
 		quoted = append(quoted, shellQuote(rel))
 	}
 	// Missing files are skipped, and a scope that is already gone (a repeated
-	// teardown) reads back as nothing rather than as an error.
+	// teardown) reads back as nothing rather than as an error. head -c bounds the
+	// honest case on the host's side too; the local limit is the authoritative one.
 	script := "cd " + shellQuote(w.AccountDir()) + " 2>/dev/null || exit 0; " +
 		"list=$(for f in " + strings.Join(quoted, " ") + "; do [ -f \"$f\" ] && printf '%s\\n' \"$f\"; done); " +
-		"[ -n \"$list\" ] || exit 0; printf '%s\\n' \"$list\" | tar -cf - -T -"
-	out, runErr := w.shell.Run(timeout, script, nil, false)
-	if runErr != nil {
-		return 0, fmt.Errorf("reading account %q back from the host failed: %w", w.spec.Account.Name, runErr)
+		"[ -n \"$list\" ] || exit 0; printf '%s\\n' \"$list\" | tar -cf - -T - | head -c " + strconv.FormatInt(limit+1, 10)
+	var out []byte
+	if ls, ok := w.shell.(limitedShell); ok {
+		out, err = ls.RunLimited(timeout, script, limit)
+	} else {
+		out, err = w.shell.Run(timeout, script, nil, false)
+		if err == nil && int64(len(out)) > limit {
+			err = ErrOutputOverLimit
+		}
+	}
+	if err != nil {
+		if errors.Is(err, ErrOutputOverLimit) {
+			return res, fmt.Errorf("account %q write-back refused: the host sent more than the %d-byte bound: %w", w.spec.Account.Name, limit, err)
+		}
+		return res, fmt.Errorf("reading account %q back from the host failed: %w", w.spec.Account.Name, err)
 	}
 	if len(out) == 0 {
-		return 0, nil
+		return res, nil
 	}
 	files, err := readAccountArchive(out, rels)
 	if err != nil {
-		return 0, fmt.Errorf("account %q write-back refused: %w", w.spec.Account.Name, err)
+		return res, fmt.Errorf("account %q write-back refused: %w", w.spec.Account.Name, err)
 	}
-	for rel, data := range files {
-		path := filepath.Join(w.spec.Account.Dir, filepath.FromSlash(rel))
-		if cur, rerr := os.ReadFile(path); rerr == nil && bytes.Equal(cur, data) {
+	names := make([]string, 0, len(files))
+	for rel := range files {
+		names = append(names, rel)
+	}
+	sort.Strings(names)
+	for _, rel := range names {
+		data := files[rel]
+		synced, known := w.syncedVersion[rel]
+		now := accountVersion(data)
+		if known && now == synced {
+			continue // the host never changed it: not a refresh
+		}
+		if !known {
+			res.Skipped = append(res.Skipped, rel)
+			log.WarningLog.Printf("account %q: not writing %s back — this process holds no sync-in baseline for it", w.spec.Account.Name, rel)
 			continue
 		}
-		if err := writeFileAtomic0600(path, data); err != nil {
-			return changed, fmt.Errorf("writing refreshed account %q back failed: %w", w.spec.Account.Name, err)
+		path := filepath.Join(w.spec.Account.Dir, filepath.FromSlash(rel))
+		swapped, err := swapAccountCredential(path, synced, data)
+		if err != nil {
+			return res, fmt.Errorf("writing refreshed account %q back failed: %w", w.spec.Account.Name, err)
 		}
-		changed++
+		if !swapped {
+			res.Skipped = append(res.Skipped, rel)
+			log.WarningLog.Printf("account %q: not writing %s back — the registry's copy is no longer the version this session synced in (another session refreshed it, or the account was removed); its refresh stays on the host and is discarded with the session", w.spec.Account.Name, rel)
+			continue
+		}
+		w.syncedVersion[rel] = now // later write-backs compare against what we wrote
+		res.Written++
 	}
-	return changed, nil
+	return res, nil
+}
+
+// registryLocks serializes the compare-and-swap per registry file, within the
+// daemon. A write by another process (`af accounts login`) between the check and
+// the atomic rename is a window of microseconds and loses at worst one refresh.
+var registryLocks sync.Map // path -> *sync.Mutex
+
+// swapAccountCredential replaces the registry file at path with data only while it
+// still holds the version expected. It reports whether it wrote. A missing file is
+// a mismatch: an account that was removed is never resurrected by a write-back.
+func swapAccountCredential(path, expected string, data []byte) (bool, error) {
+	mu, _ := registryLocks.LoadOrStore(path, &sync.Mutex{})
+	l := mu.(*sync.Mutex)
+	l.Lock()
+	defer l.Unlock()
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if accountVersion(cur) != expected {
+		return false, nil
+	}
+	if err := writeFileAtomic0600(path, data); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // removeAccount deletes the scoped account directory from the host.
@@ -191,33 +314,35 @@ func (w *sandboxWorkspace) teardownAccount(timeout time.Duration) error {
 	}
 }
 
-func buildAccountArchive(dir string, rels []string) ([]byte, int, error) {
+func buildAccountArchive(dir string, rels []string) ([]byte, map[string]string, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	n := 0
+	versions := map[string]string{}
 	for _, rel := range rels {
 		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return nil, 0, fmt.Errorf("reading account credential %s: %w", rel, err)
+			return nil, nil, fmt.Errorf("reading account credential %s: %w", rel, err)
 		}
 		if len(data) > accountSyncMaxFileBytes {
-			return nil, 0, fmt.Errorf("account credential %s is %d bytes, over the %d-byte sync bound", rel, len(data), accountSyncMaxFileBytes)
+			return nil, nil, fmt.Errorf("account credential %s is %d bytes, over the %d-byte sync bound", rel, len(data), accountSyncMaxFileBytes)
 		}
 		if err := tw.WriteHeader(&tar.Header{Name: rel, Mode: 0o600, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
-			return nil, 0, err
+			return nil, nil, err
 		}
 		if _, err := tw.Write(data); err != nil {
-			return nil, 0, err
+			return nil, nil, err
 		}
-		n++
+		// The version is taken from the SAME bytes that go on the wire, so the
+		// baseline can never describe a file other than the one the host received.
+		versions[rel] = accountVersion(data)
 	}
 	if err := tw.Close(); err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
-	return buf.Bytes(), n, nil
+	return buf.Bytes(), versions, nil
 }
 
 // readAccountArchive parses an archive from the HOST — untrusted input — and
