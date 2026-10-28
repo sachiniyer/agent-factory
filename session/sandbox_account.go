@@ -302,20 +302,45 @@ func writeFileAtomic0600(path string, data []byte) error {
 // subtract from an environment it never sees, so the names are defined empty in
 // the 0600 identity file the launch shell sources — the docker backend's shape.
 func (w *sandboxWorkspace) accountScrubEnv() string {
-	configVar, _, ok := w.accountEnv()
-	if !ok {
-		return ""
-	}
 	var b strings.Builder
-	for _, name := range sessionenv.AccountIdentityNames(w.spec.Account.Agent) {
-		if name == configVar {
-			// Injected with the scope, never emptied: an empty copy would erase the
-			// selection this exists to make.
-			continue
-		}
+	for _, name := range w.accountPinnedNames() {
 		b.WriteString(name + "=\n")
 	}
 	return b.String()
+}
+
+// accountPinnedNames are the variables an account-scoped remote launch defines
+// EMPTY: every identity name (credentials plus late-environment names) AND every
+// cloud-authentication selector of the agent, never the config variable itself.
+// Both come from sessionenv's per-agent tables — the same source the local path and
+// docker use — so the paths cannot drift.
+//
+// The selectors matter as much as the keys. A cloud mode (Bedrock, Vertex, Foundry)
+// on the HOST would route the agent to that provider's credentials and billing
+// while the session reports the selected account. The local path REFUSES an active
+// selector (ApplyAccount); the daemon cannot see the host's environment to refuse,
+// so the remote path NEUTRALIZES it — an empty selector is disabled, which also
+// stops the filters from admitting the provider credentials it gates.
+func (w *sandboxWorkspace) accountPinnedNames() []string {
+	configVar, _, ok := w.accountEnv()
+	if !ok {
+		return nil
+	}
+	agent := w.spec.Account.Agent
+	seen := map[string]bool{configVar: true}
+	var names []string
+	add := func(list []string) {
+		for _, name := range list {
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	add(sessionenv.AccountIdentityNames(agent))
+	add(sessionenv.AgentAuthSelectors(agent))
+	sort.Strings(names)
+	return names
 }
 
 // accountLaunchGuard is the shell fragment that makes the agent-server launch FAIL
@@ -334,8 +359,14 @@ func (w *sandboxWorkspace) accountLaunchGuard() string {
 	for _, rel := range accountCredentialRel[w.spec.Account.Agent] {
 		has = append(has, "[ -f "+shellQuote(scope+"/"+rel)+" ]")
 	}
-	return fmt.Sprintf("{ [ \"$%s\" = %s ] && { %s; }; } || { echo %s >&2; exit 1; }; ",
-		name, shellQuote(scope), strings.Join(has, " || "),
+	// Every cloud selector must be empty in the environment the agent-server will
+	// inherit, whatever the host's own environment said (accountPinnedNames).
+	selectorsEmpty := ""
+	for _, selector := range sessionenv.AgentAuthSelectors(w.spec.Account.Agent) {
+		selectorsEmpty += fmt.Sprintf(" && [ -z \"${%s:-}\" ]", selector)
+	}
+	return fmt.Sprintf("{ [ \"$%s\" = %s ] && { %s; }%s; } || { echo %s >&2; exit 1; }; ",
+		name, shellQuote(scope), strings.Join(has, " || "), selectorsEmpty,
 		shellQuote("af: the session's account scope is not in place; refusing to start the agent under any other identity"))
 }
 
@@ -384,13 +415,7 @@ func (w *sandboxWorkspace) accountPassthroughNames() []string {
 	if !ok {
 		return nil
 	}
-	names := []string{configVar}
-	for _, name := range sessionenv.AccountIdentityNames(w.spec.Account.Agent) {
-		if name != configVar {
-			names = append(names, name)
-		}
-	}
-	return names
+	return append([]string{configVar}, w.accountPinnedNames()...)
 }
 
 // accountScopeSeed is the minimal, non-credential configuration a fresh account

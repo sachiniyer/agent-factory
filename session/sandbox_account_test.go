@@ -401,3 +401,69 @@ func TestAccountScopeMarkerReachesTheAgentServerOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, pcmd, AccountScopeAgentEnv)
 }
+
+// A cloud-authentication selector in the HOST's environment must not route an
+// account-scoped agent to that provider's credentials (wrong identity, wrong
+// billing). The local path refuses an active selector; the daemon cannot see the
+// host's environment, so the remote launch neutralizes every selector sessionenv
+// names for the agent — and the provider credentials they gate go with them.
+func TestRemoteLaunchNeutralizesHostCloudAuthSelectors(t *testing.T) {
+	acct := writeAccount(t, "claude", testSecretA)
+	sh := &recordingShell{}
+	w := &sandboxWorkspace{shell: sh, SessionDir: t.TempDir(), tokenRef: "ref", agentServerToken: "tok", program: "claude",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+	require.NoError(t, w.writeRuntimeIdentity(time.Second))
+	envFile := filepath.Join(t.TempDir(), "af-identity.env")
+	require.NoError(t, os.WriteFile(envFile, []byte(sh.stdin[1]), 0o600))
+
+	// The host user's launch environment: every Claude cloud mode switched on, with
+	// the provider credentials they admit.
+	hostEnv := []string{"PATH=" + os.Getenv("PATH"),
+		"CLAUDE_CODE_USE_BEDROCK=1", "CLAUDE_CODE_USE_VERTEX=1", "CLAUDE_CODE_USE_FOUNDRY=1",
+		"AWS_ACCESS_KEY_ID=host-aws", "AWS_SECRET_ACCESS_KEY=host-aws-secret", "AWS_PROFILE=host",
+		"GOOGLE_APPLICATION_CREDENTIALS=/host/sa.json", "ANTHROPIC_API_KEY=host-key"}
+	cmd := exec.Command("sh", "-c", "set -a && . "+shellQuote(envFile)+" && set +a; env")
+	cmd.Env = hostEnv
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	launched := strings.Split(strings.TrimSpace(string(out)), "\n")
+
+	// The selectors come from sessionenv's table, so the test names no list of its own.
+	selectors := sessionenv.AgentAuthSelectors("claude")
+	require.NotEmpty(t, selectors, "premise: claude has cloud selectors")
+	for _, selector := range selectors {
+		assert.Contains(t, launched, selector+"=", "%s must be defined empty, not left active", selector)
+		assert.NotContains(t, launched, selector+"=1")
+	}
+
+	// Through the SAME filter the agent-server's re-exec applies, nothing of the
+	// host's cloud identity survives, and the neutralized selectors stay present.
+	filtered := sessionenv.FilterForCommand(launched, "claude", "claude", w.accountPassthroughNames())
+	for _, leaked := range []string{"AWS_ACCESS_KEY_ID=host-aws", "AWS_SECRET_ACCESS_KEY=host-aws-secret",
+		"GOOGLE_APPLICATION_CREDENTIALS=/host/sa.json", "ANTHROPIC_API_KEY=host-key"} {
+		assert.NotContains(t, filtered, leaked, "the host's cloud/API identity must not reach the agent: %s", strings.SplitN(leaked, "=", 2)[0])
+	}
+	for _, selector := range selectors {
+		assert.Contains(t, filtered, selector+"=", "%s stays present and empty through the filter", selector)
+	}
+
+	// Defense in depth: the launch guard itself refuses a selector that is active in
+	// the environment the agent-server would inherit.
+	guard := w.accountLaunchGuard()
+	require.NoError(t, os.MkdirAll(w.AccountDir(), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(w.AccountDir(), ".credentials.json"), []byte("x"), 0o600))
+	for _, env := range [][]string{
+		{"CLAUDE_CONFIG_DIR=" + w.AccountDir(), "CLAUDE_CODE_USE_BEDROCK=1"},
+		{"CLAUDE_CONFIG_DIR=" + w.AccountDir(), "CLAUDE_CODE_USE_VERTEX=true"},
+	} {
+		c := exec.Command("sh", "-c", guard+"echo STARTED")
+		c.Env = append(os.Environ(), env...)
+		o, gerr := c.CombinedOutput()
+		require.Error(t, gerr, string(o))
+		assert.NotContains(t, string(o), "STARTED")
+	}
+	ok := exec.Command("sh", "-c", guard+"echo STARTED")
+	ok.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+w.AccountDir())
+	o, gerr := ok.CombinedOutput()
+	require.NoError(t, gerr, string(o))
+}
