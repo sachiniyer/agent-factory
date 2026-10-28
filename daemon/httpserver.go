@@ -286,6 +286,9 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	// the preview iframe (step 3). Internal, not an `af api` RPC — like the stream
 	// routes it registers directly rather than through the httpRoutes catalog.
 	mux.HandleFunc("GET /v1/preview-auth", cs.previewAuthHandler)
+	// W5.2: the operator-token-authenticated mint of a session's editor-origin
+	// bootstrap URL for remote viewers. POST, not GET: it allocates.
+	mux.HandleFunc("POST /v1/editor-origin", cs.editorOriginHandler)
 
 	// The web-tab reverse proxy: not a JSON-envelope RPC (it relays a dev
 	// server's raw HTTP/asset/WS traffic), so it is registered directly here like

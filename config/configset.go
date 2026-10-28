@@ -128,6 +128,8 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"network.preview_listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error {
 		return validateListenAddrValue(v)
 	}},
+	// The editor-origin port pool (W5.2), validated eagerly.
+	"network.editor_origin_ports": {kind: cfgString, section: "network", validate: validateEditorOriginPorts},
 	// A []string written as a single-line TOML array, comma-separated on the CLI
 	// (empty clears it). Each element must be a well-formed browser origin
 	// (scheme://host[:port]); the writer rejects a malformed one eagerly so a typo

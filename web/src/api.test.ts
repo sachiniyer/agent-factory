@@ -16,6 +16,7 @@ import {
   createTab,
   errorText,
   fetchSessionSnapshot,
+  fetchEditorPortOrigin,
   fetchPreviewOrigin,
   handoffSession,
   isMutationCommittedError,
@@ -1564,4 +1565,41 @@ test("handoffSession sends an operator-selected account with optional agent", as
  await handoffSession("id", "feature", "", "tok", "personal");
  assert.equal(cap.body.account, "personal");
  assert.equal(cap.body.to, "");
+});
+
+// --- fetchEditorPortOrigin (W5.2) -------------------------------------------
+
+test("fetchEditorPortOrigin POSTs with the bearer and returns origin and bootstrap URL", async () => {
+  const cap: { url: string; method?: string; auth?: string } = { url: "" };
+  (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
+    cap.url = url;
+    cap.method = init.method;
+    cap.auth = (init.headers as Record<string, string> | undefined)?.Authorization;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { origin: "https://box.ts.net:9100", bootstrap_url: "https://box.ts.net:9100/_af/editor-bootstrap?t=x" },
+        error: null,
+      }),
+    } as unknown as Response;
+  };
+  const got = await fetchEditorPortOrigin("sess 1", "tok");
+  assert.deepEqual(got, {
+    origin: "https://box.ts.net:9100",
+    bootstrapUrl: "https://box.ts.net:9100/_af/editor-bootstrap?t=x",
+  });
+  assert.equal(cap.url, "/v1/editor-origin?session=sess%201");
+  assert.equal(cap.method, "POST", "minting allocates, so it must not be a GET");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("fetchEditorPortOrigin is null when the feature is off or the call fails", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> =>
+    ({ ok: false, status: 404, json: async () => ({ error: "off" }) }) as unknown as Response;
+  assert.equal(await fetchEditorPortOrigin("s", ""), null);
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => {
+    throw new Error("network");
+  };
+  assert.equal(await fetchEditorPortOrigin("s", ""), null);
 });

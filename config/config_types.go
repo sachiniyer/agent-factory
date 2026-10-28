@@ -559,6 +559,14 @@ type Config struct {
 	// Global-only (daemon network surface), like listen_addr: a cloned repo must
 	// never be able to open a network port. See docs/configuration.md.
 	PreviewListenAddr string `json:"preview_listen_addr,omitempty" toml:"preview_listen_addr,omitempty"`
+	// EditorOriginPorts is the pool of loopback ports (W5.2) the daemon allocates
+	// per-session editor origins from, e.g. "9100-9119" or "9100,9105-9107". Each
+	// session with a VS Code editor gets one port, persisted across restarts, and an
+	// operator exposes the same ports behind the front door (`tailscale serve
+	// --https=<port> 127.0.0.1:<port>`) so a remote viewer's editor storage is
+	// partitioned per session. Empty ⇒ off. Global-only, like listen_addr: a cloned
+	// repo must never open a port.
+	EditorOriginPorts string `json:"editor_origin_ports,omitempty" toml:"editor_origin_ports,omitempty"`
 	// DebugPprof serves the daemon's opt-in runtime profiling endpoint (#3651) at
 	// GET /v1/debug/pprof/{profile} — the stdlib net/http/pprof surface (heap,
 	// goroutine, allocs, profile, block, mutex, trace). It exists to answer the

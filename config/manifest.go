@@ -237,6 +237,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "network.editor_origin_ports",
+		Type:       "string",
+		Default:    `""`,
+		Purpose:    "Pool of loopback ports (for example 9100-9119) the daemon allocates per-session VS Code editor origins from, so a remote viewer's editor storage is separate for each session · off by default; expose the same ports behind your front door, for example with tailscale serve.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "network.allow_unauthenticated_network",
 		Type:       "bool",
 		Default:    "false",
