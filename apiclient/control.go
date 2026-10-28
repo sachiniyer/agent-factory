@@ -218,7 +218,7 @@ func (c *Client) ResumeStatusPoll(req daemon.ResumeStatusPollRequest) error {
 // the daemon over these same HTTP routes the web UI uses, so the transport alone
 // cannot tell them apart and each client says which it is.
 func (c *Client) AddTask(t task.Task, actor task.Actor) error {
-	return c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &daemon.AddTaskResponse{})
+	return c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor), ValidatePath: c.isRemote()}, &daemon.AddTaskResponse{})
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the
@@ -235,7 +235,7 @@ func (c *Client) AddTask(t task.Task, actor task.Actor) error {
 // actor names the calling surface for the audit trail — see AddTask.
 func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
 	var resp daemon.UpdateTaskResponse
-	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor)}, &resp); err != nil {
+	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil

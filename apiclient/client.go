@@ -171,6 +171,11 @@ type Client struct {
 	requestTimeout time.Duration
 }
 
+// isRemote reports whether this client dials a --daemon-url target rather than
+// the local unix socket. A remote target's host-side facts (does this path
+// exist? is it a repository?) are the daemon's to check, not this machine's.
+func (c *Client) isRemote() bool { return c.remoteTransport != nil }
+
 // New returns a Client dialing the daemon HTTP socket resolved from the current
 // config dir (AGENT_FACTORY_HOME), the same path the daemon binds. It does not
 // dial or spawn anything — a daemon need not be running yet; the first call

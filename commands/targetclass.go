@@ -45,7 +45,20 @@ var localOnlyVerbs = map[string]string{
 // refusal, which names the verb and the daemon it declined to act on.
 func refuseLocalOnlyUnderRemoteTarget(cmd *cobra.Command) error {
 	if does, ok := localOnlyVerbs[cmd.CommandPath()]; ok {
-		return requireLocalTarget(cmd.CommandPath(), does)
+		err := requireLocalTarget(cmd.CommandPath(), does)
+		// The hook runs before the verb's own handler, so the verb's --json error
+		// contract has to be honoured here: with --json a refusal is the same
+		// {data,error} envelope every other failure of the verb prints, not a
+		// bare "Error:" line a script cannot parse (#5857).
+		return jsonWrapError(cmd, jsonModeRequested(cmd), err)
 	}
 	return nil
+}
+
+// jsonModeRequested reports whether the verb was invoked with --json (or
+// --json=true). It reads the parsed flag, so it works for every verb that
+// declares one without a table of which do.
+func jsonModeRequested(cmd *cobra.Command) bool {
+	f := cmd.Flags().Lookup("json")
+	return f != nil && f.Value.String() == "true"
 }
