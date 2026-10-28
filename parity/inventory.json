@@ -382,6 +382,25 @@
       "notes": "Collects host-side logs and redacted state; must work when af is too broken to render a UI."
     },
     {
+      "id": "host.check",
+      "title": "Probe a listed host for the tools a sandbox session needs and record its readiness",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "doctor/hosts.go checkListedHosts -> daemon/control_client.go CheckHost (POST /v1/CheckHost); the daemon's supervisor also refreshes every listed host on a timer (daemon/checkhost.go)"
+      },
+      "verdict": "deliberate",
+      "issue": "#5571",
+      "notes": "W2.3 of the sandbox-parity epic. A diagnostic, like install.doctor: the TUI and web pickers do not run it, they READ its result (HostOption.readiness/note on ListBackends), which the daemon refreshes on a ~10 minute jittered timer and on `af doctor`. The RPC refuses a name outside the global host list before anything is dialed, and stays out of the sandbox credential scope (sandboxAllowed is false): a probe dials the operator's hosts."
+    },
+    {
       "id": "install.doctor",
       "title": "Diagnose setup and leaked resources",
       "tui": {
@@ -1841,6 +1860,7 @@
       "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListAccounts": "session.accounts",
+      "POST /v1/CheckHost": "host.check",
       "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListDirectory": "project.browse",
       "POST /v1/ListProjects": "project.list",

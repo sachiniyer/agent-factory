@@ -21,6 +21,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `GET` | `/v1/health` | — | Lifecycle health probe (alias for Ping): version, boot/transaction identity, phase, and bound listeners; answers before readiness. |
 | `POST` | `/v1/CreateSession` | `title`, `title_base`, `repo_path`, `program`, `account`, `prompt`, `in_place`, `force_remote`, `validate_first`, `backend`, `host` | Create a new session (git worktree + agent) in a repo. |
 | `POST` | `/v1/ListBackends` | `repo_path` | List the runtimes a session in this repo can be created on, whether the repo's config supports each, and the backend an unspecified create defaults to. |
+| `POST` | `/v1/CheckHost` | `host` | Probe a listed host (or every listed host) for the tools a sandbox session needs and record its readiness. Refuses a name outside the global host list. |
 | `POST` | `/v1/ListPrograms` | `repo_path` | List the agent programs a session can be created with, and the program an unspecified create defaults to. |
 | `POST` | `/v1/SuggestSessionName` | — | Suggest a random, readable session name (adjective-noun) not used by any live session, for the create form's autocreate placeholder. |
 | `POST` | `/v1/Snapshot` | `repo_id`, `live`, `statuses`, `created_after`, `limit` | List sessions from the daemon's authoritative in-memory state, with optional live/status, created-after, and limit filters applied before transfer (empty repo_id = all repos). |

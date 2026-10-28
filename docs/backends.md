@@ -640,6 +640,16 @@ inherit it. A local token is never copied to the SSH host implicitly.
 - The repo must have an `origin` remote the **remote host** can clone from
   (GitHub for a real repo; a `file://` path for a self-contained test).
 
+### Checking a listed host
+
+A host in the global `hosts` list is probed for `git`, `tmux` (3.2 or newer) and
+`gh` without creating a session on it. `af doctor` shows one row per listed host
+(ready, blocked with the missing tool, or unreachable), and the daemon repeats
+the probe about every ten minutes, so the host pickers show a recent verdict
+instead of "not probed yet". An unreachable host or an unreadable reply records
+nothing: it can neither mark a host ready nor clear an earlier blocked verdict.
+A create always re-checks the host live.
+
 ### Operations
 
 - **Find a session's remote files:** they live under `~/.af-sessions/<title>.XXXXXX`
