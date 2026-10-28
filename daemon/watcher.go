@@ -643,7 +643,7 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 		waitErr = lifeline.shellResult(waitErr)
 	}
 	close(stdoutWritersStopped)
-	awaitWatchReaders(w.taskID, groupKilled, w.sup.stopGrace, []*os.File{r, stderrR}, readerDone, stderrDone)
+	awaitWatchReaders(w.taskID, groupKilled, w.sup.stopGrace, []*os.File{r, stderrR}, w.limitBackpressureParked, readerDone, stderrDone)
 
 	return tail, waitErr
 }
