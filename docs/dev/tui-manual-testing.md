@@ -279,11 +279,15 @@ ten-minute run on each merge is intentional while the signal is measured; the
 runner is free for this public repository. The daemon, TUI, stand-in sessions,
 and private tmux server remain inside the ephemeral testbox container.
 
-This is the signal-only first step from #4000: it deliberately has no
-`pull_request` trigger and does not gate merges. Its purpose is to identify the
-exact master commit that makes the scenario red while runtime is measured.
-Failed or cancelled runs upload the full console stream, including the driver's
-last-screen dump, as the `tui-driver-selftest-transcript` artifact.
+Step 1 from #4000 was signal-only — this workflow named the offending master
+commit and gated nothing. It now also gates PRs that touch the TUI surface:
+`pr.yml` calls it as a reusable workflow, gated by its `web-selftest-scope` job
+from the changed-file list, and Build lists the call in `needs`, so a red run
+blocks the merge. The master `push` trigger still does the original job of
+identifying the exact commit that makes the scenario red while runtime is
+measured. Failed or cancelled runs upload the full console stream, including
+the driver's last-screen dump, as the `tui-driver-selftest-transcript`
+artifact.
 
 ### One scenario script (a per-fix real-TUI gate)
 
