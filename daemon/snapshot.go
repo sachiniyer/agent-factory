@@ -49,8 +49,23 @@ type SnapshotRequest struct {
 	Limit *int `json:"limit,omitempty"`
 }
 
+// SnapshotCapabilities is the subset of Ping's capability bits a SANDBOX
+// credential can learn. That credential is not admitted to /v1/health, so a
+// client that must know whether this daemon honors a wire field before sending it
+// (the --host pick) reads it from the one admitted response instead of probing a
+// route the scope denies. Present only for a sandbox credential; its existence
+// is itself the proof, since scoped credentials are minted only by daemons that
+// already honor every field listed here.
+type SnapshotCapabilities struct {
+	HostPick        bool `json:"host_pick,omitempty"`
+	DeliverHostPick bool `json:"deliver_host_pick,omitempty"`
+	TaskHost        bool `json:"task_host,omitempty"`
+}
+
 type SnapshotResponse struct {
 	Instances []session.InstanceData `json:"instances"`
+	// Capabilities: see SnapshotCapabilities. Nil for an operator credential.
+	Capabilities *SnapshotCapabilities `json:"capabilities,omitempty"`
 	// Caller is the id of the session the presented sandbox credential is bound
 	// to (#5571 W3.2). It lets an in-sandbox `whoami` / `archive --self` resolve
 	// the caller from the credential instead of from TmuxName, which the narrowed
@@ -506,6 +521,7 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	if isSandbox {
 		instances = projectRowsForSandbox(instances, sandboxProjectID, sandboxProjectErr == nil)
 		resp.Caller = sandboxOwnerID
+		resp.Capabilities = &SnapshotCapabilities{HostPick: true, DeliverHostPick: true, TaskHost: true}
 		alarms = nil
 		// A repo ID is operator identity a sandbox must not learn — the
 		// sandboxSafeInstanceData projection already withholds Path/Worktree/

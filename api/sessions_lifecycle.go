@@ -120,13 +120,20 @@ their worktree. Local archives print the relocated worktree path on success.`,
 		var repoID string
 		var sessionID string
 		if sessionsArchiveSelf {
-			if apiclient.IsRemoteTarget() {
-				return jsonError(remoteSelfRefusal("--self"))
-			}
 			if title != "" {
 				return jsonError(fmt.Errorf("cannot combine --self with a <title> argument; --self archives the current session"))
 			}
-			data, err := resolveSelfSession()
+			// Against a remote daemon the caller is whoever the CREDENTIAL says it
+			// is: a sandbox credential is bound to its own session, which the
+			// daemon reports (and whose route admits this verb). This machine's
+			// tmux name would be a guess about someone else's registry.
+			var data *session.InstanceData
+			var err error
+			if apiclient.IsRemoteTarget() {
+				data, err = resolveCredentialSelf()
+			} else {
+				data, err = resolveSelfSession()
+			}
 			if err != nil {
 				return jsonError(fmt.Errorf("--self must be run from inside an af session: %w", err))
 			}
