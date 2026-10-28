@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -34,6 +35,7 @@ func credentialMountTargets(mounts []string, home string) []string {
 		if container == "" || home == "" {
 			continue
 		}
+		container = path.Clean(container)
 		if strings.HasPrefix(container, home+"/") {
 			targets = append(targets, container)
 		}
@@ -74,12 +76,21 @@ func chownRecursiveScript(home, owner string, prune []string) string {
 			b.WriteString(" -o ")
 		}
 		b.WriteString("-path ")
-		b.WriteString(shellQuote(p))
+		b.WriteString(shellQuote(findLiteralPattern(path.Clean(p))))
 	}
 	b.WriteString(" \\) -prune -o -exec chown -h ")
 	b.WriteString(owner)
 	b.WriteString(" {} +")
 	return b.String()
+}
+
+// findLiteralPattern escapes the shell-pattern metacharacters of a path so
+// find's -path matches it literally: -path takes a pattern, not a pathname, so a
+// destination such as /root/cache[1] would otherwise match /root/cache1 and miss
+// the real mount (#5424 review). Shell quoting is applied separately by the
+// caller.
+func findLiteralPattern(p string) string {
+	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`, "]", `\]`).Replace(p)
 }
 
 // volumeBindContainer reports the container destination of a -v / --volume
@@ -173,6 +184,9 @@ func bindMountTargets(args []string, home string) []string {
 	}
 	var targets []string
 	add := func(container string) {
+		// Docker records path.Clean(target) as the mount destination, so a
+		// trailing slash or "." segment names the same directory find visits.
+		container = path.Clean(container)
 		if strings.HasPrefix(container, home+"/") {
 			targets = append(targets, container)
 		}

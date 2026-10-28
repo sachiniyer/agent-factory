@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -772,4 +774,46 @@ func TestPrepareNonAccountUser_PrunesCredentialAndRunArgsBindTogether(t *testing
 	// once in the prune list.
 	count := strings.Count(joined, "-path "+shellQuote(credTarget))
 	require.Equal(t, 1, count, "a path in both credentialMounts and runArgs is deduped; call=%v", chown)
+}
+
+// TestBindMountTargets_NormalizesDestinations: Docker records
+// path.Clean(target), so a trailing slash or dot segment names the same mount
+// find visits; an uncleaned prune path would never match and the chown would
+// descend into the bind (#5424 review).
+func TestBindMountTargets_NormalizesDestinations(t *testing.T) {
+	got := bindMountTargets([]string{
+		"-v", "/host/a:" + dockerContainerHome + "/cache/",
+		"-v", "/host/b:" + dockerContainerHome + "/x/./y",
+		"--mount", "type=bind,src=/host/c,dst=" + dockerContainerHome + "/z//",
+		// Escapes home once cleaned: not under home, so not returned.
+		"-v", "/host/d:" + dockerContainerHome + "/../etc",
+	}, dockerContainerHome)
+	assert.Equal(t, []string{
+		dockerContainerHome + "/cache",
+		dockerContainerHome + "/x/y",
+		dockerContainerHome + "/z",
+	}, got)
+}
+
+// TestChownRecursiveScript_PruneMatchesMetacharactersLiterally runs the generated
+// find expression's prune half against a real tree: find's -path takes a shell
+// pattern, so /cache[1] must not match /cache1 and must match itself (#5424
+// review).
+func TestChownRecursiveScript_PruneMatchesMetacharactersLiterally(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"cache[1]", "cache1", "we?rd*", "weird"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, d, "inner"), 0o755))
+	}
+	prune := []string{root + "/cache[1]/", root + "/we?rd*"}
+	script := chownRecursiveScript(root, "0:0", prune)
+	// Swap the chown for echo so the test needs no privilege and just lists what
+	// the expression would have chowned.
+	script = strings.Replace(script, "-exec chown -h 0:0 {} +", "-print", 1)
+	out, err := exec.Command("sh", "-c", script).Output()
+	require.NoError(t, err)
+	listed := string(out)
+	assert.NotContains(t, listed, "cache[1]", "the literal bracketed mount and its subtree are pruned")
+	assert.NotContains(t, listed, "we?rd*", "the literal ?/* mount is pruned")
+	assert.Contains(t, listed, filepath.Join(root, "cache1", "inner"), "a pattern-lookalike sibling is still chowned")
+	assert.Contains(t, listed, filepath.Join(root, "weird", "inner"), "a pattern-lookalike sibling is still chowned")
 }
