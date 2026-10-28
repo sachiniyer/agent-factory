@@ -31,7 +31,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Status:                   i.statusLocked(),
 		Liveness:                 i.liveness,
 		InFlightOp:               i.inFlightOp,
-		LifecycleAction:          lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil),
+		LifecycleAction:          lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil),
 		CanKill:                  canKillFor(i.ID, i.inFlightOp),
 		CanHandoff:               i.canHandoffLocked(),
 		CurrentAgent:             i.currentAgentNameLocked(),
@@ -41,6 +41,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		CallbackUnavailable:      i.callbackUnavailable,
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
 		LostRestoreWait:          cloneLostRestoreWait(i.lostRestoreWait),
+		Unreachable:              i.unreachableDataLocked(),
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
 		LastPromptDeliveryStatus: i.lastPromptDeliveryStatus,
 		LastPaneChurnAt:          i.lastPaneChurnAt,
@@ -158,6 +159,10 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// reintroduce the bug it fixes — a session whose run is live must read as active
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
+	// Not gated on taskRunActive like the held flags below it: an interrupted
+	// run has already spent its active marker, and the interruption is exactly
+	// the fact startup reconcile needs after a restart (#4222 review).
+	data.TaskRunInterrupted = i.taskRunInterrupted
 	data.TaskRunFailurePending = i.taskRunFailurePending
 	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
 	data.TaskRunTurnGateHeld = i.taskRunActive && i.taskRunTurnGateHeld
@@ -489,6 +494,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
 		taskRunActive:       data.TaskRunActive,
+		taskRunInterrupted:  data.TaskRunInterrupted && !data.TaskRunActive,
 		taskRunIdleEdgeHeld: data.TaskRunActive && data.TaskRunIdleEdgeHeld,
 		taskRunTurnGateHeld: data.TaskRunActive && data.TaskRunTurnGateHeld,
 		// Gate on the run still being in flight, mirroring the write side and
@@ -505,6 +511,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		callbackUnavailable:      data.CallbackUnavailable,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
 		lostRestoreWait:          lostRestoreWaitFromData(data.LostRestoreWait),
+		unreachableSince:         unreachableSinceFromData(data.Unreachable),
+		unreachableErr:           unreachableErrFromData(data.Unreachable),
 		lastPromptAttemptAt:      data.LastPromptAttemptAt,
 		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
 		lastPaneChurnAt:          data.LastPaneChurnAt,
@@ -604,7 +612,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// unearned KilledWithoutLiveRuntime marker from the inert backend's nil
 		// runtimeTeardown alone and orphan the still-live runtime. Rebuild only
 		// that teardown handle — no endpoint, tunnel, or live sandbox client is
-		// dialled during load. Archived sandboxes were already reaped before
+		// dialled during load. The same handle now also carries the session's
+		// reattach identity (#5571 W1.1): remote_addr, agent_server_version and
+		// token_ref travel inside it, so the runtime-identity key in AF home can
+		// re-derive the bearer token a restart needs without the token itself
+		// ever touching the row. Archived sandboxes were already reaped before
 		// becoming Archived, so deleting their record needs no remote cleanup
 		// handle; the archived ForStorage branch scrubs RuntimeCleanup, so the
 		// handle here is naturally nil for those rows.

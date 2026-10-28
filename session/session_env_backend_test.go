@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -319,6 +320,7 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 	spec := ProvisionSpec{Title: "override", Program: tmux.ProgramClaude}
 	tests := map[string]struct {
 		executable    string
+		extras        []string
 		args          []string
 		commandResult func() (string, error)
 	}{
@@ -332,6 +334,11 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 		},
 		"ssh": {
 			executable: "/srv/af-session/af",
+			// The ssh handoff carries the runtime-identity ref NAME in extras
+			// (#5571 W1.1) so it lands in this one process's exec-time
+			// environment; docker's in-container launch has no remote /proc
+			// identity probe and carries none.
+			extras: []string{runtimetoken.RefEnvName},
 			args: []string{"agent-server", "--listen", "127.0.0.1:0", "--repo", "/srv/af-session/workspace",
 				"--title", spec.Title, "--program", tmux.ProgramCodex, "--program-resolved"},
 			commandResult: func() (string, error) {
@@ -344,7 +351,7 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		want, err := sessionenv.WrapAgentServerCommand(test.executable, nil, test.args)
+		want, err := sessionenv.WrapAgentServerCommand(test.executable, test.extras, test.args)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -424,7 +431,10 @@ func TestSSHAgentServerCommandExecsAtRecordedPID(t *testing.T) {
 	}
 	args := []string{"agent-server", "--listen", "127.0.0.1:0", "--repo", w.WorkspacePath(),
 		"--title", spec.Title, "--program", spec.Program, "--program-resolved"}
-	want, err := sessionenv.WrapAgentServerCommand(w.AfPath(), nil, args)
+	// Extras carries exactly the token-ref NAME (#5571 W1.1): the channel that
+	// reaches this process's exec-time environment — and the value that name
+	// resolves to lives only in the sourced af-identity.env, never in argv.
+	want, err := sessionenv.WrapAgentServerCommand(w.AfPath(), []string{runtimetoken.RefEnvName}, args)
 	if err != nil {
 		t.Fatal(err)
 	}

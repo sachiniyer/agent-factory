@@ -348,8 +348,66 @@ func uriPathEndsAt(s string, start, end, nextRuneSize int) bool {
 // URI path, never a root boundary.
 func uriStartForPath(s string, start int) (int, bool) {
 	prefix := s[:start]
-	schemeEnd := strings.LastIndexByte(prefix, ':')
-	if schemeEnd < 0 {
+	// The scheme colon sits immediately before the hier-part: either an empty
+	// authority ("scheme:/path") or "//authority" ("scheme://host[:port]/path").
+	// The authority may itself contain ":" (port, userinfo, IPv6 literal) but
+	// never "/", so LastIndexByte cannot locate the scheme colon — it would
+	// latch onto a port or userinfo colon instead. Walk back from the path
+	// over the authority's slash-free bytes to reach the "//" marker; the
+	// scheme colon is the ":" just before it. With no "//", the only accepted
+	// no-authority form has the scheme colon immediately before the path,
+	// with an empty hier-part. The authority ends at "?", "#", or the first
+	// "/" after "//"; a "?" or "#" before "//" means the slash at start lives
+	// in a query or fragment. A root that follows other fragment/query bytes
+	// (a "#prefix/root" suffix) is not a root boundary, but two forms still
+	// are: a direct no-authority "scheme:/path" whose colon sits at start-1
+	// (an earlier delimiter in a percent-decoded view does not change that),
+	// and a component-leading root where the delimiter is immediately before
+	// the slash ("#/root"), which begins the fragment/query rather than
+	// following text inside it. A component-leading fragment root may itself
+	// be preceded by a query ("...?next#/root"): the "?" is the query
+	// delimiter and the authority lies before it, so the backward scan keeps
+	// walking across the query rather than rejecting there.
+	i := start - 1
+	for i >= 0 && prefix[i] != '/' && prefix[i] != '?' && prefix[i] != '#' {
+		i--
+	}
+	if i >= 0 && (prefix[i] == '?' || prefix[i] == '#') {
+		if prefix[start-1] != ':' && i+1 != start {
+			return 0, false
+		}
+		if i+1 == start {
+			// Treat the delimiter as the authority end and keep walking back
+			// over the authority to find the "//" marker. When the delimiter
+			// starts a fragment, a preceding "?" is the query delimiter and
+			// the real authority end lies before it, so keep scanning across
+			// the query; a second "#" or a "?" inside the query is malformed
+			// and is rejected.
+			outer := prefix[i]
+			i--
+			for {
+				for i >= 0 && prefix[i] != '/' && prefix[i] != '?' && prefix[i] != '#' {
+					i--
+				}
+				if i < 0 || prefix[i] == '/' {
+					break
+				}
+				if outer == '#' && prefix[i] == '?' {
+					outer = '?'
+					i--
+					continue
+				}
+				return 0, false
+			}
+		}
+	}
+	schemeEnd := -1
+	if i >= 1 && prefix[i] == '/' && prefix[i-1] == '/' {
+		schemeEnd = i - 2
+	} else if start > 0 && prefix[start-1] == ':' {
+		schemeEnd = start - 1
+	}
+	if schemeEnd < 0 || prefix[schemeEnd] != ':' {
 		return 0, false
 	}
 	pathPrefix := prefix[schemeEnd+1:]

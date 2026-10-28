@@ -136,6 +136,34 @@ type Instance struct {
 	// to the previous release — which knows only the mission hold — drops the
 	// marker instead of releasing it as a retired mission edge.
 	taskRunTurnGateHeld bool
+	// agentRuntimeReplaced records whether the runtime a recover or load just
+	// re-established is a REPLACEMENT process — a respawn or remote
+	// re-provision, or a reattach whose pane identity could not be verified —
+	// rather than the recorded agent still running. Backends assign it on every
+	// re-establishment, before their ConfirmLive edge (or before Start(false)
+	// returns), so the run-end classifier reads this attempt's verdict and
+	// never a stale one: replaced ends an in-flight task run as interrupted;
+	// a verified reattach leaves the run to the agent that still owns its
+	// prompt (#4222).
+	agentRuntimeReplaced bool
+	// taskRunInterrupted records that this session's task run ended
+	// interrupted — the runtime that owned its prompt was replaced without a
+	// replay (#4222). It is what tells "the marker cleared" apart from "the
+	// run completed" for the daemon's completion edge, which may have captured
+	// taskRunWasActive=true on a tick that raced the restore. Sticky for the
+	// process's lifetime: a session has exactly one run, and an interrupted
+	// end is a fact about it that never un-happens. In-memory only — after a
+	// restart the marker is already false, so no poll can ever capture the
+	// active half of the edge again and nothing needs the flag.
+	taskRunInterrupted bool
+	// taskRunInterruptedStamp is the one-shot twin of taskRunInterrupted for
+	// the daemon's status write: set when a restore's ConfirmLive performs the
+	// interrupt, consumed once by noteRuntimeReplaced so the owning task's
+	// last_run_status is stamped exactly once — a later restore with no run to
+	// interrupt must not rewrite a newer status. A restart in the gap keeps the
+	// prior status while the durable fact — the cleared marker — was persisted
+	// by the restore's own settlement.
+	taskRunInterruptedStamp bool
 	// taskRunFailed records that this session's task run ended failed — its
 	// prompt was PROVEN undelivered on the initial send (#5278). Sticky for
 	// the process's lifetime: a session has exactly one run, and the daemon's
@@ -554,6 +582,19 @@ type Instance struct {
 	// matching retry adopts without spawning and a mismatched one refuses
 	// before spawning. Guarded by i.mu; lazily allocated.
 	tabCreateInFlight map[string]*tabCreateClaim
+
+	// unreachableSince/unreachableErr are the live-probe OUTAGE observation
+	// (#5571 W1.3): set when a remote observation goes unanswered, retired on
+	// the next answered probe or any other transport evidence (attach stream,
+	// runtime replacement, tombstone). They are an observation flag, not a
+	// liveness — unreachable coexists with Running/Ready/Lost because an
+	// unanswered probe is not evidence about the agent, and the remote-loss
+	// debounce deliberately preserves last-known liveness underneath.
+	// Projection-only: ForStorage scrubs them, so a restarted daemon re-derives
+	// the claim from its own probes instead of inheriting an outage it never
+	// observed. Guarded by i.mu.
+	unreachableSince time.Time
+	unreachableErr   string
 }
 
 // tmuxLocked returns the agent tab's tmux session, or nil when the instance has
