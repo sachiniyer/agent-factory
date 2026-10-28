@@ -11,9 +11,6 @@ import (
 // so the capture never EOFs. The watcher must notice pane_dead on its own and
 // release the dead-screen repaint to the attached subscriber (#5618).
 func TestPTYBrokerPaneDeathWithoutEOFRepaintsAttachedSubscriber(t *testing.T) {
-	defer func(d time.Duration) { paneDeathPollInterval = d }(paneDeathPollInterval)
-	paneDeathPollInterval = 10 * time.Millisecond
-
 	ch := &fakeClientlessChannel{
 		snapshot:        []byte("1 2 3\nPane is dead"),
 		snapshotRows:    24,
@@ -21,6 +18,8 @@ func TestPTYBrokerPaneDeathWithoutEOFRepaintsAttachedSubscriber(t *testing.T) {
 		snapshotHasSize: true,
 	}
 	br := newPTYBroker(ch)
+	br.paneDeathPoll = 10 * time.Millisecond
+	t.Cleanup(br.close)
 	sub, err := br.subscribe(0)
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -60,11 +59,10 @@ func TestPTYBrokerPaneDeathWithoutEOFRepaintsAttachedSubscriber(t *testing.T) {
 
 // A healthy pane must not be disturbed by the watcher.
 func TestPTYBrokerPaneWatcherLeavesLivePaneAlone(t *testing.T) {
-	defer func(d time.Duration) { paneDeathPollInterval = d }(paneDeathPollInterval)
-	paneDeathPollInterval = 5 * time.Millisecond
-
 	ch := &fakeClientlessChannel{snapshotHasSize: true}
 	br := newPTYBroker(ch)
+	br.paneDeathPoll = 5 * time.Millisecond
+	t.Cleanup(br.close)
 	if _, err := br.subscribe(0); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}

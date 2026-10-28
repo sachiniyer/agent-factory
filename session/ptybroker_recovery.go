@@ -469,9 +469,10 @@ func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp *repaintSnapshot)
 	}
 }
 
-// paneDeathPollInterval is how often a live capture asks whether its pane has
-// died. A var so tests can compress it.
-var paneDeathPollInterval = time.Second
+// defaultPaneDeathPollInterval is how often a live capture asks whether its
+// pane has died. Per-broker (ptyBroker.paneDeathPoll) so tests compress it on
+// their own broker instead of writing a global a sibling test's watcher reads.
+const defaultPaneDeathPollInterval = time.Second
 
 // watchPaneDeath notices a watched pane dying under a live capture (#5618).
 //
@@ -488,7 +489,8 @@ var paneDeathPollInterval = time.Second
 // subscriber onto the dead screen. The capture is not restarted, so the watcher
 // ends there; a later subscribe consults PaneDead up front.
 func (b *ptyBroker) watchPaneDeath(quit <-chan struct{}) {
-	t := time.NewTicker(paneDeathPollInterval)
+	defer b.watchers.Done()
+	t := time.NewTicker(b.paneDeathPoll)
 	defer t.Stop()
 	for {
 		select {
