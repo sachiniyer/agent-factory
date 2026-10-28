@@ -662,7 +662,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		repoIdentityPath:      opts.RepoIdentityPath,
 		Program:               opts.Program,
 		Account:               opts.Account,
-		Host:                  opts.Host,
+		Host:                  recordedAccountHost(opts, kind, absPath),
 		accountAgent:          accountAgent,
 		Height:                0,
 		Width:                 0,

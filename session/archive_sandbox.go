@@ -318,6 +318,16 @@ func (i *Instance) reprovisionRemote() error {
 			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
 		}
 		spec.Account = account
+	} else if strings.TrimSpace(accountName) != "" {
+		// A session recorded under an account is relaunched under THAT account or
+		// not at all (#5571 W7.4). The target can no longer carry it — its host is
+		// not in the global host list any more — and replacing the sandbox anyway
+		// would run the session on the host's own login (or another account) while
+		// the row still reports this one. Refused BEFORE anything is reaped, so the
+		// old runtime stays recoverable.
+		return fmt.Errorf("cannot re-provision session %q: it runs under account %q, but its target %s is not a host in the global host list, so the account cannot be synced; "+
+			"re-add the host under [hosts.<name>] (it is recorded as %q) or clear the session's account, rather than restoring it under another identity",
+			i.Title, accountName, string(kind), i.Host)
 	}
 	rt, err := ResolveRuntime(kind)
 	if err != nil {

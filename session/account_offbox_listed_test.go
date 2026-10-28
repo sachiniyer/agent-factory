@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -149,6 +150,73 @@ func TestReprovisionCarriesThePersistedAccountOnlyOnAListedHost(t *testing.T) {
 	assert.Equal(t, "box1", f.spec.Host)
 
 	*f.spec = ProvisionSpec{}
-	require.NoError(t, build("").reprovisionRemote())
-	assert.Empty(t, f.spec.Account.Dir, "a target that is not listed receives no credential on a restore either")
+	err := build("").reprovisionRemote()
+	require.Error(t, err, "a restore on a target that is not listed is refused, never launched under another identity")
+	assert.Empty(t, f.spec.Account.Dir, "and no credential is sent")
+}
+
+// A session recorded under account X is relaunched under X or NOT AT ALL. When the
+// target can no longer carry it, restore refuses BEFORE reaping anything — it never
+// launches under the host's own login, another account, or none.
+func TestRestoreRefusesWhenThePersistedAccountCannotBeCarried(t *testing.T) {
+	f := newListedFixture(t, oneListedHost)
+	reaped := false
+	i := &Instance{
+		Title: "s", Path: f.repo, Branch: "root/s", Host: "box1", Program: tmux.ProgramClaude,
+		Account: "work", backend: newInertSandboxBackend("ssh"),
+		runtimeTeardown: func() error { reaped = true; return nil },
+	}
+
+	// The host is no longer listed (the operator removed it from the global config).
+	cfg := config.DefaultConfig()
+	require.NoError(t, config.SaveConfig(cfg))
+	err := i.reprovisionRemote()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `account "work"`)
+	assert.Contains(t, err.Error(), "global host list")
+	assert.Contains(t, err.Error(), "box1", "the recorded host is named so the operator can re-add it")
+	assert.False(t, reaped, "the old runtime must still be there: a refusal costs nothing")
+	assert.Empty(t, f.spec.RepoRoot, "and no replacement was provisioned")
+}
+
+func TestRestoreRefusesWhenThePersistedAccountIsGone(t *testing.T) {
+	f := newListedFixture(t, oneListedHost)
+	reaped := false
+	i := &Instance{
+		Title: "s", Path: f.repo, Branch: "root/s", Host: "box1", Program: tmux.ProgramClaude,
+		Account: "work", backend: newInertSandboxBackend("ssh"),
+		runtimeTeardown: func() error { reaped = true; return nil },
+	}
+	require.NoError(t, os.RemoveAll(f.accountDir)) // the account was removed from the registry
+
+	err := i.reprovisionRemote()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "persisted account")
+	assert.False(t, reaped)
+	assert.Empty(t, f.spec.RepoRoot)
+}
+
+// A session placed by default_host records the host it RESOLVED to, so a later
+// change elsewhere — the repository gaining its own [ssh] section — cannot move the
+// session, and its credentials, to a different target on restore.
+func TestDefaultHostIsPinnedForAnAccountScopedSession(t *testing.T) {
+	f := newListedFixture(t, oneListedHost)
+	cfg := config.DefaultConfig()
+	cfg.Hosts = oneListedHost
+	cfg.DefaultHost = "box1"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	writeInRepoConfig(t, f.repo, map[string]any{"backend": "ssh"}) // ssh, no [ssh] section: default_host applies
+	inst, err := f.create(t, InstanceOptions{Account: "work"})     // no --host
+	require.NoError(t, err)
+	assert.Equal(t, "box1", inst.Host, "the resolved host is recorded, not the empty pick")
+
+	// The repository now names its own ssh target; a re-derivation would follow it.
+	writeInRepoConfig(t, f.repo, map[string]any{"backend": "ssh", "ssh": map[string]any{"host": "repo-chosen.example"}})
+	inst.SetBackend(newInertSandboxBackend("ssh"))
+	inst.runtimeTeardown = func() error { return nil }
+	*f.spec = ProvisionSpec{}
+	require.NoError(t, inst.reprovisionRemote())
+	assert.Equal(t, f.accountDir, f.spec.Account.Dir, "the account still goes to the recorded listed host")
+	assert.Equal(t, "box1", f.spec.Host)
 }

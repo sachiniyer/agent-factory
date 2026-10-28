@@ -302,6 +302,9 @@ func (w *sandboxWorkspace) writeRuntimeIdentity(timeout time.Duration) error {
 	envBody := fmt.Sprintf("%s=%s\n", runtimetoken.RefEnvName, shellQuote(w.tokenRef))
 	if name, value, ok := w.accountEnv(); ok {
 		envBody += fmt.Sprintf("%s=%s\n", name, shellQuote(value))
+		// And every identity variable EMPTY, so the host's own keys cannot outrank
+		// the account (W7.4).
+		envBody += w.accountScrubEnv()
 	}
 	envScript := "umask 077 && cat > " + shellQuote(w.IdentityEnvPath())
 	out, err = w.shell.Run(timeout, envScript, strings.NewReader(envBody), false)
@@ -460,7 +463,7 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	// agent-server's exec-time environment so the persisted identity's host-side
 	// /proc/<pid>/environ probe can bind the live process to the row. Same
 	// `set -a`/`;`/`|| exit 1` contract the callback source below documents.
-	launch = "set -a && . " + shellQuote(w.IdentityEnvPath()) + " && set +a || exit 1; " + launch
+	launch = "set -a && . " + shellQuote(w.IdentityEnvPath()) + " && set +a || exit 1; " + w.accountLaunchGuard() + launch
 	if w.spec.CallbackToken != "" {
 		// Sourced into the shell that launches the agent-server, so the variables
 		// are in its ENVIRONMENT rather than its argv. AF_DAEMON_URL and

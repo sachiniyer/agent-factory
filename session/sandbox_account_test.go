@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -183,4 +184,93 @@ func TestAccountEnvPointsTheAgentAtTheScopedDir(t *testing.T) {
 	pcmd, err := plain.agentServerCommand()
 	require.NoError(t, err)
 	assert.NotContains(t, pcmd, "CLAUDE_CONFIG_DIR", "no account, no account variable")
+}
+
+// The agent's config-dir variable ALWAYS points at the session's own scope, and the
+// host's own identity variables are defined empty so they cannot outrank the
+// synced account (W7.4). The scrub is judged on the real environment a launch shell
+// builds: ambient keys and another session's scope on the host user's environment.
+func TestRemoteLaunchIsolatesTheAccountFromTheHostsOwnIdentity(t *testing.T) {
+	acct := writeAccount(t, "claude", testSecretA)
+	sh := &recordingShell{}
+	w := &sandboxWorkspace{shell: sh, SessionDir: t.TempDir(), tokenRef: "ref", agentServerToken: "tok", program: "claude",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+	require.NoError(t, w.writeRuntimeIdentity(time.Second))
+	envFile := filepath.Join(t.TempDir(), "af-identity.env")
+	require.NoError(t, os.WriteFile(envFile, []byte(sh.stdin[1]), 0o600))
+	require.NoError(t, os.MkdirAll(w.AccountDir(), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(w.AccountDir(), ".credentials.json"), []byte("x"), 0o600))
+
+	script := "set -a && . " + shellQuote(envFile) + " && set +a || exit 1; " + w.accountLaunchGuard() +
+		`printf '%s|%s|%s' "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" "$CLAUDE_CONFIG_DIR"`
+	cmd := exec.Command("sh", "-c", script)
+	// The host user's own environment: their API key, and some OTHER session's scope.
+	cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY=host-user-key", "ANTHROPIC_AUTH_TOKEN=host-token",
+		"CLAUDE_CONFIG_DIR=/home/hostuser/.claude")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Equal(t, "||"+w.AccountDir(), string(out),
+		"the host's keys are emptied and the config dir is exactly this session's scope")
+	assert.NotContains(t, sh.stdin[1], testSecretA, "no credential content in the identity file")
+}
+
+// The launch fails CLOSED when the scope is not in place: scope dir absent, no
+// credential in it, or the config variable pointing anywhere but at it. In every
+// case the agent-server is never started.
+func TestRemoteLaunchFailsClosedWithoutTheSessionScope(t *testing.T) {
+	acct := writeAccount(t, "claude", testSecretA)
+	w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: t.TempDir(), program: "claude",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+	guard := w.accountLaunchGuard()
+	require.NotEmpty(t, guard)
+	run := func(env ...string) error {
+		cmd := exec.Command("sh", "-c", guard+"echo STARTED")
+		cmd.Env = append(os.Environ(), env...)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			assert.Contains(t, string(out), "STARTED")
+		} else {
+			assert.NotContains(t, string(out), "STARTED", "a refused launch must not reach the agent-server")
+			assert.Contains(t, string(out), "account scope is not in place")
+		}
+		return err
+	}
+	scopeVar := "CLAUDE_CONFIG_DIR=" + w.AccountDir()
+
+	require.Error(t, run(scopeVar), "the scope dir is absent")
+
+	require.NoError(t, os.MkdirAll(w.AccountDir(), 0o700))
+	require.Error(t, run(scopeVar), "the scope exists but holds no credential")
+
+	require.NoError(t, os.WriteFile(filepath.Join(w.AccountDir(), ".credentials.json"), []byte("x"), 0o600))
+	require.NoError(t, run(scopeVar), "the scope is in place")
+	require.Error(t, run("CLAUDE_CONFIG_DIR=/home/hostuser/.claude"), "the variable points at the host user's global home")
+	require.Error(t, run("CLAUDE_CONFIG_DIR=/other/session/account"), "or at another session's scope")
+	require.Error(t, run("CLAUDE_CONFIG_DIR="), "or at nothing")
+
+	// A session with no account gets no guard and no scrub: nothing changes for it.
+	plain := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", spec: ProvisionSpec{Title: "t"}}
+	assert.Empty(t, plain.accountLaunchGuard())
+	assert.Empty(t, plain.accountScrubEnv())
+}
+
+// The guard is part of the launch itself: sourced identity first, then the guard,
+// then the agent-server — so an absent scope aborts before anything starts.
+func TestAgentServerLaunchScriptCarriesTheGuardBetweenIdentityAndStart(t *testing.T) {
+	acct := writeAccount(t, "claude", testSecretA)
+	sh := &recordingShell{}
+	w := &sandboxWorkspace{shell: sh, SessionDir: "/s", program: "claude",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+	_ = w.startAgentServer(time.Second)
+	require.NotEmpty(t, sh.scripts)
+	script := sh.scripts[len(sh.scripts)-1]
+	identity := strings.Index(script, "af-identity.env")
+	guard := strings.Index(script, "account scope is not in place")
+	start := strings.Index(script, "nohup")
+	require.True(t, identity >= 0 && guard > identity && start > guard,
+		"identity (%d) → guard (%d) → start (%d) in: %s", identity, guard, start, script)
+
+	plain := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "claude", spec: ProvisionSpec{Title: "t"}}
+	_ = plain.startAgentServer(time.Second)
+	assert.NotContains(t, plain.shell.(*recordingShell).scripts[0], "account scope")
 }

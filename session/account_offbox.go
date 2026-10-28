@@ -1,5 +1,7 @@
 package session
 
+import "strings"
+
 // Off-box accounts on listed hosts (#5571 W7.4).
 //
 // `--account` and `default_accounts` are admitted on a session whose target is a
@@ -44,4 +46,21 @@ func accountCarried(kind BackendKind, repoRoot, pick string) bool {
 func listedHostAccountRemedy() string {
 	return "af sends an account only to a host in the global host list: add the host under [hosts.<name>] in the global config and pick it with --host <name>, " +
 		"or omit --account to run on the host's own credentials"
+}
+
+// recordedAccountHost is the host name the session row records. It is the pick as
+// made — except for an account-scoped session on a listed host reached through
+// default_host, whose empty pick would otherwise be re-resolved on every restore
+// and could resolve elsewhere (a repository that later gains its own [ssh] section
+// would silently move the session, and its credentials, to a different target).
+// Pinning the RESOLVED name makes "this session's account goes to this host"
+// a recorded fact rather than a re-derivation.
+func recordedAccountHost(opts InstanceOptions, kind BackendKind, repoRoot string) string {
+	if opts.Host != "" || strings.TrimSpace(opts.Account) == "" {
+		return opts.Host
+	}
+	if name, ok := listedAccountHost(kind, repoRoot, ""); ok {
+		return name
+	}
+	return ""
 }

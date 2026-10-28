@@ -276,3 +276,48 @@ func writeFileAtomic0600(path string, data []byte) error {
 	}
 	return os.Rename(tmp.Name(), path)
 }
+
+// accountScrubEnv is the environment-file text that defines every identity
+// variable of the session's agent EMPTY on the host (#5571 W7.4). The host's
+// launch environment is the host user's: an ambient ANTHROPIC_API_KEY or
+// OPENAI_API_KEY outranks the synced OAuth credentials, so without this the
+// session would report one account while spending another. The daemon cannot
+// subtract from an environment it never sees, so the names are defined empty in
+// the 0600 identity file the launch shell sources — the docker backend's shape.
+func (w *sandboxWorkspace) accountScrubEnv() string {
+	configVar, _, ok := w.accountEnv()
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, name := range sessionenv.AccountIdentityNames(w.spec.Account.Agent) {
+		if name == configVar {
+			// Injected with the scope, never emptied: an empty copy would erase the
+			// selection this exists to make.
+			continue
+		}
+		b.WriteString(name + "=\n")
+	}
+	return b.String()
+}
+
+// accountLaunchGuard is the shell fragment that makes the agent-server launch FAIL
+// CLOSED unless the session's own synced scope is in place: the agent's config
+// variable must equal this session's scope exactly — never the host user's global
+// agent home, never another session's scope — and the scope must hold at least one
+// of the account's credential files. It runs after the identity file is sourced,
+// so it judges the environment the agent-server will actually inherit. Empty when
+// the session carries no account.
+func (w *sandboxWorkspace) accountLaunchGuard() string {
+	name, scope, ok := w.accountEnv()
+	if !ok {
+		return ""
+	}
+	var has []string
+	for _, rel := range accountCredentialRel[w.spec.Account.Agent] {
+		has = append(has, "[ -f "+shellQuote(scope+"/"+rel)+" ]")
+	}
+	return fmt.Sprintf("{ [ \"$%s\" = %s ] && { %s; }; } || { echo %s >&2; exit 1; }; ",
+		name, shellQuote(scope), strings.Join(has, " || "),
+		shellQuote("af: the session's account scope is not in place; refusing to start the agent under any other identity"))
+}
