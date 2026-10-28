@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import { getConfig, setConfigValue } from "./api.js";
-import { type ConfigStatus, canCommit, controlKind, createKeyedQueue, saveNotice, shouldCloseSavedField } from "./config.js";
+import { type ConfigStatus, canCommit, configRowsReadOnly, controlKind, createKeyedQueue, saveNotice, shouldCloseSavedField } from "./config.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 
 // These are the web client's config-editor contracts. They are pure logic +
@@ -372,4 +372,11 @@ test("getConfig sends repo_path only for a project scope", async () => {
   const respGlobal = await getConfig("tok");
   assert.deepEqual(global.body, {}, "the global read sends no repo_path");
   assert.equal(respGlobal.project_root, "", "a global answer carries no scope");
+});
+
+test("rows are read-only for a project scope and while a scope change is in flight", () => {
+  assert.equal(configRowsReadOnly({ root: "", selected: "" }), false, "global is writable");
+  assert.equal(configRowsReadOnly({ root: "/repo", selected: "/repo" }), true, "a project is inspection only");
+  assert.equal(configRowsReadOnly({ root: "", selected: "/repo" }), true, "global rows must not take edits once the selector shows a project");
+  assert.equal(configRowsReadOnly({ root: "/repo", selected: "" }), true, "rows still resolved for a project stay read-only on the way back");
 });

@@ -9130,6 +9130,9 @@ function rebuildKeepingScroll(el2, previous, next, rebuild) {
 
 // src/config.ts
 var CONFIG_LIST_TOKEN = "config";
+function configRowsReadOnly(scope) {
+  return scope.root !== "" || scope.selected !== scope.root;
+}
 function tiersInOrder(entries) {
   const seen = /* @__PURE__ */ new Map();
   for (const e of entries) {
@@ -9456,7 +9459,7 @@ var ConfigPane = class {
    *  a save the writer refuses. */
   renderControl(e) {
     const kind = controlKind(e);
-    const readOnly = this.scope.root !== "";
+    const readOnly = configRowsReadOnly(this.scope);
     if (kind === "checkbox") {
       const box = h("input", { type: "checkbox", class: "af-config-check" });
       box.checked = e.value === "true";

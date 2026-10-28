@@ -60,6 +60,14 @@ export interface ConfigScopeState {
   options: string[];
 }
 
+/** Whether the rows on screen take no edits: a project scope is inspection only,
+ *  and so is a scope change still in flight (`selected` has moved but `root` is
+ *  still the scope the rows were read from) — a toggle in that gap would write
+ *  the global file while the selector already shows a project. */
+export function configRowsReadOnly(scope: Pick<ConfigScopeState, "root" | "selected">): boolean {
+  return scope.root !== "" || scope.selected !== scope.root;
+}
+
 /** What the config view can ask the shell to do. Saving is the shell's job (it
  *  owns the token and the refresh), so the pane reports intent and renders the
  *  outcome it is handed back. */
@@ -626,7 +634,12 @@ export class ConfigPane {
     // never saw — so the row must not write through the global save path
     // (config.write-project is the separate seam that will own that). The
     // controls still render the value; they just do not take edits.
-    const readOnly = this.scope.root !== "";
+    //
+    // A scope change still in flight reads the same way: `selected` has moved to
+    // the project while `root` is still the global scope the rows were read from,
+    // and a toggle in that gap would write the GLOBAL file while the selector
+    // already shows the project.
+    const readOnly = configRowsReadOnly(this.scope);
 
     if (kind === "checkbox") {
       const box = h("input", { type: "checkbox", class: "af-config-check" });
