@@ -1,9 +1,11 @@
 package sessionenv
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // Unmodeled argv-passthrough wrappers (strace, perf, valgrind, gdb --args,
@@ -419,4 +421,28 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, codex),
 			"command %q", test.command)
 	}
+}
+
+// Nested strace option runs are linear (Codex P2 on #5709): `strace -o strace
+// -o strace … true` starts one run per strace word, each reaching the end of the
+// command. Every position is judged once, so the number of judged words is
+// proportional to the command, whatever the machine or its load, and the verdict
+// does not change with length.
+func TestStraceNestedOptionRunsAreLinear(t *testing.T) {
+	names := map[string]struct{}{"CODEX_HOME": {}}
+	run := func(n int) (unsafe bool, work int) {
+		command := "strace" + strings.Repeat(" -o strace", n) + " true"
+		file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+		require.NoError(t, err)
+		call := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		memo := newOperandTailMemo()
+		_, unsafe = unwrapAccountCommand(call.Args, names, memo)
+		return unsafe, *memo.straceRunWork
+	}
+	unsafe, small := run(250)
+	require.False(t, unsafe, "a benign chain stays allowed")
+	unsafe, large := run(8000)
+	require.False(t, unsafe, "and stays allowed at any length")
+	require.LessOrEqual(t, large, 4*8000, "each position is judged a bounded number of times")
+	require.LessOrEqual(t, large, 40*small, "32x the words took %d/%d judged words", large, small)
 }
