@@ -26,7 +26,14 @@ type hostsFake struct {
 
 func installHostsFake(t *testing.T, f *hostsFake) {
 	t.Helper()
-	pl, ps, pc := hostsLoad, hostsConfigSet, hostsCheckProbe
+	pl, ps, pc, pw, pp := hostsLoad, hostsConfigSet, hostsCheckProbe, hostsWriteIf, hostsPosture
+	hostsPosture = func() string { return "" }
+	hostsWriteIf = func(key, value string, ifCurrent *string) (daemon.SetConfigValueResponse, error) {
+		if ifCurrent != nil && *ifCurrent != config.HostsSnapshot(f.hosts) {
+			return daemon.SetConfigValueResponse{}, errors.New(config.ErrConfigChangedConcurrently)
+		}
+		return hostsConfigSet(key, value)
+	}
 	hostsLoad = func() (map[string]config.HostConfig, string, error) {
 		out := map[string]config.HostConfig{}
 		for k, v := range f.hosts {
@@ -54,7 +61,7 @@ func installHostsFake(t *testing.T, f *hostsFake) {
 		return f.reply, f.checkEr
 	}
 	t.Cleanup(func() {
-		hostsLoad, hostsConfigSet, hostsCheckProbe = pl, ps, pc
+		hostsLoad, hostsConfigSet, hostsCheckProbe, hostsWriteIf, hostsPosture = pl, ps, pc, pw, pp
 		hostsAddIdentityFile, hostsAddWorkspaceRoot, hostsAddHostKeyPosture = "", "", ""
 		hostsAddDefault, hostsAddNoCheck, hostsRemoveClearDefault, hostsJSONFlag = false, false, false, false
 	})

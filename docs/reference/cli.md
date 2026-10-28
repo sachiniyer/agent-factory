@@ -1452,7 +1452,7 @@ Save a host and check that it can run a session
 
 Save <name> as a sandbox host and probe it.
 
-<ssh-destination> is [user@]host[:port], for example ubuntu@box1.tailnet.ts.net.
+<ssh-destination> is [user@]host[:port] (an ssh:// URL works too), for example ubuntu@box1.tailnet.ts.net.
 The name is what 'af sessions create --host <name>' takes. The host is probed
 for git, tmux (3.2 or newer) and gh, and every missing tool is reported with
 its fix. The entry is kept either way; use --no-check to skip the probe.

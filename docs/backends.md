@@ -650,6 +650,15 @@ ssh config, and a host that is unreachable or missing a tool is still saved, wit
 the fix printed and a non-zero exit so a script notices. These verbs act on this
 machine's host list and daemon, so they refuse a remote `--daemon-url`.
 
+With `--json` every outcome is exactly one envelope on **stdout** and nothing on
+stderr. A failure is `{"data": null, "error": {...}}`. When the host was saved
+and a later step did not finish, `data` carries the entry or the probe result
+and `error.code` says which: `mutation_committed` (saved, but the probe or the
+default pick could not run) or `host_not_ready` (saved and probed, not ready
+yet). The exit code is non-zero in both. Concurrent `add`, `remove` and
+`af config set hosts` never lose each other's change: the edit is re-read and
+redone if the table moved while it was being prepared.
+
 A host in the global `hosts` list is probed for `git`, `tmux` (3.2 or newer) and
 `gh` without creating a session on it. `af doctor` shows one row per listed host
 (ready, blocked with the missing tool, or unreachable), and the daemon repeats

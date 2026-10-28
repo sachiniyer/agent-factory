@@ -2297,6 +2297,13 @@
       "web_rpcs: keyed by RPC method -> json field."
     ],
     "requests": {
+      "SetConfigValueRequest": {
+        "tui": {
+          "if_current": {
+            "ok": "The compare-and-set precondition for a per-entry edit of the host table (#5855). Only `af hosts add/remove` read the table, change one entry and write it back, so only they need the write to fail if the table moved. The TUI and web write single scalar keys, or replace a whole value the user just edited, and keep the documented last-writer-wins contract; a client that omits the field gets exactly that."
+          }
+        }
+      },
       "RebindProjectRequest": {
         "cli": {
           "expected_root": {
@@ -2734,6 +2741,11 @@
       "PruneSessionsRequest": {}
     },
     "web_rpcs": {
+      "SetConfigValue": {
+        "if_current": {
+          "ok": "The compare-and-set precondition for a per-entry edit of the host table (#5855). Only `af hosts add/remove` read the table, change one entry and write it back, so only they need the write to fail if the table moved. The TUI and web write single scalar keys, or replace a whole value the user just edited, and keep the documented last-writer-wins contract; a client that omits the field gets exactly that."
+        }
+      },
       "ListAccounts": {
         "agent": {
           "ok": "The web section lists EVERY agent's accounts at once — it renders one group per agent and a register form under each — so it never narrows the read. The filter exists for `af accounts list <agent>`, where a caller asked for one agent; a UI that sent it would have to decide which agent the operator meant before showing them the list they came for."

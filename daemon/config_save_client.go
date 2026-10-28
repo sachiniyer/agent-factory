@@ -48,6 +48,15 @@ func requestApplyConfigAttempt() (ApplyConfigResponse, daemonCallAttempt) {
 // reopen exactly the split #3231 closes. It never STARTS a daemon, like the
 // apply poke.
 func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
+	return SetGlobalConfigValueIf(key, value, nil)
+}
+
+// SetGlobalConfigValueIf is SetGlobalConfigValue with the host-table
+// compare-and-set (SetConfigValueRequest.IfCurrent). Against a daemon that has
+// not advertised ConfigSetIf — or one whose Ping cannot be read — a conditional
+// write is refused rather than sent, because the daemon would drop the field and
+// write unconditionally: the lost update the condition exists to prevent.
+func SetGlobalConfigValueIf(key, value string, ifCurrent *string) (SetConfigValueResponse, error) {
 	if err := config.RetiredThemeKeyError(key); err != nil {
 		return SetConfigValueResponse{}, err
 	}
@@ -62,8 +71,14 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 			// daemon canonicalizes the same alias before writing. Normalize its
 			// echo so new callers always see the canonical public key.
 			wireKey := config.LegacyConfigKey(key)
+			if ifCurrent != nil {
+				var ping PingResponse
+				if err := client.Call(controlServiceName+".Ping", PingRequest{}, &ping); err != nil || !ping.ConfigSetIf {
+					return SetConfigValueResponse{}, fmt.Errorf("the running daemon (%s) cannot apply a conditional config write, so it would overwrite a concurrent edit; run `af daemon restart` to upgrade it, then retry (nothing was written)", ping.Version)
+				}
+			}
 			callErr := client.Call(controlServiceName+".SetConfigValue",
-				SetConfigValueRequest{Key: wireKey, Value: value}, &resp)
+				SetConfigValueRequest{Key: wireKey, Value: value, IfCurrent: ifCurrent}, &resp)
 			if callErr == nil && resp.Result != nil {
 				resp.Result.Key = config.CanonicalConfigKey(resp.Result.Key)
 			}
@@ -95,7 +110,7 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 				"config change refused while rollback restores the previous daemon: %w; retry after rollback recovery finishes", gateErr)
 		}
 	}
-	result, err := config.SetGlobalConfigValue(key, value)
+	result, _, err := config.SetGlobalConfigValueIfWithDigest(key, value, ifCurrent)
 	if err != nil {
 		return SetConfigValueResponse{}, err
 	}
