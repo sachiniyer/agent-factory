@@ -16,6 +16,11 @@ import (
 
 // Manager owns the daemon's authoritative session mutations.
 type Manager struct {
+	// advisory scopes best-effort background work (host-readiness probes) that
+	// must never delay shutdown: drainDaemon cancels it FIRST, before it closes the
+	// transports or joins anything, so a probe's ssh child is killed rather than
+	// waited on (#5839). Zero-value safe; see advisory.go.
+	advisory advisoryScope
 	// cfg is the FROZEN startup config. It is read only by the keys that
 	// deliberately do NOT hot-reload: root_agents (its next-daemon-start contract,
 	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and
