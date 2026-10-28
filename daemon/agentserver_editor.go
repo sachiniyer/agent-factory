@@ -21,8 +21,11 @@ import (
 // one is the same install-hint state.
 
 // agentEditorKey is the supervisor key of the one editor this single-workspace
-// server owns.
-const agentEditorKey = "workspace"
+// server owns. It carries the workspace's stable id: sessions on one host share an
+// ssh user and an af home, so the owner records the supervisor persists are shared
+// too, and a key common to every session would let one session's teardown match
+// another's record.
+func (hs *headlessServer) agentEditorKey() string { return "workspace-" + hs.inst.ID }
 
 // agentEditorResponse is EditorPath's answer.
 type agentEditorResponse struct {
@@ -54,7 +57,10 @@ func (hs *headlessServer) ensureEditor() (vscodeEndpoint, error) {
 	if worktree == "" {
 		return vscodeEndpoint{}, errors.New("the workspace has no directory to open in the editor")
 	}
-	return hs.editorSupervisor().ensureServerForInstance(agentEditorKey, hs.inst.ID, worktree)
+	if strings.TrimSpace(hs.inst.ID) == "" {
+		return vscodeEndpoint{}, errors.New("the workspace has no stable id to own an editor under")
+	}
+	return hs.editorSupervisor().ensureServerForInstance(hs.agentEditorKey(), hs.inst.ID, worktree)
 }
 
 // Editor implements EditorPath: it starts the editor and reports whether it is
@@ -75,9 +81,29 @@ func (hs *headlessServer) Editor(_ struct{}, resp *agentEditorResponse) error {
 	return nil
 }
 
-// stopEditor ends the editor with the workspace. A no-op if none was started.
-func (hs *headlessServer) stopEditor() {
-	if hs.editor.sup != nil {
-		hs.editor.sup.Stop()
+// stopEditor ends THIS workspace's editor and no other. It is session-scoped on
+// purpose: the supervisor's Stop() is the daemon's shutdown operation and sweeps
+// every owner record in the af home, which on a shared host includes other
+// sessions' editors. stopForInstance acts only on the process this agent-server
+// recorded at launch for this stable id (pid plus start identity, confirmed by the
+// supervisor before any signal), and a record it cannot prove it owns is left alone.
+func (hs *headlessServer) stopEditor() error {
+	if hs.hasNoEditorIdentity() {
+		return nil
 	}
+	return hs.editorSupervisor().stopForInstance(hs.agentEditorKey(), hs.inst.ID)
+}
+
+func (hs *headlessServer) hasNoEditorIdentity() bool {
+	return hs.inst == nil || strings.TrimSpace(hs.inst.ID) == ""
+}
+
+// EditorStop implements EditorStopPath: the daemon asks for the editor to end when
+// the last VS Code tab closes.
+func (hs *headlessServer) EditorStop(_ struct{}, resp *agentOKResponse) error {
+	if err := hs.stopEditor(); err != nil {
+		return fmt.Errorf("stop the workspace editor: %w", err)
+	}
+	resp.OK = true
+	return nil
 }

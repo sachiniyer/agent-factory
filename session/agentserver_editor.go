@@ -28,6 +28,8 @@ type EditorRelayer interface {
 	// DialEditor opens a byte stream to the editor's socket on the host. The
 	// target is server-owned: the caller names no path or port.
 	DialEditor(ctx context.Context) (net.Conn, error)
+	// StopEditor ends this workspace's editor on the host (and no other editor).
+	StopEditor(ctx context.Context) error
 }
 
 var _ EditorRelayer = (*remoteAgentServer)(nil)
@@ -62,4 +64,17 @@ func (s *remoteAgentServer) DialEditor(ctx context.Context) (net.Conn, error) {
 		return s.rc.dialRelayQuery(ctx, agentproto.RelayTargetQueryParam, agentproto.RelayTargetEditor,
 			"the workspace editor is not serving on the host")
 	})
+}
+
+// StopEditor implements EditorRelayer. A host without the route has no editor of
+// ours to stop, so that is success rather than an error.
+func (s *remoteAgentServer) StopEditor(_ context.Context) error {
+	h, err := s.rc.health()
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(h.Features, agentproto.EditorFeature) {
+		return nil
+	}
+	return s.rc.callWithin(agentproto.EditorStopPath, struct{}{}, nil, editorCallTimeout)
 }

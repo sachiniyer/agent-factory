@@ -53,7 +53,7 @@ func (m *Manager) remoteEditorTarget(instance *session.Instance, repoID, title s
 	default:
 		return webTabTarget{Kind: kind}, fmt.Errorf("the workspace editor reported unknown state %q", st.State)
 	}
-	return webTabTarget{URL: vscodeUpstreamURL, Transport: m.editorRelayTransport(instance, repoID, title), Kind: kind}, nil
+	return webTabTarget{URL: vscodeUpstreamURL, Transport: m.editorRelayTransport(instance, repoID, title), Kind: kind, RelayedEditor: true}, nil
 }
 
 // editorRelayTransport is relayTransport's twin for the editor: one cached
@@ -81,4 +81,23 @@ func (m *Manager) editorRelayTransport(instance *session.Instance, repoID, title
 		old.(relayTransportEntry).transport.CloseIdleConnections()
 	}
 	return tr
+}
+
+// stopRemoteEditor ends an off-box session's host-side editor when its last VS Code
+// tab closes, as the local editor stops then. Best effort: the host may be
+// unreachable, and the editor stops with the session in any case, so a failure is
+// logged rather than blocking the close.
+func (m *Manager) stopRemoteEditor(instance *session.Instance) {
+	if instance.Capabilities().Workspace != session.WorkspaceRemote {
+		return
+	}
+	er, ok := instance.AgentServer().(session.EditorRelayer)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), editorStartTimeout)
+	defer cancel()
+	if err := er.StopEditor(ctx); err != nil {
+		m.warn().Printf("remote editor of session id %q was not stopped on tab close (it stops with the session): %v", instance.ID, err)
+	}
 }

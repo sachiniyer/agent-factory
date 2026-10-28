@@ -414,7 +414,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// tmux session or worktree is orphaned. Durability of in-progress work is the
 	// driving daemon's job (archive = push branch, epic §5), not the agent-server's.
 	_ = closeTCP.close()
-	hs.stopEditor()
+	if err := hs.stopEditor(); err != nil {
+		log.WarningLog.Printf("agent-server: workspace editor teardown on shutdown: %v", err)
+	}
 	if err := hs.as.Kill(false); err != nil {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)
 	}
@@ -451,6 +453,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// provider's conversation. Advertised as the "relaunch" feature.
 	mux.HandleFunc("/v1/agent/relaunch", rpcHandler(hs.Relaunch))
 	mux.HandleFunc(agentproto.EditorPath, rpcHandler(hs.Editor))
+	mux.HandleFunc(agentproto.EditorStopPath, rpcHandler(hs.EditorStop))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -867,7 +870,9 @@ func (hs *headlessServer) Relaunch(_ struct{}, resp *agentOKResponse) error {
 }
 
 func (hs *headlessServer) Kill(_ struct{}, resp *agentOKResponse) error {
-	hs.stopEditor()
+	if err := hs.stopEditor(); err != nil {
+		log.WarningLog.Printf("agent-server: workspace editor teardown: %v", err)
+	}
 	if err := hs.as.Kill(false); err != nil {
 		return err
 	}

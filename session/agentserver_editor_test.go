@@ -42,3 +42,23 @@ func TestRemoteAgentServer_DialEditorRefusesAfterKill(t *testing.T) {
 	_, err := s.DialEditor(t.Context())
 	require.Error(t, err, "an editor relay must not outlive the session")
 }
+
+func TestRemoteAgentServer_StopEditorCallsTheHostOnlyWhenItHasTheFeature(t *testing.T) {
+	withFeature := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true, "features": []string{agentproto.EditorFeature}}).
+		route(agentproto.EditorStopPath, map[string]any{"ok": true})
+	srv := httptest.NewServer(withFeature.mux)
+	defer srv.Close()
+	s := &remoteAgentServer{rc: withFeature.client(t, srv.URL)}
+	require.NoError(t, s.StopEditor(t.Context()))
+	withFeature.mu.Lock()
+	_, called := withFeature.bodies[agentproto.EditorStopPath]
+	withFeature.mu.Unlock()
+	assert.True(t, called)
+
+	// An older host has no editor of ours to stop: success, and no unknown-route call.
+	old := newTabWireServer(t).route("/v1/health", map[string]any{"ok": true})
+	srv2 := httptest.NewServer(old.mux)
+	defer srv2.Close()
+	require.NoError(t, (&remoteAgentServer{rc: old.client(t, srv2.URL)}).StopEditor(t.Context()))
+}

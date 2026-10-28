@@ -23,6 +23,11 @@ const RelayTargetEditor = "editor"
 // "missing" (no editor binary installed on the host).
 const EditorPath = "/v1/agent/editor"
 
+// EditorStopPath ends the workspace's editor (POST): the daemon calls it when the
+// session's last VS Code tab closes. It stops only the editor this agent-server
+// started for this workspace.
+const EditorStopPath = "/v1/agent/editor-stop"
+
 // Editor states answered by EditorPath.
 const (
 	EditorStateReady    = "ready"
