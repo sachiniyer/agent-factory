@@ -68,6 +68,9 @@ type ProvisionSpec struct {
 	// Program is the agent program to run in the workspace (empty ⇒ the config
 	// default). Passed through to the sandbox's `af agent-server --program`.
 	Program string
+	// Host is the listed host the session was placed on (W6.3); empty means the
+	// repo's own ssh settings, or the default_host where the runtime allows it.
+	Host string
 	// CallbackURL and CallbackToken let the agent INSIDE a sandbox call back into
 	// the daemon (#2999) — the reverse of the daemon-drives-sandbox direction. They
 	// are AF_DAEMON_URL / AF_DAEMON_TOKEN, which apiclient already reads, so no new
@@ -107,6 +110,14 @@ type ProvisionSpec struct {
 	// Only off-box runtimes (docker/ssh/hook) honor it; the in-process local
 	// runtime never clones, so it is a no-op there.
 	RestoreBranch string
+	// SeedBundlePath, when set, seeds the sandbox workspace from a local git
+	// bundle (a W7.9 session move) instead of only a fresh clone: after cloning,
+	// the bundle is streamed to the sandbox and SeedRefs are fetched from it as
+	// local refs, so the session's branch and snapshot commit arrive exactly as
+	// they were. Off-box runtimes honour it; local never clones.
+	SeedBundlePath string
+	// SeedRefs are the refs fetched from SeedBundlePath (each as ref:ref).
+	SeedRefs []string
 	// Account scopes this session to a registered credential account (#3082), for
 	// the off-box kinds that can carry one. Zero value means unscoped.
 	//

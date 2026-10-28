@@ -9,7 +9,7 @@ on:
     - cron: '*/10 * * * *'
   workflow_dispatch:
   workflow_run:
-    workflows: ['PR Validation']
+    workflows: ['PR Validation', 'Build', 'Lint']
     types: [completed]
 
 permissions:
@@ -100,6 +100,7 @@ jobs:
         uses: actions/github-script@v8
         env:
           USING_PAT: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
+          AUTO_MERGE_BATCH_SIZE: ${{ vars.AUTO_MERGE_BATCH_SIZE }}
         with:
           github-token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
           script: |

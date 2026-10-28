@@ -134,6 +134,7 @@ func TestLifecycleActionIsSharedAcrossInstanceAndProjection(t *testing.T) {
 		live   Liveness
 		op     InFlightOp
 		killed bool
+		title  string
 		want   LifecycleAction
 	}{
 		{name: "ready archives", id: "ready-id", live: LiveReady, want: LifecycleActionArchive},
@@ -146,9 +147,13 @@ func TestLifecycleActionIsSharedAcrossInstanceAndProjection(t *testing.T) {
 		{name: "restoring admits no competing lifecycle action", id: "restoring-id", live: LiveLost, op: OpRestoring, want: LifecycleActionNone},
 		{name: "tombstone admits no lifecycle action", id: "killed-id", live: LiveLost, killed: true, want: LifecycleActionNone},
 		{name: "id-less has no lifecycle action", live: LiveReady, want: LifecycleActionNone},
+		// The daemon refuses archive AND restore of the reserved root session
+		// unconditionally (#5406), so no verb may be projected for it.
+		{name: "reserved root ready offers no archive", id: "root-id", title: RootSessionTitle, live: LiveReady, want: LifecycleActionNone},
+		{name: "reserved root lost offers no restore", id: "root-id", title: RootSessionTitle, live: LiveLost, want: LifecycleActionNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			inst := &Instance{ID: tc.id, liveness: tc.live, inFlightOp: tc.op, userKilled: tc.killed}
+			inst := &Instance{ID: tc.id, Title: tc.title, liveness: tc.live, inFlightOp: tc.op, userKilled: tc.killed}
 			require.Equal(t, tc.want, inst.LifecycleAction(), "TUI domain decision")
 			require.Equal(t, tc.want, inst.ToInstanceData().LifecycleAction, "web projection decision")
 		})

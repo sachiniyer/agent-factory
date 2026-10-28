@@ -82,6 +82,8 @@ var keyEffectClasses = map[string]EffectClass{
 	"docker.mount_agent_credentials": EffectAppliedLive,
 	"ssh.host_key_verification":      EffectAppliedLive,
 	"sandbox.ssh":                    EffectAppliedLive,
+	"hosts":                          EffectAppliedLive,
+	"default_host":                   EffectAppliedLive,
 	// The network listener keys apply live since #2480 PR2: require_token /
 	// require_loopback_token / cors_allowed_origins are read per request
 	// (livePosture), and listen_addr / preview_listen_addr rebind in place

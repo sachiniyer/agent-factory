@@ -253,6 +253,13 @@ type Config struct {
 	// Default strict, so an existing backend=ssh user sees no change; accept-new
 	// writes learned keys to an af-owned store, never the user's ~/.ssh/known_hosts.
 	SSHHostKeyVerification string `json:"ssh_host_key_verification" toml:"ssh_host_key_verification"`
+	// Hosts is the operator-owned named host list (#5571 W6.1): name → ssh
+	// destination. Global-only — af executes against these and sends credentials
+	// to them, so no repo layer can set or extend it. See HostConfig.
+	Hosts map[string]HostConfig `json:"hosts,omitempty" toml:"hosts,omitempty"`
+	// DefaultHost names the Hosts entry used when a session does not pick one.
+	// Empty means no default. Global-only, like Hosts.
+	DefaultHost string `json:"default_host,omitempty" toml:"default_host,omitempty"`
 	// SandboxSSH is the free-form `ssh …` command the `sandbox` backend runs to
 	// reach the sandbox host — any invocation that already works for the operator
 	// (jump hosts, ProxyCommand, custom ports/flags/keys; #2476). It is

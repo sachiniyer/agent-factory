@@ -344,6 +344,59 @@ func TestRunTask_ReplayAdoptedTombstoneIsAborted(t *testing.T) {
 	}
 }
 
+// TestRunTask_ReplayDoesNotAdoptAnInterruptedRow is the #4222 crash window at
+// the fire-marker axis: a create committed its row and bound the marker, the
+// daemon died before the outcome cleared, and on restart the row's runtime had
+// to be respawned — a replacement that was never replayed the prompt. The
+// pending marker is still owed its delivery; reconcile must not adopt the
+// interrupted row as the fire's product and misreport the undelivered
+// occurrence "started".
+func TestRunTask_ReplayDoesNotAdoptAnInterruptedRow(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	seedCronTask(t, "ab0r7100", repoPath)
+	creates, _ := stubTaskDelivery(t)
+
+	intendedAt := time.Now().Add(-time.Minute)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	if err := appendInstanceData(repo.ID, session.InstanceData{
+		ID:                 "inst-int1",
+		TaskID:             "ab0r7100",
+		Title:              "nightly-4",
+		Path:               repoPath,
+		Program:            "claude",
+		Status:             session.Ready,
+		Liveness:           session.LiveReady,
+		TaskRunInterrupted: true,
+		CreatedAt:          intendedAt.Add(2 * time.Second),
+		UpdatedAt:          intendedAt.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("seed session row: %v", err)
+	}
+	seedPendingFire(t, taskFireMarker{
+		TaskID:     "ab0r7100",
+		IntendedAt: intendedAt,
+		Title:      "nightly-4",
+		InstanceID: "inst-int1",
+	})
+
+	if err := runTaskDelivery("ab0r7100", task.ProjectExpectation{}, replayMarker("ab0r7100", intendedAt)); err != nil {
+		t.Fatalf("replay runTaskDelivery: %v", err)
+	}
+	if len(*creates) != 1 {
+		t.Fatalf("an interrupted row is not the fire's product — the still-owed occurrence must deliver fresh; creates = %d", len(*creates))
+	}
+	if got := lastRunStatus(t, "ab0r7100"); got != "started" {
+		t.Fatalf("LastRunStatus = %q, want started (the fresh delivery's own run)", got)
+	}
+	if markerExists(t, "ab0r7100") {
+		t.Fatal("the fresh delivery discharges the marker")
+	}
+}
+
 // TestRunTask_ReplayResidueDischarges: the marker survived but the run's status
 // already landed — the replay consumes it without delivering.
 func TestRunTask_ReplayResidueDischarges(t *testing.T) {
@@ -898,5 +951,161 @@ func TestRunTask_UpgradeGateErrorKeepsMarker(t *testing.T) {
 	}
 	if !markerExists(t, "ab0r7100") {
 		t.Fatal("a fire blocked by the upgrade gate must keep its marker for the replacement daemon")
+	}
+}
+
+// TestTaskFireLeftoverRecord_ForeignRowOwningCollidingTmuxName pins the
+// foreign-row scan's newly added tmux-identity clause. Titles whose distinct
+// spellings the tmux sanitizer collapses onto one name (e.g. "api/refactor"
+// and "api_refactor" both map to af_<repoHash>_api_refactor) while branch
+// sanitization keeps '/' distinct (so the derived branches differ) MUST be
+// treated as foreign when a persisted row owns that tmux name. The reconcile
+// reaps, probes, and kills by the sanitized tmux name; before the fix a
+// foreign row colliding only on that name passed the ownership scan and the
+// leftover was treated as ours to quarantine — and on a host with a live
+// session under that name, killed (#5544 review).
+//
+// This is the no-tmux half of the regression: a seeded leftover worktree makes
+// the function discover residue (so it would otherwise quarantine), and a
+// foreign row colliding only on the tmux name must force the foreign verdict
+// (nil, nil) instead. The end-to-end kill path is covered by the tmux-gated
+// sibling TestTaskFireLeftoverRecord_ForeignRowOwningTmuxNameDoesNotReap.
+func TestTaskFireLeftoverRecord_ForeignRowOwningCollidingTmuxName(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	fireTitle := "api/refactor"
+	foreignTitle := "api_refactor"
+	branch := git.BranchForTitle(cfg.BranchPrefix, fireTitle)
+	sanitized := tmux.SanitizedNameForRepo(fireTitle, repo.IdentityPath())
+
+	// The collision is the whole premise of the bug: the two titles share one
+	// sanitized tmux name (so the kill path addresses the foreign session),
+	// while their derived branches differ (so no branch clause catches the
+	// foreign row either).
+	if got := tmux.SanitizedNameForRepo(foreignTitle, repo.IdentityPath()); got != sanitized {
+		t.Fatalf("collision precondition failed: foreign title sanitizes to %q, want %q", got, sanitized)
+	}
+	if foreignBranch := git.BranchForTitle(cfg.BranchPrefix, foreignTitle); foreignBranch == branch {
+		t.Fatalf("branches must differ so the branch clause cannot catch the foreign row; both = %q", branch)
+	}
+
+	// A leftover worktree on the derived branch makes the function discover
+	// residue; an intent in the future keeps it unproven so the function would
+	// return a quarantine record (never reach the kill) on a host without a
+	// colliding live session, isolating the foreign-scan verdict from the
+	// runtime-stop ordering.
+	wtPath := filepath.Join(t.TempDir(), "leftover-wt")
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("seed leftover worktree: %v: %s", err, out)
+	}
+	fire := &taskFireMarker{
+		TaskID:     "ab0r7110",
+		IntendedAt: time.Now().Add(time.Hour), // future: worktree evidence cannot postdate it → unproven
+		Title:      fireTitle,
+	}
+	foreignRow := session.InstanceData{
+		ID:       "inst-foreign-tmux",
+		TaskID:   "s0me0ther",
+		Title:    foreignTitle,
+		Path:     repoPath,
+		Branch:   git.BranchForTitle(cfg.BranchPrefix, foreignTitle),
+		TmuxName: sanitized, // owns the colliding tmux identity
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7110", ProjectPath: repoPath, Prompt: "p"},
+		fire, repo, []session.InstanceData{foreignRow})
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if row != nil {
+		t.Fatalf("a foreign persisted row owns the colliding tmux name; the leftover must be left alone, got record %+v", row)
+	}
+}
+
+// TestTaskFireLeftoverRecord_ForeignRowOwningTmuxNameDoesNotReap is the
+// end-to-end regression for #5544's tmux-name-collision gap. A persisted
+// foreign row whose TmuxName equals the fire's sanitized name — because the
+// sanitizer collapses distinct titles like "api/refactor" and "api_refactor"
+// to one session name while their branches differ — must be left completely
+// alone when the reconcile probes and kills by that name. Before the fix the
+// foreign row passed the ownership scan, satisfied the per-attempt evidence
+// checks (same AF ancestry markers and a creation time at-or-after the
+// intent), and its live tmux session was killed mid-work with no quarantine
+// or tombstone record left behind. The session is seeded exactly as a
+// normally-created af local session looks.
+func TestTaskFireLeftoverRecord_ForeignRowOwningTmuxNameDoesNotReap(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := setupTaskRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	fireTitle := "api/refactor"
+	foreignTitle := "api_refactor"
+	sanitized := tmux.SanitizedNameForRepo(fireTitle, repo.IdentityPath())
+
+	// The collision precondition the bug turns on: both titles share one
+	// sanitized tmux name, while their derived branches differ.
+	if got := tmux.SanitizedNameForRepo(foreignTitle, repo.IdentityPath()); got != sanitized {
+		t.Fatalf("collision precondition failed: foreign title sanitizes to %q, want %q", got, sanitized)
+	}
+	if fb, fb2 := git.BranchForTitle(cfg.BranchPrefix, foreignTitle), git.BranchForTitle(cfg.BranchPrefix, fireTitle); fb == fb2 {
+		t.Fatalf("branches must differ so the branch clause cannot catch the foreign row; both = %q", fb)
+	}
+
+	// A live tmux session under the colliding name, carrying the af ancestry
+	// markers exactly as a normally-created af local session does — so the
+	// per-attempt evidence checks pass for it.
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sanitized,
+		"-e", tmux.EnvMarkerSession+"="+sanitized,
+		"-e", tmux.EnvMarkerHome+"="+home, "sh").CombinedOutput(); err != nil {
+		t.Fatalf("seed foreign tmux session: %v: %s", err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-session", "-t", "="+sanitized).Run()
+	})
+
+	fire := &taskFireMarker{
+		TaskID:     "ab0r7111",
+		IntendedAt: time.Now().Add(-time.Minute), // past: evidence's creation-time gate passes
+		Title:      fireTitle,
+	}
+	foreignRow := session.InstanceData{
+		ID:       "inst-foreign-live",
+		TaskID:   "s0me0ther",
+		Title:    foreignTitle,
+		Path:     repoPath,
+		Branch:   git.BranchForTitle(cfg.BranchPrefix, foreignTitle),
+		TmuxName: sanitized, // owns the colliding tmux identity
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7111", ProjectPath: repoPath, Prompt: "p"},
+		fire, repo, []session.InstanceData{foreignRow})
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if row != nil {
+		t.Fatalf("a foreign persisted row owns the colliding tmux name; the leftover must be left alone, got record %+v", row)
+	}
+	// The foreign live session must still be alive — the reconcile must not
+	// have reaped it through the sanitized name.
+	if out, err := exec.Command("tmux", "has-session", "-t", "="+sanitized).CombinedOutput(); err != nil {
+		t.Fatalf("a foreign persisted row owns this tmux name; its live session must not be reaped, but it is gone: %v: %s", err, out)
 	}
 }

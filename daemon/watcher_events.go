@@ -66,6 +66,16 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	err := w.sup.deliver(w.taskID, line, watchDeliveryOptions{})
 	w.recordDeliveryResult(time.Now(), err)
 	if err != nil {
+		if isMutationCommitted(err) {
+			// The delivery already committed durable state (a retained
+			// auto-create row, or a prompt whose start outcome is unknown), so
+			// replaying it could provision a second session or paste the prompt
+			// twice. It needs inspection, not an automatic retry: surface it on
+			// the failure tail instead of the replay queue.
+			log.ErrorLog.Printf("watch task %s: event delivery committed but reported an error; not queueing it for replay — inspect the target session: %v", w.taskID, err)
+			tail.add(line)
+			return
+		}
 		limitParked := false
 		parkedStatusRecorded := false
 		switch {

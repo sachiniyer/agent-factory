@@ -1,8 +1,10 @@
 package session
 
 import (
+	"os"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -117,7 +119,7 @@ Sessions (one agent per isolated worktree):
 
 Never rebind an af worktree to another lane's branch with "git checkout -B", "git switch -C", or a direct ref/HEAD write. Those commands bypass Git's ordinary worktree collision refusal and can turn the other lane's unchanged index into a staged revert when the branch moves. Use "af sessions handoff --to <agent> -- <title>" to continue in the existing worktree, or create a session on a different branch.
 
-Tabs (extra processes and views in your instance's worktree; no limit on how many). Shell, process, and VS Code tabs require a local session; external HTTPS web tabs work on remote sessions; loopback web targets still require a local session (--port is loopback). The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
+Tabs (extra processes and views in your instance's worktree; no limit on how many). Shell, process, and VS Code tabs require a local session; web tabs work on remote sessions too — an external HTTPS URL is framed directly, and a loopback target (--port is loopback) shows whatever listens on that port inside the session's own workspace. The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
   af sessions tab-create <title> --kind shell                    Terminal tab running $SHELL in the worktree (the same Terminal the TUI/web opens)
   af sessions tab-create <title> --command <cmd> [--name <tab>]   Process tab running <cmd> in the worktree; prints the tab name; persists across restarts
   af sessions tab-create <title> --kind web --url <u>|--port <n>  Web tab — a live browser view (no process) shown to the user in the web UI; this is how you show a URL, site, or dev server (--port n = http://localhost:n)
@@ -289,10 +291,56 @@ func injectSystemPrompt(resolved string, target skillTarget, callbackUnavailable
 		// OPENCODE_CONFIG at an af-OWNED config that adds af's instructions file.
 		// opencode MERGES it with the user's own config (verified), so their
 		// settings survive, and af writes nothing into ~/.config/opencode.
-		if opencodeCarriesConfigEnv(resolved) {
+		//
+		// A user-supplied OPENCODE_CONFIG reaches this branch through TWO
+		// channels, and af must skip injection for EITHER so it does not
+		// silently shadow the user's file:
+		//
+		//   1. An inline assignment in the resolved command (a program_overrides
+		//      entry like `OPENCODE_CONFIG=~/mine.jsonc opencode`), detected by
+		//      opencodeCarriesConfigEnv. Shell semantics give the LAST
+		//      assignment precedence, so af's injected prefix would lose to it
+		//      anyway — but detecting it lets af SAY the guidance did not land.
+		//   2. An exported OPENCODE_CONFIG in the launching process
+		//      environment, which the opencode allowlist
+		//      (internal/sessionenv) deliberately delivers to the pane.
+		//      Unlike channel 1, a command-prefix assignment SHADOWS an
+		//      already-exported variable of the same name in POSIX shells, so
+		//      injecting af's own OPENCODE_CONFIG would silently override the
+		//      user's exported value and their config file would never be read
+		//      — the exact silent outcome this guard exists to prevent.
+		//
+		// Only OPENCODE_CONFIG needs this treatment: af injects solely that
+		// name; OPENCODE_CONFIG_DIR / OPENCODE_CONFIG_CONTENT pass through the
+		// allowlist unshadowed. Checking os.Getenv here mirrors the same
+		// os.Environ source that prepareLaunchEnvironment (session/tmux)
+		// filters into the pane, so the env-channel decision sees exactly the
+		// value the pane would have inherited.
+		//
+		// The env channel only reaches the pane when the opencode allowlist
+		// actually applies to the launch — i.e. when the resolved command is
+		// operator-attributable, so prepareLaunchEnvironment's
+		// GrantAgentForCommand admits the opencode name set and
+		// FilterForCommand keeps OPENCODE_CONFIG. A non-attributable spelling
+		// (a relative `./opencode`, or an `ionice … opencode` wrapper
+		// GrantAgentForCommand does not model) reaches this branch through
+		// DetectAgentFromCommand but is granted "" and filtered to the common
+		// set, so the user's exported OPENCODE_CONFIG never reaches the pane.
+		// Honoring it there would skip injection for a value the pane will not
+		// see, leaving the pane with neither the user's config nor af's — af
+		// would silently drop its own guidance while logging that it honored
+		// the user's. opencodeExportedConfigReachesPane gates the env channel
+		// on the same grant predicate the pane uses, so a non-attributable
+		// command falls through to af's injection (the pre-env-channel
+		// behavior) and the pane still gets af's config. The inline-assignment
+		// channel (opencodeCarriesConfigEnv) is in the command string, which
+		// FilterForCommand never touches, so it is not subject to this gate.
+		if opencodeCarriesConfigEnv(resolved) || opencodeExportedConfigReachesPane(resolved) {
 			// INFO, not WARNING (#2166): the user pointed OPENCODE_CONFIG at
-			// their own file via program_overrides and af is honoring it.
-			log.InfoLog.Printf("opencode command already sets OPENCODE_CONFIG; leaving it alone (af guidance not injected for opencode)")
+			// their own file (program_overrides assignment OR exported env var
+			// that the pane's allowlist will actually deliver) and af is
+			// honoring it.
+			log.InfoLog.Printf("opencode already has OPENCODE_CONFIG (command or environment); leaving it alone (af guidance not injected for opencode)")
 			return resolved
 		}
 		path, err := ensureOpencodeAfConfig()
@@ -336,4 +384,39 @@ func injectSystemPrompt(resolved string, target skillTarget, callbackUnavailable
 		return tmux.EnsureDevinWorkspaceTrustSuppressed(resolved)
 	}
 	return resolved
+}
+
+// opencodeExportedConfigReachesPane reports whether a user's EXPORTED
+// OPENCODE_CONFIG would actually reach the opencode pane's environment, so the
+// guard in injectSystemPrompt can decide whether honoring it (and skipping af's
+// own injection) leaves the pane with the user's config rather than nothing.
+//
+// The opencode allowlist in internal/sessionenv admits OPENCODE_CONFIG only when
+// prepareLaunchEnvironment attributes the command to opencode through
+// GrantAgentForCommand — a relative `./opencode` or an `ionice … opencode`
+// wrapper the grant predicate does not model reaches the opencode branch through
+// DetectAgentFromCommand but is granted "" and filtered to the common set, so
+// the exported value never reaches the pane. DetectAgentFromCommand and
+// GrantAgentForCommand diverge by design: the former classifies what the command
+// runs for guidance injection, the latter what the operator may carry credentials
+// for, and a non-attributable spelling is exactly the case the credential grant
+// refuses.
+//
+// This helper mirrors the pane's grant decision so the env-channel guard does
+// not skip af's injection for a value the pane will never see — which would
+// leave the pane with neither the user's config nor af's, while the INFO log
+// claims the user's value was honored. workDir is unknown at this call site
+// (the daemon that runs injectSystemPrompt does not know the pane's working
+// directory), so the empty value is the same conservative default
+// GrantAgentForCommand uses for a remote host: it denies every non-absolute
+// spelling, which is exactly the class whose env does not survive the pane's
+// filter. An absolute path inside the real pane workDir is attributed here but
+// denied by the pane's own grant — for that rare spelling the env guard still
+// fires and the pane still gets nothing, matching the pre-env-channel behavior
+// and no worse than the silent skip this guard replaced.
+func opencodeExportedConfigReachesPane(resolved string) bool {
+	if os.Getenv("OPENCODE_CONFIG") == "" {
+		return false
+	}
+	return sessionenv.GrantAgentForCommand(resolved, os.Environ(), "") == tmux.ProgramOpencode
 }

@@ -157,6 +157,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 		return !reflect.DeepEqual(a.SessionEnvPassthrough, b.SessionEnvPassthrough)
 	},
 	"on_archive_command":   func(a, b *config.Config) bool { return a.OnArchiveCommand != b.OnArchiveCommand },
+	"move_cmd":             func(a, b *config.Config) bool { return a.MoveCmd != b.MoveCmd },
 	"worktree_root":        func(a, b *config.Config) bool { return a.WorktreeRoot != b.WorktreeRoot },
 	"vscode_server_binary": func(a, b *config.Config) bool { return a.VSCodeServerBinary != b.VSCodeServerBinary },
 	"daemon_poll_interval": func(a, b *config.Config) bool { return a.DaemonPollInterval != b.DaemonPollInterval },
@@ -172,6 +173,8 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"docker.mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
 	"ssh.host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
 	"sandbox.ssh":                    func(a, b *config.Config) bool { return a.SandboxSSH != b.SandboxSSH },
+	"hosts":                          func(a, b *config.Config) bool { return !reflect.DeepEqual(a.Hosts, b.Hosts) },
+	"default_host":                   func(a, b *config.Config) bool { return a.DefaultHost != b.DefaultHost },
 	// Network listener keys — applied-live since #2480 PR2: the auth/CORS keys are
 	// read per request (livePosture); network.listen_addr / network.preview_listen_addr rebind the
 	// socket in place (webListeners.reconcile, below in ApplyConfig).
