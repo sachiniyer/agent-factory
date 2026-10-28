@@ -1518,6 +1518,9 @@ color such as '#2f5fd8' or '2f5fd8'. Pass "" to clear the color.
 The web client paints the frame around the session and the browser tab's
 favicon with this color, so you can find the project's tab or window quickly.
 
+Against a remote daemon (--daemon-url) <project> is a prj_ id or an absolute
+checkout path on the daemon's host, resolved by that daemon's registry.
+
 ```
 af projects color <project> <color>
 ```
