@@ -49,10 +49,10 @@ var (
 	sessionsArchiveSelf     bool
 	sendPromptViaDaemon     = routedSendPrompt
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
-	createTabViaDaemon      = daemon.CreateTab
-	closeTabViaDaemon       = daemon.CloseTab
-	renameTabViaDaemon      = daemon.RenameTab
-	reorderTabViaDaemon     = daemon.ReorderTab
+	createTabViaDaemon      = routedCreateTab
+	closeTabViaDaemon       = routedCloseTab
+	renameTabViaDaemon      = routedRenameTab
+	reorderTabViaDaemon     = routedReorderTab
 	previewSessionViaDaemon = func(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
 		if !apiclient.IsRemoteTarget() {
 			return daemon.PreviewSessionSnapshot(req)
@@ -930,6 +930,13 @@ func localCreateInputs(createTitle string, inPlace bool) (string, string, error)
 	}
 	if createHostFlag != "" && createBackendFlag != "" && createBackendFlag != config.BackendSSH {
 		return "", "", fmt.Errorf("--host places the session on a listed host over ssh and is incompatible with --backend %s; drop one of them", createBackendFlag)
+	}
+	if createHostFlag != "" {
+		// The same refusal every pick surface gives, before the daemon reserves
+		// anything. This machine's global list is the daemon's (a local create).
+		if err := config.ValidateHostPick(cfg.Hosts, createHostFlag); err != nil {
+			return "", "", err
+		}
 	}
 	if inPlace && createHostFlag != "" {
 		return "", "", fmt.Errorf("--here runs in the local working tree and is incompatible with --host")

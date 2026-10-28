@@ -330,12 +330,17 @@ func TestListBackends_UnreadableConfigIsUnknownNotUnavailable(t *testing.T) {
 		assert.NotEmptyf(t, opt.Reason, "%s must say what stopped the check", name)
 	}
 
-	// local reads no repo config, and a create with no explicit backend still runs
-	// local through this failure — so calling it unknown would be its own lie, and
-	// the user can still create a session while they fix the file.
+	// local reads no repo config, so choosing it explicitly still works while the
+	// user fixes the file — calling it unknown would be its own lie.
 	assert.Equal(t, BackendAvailable, optionByName(t, resp, config.BackendLocal).Status)
-	assert.Equal(t, config.BackendLocal, resp.Default)
-	assert.Equal(t, BackendAvailable, resp.DefaultStatus)
+	// A create with NO explicit backend no longer falls back to local through this
+	// failure (#5801): it refuses with the config error, so the default is not a
+	// usable backend and the catalog says it could not be evaluated, with the
+	// reason, instead of promising local.
+	assert.Equal(t, "", resp.Default)
+	assert.Equal(t, BackendUnknown, resp.DefaultStatus)
+	assert.Contains(t, resp.DefaultReason, "cannot determine the backend")
+	assert.Contains(t, resp.DefaultReason, "config.json", "the reason names the file")
 }
 
 // TestListBackends_NewBackendReachesClientsWithNoClientChange is THE anti-drift

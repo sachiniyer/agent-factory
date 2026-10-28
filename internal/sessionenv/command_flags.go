@@ -633,6 +633,12 @@ func agentServerProgram(args []string) (string, bool) {
 			idx += 2
 			continue
 		}
+		// --policy-file names the daemon-resolved operator policy to READ
+		// (#5571 W2.5): an absolute path, never executed.
+		if args[idx] == "--policy-file" && idx+1 < len(args) && strings.HasPrefix(args[idx+1], "/") {
+			idx += 2
+			continue
+		}
 		if args[idx] != "--session-env" || idx+1 >= len(args) || !validName(args[idx+1]) {
 			return "", false
 		}

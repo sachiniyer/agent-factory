@@ -8,10 +8,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -99,9 +100,9 @@ type hostProgramProber struct {
 	processPATH string
 	// run executes the probe argv.
 	run hostProgramRunner
-	// statFile is os.Stat in production; the resolved answer must be a
-	// regular, executable file on this host.
-	statFile func(string) (os.FileInfo, error)
+	// canExecute is canExecuteFile in production: the resolved answer must be
+	// a regular file this user can execute.
+	canExecute func(string) bool
 	// nonce returns a fresh fence token per probe.
 	nonce func() string
 }
@@ -127,7 +128,7 @@ func ResolveProgramOnHost(ctx context.Context, program string) (command, loginPA
 		host:        host,
 		processPATH: os.Getenv("PATH"),
 		run:         execProbeRunner,
-		statFile:    os.Stat,
+		canExecute:  canExecuteFile,
 		nonce:       randomProbeNonce,
 	})
 }
@@ -139,7 +140,7 @@ func resolveProgramOnHost(ctx context.Context, program string, p hostProgramProb
 			return "", "", fmt.Errorf("agent program %q has no executable word", program)
 		}
 		if errors.Is(err, sessionenv.ErrProgramDynamic) && !pathShapedWord(program, exe) {
-			return "", "", fmt.Errorf("agent program %q computes its executable name or PATH at run time, so af cannot resolve it on %s: write the executable as a literal name or an absolute path", program, p.host)
+			return "", "", fmt.Errorf("agent program %q computes its executable name at run time, so af cannot resolve it on %s: write the executable as a literal name or an absolute path", program, p.host)
 		}
 		// Not one simple command (a pipeline), or a computed path
 		// ($HOME/bin/claude): af cannot say what runs, so it does not guess —
@@ -147,10 +148,14 @@ func resolveProgramOnHost(ctx context.Context, program string, p hostProgramProb
 		return program, p.adoptedPATH(ctx), nil
 	}
 	if exe.Opaque || strings.ContainsRune(exe.Name, '/') {
-		// Path-qualified (the operator's explicit choice) or a lookup the
-		// command reshapes in a way a probe cannot reproduce: verbatim on this
-		// filesystem. The login PATH is still adopted.
+		// Path-qualified (the operator's explicit choice, whatever PATH the
+		// command computes — a slash word never consults PATH, #5781) or a
+		// lookup the command reshapes in a way a probe cannot reproduce:
+		// verbatim on this filesystem. The login PATH is still adopted.
 		return program, p.adoptedPATH(ctx), nil
+	}
+	if exe.PATHDynamic {
+		return "", "", fmt.Errorf("agent program %q computes its PATH at run time, so af cannot resolve %q on %s: write the PATH as a literal value or the executable as an absolute path", program, exe.Name, p.host)
 	}
 
 	adopted := p.adoptedPATH(ctx)
@@ -163,7 +168,14 @@ func resolveProgramOnHost(ctx context.Context, program string, p hostProgramProb
 	if exe.HasPATH {
 		search = exe.PATH
 	}
-	if abs := p.findOnPATH(exe.Name, search); abs != "" {
+	abs, decided := p.findOnPATH(exe.Name, search)
+	if !decided {
+		// A relative or empty PATH entry comes before any absolute match, and
+		// it means the pane's working directory, which is not known here. The
+		// pane's own shell is the only thing that can answer, so it does.
+		return program, adopted, nil
+	}
+	if abs != "" {
 		return program[:exe.Start] + quoteHostPathIfNeeded(abs) + program[exe.End:], adopted, nil
 	}
 	if exe.HasPATH {
@@ -184,29 +196,36 @@ func (p hostProgramProber) adoptedPATH(ctx context.Context) string {
 	return mergeHostPATH(p.probePath(ctx), p.processPATH)
 }
 
-// findOnPATH walks path the way the pane's sh would: the first directory
-// holding a regular executable file of that name wins. Relative entries
-// (including the empty entry, the current directory) are skipped, because a
-// resolved answer must be an absolute path.
-func (p hostProgramProber) findOnPATH(name, path string) string {
+// findOnPATH walks path the way the pane's sh does: each entry is joined to the
+// name as plain text — never cleaned, so a symlink or ".." component in an
+// entry is resolved by the kernel against the real tree, not collapsed
+// lexically (#5783) — and the first entry whose file this user can execute
+// wins; one it cannot (wrong mode, foreign owner, a directory) is skipped, not
+// pinned (#5782). decided is false when a relative or empty entry is reached
+// first: that is the pane's working directory, so the caller leaves the lookup
+// to the shell.
+func (p hostProgramProber) findOnPATH(name, path string) (found string, decided bool) {
 	for _, dir := range strings.Split(path, ":") {
-		if !filepath.IsAbs(dir) {
-			continue
+		if !strings.HasPrefix(dir, "/") {
+			return "", false
 		}
-		if candidate := filepath.Join(dir, name); p.validExecutable(candidate) {
-			return candidate
+		candidate := strings.TrimRight(dir, "/") + "/" + name
+		if p.canExecute != nil && p.canExecute(candidate) {
+			return candidate, true
 		}
 	}
-	return ""
+	return "", true
 }
 
-// validExecutable reports whether path is a regular file with an execute bit.
-func (p hostProgramProber) validExecutable(path string) bool {
-	if !filepath.IsAbs(path) || p.statFile == nil {
+// canExecuteFile reports whether the calling user may run path: a regular file
+// (symlinks followed) that the kernel grants execute permission to for the
+// effective uid and gid, which is the question execve answers.
+func canExecuteFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
-	info, err := p.statFile(path)
-	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+	return unix.Faccessat(unix.AT_FDCWD, path, unix.X_OK, unix.AT_EACCESS) == nil
 }
 
 // probePath fetches the login shell's PATH. Output before the nonce fence (a
@@ -259,8 +278,11 @@ func mergeHostPATH(login, inherited string) string {
 	seen := map[string]bool{}
 	var merged []string
 	for _, list := range []string{login, inherited} {
+		if list == "" {
+			continue
+		}
 		for _, dir := range strings.Split(list, ":") {
-			if dir == "" || seen[dir] {
+			if seen[dir] {
 				continue
 			}
 			seen[dir] = true

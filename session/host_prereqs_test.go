@@ -104,3 +104,31 @@ func TestCheckHostPrereqsRecordsTheVerdict(t *testing.T) {
 	_ = (&sandboxWorkspace{shell: sh2}).checkHostPrereqs(key2, time.Second)
 	assert.Equal(t, HostReadinessUnprobed, ReadHostReadiness(key2).State, "a probe that never completed says nothing about the host")
 }
+
+// Only a complete, positively parsed answer may produce a ready verdict; an
+// empty, garbled or truncated one is unknown and must not overwrite a block.
+func TestCheckHostPrereqsNeverCachesReadyFromUnreadableOutput(t *testing.T) {
+	for name, out := range map[string]string{
+		"empty":            "",
+		"garbage":          "Welcome to the host!\nbanner\n",
+		"truncated":        "git=ok\ntmux=tmux 3.4\n",
+		"truncated midway": "git=ok\n",
+		"unknown values":   "git=maybe\ntmux=\ngh=what\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.False(t, parseHostPrereqs(out).Complete)
+			key := "ssh unreadable-" + name
+			require.NoError(t, (&sandboxWorkspace{shell: &prereqShell{out: out}}).checkHostPrereqs(key, time.Second))
+			assert.Equal(t, HostReadinessUnprobed, ReadHostReadiness(key).State)
+
+			RecordHostReadiness(key, errors.New("git is missing"))
+			require.NoError(t, (&sandboxWorkspace{shell: &prereqShell{out: out}}).checkHostPrereqs(key, time.Second))
+			assert.Equal(t, HostReadinessBlocked, ReadHostReadiness(key).State, "no evidence the host was fixed")
+		})
+	}
+	assert.True(t, parseHostPrereqs("git=ok\ntmux=tmux 3.4\ngh=missing\n").Complete)
+
+	key := "ssh complete-ready"
+	require.NoError(t, (&sandboxWorkspace{shell: &prereqShell{out: "git=ok\ntmux=tmux 3.4\ngh=ok\n"}}).checkHostPrereqs(key, time.Second))
+	assert.Equal(t, HostReadinessReady, ReadHostReadiness(key).State)
+}

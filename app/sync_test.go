@@ -355,3 +355,30 @@ func TestReconcileSnapshot_IdentityUsesStableID(t *testing.T) {
 // enumeration/import path (list_cmd, SetRemoteImporterForTest,
 // ListRemoteHookInstanceData, importRemoteHookSessions, RemoteMeta) was deleted
 // in the provision-and-expose migration. // #1592 Phase 4 PR7
+
+// #5803: the daemon publishes a pending create before its worktree exists.
+// That empty path is an expected transient and must not warn; the same empty
+// path on a record with no create in flight is a real fault and still does.
+func TestAddInstanceFromSnapshot_EmptyWorktreePath(t *testing.T) {
+	pending := session.InstanceData{
+		ID: session.NewInstanceID(), Title: "hello", Path: "/repo", Program: "claude",
+		Status: session.Loading, Liveness: session.LiveReady, InFlightOp: session.OpCreating,
+		Worktree: session.GitWorktreeData{RepoPath: "/repo"},
+	}
+	require.True(t, snapshotAwaitingWorktree(pending))
+
+	h := newTestHome(t)
+	require.False(t, h.addInstanceFromSnapshot(pending), "deferred, not added")
+	require.Nil(t, h.store.GetInstanceByTitle("hello"))
+
+	for _, live := range []session.Liveness{session.LiveReady, session.LiveRunning} {
+		fault := pending
+		fault.InFlightOp = session.OpNone
+		fault.Liveness = live
+		require.False(t, snapshotAwaitingWorktree(fault), "liveness %v with no create in flight is a fault", live)
+	}
+
+	withPath := pending
+	withPath.Worktree.WorktreePath = "/repo/wt"
+	require.False(t, snapshotAwaitingWorktree(withPath))
+}

@@ -578,7 +578,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		if m.lostRestoreFlapGiveUpIfBound(key, repoID, stateKey, inst) {
 			return
 		}
-		if err := m.preserveSandboxBeforeReap(repoID, key, inst, reapRefusalSuggestionFor(repoID, inst)); err != nil {
+		if err := m.preserveUnlessRelaunchable(repoID, key, inst); err != nil {
 			// The durable terminal verdict is a session fact, safe to read
 			// before the state lock — the same discipline lostRestoreFailed
 			// applies: arming an environmental retry for a session the entry

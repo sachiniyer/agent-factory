@@ -47,7 +47,7 @@ func TestEnsurePluginDir_ConcurrentStalePrune(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			_, errs[i] = ensurePluginDir(false)
+			_, errs[i] = ensurePluginDir(fullGuidanceCaps)
 		}()
 	}
 	wg.Wait()
@@ -66,7 +66,7 @@ func TestEnsurePluginDir_ConcurrentStalePrune(t *testing.T) {
 		}
 	}
 	// Declared command files must exist.
-	for name := range pluginCommands(false) {
+	for name := range pluginCommands(fullGuidanceCaps) {
 		if _, err := os.Stat(filepath.Join(commandsDir, name)); err != nil {
 			t.Errorf("expected %s to exist after concurrent prune: %v", name, err)
 		}
@@ -106,7 +106,7 @@ func TestEnsurePluginDir_DisarmsStaleGuardWithoutBreakingLiveHook(t *testing.T) 
 		t.Fatalf("seed guard-tmux.sh: %v", err)
 	}
 
-	pluginDir, err := ensurePluginDir(false)
+	pluginDir, err := ensurePluginDir(fullGuidanceCaps)
 	if err != nil {
 		t.Fatalf("ensurePluginDir: %v", err)
 	}

@@ -42,6 +42,9 @@ type SandboxCredential struct {
 	// URL and Token are injected into the sandbox as AF_DAEMON_URL and
 	// AF_DAEMON_TOKEN. Empty when no credential was granted.
 	URL, Token string
+	// Socket is the daemon-side socket the -R forward for URL terminates on
+	// (ProvisionSpec.CallbackSocket).
+	Socket string
 	// UnavailableReason says WHY no credential was granted, in the mint's own
 	// refusal text. A sandbox whose credential could not be issued still
 	// provisions — a session without callback is strictly more useful than no
@@ -126,7 +129,7 @@ func mintForProvision(spec *ProvisionSpec, kind BackendKind, creds SandboxCreden
 	if err != nil {
 		return SandboxCredential{UnavailableReason: err.Error()}
 	}
-	spec.CallbackURL, spec.CallbackToken = cred.URL, cred.Token
+	spec.CallbackURL, spec.CallbackToken, spec.CallbackSocket = cred.URL, cred.Token, cred.Socket
 	// The runtime must be able to re-check the grant before it commits the env
 	// to the host — the post-provision revalidation the caller runs is already
 	// too late to keep a dead token out of the launched server's environment

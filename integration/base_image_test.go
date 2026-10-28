@@ -223,8 +223,15 @@ func apkAddRun(pkgs ...string) string {
 // second spelling of the FROM line is exactly how the property under test would
 // rot without anything going red.
 func dockerRoundTripDockerfile(base string) string {
-	return "FROM " + base + "\n" + apkAddRun("git", "tmux", "bash")
+	return "FROM " + base + "\n" + apkAddRun("git", "tmux", "bash") + trustBindMountedRepoRun
 }
+
+// trustBindMountedRepoRun marks the fixture's bind-mounted bare repo as safe.
+// The clone source (/repo.git) is owned by the host test user, not the
+// container's root, so git refuses it as "dubious ownership". The product no
+// longer writes a global safe.directory into the host (#5571 W2.7), so the
+// fixture image carries the exemption instead.
+const trustBindMountedRepoRun = "RUN git config --system --add safe.directory '*'\n"
 
 // sshdRoundTripDockerfile is the ssh round-trip image: a real sshd target for
 // the ssh runtime, with host keys baked at build time so they are stable for
@@ -232,6 +239,7 @@ func dockerRoundTripDockerfile(base string) string {
 func sshdRoundTripDockerfile(base string) string {
 	return "FROM " + base + "\n" +
 		apkAddRun("git", "tmux", "bash", "openssh-server") +
+		trustBindMountedRepoRun +
 		"RUN ssh-keygen -A && mkdir -p /root/.ssh && chmod 700 /root/.ssh\n" +
 		// The ssh runtime reaches the remote agent-server through an ssh
 		// local-forward (direct-tcpip) tunnel, which the sshd must permit — alpine's

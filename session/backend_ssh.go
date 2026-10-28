@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -226,6 +227,10 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// The agent-server resolves it on the host's login PATH (#5571).
 	program := remoteProgramForHost(cfg, spec.Program)
 	p := newSSHSandboxProvisioner(spec, sshCmd, afBin, program)
+	// sandbox.binary is the operator's daemon-local override for air-gapped or
+	// unbuilt hosts (#5571 W2.2) — global-only config, so it can never be
+	// repo-supplied.
+	p.sandboxBinary = strings.TrimSpace(cfg.Config.SandboxBinary)
 	res, err := p.provision()
 	if err != nil {
 		// Best-effort reap whatever the failed provision left behind. Preserve any
