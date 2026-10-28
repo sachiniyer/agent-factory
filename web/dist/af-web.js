@@ -13773,6 +13773,25 @@ function siblingSubtreeOf(root2, leafId) {
   }
   return siblingSubtreeOf(root2.b, leafId);
 }
+function focusSuccessorAfterDrop(prev, droppedId, survivors) {
+  const siblings = [];
+  let node = prev;
+  while (node && node.kind === "split") {
+    const inA = findLeaf(node.a, droppedId);
+    if (!inA && !findLeaf(node.b, droppedId)) {
+      return null;
+    }
+    siblings.unshift(inA ? node.b : node.a);
+    node = inA ? node.a : node.b;
+  }
+  for (const sib of siblings) {
+    const hit = leaves(sib).find((l) => survivors.has(l.id));
+    if (hit) {
+      return hit.id;
+    }
+  }
+  return null;
+}
 function dedupeExcept(root2, tab, keepId) {
   const dupes = leaves(root2).filter((l) => l.tab === tab && l.id !== keepId);
   let cur = root2;
@@ -13869,6 +13888,35 @@ function tabsRebound(prevIds, prevKinds, prevTargets, ids, kinds, targets) {
     targets.map((t) => t ?? "")
   );
 }
+var isSynth = (id) => /^\d+:/.test(id);
+function adoptedSynthIdentities(prevIds, ids) {
+  const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
+  const gone = /* @__PURE__ */ new Map();
+  let key = "";
+  for (const id of prevIds) {
+    if (shared.has(id)) {
+      key = id;
+    } else if (id !== "" && isSynth(id)) {
+      gone.set(key, [...gone.get(key) ?? [], id]);
+    }
+  }
+  const adopted = /* @__PURE__ */ new Set();
+  key = "";
+  const fresh = /* @__PURE__ */ new Map();
+  for (const id of ids) {
+    if (shared.has(id)) {
+      key = id;
+    } else if (id !== "" && !isSynth(id) && !prevIds.includes(id)) {
+      const n = fresh.get(key) ?? 0;
+      const synth = gone.get(key)?.[n];
+      if (synth !== void 0) {
+        adopted.add(synth);
+      }
+      fresh.set(key, n + 1);
+    }
+  }
+  return adopted;
+}
 function remapByIdentity(root2, prevIds, ids) {
   if (prevIds.length === 0) {
     return root2;
@@ -13901,14 +13949,13 @@ function remapByIdentity(root2, prevIds, ids) {
   const max = ids.length - 1;
   const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
   if (maxLeaf) {
-    const isSynth = (id) => /^\d+:/.test(id);
-    const backfill = ids.some((id) => id !== "" && !isSynth(id) && !prevIds.includes(id));
+    const adopted = adoptedSynthIdentities(prevIds, ids);
     const deadIdentity = (tab) => {
       const prev = prevIds[tab];
       if (prev === void 0 || prev === "") {
         return true;
       }
-      return !isSynth(prev) || !backfill;
+      return !isSynth(prev) || !adopted.has(prev);
     };
     for (const leaf of leaves(cur)) {
       if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
@@ -14576,7 +14623,8 @@ var SplitView = class {
       }
     }
     if (!this.focusedId || !wanted.has(this.focusedId)) {
-      this.focusedId = desired[0]?.id ?? null;
+      const successor = this.focusedId && this.builtTree ? focusSuccessorAfterDrop(this.builtTree, this.focusedId, wanted) : null;
+      this.focusedId = successor ?? desired[0]?.id ?? null;
     }
     if (!sameLayout(this.tree, this.builtTree)) {
       const rootEl = this.buildNode(this.tree);
