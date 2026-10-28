@@ -236,13 +236,28 @@ func whoamiSession(tmuxName string) (*session.InstanceData, error) {
 // `af sessions whoami` does: match the current tmux session name against the
 // stored instances. Shared by the whoami command and `sessions archive --self`
 // so the two cannot drift.
+//
+// A sandbox credential is bound to its session (#5571 W3.2), so when the daemon
+// reports a bound caller that row is the answer: the narrowed projection a
+// sandbox receives withholds TmuxName, and matching on it would never find the
+// caller. Otherwise — operator credential, older daemon — the tmux path is
+// unchanged.
 func resolveSelfSession() (*session.InstanceData, error) {
+	if os.Getenv("AF_DAEMON_TOKEN") != "" {
+		if row, ok, err := callerSessionFn(); err == nil && ok {
+			return &row, nil
+		}
+	}
 	tmuxName, err := currentTmuxName()
 	if err != nil {
 		return nil, err
 	}
 	return whoamiSession(tmuxName)
 }
+
+// callerSessionFn resolves the credential-bound session; a var so tests can
+// substitute the daemon.
+var callerSessionFn = apiclient.CallerNoSpawn
 
 var (
 	sessionsListAllFlag      bool
