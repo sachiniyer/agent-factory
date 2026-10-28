@@ -76,3 +76,28 @@ func SnapshotNoSpawn(req daemon.SnapshotRequest) ([]session.InstanceData, []daem
 	}
 	return instances, skipped, nil
 }
+
+// CallerNoSpawn returns the session a sandbox credential is bound to together
+// with that session's (narrowed) row (#5571 W3.2). ok is false when the daemon
+// reports no bound caller — an operator credential, an older daemon, or no
+// daemon at all — so the caller falls back to resolving by tmux name. It never
+// starts a daemon.
+func CallerNoSpawn() (row session.InstanceData, ok bool, err error) {
+	c, err := NewTargeted()
+	if err != nil {
+		return session.InstanceData{}, false, err
+	}
+	var resp daemon.SnapshotResponse
+	if err := c.callCtx(context.Background(), "Snapshot", daemon.SnapshotRequest{}, &resp); err != nil {
+		return session.InstanceData{}, false, err
+	}
+	if resp.Caller == "" {
+		return session.InstanceData{}, false, nil
+	}
+	for _, d := range resp.Instances {
+		if d.ID == resp.Caller {
+			return d, true, nil
+		}
+	}
+	return session.InstanceData{}, false, nil
+}

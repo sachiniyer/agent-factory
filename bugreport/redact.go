@@ -1,6 +1,8 @@
 package bugreport
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"os"
 	"os/user"
@@ -400,6 +402,14 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.Account != "" {
 		d.Account = redactedMarker
 	}
+	// Host is the listed host a session was placed on (#5571 W6.3). The operator
+	// names it, and the name can carry an internal hostname, so it never reaches a
+	// shared bundle verbatim. A stable digest placeholder keeps reports
+	// correlatable — two sessions on one host read as the same host — without
+	// naming the machine. An unset host stays unset.
+	if d.Host != "" {
+		d.Host = redactedHostPlaceholder(d.Host)
+	}
 	// AccountAgent is the namespace Account was selected in (#4430 round 4).
 	// af only writes the credential-boundary agent enum there — the same value
 	// PendingAccountSwap.AccountAgent keeps — so it stays legible next to the
@@ -724,7 +734,6 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 	r.noteTitle(t.TargetSession)
 	rt := redactedTask{
 		ID:            t.ID,
-		Name:          t.Name,
 		CronExpr:      t.CronExpr,
 		ProjectPath:   r.collapsePathField(t.ProjectPath),
 		Program:       redactProgram(t.Program),
@@ -734,6 +743,11 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 	}
 	if t.TargetSession != "" {
 		rt.TargetSession = redactedMarker
+	}
+	if t.Name != "" {
+		// The name is free text the user typed (a client, codename or person),
+		// like a tab name, so it is dropped rather than shipped (#4318).
+		rt.Name = redactedMarker
 	}
 	if strings.TrimSpace(t.Prompt) != "" {
 		rt.HasPrompt = true
@@ -761,4 +775,11 @@ func (r *redactor) redactTasks(tasks []task.Task) []redactedTask {
 		out = append(out, r.redactTask(t))
 	}
 	return out
+}
+
+// redactedHostPlaceholder maps a listed-host name to "[host:<8 hex>]", a stable
+// digest so the same host reads the same across a report without being named.
+func redactedHostPlaceholder(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return "[host:" + hex.EncodeToString(sum[:4]) + "]"
 }

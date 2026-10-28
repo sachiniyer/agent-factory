@@ -70,7 +70,11 @@ func parseHostPrereqs(out string) hostPrereqReport {
 // checkHostPrereqs runs the probe through the workspace's shell. A failure of
 // the probe itself is logged and tolerated (see parseHostPrereqs); only a host
 // that answered and is missing something refuses the create.
-func (w *sandboxWorkspace) checkHostPrereqs(timeout time.Duration) error {
+//
+// It also records the verdict in the readiness cache under hostKey (#5571 W2.3
+// part B). A probe that did not complete records nothing: it says nothing about
+// the host's tools.
+func (w *sandboxWorkspace) checkHostPrereqs(hostKey string, timeout time.Duration) error {
 	out, err := w.shell.Run(timeout, hostPrereqScript, nil, false)
 	if err != nil {
 		log.WarningLog.Printf("host prerequisite probe did not complete (%v); continuing", err)
@@ -81,7 +85,10 @@ func (w *sandboxWorkspace) checkHostPrereqs(timeout time.Duration) error {
 		log.WarningLog.Printf("host prerequisite warning: %s", warn)
 	}
 	if len(report.Problems) == 0 {
+		RecordHostReadiness(hostKey, nil)
 		return nil
 	}
-	return fmt.Errorf("the host cannot run a session: %s", strings.Join(report.Problems, "; "))
+	blocked := fmt.Errorf("the host cannot run a session: %s", strings.Join(report.Problems, "; "))
+	RecordHostReadiness(hostKey, blocked)
+	return blocked
 }

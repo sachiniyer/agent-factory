@@ -45,7 +45,7 @@ func TestRemoteAgentDialStream_ErrorCarriesNoToken(t *testing.T) {
 		t.Fatalf("newRemoteAgentClient: %v", err)
 	}
 
-	_, derr := rc.dialStream(context.Background(), 0, 0)
+	_, derr := rc.dialStream(context.Background(), 0, "", 0)
 	if derr == nil {
 		t.Fatal("dial against a closed port returned nil error; this test needs a failed dial")
 	}

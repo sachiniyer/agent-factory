@@ -106,7 +106,7 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 			gitWorktree, branchName, err = git.NewGitWorktreeInPlace(i.Path)
 		} else {
 			branchPrefix := i.branchPrefix
-			if !i.branchPrefixResolved {
+			if i.branchName == "" && !i.branchPrefixResolved {
 				var cfg *config.Config
 				cfg, err = config.LoadConfig()
 				if err != nil {
@@ -116,7 +116,12 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 				}
 			}
 			if err == nil {
-				gitWorktree, branchName, err = git.NewGitWorktree(i.Path, i.Title, branchPrefix)
+				if i.branchName != "" {
+					// The daemon already named this branch (#5571 W2.4).
+					gitWorktree, branchName, err = git.NewGitWorktreeNamed(i.Path, i.Title, i.branchName)
+				} else {
+					gitWorktree, branchName, err = git.NewGitWorktree(i.Path, i.Title, branchPrefix)
+				}
 			}
 		}
 		if err != nil {
@@ -284,7 +289,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// spawned under it, and FromInstanceData loads the row Lost so the
 			// lost-restore loop can Recover it — which needs this exact
 			// persisted binding to respawn the same name (#5172).
-			preserveAgentHandle = retainsInertInstance(err) || errors.Is(err, tmux.ErrSpawnDirMissing)
+			preserveAgentHandle = retainsInertInstance(err) || restoreDeferred(err)
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
 		}
@@ -416,7 +421,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// names it: nilling the ref here would orphan the pane. See the predicate.
 		// A sibling spawn-dir refusal keeps it too — the binding (live or
 		// never-spawned) is what Recover reattaches or re-spawns (#5172).
-		preserveAgentHandle = retainsInertInstance(err) || errors.Is(err, tmux.ErrSpawnDirMissing)
+		preserveAgentHandle = retainsInertInstance(err) || restoreDeferred(err)
 		setupErr = finishLaunchTabFailure(firstTimeSetup, tmuxSession, err)
 		return setupErr
 	}
@@ -909,7 +914,9 @@ func (b *LocalBackend) IsAlive(i *Instance) (bool, error) {
 	// the daemon's poll turns it into probeAlive, which clears a session's restore
 	// history and marks it Ready. ExistsOrUnknown reports a timed-out probe as
 	// "exists", so taking it here would report a wedged server as a live agent.
-	exists, known := ts.ProbeSession()
+	// ProbeSessionLiveness: an unlinked socket with a live server is unknown,
+	// not gone, so a live agent is never respawned over (#4135).
+	exists, known := ts.ProbeSessionLiveness()
 	if !known {
 		return false, fmt.Errorf("%w: has-session while probing liveness", tmux.ErrTmuxTimeout)
 	}

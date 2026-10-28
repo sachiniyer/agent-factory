@@ -88,30 +88,53 @@ selected_name() {
     af_capture | grep -oE '▾[[:space:]]+[^[:space:]●○◌]+' | head -1 | sed 's/▾[[:space:]]*//'
 }
 
+# run_leg_once is invoked as `run_leg_once ... || return 1`. Bash (POSIX) IGNORES
+# errexit inside any function called as part of a || list, so `set -e` gives it
+# NO protection: an unchecked step that fails is silently swallowed and the leg
+# can still record a result (#5730 — e.g. a failed final `tab-create --name a`
+# left a non-`a` roster that the master leg accepted as a control reproduction).
+# Every step therefore checks its own status explicitly, via leg_step/leg_af
+# below or an inline `|| return 1`. Do NOT rely on set -e in this function.
+#
+# leg_step runs a command and, on failure, fails the leg with a message naming it.
+leg_step() { # <description> <cmd...>
+    local what="$1"
+    shift
+    "$@" || { _af_fail "${LEG:-leg}: $what failed"; return 1; }
+}
+
+# leg_af runs the leg's af binary from the mock repo, quietly.
+leg_af() { # <af args...>
+    (cd "$AF_DRIVER_REPO" && "$LEG_BIN" "$@") >/dev/null 2>&1
+}
+
 run_leg_once() { # <leg> <binary>
     local leg="$1" bin="$2"
+    LEG="$leg" LEG_BIN="$bin"
     export AF_DRIVER_BIN="$2"
 
-    af_reset_sandbox
-    af_set_config 'default_program = "claude"
+    leg_step "reset sandbox" af_reset_sandbox || return 1
+    leg_step "write config" af_set_config 'default_program = "claude"
 
 [program_overrides]
-claude = "bash"'
-    af_boot
+claude = "bash"' || return 1
+    leg_step "boot TUI" af_boot || return 1
     tui_provenance "$leg" "$2" || return 1
 
     # Three sessions so the replacement's fresh CreatedAt re-sorts and drifts
     # the cursor's flat index — the reported trigger. af_new_instance leaves the
     # newest selected, so re-select dup so its subtree is the expanded one the
     # tab rows render under.
-    af_new_instance alpha
-    af_new_instance dup
-    af_new_instance omega
+    leg_step "create session alpha" af_new_instance alpha || return 1
+    leg_step "create session dup" af_new_instance dup || return 1
+    leg_step "create session omega" af_new_instance omega || return 1
 
     # Build dup's corpse roster: [agent, a, b] via two named process tabs that
     # sleep so they survive the snapshot poll.
-    (cd "$AF_DRIVER_REPO" && "$bin" sessions tab-create dup --command 'sleep 600' --name a) >/dev/null 2>&1
-    (cd "$AF_DRIVER_REPO" && "$bin" sessions tab-create dup --command 'sleep 600' --name b) >/dev/null 2>&1
+    leg_af sessions tab-create dup --command 'sleep 600' --name a \
+        || { _af_fail "$leg: corpse tab-create a failed"; return 1; }
+    leg_af sessions tab-create dup --command 'sleep 600' --name b \
+        || { _af_fail "$leg: corpse tab-create b failed"; return 1; }
     sleep 2 # let the snapshot poll project the two new tabs
 
     # Expand dup so its tab rows render, and put the cursor on "a" (slot 1).
@@ -121,7 +144,7 @@ claude = "bash"'
     # "a" tab row before jumping, so the jump has exactly the expected roster.
     af_wait_for '› a' "$AF_DRIVER_TIMEOUT" "$leg: corpse tab a row visible" || return 1
     af_wait_for '› b' "$AF_DRIVER_TIMEOUT" "$leg: corpse tab b row visible" || return 1
-    af_send 2                       # digit-jump to slot 1 ("a"); SyncCursorToActiveTab
+    leg_step "digit-jump to slot 1" af_send 2 || return 1  # SyncCursorToActiveTab
     sleep "$AF_DRIVER_POLL"
     af_open_pane || return 1        # pane on "a"
 
@@ -134,18 +157,21 @@ claude = "bash"'
     # a remove-then-add. So run them back-to-back with no wait between (any wait
     # lets a poll fire that removes the corpse first, surfacing as an add).
     LOG_MARK="$(wc -l <"$AGENT_FACTORY_HOME/agent-factory.log" 2>/dev/null || echo 0)"
-    (cd "$AF_DRIVER_REPO" && "$bin" sessions kill dup) >/dev/null 2>&1 \
+    leg_af sessions kill dup \
         || { _af_fail "$leg: af sessions kill dup failed"; return 1; }
-    (cd "$AF_DRIVER_REPO" && "$bin" sessions create dup) >/dev/null 2>&1 \
+    leg_af sessions create dup \
         || { _af_fail "$leg: af sessions create dup failed"; return 1; }
-    (cd "$AF_DRIVER_REPO" && "$bin" sessions tab-create dup --command 'sleep 600' --name b) >/dev/null 2>&1
-    (cd "$AF_DRIVER_REPO" && "$bin" sessions tab-create dup --command 'sleep 600' --name a) >/dev/null 2>&1
+    leg_af sessions tab-create dup --command 'sleep 600' --name b \
+        || { _af_fail "$leg: replacement tab-create b failed"; return 1; }
+    leg_af sessions tab-create dup --command 'sleep 600' --name a \
+        || { _af_fail "$leg: replacement tab-create a failed"; return 1; }
     sleep 3 # let the snapshot poll reconcile the swap + re-pin
-    af_capture >"$EVID/$leg-after-swap.txt"
+    af_capture >"$EVID/$leg-after-swap.txt" \
+        || { _af_fail "$leg: capturing the post-swap screen failed"; return 1; }
 
     local sel tab
-    sel="$(selected_name)"
-    tab="$(active_tab_label)"
+    sel="$(selected_name)" || { _af_fail "$leg: reading the selected session failed"; return 1; }
+    tab="$(active_tab_label)" || { _af_fail "$leg: reading the active tab failed"; return 1; }
     printf '%s\t%s\t%s\n' "swap-panerepin" "$sel" "$tab" >>"$EVID/$leg-results.tsv"
     _af_log "$leg/swap-panerepin -> selected='$sel' active_tab='$tab'"
     return 0

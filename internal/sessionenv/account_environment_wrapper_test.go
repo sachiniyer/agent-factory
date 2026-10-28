@@ -1,9 +1,11 @@
 package sessionenv
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // Unmodeled argv-passthrough wrappers (strace, perf, valgrind, gdb --args,
@@ -165,9 +167,6 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		// only its own process's environment and execs nothing, so the tail
 		// assignment overrides no running agent.
 		"strace env CODEX_HOME=/other",
-		// A dynamic tail word could expand to `env`, but with no command word
-		// after the assignment the result is still print mode.
-		"strace $W CODEX_HOME=/other",
 		// xargs with a literal command whose argv cannot reach env: items and
 		// substitutions land in the command's own arguments.
 		"xargs",
@@ -250,6 +249,85 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"grep -E 'CODEX_HOME=' /etc/environment", false},
 		{"strace -E FOO=1 codex", false},
 		{"strace --env=PORT=3000 codex", false},
+		// #5033: the attached forms stay refused when the VALUE (or the whole
+		// operand) carries an expansion the walk cannot prove — the literal
+		// NAME in the word's Lit prefix still decides, and an unprovable
+		// operand fails closed like the separate-word form does.
+		{"strace -ECODEX_HOME=$V codex", true},
+		{"strace --env=CODEX_HOME=$V codex", true},
+		{"strace -ECODEX_HOME=\"$V\" codex", true},
+		{"strace -E$V codex", true},
+		{"strace --env=$V codex", true},
+		{"strace -E$V=/other codex", true},
+		{"xargs strace -ECODEX_HOME=$V codex", true},
+		{"nice strace --env=CODEX_HOME=$V codex", true},
+		// A short-option cluster reaches -E after its flags (verified against
+		// the installed strace: -fECODEX_HOME=/o sets it in the child).
+		{"strace -fECODEX_HOME=/other codex", true},
+		{"strace -qqECODEX_HOME=/other codex", true},
+		{"strace -fECODEX_HOME=$V codex", true},
+		{"strace -fE CODEX_HOME=/other codex", true},
+		{"strace -fE codex", false},
+		// An operand-taking option consumes the REST of the cluster (Codex P1
+		// on #5701): -oECODEX_HOME=x is -o with a file name, not -E.
+		{"strace -oECODEX_HOME=x codex", false},
+		{"strace -fsECODEX_HOME=x codex", false},
+		{"strace -pECODEX_HOME=x codex", false},
+		{"strace -fE CODEX_HOME=/other codex", true},
+		// A dynamic word in option position could expand to -E… (word
+		// splitting) and make the next word the traced command, so a trailing
+		// NAME= word is that command's argument, not print mode.
+		{"strace $W CODEX_HOME=/other", true},
+		{"strace -fEPORT=1 codex", false},
+		// getopt_long accepts unambiguous prefixes (verified: strace
+		// --en=CODEX_HOME=/o sets it in the child).
+		{"strace --en=CODEX_HOME=/other codex", true},
+		{"strace --e=CODEX_HOME=/other codex", true},
+		{"strace --en CODEX_HOME=/other codex", true},
+		{"strace --en=CODEX_HOME=$V codex", true},
+		{"strace --en$x codex", true},
+		{"strace --en=PORT=1 codex", false},
+		// Inversion (#5033 review): strace's own option words are admitted only
+		// when positively recognized. Unknown long options and abbreviations
+		// refuse; known-safe options and their operands stay allowed.
+		{"strace --bogus codex", true},
+		{"strace --enx=CODEX_HOME=/other codex", true},
+		{"strace --en CODEX_HOME=/other codex", true},
+		{"strace --e=CODEX_HOME=/other codex", true},
+		{"strace -fy$x codex", true},
+		{"strace -Q codex", true},
+		{"strace $opt codex", true},
+		{"strace --output=$F codex", false},
+		{"strace --output=trace.log --follow-forks codex", false},
+		{"strace --trace=openat codex", false},
+		{"strace -f -o trace.log codex --model x", false},
+		{"strace -ff -s 200 -e trace=network -o\"$LOG\" codex", false},
+		{"strace -p 1234 codex", false},
+		{"strace -- codex", false},
+		{"strace -E PORT codex", false},
+		// A strace in command position of another strace, env, or a modeled
+		// wrapper is option-walked too, however deep (#5033 follow-up).
+		{"strace -f strace --en=CODEX_HOME=/other codex", true},
+		{"strace -f strace --bogus codex", true},
+		{"strace strace -fECODEX_HOME=/other codex", true},
+		{"env strace --en=CODEX_HOME=/other codex", true},
+		{"env A=1 strace --bogus codex", true},
+		{"strace env strace --en=CODEX_HOME=/other codex", true},
+		{"strace -f env A=1 strace --bogus codex", true},
+		{"strace env -i strace --bogus codex", true},
+		{"strace nice strace --bogus codex", true},
+		{"strace timeout 5 strace --bogus codex", true},
+		{"nohup strace -f strace --bogus codex", true},
+		{"strace strace strace --bogus codex", true},
+		{"strace -f strace -o x codex", false},
+		{"strace strace -f codex --model x", false},
+		{"env strace -o x codex", false},
+		{"strace env FOO=1 strace -f -o x codex", false},
+		// Control: the same expansions on a name af does not own, and the
+		// non-strace spelling, stay allowed.
+		{"strace -EPORT=$V codex", false},
+		{"strace --env=PORT=$V codex", false},
+		{"grep -ECODEX_HOME=$V /etc/environment", false},
 		// An option word whose value is a denied NAME= assignment mutates the
 		// child's environment even when the option is not strace's.
 		{"unrecognized --setenv=CODEX_HOME=/other codex", true},
@@ -343,4 +421,28 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, codex),
 			"command %q", test.command)
 	}
+}
+
+// Nested strace option runs are linear (Codex P2 on #5709): `strace -o strace
+// -o strace … true` starts one run per strace word, each reaching the end of the
+// command. Every position is judged once, so the number of judged words is
+// proportional to the command, whatever the machine or its load, and the verdict
+// does not change with length.
+func TestStraceNestedOptionRunsAreLinear(t *testing.T) {
+	names := map[string]struct{}{"CODEX_HOME": {}}
+	run := func(n int) (unsafe bool, work int) {
+		command := "strace" + strings.Repeat(" -o strace", n) + " true"
+		file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+		require.NoError(t, err)
+		call := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		memo := newOperandTailMemo()
+		_, unsafe = unwrapAccountCommand(call.Args, names, memo)
+		return unsafe, *memo.straceRunWork
+	}
+	unsafe, small := run(250)
+	require.False(t, unsafe, "a benign chain stays allowed")
+	unsafe, large := run(8000)
+	require.False(t, unsafe, "and stays allowed at any length")
+	require.LessOrEqual(t, large, 4*8000, "each position is judged a bounded number of times")
+	require.LessOrEqual(t, large, 40*small, "32x the words took %d/%d judged words", large, small)
 }

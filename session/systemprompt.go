@@ -119,7 +119,7 @@ Sessions (one agent per isolated worktree):
 
 Never rebind an af worktree to another lane's branch with "git checkout -B", "git switch -C", or a direct ref/HEAD write. Those commands bypass Git's ordinary worktree collision refusal and can turn the other lane's unchanged index into a staged revert when the branch moves. Use "af sessions handoff --to <agent> -- <title>" to continue in the existing worktree, or create a session on a different branch.
 
-Tabs (extra processes and views in your instance's worktree; no limit on how many). Shell, process, and VS Code tabs require a local session; external HTTPS web tabs work on remote sessions; loopback web targets still require a local session (--port is loopback). The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
+Tabs (extra processes and views in your instance's worktree; no limit on how many). Shell, process, and VS Code tabs require a local session; web tabs work on remote sessions too — an external HTTPS URL is framed directly, and a loopback target (--port is loopback) shows whatever listens on that port inside the session's own workspace. The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
   af sessions tab-create <title> --kind shell                    Terminal tab running $SHELL in the worktree (the same Terminal the TUI/web opens)
   af sessions tab-create <title> --command <cmd> [--name <tab>]   Process tab running <cmd> in the worktree; prints the tab name; persists across restarts
   af sessions tab-create <title> --kind web --url <u>|--port <n>  Web tab — a live browser view (no process) shown to the user in the web UI; this is how you show a URL, site, or dev server (--port n = http://localhost:n)
@@ -244,7 +244,8 @@ func shellQuote(s string) string {
 // injectSystemPrompt adds af's guidance to the resolved command, and for the two
 // agents that DISCOVER it from a config root, places it where the launch will
 // actually look: target carries the account boundary's config root for a scoped
-// session, and the zero value means unscoped (#3645).
+// session (#3645) and the root the command itself resolves to for an unscoped one
+// (#4501). The zero value places nothing; see skillTarget.
 //
 // callbackUnavailable swaps the guidance on the PER-INSTANCE seams (claude's
 // --plugin-dir, aider's --read) for the callbackless variant — a session with

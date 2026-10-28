@@ -108,11 +108,30 @@ func splitRemoteLiveness(out string) (body, liveness string) {
 	return text, ""
 }
 
+// sessionRootDir is the shell-quoted directory per-session dirs are created
+// under: the host's workspace_root when it names one (an operator-chosen absolute
+// path, validated at config time), else "$HOME/.af-sessions".
+func sessionRootDir(spec ProvisionSpec) string {
+	if spec.WorkspaceRoot != "" {
+		return shellQuote(spec.WorkspaceRoot)
+	}
+	return `"$HOME/` + sshSessionRoot + `"`
+}
+
+// sessionDirScript makes the root if needed and mktemp's a unique per-session dir
+// under it. Only that unique dir is ever reaped, never the root itself.
+func sessionDirScript(spec ProvisionSpec) string {
+	root := sessionRootDir(spec)
+	if spec.WorkspaceRoot != "" {
+		return fmt.Sprintf(`mkdir -p %s && mktemp -d %s`, root, shellQuote(spec.WorkspaceRoot+"/"+Slugify(spec.Title)+".XXXXXX"))
+	}
+	return fmt.Sprintf(`mkdir -p %s && mktemp -d "$HOME/%s/%s.XXXXXX"`, root, sshSessionRoot, Slugify(spec.Title))
+}
+
 // makeSessionDir creates a fresh per-session dir under the remote home with
 // `mktemp -d` and captures its absolute path.
 func (w *sandboxWorkspace) makeSessionDir(timeout time.Duration) error {
-	slug := Slugify(w.spec.Title)
-	script := fmt.Sprintf(`mkdir -p "$HOME/%s" && mktemp -d "$HOME/%s/%s.XXXXXX"`, sshSessionRoot, sshSessionRoot, slug)
+	script := sessionDirScript(w.spec)
 	out, err := w.shell.Run(timeout, script, nil, false)
 	if err != nil {
 		return fmt.Errorf("creating the remote session dir failed: %s: %w", strings.TrimSpace(string(out)), err)
@@ -300,9 +319,6 @@ func (w *sandboxWorkspace) writeRuntimeIdentity(timeout time.Duration) error {
 	return nil
 }
 
-// startAgentServer launches `af agent-server` headless on the remote, detached
-// via nohup with its banner + log redirected to files, bound to 127.0.0.1:0, and
-// captures the background PID.
 // revalidateCallbackBeforeEnv re-checks the minted credential at the LAST step
 // that can still keep a dead grant out of the launched agent-server's
 // environment (#5571 W3.1, PR #5577 review): once the env file is written and
@@ -353,12 +369,23 @@ func (w *sandboxWorkspace) writeCallbackEnv(timeout time.Duration) error {
 	return nil
 }
 
+// startAgentServer launches `af agent-server` headless on the remote, detached
+// (setsid where available, plus nohup) with its banner + log redirected to
+// files, bound to 127.0.0.1:0, and captures the background PID.
 func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	filteredInner, err := w.agentServerCommand()
 	if err != nil {
 		return err
 	}
-	launch := fmt.Sprintf("nohup %s >%s 2>%s </dev/null & echo $!",
+	// setsid, when the host has it, moves the agent-server into its own session
+	// (#5571 W1.4): it then outlives the provisioning ssh session's teardown,
+	// whose SIGHUP/session-kill nohup alone does not survive under
+	// KillUserProcesses=yes. It is a plain background child of this
+	// non-interactive shell — never a process-group leader — so setsid execs in
+	// place rather than forking, and `$!` below is still the agent-server's own
+	// PID, which the reap-side argv[0] identity check depends on. Hosts without
+	// setsid (macOS) keep the previous nohup-only launch.
+	launch := fmt.Sprintf("d=; if command -v setsid >/dev/null 2>&1; then d=setsid; fi; nohup $d %s >%s 2>%s </dev/null & echo $!",
 		filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
 	// The runtime-identity env is unconditional — every W1.1 provision writes
 	// af-identity.env before this point. AF_TOKEN_REF must land in the
@@ -405,6 +432,9 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	}
 	for _, name := range w.spec.SessionEnvPassthrough {
 		args = append(args, "--session-env", name)
+	}
+	if branch := strings.TrimSpace(w.spec.Branch); branch != "" {
+		args = append(args, "--branch", branch)
 	}
 	// AF_TOKEN_REF rides the handoff's per-invocation extras — the one channel
 	// that reaches THIS process's exec-time environment — rather than

@@ -306,6 +306,12 @@ type home struct {
 	// af has seen; Enter on the cursor row switches the rail to that project via
 	// the #1547 switchProject path.
 	projects *ui.ProjectsPane
+	// sidebarProjects is the Projects section's last applied row set in the
+	// picker's overlay.Project shape. The section's own SidebarProject rows
+	// drop the registry fields, so a session-snapshot failure could not merge
+	// fresh registry truth into what is on screen without this copy (#4888
+	// review). Set only through setSidebarProjects.
+	sidebarProjects []overlay.Project
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay
@@ -318,7 +324,10 @@ type home struct {
 	// attached to, as `af config set` has since #3679.
 	configPane *ui.ConfigPane
 	// Identifies the current opening and its latest remote accounts operation.
+	// quotaGeneration does the same for the Usage read (#2983), so a report
+	// fetched for an earlier opening cannot land on the pane after a reopen.
 	accountGeneration uint64
+	quotaGeneration   uint64
 	// A remote mutation outlives the overlay and is released only on completion.
 	accountRegisterInFlight *daemon.RegisterAccountRequest
 	// menu displays the key hints inside the status bar (shared handle for

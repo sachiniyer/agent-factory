@@ -754,3 +754,52 @@ func BenchmarkSidebarTreeRender(b *testing.B) {
 		_ = s.String()
 	}
 }
+
+// idTreeInstance is a tree-shaped instance with a stable session ID.
+func idTreeInstance(t *testing.T, title, id string) *session.Instance {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: t.TempDir(), Program: "test"})
+	require.NoError(t, err)
+	inst.ID = id
+	addAgentShellTabs(inst)
+	return inst
+}
+
+// TestSidebarTreeCollapseSurvivesSameSessionPointerReplacement pins #5651: the
+// instanceStartedMsg completion deliberately swaps a ready disk-built copy of a
+// session for another pointer to the SAME session (same ID). The user's explicit
+// h/← fold is keyed to the logical session, not the allocation address, so that
+// routine swap must not undo it.
+func TestSidebarTreeCollapseSurvivesSameSessionPointerReplacement(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	old := idTreeInstance(t, "work", "sess-1")
+	addTestInstance(s, old)
+	s.SetSelectedInstance(0)
+	require.Equal(t, 2, tabRowCount(s), "auto-expanded")
+	s.CollapseSection()
+	require.Equal(t, 0, tabRowCount(s))
+
+	replacement := idTreeInstance(t, "work", "sess-1")
+	require.True(t, s.proj.ReplaceInstanceByTitle("work", replacement))
+	s.proj.SelectInstance(replacement)
+
+	assert.Equal(t, 0, tabRowCount(s), "the fold survives a same-session pointer replacement")
+	assert.False(t, s.instanceExpanded(replacement), "the replacement renders folded")
+}
+
+// Control: a real kill/recreate mints a new session ID, and the old session's
+// fold must NOT pass through to it.
+func TestSidebarTreeCollapseDropsOnRecreatedSession(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	old := idTreeInstance(t, "work", "sess-1")
+	addTestInstance(s, old)
+	s.SetSelectedInstance(0)
+	s.CollapseSection()
+	require.Equal(t, 0, tabRowCount(s))
+
+	recreated := idTreeInstance(t, "work", "sess-2")
+	require.True(t, s.proj.ReplaceInstanceByTitle("work", recreated))
+	s.proj.SelectInstance(recreated)
+
+	assert.Equal(t, 2, tabRowCount(s), "a recreated session starts auto-expanded")
+}

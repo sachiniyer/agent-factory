@@ -100,3 +100,60 @@ func TestBackendsRepoPathRemoteRequiresRepoAsTyped(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "~/src/proj", got)
 }
+
+// W9.2: a remote create sends the daemon-host path exactly as typed and runs no
+// client-side disk resolution; --repo is required.
+func TestRemoteCreateInputsSendsPathAsTyped(t *testing.T) {
+	oldURL, oldRepo, oldProg := apiclient.FlagDaemonURL, repoFlag, createProgramFlag
+	apiclient.FlagDaemonURL = "http://box:8443"
+	t.Cleanup(func() { apiclient.FlagDaemonURL, repoFlag, createProgramFlag = oldURL, oldRepo, oldProg })
+
+	repoFlag = ""
+	_, _, err := remoteCreateInputs(false)
+	require.ErrorContains(t, err, "--repo is required")
+
+	repoFlag, createProgramFlag = "~/srv/does/not/exist/here", ""
+	ws, prog, err := remoteCreateInputs(false)
+	require.NoError(t, err)
+	require.Equal(t, "~/srv/does/not/exist/here", ws)
+	require.Empty(t, prog, "empty program defers to the daemon's default_program")
+
+	createProgramFlag = "not-an-agent"
+	_, _, err = remoteCreateInputs(false)
+	require.Error(t, err)
+}
+
+// #5743: a relative --repo would resolve against the daemon's cwd and could pick
+// a different checkout, so it is refused rather than sent.
+func TestRemoteCreateInputsRefusesRelativeRepo(t *testing.T) {
+	oldURL, oldRepo := apiclient.FlagDaemonURL, repoFlag
+	apiclient.FlagDaemonURL = "http://box:8443"
+	t.Cleanup(func() { apiclient.FlagDaemonURL, repoFlag = oldURL, oldRepo })
+
+	for _, rel := range []string{"src/project", "./project", "../project", "project"} {
+		repoFlag = rel
+		_, _, err := remoteCreateInputs(false)
+		require.ErrorContains(t, err, "must be absolute", rel)
+	}
+	repoFlag = "/srv/box/project"
+	ws, _, err := remoteCreateInputs(false)
+	require.NoError(t, err)
+	require.Equal(t, "/srv/box/project", ws)
+}
+
+// #5744: the remote create asks the daemon to validate before reserving.
+func TestRoutedCreateSetsValidateFirst(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.CreateSessionResponse{}))
+	}))
+	defer srv.Close()
+	oldURL := apiclient.FlagDaemonURL
+	apiclient.FlagDaemonURL = srv.URL
+	t.Cleanup(func() { apiclient.FlagDaemonURL = oldURL })
+
+	_, err := routedCreateSession(daemon.CreateSessionRequest{Title: "a", RepoPath: "/srv/x"})
+	require.NoError(t, err)
+	require.Equal(t, true, got["validate_first"])
+}

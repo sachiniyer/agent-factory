@@ -273,6 +273,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleProjectAdded(msg)
 	case projectReboundMsg:
 		return m.handleProjectRebound(msg)
+	case rebindConflictSnapshotMsg:
+		return m.handleRebindConflictSnapshot(msg)
 	case limitRetriedMsg:
 		return m.handleLimitRetried(msg)
 	case handoffDeliveryConfirmedMsg:
@@ -284,7 +286,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case handoffAccountsLoadedMsg:
 		return m.handleHandoffAccountsLoaded(msg)
 	case accountsLoadedMsg:
-		m.handleAccountsLoaded(msg)
+		return m, m.handleAccountsLoaded(msg)
+	case quotaLoadedMsg:
+		m.handleQuotaLoaded(msg)
 		return m, nil
 	case accountRegisteredMsg:
 		return m, m.handleAccountRegistered(msg)

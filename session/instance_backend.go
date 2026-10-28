@@ -485,7 +485,7 @@ func (i *Instance) SetArchived() {
 		i.started = false
 		i.touchLocked()
 	}
-	i.liveness = LiveArchived
+	i.assignLivenessLocked(LiveArchived)
 	i.inFlightOp = OpNone
 	i.clearAgentModelChangeLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)
@@ -636,7 +636,18 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	}
 	gw := i.gitWorktree
 	if gw == nil {
-		return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
+		// An off-box archive has no daemon-side checkout: its workspace lives on
+		// its host and the record's restore pointer is keyed by identity, not by
+		// the title. Freeing the title is then a pure record rename, as it is
+		// for a local archive after its worktree has moved (#2127, W8.4). A
+		// local row with no worktree is still anomalous and still refuses.
+		if i.capabilitiesLocked().Workspace == WorkspaceLocalWorktree {
+			return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
+		}
+		i.stateEpoch++
+		i.Title = newTitle
+		i.touchLocked()
+		return nil
 	}
 	// Retire any worktree-missing probe that is out while this rename runs
 	// (#5102). The move below empties the recorded path, so a probe whose lstat
@@ -909,7 +920,15 @@ func (i *Instance) capabilitiesLocked() Capabilities {
 	if i.backend == nil {
 		return (&LocalBackend{}).Capabilities()
 	}
-	return i.backend.Capabilities()
+	caps := i.backend.Capabilities()
+	// A sandbox whose agent-server advertises the tab API serves shell and
+	// process tabs off-box (#5571 W4.5): the static backend declaration is the
+	// floor, the cached advertisement lifts it. Cache read only — no network
+	// under i.mu.
+	if caps.Workspace == WorkspaceRemote && i.offBoxTabAPILocked() {
+		caps.TabManagement = true
+	}
+	return caps
 }
 
 // GetBackend returns the backend for the instance (mainly for testing).

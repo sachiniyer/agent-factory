@@ -343,6 +343,16 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// leaves the safer Missing=true from the first commit. Unconditional, because
 	// it is a no-op on a row that was never flagged.
 	instance.ClearWorktreeMissing()
+
+	// RestoreFromArchive reaches LocalBackend's Recover → respawn, which can
+	// rebuild the restored path if it vanishes before being inspected — and a
+	// rebuild arms a stale-pane teardown obligation that must be durable at
+	// both its transitions (#5371 review). Install the checkpoint the setter
+	// requires.
+	instance.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
+	instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
+		return m.stopVSCodeForInstance(key, i.ID)
+	})
 	restoreRuntimeErr := instance.RestoreFromArchiveHeldFenced()
 	// LocalBackend's Recover can rebuild if the restored path vanishes before it
 	// inspects it. Keep the same admission through that one rebuild choke point,

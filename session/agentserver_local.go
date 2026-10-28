@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"fmt"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"sync"
 )
 
@@ -198,6 +200,23 @@ func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) 
 		return s.inst.PreviewTabSnapshot(tab, full)
 	}
 	b := s.inst.currentBackend()
+	// A tmux-backed agent tab measures the lines above its visible capture (#3169)
+	// in the same command as the content, so a remote client can tell a complete
+	// capture from a partial one (#5571 W4.2). Fall through to the backend path
+	// on any miss; the count is an enhancement, never a requirement.
+	if !full {
+		s.inst.mu.RLock()
+		ts := s.inst.tmuxLocked()
+		started := s.inst.started
+		s.inst.mu.RUnlock()
+		if ts != nil && started {
+			if content, above, known, cerr := captureVisibleWithCount(ts); cerr == nil {
+				snap := previewSnapshotWithModes(content, ts)
+				snap.LinesAbove, snap.LinesAboveKnown = above, known
+				return snap, nil
+			}
+		}
+	}
 	var (
 		content string
 		err     error
@@ -214,6 +233,48 @@ func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) 
 	ts := s.inst.tmuxLocked()
 	s.inst.mu.RUnlock()
 	return previewSnapshotWithModes(content, ts), nil
+}
+
+// PreviewGrid captures tab `tab`'s pane through the same code the local
+// clientless channel repaints from, so a remote subscriber gets the exact grid,
+// cursor, modes and size a local one does (#5571 W4.2). A tab with no tmux pane
+// has no grid to give.
+func (s *localAgentServer) PreviewGrid(tab int) (PaneSnapshot, error) {
+	s.inst.mu.RLock()
+	var ts *tmux.TmuxSession
+	if tab == 0 {
+		ts = s.inst.tmuxLocked()
+	} else {
+		ts = s.inst.tabTmuxAtLocked(tab)
+	}
+	s.inst.mu.RUnlock()
+	if ts == nil {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab %d: no tmux pane to capture a grid from", s.inst.Title, tab)
+	}
+	return tmuxPaneSnapshot(ts)
+}
+
+// PreviewGridByID is PreviewGrid bound to one stable tab identity: the pane is
+// selected under the roster lock, so no ordinal crosses it (#2200).
+func (s *localAgentServer) PreviewGridByID(tabID string) (PaneSnapshot, error) {
+	s.inst.mu.RLock()
+	idx, ok := s.inst.tabIndexByIDLocked(tabID)
+	var ts *tmux.TmuxSession
+	if ok {
+		if idx == 0 {
+			ts = s.inst.tmuxLocked()
+		} else {
+			ts = s.inst.Tabs[idx].tmux
+		}
+	}
+	s.inst.mu.RUnlock()
+	if !ok {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab id %q: %w", s.inst.Title, tabID, ErrTabGone)
+	}
+	if ts == nil {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab id %q: no tmux pane to capture a grid from", s.inst.Title, tabID)
+	}
+	return tmuxPaneSnapshot(ts)
 }
 
 // PreviewByID binds directly to the tmux/backend target selected under the
@@ -264,6 +325,9 @@ func (s *localAgentServer) SendPrompt(prompt string) error {
 func (s *localAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error) {
 	// Adoption, counted before the write (#3865). SendPrompt above routes through
 	// here, so this is the one bump for both.
+	if err := s.inst.refuseInputWhileRebuildTeardownPending(); err != nil {
+		return PromptNotDelivered, err
+	}
 	if err := s.inst.NoteAdoptionDelivery(); err != nil {
 		return PromptNotDelivered, err
 	}
@@ -438,6 +502,9 @@ func (s *localAgentServer) InputTab(tabID string, b []byte) error {
 	// The browser terminal's path (daemon/ws_pty.go idTabBinding.input), which
 	// takes no manager lock — so this bump, and the fence it consults, are the
 	// whole of its serialization against a teardown (#3865).
+	if err := s.inst.refuseInputWhileRebuildTeardownPending(); err != nil {
+		return err
+	}
 	if err := s.inst.NoteAdoptionDelivery(); err != nil {
 		return err
 	}
@@ -466,6 +533,9 @@ func (s *localAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, error
 
 func (s *localAgentServer) Input(tab int, b []byte) error {
 	// The legacy ordinal PTY path, same reason as InputTab (#3865).
+	if err := s.inst.refuseInputWhileRebuildTeardownPending(); err != nil {
+		return err
+	}
 	if err := s.inst.NoteAdoptionDelivery(); err != nil {
 		return err
 	}

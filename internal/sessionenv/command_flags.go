@@ -627,6 +627,12 @@ func agentServerProgram(args []string) (string, bool) {
 		idx += 3
 	}
 	for idx < len(args) {
+		// --branch is the daemon-named branch (#5571 W2.4): any non-empty value,
+		// since it only names a git ref and is never executed.
+		if args[idx] == "--branch" && idx+1 < len(args) && args[idx+1] != "" {
+			idx += 2
+			continue
+		}
 		if args[idx] != "--session-env" || idx+1 >= len(args) || !validName(args[idx+1]) {
 			return "", false
 		}
@@ -762,16 +768,14 @@ func literalShellWord(word *syntax.Word) (string, bool) {
 			panic(errWorkLimitExceeded)
 		}
 	}
-	if word == nil {
-		return "", false
-	}
-	var value strings.Builder
-	for _, part := range word.Parts {
-		if !appendLiteralShellPart(&value, part) {
-			return "", false
-		}
-	}
-	return value.String(), true
+	// Read the word the way the shell will pass it, not as its written text
+	// (#4523): literalArgvWord removes unquoted backslashes (`\env` is env,
+	// `CODEX\_HOME` is CODEX_HOME) and fails closed on what the shell expands
+	// at run time — glob characters, a leading tilde, brace expansion and
+	// $'…'/$"…" — so a word that decides a command name, an option or an
+	// assignment is never judged by raw source bytes.
+	text, _, ok := literalArgvWord(word)
+	return text, ok
 }
 
 func appendLiteralShellPart(value *strings.Builder, part syntax.WordPart) bool {

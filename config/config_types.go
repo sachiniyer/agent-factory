@@ -253,6 +253,13 @@ type Config struct {
 	// Default strict, so an existing backend=ssh user sees no change; accept-new
 	// writes learned keys to an af-owned store, never the user's ~/.ssh/known_hosts.
 	SSHHostKeyVerification string `json:"ssh_host_key_verification" toml:"ssh_host_key_verification"`
+	// Hosts is the operator-owned named host list (#5571 W6.1): name → ssh
+	// destination. Global-only — af executes against these and sends credentials
+	// to them, so no repo layer can set or extend it. See HostConfig.
+	Hosts map[string]HostConfig `json:"hosts,omitempty" toml:"hosts,omitempty"`
+	// DefaultHost names the Hosts entry used when a session does not pick one.
+	// Empty means no default. Global-only, like Hosts.
+	DefaultHost string `json:"default_host,omitempty" toml:"default_host,omitempty"`
 	// SandboxSSH is the free-form `ssh …` command the `sandbox` backend runs to
 	// reach the sandbox host — any invocation that already works for the operator
 	// (jump hosts, ProxyCommand, custom ports/flags/keys; #2476). It is
@@ -266,6 +273,14 @@ type Config struct {
 	// operator's ssh_config / known_hosts / ProxyCommand are the authority (unlike
 	// the x/crypto `ssh` backend, which af enforces via ssh_host_key_verification).
 	SandboxSSH string `json:"sandbox_ssh,omitempty" toml:"sandbox_ssh,omitempty"`
+	// MoveCmd is the operator-written script af runs on the daemon box when it
+	// moves a live local session to a sandbox (`af sessions move`, W7.9): JSON spec
+	// on stdin, AF_SSH / AF_SSH_DEST / AF_SSH_FULL in the environment. It is
+	// deliberately global-only: af EXECUTES it with the session's environment and
+	// the operator's credentials in reach, so a repository must never choose it —
+	// a checked-in value is a load error, not a warning. The user writes the
+	// script; the repo only ever has a session worth moving.
+	MoveCmd string `json:"move_cmd,omitempty" toml:"move_cmd,omitempty"`
 	// AutoUpdate controls the startup self-update check. It defaults to true:
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.

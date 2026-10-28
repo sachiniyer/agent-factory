@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -12,7 +14,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // remoteProgramForHost resolves the configured program for REMOTE execution.
@@ -37,9 +39,8 @@ func remoteProgramForHost(resolved *config.ResolvedConfig, agent string) string 
 	if !ok {
 		return command
 	}
-	tokens, ends := tmux.SplitShellTokens(command)
-	exeIdx := firstExecutableWord(command, ends)
-	if exeIdx < 0 {
+	exe, err := sessionenv.LocateProgramExecutable(command)
+	if err != nil {
 		return command
 	}
 	for _, candidate := range value.Candidates {
@@ -50,41 +51,13 @@ func remoteProgramForHost(resolved *config.ResolvedConfig, agent string) string 
 		if !isStr {
 			continue
 		}
-		builtInTokens, builtInEnds := tmux.SplitShellTokens(builtIn)
-		builtInExeIdx := firstExecutableWord(builtIn, builtInEnds)
-		if builtInExeIdx >= 0 && builtInTokens[builtInExeIdx] == tokens[exeIdx] {
-			exeStart := wordStart(command, ends, exeIdx)
-			return command[:exeStart] + agent + command[ends[exeIdx]:]
+		if builtInExe, err := sessionenv.LocateProgramExecutable(builtIn); err == nil && builtInExe.Name == exe.Name {
+			// Only the executable word is replaced; assignments, env, exec and
+			// every argument stay exactly where the operator wrote them.
+			return command[:exe.Start] + agent + command[exe.End:]
 		}
 	}
 	return command
-}
-
-// firstExecutableWord returns the token index of the first word that is not a
-// leading NAME=VALUE environment assignment, or -1 when the command is all
-// assignments (or empty). ends must be the offsets SplitShellTokens returned
-// alongside the tokens.
-func firstExecutableWord(command string, ends []int) int {
-	prevEnd := 0
-	for i, end := range ends {
-		seg := command[prevEnd:end]
-		if !isEnvAssignmentWord(strings.TrimLeft(seg, " \t")) {
-			return i
-		}
-		prevEnd = end
-	}
-	return -1
-}
-
-// wordStart returns the byte offset where token i's raw word begins,
-// including any quote characters — the rewrite splices on raw text.
-func wordStart(command string, ends []int, i int) int {
-	prevEnd := 0
-	for j := 0; j < i; j++ {
-		prevEnd = ends[j]
-	}
-	seg := command[prevEnd:ends[i]]
-	return prevEnd + len(seg) - len(strings.TrimLeft(seg, " \t"))
 }
 
 // hostProgramProbeTimeout bounds one login-shell probe. Interactive rc files
@@ -94,23 +67,18 @@ func wordStart(command string, ends []int, i int) int {
 const hostProgramProbeTimeout = 15 * time.Second
 const hostProgramProbeWaitDelay = time.Second
 
-// The executable name always reaches the login shell as a POSITIONAL
-// ARGUMENT, never interpolated into the -c script: program_overrides text is
-// operator/repository-authored and untrusted, so `"$SHELL" -l -c 'command -v
-// -- "$1"' af-probe "$name"` is the only admissible shape (#5571 W2.1). The
-// `--` keeps a name that begins with `-` a name rather than an option. The
-// `which` fallback gets the same treatment — a `which` that cannot parse `--`
-// simply answers "not found", which is the safe direction.
-const (
-	hostProbeCommandV = `command -v -- "$1"; printf '\n__af_path__\n%s\n' "$PATH"`
-	hostProbeWhich    = `which -- "$1" 2>/dev/null; printf '\n__af_path__\n%s\n' "$PATH"`
-	hostProbePathOnly = `printf '__af_path__\n%s\n' "$PATH"`
-)
-
-// hostProbePathMarker terminates the executable report; the login shell's
-// PATH follows it on the next line. The marker is a line of its own so a
-// report that ends without a newline cannot glue onto the PATH record.
-const hostProbePathMarker = "__af_path__\n"
+// The executable name never reaches a shell. The pane runs its program under
+// `sh -c`, so the only thing that can run is a file found by walking PATH —
+// the login shell's functions, aliases and builtins do not exist there, and
+// `command -v` would answer for them (#5768). The login shell is therefore
+// asked for one thing only, its PATH, and the walk happens in Go over that
+// PATH or over the command's own. program_overrides text is operator- or
+// repository-authored and untrusted, so keeping it out of every script is also
+// what keeps it inert (#5571 W2.1).
+//
+// $1 is a per-probe nonce that fences the answer: a login profile's own output
+// lands before the fence and is ignored (#5727).
+const hostProbePathOnly = `printf '\n%s\n%s\n' "$1" "$PATH"`
 
 // hostProgramRunner executes one probe argv on the local host. Tests inject a
 // fake so the exact argv — login flags, positional argument, uninterpolated
@@ -129,10 +97,13 @@ type hostProgramProber struct {
 	// image PATH under docker, sshd's default under ssh. It is the fallback
 	// lookup and the merge tail for the adopted PATH.
 	processPATH string
-	// lookPath is exec.LookPath in production.
-	lookPath func(string) (string, error)
 	// run executes the probe argv.
 	run hostProgramRunner
+	// statFile is os.Stat in production; the resolved answer must be a
+	// regular, executable file on this host.
+	statFile func(string) (os.FileInfo, error)
+	// nonce returns a fresh fence token per probe.
+	nonce func() string
 }
 
 // ResolveProgramOnHost resolves a program command's executable word through
@@ -155,109 +126,116 @@ func ResolveProgramOnHost(ctx context.Context, program string) (command, loginPA
 		shell:       loginShellName(os.Getenv),
 		host:        host,
 		processPATH: os.Getenv("PATH"),
-		lookPath:    exec.LookPath,
 		run:         execProbeRunner,
+		statFile:    os.Stat,
+		nonce:       randomProbeNonce,
 	})
 }
 
 func resolveProgramOnHost(ctx context.Context, program string, p hostProgramProber) (string, string, error) {
-	tokens, ends := tmux.SplitShellTokens(program)
-	if len(tokens) == 0 {
-		return "", "", fmt.Errorf("agent program %q has no executable word", program)
-	}
-	// Leading NAME=VALUE environment assignments are a legal command prefix
-	// (CLAUDE_CODE_USE_BEDROCK=1 claude); the executable is the first
-	// non-assignment word and the prefix must survive the rewrite (#5578).
-	exeIdx := firstExecutableWord(program, ends)
-	if exeIdx < 0 {
-		return "", "", fmt.Errorf("agent program %q has no executable word", program)
-	}
-	exe := tokens[exeIdx]
-	prefix := program[:wordStart(program, ends, exeIdx)]
-	suffix := program[ends[exeIdx]:]
-
-	if strings.ContainsRune(exe, '/') {
-		// Path-qualified — verbatim on this filesystem. The login PATH is
-		// still adopted so the pane sees the operator's environment.
-		_, loginPATH := p.probePath(ctx)
-		return program, mergeHostPATH(loginPATH, p.processPATH), nil
-	}
-
-	for _, script := range []string{hostProbeCommandV, hostProbeWhich} {
-		resolved, loginPATH, _ := p.probe(ctx, script, exe)
-		if resolved != "" {
-			return prefix + quoteHostPathIfNeeded(resolved) + suffix, mergeHostPATH(loginPATH, p.processPATH), nil
+	exe, err := sessionenv.LocateProgramExecutable(program)
+	if err != nil {
+		if errors.Is(err, sessionenv.ErrNoProgramExecutable) {
+			return "", "", fmt.Errorf("agent program %q has no executable word", program)
 		}
-	}
-	// The login shell is not the only PATH that matters: a docker image sets
-	// PATH in its ENV where no profile can see it, so the process's own PATH
-	// is the last lookup before refusing.
-	if abs, err := p.lookPath(exe); err == nil && filepath.IsAbs(abs) {
-		return prefix + quoteHostPathIfNeeded(abs) + suffix, p.processPATH, nil
-	}
-	_, loginPATH := p.probePath(ctx)
-	return "", "", fmt.Errorf("agent program %q not found on %s (login-shell PATH %q)", exe, p.host, loginPATH)
-}
-
-// isEnvAssignmentWord reports whether the RAW shell word is a leading
-// VAR=value environment assignment: an unquoted NAME= prefix where NAME is a
-// shell identifier. The raw word is checked, not the unquoted token, so a
-// quoted 'FOO=1' — which a shell would exec literally, not assign — does not
-// count (#5578).
-func isEnvAssignmentWord(word string) bool {
-	eq := strings.IndexByte(word, '=')
-	if eq <= 0 {
-		return false
-	}
-	for i := 0; i < eq; i++ {
-		c := word[i]
-		alpha := c == '_' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
-		if !alpha && !(i > 0 && '0' <= c && c <= '9') {
-			return false
+		if errors.Is(err, sessionenv.ErrProgramDynamic) && !pathShapedWord(program, exe) {
+			return "", "", fmt.Errorf("agent program %q computes its executable name or PATH at run time, so af cannot resolve it on %s: write the executable as a literal name or an absolute path", program, p.host)
 		}
+		// Not one simple command (a pipeline), or a computed path
+		// ($HOME/bin/claude): af cannot say what runs, so it does not guess —
+		// the command runs as written under the adopted login PATH.
+		return program, p.adoptedPATH(ctx), nil
 	}
-	return true
-}
-
-// probe runs one login-shell script with the executable name as $1 and splits
-// the output into the executable report and the login PATH.
-func (p hostProgramProber) probe(ctx context.Context, script, name string) (resolved, loginPATH string, err error) {
-	out, err := p.run(ctx, []string{p.shell, "-l", "-c", script, "af-probe", name})
-	if err != nil && len(out) == 0 {
-		return "", "", err
+	if exe.Opaque || strings.ContainsRune(exe.Name, '/') {
+		// Path-qualified (the operator's explicit choice) or a lookup the
+		// command reshapes in a way a probe cannot reproduce: verbatim on this
+		// filesystem. The login PATH is still adopted.
+		return program, p.adoptedPATH(ctx), nil
 	}
-	report, path := parseHostProbeOutput(string(out))
-	return firstAbsPathLine(report), path, nil
-}
 
-// probePath fetches only the login PATH (no executable lookup).
-func (p hostProgramProber) probePath(ctx context.Context) (string, string) {
-	out, _ := p.run(ctx, []string{p.shell, "-l", "-c", hostProbePathOnly, "af-probe"})
-	_, path := parseHostProbeOutput(string(out))
-	return "", path
-}
-
-// parseHostProbeOutput splits probe output at the marker line into the
-// executable report (which may be empty, a path, or shell commentary like an
-// alias definition) and the login PATH that follows the marker.
-func parseHostProbeOutput(out string) (report, loginPATH string) {
-	idx := strings.LastIndex(out, hostProbePathMarker)
-	if idx < 0 {
-		return out, ""
+	adopted := p.adoptedPATH(ctx)
+	// The command's own PATH, when it names one, is the whole lookup — the
+	// process PATH must not silently override it (#5726). Otherwise the pane
+	// gets the login PATH merged with the spawning environment's, so that is
+	// what is searched: a docker image sets PATH in its ENV where no profile
+	// can see it.
+	search := adopted
+	if exe.HasPATH {
+		search = exe.PATH
 	}
-	return out[:idx], strings.TrimSpace(out[idx+len(hostProbePathMarker):])
+	if abs := p.findOnPATH(exe.Name, search); abs != "" {
+		return program[:exe.Start] + quoteHostPathIfNeeded(abs) + program[exe.End:], adopted, nil
+	}
+	if exe.HasPATH {
+		return "", "", fmt.Errorf("agent program %q not found on %s in the command's own PATH %q", exe.Name, p.host, exe.PATH)
+	}
+	return "", "", fmt.Errorf("agent program %q not found on %s (login-shell PATH %q)", exe.Name, p.host, search)
 }
 
-// firstAbsPathLine returns the first report line that names an absolute path.
-// `which` variants interleave "no X in PATH" noise with real answers, and a
-// login rc file may print commentary — only a /-anchored line is an answer.
-func firstAbsPathLine(report string) string {
-	for _, line := range strings.Split(report, "\n") {
-		if line = strings.TrimSpace(line); strings.HasPrefix(line, "/") {
-			return line
+// pathShapedWord reports whether a computed executable word still contains a
+// slash. Such a word never goes through a PATH lookup — the shell runs the
+// path it expands to — so there is nothing to resolve.
+func pathShapedWord(program string, exe sessionenv.ProgramExecutable) bool {
+	return exe.End > exe.Start && strings.ContainsRune(program[exe.Start:exe.End], '/')
+}
+
+// adoptedPATH is the login PATH merged with the PATH this process already had.
+func (p hostProgramProber) adoptedPATH(ctx context.Context) string {
+	return mergeHostPATH(p.probePath(ctx), p.processPATH)
+}
+
+// findOnPATH walks path the way the pane's sh would: the first directory
+// holding a regular executable file of that name wins. Relative entries
+// (including the empty entry, the current directory) are skipped, because a
+// resolved answer must be an absolute path.
+func (p hostProgramProber) findOnPATH(name, path string) string {
+	for _, dir := range strings.Split(path, ":") {
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		if candidate := filepath.Join(dir, name); p.validExecutable(candidate) {
+			return candidate
 		}
 	}
 	return ""
+}
+
+// validExecutable reports whether path is a regular file with an execute bit.
+func (p hostProgramProber) validExecutable(path string) bool {
+	if !filepath.IsAbs(path) || p.statFile == nil {
+		return false
+	}
+	info, err := p.statFile(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+// probePath fetches the login shell's PATH. Output before the nonce fence (a
+// login profile's) is discarded; a probe that fails or never prints the fence
+// yields "".
+func (p hostProgramProber) probePath(ctx context.Context) string {
+	nonce := p.nonce()
+	out, _ := p.run(ctx, []string{p.shell, "-l", "-c", hostProbePathOnly, "af-probe", nonce})
+	return parseHostProbeOutput(string(out), nonce)
+}
+
+// parseHostProbeOutput returns the line after the first nonce fence.
+func parseHostProbeOutput(out, nonce string) string {
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == nonce && i+1 < len(lines) {
+			return strings.TrimSpace(lines[i+1])
+		}
+	}
+	return ""
+}
+
+// randomProbeNonce returns an unguessable fence for one probe.
+func randomProbeNonce() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("af-probe-%d", time.Now().UnixNano())
+	}
+	return "af-probe-" + hex.EncodeToString(b[:])
 }
 
 // quoteHostPathIfNeeded quotes a resolved executable for the pane's sh -c only

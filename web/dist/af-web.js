@@ -6513,6 +6513,7 @@ function isDaemonRejection(err, status) {
   return err?.daemon_rejected === true && status !== 502 && status !== 504 && envelopeErrorCode(err) !== MUTATION_COMMITTED_ERROR_CODE;
 }
 var MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
+var PROJECT_REBOUND_ERROR_CODE = "project_rebound";
 var ApiError = class extends Error {
   status;
   code;
@@ -6529,10 +6530,13 @@ var ApiError = class extends Error {
 function isMutationCommittedError(e) {
   return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE && e.status !== 502 && e.status !== 504;
 }
+function isProjectReboundError(e) {
+  return e instanceof ApiError && e.daemonRejected && e.code === PROJECT_REBOUND_ERROR_CODE;
+}
 function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
-async function af(method, body, token2) {
+async function af(method, body, token2, signal) {
   const headers = { "Content-Type": "application/json" };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
@@ -6542,7 +6546,8 @@ async function af(method, body, token2) {
     resp = await fetch(`/v1/${method}`, {
       method: "POST",
       headers,
-      body: JSON.stringify(body ?? {})
+      body: JSON.stringify(body ?? {}),
+      signal: signal ?? null
     });
   } catch (e) {
     throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
@@ -6707,12 +6712,39 @@ async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
   return resp.project;
 }
-async function rebindProject(id, path, token2) {
-  const resp = await af("RebindProject", { id, path }, token2);
+var GUARDED_REBIND_UNSUPPORTED = "this daemon predates guarded rebinds \u2014 upgrade it, or rebind from the daemon host";
+async function rebindProject(id, path, token2, expectedRoot = null, expectedCheckoutID = null) {
+  const request = {
+    id,
+    path
+  };
+  if (expectedRoot !== null && expectedRoot !== "") {
+    request.expected_root = expectedRoot;
+  }
+  if (expectedCheckoutID !== null && expectedCheckoutID !== "") {
+    request.expected_checkout_id = expectedCheckoutID;
+  }
+  if (request.expected_root !== void 0 || request.expected_checkout_id !== void 0) {
+    let resp2;
+    try {
+      resp2 = await af("RebindProjectGuarded", request, token2);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404 && (e.daemonRejected || e.code === "" && e.message === 'unknown route "/v1/RebindProjectGuarded"')) {
+        throw new ApiError(404, GUARDED_REBIND_UNSUPPORTED, e.code, true);
+      }
+      throw e;
+    }
+    return resp2.project;
+  }
+  const resp = await af("RebindProject", request, token2);
   return resp.project;
 }
-async function listProjects(token2) {
-  const resp = await af("ListProjects", {}, token2);
+async function setProjectColor(id, color, token2) {
+  const resp = await af("SetProjectColor", { id, color }, token2);
+  return resp.project;
+}
+async function listProjects(token2, signal) {
+  const resp = await af("ListProjects", {}, token2, signal);
   return resp.projects ?? [];
 }
 async function listDirectory(path, token2) {
@@ -6839,7 +6871,10 @@ async function updateTask(task, update, token2) {
 }
 async function triggerTask(task, token2) {
   requireTaskID(task.id, "trigger a task");
-  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+  const result = await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 async function removeTask(task, token2) {
   requireTaskID(task.id, "remove a task");
@@ -6886,6 +6921,10 @@ async function listAccounts(token2, repoPath = "") {
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af("ListAccounts", body, token2);
   return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
+}
+async function quotaReport(token2) {
+  const resp = await af("QuotaReport", {}, token2);
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
@@ -7700,6 +7739,59 @@ function appendStatus(row, status, agent, name) {
   row.append(h("div", { class: "af-accounts-echo" }, status.message));
 }
 
+// src/quota.ts
+function emptyQuotaState() {
+  return { agents: [], warnings: [], loaded: false, error: "" };
+}
+var QUOTA_NOTE = "Quota is what the provider reports \u2014 today \u201Cnot reported\u201D everywhere, af declining to guess a ceiling. Observed is what af\u2019s own sessions show. af quota prints the same report.";
+function renderQuotaSection(state) {
+  const section = h("section", { class: "af-quota" });
+  section.setAttribute("aria-label", "Usage");
+  if (state.loaded === false && !state.error) {
+    section.append(h("p", {}, "Connecting\u2026"));
+    return section;
+  }
+  const head = h(
+    "div",
+    { class: "af-quota-head" },
+    h("span", { class: "af-quota-title" }, "Usage"),
+    h("span", { class: "af-view-count" }, String(state.agents.length))
+  );
+  section.append(head, h("p", { class: "af-quota-note" }, QUOTA_NOTE));
+  if (state.error !== "") {
+    section.append(
+      h("p", { class: "af-quota-error", role: "alert" }, `Usage limits could not be read: ${state.error}`)
+    );
+    return section;
+  }
+  for (const warning of state.warnings) {
+    section.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
+  }
+  if (state.agents.length === 0) {
+    section.append(
+      h("p", { class: "af-quota-empty" }, "No agent CLIs are configured, so there is nothing to report.")
+    );
+    return section;
+  }
+  const list = h("div", { class: "af-quota-list" });
+  for (const agent of state.agents) {
+    const row = h(
+      "div",
+      { class: "af-quota-row" },
+      h("span", { class: "af-quota-agent" }, agent.program),
+      h("span", { class: "af-quota-cell" }, agent.quota),
+      h(
+        "span",
+        { class: agent.limited_sessions > 0 ? "af-quota-cell af-quota-limited" : "af-quota-cell" },
+        agent.observed
+      )
+    );
+    list.append(row, h("p", { class: "af-quota-detail" }, agent.detail));
+  }
+  section.append(list);
+  return section;
+}
+
 // src/scrollkeep.ts
 function listToken(parts) {
   return parts.map((p) => p ?? "none").join("\0");
@@ -7814,6 +7906,9 @@ var ConfigPane = class {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   accounts = emptyAccountsState();
+  /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
+   *  Accounts. Same "not config" rule: see quota.ts. */
+  quota = emptyQuotaState();
   theme = "system";
   showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
@@ -7842,11 +7937,12 @@ var ConfigPane = class {
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
+  lastQuota = null;
   lastTheme = null;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status, accounts, theme = this.theme) {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastTheme === theme) {
+  update(entries, path, status, accounts, quota, theme = this.theme) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastQuota === quota && this.lastTheme === theme) {
       return;
     }
     const statusIsNew = status !== this.lastStatus;
@@ -7859,12 +7955,14 @@ var ConfigPane = class {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastQuota = quota;
     this.lastTheme = theme;
     this.theme = theme;
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    this.quota = quota;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
@@ -8025,7 +8123,8 @@ var ConfigPane = class {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
-      renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
+      renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
+      renderQuotaSection(this.quota)
     );
   }
   /** Theme and the saved token live in this browser's localStorage, not in
@@ -12185,11 +12284,15 @@ function compareSessionsForRail(a, b) {
   }
   return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
 }
+var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
+function isOffBoxWorkspace(s) {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
 function rowTitle(s) {
   const lv = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
   let title = s.title;
-  if (s.backend_type === "remote") {
+  if (isOffBoxWorkspace(s)) {
     title = "[remote] " + title;
   }
   if (lv === Liveness.Lost) {
@@ -12266,7 +12369,13 @@ function backendChoices(catalog) {
   if (catalog === null) {
     return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
   }
-  const callbackAdvisory = (opt) => opt?.status === "available" && opt.callback_unavailable_reason ? CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason : "";
+  const callbackAdvisory = (opt) => {
+    if (opt?.status !== "available") return "";
+    const parts = [];
+    if (opt.note) parts.push(`Host ${opt.note}`);
+    if (opt.callback_unavailable_reason) parts.push(CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason);
+    return parts.join(" \xB7 ");
+  };
   const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
   const choices = [
     {
@@ -14584,7 +14693,12 @@ var SplitView = class {
     const paneHost = el("div", "af-pane-host");
     const overlay = el("div", "af-drop-overlay");
     container.append(head, paneHost, overlay);
-    container.addEventListener("mousedown", () => this.focusPane(leaf.id));
+    container.addEventListener("mousedown", (e) => {
+      this.onPaneMouseDown(leaf.id);
+      if (!paneHost.contains(e.target)) {
+        e.preventDefault();
+      }
+    });
     const pane = {
       leafId: leaf.id,
       container,
@@ -15028,6 +15142,19 @@ var SplitView = class {
     pane.overlay.className = "af-drop-overlay";
   }
   // --- internal: focus + status ---------------------------------------------
+  /** Click-to-focus (#1694, #4341). focusPane only moves the bookkeeping; the DOM
+   *  focus handoff lives in refocus(), so a click that does not reach xterm's own
+   *  textarea (the pane header) must go through both or the highlight and the
+   *  keyboard disagree. A click on the pane that already holds focus is left to
+   *  xterm: re-focusing here would steal the keyboard from rail mode on every
+   *  click of an already-selected pane. */
+  onPaneMouseDown(leafId) {
+    if (this.focusedId === leafId) {
+      return;
+    }
+    this.focusPane(leafId);
+    this.refocus();
+  }
   focusPane(leafId) {
     if (this.focusedId === leafId) {
       return;
@@ -15656,14 +15783,29 @@ function createFencedRefetcher(spec) {
         return Promise.resolve();
       }
       const request = gate.begin();
-      const isNewest = () => request.isCurrent() && spec.readToken() === tok;
-      return spec.fetch(tok).then((value) => {
+      let expired = false;
+      const isNewest = () => !expired && request.isCurrent() && spec.readToken() === tok;
+      let controller;
+      let bound;
+      if (spec.timeoutMs !== void 0) {
+        controller = new AbortController();
+        const own = controller;
+        bound = globalThis.setTimeout(() => {
+          expired = true;
+          own.abort();
+        }, spec.timeoutMs);
+      }
+      return spec.fetch(tok, controller?.signal).then((value) => {
         if (isNewest()) {
           spec.commit(value);
         }
       }).catch((error) => {
         if (isNewest() && !options?.silent) {
           spec.onError?.(error);
+        }
+      }).finally(() => {
+        if (bound !== void 0) {
+          globalThis.clearTimeout(bound);
         }
       });
     },
@@ -16664,6 +16806,138 @@ function replaceProjectMenuChildren(menu, children, fallback) {
   (replacement ?? fallback).focus({ preventScroll: true });
 }
 
+// src/project_color.ts
+var PROJECT_COLOR_PALETTE = [
+  "#e11d48",
+  "#ea580c",
+  "#ca8a04",
+  "#16a34a",
+  "#0d9488",
+  "#2563eb",
+  "#7c3aed",
+  "#db2777"
+];
+var FAVICON_MARK_PATH = "M96 416 L96 96 L160 96 L160 288 L224 288 L224 192 L320 288 L320 192 L416 288 L416 416 Z";
+var HEX = /^#[0-9a-f]{6}$/;
+function projectColor(projects, root2) {
+  if (root2 === null) return null;
+  const color = projects.find((p) => p.root === root2)?.color?.toLowerCase() ?? "";
+  return HEX.test(color) ? color : null;
+}
+function markInk(color) {
+  const channel = (i) => {
+    const v = parseInt(color.slice(i, i + 2), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+  const darkInkContrast = (luminance + 0.05) / (0.014 + 0.05);
+  const whiteInkContrast = 1.05 / (luminance + 0.05);
+  return darkInkContrast >= whiteInkContrast ? "#1f1f1f" : "#ffffff";
+}
+function projectFaviconSvg(color) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${color}"/><path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`;
+}
+function projectFaviconDataUrl(color) {
+  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color))}`;
+}
+function projectFaviconPng(color, size) {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx || typeof Path2D === "undefined") return null;
+  ctx.scale(size / 512, size / 512);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(112, 0);
+  ctx.arcTo(512, 0, 512, 512, 112);
+  ctx.arcTo(512, 512, 0, 512, 112);
+  ctx.arcTo(0, 512, 0, 0, 112);
+  ctx.arcTo(0, 0, 512, 0, 112);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = markInk(color);
+  ctx.fill(new Path2D(FAVICON_MARK_PATH));
+  return canvas.toDataURL("image/png");
+}
+var appliedFavicon = null;
+function applyProjectFavicon(color) {
+  if (appliedFavicon === color) return;
+  appliedFavicon = color;
+  for (const link of document.querySelectorAll('link[rel="icon"]')) {
+    if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
+    let href = null;
+    if (color !== null) {
+      if (link.type === "image/svg+xml") {
+        href = projectFaviconDataUrl(color);
+      } else {
+        href = projectFaviconPng(color, Number.parseInt(link.sizes.value, 10) || 32);
+      }
+    }
+    link.setAttribute("href", href ?? link.dataset.afDefaultHref);
+  }
+}
+function applyProjectFrame(main, color) {
+  if (color === null) {
+    if (main.dataset.projectColor === void 0) return;
+    delete main.dataset.projectColor;
+    main.style.removeProperty("--af-project-color");
+    return;
+  }
+  if (main.dataset.projectColor === color) return;
+  main.dataset.projectColor = color;
+  main.style.setProperty("--af-project-color", color);
+}
+function projectColorRow(current, label, onPick) {
+  const pick = (color) => (e) => {
+    e.stopPropagation();
+    onPick(color);
+  };
+  const swatches = PROJECT_COLOR_PALETTE.map((color) => {
+    const swatch = h("button", { type: "button", class: "af-project-swatch" });
+    swatch.style.setProperty("--af-swatch", color);
+    swatch.setAttribute("aria-label", `Color ${label} ${color}`);
+    swatch.setAttribute("title", color);
+    swatch.setAttribute("aria-pressed", current === color ? "true" : "false");
+    swatch.dataset.projectFocus = `color:${color}`;
+    swatch.addEventListener("click", pick(color));
+    return swatch;
+  });
+  const input = h("input", { type: "color", class: "af-project-color-input", tabIndex: -1 });
+  input.value = current ?? PROJECT_COLOR_PALETTE[5];
+  input.setAttribute("aria-hidden", "true");
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("change", () => onPick(input.value));
+  const custom2 = h("button", { type: "button", class: "af-project-swatch af-project-swatch-custom" }, "+");
+  custom2.setAttribute("aria-label", `Custom color for ${label}`);
+  custom2.setAttribute("title", "Custom color");
+  custom2.dataset.projectFocus = "color:custom";
+  custom2.addEventListener("click", (e) => {
+    e.stopPropagation();
+    try {
+      input.showPicker();
+    } catch {
+      input.click();
+    }
+  });
+  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "No color");
+  clear.disabled = current === null;
+  clear.dataset.projectFocus = "color:clear";
+  clear.addEventListener("click", pick(""));
+  const row = h(
+    "div",
+    { class: "af-project-color" },
+    h("span", { class: "af-project-color-label" }, "Color"),
+    ...swatches,
+    custom2,
+    input,
+    clear
+  );
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", `Color for ${label}`);
+  return row;
+}
+
 // src/tabreorder.ts
 var PINNED_TABS = 1;
 function insertionIndexAt(centers, x) {
@@ -16816,10 +17090,6 @@ function isKillableSession(s) {
 var TAB_PINNED_NOTICE = "Agent tab stays first \xB7 drag to a pane to split";
 function restoreRequiresConfirmation(session) {
   return session.backend_type !== void 0 && session.backend_type !== "" && session.backend_type !== "local";
-}
-var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
-function isOffBoxWorkspace(s) {
-  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
 }
 function allowedTabKinds(s) {
   if (s.tab_kinds && s.tab_kinds.length > 0) {
@@ -17413,6 +17683,7 @@ var AppShell = class {
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectFavicon(null);
   }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
    *  history entry name the session and project rather than a static "Agent Factory".
@@ -17454,6 +17725,9 @@ var AppShell = class {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
+    const color = projectColor(state.registeredProjects, state.selectedProject);
+    applyProjectFrame(this.main, color);
+    applyProjectFavicon(color);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -17509,7 +17783,7 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.themeChoice);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -17962,6 +18236,11 @@ var AppShell = class {
     footChildren.push(add);
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      children.push(
+        projectColorRow(projectColor(state.registeredProjects, currentSummary.root), currentSummary.name, (color) => {
+          this.actions.setProjectColor(currentSummary.root, color);
+        })
+      );
       const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
       if (currentRecord) {
         const rebind = h("button", { type: "button", class: "af-ghost af-project-rebind" }, "Rebind\u2026");
@@ -18015,10 +18294,18 @@ var AppShell = class {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
+    const name = h("span", { class: "af-project-item-name" }, p.name);
+    const dotColor = record ? projectColor([record], record.root) : null;
+    if (dotColor !== null) {
+      const dot = h("span", { class: "af-project-dot" });
+      dot.style.setProperty("--af-swatch", dotColor);
+      dot.setAttribute("aria-hidden", "true");
+      name.prepend(dot, " ");
+    }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      h("span", { class: "af-project-item-name" }, p.name),
+      name,
       h("span", { class: "af-project-item-path" }, p.path)
     );
     const meta = h(
@@ -19075,6 +19362,37 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
   }
 }
 
+// src/project_color_writes.ts
+function createLatestWriter(write, onError) {
+  const waiting = /* @__PURE__ */ new Map();
+  const draining = /* @__PURE__ */ new Map();
+  const drain = async (key) => {
+    for (let next = waiting.get(key); next !== void 0; next = waiting.get(key)) {
+      waiting.delete(key);
+      try {
+        await write(key, next.value);
+      } catch (e) {
+        onError(e, key, next.value);
+      }
+    }
+    draining.delete(key);
+  };
+  return {
+    set(key, value) {
+      waiting.set(key, { value });
+      const running = draining.get(key);
+      if (running) return running;
+      const started = drain(key);
+      draining.set(key, started);
+      return started;
+    },
+    cancel(key) {
+      waiting.delete(key);
+      return draining.get(key) ?? Promise.resolve();
+    }
+  };
+}
+
 // src/tab_delete_target.ts
 function captureTabDeleteTarget(target) {
   const identity = tabIdentity(target);
@@ -19092,6 +19410,7 @@ var store = new Store({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  quota: emptyQuotaState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -19439,6 +19758,7 @@ function switchView(view) {
   if (view === "config") {
     refreshConfig();
     refreshAccounts();
+    refreshQuota();
   }
 }
 function setStatusFilter(kind, on) {
@@ -19783,18 +20103,40 @@ function openDeleteProject(root2, label) {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root2, tok).then(() => {
-          if (modal === m) closeModal();
-        }).catch((e) => {
-          if (isMutationCommittedError(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            refreshRegisteredProjects();
-            surfaceTabError(e);
-            return;
+        const connection = connectionGeneration;
+        void projectColorWriter.cancel(root2).then(async () => {
+          if (!isCurrentConnection(connection, tok)) return;
+          const learned = projectColorRegistrations.get(root2);
+          if (learned && "uncertain" in learned) {
+            try {
+              await registerProject(root2, tok);
+            } catch (e) {
+              if (!isMutationCommittedError(e) && isMutationOutcomeUncertain(e)) {
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(new Error(`The project registration outcome could not be confirmed. ${errorText(e)}`));
+                return;
+              }
+            }
+            projectColorRegistrations.delete(root2);
           }
-          m.setBusy(false);
-          m.setError(errorText(e));
+          if (!isCurrentConnection(connection, tok)) return;
+          return deleteProject(root2, tok).then(() => {
+            projectColorRegistrations.delete(root2);
+            if (modal === m) closeModal();
+          }).catch((e) => {
+            if (isMutationCommittedError(e)) {
+              projectColorRegistrations.delete(root2);
+              if (modal === m) closeModal();
+              requestResync();
+              refreshRegisteredProjects();
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
         });
       },
       onCancel: closeModal
@@ -19837,6 +20179,7 @@ function openAddProject() {
 var rebindInFlight = null;
 var rebindInFlightGeneration = 0;
 var REBIND_ANSWER_MS = 3e4;
+var REBIND_REFRESH_MS = 1e4;
 function rebindOutcomeUnknown(label) {
   return new Error(`Rebind of ${label} \xB7 outcome unknown \xB7 check the project list`);
 }
@@ -19858,7 +20201,10 @@ function openRebindProject(projectId, label) {
     showTransientNotice(`Rebind of ${rebindInFlight} is still running \u2014 try again when it finishes.`);
     return;
   }
-  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  const shown = store.get().registeredProjects.find((r) => r.id === projectId);
+  const oldRoot = shown?.root ?? null;
+  let expectedRoot = oldRoot;
+  let expectedCheckoutID = shown?.checkout_id ?? null;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -19895,6 +20241,49 @@ function openRebindProject(projectId, label) {
           return true;
         };
         const stillHere = () => modal === m || oldRoot !== null && store.get().selectedProject === oldRoot;
+        const reArmAfterRebound = (e) => {
+          const missed = () => {
+            if (!current()) return;
+            refreshRegisteredProjects();
+            if (modal !== m) {
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          };
+          let readSettled = false;
+          const bound = window.setTimeout(() => {
+            if (readSettled) return;
+            readSettled = true;
+            missed();
+          }, REBIND_REFRESH_MS);
+          void projectsRefetcher.refresh().then(() => {
+            if (readSettled) return;
+            readSettled = true;
+            window.clearTimeout(bound);
+            if (!current()) return;
+            const own = token === tok;
+            if (own && store.get().projectsError) {
+              missed();
+              return;
+            }
+            const now = own ? store.get().registeredProjects.find((p) => p.id === projectId) : void 0;
+            if (own) {
+              if (now !== void 0) {
+                expectedRoot = now.root;
+                expectedCheckoutID = now.checkout_id;
+              }
+              refreshRegisteredProjects();
+            }
+            if (modal !== m) {
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(now !== void 0 ? `Rebound elsewhere, to ${now.root} \xB7 submit again to move it from there` : errorText(e));
+          });
+        };
         const unknownOutcome = () => {
           if (modal === m) closeModal();
           refreshRegisteredProjects();
@@ -19904,7 +20293,7 @@ function openRebindProject(projectId, label) {
           if (!current() || !settle()) return;
           unknownOutcome();
         }, REBIND_ANSWER_MS);
-        void rebindProject(projectId, path, tok).then(() => {
+        void rebindProject(projectId, path, tok, expectedRoot, expectedCheckoutID).then(() => {
           if (!current()) return;
           if (!settle()) {
             refreshRegisteredProjects();
@@ -19936,6 +20325,10 @@ function openRebindProject(projectId, label) {
           }
           if (isMutationOutcomeUncertain(e)) {
             unknownOutcome();
+            return;
+          }
+          if (isProjectReboundError(e)) {
+            reArmAfterRebound(e);
             return;
           }
           if (modal !== m) {
@@ -20216,7 +20609,10 @@ async function reconcileConfigRead(candidate, attempt) {
 }
 var accountsRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: listAccounts,
+  // The refetch reads every agent's defaults, never a single repo's — wrap
+  // rather than pass listAccounts directly, whose second parameter is
+  // repoPath, so an AbortSignal the refetcher hands out could never land in it.
+  fetch: (tok) => listAccounts(tok),
   commit: (resp) => {
     store.set({
       accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "", loaded: true }
@@ -20228,6 +20624,21 @@ var accountsRefetcher = createFencedRefetcher({
 });
 function refreshAccounts() {
   accountsRefetcher.refresh();
+}
+var quotaRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], error: "", loaded: true }
+    });
+  },
+  onError: (err) => {
+    store.set({ quota: { ...store.get().quota, error: errorText(err) } });
+  }
+});
+function refreshQuota() {
+  quotaRefetcher.refresh();
 }
 function setAccountStatus(agent, name, message, error) {
   store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
@@ -20359,13 +20770,24 @@ function requestTaskResync() {
     refreshTasks();
   }, 150);
 }
+var REGISTRY_READ_MS = 3e4;
 var projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
+  timeoutMs: REGISTRY_READ_MS,
   commit: commitRegisteredProjects,
   onError: (e) => store.set({ projectsError: errorText(e) })
 });
 function commitRegisteredProjects(projects) {
+  const byRoot = new Map(projects.map((p) => [p.root, p.id]));
+  for (const [root2, learned] of projectColorRegistrations) {
+    if ("uncertain" in learned) {
+      const id = byRoot.get(root2);
+      if (id !== void 0) projectColorRegistrations.set(root2, { id });
+    } else if (byRoot.get(root2) !== learned.id) {
+      projectColorRegistrations.delete(root2);
+    }
+  }
   const selectedProject = reconcileProject(
     store.get().sessions,
     store.get().tasks,
@@ -20377,6 +20799,39 @@ function commitRegisteredProjects(projects) {
 }
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
+}
+var projectColorRegistrations = /* @__PURE__ */ new Map();
+var projectColorWriter = createLatestWriter(
+  async (root2, { color, tok, connection, projectId: known }) => {
+    const current = () => isCurrentConnection(connection, tok);
+    if (!current()) return;
+    const learned = projectColorRegistrations.get(root2);
+    const projectId = known ?? (learned && "id" in learned ? learned.id : null) ?? await (async () => {
+      try {
+        const project = await registerProject(root2, tok);
+        projectColorRegistrations.set(root2, { id: project.id });
+        return project.id;
+      } catch (e) {
+        if (isMutationOutcomeUncertain(e)) projectColorRegistrations.set(root2, { uncertain: true });
+        throw e;
+      }
+    })();
+    if (!current()) return;
+    await setProjectColor(projectId, color, tok);
+    if (current()) refreshRegisteredProjects();
+  },
+  (e, _root, { tok, connection }) => {
+    if (isCurrentConnection(connection, tok)) surfaceMutationError(e);
+  }
+);
+function isCurrentConnection(connection, tok) {
+  return connection === connectionGeneration && token === tok;
+}
+function doSetProjectColor(root2, color) {
+  const tok = token;
+  if (tok === null) return;
+  const projectId = store.get().registeredProjects.find((r) => r.root === root2)?.id ?? null;
+  void projectColorWriter.set(root2, { color, tok, connection: connectionGeneration, projectId });
 }
 function requestProjectsResync() {
   if (projectsResyncTimer !== null) {
@@ -20480,7 +20935,12 @@ function doTriggerTask(task) {
   if (tok === null) {
     return;
   }
-  void triggerTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void triggerTask(task, tok).then(refreshTasks).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      refreshTasks();
+    }
+    surfaceTabError(e);
+  });
 }
 function doRetryLimit() {
   const sel = selectedSession2();
@@ -20671,6 +21131,7 @@ var actions = {
   deleteProject: openDeleteProject,
   addProject: openAddProject,
   rebindProject: openRebindProject,
+  setProjectColor: doSetProjectColor,
   setTheme
 };
 function syncSplit(state) {
@@ -20730,6 +21191,7 @@ function stopStream() {
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
   accountsRefetcher.invalidate();
+  quotaRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

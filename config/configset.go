@@ -174,6 +174,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"log_max_backups":    {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
 	"branch_prefix":      {kind: cfgString},
 	"on_archive_command": {kind: cfgString},
+	"move_cmd":           {kind: cfgString},
 	"worktree_root": {kind: cfgString, validate: func(_, v string) error {
 		if !validateWorktreeRootValue(v) {
 			return fmt.Errorf("worktree_root must be one of [%s, %s], got %q", WorktreeRootSubdirectory, WorktreeRootSibling, v)
@@ -212,6 +213,18 @@ var settableKeySpecs = map[string]settableKeySpec{
 			return fmt.Errorf("limit_patterns.%s is not a valid regular expression: %w", leaf, err)
 		}
 		return nil
+	}},
+	// The named host list (#5571 W6.1): a whole compact-JSON table of
+	// name → {host,user,port,identity_file,workspace_root}, and the default's name.
+	// A default is only meaningful against the list, so the cross-check (a default
+	// naming a listed host) runs where both are known — the loader and the whole-
+	// table writer; the leaf writer checks the name's shape.
+	"hosts": {structured: true},
+	"default_host": {kind: cfgString, validate: func(_, v string) error {
+		if v == "" {
+			return nil
+		}
+		return ValidateHostName(v)
 	}},
 	"session_env_passthrough": {structured: true},
 	"root_agents":             {structured: true},
@@ -836,6 +849,15 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	}
 	updated = setTOMLScalar(updated, "", SchemaVersionField, strconv.Itoa(GlobalConfigSchemaVersion))
 
+	// A host list and its default are one fact. The loader drops a default that
+	// names no listed host (sanitizeHosts), so a write that leaves one dangling
+	// would report success for a setting that never takes effect; refuse it here,
+	// against the bytes this write produces, before sanitization hides it.
+	if w.key == "hosts" || w.key == "default_host" {
+		if err := ValidateHostsInTOML([]byte(updated)); err != nil {
+			return nil, ConfigDigest{}, fmt.Errorf("invalid value for %s: %w", w.key, err)
+		}
+	}
 	// Final gate: the edited bytes must parse and validate exactly as the loader
 	// would, so `config set` can never leave an unloadable config. The parsed
 	// result is also the config this write RESULTS in — the same values

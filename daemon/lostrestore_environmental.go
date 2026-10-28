@@ -82,6 +82,14 @@ func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 	if errors.Is(err, apiproto.ErrRemoteResourceExhausted) {
 		return lostRestoreEnvErrno
 	}
+	// A restore refused because the session's tmux socket is missing under a
+	// possibly-live server (#4135) is waiting on the environment, not a session
+	// defect: charging it to the structural budget would give up on — and
+	// durably mark — a session whose agent is still running. It waits, listed
+	// and untouched, until the socket is verifiable.
+	if errors.Is(err, sessiontmux.ErrSessionSocketUnverified) {
+		return lostRestoreEnvErrno
+	}
 	// Neither half of an environmental non-answer signature is exempt on its
 	// own. context.DeadlineExceeded alone is ambiguous — a permanently hung
 	// user launch_cmd wraps it too, and that is a session defect, not an

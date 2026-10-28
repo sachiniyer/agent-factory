@@ -196,3 +196,14 @@ func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBu
 		}
 	}
 }
+
+// limitBackpressureParked reports whether the watch reader is deliberately idle
+// because a usage-limit backlog is backpressuring it, so awaitWatchReaders must
+// not close its pipe out from under the lossless wait (#4321).
+func (w *taskWatcher) limitBackpressureParked() bool {
+	if w.queue == nil || w.stopRequested() {
+		return false
+	}
+	blocked, _ := w.queue.limitBackpressureState()
+	return blocked
+}
