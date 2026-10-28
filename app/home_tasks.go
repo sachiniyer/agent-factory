@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
@@ -56,7 +57,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// path caused that, and nothing the user retypes fixes it, so it is an
 	// operation failure. ("invalid path" is the user-facing half; the severity is
 	// the monitoring half, and they answer different questions.)
-	absPath, err := config.ResolveUserPath(projectPath)
+	absPath, err := ui.ResolveTaskProjectPath(projectPath)
 	if err != nil {
 		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}
@@ -121,7 +122,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// different repo than the active scope — is intentionally outside this list
 	// and is surfaced below.
 	var reloadErr error
-	tasks, err := task.LoadTasksForKnownRepo(m.repoRoot, m.repoID)
+	tasks, err := tasksForScope(m.repoRoot, m.repoID)
 	if err == nil {
 		// Like refreshTasks, a successful read clears load errors separately
 		// from replacing the task data and its transient pane state.

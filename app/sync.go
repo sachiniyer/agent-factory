@@ -102,7 +102,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// reads the switched-to project's tasks — not the launch repo's. Its own
 		// error is carried separately so a warming-daemon RPC failure never
 		// suppresses a successful disk task read.
-		tasks, tasksErr := task.LoadTasksForKnownRepo(repoRoot, repoID)
+		tasks, tasksErr := tasksForScope(repoRoot, repoID)
 		// The disk read is the DEFINITION and stays authoritative; what it cannot
 		// see is whether the running scheduler is holding each task, which is
 		// observable only inside the daemon. Fetched here, beside the snapshot,

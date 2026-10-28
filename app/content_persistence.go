@@ -79,7 +79,11 @@ func (m *home) saveContentPaneState() error {
 	failedEdit := false
 
 	hp := m.hooksPane
-	if hp.IsDirty() {
+	if hp.IsDirty() && isRemoteTarget() {
+		// Refuse rather than write a local file the target never reads. The pane
+		// stays dirty (the #1001 rule), so the edit survives for the user to copy.
+		saveErr = errors.Join(saveErr, errRemoteHooksSave())
+	} else if hp.IsDirty() {
 		// Hook edits are written to the in-repo .agent-factory/config.json —
 		// the canonical location for post_worktree_commands since #800. The
 		// legacy ~/.agent-factory/repos/<id>/config.json stays untouched as a
@@ -239,7 +243,7 @@ func (m *home) saveContentPaneState() error {
 	// retarget that crossed repos is intentionally outside this list and is
 	// surfaced below so the silent drop does not look like a failed save
 	// (#1836, mirroring the cross-repo create path's notice in home_tasks.go).
-	tasks, err := task.LoadTasksForKnownRepo(m.repoRoot, m.repoID)
+	tasks, err := tasksForScope(m.repoRoot, m.repoID)
 	if err == nil {
 		m.store.SetTasks(tasks)
 		sp.SetTasks(tasks)

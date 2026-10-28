@@ -102,12 +102,21 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			if err != nil {
 				return fmt.Errorf("failed to get current directory: %w", err)
 			}
-			if err := git.EnsureGitInstalled(); err != nil {
-				return err
+			// A remote target (--daemon-url / AF_DAEMON_URL / a saved target, W9.7)
+			// owns the projects, tasks and sessions this TUI shows, so THIS
+			// machine's cwd and git are irrelevant: it launches in registry mode
+			// and the project comes from the target's registry. Resolving the cwd
+			// repo here would scope the TUI to a local checkout the daemon has
+			// never heard of.
+			remote := apiclient.IsRemoteTarget()
+			if !remote {
+				if err := git.EnsureGitInstalled(); err != nil {
+					return err
+				}
 			}
 
 			var repo *config.RepoContext
-			if git.IsGitRepo(currentDir) {
+			if !remote && git.IsGitRepo(currentDir) {
 				repo, err = config.CurrentRepo()
 				if err != nil {
 					return fmt.Errorf("failed to determine project context: %w", err)
@@ -161,7 +170,12 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			// The daemon hosts the task scheduler (#782), so make sure
 			// it is up whenever an enabled task exists. In the background:
 			// daemon launch can take a few seconds and must not delay the TUI.
-			go launchEnsureDaemonForTasks()
+			// Never against a remote target: the daemon there is not ours to
+			// start, and ensureDaemonForTasks would spawn a LOCAL one for a
+			// local task list the remote TUI does not show.
+			if !remote {
+				go launchEnsureDaemonForTasks()
+			}
 
 			// From here bubbletea owns the terminal; a stderr write would
 			// tear the screen, so later config warnings are log-only.
