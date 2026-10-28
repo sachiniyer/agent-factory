@@ -34,6 +34,7 @@ import {
   type TabDropResult,
   type Edge,
   findLeaf,
+  focusSuccessorAfterDrop,
   type LayoutNode,
   type LeafNode,
   leafCount,
@@ -853,7 +854,14 @@ export class SplitView {
 
     // Keep a valid focus.
     if (!this.focusedId || !wanted.has(this.focusedId)) {
-      this.focusedId = desired[0]?.id ?? null;
+      // A focused leaf dropped out-of-band hands the keyboard to the pane that grew
+      // into its region (closePane's sibling rule, #5983), read from the tree the DOM
+      // was last built from — never the root-first leaf of an unrelated branch.
+      const successor =
+        this.focusedId && this.builtTree
+          ? focusSuccessorAfterDrop(this.builtTree, this.focusedId, wanted)
+          : null;
+      this.focusedId = successor ?? desired[0]?.id ?? null;
     }
 
     // Rebuild the split wrappers, inserting the persistent containers. Containers now
