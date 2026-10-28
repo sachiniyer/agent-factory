@@ -94,6 +94,14 @@ export interface LostRestoreWait {
 
 export type PromptDeliveryStatus = "delivered" | "not-delivered" | "sent-unverified" | "could-not-confirm";
 
+/** Live remote-probe outage projection (#5571 W1.3): `since` (RFC3339) anchors
+ *  the first unanswered probe of the episode, `error` is the last transport
+ *  failure — already collapsed, bounded, and token-redacted by the daemon. */
+export interface UnreachableData {
+  since?: string;
+  error?: string;
+}
+
 /** Durable identity transaction retained until its replacement mission settles. */
 export interface AccountSwapData {
   manual?: boolean;
@@ -176,6 +184,11 @@ export interface SessionData {
    *  It remains on restored rows so an automatic Lost recovery cannot make the
    *  omitted files disappear from subsequent snapshots. */
   archive_warning?: string;
+  /** Why this session has no af callback — the mint refusal recorded when its
+   *  sandbox provisioned without one (#5571 W3.1). Surfaces render it under the
+   *  "af callback unavailable:" prefix; absent means callback was delivered or
+   *  the backend never injects one. */
+  callback_unavailable?: string;
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
   idle_reason?: IdleReason;
@@ -183,6 +196,11 @@ export interface SessionData {
   lost_restore_failure?: LostRestoreFailure;
   /** Present while the restore loop defers a retry on the environment (#5295). */
   lost_restore_wait?: LostRestoreWait;
+  /** Daemon-projected remote-probe outage (#5571 W1.3). An observation flag,
+   *  not a liveness: it coexists with running/ready/lost and says af's view of
+   *  this row cannot currently be re-confirmed. The daemon already bounds and
+   *  token-redacts `error`; clients render it verbatim. */
+  unreachable?: UnreachableData;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */
@@ -293,6 +311,36 @@ export interface SnapshotResponse {
 	operation_lock_timeout_ms?: number;
 	/** Process-local monotonic reading used to measure that admission bound. */
 	operation_clock_ms?: number;
+	/** Repos the daemon dropped at startup (corrupt/unreadable/newer-schema/unloadable
+	 *  instances.json), so this snapshot may be MISSING their sessions (#4742). The
+	 *  daemon reports the set explicitly so a client can tell "repo has no sessions"
+	 *  apart from "the daemon dropped this repo's sessions at startup" — the same
+	 *  contract the CLI's list/get/whoami reads honor by refusing or caveating. The
+	 *  web mirrors the field and surfaces it as a persistent incompleteness notice
+	 *  rather than rendering the truncated `instances` as a complete list. Omitted
+	 *  (omitempty on the Go side) when no repo was skipped, which is every healthy
+	 *  startup, so the rail renders nothing extra in the steady state. */
+	skipped_repos?: SkippedRepo[];
+}
+
+/** One repo the daemon could not load sessions for at startup
+ *  (daemon/snapshot.go SkippedRepo), reported on SnapshotResponse.skipped_repos so
+ *  the web can name the affected repo and reason instead of silently hiding its
+ *  sessions. Field names and JSON tags match the Go struct exactly. */
+export interface SkippedRepo {
+	/** The repo's stable id (config.RepoIDFromRoot — a short hex hash, not a path).
+	 *  The web maps it to a project root via registeredProjects when the repo is
+	 *  registered, falling back to the bare id. */
+	repo_id: string;
+	/** Stable machine-readable reason code (daemon/snapshot.go): one of
+	 *  "corrupted-instances-json", "unreadable-instances-json",
+	 *  "newer-schema-instances-json", "rows-failed-to-load". An empty or unknown
+	 *  value is treated as corrupted, which is all an older daemon ever sent. */
+	reason?: string;
+	/** Count of sessions that failed to load when reason is
+	 *  "rows-failed-to-load" (their worktree or tmux is gone); zero for the
+	 *  read/parse reasons, under which a row never reached the materializer. */
+	failed_rows?: number;
 }
 
 /** One lifecycle choice served by the daemon, including its consequence. */
@@ -507,6 +555,11 @@ export interface ConfigSetResult {
   value: string;
   path: string;
   requires_restart: boolean;
+  /** Per-write warnings from the writer itself (e.g. an unregistered
+   *  default_accounts.<agent> name). A channel distinct from the response's
+   *  apply-time `warnings`: the daemon fills this even when the live apply
+   *  produced none (#5266). */
+  warnings?: string[];
 }
 
 /** SetConfigValueResponse (daemon/control_types.go). The restart notice rides
@@ -528,6 +581,56 @@ export interface ConfigSetResponse {
    *  without it the operator is told where they are NOT and left to guess where
    *  they are. Optional: an older daemon does not send it. */
   listener_addr?: string;
+}
+
+/** config.SourceRef (config/provenance.go) — the exact configuration location
+ *  that supplied an effective scalar or composite leaf. */
+export interface SourceRef {
+  layer: string;
+  path?: string;
+  format?: string;
+  key_path: string;
+}
+
+/** config.CandidateTrace (config/provenance.go) — one source considered while
+ *  resolving a key. `value` is the configured value at that source; absent and
+ *  disallowed candidates carry null. */
+export interface CandidateTrace {
+  layer: string;
+  path?: string;
+  format?: string;
+  key_path: string;
+  allowed: boolean;
+  present: boolean;
+  value: unknown;
+  result: string;
+  reason: string;
+}
+
+/** config.ResolvedValue (config/provenance.go) — an effective config value and
+ *  the complete trace that produced it. Replace/list keys name one `winner`;
+ *  composite keys instead carry a source per leaf in `origins`, so a composite
+ *  is never assigned a fake winner. */
+export interface ResolvedValue {
+  key: string;
+  value: unknown;
+  default?: string;
+  merge: string;
+  precedence: string[];
+  winner?: SourceRef;
+  origins?: Record<string, SourceRef>;
+  candidates: CandidateTrace[];
+}
+
+/** daemon.ExplainConfigResponse (daemon/control_types.go, #4803) — the shared
+ *  provenance explanation the CLI renders from `af config get --explain`,
+ *  served to clients that cannot resolve in-process. Global scope only; the
+ *  daemon deliberately does not consult its running config snapshot
+ *  (`running_value_checked`), so the trace describes on-disk sources. */
+export interface ExplainConfigResponse {
+  explanation: ResolvedValue;
+  scope: string;
+  running_value_checked: boolean;
 }
 
 /** daemon.AccountEntry — one registered agent account (#3384/#3385).

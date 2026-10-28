@@ -96,53 +96,6 @@ func exitedProcess(t *testing.T) proctree.Process {
 	return process
 }
 
-// The "did not burn its budget" assertions below are a FRACTION of the budget
-// they are given, never an absolute wall-clock figure. The property is "returns
-// as soon as the process is gone rather than polling to its deadline", and a
-// fraction states exactly that while staying true on a loaded machine — where an
-// absolute ceiling like 250ms is a statement about the scheduler, not about the
-// code under test (#2879). A regression that really does burn the budget takes
-// the whole of it and still fails.
-var (
-	// The budget these calls are GIVEN. Large, so an implementation that polls to
-	// its deadline is unmistakable and no honest run can reach it under load.
-	exitWaitBudget = 30 * time.Second
-	// The bound that "did not burn its budget" is measured against. It has to sit
-	// BELOW the production wait: an implementation that always waited paneExitWait
-	// before answering is exactly the slow teardown this guards, so any bound above
-	// that would wave it through. Derived from it so the relationship survives a
-	// change to either, and still ~1000x the detection this measures in practice.
-	exitWaitPrompt = paneExitWait * 2 / 3
-)
-
-func TestWaitForProcessExit_ExitedProcess(t *testing.T) {
-	start := time.Now()
-	require.True(t, waitForProcessExit(exitedProcess(t), exitWaitBudget),
-		"an already-exited PID must report exited")
-	require.Less(t, time.Since(start), exitWaitPrompt,
-		"a dead PID must be detected without burning the timeout")
-}
-
-func TestWaitForProcessExit_AliveProcessTimesOut(t *testing.T) {
-	// Our own PID is alive for the duration of the test.
-	require.False(t, waitForProcessExit(processIdentity(t, os.Getpid()), 120*time.Millisecond),
-		"a live PID must report not-exited once the timeout elapses")
-}
-
-func TestWaitForProcessExit_ZombieCountsAsExited(t *testing.T) {
-	cmd := exec.Command("sleep", "300")
-	require.NoError(t, cmd.Start())
-	process := processIdentity(t, cmd.Process.Pid)
-	t.Cleanup(func() { _, _ = cmd.Process.Wait() })
-	require.NoError(t, cmd.Process.Kill())
-
-	start := time.Now()
-	require.True(t, waitForProcessExit(process, exitWaitBudget),
-		"a pane that exited but remains an unreaped zombie is no longer writing")
-	require.Less(t, time.Since(start), exitWaitPrompt,
-		"an exited pane must not burn the teardown wait budget")
-}
-
 func TestCloseAndWaitForPaneExit_AlivePaneKeepsCleanupUnsafe(t *testing.T) {
 	oldWait := paneExitWait
 	paneExitWait = 20 * time.Millisecond

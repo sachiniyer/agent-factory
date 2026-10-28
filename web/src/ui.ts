@@ -40,11 +40,13 @@ import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import { applyProjectColor, applyProjectFavicon, projectColor, projectColorRow } from "./project_color.js";
 import {
   archiveWarningText,
+  callbackUnavailableText,
   canHandoff,
   compareSessionsForRail,
   isArchived,
   isCreating,
   idleReasonDetail,
+  unreachableDetail,
   isLimitReached,
   isPendingAgentHandoffDeliveryUnconfirmed,
   isPendingAgentHandoffDeliveryConfirmable,
@@ -55,12 +57,14 @@ import {
   operatorKind,
   rowStatus,
   rowTitle,
+  isOffBoxWorkspace,
+  sessionWarningText,
 } from "./status.js";
 import type { AccountsState } from "./accounts.js";
-import { ConfigPane, type ConfigStatus } from "./config.js";
+import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
-import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
+import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
 import { KeyedRows, orderChildren } from "./keyed-rows.js";
 import { sessionKey } from "./sessions.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
@@ -71,10 +75,55 @@ import {
   type ConfigEntry,
   type LifecycleAction,
   type SessionData,
+  type SkippedRepo,
   type TabKindAllowance,
   type TaskData,
   TabKind,
 } from "./types.js";
+
+/** The daemon's stable reason codes for a skipped repo (daemon/snapshot.go). Mirror
+ *  the exact strings the Go side stamps so the web never reclassifies a reason the
+ *  daemon owns — an unknown value renders as corrupted, which is all an older daemon
+ *  ever sent. */
+export const SKIPPED_REPO_REASON = {
+  corrupted: "corrupted-instances-json",
+  unreadable: "unreadable-instances-json",
+  newerSchema: "newer-schema-instances-json",
+  rowsFailed: "rows-failed-to-load",
+} as const;
+
+/** A short, human-readable label for a skipped repo's reason. Mirrors the
+ *  classification in api/skipped_repos.go (splitSkippedRepos) so the web and the CLI
+ *  name the same failure. Unknown/empty → corrupted (the older-daemon default). */
+export function skippedRepoReasonLabel(reason: string | undefined): string {
+  switch (reason) {
+    case SKIPPED_REPO_REASON.unreadable:
+      return "instances.json could not be read";
+    case SKIPPED_REPO_REASON.newerSchema:
+      return "instances.json written by a newer af";
+    case SKIPPED_REPO_REASON.rowsFailed:
+      return "some sessions could not be loaded (worktree or tmux gone)";
+    default:
+      return "instances.json is corrupted";
+  }
+}
+
+/** The one-line repair hint for a skipped repo's reason. Mirrors the constant hints
+ *  in api/skipped_repos.go verbatim so the web sends the operator to the SAME remedy
+ *  the CLI does — the daemon is the contract, and a different remedy here would drift
+ *  the moment the CLI's hint is refined. Unknown/empty → corrupted. */
+export function skippedRepoRepairHint(reason: string | undefined): string {
+  switch (reason) {
+    case SKIPPED_REPO_REASON.unreadable:
+      return "Make the file(s) readable by the user the af daemon runs as (check ownership, permissions and the disk), then restart the daemon so it re-reads them; do not delete them, they hold the hidden sessions.";
+    case SKIPPED_REPO_REASON.newerSchema:
+      return "Upgrade af to a version that understands the newer state file, then restart the daemon; do not edit or delete these files, they hold sessions this binary cannot read.";
+    case SKIPPED_REPO_REASON.rowsFailed:
+      return "Restore or delete the sessions the daemon could not load (their worktree or tmux is gone), then the daemon re-reads the complete list on the next poll; e.g. `af sessions restore <title>` or `af sessions delete <title>`; the instances.json itself is not the problem.";
+    default:
+      return "Stop the af daemon, copy the corrupt file(s) aside, fix the JSON or restore it from a backup, then start the daemon; af keeps no backup of these files.";
+  }
+}
 
 /** The tab kinds the web UI can create with no further input from the user. A
  *  web tab is deliberately absent: its target comes from whatever an agent is
@@ -190,6 +239,13 @@ export interface AppState {
   projectsError?: string;
   /** the live session projection (Snapshot + /v1/events), the rail's data. */
   sessions: SessionData[];
+  /** Repos the daemon dropped at startup (SnapshotResponse.skipped_repos, #4742),
+   *  so the rail can surface their missing sessions as a persistent incompleteness
+   *  notice instead of presenting the truncated projection as a complete list.
+   *  Empty in the healthy steady state. Replaced wholesale on every snapshot
+   *  commit (applySessions carries it on the snapshot evidence); event deltas do
+   *  not touch it, since the skip set changes only when a snapshot refresh runs. */
+  skippedRepos: SkippedRepo[];
   /** the selected row's STABLE id (session.id), or null when nothing is selected.
    *  Selection keys off the id, not the title: the attach terminal dials
    *  /v1/sessions/{id}/stream and titles can collide across repos (design §4). */
@@ -356,6 +412,11 @@ export interface Actions {
    *  close. The config pane only reports the intent; the shell owns the token and the
    *  modal host. */
   openConfigAssistant(): void;
+  /** Resolves one config key's provenance through POST /v1/ExplainConfig (#4803)
+   *  — the same config.ResolvedValue `af config get --explain` renders, computed
+   *  daemon-side so the view formats a trace it could not diverge from. Always
+   *  settles: a refusal arrives as `{ok:false}` text. */
+  explainConfig(key: string): Promise<ExplainOutcome>;
   /** Creates an agent account's credential directory on the daemon host (#3385).
    *  Idempotent; the daemon holds the name rule and its refusal is shown verbatim. */
   registerAccount(agent: string, name: string): void;
@@ -442,23 +503,7 @@ export function restoreRequiresConfirmation(session: SessionData): boolean {
   return session.backend_type !== undefined && session.backend_type !== "" && session.backend_type !== "local";
 }
 
-/** The backend types whose workspace lives off-box (session/archive_sandbox.go
- *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
- *  them can service tab management: every Add*Tab path needs a daemon-side git
- *  worktree they do not have, so the daemon's Capabilities().TabManagement is
- *  false for all three (#1874).
- *
- *  This list is the ONE place the web names backend types. It exists only because
- *  the session envelope carries `backend_type` but not the daemon's capability
- *  bits — the honest fix is to serialize the capability so no client re-derives
- *  it (see #1874). Until then, a NEW off-box runtime must be added here, which is
- *  what ui.test.ts pins. */
-const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
-
-/** The existing backend-type fallback for off-box workspace ownership. */
-export function isOffBoxWorkspace(s: Pick<SessionData, "backend_type">): boolean {
-  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
-}
+export { isOffBoxWorkspace };
 
 /** The kinds this session may gain a tab of, as the DAEMON decided them.
  *
@@ -685,6 +730,16 @@ export function renderLogin(root: HTMLElement, state: AppState, actions: Actions
   root.replaceChildren(loginView(state, actions));
   const input = root.querySelector<HTMLInputElement>("#af-token");
   if (input) input.value = draft;
+}
+
+/** Forgets the in-memory login draft for `root` so an auth-driven return to the
+ *  login view (a resync 401, a token rejection) does not pre-fill the paste form
+ *  with a credential the daemon just rejected. The draft WeakMap is module-private
+ *  and never cleared by renderLogin itself, so disconnect() must call this on an
+ *  auth rejection; the manual-Disconnect path leaves the draft alone because its
+ *  falsy renderLogin guard already resolves `draft` to "". */
+export function clearLoginDraft(root: HTMLElement): void {
+  loginDrafts.set(root, "");
 }
 
 export function loginView(state: AppState, actions: Actions): HTMLElement {
@@ -1281,6 +1336,7 @@ export class AppShell {
     this.configPane = new ConfigPane({
       save: (key: string, value: string) => this.actions.setConfigValue(key, value),
       openAssistant: () => this.actions.openConfigAssistant(),
+      explain: (key: string) => this.actions.explainConfig(key),
       accounts: {
         register: (agent: string, name: string) => this.actions.registerAccount(agent, name),
         login: (agent: string, name: string) => this.actions.openAccountLogin(agent, name),
@@ -1465,6 +1521,13 @@ export class AppShell {
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
+    // A registry-only change (registeredProjects updated without touching
+    // sessions/selection/filter) still moves the skipped-repos notice — its labels
+    // map repo_id -> root via the registry, so a freshly learned root (a rebind, or a
+    // ListProjects recovery on projects.changed) must re-render the rail even though
+    // the row set is unchanged. Captured before the project-switcher block below
+    // overwrites lastRegisteredProjects.
+    const registryChanged = this.lastRegisteredProjects !== state.registeredProjects;
 
     // Selecting a session on a phone should reveal its terminal, so fold the drawer
     // shut whenever the selection lands on a real session — the keyboard/programmatic
@@ -1502,7 +1565,7 @@ export class AppShell {
     // the terminal host (it lives in the main pane), so events never blur it.
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
       // Mount/bind a routed terminal before spending the first frame on the rail.
       // Further updates coalesce into that first paint; later gestures stay immediate.
       if (!this.railPainted && prioritizeTerminal) {
@@ -1660,7 +1723,48 @@ export class AppShell {
       this.lastRailNoticeSignature = noticeSignature;
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
     }
-    orderChildren(this.railList, this.cachedRailNotice ? [this.cachedRailNotice, ...rows] : rows);
+    // The skipped-repos notice is independent of the project scope and the status
+    // filter: it reports snapshot incompleteness the daemon carried alongside the
+    // rows, not a per-project empty/filter state, so it is rebuilt only when the
+    // skip set itself changes. Its labels map repo_id -> root via the registry, so
+    // the signature also carries the id/root pairs for the skipped repos — a
+    // ListProjects recovery or a rebind that leaves the skip set untouched still
+    // replaces a bare repo_id (or an obsolete root) with the now-known path.
+    // Prepended before the rail notice so a project that IS the skipped one still
+    // sees WHY its sessions vanished.
+    const skipped = state.skippedRepos ?? [];
+    // Key on RegisteredProject.repo_id (the RepoIDFromRoot hash the snapshot's
+    // skipped_repos[].repo_id carries), not RegisteredProject.id (the `prj_...`
+    // registry identity, which never matches a repo hash). Without this the
+    // notice can never resolve a skipped repo to its root and falls back to the
+    // bare hash even on the initial render.
+    const skippedRoots = state.registeredProjects
+      .filter(p => p.repo_id && skipped.some(s => s.repo_id === p.repo_id))
+      .map(p => [p.repo_id, p.root] as [string, string]);
+    const skippedSig = JSON.stringify([skipped, skippedRoots]);
+    if (skippedSig !== this.lastSkippedNoticeSignature) {
+      this.lastSkippedNoticeSignature = skippedSig;
+      this.cachedSkippedNotice = this.skippedReposNotice(state);
+    }
+    const head: HTMLElement[] = [];
+    if (this.cachedRailNotice) head.push(this.cachedRailNotice);
+    orderChildren(this.railList, [...head, ...rows]);
+    // The skipped-repos notice is a role="alert": it must be a SIBLING of the
+    // role="listbox", not one of its owned children (which the ARIA listbox contract
+    // expects to be role="option" session rows). Mounting it inside the listbox made
+    // assistive tech either drop the alert or miscount the listbox's options. Render
+    // it just above the list, between the rail head and the listbox, so it is still
+    // announced and visually precedes the rows without joining the listbox's owned
+    // item set. Tracked separately from cachedSkippedNotice so a null notice (the
+    // healthy steady state) removes the previously mounted element.
+    const railNav = this.railList.parentElement;
+    if (this.cachedSkippedNotice !== this.mountedSkippedNotice) {
+      this.mountedSkippedNotice?.remove();
+      if (this.cachedSkippedNotice && railNav) {
+        railNav.insertBefore(this.cachedSkippedNotice, this.railList);
+      }
+      this.mountedSkippedNotice = this.cachedSkippedNotice;
+    }
     for (const menu of reopened) if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
     restoreChangedFocus?.();
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
@@ -1675,6 +1779,12 @@ export class AppShell {
   private lastFilterSignature = "";
   private lastRailNoticeSignature = "";
   private cachedRailNotice: HTMLElement | null = null;
+  private lastSkippedNoticeSignature = "";
+  private cachedSkippedNotice: HTMLElement | null = null;
+  // The element currently mounted as a sibling of the rail listbox; null when the
+  // skip set is empty. Distinct from cachedSkippedNotice (the latest value) so a
+  // transition to empty removes the previously mounted alert.
+  private mountedSkippedNotice: HTMLElement | null = null;
 
   /** Quiet controls reserved beside every row carrying at least one daemon-owned
    *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
@@ -1826,6 +1936,55 @@ export class AppShell {
       );
     }
     return null;
+  }
+
+  /** A persistent incompleteness notice for the rail, naming the repos the daemon
+   *  dropped at startup and the daemon's reason for each (#4742). This is the web's
+   *  half of the contract the CLI's list/get/whoami honor by refusing or caveating:
+   *  rather than presenting the truncated `instances` as a complete roster, the rail
+   *  shows WHAT is missing and WHY so a user can tell "repo has no sessions" from
+   *  "the daemon dropped this repo's sessions at startup". Returns null when no repo
+   *  was skipped — the healthy steady state — so the rail renders nothing extra.
+   *
+   *  Each skipped repo is named by its project root when the registry knows it (the
+   *  repo_id is a short hash, not a path), falling back to the bare id; the reason
+   *  renders the daemon's stable code plus a one-line repair hint mirroring
+   *  api/skipped_repos.go verbatim so the web and the CLI send the operator to the
+   *  same remedy. An unknown/empty reason is treated as corrupted, which is all an
+   *  older daemon ever sent. */
+  private skippedReposNotice(state: AppState): HTMLElement | null {
+    const skipped = state.skippedRepos ?? [];
+    if (skipped.length === 0) return null;
+    // Map the snapshot's skipped_repos[].repo_id (a RepoIDFromRoot hash) to the
+    // registered project root through RegisteredProject.repo_id — the SAME identity
+    // space — not the project's `id` (a `prj_...` registry key, which never matches
+    // a repo hash). An unresolved registered project (no repo_id) cannot resolve a
+    // skipped repo this way and falls back to the bare hash, which is correct: the
+    // registry has no known root for it either.
+    const knownRoot = new Map<string, string>();
+    for (const p of state.registeredProjects) {
+      if (p.repo_id && !knownRoot.has(p.repo_id)) knownRoot.set(p.repo_id, p.root);
+    }
+    const body = h("div", { class: "af-rail-skipped-body" });
+    for (const s of skipped) {
+      const label = knownRoot.get(s.repo_id) ?? s.repo_id;
+      const reason = skippedRepoReasonLabel(s.reason);
+      const hint = skippedRepoRepairHint(s.reason);
+      const line = h("p", { class: "af-rail-skipped-row" },
+        h("strong", {}, label),
+        ` — ${reason}. `,
+        hint,
+      );
+      if (s.failed_rows && s.failed_rows > 0) {
+        line.append(` (${s.failed_rows} session(s) hidden)`);
+      }
+      body.append(line);
+    }
+    return h("div", { class: "af-rail-skipped", role: "alert" },
+      h("div", { class: "af-rail-skipped-head" },
+        "Some sessions are hidden — a daemon repo could not be loaded."),
+      body,
+    );
   }
 
   /** (Re)builds the filter menu: one checkbox per session state with its scoped
@@ -2421,7 +2580,7 @@ export class AppShell {
     this.attachTabTouchDrag(tabBar);
 
     const head = chrome.head;
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
@@ -2709,11 +2868,20 @@ export class AppShell {
       }
       // Picked up: this gesture is ours, so stop the page reacting to it as a scroll.
       e.preventDefault();
-      // Over a pane → that pane's split zone; otherwise the bar's insertion gap.
-      if (!bar.contains(document.elementFromPoint(e.clientX, e.clientY)) && this.actions.paneDropHintAt(e.clientX, e.clientY)) {
-        this.hideTabInsert();
-      } else {
+      // Three regions, mirroring the pointerup drop decision below: a pane shows its
+      // split zone, the bar shows its insertion gap, and anywhere else (the header,
+      // appbar controls, or empty space) shows nothing — a release there is a cancel,
+      // so the indicator must not track a finger that is no longer over the bar. The
+      // verdict lives in tabtouch.ts for the same reason `tabPressVerdict` does. The
+      // pane hit-test shows its hint as a side effect, so it runs only when the pointer
+      // is off the bar (short-circuit), exactly as before.
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const overBar = bar.contains(hit);
+      const overPane = !overBar && this.actions.paneDropHintAt(e.clientX, e.clientY);
+      if (tabDragFeedbackRegion(overBar, overPane) === "bar") {
         this.showTabInsert(bar, e.clientX);
+      } else {
+        this.hideTabInsert();
       }
     });
 
@@ -2960,7 +3128,7 @@ export class AppShell {
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
-    const warningText = archiveWarningText(selected);
+    const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
         this.archiveWarning.textContent = warningText;
@@ -3394,14 +3562,23 @@ export function sessionRow(
   const managed = actionable || killable;
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
-  const idleDetail = idleReasonDetail(s);
+  // The outage detail outranks the idle reason: it explains why every other
+  // fact on the row may be stale, so it renders even on unselected rows — the
+  // TUI keeps it for the same reason (#5571 W1.3).
+  const outageDetail = unreachableDetail(s);
+  const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
   const branchParts: Array<Node | string> = [
     h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
   ];
-  if (selected && idleDetail) {
+  if ((selected || outageDetail !== "") && idleDetail) {
     const idle = h("span", { class: "af-idle-reason" }, ` · ${idleDetail}`);
     idle.dataset.idleReason = s.idle_reason ?? "";
-    if (s.last_pane_churn_at) {
+    if (outageDetail !== "" && s.unreachable) {
+      // Repaint hook: refreshIdleReasonAges re-ages the outage without a
+      // session event, exactly like the pane-churn arm below.
+      idle.dataset.unreachableSince = s.unreachable.since ?? "";
+      idle.dataset.unreachableError = s.unreachable.error ?? "";
+    } else if (s.last_pane_churn_at) {
       idle.dataset.paneChurnAt = s.last_pane_churn_at;
     }
     branchParts.push(idle);
@@ -3453,6 +3630,7 @@ export function sessionRow(
     : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  const callbackWarning = callbackUnavailableText(s);
   // A managed-but-inert row keeps its Kill button but cannot be opened; its
   // title says why. The reason rides a dataset fragment like the other title
   // parts so refreshIdleReasonAges preserves it on an idle-age repaint.
@@ -3460,10 +3638,11 @@ export function sessionRow(
   row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
+  row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
   row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${inertReason}`,
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${inertReason}`,
   );
   if (actionable) {
     row.onclick = () => openSession(s.id);
@@ -3480,6 +3659,23 @@ export function sessionRow(
 /** Patch relative pane ages without waiting for a session event or rebuilding
  * the rail. The row's branch, controls, selection, and scroll position survive. */
 export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()): void {
+  for (const idle of root.querySelectorAll<HTMLElement>(".af-idle-reason[data-unreachable-since]")) {
+    const detail = unreachableDetail(
+      {
+        unreachable: { since: idle.dataset.unreachableSince, error: idle.dataset.unreachableError },
+      } as SessionData,
+      now,
+    );
+    idle.textContent = detail ? ` · ${detail}` : "";
+    const row = idle.closest(".af-row") as HTMLElement | null;
+    if (row) {
+      const reason = detail ? `; ${detail}` : "";
+      row.setAttribute(
+        "title",
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`,
+      );
+    }
+  }
   for (const idle of root.querySelectorAll<HTMLElement>(".af-idle-reason[data-pane-churn-at]")) {
     const detail = idleReasonDetail(
       {
@@ -3494,7 +3690,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`,
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleInert ?? ""}`,
       );
     }
   }

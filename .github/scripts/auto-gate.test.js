@@ -642,7 +642,7 @@ test("PR Validation ends by requesting the reconciliation pass itself (#5179)", 
   assert.equal(jobKey(job, "needs"), "[build]");
   assert.equal(
     jobKey(job, "if"),
-    "always() && !inputs.probe && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork != true && github.actor != 'dependabot[bot]'))",
+    "${{ !cancelled() && vars.AUTO_GATE_ENABLED == 'true' && !inputs.probe }}",
   );
 
   // The only write permission in the workflow, scoped to this job — and this
@@ -689,10 +689,10 @@ test("PR Validation ends by requesting the reconciliation pass itself (#5179)", 
       "github.actor",
       "github.event.pull_request.head.repo.fork",
       "github.event.pull_request.head.sha",
-      "github.event_name",
       "github.sha",
       "inputs.probe",
       "secrets.GITHUB_TOKEN",
+      "vars.AUTO_GATE_ENABLED",
     ],
     "only run-derived values, platform booleans, the probe gate, and the token may reach this job",
   );
@@ -13246,6 +13246,7 @@ test("merge invalidates the old-head aggregate before dispatching docs", async (
     "dispatch:build.yml",
     "dispatch:docs.yml",
     "dispatch:lint.yml",
+    "dispatch:pr.yml",
     "dispatch:tui-driver-selftest.yml",
     "dispatch:web-selftest.yml",
   ]);
@@ -13410,9 +13411,12 @@ test("the re-raised Docs run decides deployment from its own path list", () => {
   // publish Pages, so substituting it into the program text would be a script
   // injection with a publish primitive on the end of it.
   assert.match(docs, /env:\s+EVENT_NAME:[\s\S]*?VERIFY_SHA: \$\{\{ inputs\.verify_sha \}\}/);
-  assert.match(docs, /if \[\[ -n "\$VERIFY_SHA" && ! "\$VERIFY_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/);
-  assert.match(docs, /after="\$\{VERIFY_SHA:-\$EVENT_SHA\}"/);
-  assert.match(docs, /if \[\[ -n "\$VERIFY_SHA" \|\| -z "\$before"/);
+  // The decision lives in scripts/docs-deploy-changed.sh (#5659), tested by
+  // scripts/docs_deploy_changed_test.go; the shape is pinned here.
+  const script = fs.readFileSync(path.join(__dirname, "..", "..", "scripts", "docs-deploy-changed.sh"), "utf8");
+  assert.match(script, /if \[\[ -n "\$\{VERIFY_SHA:-\}" && ! "\$VERIFY_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/);
+  assert.match(script, /after="\$\{VERIFY_SHA:-\$EVENT_SHA\}"/);
+  assert.match(script, /if \[\[ -n "\$\{VERIFY_SHA:-\}" \|\| -z "\$before"/);
   // No ${{ }} expansion may remain inside the step's shell program.
   const step = /- name: Check docs deploy paths[\s\S]*?\n      - name: /.exec(docs)[0];
   const program = step.slice(step.indexOf("run: |"));
@@ -13421,8 +13425,8 @@ test("the re-raised Docs run decides deployment from its own path list", () => {
   // docs.yml accepts a dispatch that defers to its own rule, and falls through
   // to the same path diff a push uses when it does.
   assert.match(docs, /deploy_docs:[\s\S]*?default: auto[\s\S]*?options: \[auto, 'true', 'false'\]/);
-  assert.match(docs, /"\$EVENT_NAME" == "workflow_dispatch" && "\$DEPLOY_DOCS" != "auto"/);
-  assert.match(docs, /case "\$path" in\s+docs\/\*\|mkdocs\.yml\|README\.md/);
+  assert.match(script, /"\$\{EVENT_NAME:-\}" == "workflow_dispatch" && "\$\{DEPLOY_DOCS:-auto\}" != "auto"/);
+  assert.match(script, /case "\$path" in\s+docs\/\*\|mkdocs\.yml\|README\.md/);
 });
 
 test("one unavailable master-verify workflow does not suppress the others", async () => {

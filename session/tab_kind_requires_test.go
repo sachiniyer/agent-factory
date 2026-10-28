@@ -12,6 +12,27 @@ import (
 // remoteAgentBackend declares it.
 func remoteCaps() Capabilities { return (&remoteAgentBackend{}).Capabilities() }
 
+// noRelayRemoteCaps is an off-box runtime WITHOUT the agent-server port relay: the
+// pre-W5.1 shape, whose loopback web tabs the daemon could only have served from
+// its own host. The refusal copy for that case is still the contract for any
+// runtime that has not gained the relay.
+func noRelayRemoteCaps() Capabilities {
+	c := remoteCaps()
+	c.LoopbackRelay = false
+	return c
+}
+
+// A relay-capable off-box runtime admits the same web targets a local session
+// does (W5.3): a loopback target is served from the workspace, not the daemon.
+func TestRefuseTabKindAdmitsLoopbackWebTabsWhereARelayExists(t *testing.T) {
+	require.True(t, remoteCaps().LoopbackRelay, "the off-box agent-server runtimes carry the port relay")
+	for _, target := range []string{"http://localhost:3000", "http://127.0.0.1:5173", "https://example.com/app"} {
+		require.NoError(t, remoteCaps().RefuseTabKind(TabKindWeb, target), target)
+		require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, target), target)
+	}
+	require.Error(t, remoteCaps().RefuseTabKind(TabKindShell, ""), "the relay does not make a process tab servable")
+}
+
 func localCaps() Capabilities { return (&LocalBackend{}).Capabilities() }
 
 // TestTabKindRequiresClassifiesEveryKind pins the classification itself. The
@@ -42,7 +63,7 @@ func TestRefuseTabKindGivesEachKindItsOwnReason(t *testing.T) {
 	require.False(t, remoteCaps().TabManagement,
 		"fixture drifted: the off-box row is supposed to lack TabManagement")
 
-	web := remoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
+	web := noRelayRemoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
 	vscode := remoteCaps().RefuseTabKind(TabKindVSCode, "")
 	shell := remoteCaps().RefuseTabKind(TabKindShell, "")
 	require.Error(t, web, "a web tab cannot be SERVED off-box yet (#3062)")
@@ -72,8 +93,8 @@ func TestRefuseTabKindGivesEachKindItsOwnReason(t *testing.T) {
 // not have — the same defect one level down. Both targets are refused, for
 // different and individually true reasons.
 func TestWebRefusalIsPerTargetNotPerKind(t *testing.T) {
-	loopback := remoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
-	external := remoteCaps().RefuseTabKind(TabKindWeb, "https://example.com")
+	loopback := noRelayRemoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
+	external := noRelayRemoteCaps().RefuseTabKind(TabKindWeb, "https://example.com")
 
 	require.Error(t, loopback, "a loopback target is still proxied from the daemon host")
 	require.NoError(t, external,

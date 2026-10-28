@@ -111,6 +111,16 @@ type RegisterProjectResponse struct {
 type RebindProjectRequest struct {
 	ID   string `json:"id"`
 	Path string `json:"path"`
+	// ExpectedRoot, when set, is the root the caller last saw the project bound
+	// to. ExpectedCheckoutID is the checkout marker that row carried — the pair
+	// is the precondition the daemon compares under the registry lock (#4822
+	// spec): a reclone at the same path mints a new marker, so the root
+	// spelling alone cannot see the checkout the caller read being replaced.
+	// Guarded clients always send both; a request carrying only one is still
+	// guarded, and a record that cannot satisfy both halves refuses rather
+	// than applying the half it got.
+	ExpectedRoot       string `json:"expected_root,omitempty"`
+	ExpectedCheckoutID string `json:"expected_checkout_id,omitempty"`
 }
 
 // RebindProjectResponse carries the re-bound durable identity: the same ID,

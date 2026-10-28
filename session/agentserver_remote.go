@@ -72,6 +72,8 @@ type remoteAgentServer struct {
 	// — each fans a single remote WS to N local subscribers. The channel behind
 	// each is a remoteClientlessChannel (the remote WS) rather than a tmux one.
 	brokers map[int]*ptyBroker
+	// relays are the open loopback port relays (W5.1); Kill closes them.
+	relays map[*trackedRelayConn]struct{}
 	// closed latches once Kill has run so a Subscribe/Input/Resize racing the kill
 	// cannot lazily resurrect a broker (and dial a fresh WS to a torn-down sandbox
 	// that never gets closed) — the local runtime's #1632 guard, same reasoning.
@@ -291,6 +293,7 @@ func (s *remoteAgentServer) Kill(_ bool) error {
 	for _, br := range brokers {
 		br.close()
 	}
+	s.closeRelays()
 	// Kill the in-sandbox workspace over REST, THEN reap the sandbox itself. Both
 	// run even if the REST kill fails (the container must not leak because its
 	// agent-server was already down) — the errors are joined so a caller sees
@@ -419,6 +422,22 @@ type remoteClientlessChannel struct {
 	conn   *websocket.Conn
 	ctx    context.Context
 	cancel context.CancelFunc
+	// remoteSeq is this channel's cursor in the REMOTE broker's ring (#5571
+	// W1.2): the OpHello start seq of the current subscription plus the bytes
+	// it has delivered since. A re-dial sends it as ?since=, so bytes the
+	// sandbox produced while the tunnel was down replay into the daemon-side
+	// ring as contiguous output instead of a silent scrollback hole. Written
+	// by readLoop under mu; read by StartCapture under the same lock.
+	remoteSeq uint64
+	// dialSeq is the ?since the live subscription requested, and helloPending
+	// marks its OpHello as not yet seen. The first OpHello's seq is the
+	// post-clamp start position — equal to dialSeq iff the remote honored the
+	// cursor exactly. Any clamp (down over an evicted head, or up over a base
+	// ahead of the cursor) leaves a gap the local ring cannot backfill, so the
+	// recovery repaint is still owed; replayContiguous records the verdict.
+	dialSeq          uint64
+	helloPending     bool
+	replayContiguous bool
 	// writeMu serializes SendRaw/Resize writes: coder/websocket allows one
 	// concurrent reader + one writer, but two goroutines writing (an input and a
 	// resize) would race the frame boundary.
@@ -427,16 +446,30 @@ type remoteClientlessChannel struct {
 
 var _ clientlessChannel = (*remoteClientlessChannel)(nil)
 
+// PaneDead is always false here: a dead REMOTE pane is the remote daemon's
+// business — its own broker serves the repaint-only stream, which reaches this
+// channel as ordinary upstream bytes (#5330). Nothing local ever needs the
+// verdict this method answers for.
+func (c *remoteClientlessChannel) PaneDead() bool {
+	return false
+}
+
 func newRemoteClientlessChannel(rc *remoteAgentClient, tab int) *remoteClientlessChannel {
 	return &remoteClientlessChannel{rc: rc, tab: tab}
 }
 
-// StartCapture dials the tab's WS stream (from the live tail) and returns a reader
-// over the sandbox's PTY_OUT bytes. The reader goroutine also drains the socket's
-// control/repaint frames (dropping them) so the connection stays healthy — coder/
-// websocket auto-responds to the server's keepalive pings only while a read is in
-// flight, so this loop IS the keepalive. It is the broker's first-Subscribe entry
-// point, so the returned reader is consumed immediately and never blocks the socket.
+// StartCapture dials the tab's WS stream and returns a reader over the
+// sandbox's PTY_OUT bytes. The dial carries ?since=remoteSeq whenever the
+// channel holds a cursor from an earlier capture (#5571 W1.2): the remote
+// broker replays exactly the bytes produced while the socket was down, so a
+// transport blip costs a repaint at most, never a hole in the scrollback. The
+// first dial — or one after the remote clamped a stale cursor — is a live
+// tail, same as before. The reader goroutine also drains the socket's
+// control/repaint frames (dropping them) so the connection stays healthy —
+// coder/websocket auto-responds to the server's keepalive pings only while a
+// read is in flight, so this loop IS the keepalive. It is the broker's
+// first-Subscribe entry point, so the returned reader is consumed immediately
+// and never blocks the socket.
 func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -444,12 +477,13 @@ func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		return nil, fmt.Errorf("remote clientless capture already started")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	conn, err := c.rc.dialStream(ctx, c.tab)
+	conn, err := c.rc.dialStream(ctx, c.tab, c.remoteSeq)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 	c.conn, c.ctx, c.cancel = conn, ctx, cancel
+	c.dialSeq, c.helloPending, c.replayContiguous = c.remoteSeq, true, false
 	pr, pw := io.Pipe()
 	go c.readLoop(ctx, conn, pw)
 	return pr, nil
@@ -462,6 +496,13 @@ func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
 // the remote's through would double-count repaint bytes in the ring seq and echo
 // resizes twice. This makes the remote socket behave to the broker exactly like
 // tmux pipe-pane: a future-only stream of raw output.
+//
+// The one frame it READS rather than drops is OpHello (#5571 W1.2): its seq is
+// the remote ring position this subscription actually started from — the
+// ?since cursor post-clamp — so remoteSeq tracks startSeq + Σ|PTY_OUT| with
+// the clamp already priced in. It is updated AFTER the bytes are written to
+// the pipe, so a failed delivery never advances the cursor past output the
+// broker never saw.
 func (c *remoteClientlessChannel) readLoop(ctx context.Context, conn *websocket.Conn, pw *io.PipeWriter) {
 	defer func() { _ = pw.Close() }()
 	for {
@@ -469,12 +510,69 @@ func (c *remoteClientlessChannel) readLoop(ctx context.Context, conn *websocket.
 		if err != nil {
 			return
 		}
-		if msg.Binary && msg.Frame.Op == agentproto.OpPTYOut {
-			if _, werr := pw.Write(msg.Frame.Data); werr != nil {
+		if !msg.Binary {
+			continue
+		}
+		switch msg.Frame.Op {
+		case agentproto.OpHello:
+			c.mu.Lock()
+			c.reseedRemoteSeqLocked(conn, msg.Frame.Seq)
+			if c.helloPending && c.remoteSeqWritableLocked(conn) {
+				c.replayContiguous = msg.Frame.Seq == c.dialSeq
+				c.helloPending = false
+			}
+			c.mu.Unlock()
+		case agentproto.OpPTYOut:
+			n, werr := pw.Write(msg.Frame.Data)
+			c.mu.Lock()
+			c.advanceRemoteSeqLocked(conn, uint64(n))
+			c.mu.Unlock()
+			if werr != nil {
 				return
 			}
 		}
 	}
+}
+
+// remoteSeqWritableLocked reports whether one readLoop's conn may still write
+// remoteSeq: dropped only when c.conn is a DIFFERENT live socket — a stale
+// loop's frame must never move the cursor a newer subscription already
+// re-seeded. Post-StopCapture (c.conn nil) it still applies: bytes the pipe
+// provably delivered belong in the cursor, and the next dial's ?since would
+// otherwise replay them as duplicated output. Callers hold c.mu.
+func (c *remoteClientlessChannel) remoteSeqWritableLocked(conn *websocket.Conn) bool {
+	return c.conn == nil || c.conn == conn
+}
+
+// reseedRemoteSeqLocked SETS the cursor from an OpHello — a subscription's
+// post-clamp start, or a mid-stream re-seed after the remote fast-forwarded
+// over evicted bytes (a jump is authoritative, not additive — even to 0 on a
+// fresh remote ring).
+func (c *remoteClientlessChannel) reseedRemoteSeqLocked(conn *websocket.Conn, seed uint64) {
+	if c.remoteSeqWritableLocked(conn) {
+		c.remoteSeq = seed
+	}
+}
+
+// advanceRemoteSeqLocked ADDs to the cursor for bytes just delivered to the
+// broker's pipe.
+func (c *remoteClientlessChannel) advanceRemoteSeqLocked(conn *websocket.Conn, delta uint64) {
+	if c.remoteSeqWritableLocked(conn) {
+		c.remoteSeq += delta
+	}
+}
+
+// ReplaysHistory reports whether THIS capture actually delivers contiguous
+// retained output — the remote honored the ?since cursor exactly, proven by
+// the subscription's OpHello seq matching the requested dialSeq. A clamped
+// OpHello means the remote ring evicted our cursor during the outage and the
+// gap is unrecoverable from the stream: the recovery repaint is still owed.
+// False whenever no capture is live or the hello has not landed — both are
+// the repaint-safe side.
+func (c *remoteClientlessChannel) ReplaysHistory() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn != nil && c.replayContiguous
 }
 
 // StopCapture cancels the read loop and closes the WS, so the broker's read side
@@ -527,23 +625,11 @@ func (c *remoteClientlessChannel) Resize(rows, cols uint16) error {
 // the first live byte, mirroring tmux capture-pane. The WS stream carries only
 // future output, so without this a just-opened remote pane would render blank.
 func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
-	snapshot, err := c.rc.preview(c.tab, false)
-	if err != nil {
-		return PaneSnapshot{}, err
-	}
-	// REST Preview carries only the screen, not the cursor position, so the repaint
-	// omits cursor restore for remote panes (HasCursor stays false). It is also
-	// -J-joined (the agent-server's Preview uses CapturePaneContent), NOT the grid form
-	// buildRepaint's per-row positioning wants (#1688) — so a wrapped logical line
-	// re-wraps by the client width here. This is a known screen-only best-effort
-	// limitation of the still-dark remote runtime (no cursor cascade to corrupt, since
-	// HasCursor is false); productizing it needs the agent-server to expose a grid
-	// capture + cursor over REST, mirroring tmuxClientlessChannel.Snapshot.
-	return PaneSnapshot{
-		Screen:   []byte(snapshot.Content),
-		Modes:    snapshot.Modes,
-		HasModes: snapshot.HasModes,
-	}, nil
+	// The grid form (one line per row, no -J) plus cursor and size, so the
+	// repaint lands exactly at any client width (#1688, #5571 W4.2). Against an
+	// agent-server that predates it, previewGrid returns the joined screen only
+	// and the repaint stays the screen-only best effort it was.
+	return c.rc.previewGrid(c.tab)
 }
 
 // activeConn returns the live capture socket and its context, or an error if
@@ -725,21 +811,50 @@ func (c *remoteAgentClient) preview(tab int, full bool) (PreviewSnapshot, error)
 		return PreviewSnapshot{}, err
 	}
 	return PreviewSnapshot{
-		Content:  resp.Content,
-		Modes:    resp.Modes,
-		HasModes: resp.HasModes,
+		Content:         resp.Content,
+		Modes:           resp.Modes,
+		HasModes:        resp.HasModes,
+		LinesAbove:      resp.LinesAbove,
+		LinesAboveKnown: resp.LinesAboveKnown,
 	}, nil
 }
 
-// dialStream opens the WS PTY subscription to tab `tab` (from the live tail). The
-// token rides both the Authorization header and the ?access_token= query — the
-// agent-server honors either, and the query mirrors the browser WS path Phase 5
-// needs. The read limit is raised off the 32 KiB default: a repaint of a wide pane
-// is a single large binary frame.
-func (c *remoteAgentClient) dialStream(ctx context.Context, tab int) (*websocket.Conn, error) {
+// previewGrid is the repaint capture: the pane as one line per row with its
+// cursor, modes and size (#5571 W4.2). A sandbox that predates the grid answers
+// with the joined Content and no has_grid, and the result is then today's
+// screen-only snapshot — same bytes, no cursor, no size — so an old agent-server
+// degrades instead of failing.
+func (c *remoteAgentClient) previewGrid(tab int) (PaneSnapshot, error) {
+	var resp agentPreviewResp
+	if err := c.call("/v1/agent/preview", agentPreviewReq{Tab: tab, Grid: true}, &resp); err != nil {
+		return PaneSnapshot{}, err
+	}
+	if !resp.HasGrid {
+		return PaneSnapshot{Screen: []byte(resp.Content), Modes: resp.Modes, HasModes: resp.HasModes}, nil
+	}
+	return PaneSnapshot{
+		Screen:    []byte(resp.Grid),
+		CursorRow: resp.CursorRow, CursorCol: resp.CursorCol, HasCursor: resp.HasCursor,
+		Modes: resp.Modes, HasModes: resp.HasModes,
+		Rows: resp.Rows, Cols: resp.Cols, HasSize: resp.HasSize,
+	}, nil
+}
+
+// dialStream opens the WS PTY subscription to tab `tab`. A nonzero `since` is
+// the caller's cursor into the sandbox's output ring, sent as ?since= so the
+// remote broker replays the gap produced while a previous socket was down
+// (#5571 W1.2); 0 subscribes at the live tail. The token rides both the
+// Authorization header and the ?access_token= query — the agent-server honors
+// either, and the query mirrors the browser WS path Phase 5 needs. The read
+// limit is raised off the 32 KiB default: a repaint of a wide pane is a single
+// large binary frame.
+func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, since uint64) (*websocket.Conn, error) {
 	q := url.Values{}
 	if tab != 0 {
 		q.Set("tab", strconv.Itoa(tab))
+	}
+	if since != 0 {
+		q.Set("since", strconv.FormatUint(since, 10))
 	}
 	q.Set(agentproto.AccessTokenQueryParam, c.token)
 	u := c.wsBase + "/v1/sessions/" + url.PathEscape(c.title) + "/stream?" + q.Encode()
@@ -825,12 +940,23 @@ type agentSnapshotResp struct {
 type agentPreviewReq struct {
 	Tab  int  `json:"tab"`
 	Full bool `json:"full"`
+	Grid bool `json:"grid,omitempty"`
 }
 
 type agentPreviewResp struct {
-	Content  string         `json:"content"`
-	Modes    terminal.Modes `json:"terminal_modes,omitempty"`
-	HasModes bool           `json:"has_terminal_modes,omitempty"`
+	Content         string         `json:"content"`
+	Modes           terminal.Modes `json:"terminal_modes,omitempty"`
+	HasModes        bool           `json:"has_terminal_modes,omitempty"`
+	LinesAbove      int            `json:"lines_above,omitempty"`
+	LinesAboveKnown bool           `json:"lines_above_known,omitempty"`
+	HasGrid         bool           `json:"has_grid,omitempty"`
+	Grid            string         `json:"grid,omitempty"`
+	HasCursor       bool           `json:"has_cursor,omitempty"`
+	CursorRow       int            `json:"cursor_row,omitempty"`
+	CursorCol       int            `json:"cursor_col,omitempty"`
+	HasSize         bool           `json:"has_size,omitempty"`
+	Rows            uint16         `json:"rows,omitempty"`
+	Cols            uint16         `json:"cols,omitempty"`
 }
 
 type agentAliveResp struct {

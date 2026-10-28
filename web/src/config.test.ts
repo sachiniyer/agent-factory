@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { getConfig, setConfigValue } from "./api.js";
-import { type ConfigStatus, canCommit, controlKind, createKeyedQueue, saveNotice, shouldCloseSavedField } from "./config.js";
+import { explainConfig, getConfig, setConfigValue } from "./api.js";
+import {
+  type ConfigStatus,
+  canCommit,
+  controlKind,
+  createKeyedQueue,
+  explainValueText,
+  saveNotice,
+  shouldCloseSavedField,
+} from "./config.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 
 // These are the web client's config-editor contracts. They are pure logic +
@@ -171,6 +179,37 @@ test("saveNotice tolerates an older daemon that sends no address", () => {
   assert.doesNotMatch(notice, /undefined/);
 });
 
+test("saveNotice surfaces a write-only warning the daemon applied silently (default_accounts)", () => {
+  // #5266: for an applied-live write the only warning is per-write — it lands on
+  // resp.result.warnings while resp.warnings stays empty. The TUI falls back to
+  // the result channel (ui/config_target.go); the web form must too, or the one
+  // place that tells the operator the account is unregistered disappears.
+  const warning =
+    'no claude account named "missing" is registered on this machine, so a session using this default will be refused rather than started. Register it with `af accounts add claude missing` and log in';
+  const notice = saveNotice(
+    setResp({
+      result: { key: "default_accounts.claude", value: "missing", path: "/tmp/config.toml", requires_restart: false, warnings: [warning] },
+      // warnings absent: the apply channel is silent for an applied
+      // default_accounts write
+    }),
+  );
+  assert.equal(notice, `Applied — the running daemon is using the new value now. · ${warning}`);
+});
+
+test("saveNotice prefers the apply-time warnings when both channels speak", () => {
+  // The fallback is not a union: a daemon-running edit can carry differently
+  // worded versions of the same notice on both channels, and the TUI shows
+  // exactly the apply-time one. The surfaces must agree.
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: "0.0.0.0:8443", path: "/tmp/config.toml", requires_restart: false, warnings: ["write-time phrasing"] },
+      warnings: ["apply-time phrasing"],
+    }),
+  );
+  assert.doesNotMatch(notice, /write-time phrasing/);
+  assert.match(notice, /apply-time phrasing/);
+});
+
 test("setConfigValue surfaces the validator's own message on a rejected value", async () => {
   // The daemon returns the validator's error verbatim; a 500 is how this API
   // reports a handler error (daemon/httpserver.go). The browser must not rewrite
@@ -196,6 +235,63 @@ test("setConfigValue sends no Authorization header for the tokenless credential"
   });
   await setConfigValue("auto_update", "true", "");
   assert.equal(cap.auth, undefined);
+});
+
+// --- ExplainConfig (#4803): the daemon's provenance, not a browser recompute ---
+
+test("explainConfig posts only the key — the daemon owns resolution", async () => {
+  const cap = stubFetch({
+    explanation: {
+      key: "default_program",
+      value: "codex",
+      default: "claude",
+      merge: "replace",
+      precedence: ["global"],
+      winner: { layer: "global", path: "/home/u/.agent-factory/config.toml", key_path: "default_program" },
+      candidates: [
+        { layer: "built-in", present: true, allowed: true, value: "claude", result: "shadowed", reason: "overridden by higher-precedence global" },
+        { layer: "global", path: "/home/u/.agent-factory/config.toml", key_path: "default_program", present: true, allowed: true, value: "codex", result: "winner", reason: "highest-precedence present allowed source" },
+      ],
+    },
+    scope: "global",
+    running_value_checked: false,
+  });
+  const resp = await explainConfig("default_program", "tok");
+
+  assert.equal(cap.url, "/v1/ExplainConfig");
+  assert.deepEqual(cap.body, { key: "default_program" }, "no scope flag: the route is global-only");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.equal(resp.explanation.candidates.length, 2);
+  assert.equal(resp.explanation.candidates[1].result, "winner");
+  assert.equal(resp.running_value_checked, false, "the trace describes on-disk sources");
+});
+
+test("explainConfig surfaces the daemon's own refusal on an unknown key", async () => {
+  // The answer a user who typed a retired or misspelled key needs is the
+  // resolver's, not the browser's — show it verbatim rather than substituting
+  // a generic "not found".
+  stubFetch(null, { ok: false, status: 500, error: "unknown config key \"no.such.key\"" });
+
+  await assert.rejects(
+    () => explainConfig("no.such.key", "tok"),
+    (err: Error) => {
+      assert.match(err.message, /unknown config key/);
+      return true;
+    },
+  );
+});
+
+test("explainValueText spells values the way the CLI's explanation does", () => {
+  // The web half of one renderer: config.FormatExplainValue prints an
+  // explicitly configured empty string as `""` (a bare blank would read as
+  // absent), scalars bare, composites as compact JSON.
+  assert.equal(explainValueText("codex"), "codex");
+  assert.equal(explainValueText(""), '""');
+  assert.equal(explainValueText(true), "true");
+  assert.equal(explainValueText(42), "42");
+  assert.equal(explainValueText(null), "null");
+  assert.equal(explainValueText({ claude: "/usr/bin/claude" }), '{"claude":"/usr/bin/claude"}');
+  assert.equal(explainValueText(["a", "b"]), '["a","b"]');
 });
 
 // The web half of the anti-drift guarantee.

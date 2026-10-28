@@ -68,6 +68,12 @@ type clientlessChannel interface {
 	// artifact). HasCursor is false when the channel cannot report a position (the
 	// remote REST-preview snapshot), in which case the repaint omits cursor restore.
 	Snapshot() (PaneSnapshot, error)
+	// PaneDead reports whether the pane's terminal is gone and tmux holds it
+	// dead (remain-on-exit). pipe-pane refuses such a pane FOREVER — it can
+	// never produce another byte — so a dead pane is a terminal stream state,
+	// not a recoverable outage (#5330). A channel that cannot answer reports
+	// false and the ordinary capture/retry paths apply.
+	PaneDead() bool
 }
 
 // ptyBroker is the per-session data plane. Guarded by mu; the ring buffer, the
@@ -88,6 +94,13 @@ type ptyBroker struct {
 	// pipe to the true desired state. Lock ordering: captureMu THEN mu, never the
 	// reverse.
 	captureMu sync.Mutex
+
+	// paneDeathPoll is the pane-death watcher's tick; set at construction.
+	paneDeathPoll time.Duration
+	// watchers tracks live pane-death watchers so close/closeTab can wait for
+	// them: none may outlive its broker. The wait happens AFTER shutdown drops
+	// captureMu, because a watcher mid-recovery needs that lock.
+	watchers sync.WaitGroup
 
 	mu   sync.Mutex
 	buf  []byte // ring: recent output bytes, buf[0] is at seq `base`
@@ -197,6 +210,8 @@ func newPTYBroker(ch clientlessChannel) *ptyBroker {
 		maxBytes: ptyRingMaxBytes,
 		subs:     make(map[uint64]*ptySub),
 		closedCh: make(chan struct{}),
+
+		paneDeathPoll: defaultPaneDeathPollInterval,
 	}
 }
 
@@ -297,8 +312,39 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// concurrent last-leaver teardown re-checking the count won't tear down the
 	// capture this subscriber needs.
 	if err := b.ensureCaptureStarted(); err != nil {
-		b.remove(sub.id)
-		return nil, err
+		// A held dead pane can never produce output again — pipe-pane refuses
+		// it — so the ordinary bring-up fails and the pane renders blank
+		// (#5330). Serve a repaint-only subscription instead: the channel's
+		// dead-pane snapshot carries the buffer's bottom-anchored tail and the
+		// "Pane is dead" marker through the same pendingRepaint a live pane's
+		// snapshot uses. The subscription then has no bytes, which is correct:
+		// a dead pane emits none.
+		if !b.ch.PaneDead() {
+			b.remove(sub.id)
+			return nil, err
+		}
+		b.mu.Lock()
+		genBefore := b.resizeGen
+		b.mu.Unlock()
+		snap, snapErr := b.ch.Snapshot()
+		if snapErr != nil {
+			// With no snapshot there is no repaint source AND no capture to
+			// retry it — a subscription kept here sits blank forever (unlike a
+			// live bring-up, where ring bytes still arrive). Fail like the
+			// non-dead path so the caller can retry.
+			b.remove(sub.id)
+			return nil, snapErr
+		}
+		b.adoptSnapshotSize(snap, genBefore)
+		if snapshotHasRepaintState(snap) {
+			rp := buildRepaintSnapshot(snap)
+			b.mu.Lock()
+			sub.cursor = b.headLocked()
+			sub.pendingRepaint = &rp
+			b.mu.Unlock()
+			sub.wake()
+		}
+		return sub, nil
 	}
 
 	// Re-evaluate the repaint decision after ensureCaptureStarted() unblocks.
@@ -439,10 +485,12 @@ func (b *ptyBroker) ensureCaptureStartedLocked() error {
 		return fmt.Errorf("start clientless pty capture: %w", err)
 	}
 	done := make(chan struct{})
+	quit := make(chan struct{})
 	b.mu.Lock()
 	b.capturing = true
 	b.captureStarted = time.Now()
 	b.stopCapture = func() {
+		close(quit) // ends this capture's pane-death watcher
 		if err := b.ch.StopCapture(); err != nil {
 			// A stop that is RELEASING an already-dead capture is expected to fail
 			// to close cleanly: remoteClientlessChannel does
@@ -470,6 +518,8 @@ func (b *ptyBroker) ensureCaptureStartedLocked() error {
 	}
 	b.mu.Unlock()
 	go b.readLoop(r, done)
+	b.watchers.Add(1) // under captureMu, which shutdown holds to latch closed
+	go b.watchPaneDeath(quit)
 	return nil
 }
 
@@ -721,14 +771,14 @@ func (b *ptyBroker) remove(id uint64) {
 
 // close tears down the broker: every subscriber's NextEvent returns io.EOF and
 // the clientless capture is stopped. Called when the session is killed.
-func (b *ptyBroker) close() { b.shutdown(false) }
+func (b *ptyBroker) close() { b.shutdown(false); b.watchers.Wait() }
 
 // closeTab is close for a broker whose TAB was closed (#2136) — the same
 // teardown, but each subscriber's NextEvent reports ErrTabClosed so the WS writer
 // can tell the client its tab went away rather than leaving it to time out on the
 // keepalive. Only the closed tab's broker is shut down; a sibling tab of the same
 // session has its own broker and keeps streaming.
-func (b *ptyBroker) closeTab() { b.shutdown(true) }
+func (b *ptyBroker) closeTab() { b.shutdown(true); b.watchers.Wait() }
 
 // shutdown is the shared teardown behind close/closeTab. Holds captureMu
 // (captureMu-then-mu ordering) so it cannot race a concurrent

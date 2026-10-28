@@ -59,23 +59,12 @@ func ReservedTitleCollision(title string) string {
 	return ""
 }
 
-// ReservedTitleRefusal returns the error a create must fail with when the title
-// claims a reserved name, or nil when the title is free. Every creation path
-// lands on the daemon's authoritative gate, but the API pre-check refuses the
-// same titles a round trip earlier; both call this so the wording cannot drift
-// apart the way two copies of the message already had.
-//
-// The derived-name refusal names BOTH titles and says why they are one name:
-// "ro ot" and "root" look nothing alike on a sidebar row, so a refusal that
-// only said "reserved" would read as a bug.
-func ReservedTitleRefusal(title string) error {
-	return ReservedTitleRefusalFor(title, "")
-}
-
-// ReservedTitleRefusalFor is ReservedTitleRefusal with the resolved repository
-// workspace path. A known path is shell-quoted in both remedy commands so they
-// target that repository regardless of the caller's cwd. An empty path retains
-// the instruction to run the commands from the intended repository.
+// ReservedTitleRefusalFor returns the error a create must fail with when the
+// title claims a reserved name, or nil when the title is free, using the
+// resolved repository workspace path. A known path is shell-quoted in both
+// remedy commands so they target that repository regardless of the caller's
+// cwd. An empty path retains the instruction to run the commands from the
+// intended repository.
 func ReservedTitleRefusalFor(title, repoPath string) error {
 	reserved := ReservedTitleCollision(title)
 	if reserved == "" {

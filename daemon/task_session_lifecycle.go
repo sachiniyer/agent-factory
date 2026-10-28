@@ -75,14 +75,69 @@ const taskLifecycleHookWait = 10 * time.Minute
 //     (keepUncertainCreate), and reaping it would destroy exactly what that
 //     retention exists to preserve. Stating the condition here means a future
 //     refactor of the poll's early returns cannot silently authorize that.
+//
+//   - the run did not end interrupted (#4222). A Lost-restore whose replacement
+//     runtime was never replayed the prompt clears the marker inside its own
+//     ConfirmLive — off the poll's edge entirely — so a tick that captured
+//     taskRunWasActive before racing that restore would otherwise read the
+//     freshly-idle replacement pane as a completed run and apply on_complete
+//     to work the interrupted run produced. The sticky flag is the
+//     distinguishing fact: the marker cleared, but not by a completion edge.
+//
+//   - the run did not end failed. A proven-undelivered initial delivery ends the
+//     run where the verdict lands, BETWEEN polls (#5278) — the same
+//     true→false flip a completed run makes, and indistinguishable from it
+//     here unless the session records which it was. That fact is sticky
+//     precisely so a tick that captured taskRunWasActive before the failed
+//     send cannot read the cleared marker as a completion one tick later.
 func runEndedIntoIdle(instance *session.Instance, taskRunWasActive bool) bool {
 	if !taskRunWasActive || instance.TaskRunActive() {
 		return false
 	}
-	if instance.StartupStateUnknown() {
+	if instance.TaskRunInterrupted() || instance.TaskRunFailed() || instance.StartupStateUnknown() {
 		return false
 	}
 	return instance.GetLiveness() == session.LiveReady
+}
+
+// taskStatusErroredPromptUndelivered is the last_run_status for a run whose
+// initial prompt delivery was proven undelivered — the pane demonstrably took
+// nothing (#5278). It carries the "errored:" prefix the TUI keys on to render
+// a failed run (ui/task_pane.go), the same family RunTask writes for a run
+// whose send errored.
+const taskStatusErroredPromptUndelivered = task.RunFailedUndeliveredStatus
+
+// stampTaskRunFailed records the failed run's outcome on the owning task. The
+// session knows the verdict — it raises the one-shot flag where the run ends —
+// and the task store owns the status; this is where the two meet. LastRunAt IS
+// stamped: the run was attempted and finished failed, a run outcome like the
+// "errored:" statuses RunTask writes, not a supervision note like arming's.
+// The flag is one-shot per process and the load path re-derives the same end
+// from the persisted verdict, so the write is idempotent across restarts.
+func (m *Manager) stampTaskRunFailed(instance *session.Instance) {
+	if instance.TaskID == "" {
+		return
+	}
+	now := nowFunc()
+	updated, applied, err := task.RecordRunStatus(instance.TaskID, taskRunKey(instance), &now, taskStatusErroredPromptUndelivered)
+	if err != nil {
+		m.warn().Printf("could not record the failed run for task %q (session %q): %v",
+			instance.TaskID, instance.Title, err)
+		return
+	}
+	// Settled either way: applied, or a no-op because the row already holds this
+	// failure or a newer run (the state machine, task/run_status.go). Only a
+	// store error (above) keeps the durable flag armed.
+	instance.AckTaskRunFailureStamped()
+	if applied {
+		m.publishEvent(agentproto.EventTaskUpdated, updated)
+	}
+}
+
+// taskRunKey is the run identity of the task run a session carries: its
+// instance id, ordered by its creation time (assigned at delivery start).
+func taskRunKey(instance *session.Instance) task.RunKey {
+	return task.RunKey{ID: instance.ID, StartedAt: instance.CreatedAt}
 }
 
 // deferTaskSessionLifecycleWhilePaused records that a run finished on the PAUSED

@@ -201,6 +201,19 @@ func (w *taskWatcher) drainLoop() {
 		}
 		if err != nil {
 			w.recordDeliveryResult(time.Now(), err)
+			if isMutationCommitted(err) {
+				// The replay committed durable state before reporting its error;
+				// retrying the same head could provision a second session or paste
+				// the prompt twice. Consume it (the record is not re-deliverable)
+				// and leave the follow-up to the operator, loudly.
+				log.ErrorLog.Printf("watch task %s: queued event delivery committed but reported an error; dropping it from the replay queue rather than retrying — inspect the target session: %v", w.taskID, err)
+				if _, aerr := w.queue.advance(cursor); aerr != nil {
+					log.ErrorLog.Printf("watch task %s: failed to advance the event queue; replay parked until the next reload: %v", w.taskID, aerr)
+					w.stopDraining()
+					return
+				}
+				continue
+			}
 			if errors.Is(err, errTargetLimitReached) {
 				// A known limit park is not an outage and delivered nothing. Retain
 				// the head past ordinary age/cap eviction, refund this attempt's rate

@@ -222,6 +222,127 @@ func TestRunEndedIntoIdle_ExcludesAnUncertainCreate(t *testing.T) {
 		"a create whose startup outcome was never established is not a finished run")
 }
 
+// TestTaskSessionLifecycle_InterruptedRunStampsAbortedAndKeepsTheSession is the
+// #4222 report end to end: a Lost-restore that RESPAWNED the runtime — the
+// prompted agent is gone and the replacement was never replayed the prompt —
+// ends the run as interrupted. The owning task's status is stamped
+// "aborted: runtime replaced" at the restore's settlement, and no on_complete
+// verb may apply to the interrupted run's work.
+func TestTaskSessionLifecycle_InterruptedRunStampsAbortedAndKeepsTheSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "task-int", repoPath)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-int")
+	stubTaskLifecycle(t, "task-int", task.OnCompleteKill)
+
+	// Lost mid-run → restore fence → the backend's respawn verdict → the
+	// ConfirmLive that used to drop the fence and leave the run's marker for
+	// the replacement pane's first idle edge to "finish".
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
+	require.NoError(t, inst.Transition(session.MarkRestoring()))
+	inst.MarkAgentRuntimeReplacedForTest(true)
+	require.NoError(t, inst.Transition(session.ConfirmLive()))
+	require.False(t, inst.TaskRunActive(),
+		"the run ends at the restore edge — before the fix the marker was still set here")
+
+	// The restore's post-operation settlement site stamps the owning task.
+	manager.noteRuntimeReplaced(repoID, inst)
+	assert.Equal(t, taskStatusAbortedRuntimeReplaced, lastRunStatus(t, "task-int"))
+
+	// The racing tick: a poll that captured the run in flight before the
+	// restore must not read the replacement's idle pane as a completed run —
+	// that tick is what used to hand on_complete the interrupted worktree.
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, true)
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, true)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, true)
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+
+	// Nothing dispatched, so a short settle is enough to prove no teardown ran.
+	time.Sleep(200 * time.Millisecond)
+	manager.mu.Lock()
+	_, stillRegistered := manager.instances[daemonInstanceKey(repoID, "nightly")]
+	manager.mu.Unlock()
+	assert.True(t, stillRegistered,
+		"an interrupted run keeps its session — on_complete must not reap it")
+	assert.Equal(t, session.LiveReady, inst.GetLiveness())
+	assert.Nil(t, inst.OwedOnComplete(), "no teardown obligation may be filed for an interrupted run")
+}
+
+// TestTaskSessionLifecycle_InterruptIsDurableAtTheLiveBoundary pins the crash
+// window the transition carve-out alone could not cover (#4222 review): if the
+// daemon exited after the replacement's ConfirmLive but before the
+// post-recovery persist, a reload would find task_run_active=true under a
+// replaced runtime and let the fresh pane's first idle edge complete the
+// interrupted run. prepareRuntimeReplacement settles the interrupt into the
+// SAME write that retires predecessor evidence, so the record on disk already
+// reports the run ended.
+func TestTaskSessionLifecycle_InterruptIsDurableAtTheLiveBoundary(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "task-int", repoPath)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-int")
+
+	// Lost mid-run, restore fence up, respawn verdict stamped — the state the
+	// backend is in when it invokes its fenced live boundary.
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
+	require.NoError(t, inst.Transition(session.MarkRestoring()))
+	inst.MarkAgentRuntimeReplacedForTest(true)
+
+	key := daemonInstanceKey(repoID, "nightly")
+	require.NoError(t, manager.prepareRuntimeReplacement(repoID, key, inst))
+
+	require.False(t, inst.TaskRunActive(),
+		"the run ends at the boundary itself, not at the post-recovery persist")
+	require.True(t, inst.TaskRunInterrupted())
+	rec := recordFor(t, repoID, "nightly")
+	require.NotNil(t, rec)
+	assert.False(t, rec.TaskRunActive,
+		"the boundary settlement persists the ended run — a crash here must not reload it in flight")
+}
+
+// TestStampTaskRunInterrupted_YieldsToANewerRun is the multi-fire guard
+// (#4222 review): last_run_status is task-wide, so a stale session's interrupt
+// must not overwrite the status of a run a later fire already spawned for the
+// same task. Two proofs say the newer run owns it — a pending fire marker
+// naming the newer session, and once the marker discharges, the newer session
+// still registered for the task.
+func TestStampTaskRunInterrupted_YieldsToANewerRun(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "task-2runs", repoPath)
+	stale := registerTaskSpawnedSession(t, manager, repoID, repoPath, "old-run", "task-2runs")
+
+	// A second fire already spawned its session for the same task.
+	newer, err := session.NewInstance(session.InstanceOptions{
+		Title: "new-run", Path: repoPath, Program: "claude", TaskID: "task-2runs",
+	})
+	require.NoError(t, err)
+	newer.CreatedAt = stale.CreatedAt.Add(time.Hour)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "new-run")] = newer
+	manager.mu.Unlock()
+
+	// The in-flight occurrence's marker names the newer session.
+	seedPendingFire(t, taskFireMarker{
+		TaskID: "task-2runs", IntendedAt: time.Now(), InstanceID: newer.ID,
+	})
+	stampTaskRunInterrupted(stale, manager.taskRunPeerSnapshot())
+	assert.Equal(t, "", lastRunStatus(t, "task-2runs"),
+		"a marker naming another session means that run — not this interrupt — owns the status")
+
+	// Marker discharged; the registered newer session still owns it.
+	clearTaskFire("task-2runs")
+	stampTaskRunInterrupted(stale, manager.taskRunPeerSnapshot())
+	assert.Equal(t, "", lastRunStatus(t, "task-2runs"),
+		"a newer registered session means the task's status already belongs to a later run")
+
+	// With the newer session gone the stale run is the task's last again —
+	// the stamp lands.
+	manager.mu.Lock()
+	delete(manager.instances, daemonInstanceKey(repoID, "new-run"))
+	manager.mu.Unlock()
+	stampTaskRunInterrupted(stale, manager.taskRunPeerSnapshot())
+	assert.Equal(t, taskStatusAbortedRuntimeReplaced, lastRunStatus(t, "task-2runs"))
+}
+
 // TestTaskSessionLifecycle_DeliveryWindowIdleDoesNotFileOnComplete is the
 // issue's report end to end (#5219): a task session whose prompt was attempted
 // but whose agent has not visibly reacted settles idle on the first quiet
@@ -516,4 +637,82 @@ func TestTaskSessionLifecycle_ParkedIntentIsReclaimedOnTitleReuse(t *testing.T) 
 	_, stillParked := manager.deferredTaskLifecycle[key]
 	manager.mu.Unlock()
 	assert.False(t, stillParked, "a replacement session must not inherit the original's owed teardown")
+}
+
+// TestTaskSessionLifecycle_UndeliveredRunEndsFailedAndKeepsTheSession is the
+// #5278 slice-1 report end to end. A task-spawned session whose initial prompt
+// send PROVES undelivered — the pane demonstrably took nothing — ends its run
+// failed where the verdict lands, the poll stamps the task
+// "errored: prompt not delivered", and no on_complete verb is applied to a
+// session that never received its prompt.
+//
+// On master the marker stayed set after the proven-failed send, the first idle
+// edge ended the run as a completion, and on_complete=kill reaped the session:
+// applyTaskSessionLifecycleOnRunEnd passed runEndedIntoIdle below.
+func TestTaskSessionLifecycle_UndeliveredRunEndsFailedAndKeepsTheSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "task-undeliv", repoPath)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-undeliv")
+	stubTaskLifecycle(t, "task-undeliv", task.OnCompleteKill)
+
+	// The verdict SendPromptWithEvidence records when the send returns a
+	// positive non-delivery: the runtime provably accepted nothing.
+	require.True(t, inst.RecordPromptAttempt(session.PromptNotDelivered, time.Now()))
+	require.False(t, inst.TaskRunActive(),
+		"the run ends where the verdict lands — before the fix it stayed in flight for the idle edge to complete")
+	require.True(t, inst.TaskRunFailed())
+
+	// The poll's run-end observation stamps the task — this consume is the
+	// same one refreshInstanceStatus and observeTaskRunWhilePaused perform.
+	require.True(t, inst.ConsumeTaskRunFailed())
+	manager.stampTaskRunFailed(inst)
+	assert.Equal(t, taskStatusErroredPromptUndelivered, lastRunStatus(t, "task-undeliv"),
+		"the task reads failed, matching the errored: family RunTask writes")
+
+	// Now the hazard: a poll that captured the marker BEFORE the failed send
+	// (true) observes it cleared. That flip must not read as a completion —
+	// not on this tick, not on the idle edge the quiet pane produces next, and
+	// not through the paused path either.
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, true)
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, true)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, true)
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"a session that never received its prompt is kept")
+	assert.Nil(t, inst.OwedOnComplete(),
+		"no on_complete obligation may be filed for a run that never delivered")
+	manager.mu.Lock()
+	_, stillRegistered := manager.instances[daemonInstanceKey(repoID, "nightly")]
+	manager.mu.Unlock()
+	assert.True(t, stillRegistered, "on_complete=kill must not reap an undelivered run's session")
+	assert.Equal(t, taskStatusErroredPromptUndelivered, lastRunStatus(t, "task-undeliv"),
+		"the failed status survives the no-op lifecycle calls")
+}
+
+// TestTaskSessionLifecycle_UndeliveredRunKeepsSessionUnderArchive is the
+// archive twin — the non-destructive verb is still a lifecycle application a
+// failed run never earned.
+func TestTaskSessionLifecycle_UndeliveredRunKeepsSessionUnderArchive(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "task-undeliv-arch", repoPath)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-undeliv-arch")
+	stubTaskLifecycle(t, "task-undeliv-arch", task.OnCompleteArchive)
+
+	require.True(t, inst.RecordPromptAttempt(session.PromptNotDelivered, time.Now()))
+	if inst.ConsumeTaskRunFailed() {
+		manager.stampTaskRunFailed(inst)
+	}
+
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, true)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, true)
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"the failed run's session is not archived")
+	assert.Equal(t, taskStatusErroredPromptUndelivered, lastRunStatus(t, "task-undeliv-arch"))
 }
