@@ -166,6 +166,9 @@ func (m *home) coldStartFromSnapshot() error {
 // A single unrestorable record is logged and skipped, never aborting the batch.
 func (m *home) materializeSnapshot(data []session.InstanceData) {
 	for _, d := range data {
+		if snapshotAwaitingWorktree(d) {
+			continue
+		}
 		inst, err := buildInstanceFromSnapshot(d)
 		if err != nil {
 			// The session's tmux/worktree may have been destroyed externally;
@@ -560,11 +563,25 @@ func sameSession(inst *session.Instance, d session.InstanceData) bool {
 	return inst.CreatedAt.Equal(d.CreatedAt)
 }
 
+// snapshotAwaitingWorktree reports whether a record is the daemon's pending
+// create projection: published (so clients see the session at once) before the
+// worktree exists, so its empty worktree path is an expected transient and the
+// next reconcile picks the row up. The same empty path on a record with no
+// create in flight stays a real fault and keeps its warning, whatever its
+// liveness says (the pending projection itself claims LiveReady).
+func snapshotAwaitingWorktree(d session.InstanceData) bool {
+	return d.InFlightOp == session.OpCreating && d.Worktree.WorktreePath == ""
+}
+
 // addInstanceFromSnapshot builds a live instance from a snapshot record and adds
 // it to the projection store. Returns true on success (a real change). A build
 // failure is logged and skipped — a single unrestorable record must not abort
 // the whole reconcile.
 func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
+	if snapshotAwaitingWorktree(d) {
+		log.InfoLog.Printf("deferring instance %q: create in flight, worktree not populated yet", d.Title)
+		return false
+	}
 	inst, err := buildInstanceFromSnapshot(d)
 	if err != nil {
 		log.WarningLog.Printf("failed to build instance %q from snapshot: %v", d.Title, err)
@@ -582,6 +599,9 @@ func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 // sidebar cursor rested on at the start of this reconcile ("" while it rested on
 // a section header), captured once before the per-row loop — see reconcileSnapshot.
 func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle string) bool {
+	if snapshotAwaitingWorktree(d) {
+		return false
+	}
 	inst, err := buildInstanceFromSnapshot(d)
 	if err != nil {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
