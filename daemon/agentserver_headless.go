@@ -360,6 +360,18 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("failed to build workspace instance: %w", err)
 	}
 
+	// The relaunch (W7.1) and agent swap respawn through the local runtime, and a
+	// respawn that rebuilds a deleted worktree must make its stale-pane teardown
+	// obligation durable first. The driving daemon installs those callbacks on ITS
+	// instances; this one needs its own, backed by a marker in the session dir (#5824).
+	sessionDir, sdErr := runtimetoken.SessionDir()
+	if sdErr != nil {
+		return fmt.Errorf("agent-server: %w", sdErr)
+	}
+	if err := instance.InstallDurableRebuildTeardown(sessionDir); err != nil {
+		return fmt.Errorf("agent-server: %w", err)
+	}
+
 	hs := &headlessServer{
 		as:      instance.AgentServer(),
 		inst:    instance,
