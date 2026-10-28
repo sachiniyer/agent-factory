@@ -97,11 +97,6 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
-		// Probe BEFORE the reap: removing the partial workspace frees space and
-		// could mask the very condition being measured (#5382 item 1).
-		if evidence := p.remoteCapacityEvidence(err); evidence != nil {
-			err = errors.Join(err, evidence)
-		}
 		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
 	return res, nil
@@ -556,6 +551,13 @@ func waitForSandboxTunnelWithin(label, localAddr string, timeout, poll time.Dura
 }
 
 func (p *sandboxProvisioner) reapProvisionFailure(provisionErr error) error {
+	// Probe BEFORE the reap: removing the partial workspace frees space and
+	// could mask the very condition being measured (#5382 item 1). Doing it here
+	// — the one failure path sandbox, ssh and hook provisioning all share —
+	// keeps the classification identical across them (#5686).
+	if evidence := p.remoteCapacityEvidence(provisionErr); evidence != nil {
+		provisionErr = errors.Join(provisionErr, evidence)
+	}
 	reapErr := p.reap()
 	if reapErr == nil {
 		return provisionErr
