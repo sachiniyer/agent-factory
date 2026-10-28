@@ -38,7 +38,7 @@ func TestVersionFlag(t *testing.T) {
 }
 
 // TestPersistentPreRunSilencesUsage covers #1749 item 2: after flag parsing has
-// succeeded (the point at which PersistentPreRun fires), the root command is set
+// succeeded (the point at which PersistentPreRunE fires), the root command is set
 // to SilenceUsage so a runtime RunE error prints as one calm line instead of a
 // usage dump. Flag-PARSE errors fail before this hook runs, so their usage help
 // is preserved.
@@ -47,12 +47,14 @@ func TestPersistentPreRunSilencesUsage(t *testing.T) {
 	t.Cleanup(func() { rootCmd.SilenceUsage = origSilence })
 
 	rootCmd.SilenceUsage = false
-	if rootCmd.PersistentPreRun == nil {
-		t.Fatal("rootCmd.PersistentPreRun must be set to silence usage on runtime errors")
+	if rootCmd.PersistentPreRunE == nil {
+		t.Fatal("rootCmd.PersistentPreRunE must be set to silence usage on runtime errors")
 	}
-	rootCmd.PersistentPreRun(rootCmd, nil)
+	if err := rootCmd.PersistentPreRunE(rootCmd, nil); err != nil {
+		t.Fatalf("PersistentPreRunE refused the root command: %v", err)
+	}
 	if !rootCmd.SilenceUsage {
-		t.Fatal("PersistentPreRun did not set root SilenceUsage")
+		t.Fatal("PersistentPreRunE did not set root SilenceUsage")
 	}
 }
 

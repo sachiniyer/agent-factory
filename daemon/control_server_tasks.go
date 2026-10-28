@@ -82,6 +82,11 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 	// host's home, and every later reader (the repo-id binding, the runner's
 	// git check) needs the expanded form.
 	req.Task.ProjectPath = config.ExpandTilde(req.Task.ProjectPath)
+	if req.ValidatePath {
+		if err := validateTaskProjectPath(req.Task.ProjectPath); err != nil {
+			return err
+		}
+	}
 	var validate func(task.Task) error
 	targetLocked := false
 	if s.manager != nil {
@@ -109,6 +114,7 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		return err
 	}
 	resp.OK = true
+	resp.Task = &created
 	// The task-file write is the durable commit. Publish it before the
 	// non-transactional scheduler/watch reload so other clients never remain
 	// stale when that follow-up fails.
@@ -140,6 +146,11 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 	if req.Update.ProjectPath != nil {
 		expanded := config.ExpandTilde(*req.Update.ProjectPath)
 		req.Update.ProjectPath = &expanded
+		if req.ValidatePath {
+			if err := validateTaskProjectPath(expanded); err != nil {
+				return err
+			}
+		}
 	}
 	var validate func(task.Task) (string, error)
 	targetLocked := false

@@ -313,6 +313,11 @@ type DeliverPromptRequest struct {
 	// retain a provable not-attempted outcome without claiming TaskID ownership.
 	TaskRepoID string `json:"-"`
 	TaskOrigin bool   `json:"-"`
+	// SandboxOwner is the sandbox session that created the task being delivered
+	// (task.Task.SandboxOwner, #5571 W3.5). Daemon-internal like TaskRepoID: it
+	// rides the gob loopback only. When set the delivery is re-authorized against
+	// the owner's project and NEVER auto-creates its target.
+	SandboxOwner string `json:"-"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a
@@ -646,6 +651,9 @@ type PingResponse struct {
 	// two releases honors one and silently drops the other.
 	DeliverHostPick bool `json:"deliver_host_pick,omitempty"`
 	TaskHost        bool `json:"task_host,omitempty"`
+	// ConfigHostsEdit: the daemon honors SetConfigValueRequest.HostsEdit. An older
+	// daemon drops the field, so an edit must see true here first.
+	ConfigHostsEdit bool `json:"config_hosts_edit,omitempty"`
 	// (The guarded-rebind capability is its wire method instead of a Ping bit —
 	// #4888 review: RebindProjectGuarded exists only on daemons that enforce
 	// the expected_root/expected_checkout_id pair, so a guarded send is refused
@@ -812,6 +820,13 @@ type ExplainConfigResponse struct {
 type SetConfigValueRequest struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
+	// HostsEdit, with Key "hosts", asks the daemon to apply ONE per-entry edit to
+	// the host table (add or remove) as a single read-modify-write under the config
+	// file lock, instead of replacing the whole table from a copy the client read
+	// earlier (#5855). Value is ignored then. Nil (omitted) is the ordinary write.
+	// A daemon that predates it would ignore the field and write the (empty) Value,
+	// so a client must read PingResponse.ConfigHostsEdit first.
+	HostsEdit *config.HostsEdit `json:"hosts_edit,omitempty"`
 }
 type SetConfigValueResponse struct {
 	// Result is config.SetResult verbatim — key, canonical value, path, and

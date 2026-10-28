@@ -28,6 +28,7 @@ func TestRemoteLaunchSendsAndRecordsTheConversation(t *testing.T) {
 	inst := &Instance{Title: "sb", Tabs: []*Tab{newRemoteAgentTab()}}
 	inst.Tabs[0].Conversation = claudeConv
 	s := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: inst}
+	inst.remoteClient = s.rc
 
 	require.NoError(t, s.Launch(true))
 
@@ -51,6 +52,7 @@ func TestRemoteLaunchWithoutReportKeepsTheRecord(t *testing.T) {
 	inst := &Instance{Title: "sb", Tabs: []*Tab{newRemoteAgentTab()}}
 	inst.Tabs[0].Conversation = claudeConv
 	s := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: inst}
+	inst.remoteClient = s.rc
 
 	require.NoError(t, s.Launch(true))
 	assert.Equal(t, claudeConv, inst.AgentConversation())
@@ -58,6 +60,7 @@ func TestRemoteLaunchWithoutReportKeepsTheRecord(t *testing.T) {
 	// No record and nothing to send: the field is absent from the request.
 	fresh := &Instance{Title: "sb2", Tabs: []*Tab{newRemoteAgentTab()}}
 	s = &remoteAgentServer{rc: srv.client(t, ts.URL), inst: fresh}
+	fresh.remoteClient = s.rc
 	require.NoError(t, s.Launch(true))
 	srv.mu.Lock()
 	_, sent := srv.bodies["/v1/agent/launch"]["conversation"]
@@ -76,6 +79,7 @@ func TestRemoteSnapshotRecordsALateConversation(t *testing.T) {
 	defer ts.Close()
 	inst := &Instance{Title: "sb", Tabs: []*Tab{newRemoteAgentTab()}}
 	s := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: inst}
+	inst.remoteClient = s.rc
 
 	_, err := s.Snapshot()
 	require.NoError(t, err)
@@ -86,8 +90,8 @@ func TestRemoteSnapshotRecordsALateConversation(t *testing.T) {
 // backend seeds the tab.
 func TestReportedConversationBeforeTabExists(t *testing.T) {
 	inst := &Instance{Title: "sb"}
-	assert.False(t, inst.RecordReportedConversation(AgentConversationData{}), "an empty report is a no-op")
-	inst.RecordReportedConversation(claudeConv)
+	assert.False(t, inst.RecordReportedConversationForTest(AgentConversationData{}), "an empty report is a no-op")
+	inst.RecordReportedConversationForTest(claudeConv)
 	assert.Empty(t, inst.Tabs)
 
 	b := &remoteAgentBackend{}
@@ -144,6 +148,7 @@ func TestLateReportedConversationSurvivesRestartAndResumes(t *testing.T) {
 
 	inst := &Instance{Title: "sb", Path: t.TempDir(), Program: "codex", Tabs: []*Tab{newRemoteAgentTab()}}
 	s := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: inst}
+	inst.remoteClient = s.rc
 	assert.False(t, inst.ConversationUnpersisted())
 
 	_, err := s.Snapshot()
@@ -184,6 +189,7 @@ func TestLateReportedConversationSurvivesRestartAndResumes(t *testing.T) {
 
 	// And the restored row resumes with it.
 	s2 := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: restored}
+	restored.remoteClient = s2.rc
 	require.NoError(t, s2.Launch(true))
 	srv.mu.Lock()
 	body := srv.bodies["/v1/agent/launch"]
@@ -191,4 +197,52 @@ func TestLateReportedConversationSurvivesRestartAndResumes(t *testing.T) {
 	conv, ok := body["conversation"].(map[string]any)
 	require.True(t, ok, "the restored row must send its conversation on launch: %v", body)
 	assert.Equal(t, late.ID, conv["id"])
+}
+
+// A RETIRED runtime's in-flight snapshot must not overwrite the replacement's
+// conversation identity: the report is bound to the runtime that produced it and
+// validated under the instance lock (#5862).
+func TestRetiredRuntimeSnapshotCannotOverwriteTheReplacementsConversation(t *testing.T) {
+	stale := AgentConversationData{Agent: tmux.ProgramCodex, ID: "019aaaaa-aaaa-bbbb-cccc-ddddeeeeffff", CaptureKind: ConversationCaptureCodexRollout}
+	fresh := AgentConversationData{Agent: tmux.ProgramCodex, ID: "019bbbbb-aaaa-bbbb-cccc-ddddeeeeffff", CaptureKind: ConversationCaptureCodexRollout}
+
+	oldSrv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true}).
+		route("/v1/agent/snapshot", map[string]any{"updated": true, "content": "x", "conversation": stale})
+	oldTS := httptest.NewServer(oldSrv.mux)
+	defer oldTS.Close()
+	newSrv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true}).
+		route("/v1/agent/snapshot", map[string]any{"updated": true, "content": "x", "conversation": fresh})
+	newTS := httptest.NewServer(newSrv.mux)
+	defer newTS.Close()
+
+	inst := &Instance{Title: "sb", Tabs: []*Tab{newRemoteAgentTab()}}
+	retired := &remoteAgentServer{rc: oldSrv.client(t, oldTS.URL), inst: inst}
+	replacement := &remoteAgentServer{rc: newSrv.client(t, newTS.URL), inst: inst}
+
+	// The old runtime is current: its report is accepted (anti-vacuous: the fence
+	// is not simply refusing everything).
+	inst.remoteClient = retired.rc
+	_, err := retired.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, stale, inst.AgentConversation())
+
+	// The runtime is replaced and the replacement records its own identity.
+	inst.remoteClient = replacement.rc
+	_, err = replacement.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, fresh, inst.AgentConversation())
+
+	// The retired runtime's snapshot, in flight across the replacement, lands now.
+	_, err = retired.Snapshot()
+	require.NoError(t, err)
+	assert.Equal(t, fresh, inst.AgentConversation(), "a retired runtime's report must be dropped")
+	assert.Equal(t, fresh, inst.reportedConversation)
+
+	// And after teardown (no runtime bound) nothing is recorded at all.
+	inst.remoteClient = nil
+	_, err = replacement.Snapshot()
+	require.NoError(t, err)
+	assert.Equal(t, fresh, inst.AgentConversation())
 }

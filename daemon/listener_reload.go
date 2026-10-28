@@ -38,6 +38,10 @@ import (
 //     here succeeds.
 type webListeners struct {
 	manager *Manager
+	// closed latches daemon shutdown so a reconcile that races it binds nothing.
+	// retryStop is non-nil while the startup bind-retry goroutine runs (W9.9).
+	closed    bool
+	retryStop chan struct{}
 	// webMux is the shared control-plane mux (also served on the unix socket).
 	webMux http.Handler
 	// previewMux is the web-tab preview listener's OWN mux: one catch-all route that
@@ -116,13 +120,6 @@ type webListeners struct {
 	// keep the live read or an allowed posture change would never reach it.
 	// Stale whenever webHandle is nil; only consulted while one is bound.
 	boundSeq uint64
-	// sandboxRevokedPreSwap accumulates the credential revocations the pre-swap
-	// fence performs inside retireWebBeforePostureSwap — including ones its
-	// refusal branch delegates to refuseWebLocked — so the count can reach
-	// ApplyConfig's warning channel even though the registry is already empty
-	// by the time the transition block sweeps it (#5137 review).
-	sandboxRevokedPreSwap int
-
 	// postureBeforeSwap is the config the daemon's sockets were serving under
 	// when the current ApplyConfig began — captured at retireWebBeforePostureSwap
 	// while the old live config is still published. A refusal-driven retire
@@ -153,6 +150,9 @@ func newWebListeners(manager *Manager, webMux, previewMux http.Handler) *webList
 func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err error) {
 	wl.mu.Lock()
 	defer wl.mu.Unlock()
+	if wl.closed {
+		return nil, nil
+	}
 	// A handle retained after unexpected listener death outlives the empty
 	// binding sentinel. Disabling that listener must still enter bindWebLocked's
 	// teardown path so accepted connections do not survive reconciliation.
@@ -247,6 +247,10 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 	if !floor && wl.manager.tokenFloorArmed() {
 		wl.manager.setTokenFloor(false)
 	}
+	// What `af daemon status` shows for a listener that is not accepting: the
+	// failure while it is failing, cleared once it binds or is configured off.
+	wl.recordBindError(true, webErr)
+	wl.recordBindError(false, previewErr)
 	var errs []error
 	if webErr != nil {
 		errs = append(errs, webErr)
@@ -291,13 +295,7 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 //     That socket is retired WITHOUT recording a refusal: the configured
 //     address is allowed, and reconcile may still bind it, so status must not
 //     report a refusal the file never asked for.
-//
-// The return is the count of sandbox callback credentials the pre-swap fences
-// below revoked — they consume the registry BEFORE ApplyConfig's own
-// require_token transition block runs, which would otherwise count zero and
-// stay silent. ApplyConfig carries the count into its warning so the save
-// surface still learns what the fence took (#5137 review).
-func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) int {
+func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 	wl.mu.Lock()
 	defer wl.mu.Unlock()
 	// The live config has not swapped yet, so this (#5183 floor included) is
@@ -305,7 +303,6 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) int {
 	// gate onto, so drain-window requests keep the posture they were admitted
 	// with rather than the weaker one about to publish.
 	wl.postureBeforeSwap = wl.manager.servedPosture()
-	wl.sandboxRevokedPreSwap = 0
 	// A relaxation apply is a drain-window hazard even when NOTHING is refused:
 	// generations already retired by a rebind or opt-out are invisible to the
 	// serving-socket check below (webHandle names only the newest generation)
@@ -333,16 +330,16 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) int {
 		wl.webFreeze.pin(wl.postureBeforeSwap, through)
 	}
 	if wl.probationPreSwapLocked(newCfg) {
-		return wl.sandboxRevokedPreSwap
+		return
 	}
 	if refusal := config.ListenerBindRefusal(newCfg); refusal != "" {
 		if wl.webRefusal != refusal || wl.webHandle != nil {
 			wl.refuseWebLocked(newCfg.ListenAddr, refusal)
 		}
-		return wl.sandboxRevokedPreSwap
+		return
 	}
 	if wl.webHandle == nil {
-		return wl.sandboxRevokedPreSwap
+		return
 	}
 	// Judge the SERVING socket under the incoming auth posture: webConfigAddr
 	// is the config value that produced it, which a failed rebind deliberately
@@ -352,7 +349,7 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) int {
 	serving := *newCfg
 	serving.ListenAddr = wl.webConfigAddr
 	if config.ListenerBindRefusal(&serving) == "" {
-		return wl.sandboxRevokedPreSwap
+		return
 	}
 	addr := wl.webBoundAddr
 	if addr == "" {
@@ -384,59 +381,10 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) int {
 	wl.webConfigAddr = ""
 	wl.webBoundAddr = ""
 	wl.webGen++
-	if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
-		wl.sandboxRevokedPreSwap += n
-		log.WarningLog.Printf("control listener on %s retired before the tokenless posture applied: revoked %d sandbox callback credential(s) minted against it; those sessions lose callback until a listener is bound and they are re-provisioned", addr, n)
-	}
 	log.ErrorLog.Printf("the control listener still bound on %s is retired before its token requirement is lifted: that address is "+
 		"network-reachable, and af refuses to carry it into an unauthenticated posture without network.allow_unauthenticated_network — "+
 		"the configured network.listen_addr %q is unaffected and still applies in this apply", addr, newCfg.ListenAddr)
-	return wl.sandboxRevokedPreSwap
-}
-
-// authPostureRelaxed reports whether the incoming config admits a peer old
-// would have rejected: the token requirement dropping, or the loopback-token
-// requirement dropping while require_token held. The loopback switch is only
-// a gate when require_token enforces something — under tokenDisabled it is
-// inert (a tokenless posture already admits everyone), so a combined apply
-// that enables require_token AND flips require_loopback_token off is a
-// TIGHTENING from all-free to tokened-with-loopback-exempt, not a relaxation
-// (#5137 review — judging either boolean in isolation misclassifies it, and a
-// mistaken pin would hide the strengthen from draining generations). While
-// require_token holds, though, the flag is exactly what exempts loopback
-// peers from the token, so its true→false transition relaxes the gate for
-// loopback traffic whether or not require_token also moved. It is the
-// kind-freeze trigger for NON-refusal applies: a generation retired by a
-// rebind or opt-out is invisible to the serving-socket refusal check —
-// webHandle names only the newest generation — yet its draining handlers
-// still read the live posture, which the publish is about to weaken beneath
-// them. Tightening deliberately does not match: a stronger posture must reach
-// drains live (#2480), so only the weakening direction freezes.
-func authPostureRelaxed(old, incoming *config.Config) bool {
-	if old == nil || incoming == nil {
-		return false
-	}
-	return (old.RequireToken && !incoming.RequireToken) ||
-		(old.RequireToken && old.RequireLoopbackToken && !incoming.RequireLoopbackToken)
-}
-
-// refusalPinPosture tightens the served config into the value a refusal pin
-// freezes drains onto. A refusal retires a socket BECAUSE its posture is no
-// longer sanctioned — most pointedly an opted-in tokenless listener whose
-// allow_unauthenticated_network the apply just revoked — so pinning the raw
-// served config would keep drain-window handlers answering unauthenticated on
-// the very socket being torn down (#5137 review). Raising both token flags to
-// their strictest interpretation of the served posture closes that: a late
-// handler with no token can no longer cross the gate. A served config that
-// already requires tokens everywhere pins unchanged.
-func refusalPinPosture(prev *config.Config) *config.Config {
-	if prev == nil || (prev.RequireToken && prev.RequireLoopbackToken) {
-		return prev
-	}
-	tightened := *prev
-	tightened.RequireToken = true
-	tightened.RequireLoopbackToken = true
-	return &tightened
+	return
 }
 
 // bindWebLocked (re)binds the control-plane web listener to the config address
@@ -504,9 +452,6 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 		// the done-watcher below clears listener state only while its own generation
 		// is current, and a torn-down listener must not have its state cleared twice.
 		wl.webGen++
-		if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
-			log.WarningLog.Printf("network.listen_addr is now empty: revoked %d sandbox callback credential(s) — the control listener is closed, so nothing can call back until it is re-enabled and those sessions are re-provisioned", n)
-		}
 		return nil
 	}
 	// Leaving the refused posture for an allowed bind: with no old socket
@@ -619,7 +564,6 @@ func (wl *webListeners) adoptWebListenerLocked(addr string, handle *tcpListenerH
 	go func() {
 		<-info.done
 		wl.mu.Lock()
-		revoked := 0
 		if wl.webGen == gen {
 			if wl.manager.lifecycle != nil {
 				wl.manager.lifecycle.clearTCPBound()
@@ -642,12 +586,8 @@ func (wl *webListeners) adoptWebListenerLocked(addr string, handle *tcpListenerH
 			// the one I did not think of, which is the argument for the rule being
 			// stated on the state itself rather than remembered at each site.
 			wl.webGen++
-			revoked = wl.manager.sandboxTokens.revokeAll()
 		}
 		wl.mu.Unlock()
-		if revoked > 0 {
-			log.WarningLog.Printf("the control listener on %s is no longer accepting: revoked %d sandbox callback credential(s) issued against it; those sessions lose callback until the listener is restored and they are re-provisioned", addr, revoked)
-		}
 	}()
 	if old != nil {
 		// The OLD listener is RETIRED, never closed (#3722). A remote config write
@@ -671,18 +611,6 @@ func (wl *webListeners) adoptWebListenerLocked(addr string, handle *tcpListenerH
 // started, so nothing minted against it moved, and the banner would claim a
 // move that never happened. Caller holds wl.mu.
 func (wl *webListeners) announceWebListenerLocked(addr string, info tcpListenerInfo, policy tokenGatePolicy, notice string) {
-	// The listener moved, so every sandbox callback credential minted against the
-	// old one now points at a closed address (#3012 review). Each sandbox has the
-	// URL baked into the environment file written at provision time and nothing
-	// rewrites it, so those tokens can no longer be used by the sandboxes holding
-	// them. Revoke rather than leave live credentials aimed at nothing, and SAY so:
-	// otherwise the capability vanishes silently inside sandboxes nobody is
-	// watching. Same rule the registry already applies across a daemon restart —
-	// a credential does not outlive the listener it was issued against. Affected
-	// sessions regain callback when they are re-provisioned.
-	if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
-		log.WarningLog.Printf("network.listen_addr moved to %s: revoked %d sandbox callback credential(s) minted against the previous listener; those sessions lose callback until they are re-provisioned", addr, n)
-	}
 	// The enable banner + posture, logged once per bind (initial and rebind). The
 	// bearer-token line is the operator's only channel to a network listener's
 	// credential; the posture switch and the exposure notice explain who may connect
@@ -768,15 +696,6 @@ func (wl *webListeners) refuseWebLocked(addr, refusal string) {
 	wl.webRefusal = refusal
 	if wl.manager.lifecycle != nil {
 		wl.manager.lifecycle.setTCPRefused(addr, refusal)
-	}
-	// Same rule as every other path that leaves the endpoint gone: credentials
-	// minted against the listener do not outlive it. The count also feeds
-	// sandboxRevokedPreSwap when this ran under retireWebBeforePostureSwap —
-	// the fence consumed the registry before ApplyConfig's transition block
-	// could count it.
-	if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
-		wl.sandboxRevokedPreSwap += n
-		log.WarningLog.Printf("network.listen_addr %s is refused (unauthenticated network posture): revoked %d sandbox callback credential(s) minted against the listener it replaces; those sessions lose callback until a listener is bound and they are re-provisioned", addr, n)
 	}
 	log.ErrorLog.Printf("%s", refusal)
 }
@@ -975,6 +894,11 @@ func (m *Manager) ListenerAddress(key string) string {
 func (wl *webListeners) close() error {
 	wl.mu.Lock()
 	defer wl.mu.Unlock()
+	wl.closed = true
+	if wl.retryStop != nil {
+		close(wl.retryStop)
+		wl.retryStop = nil
+	}
 	var errs []error
 	if wl.webHandle != nil {
 		errs = append(errs, wl.webHandle.close())

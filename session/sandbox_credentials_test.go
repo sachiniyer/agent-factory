@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/unixurl"
 )
 
 // The credential subscribes to the RUNTIME's lifetime (#3068): provisioning a
@@ -312,4 +314,26 @@ func TestClearStaleCallbackSocket(t *testing.T) {
 	p.callbackSocket = "/home/u/.af-sessions/s.X/af-callback.sock"
 	p.clearStaleCallbackSocket()
 	assert.Equal(t, []string{"rm -f -- '/home/u/.af-sessions/s.X/af-callback.sock'"}, ran)
+}
+
+// The URL the in-sandbox client receives names EXACTLY the socket the carrier
+// forwards, for a session directory containing characters that are special in a
+// URL (#5870). Before, "#", "?" and "%" silently truncated or rewrote the path
+// while the ssh -R forward targeted the correct socket.
+func TestCallbackURLRoundTripsTheSocketPath(t *testing.T) {
+	for _, dir := range []string{
+		"/home/u/af#work/s.AbC123",
+		"/home/u/af?x/s.AbC123",
+		"/home/u/100%/s.AbC123",
+		"/home/ユーザー/s.AbC123",
+	} {
+		w := &sandboxWorkspace{SessionDir: dir, spec: ProvisionSpec{CallbackToken: "secret", CallbackSocket: "/home/d/cb.sock"}}
+		fwd, lost := w.callbackReverseForward()
+		require.Empty(t, lost, dir)
+		require.NotEmpty(t, fwd, dir)
+		got, ok, err := unixurl.Parse(w.spec.CallbackURL)
+		require.NoError(t, err, dir)
+		require.True(t, ok)
+		assert.Equal(t, w.CallbackSocketPath(), got, "the client dials the socket the provisioner created")
+	}
 }

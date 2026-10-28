@@ -66,13 +66,18 @@ func (w *sandboxWorkspace) probeRemotePlatform(timeout time.Duration) (remotePla
 	return plat, nil
 }
 
-// remoteBinaryName is the version+platform cache filename inside the host's
-// shared bin dir: af-1.0.327-linux-amd64. The platform is part of the name so
-// a shared $HOME mounted across machines can never hand a host another
-// platform's build. The version is the daemon's own build string, sanitized —
+// remoteBinaryName is the content-addressed cache filename inside the host's
+// shared bin dir: af-1.0.327-linux-amd64-0123456789abcdef. The digest prefix
+// makes the path immutable (#5876): two candidates for one version and platform
+// (the daemon's own build and the release artifact, or hosts of different libc
+// sharing a $HOME) get different paths, so installing one never rewrites a file
+// a running session's af link points at. The platform stays in the name so a
+// shared $HOME is readable by humans; the digest alone is what keeps it safe.
+// An unprobed platform (an explicit override on a host af publishes nothing
+// for, #5875) is spelled "unknown". The version is the daemon's own build string, sanitized —
 // it is interpolated into the remote script's path word, so anything outside
 // a filename-safe set becomes '_' rather than shell.
-func remoteBinaryName(version string, plat remotePlatform) string {
+func remoteBinaryName(version string, plat remotePlatform, sha string) string {
 	clean := strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
 			r == '.' || r == '_' || r == '-' {
@@ -83,7 +88,14 @@ func remoteBinaryName(version string, plat remotePlatform) string {
 	if clean == "" {
 		clean = "unknown"
 	}
-	return fmt.Sprintf("af-%s-%s-%s", clean, plat.goos, plat.goarch)
+	goos, goarch := plat.goos, plat.goarch
+	if goos == "" || goarch == "" {
+		goos, goarch = "unknown", "unknown"
+	}
+	if len(sha) > 16 {
+		sha = sha[:16]
+	}
+	return fmt.Sprintf("af-%s-%s-%s-%s", clean, goos, goarch, sha)
 }
 
 // remoteBinPath renders a name inside the host's shared bin dir as a
@@ -247,7 +259,7 @@ func (w *sandboxWorkspace) remoteBinarySHA256(timeout time.Duration, quotedPath 
 }
 
 // installRemoteBinary places the candidate on the host's shared bin dir as
-// af-<version>-<goos>-<goarch>, skipping the stream entirely when the cached
+// af-<version>-<goos>-<goarch>-<sha prefix>, skipping the stream entirely when the cached
 // file already matches the daemon's sha256 for the bytes it would send. The
 // upload lands under a unique temp name and is mv'd into place — a shared
 // directory means a second provision can be mid-stream beside this one, and
@@ -257,7 +269,7 @@ func (w *sandboxWorkspace) installRemoteBinary(timeout time.Duration, plat remot
 	if err != nil {
 		return "", fmt.Errorf("hashing %s failed: %w", cand.label, err)
 	}
-	name := remoteBinaryName(DaemonVersion(), plat)
+	name := remoteBinaryName(DaemonVersion(), plat, wantSHA)
 	dst := remoteBinPath(name)
 	if got := w.remoteBinarySHA256(sshShortStepTimeout, dst); got == wantSHA {
 		log.InfoLog.Printf("remote binary: %s already on the host as %s (sha256 match) — skipping the stream",
@@ -335,7 +347,15 @@ func (w *sandboxWorkspace) verifyRemoteBinary(timeout time.Duration, cand remote
 func (p *sandboxProvisioner) stageRemoteBinary(w *sandboxWorkspace) error {
 	plat, err := w.probeRemotePlatform(sshShortStepTimeout)
 	if err != nil {
-		return fmt.Errorf("backend=%s: %w", p.label(), err)
+		// The probe only decides which binary af picks for itself. An explicit
+		// sandbox.binary is the operator's own choice — typically for a
+		// platform af publishes nothing for — and is still checked by actually
+		// running it (the version gate below) (#5875).
+		if strings.TrimSpace(p.sandboxBinary) == "" {
+			return fmt.Errorf("backend=%s: %w", p.label(), err)
+		}
+		log.InfoLog.Printf("remote binary: platform probe failed (%v); trying the sandbox.binary override anyway", err)
+		plat = remotePlatform{}
 	}
 	ctx := context.Background()
 	var lastErr error

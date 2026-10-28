@@ -21,6 +21,10 @@ var readWrapperMethods = map[string]bool{
 	"ListAccounts":          true,
 	"ListBackends":          true,
 	"ListPrograms":          true,
+	// WorkspaceFacts runs git status / rev-list / for-each-ref over the session's
+	// workspace and counts: no side effects, so a replayed request measures again
+	// (#5571 W8.2).
+	"WorkspaceFacts": true,
 }
 
 // TestReadWrapperCallsOnlyReads parses the package's production source and
