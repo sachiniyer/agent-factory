@@ -134,12 +134,36 @@ const dynamicMark = "\x00dynamic"
 // time when env's operands are parsed. A word that starts NAME= keeps that
 // shape — env treats it as an assignment whatever the value expands to, and
 // whether or not the whole word is quoted ("VAR=$HOME/x", #5780) — so its
-// name, and only its name, is known.
+// name, and only its name, is known. That holds only while the word stays ONE
+// operand: an unquoted expansion ("VAR="$X, VAR=$X) is field-split by the
+// shell, and `X='v PATH=/custom/bin'` hands env a second, real assignment
+// (#5872). A word that can split is as computed as any other and is refused.
 func dynamicWordPlaceholder(word *syntax.Word) string {
+	if !staysOneField(word.Parts) {
+		return dynamicMark
+	}
 	if name, _, found := strings.Cut(leadingLiteral(word.Parts), "="); found && validAssignmentName(name) {
 		return name + "=" + dynamicMark
 	}
 	return dynamicMark
+}
+
+// staysOneField reports whether the shell is certain to pass the word as a
+// single operand: every expansion sits inside double quotes, and no unquoted
+// literal is a glob pattern.
+func staysOneField(parts []syntax.WordPart) bool {
+	for _, part := range parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			if strings.ContainsAny(p.Value, "*?[") {
+				return false
+			}
+		case *syntax.SglQuoted, *syntax.DblQuoted:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // leadingLiteral returns the literal text a word starts with, looking through
