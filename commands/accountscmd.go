@@ -243,8 +243,8 @@ settings may be seeded; notices explaining them are printed to stderr.`,
 		if apiclient.IsRemoteTarget() {
 			return jsonWrapError(cmd, accountsJSONFlag, fmt.Errorf(
 				"af accounts manages credential directories in this machine's agent-factory home and cannot "+
-					"manage them on a remote daemon; unset --daemon-url/AF_DAEMON_URL to act on this host, "+
-					"or run af accounts on the daemon's host"))
+					"manage them on %s; unset --daemon-url/AF_DAEMON_URL to act on this host, "+
+					"or run af accounts on the daemon's host", targetLabel()))
 		}
 
 		agent, name := args[0], args[1]
@@ -344,8 +344,8 @@ than accepting a selection that would silently do nothing.`,
 		if apiclient.IsRemoteTarget() {
 			return jsonWrapError(cmd, accountsJSONFlag, fmt.Errorf(
 				"af accounts manages credential directories in this machine's agent-factory home and cannot "+
-					"manage them on a remote daemon; unset --daemon-url/AF_DAEMON_URL to act on this host, "+
-					"or run af accounts on the daemon's host"))
+					"manage them on %s; unset --daemon-url/AF_DAEMON_URL to act on this host, "+
+					"or run af accounts on the daemon's host", targetLabel()))
 		}
 
 		home, err := config.GetConfigDir()
