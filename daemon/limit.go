@@ -205,7 +205,11 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	data := instance.ToInstanceData()
 	livenessChanged := data.Liveness != before
 	resetChanged := !data.LimitResetAt.Equal(beforeReset)
-	durableChanged := livenessChanged || resetChanged || settlementCheckpoint
+	// A conversation identity reported by a remote agent-server and not yet
+	// durable is a durable change of its own (#5826): without this a Codex id
+	// reported after launch, while the session stays Running, lived in memory
+	// only and a daemon restart lost the resume handle.
+	durableChanged := livenessChanged || resetChanged || settlementCheckpoint || instance.ConversationUnpersisted()
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return
@@ -243,6 +247,9 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	var err error
 	if durableChanged {
 		err = persistInstanceData(repoID, data)
+		if err == nil && len(data.Tabs) > 0 && data.Tabs[0].Conversation != nil {
+			instance.MarkConversationPersisted(*data.Tabs[0].Conversation)
+		}
 	}
 	key := daemonInstanceKey(repoID, instance.Title)
 	testHookPollBeforeSettlementRecord()

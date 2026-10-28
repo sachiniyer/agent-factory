@@ -459,6 +459,12 @@ type Instance struct {
 	// (RecordReportedConversation), held until the daemon-side agent tab exists to
 	// carry it. Guarded by mu.
 	reportedConversation AgentConversationData
+	// conversationUnpersisted is set when a remote agent-server reported a
+	// conversation identity that changed the row and the change has not yet been
+	// durably written (#5826). The daemon's poll persistence reads it as a
+	// durable change of its own and clears it only after the write succeeds, so
+	// a failed write is retried on the next tick. Guarded by mu.
+	conversationUnpersisted bool
 
 	// carriedTabs is the tab roster a PREVIOUS record held, to be rebuilt onto
 	// this instance once its agent tab is live (#2628). It has the same single

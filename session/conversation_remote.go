@@ -59,5 +59,29 @@ func (i *Instance) RecordReportedConversation(conv AgentConversationData) bool {
 	// Kept apart from Tabs[0]: a launch report arrives before the daemon-side
 	// agent tab is seeded, and the seeding step applies it.
 	i.reportedConversation = conv
-	return i.setAgentConversationLocked(conv)
+	changed := i.setAgentConversationLocked(conv)
+	if changed {
+		i.conversationUnpersisted = true
+	}
+	return changed
+}
+
+// ConversationUnpersisted reports whether a reported conversation identity is
+// still memory-only (#5826).
+func (i *Instance) ConversationUnpersisted() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.conversationUnpersisted
+}
+
+// MarkConversationPersisted records that a whole-row write carrying persisted
+// has landed. It clears the pending flag only when the conversation that was
+// written is the one now held: an identity reported after the written snapshot
+// was taken stays pending and is written on the next tick.
+func (i *Instance) MarkConversationPersisted(persisted AgentConversationData) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if len(i.Tabs) > 0 && i.Tabs[0].Conversation == persisted {
+		i.conversationUnpersisted = false
+	}
 }
