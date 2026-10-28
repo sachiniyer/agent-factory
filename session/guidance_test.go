@@ -54,6 +54,14 @@ func TestGuidanceFollowsTheCapabilityProjection(t *testing.T) {
 			anyTab := allowed["shell"] || allowed["web"] || allowed["vscode"]
 			assert.Equal(t, anyTab, strings.Contains(ref, "tab-delete"), "tab-delete only when a tab can be made")
 
+			// A remote workspace admits only external HTTPS web tabs, so the
+			// guidance must not teach the --port workflow the daemon refuses.
+			if allowed["web"] {
+				refusesLoopback := tc.caps.RefuseTabKind(TabKindWeb, "http://localhost:3000") != nil
+				assert.Equal(t, !refusesLoopback, strings.Contains(ref, "--port"), "web --port alternative")
+				assert.Equal(t, refusesLoopback, strings.Contains(ref, "only external HTTPS"), "HTTPS-only restriction stated")
+			}
+
 			selfArchive := tc.caps.Archive && !tc.callbackUnavailable
 			assert.Equal(t, selfArchive, strings.Contains(ref, "archive --self"), "self-archive")
 			assert.Equal(t, !tc.callbackUnavailable, strings.Contains(ref, "af sessions whoami"), "callback verbs")

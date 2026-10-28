@@ -30,6 +30,9 @@ type guidanceCaps struct {
 	// A process tab is a shell tab's sibling (TabNeedsLocalProcess) and follows
 	// Shell; the projection never lists it as its own kind.
 	Shell, Web, VSCode bool
+	// WebHTTPSOnly: the admitted web tabs are external HTTPS targets only — a
+	// loopback target (--port) is refused, as it is on a remote workspace.
+	WebHTTPSOnly bool
 }
 
 // fullGuidanceCaps is what a local session with a callback is shown — the
@@ -51,6 +54,7 @@ func guidanceCapsFor(callbackUnavailable bool, c Capabilities) guidanceCaps {
 			g.Shell = a.Allowed
 		case "web":
 			g.Web = a.Allowed
+			g.WebHTTPSOnly = a.Allowed && c.RefuseTabKind(TabKindWeb, "http://localhost:3000") != nil
 		case "vscode":
 			g.VSCode = a.Allowed
 		}
@@ -93,7 +97,7 @@ func (g guidanceCaps) String() string {
 		}
 		return "0"
 	}
-	return "cb" + b(g.Callback) + "sa" + b(g.SelfArchive) + "sh" + b(g.Shell) + "w" + b(g.Web) + "vs" + b(g.VSCode)
+	return "cb" + b(g.Callback) + "sa" + b(g.SelfArchive) + "sh" + b(g.Shell) + "w" + b(g.Web) + "ws" + b(g.WebHTTPSOnly) + "vs" + b(g.VSCode)
 }
 
 // afSelfArchiveLine and afUsageOutroInsideNoSelfArchive are the two places the
@@ -135,7 +139,7 @@ func (g guidanceCaps) tabsSection() string {
 		lines = append(lines, afTabLineShell, afTabLineProcess)
 	}
 	if g.Web {
-		lines = append(lines, afTabLineWeb)
+		lines = append(lines, g.webLine())
 	}
 	if g.VSCode {
 		lines = append(lines, afTabLineVSCode)
@@ -144,5 +148,26 @@ func (g guidanceCaps) tabsSection() string {
 		return "Tabs: this session cannot add tabs; ask the user if you need a terminal, web, or editor view."
 	}
 	lines = append(lines, afTabLineDelete)
-	return afTabsLead + afTabsTail + "\n" + strings.Join(lines, "\n")
+	lead := afTabsLead
+	if g.Web && g.WebHTTPSOnly {
+		// Keep the restriction the full text carries: a remote workspace admits only
+		// external HTTPS web tabs, and the daemon refuses a loopback target.
+		lead += afTabsWebHTTPSOnly
+	}
+	return lead + afTabsTail + "\n" + strings.Join(lines, "\n")
+}
+
+// afTabsWebHTTPSOnly replaces the full text's restriction prose for a session
+// whose only admitted web targets are external HTTPS URLs.
+const afTabsWebHTTPSOnly = "Web tabs on this session accept only external HTTPS URLs; a loopback target (localhost or a local port) is refused. "
+
+// afTabLineWebHTTPSOnly is afTabLineWeb without the --port alternative, which a
+// remote workspace refuses.
+const afTabLineWebHTTPSOnly = "  af sessions tab-create <title> --kind web --url <https-url>     Web tab — a live browser view (no process) shown to the user in the web UI; this is how you show an external HTTPS site"
+
+func (g guidanceCaps) webLine() string {
+	if g.WebHTTPSOnly {
+		return afTabLineWebHTTPSOnly
+	}
+	return afTabLineWeb
 }
