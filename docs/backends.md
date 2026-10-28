@@ -413,8 +413,13 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 3. It probes the remote's platform (`uname -s`/`uname -m`), picks an `af` binary
    the host can run — `sandbox.binary` if set, else the daemon's own binary on a
    matching platform, else the sha256-verified release artifact for the remote's
-   platform — and installs it under `~/.af-bin/` (a per-host cache the
-   next sessions reuse when the cached file's sha256 still matches). It then runs
+   platform — and installs it under `~/.af-bin/` (a per-host cache named by the
+   binary's sha256, so installing one build never rewrites another that a
+   running session links to; the next sessions reuse a matching file). An
+   explicit `sandbox.binary` is used even on a platform af publishes no build
+   for. The session directory stays first on the agent's `PATH`, so `af` in the
+   pane is the staged one even when the login profile puts an older install
+   ahead of it. It then runs
    `af version` **on the remote** and refuses to launch unless the staged binary
    reports the daemon's own version. Only then does it start an
    **`af agent-server`** bound to `127.0.0.1:0` (a random loopback port — never
@@ -837,9 +842,9 @@ See `examples/move-script/move.sh` for a documented example.
 
 ## Session-scoped account sync (listed hosts)
 
-> **Status:** the sync mechanism exists in the ssh runtime but is not reachable
-> yet — `--account` on an ssh or sandbox session is still refused (see the
-> account notes above) until W7.4 admits it. This section is the contract.
+> **Status:** `--account` and `default_accounts` are admitted on an ssh session
+> placed on a listed host (W7.4). On any other target an explicit `--account` is
+> refused at admission with the remedy, and a default account is not applied.
 
 On a host in the global host list (`[hosts.<name>]`), af copies the session's
 selected account into **that session's own scope** — `<session dir>/account` on the
@@ -854,19 +859,25 @@ config, so the host's own login is neither read nor replaced.
 - **Only to a listed host.** The licence to send credentials is the host-list
   entry, which only the operator writes. A target a repository named (its `[ssh]`
   section) or a free-form `sandbox.ssh` command is refused before anything is sent.
-- **Refreshes are written back.** Credential files the agent rewrote on the host
-  replace the registry copy (atomically, mode 0600, only when the content changed),
-  and the archive the host returns is untrusted: any entry that is not exactly an
-  expected credential file refuses the whole write-back. Teardown writes back one
-  last time, then removes the scope.
+- **Refreshes are written back — as a versioned compare-and-swap from a bounded
+  stream.** af remembers the version (a content digest) of each credential file it
+  synced into the session. A file the agent did not change is never written back, and
+  a changed one replaces the registry copy only while the registry still holds the
+  version this session synced in: if another session on the same account refreshed it
+  first, or the account was removed, the write is skipped and logged, so a stale
+  snapshot can never overwrite a fresher one. The host is untrusted, so its archive is
+  read under a hard byte limit while it streams — the command is killed when the limit
+  is crossed — and a truncated, oversized or malformed archive is refused whole.
+  Replacement is atomic, mode 0600, credential files only. Teardown writes back one
+  last time, then removes the scope. A refresh that loses the race stays on the host
+  and is discarded with the session; fan-out to live sessions is not built yet.
 - **Sessions on one host share its ssh user**, so they can read each other's
   workspaces and synced credentials, exactly as local worktrees share one user
   today. A Unix user per session is a later hardening, not part of this contract.
 
 Not yet built: fanning a refresh out to every live session on the same account
 (providers that rotate refresh tokens log the others out), write-back on a timer or
-after a daemon restart, and admitting `--account` and `default_accounts` off-box
-(W7.4).
+after a daemon restart.
 
 ## Archive & restore
 

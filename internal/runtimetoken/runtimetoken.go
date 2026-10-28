@@ -166,6 +166,29 @@ func DeriveAgentServerToken(key []byte, ref string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
+// DeriveCallbackToken computes the sandbox callback credential for one session
+// under ref (#5571 W3.6): HMAC-SHA256(key, "af-sandbox-callback/v1/"+sessionID+
+// "/"+nonce), base64url. Deriving it, rather than drawing a random secret that
+// lives only in the daemon's memory, is what lets a restarted daemon accept the
+// credential a still-running sandbox already holds: the row persists only the
+// ref, the daemon re-derives the same secret from its 0600 key and re-registers
+// it, and nothing has to be re-delivered to the sandbox. The session id is part
+// of the input so one ref can never yield a credential for another session, and
+// the label separates this construction from DeriveAgentServerToken's so the two
+// credentials are never interchangeable.
+func DeriveCallbackToken(key []byte, sessionID, ref string) (string, error) {
+	nonce, ok := strings.CutPrefix(ref, refSchemeV1+".")
+	if !ok || nonce == "" {
+		return "", fmt.Errorf("sandbox callback reference has an unknown scheme")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return "", fmt.Errorf("cannot derive a sandbox callback token without a session id")
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte("af-sandbox-callback/" + refSchemeV1 + "/" + sessionID + "/" + nonce))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
 // argv0 is a test seam for the spelling this process was launched under.
 var argv0 = func() string {
 	if len(os.Args) > 0 {

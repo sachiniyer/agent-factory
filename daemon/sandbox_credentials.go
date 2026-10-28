@@ -52,6 +52,7 @@ func (c *sandboxCredentials) Mint() (session.SandboxCredential, error) {
 	registry := &c.manager.sandboxTokens
 	return session.SandboxCredential{
 		Token:  grant.Token,
+		Ref:    grant.Ref,
 		Socket: grant.Socket,
 		// Carries the fence with it, so whoever provisions can re-check it after —
 		// the create path and the replacement path both do, through the same
@@ -64,6 +65,21 @@ func (c *sandboxCredentials) Mint() (session.SandboxCredential, error) {
 			return errSandboxCallbackInvalidated(grant.Socket)
 		},
 	}, nil
+}
+
+// RestoreCallback re-registers the credential derived from ref for this session
+// (session.CallbackRestorer, #5571 W3.6). A restarted daemon has an empty
+// registry, but the sandbox still holds the secret it was given; the row
+// persisted only the non-secret ref, so deriving it again from the daemon's
+// runtime-identity key yields the same secret and nothing is re-delivered. A
+// missing key is an error, never a fresh key: a new key could only derive a
+// credential the sandbox does not hold.
+func (c *sandboxCredentials) RestoreCallback(ref string) error {
+	if c == nil || c.manager == nil {
+		return nil
+	}
+	_, err := c.manager.sandboxTokens.adopt(c.sessionID, ref, false)
+	return err
 }
 
 // Revoke drops this session's credential. Idempotent, and a no-op for a session

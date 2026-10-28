@@ -45,7 +45,20 @@ func requireLocalTarget(name, does string) error {
 	if !apiclient.IsRemoteTarget() {
 		return nil
 	}
-	return fmt.Errorf("%s is local-only: it %s and cannot act on a remote daemon; "+
-		"unset --daemon-url/AF_DAEMON_URL to act on this host, or run %s on the daemon host",
-		name, does, name)
+	return fmt.Errorf("%s is local-only: it %s and cannot act on %s; "+
+		"unset --daemon-url/AF_DAEMON_URL (and any saved target: af target clear) to act on this host, "+
+		"or run %s on the daemon host",
+		name, does, targetLabel(), name)
+}
+
+// targetLabel names the daemon a refusal is about, so the message says WHICH
+// machine the verb declined to act on (W9.4). The URL comes from the same
+// resolver the real client uses, so a flag, the env and a saved target all
+// print what would actually have been dialled; the generic fallback covers a
+// target that is configured but unreadable.
+func targetLabel() string {
+	if url := apiclient.RemoteTargetURL(); url != "" {
+		return "the remote daemon at " + url
+	}
+	return "the configured remote daemon"
 }

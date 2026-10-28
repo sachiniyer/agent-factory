@@ -44,7 +44,8 @@ type snapshotFetchedMsg struct {
 	tasks    []task.Task
 	tasksErr error
 	// remote is the target's registry and tasks read on this poll, nil locally.
-	remote *remoteReads
+	remote    *remoteReads
+	remoteSeq uint64
 	// alarms carries any persistent watch-task delivery-failure alarms projected
 	// on the same daemon snapshot (#1238). It rides the session snapshot because
 	// it is a field of the one authoritative Snapshot response, not a separate
@@ -95,6 +96,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	repoRoot := m.repoRoot
 	fetch := m.snapshotFetcher
 	lifetime := m.ctx
+	remoteSeq := m.remote.seq // the task-mutation count this poll starts from
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
 	return func() tea.Msg {
@@ -136,7 +138,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		allReposData, allReposErr := allRepos(context.Background())
 		return snapshotFetchedMsg{
 			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
-			tasks: tasks, tasksErr: tasksErr, repoID: repoID, remote: remote,
+			tasks: tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
 			allRepos: allReposData, allReposErr: allReposErr,
 		}
 	}

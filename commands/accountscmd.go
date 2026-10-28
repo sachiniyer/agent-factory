@@ -118,11 +118,19 @@ real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the config
 directory, so without it a session would authenticate as whoever that key belongs
 to while every visible signal reported the selected account.
 
-Account-scoped sessions require the local or docker backend, and tmux 3.2 or newer. af
-refuses rather than falling back, because a fallback would run on the ambient
-account while reporting the one you asked for.
+Account-scoped sessions need tmux 3.2 or newer and run on the local backend, the docker backend, or an ssh
+session placed on a host in the global host list (--host <name>). On a listed host
+af syncs the session's account — only its credential files — into that session's
+own directory on the host, never the remote user's global agent config, writes
+refreshes back, and removes it when the session is killed or archived. A default
+account (default_accounts) is applied the same way; on a target that is not a listed
+host it is not applied, and the session runs on the host's own credentials. An
+explicit --account on such a target is refused, naming the remedy. af refuses rather
+than falling back, because a fallback would run on the ambient account while
+reporting the one you asked for. Sessions on one host share its ssh user, so they can
+read each other's synced credentials.
 
-ssh, sandbox and hook refuse by design, not because the work is pending. docker
+sandbox and hook targets cannot be listed, so they refuse an explicit account. docker
 bind-MOUNTS the directory, so account writes land in your real account. ` +
 		session.AccountWriteBackRationale + `
 
@@ -243,8 +251,8 @@ settings may be seeded; notices explaining them are printed to stderr.`,
 		if apiclient.IsRemoteTarget() {
 			return jsonWrapError(cmd, accountsJSONFlag, fmt.Errorf(
 				"af accounts manages credential directories in this machine's agent-factory home and cannot "+
-					"manage them on a remote daemon; unset --daemon-url/AF_DAEMON_URL to act on this host, "+
-					"or run af accounts on the daemon's host"))
+					"manage them on %s; unset --daemon-url/AF_DAEMON_URL to act on this host, "+
+					"or run af accounts on the daemon's host", targetLabel()))
 		}
 
 		agent, name := args[0], args[1]
@@ -344,8 +352,8 @@ than accepting a selection that would silently do nothing.`,
 		if apiclient.IsRemoteTarget() {
 			return jsonWrapError(cmd, accountsJSONFlag, fmt.Errorf(
 				"af accounts manages credential directories in this machine's agent-factory home and cannot "+
-					"manage them on a remote daemon; unset --daemon-url/AF_DAEMON_URL to act on this host, "+
-					"or run af accounts on the daemon's host"))
+					"manage them on %s; unset --daemon-url/AF_DAEMON_URL to act on this host, "+
+					"or run af accounts on the daemon's host", targetLabel()))
 		}
 
 		home, err := config.GetConfigDir()

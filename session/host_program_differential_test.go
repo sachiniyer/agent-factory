@@ -55,6 +55,7 @@ func TestResolveProgramOnHostMatchesARealShell(t *testing.T) {
 	file("real/claude", 0o755)
 
 	p := func(rel string) string { return filepath.Join(root, rel) }
+	envDir := realEnvDir(t, root)
 	cases := []struct{ name, program, path string }{
 		{"plain lookup", "claude", p("plain/bin")},
 		{"arguments kept", "claude --x --y", p("plain/bin")},
@@ -78,6 +79,10 @@ func TestResolveProgramOnHostMatchesARealShell(t *testing.T) {
 		{"empty entry first leaves it to the shell", "claude", ":" + p("plain/bin")},
 	}
 	for _, tc := range cases {
+		// A real env sits last on every PATH, so env-wrapper cases execute
+		// instead of agreeing on "env: not found" (#5873). It holds no
+		// `claude`, so it can never be the answer to a lookup.
+		tc.path += ":" + envDir
 		t.Run(tc.name, func(t *testing.T) {
 			// The shell's cwd holds a decoy `claude` so a wrongly cwd-relative
 			// answer would show; the pane's cwd is the worktree.
@@ -96,16 +101,13 @@ func TestResolveProgramOnHostMatchesARealShell(t *testing.T) {
 			resolved, adopted, err := resolveProgramOnHost(context.Background(), tc.program, prober)
 			require.NoError(t, err)
 
-			run := func(program, pathEnv string) string {
-				cmd := exec.Command(sh, "-c", program)
-				cmd.Dir = cwd
-				cmd.Env = []string{"PATH=" + pathEnv, "HOME=" + root}
-				out, _ := cmd.CombinedOutput()
-				return strings.TrimSpace(string(out))
-			}
-			want := run(tc.program, tc.path)
-			got := run(resolved, adopted)
-			require.NotEmpty(t, want, "the oracle shell ran nothing — a broken fixture, not a resolver result")
+			want, err := runOnShell(sh, cwd, root, tc.program, tc.path)
+			require.NoError(t, err, "the oracle shell failed: %s", want)
+			// A fixture executable always prints its own identity; anything else
+			// (a diagnostic, nothing) means the command never ran an agent.
+			require.Regexp(t, `(^|/)claude$|^CWD$`, want, "the oracle must have executed an agent, not just produced output")
+			got, err := runOnShell(sh, cwd, root, resolved, adopted)
+			require.NoError(t, err, "the resolved command failed: %s", got)
 			assert.Equal(t, want, got, "resolved %q", resolved)
 		})
 	}
@@ -118,4 +120,95 @@ func TestResolveProgramOnHostRefusesWhatNoShellCouldRun(t *testing.T) {
 	prober := loginPATHProber("", root)
 	_, _, err := resolveProgramOnHost(context.Background(), "claude", prober)
 	require.Error(t, err)
+}
+
+// runOnShell runs command under a real sh with only PATH and HOME set, and
+// returns its trimmed combined output. A failing command is an error: the
+// oracle may not treat a diagnostic as an answer (#5873).
+func runOnShell(sh, cwd, home, command, pathEnv string) (string, error) {
+	cmd := exec.Command(sh, "-c", command)
+	cmd.Dir = cwd
+	cmd.Env = []string{"PATH=" + pathEnv, "HOME=" + home}
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// realEnvDir is a directory whose only entry is the host's real env.
+func realEnvDir(t *testing.T, root string) string {
+	t.Helper()
+	env, err := exec.LookPath("env")
+	require.NoError(t, err, "the differential oracle needs a real env")
+	dir := filepath.Join(root, "realenv")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.Symlink(env, filepath.Join(dir, "env")))
+	return dir
+}
+
+// The control for the env cases (#5873): without env on PATH the same command
+// must fail on the shell, and with it must run. If the fixture ever stops
+// providing env the table above would agree on a diagnostic; this fails first.
+func TestDifferentialOracleActuallyExecutesEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX shell")
+	}
+	sh, err := exec.LookPath("sh")
+	require.NoError(t, err)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	bin := filepath.Join(root, "bin")
+	require.NoError(t, os.MkdirAll(bin, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\necho bin/claude\n"), 0o755))
+	envDir := realEnvDir(t, root)
+
+	out, err := runOnShell(sh, root, root, "env V=1 claude", bin)
+	require.Error(t, err, "env must be absent from this PATH: %s", out)
+	assert.Contains(t, out, "not found")
+	out, err = runOnShell(sh, root, root, "env V=1 claude", bin+":"+envDir)
+	require.NoError(t, err, out)
+	assert.Equal(t, "bin/claude", out)
+}
+
+// A quoted prefix followed by an unquoted expansion is field-split by the shell
+// (#5872): X='v PATH=<dir>' gives env a second, real PATH assignment, so the
+// agent that runs is not the one on the inherited PATH. The resolver must
+// refuse rather than pin the wrong one.
+func TestResolveProgramOnHostRefusesFieldSplitEnvAssignments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX shell")
+	}
+	sh, err := exec.LookPath("sh")
+	require.NoError(t, err)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	for _, rel := range []string{"inherited", "smuggled"} {
+		dir := filepath.Join(root, rel)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\necho "+rel+"\n"), 0o755))
+	}
+	pathEnv := filepath.Join(root, "inherited") + ":" + realEnvDir(t, root)
+
+	for _, program := range []string{`env "VAR="$X claude`, `env VAR=$X claude`, `env VAR=${X} claude`, `env VAR=$(echo v) claude`} {
+		t.Run(program, func(t *testing.T) {
+			// Control: the real shell does run the smuggled agent.
+			cmd := exec.Command(sh, "-c", program)
+			cmd.Env = []string{"PATH=" + pathEnv, "HOME=" + root, "X=v PATH=" + filepath.Join(root, "smuggled")}
+			if strings.Contains(program, "echo") {
+				cmd.Env[2] = "X=unused"
+			} else {
+				out, err := cmd.CombinedOutput()
+				require.NoError(t, err, string(out))
+				require.Equal(t, "smuggled", strings.TrimSpace(string(out)), "the control must show the smuggled PATH winning")
+			}
+			prober := hostProgramProber{
+				shell: sh, host: "fixture",
+				run: func(_ context.Context, argv []string) ([]byte, error) {
+					return []byte("\n" + argv[5] + "\n" + pathEnv + "\n"), nil
+				},
+				canExecute: canExecuteFile,
+				nonce:      func() string { return "N" },
+			}
+			_, _, err := resolveProgramOnHost(context.Background(), program, prober)
+			require.Error(t, err, "a field-splittable env operand must be refused")
+		})
+	}
 }

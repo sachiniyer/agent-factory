@@ -218,7 +218,18 @@ func (c *Client) ResumeStatusPoll(req daemon.ResumeStatusPollRequest) error {
 // the daemon over these same HTTP routes the web UI uses, so the transport alone
 // cannot tell them apart and each client says which it is.
 func (c *Client) AddTask(t task.Task, actor task.Actor) error {
-	return c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &daemon.AddTaskResponse{})
+	_, err := c.AddTaskResult(t, actor)
+	return err
+}
+
+// AddTaskResult is AddTask returning the record the daemon stored, or nil when
+// the daemon predates the field or answered a committed-with-warning error.
+func (c *Client) AddTaskResult(t task.Task, actor task.Actor) (*task.Task, error) {
+	var resp daemon.AddTaskResponse
+	if err := c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Task, nil
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the

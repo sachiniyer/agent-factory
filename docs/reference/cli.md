@@ -206,11 +206,19 @@ real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the config
 directory, so without it a session would authenticate as whoever that key belongs
 to while every visible signal reported the selected account.
 
-Account-scoped sessions require the local or docker backend, and tmux 3.2 or newer. af
-refuses rather than falling back, because a fallback would run on the ambient
-account while reporting the one you asked for.
+Account-scoped sessions need tmux 3.2 or newer and run on the local backend, the docker backend, or an ssh
+session placed on a host in the global host list (--host <name>). On a listed host
+af syncs the session's account — only its credential files — into that session's
+own directory on the host, never the remote user's global agent config, writes
+refreshes back, and removes it when the session is killed or archived. A default
+account (default_accounts) is applied the same way; on a target that is not a listed
+host it is not applied, and the session runs on the host's own credentials. An
+explicit --account on such a target is refused, naming the remedy. af refuses rather
+than falling back, because a fallback would run on the ambient account while
+reporting the one you asked for. Sessions on one host share its ssh user, so they can
+read each other's synced credentials.
 
-ssh, sandbox and hook refuse by design, not because the work is pending. docker
+sandbox and hook targets cannot be listed, so they refuse an explicit account. docker
 bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
 
 By default af never switches accounts on its own. With limit_auto_resume enabled,
@@ -1221,6 +1229,10 @@ af daemon restart [flags]
 ## af daemon status
 
 Report daemon liveness, config freshness, and supervision
+
+With --daemon-url (or AF_DAEMON_URL, or a saved target) this reads the TARGET's
+health route and reports whether it responds, its version, phase and boot
+identity — never this machine's sockets or autostart unit.
 
 Print a read-only snapshot of the background daemon: whether it is responding
 on the control socket, the control and HTTP socket paths (and whether their
