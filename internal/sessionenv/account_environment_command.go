@@ -391,31 +391,31 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 	case isAccountCommandName(words[0], "nohup"):
 		var unsafe bool
 		words, unsafe = unwrapNohup(words[1:])
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "nice"):
 		var unsafe bool
 		words, unsafe = unwrapNice(words[1:], names, memo)
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "timeout"):
 		var unsafe bool
 		words, unsafe = unwrapTimeout(words[1:], names, memo)
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "setsid"):
 		var unsafe bool
 		words, unsafe = unwrapSetsid(words[1:], names, memo)
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "stdbuf"):
 		var unsafe bool
 		words, unsafe = unwrapStdbuf(words[1:], names, memo)
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "ionice"):
@@ -566,4 +566,15 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		return 1, accountEnvironmentOperandDenied(value, names)
 	}
 	return 1, false
+}
+
+// childTailBuriesMutation scans the tail a modeled wrapper returns for a
+// buried suffix a PATH-shadowed wrapper (`shift N; exec "$@"`) would promote to
+// the executed command, as unwrapIonice and unwrapTaskset do for their own
+// tails (#4708). The five siblings returned the tail unscanned, so
+// `nice echo a a a xargs --process-slot-var CODEX_HOME codex` passed where the
+// same payload under ionice was refused (#5034). words[0] is the child command
+// the main walk judges next; the scan covers what follows it.
+func childTailBuriesMutation(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+	return len(words) > 1 && shadowedChildTailMutates(words[1:], names, memo)
 }
