@@ -3083,7 +3083,7 @@ af target
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af target clear
@@ -3098,7 +3098,7 @@ af target clear
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af target set
@@ -3130,7 +3130,7 @@ af target set <url> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af target show
@@ -3145,7 +3145,7 @@ af target show
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks
