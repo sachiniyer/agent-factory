@@ -89,6 +89,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		// session), so a task created here is byte-identical to one created
 		// before the field was reachable unless the user chose otherwise.
 		OnComplete:  draft.OnComplete,
+		Host:        draft.Host,
 		ProjectPath: absPath,
 		Program:     program,
 		Enabled:     true,

@@ -151,6 +151,16 @@ for (const backend of ["local", "docker", "ssh", "hook"]) {
   });
 }
 
+test("createSession sends a listed-host row as `host` and no backend", async () => {
+  // A host pick IS the ssh placement (#5571 W6.3): the daemon refuses a host paired
+  // with any other backend, so the web must send the name alone.
+  const cap = stubFetch();
+  await createSession(createInput({ backend: "host:box1" }), "tok");
+
+  assert.equal(cap.body.host, "box1");
+  assert.equal("backend" in cap.body, false, "the host: prefix is a UI encoding and must never reach the daemon as a backend");
+});
+
 test("createSession omits backend entirely when the user chose the repo default", async () => {
   // This is the subtle half. Sending "local" here would look equivalent and is
   // not: an explicit backend WINS over the repo's `backend` config key, so a repo

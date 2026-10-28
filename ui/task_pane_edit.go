@@ -87,7 +87,7 @@ func (s *TaskPane) textFocusStop() bool {
 
 func textStopAt(focusIndex int) bool {
 	switch focusIndex {
-	case taskFocusName, taskFocusTriggerValue, taskFocusPrompt, taskFocusTarget, taskFocusPath:
+	case taskFocusName, taskFocusTriggerValue, taskFocusPrompt, taskFocusTarget, taskFocusHost, taskFocusPath:
 		return true
 	}
 	return false
@@ -204,6 +204,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.tasks[s.selectedIdx].WatchCmd = watch
 			s.tasks[s.selectedIdx].TargetSession = s.editTarget.Value()
 			s.tasks[s.selectedIdx].OnComplete = s.onCompleteValue()
+			s.tasks[s.selectedIdx].Host = strings.TrimSpace(s.editHost.Value())
 			s.tasks[s.selectedIdx].ProjectPath = absPath
 			s.tasks[s.selectedIdx].Program = s.programValue()
 			s.markTaskDirty(s.tasks[s.selectedIdx].ID)
@@ -228,6 +229,8 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.editTarget, _ = s.editTarget.Update(msg)
 		case taskFocusOnComplete:
 			s.handleOnCompleteKey(msg)
+		case taskFocusHost:
+			s.editHost, _ = s.editHost.Update(msg)
 		case taskFocusPath:
 			s.editPath, _ = s.editPath.Update(msg)
 		case taskFocusProgram:
@@ -300,6 +303,7 @@ func (s *TaskPane) updateEditFocus() {
 	s.editPrompt.Blur()
 	s.editWatch.Blur()
 	s.editTarget.Blur()
+	s.editHost.Blur()
 	s.editPath.Blur()
 	// The schedule picker is active only while it is the focused trigger value
 	// on a cron task; blur it otherwise so its raw-cron cursor stays hidden.
@@ -316,6 +320,8 @@ func (s *TaskPane) updateEditFocus() {
 		s.editPrompt.Focus()
 	case taskFocusTarget:
 		s.editTarget.Focus()
+	case taskFocusHost:
+		s.editHost.Focus()
 	case taskFocusPath:
 		s.editPath.Focus()
 	}
@@ -353,6 +359,7 @@ func (s *TaskPane) renderEditMode() string {
 	s.schedule.setWidth(s.width)
 	s.editWatch.Width = inputWidth
 	s.editTarget.Width = inputWidth
+	s.editHost.Width = inputWidth
 	s.editPath.Width = inputWidth
 
 	// The prompt's role depends on the trigger: cron tasks require it, watch
@@ -456,6 +463,12 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString(s.renderOnCompleteSelector())
 	b.WriteString("\n")
 	markEnd(taskFocusOnComplete)
+	markStart(taskFocusHost)
+	b.WriteString(label("Host:"))
+	b.WriteString(s.editHost.View())
+	b.WriteString("\n")
+	b.WriteString(fieldErr(taskFocusHost))
+	markEnd(taskFocusHost)
 	markStart(taskFocusPath)
 	b.WriteString(label("Path:"))
 	b.WriteString(s.editPath.View())
