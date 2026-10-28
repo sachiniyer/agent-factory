@@ -392,7 +392,7 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 3. It probes the remote's platform (`uname -s`/`uname -m`), picks an `af` binary
    the host can run — `sandbox.binary` if set, else the daemon's own binary on a
    matching platform, else the sha256-verified release artifact for the remote's
-   platform — and installs it under `~/.af-sessions/bin/` (a per-host cache the
+   platform — and installs it under `~/.af-bin/` (a per-host cache the
    next sessions reuse when the cached file's sha256 still matches). It then runs
    `af version` **on the remote** and refuses to launch unless the staged binary
    reports the daemon's own version. Only then does it start an
@@ -658,7 +658,7 @@ the whole authority here; af adds none of its own. It is global-only and
 operator-owned, because af **executes** it on the daemon host (see
 [Configuration](configuration.md)). The remote `af` binary is staged exactly as
 the `ssh` backend stages it — platform-probed, cached under
-`~/.af-sessions/bin/`, sha256- and version-verified — and the same global-only
+`~/.af-bin/`, sha256- and version-verified — and the same global-only
 `sandbox.binary` override applies.
 
 > **Known limitation: af cannot pin a `sandbox.ssh` target to one machine.**

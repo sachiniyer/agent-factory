@@ -87,7 +87,7 @@ func remoteBinaryName(version string, plat remotePlatform) string {
 }
 
 // remoteBinPath renders a name inside the host's shared bin dir as a
-// shell-ready double-quoted word — "$HOME/.af-sessions/bin/<name>" — so $HOME
+// shell-ready double-quoted word — "$HOME/.af-bin/<name>" — so $HOME
 // still expands remotely. Only ever called with a remoteBinaryName (already
 // sanitized to filename-safe characters).
 func remoteBinPath(name string) string {
@@ -215,11 +215,13 @@ func (p *sandboxProvisioner) remoteBinaryCandidates(ctx context.Context, plat re
 }
 
 // remoteBinDir is the shared per-host cache every session on the machine
-// draws from — deliberately under the af-sessions root but OUTSIDE the
-// per-session dir, so the per-session `rm -rf` never reaps it (#5571 W2.2).
+// draws from — a sibling of the af-sessions root, not inside it: the
+// per-session `rm -rf` never reaps it, and nothing that lists the session root
+// (the reaper's leak checks, an operator's `ls ~/.af-sessions`) mistakes the
+// cache for a session (#5571 W2.2).
 // Shared means concurrent creates may both install; the tmp+mv publish inside
 // installRemoteBinary is what keeps either from ever serving a partial file.
-const remoteBinDir = ".af-sessions/bin"
+const remoteBinDir = ".af-bin"
 
 // remoteSHA256Script reports the sha256 of a remote file, portably across the
 // three hash tools a bare host might have. Empty output means the file is

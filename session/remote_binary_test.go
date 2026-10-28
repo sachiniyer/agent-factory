@@ -102,7 +102,7 @@ func TestRemoteBinaryNameSanitizesTheVersion(t *testing.T) {
 // REMOTE host — single-quoting it (shellQuote) would publish a literal $HOME
 // directory. This is the quoting class the draft got wrong.
 func TestRemoteBinPathExpandsHome(t *testing.T) {
-	assert.Equal(t, `"$HOME/.af-sessions/bin/af-1.0.0-linux-amd64"`,
+	assert.Equal(t, `"$HOME/.af-bin/af-1.0.0-linux-amd64"`,
 		remoteBinPath("af-1.0.0-linux-amd64"))
 }
 
@@ -110,7 +110,7 @@ func TestRemoteBinPathExpandsHome(t *testing.T) {
 // fallbacks) and prints nothing — a cache miss, never an error — when the
 // file is absent.
 func TestRemoteSHA256ScriptFallsBackAcrossHashTools(t *testing.T) {
-	script := fmt.Sprintf(remoteSHA256Script, `"$HOME/.af-sessions/bin/af-x"`)
+	script := fmt.Sprintf(remoteSHA256Script, `"$HOME/.af-bin/af-x"`)
 	for _, tool := range []string{"sha256sum", "shasum -a 256", "openssl dgst -sha256"} {
 		assert.Contains(t, script, tool)
 	}
@@ -222,7 +222,7 @@ func TestInstallRemoteBinaryCacheHitSkipsTheStream(t *testing.T) {
 		remotePlatform{goos: "linux", goarch: "amd64"},
 		remoteBinaryCandidate{path: p.afBin, label: "the daemon's own binary"})
 	require.NoError(t, err)
-	assert.Equal(t, `"$HOME/.af-sessions/bin/af-unknown-linux-amd64"`, got)
+	assert.Equal(t, `"$HOME/.af-bin/af-unknown-linux-amd64"`, got)
 }
 
 func TestInstallRemoteBinaryRejectsACorruptedCopy(t *testing.T) {
@@ -265,12 +265,12 @@ func TestInstallRemoteBinaryPublishesAVerifiedCopy(t *testing.T) {
 		remotePlatform{goos: "linux", goarch: "amd64"},
 		remoteBinaryCandidate{path: p.afBin, label: "the daemon's own binary"})
 	require.NoError(t, err)
-	assert.Contains(t, got, `.af-sessions/bin/af-`)
+	assert.Contains(t, got, `.af-bin/af-`)
 	// The upload lands under a temp name and is mv'd into place — the shared
 	// cache must never serve a half-written file.
 	assert.Contains(t, upload, "mktemp")
 	assert.Contains(t, upload, "mv ")
-	assert.Contains(t, upload, `mkdir -p "$HOME/.af-sessions/bin"`)
+	assert.Contains(t, upload, `mkdir -p "$HOME/.af-bin"`)
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +321,7 @@ func TestStageRemoteBinaryLinksSessionAfAtTheVerifiedCache(t *testing.T) {
 	// argv[0] keeps its <sessionDir>/af spelling via the symlink, and the
 	// target is the double-quoted $HOME cache path.
 	require.NotEmpty(t, linkCmd)
-	assert.Contains(t, linkCmd, `"$HOME/.af-sessions/bin/af-1.0.328-`)
+	assert.Contains(t, linkCmd, `"$HOME/.af-bin/af-1.0.328-`)
 	assert.Contains(t, linkCmd, w.AfPath())
 	require.NotEmpty(t, verifyCmd)
 	assert.Contains(t, verifyCmd, w.AfPath())
