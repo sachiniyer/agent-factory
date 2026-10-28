@@ -16694,8 +16694,9 @@ function taskFormModal(opts) {
   hostSelect.setAttribute("aria-describedby", hostHint.id);
   const keepHost = opts.seed?.host ?? "";
   let hostOptions = [];
+  let hostTouched = false;
   const renderHosts = () => {
-    const previous = hostSelect.value || keepHost;
+    const previous = hostSelection(hostTouched, hostSelect.value, keepHost);
     hostSelect.replaceChildren(h("option", { value: "" }, "Repo backend"));
     for (const o of hostOptions) {
       const opt = h("option", { value: o.name }, o.status === "available" ? o.name : `${o.name} \u2014 unavailable`);
@@ -16713,7 +16714,10 @@ function taskFormModal(opts) {
   const hostField = field("Host", hostSelect);
   hostField.append(hostHint);
   renderHosts();
-  hostSelect.addEventListener("change", renderHosts);
+  hostSelect.addEventListener("change", () => {
+    hostTouched = true;
+    renderHosts();
+  });
   let hostSeq = 0;
   const loadHostsFor = (repoPath) => {
     const seq = ++hostSeq;
@@ -16855,6 +16859,9 @@ function editTaskModal(projects, task, callbacks) {
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
+}
+function hostSelection(touched, current, seed) {
+  return touched ? current : seed;
 }
 
 // src/project-menu-focus.ts

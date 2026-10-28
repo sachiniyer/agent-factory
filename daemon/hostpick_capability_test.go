@@ -32,6 +32,12 @@ func TestHostPickSurfaceRequire(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "was not sent")
 
+	// The probe error is quoted, not wrapped: it is a read failure, so a caller
+	// classifying the result as a mutation outcome must not see its cause (#5968).
+	probeErr := errors.New("i/o timeout")
+	err = HostPickOnTask.Require("the host pick", PingResponse{}, probeErr, "box")
+	assert.NotErrorIs(t, err, probeErr)
+
 	full := PingResponse{HostPick: true, DeliverHostPick: true, TaskHost: true}
 	for _, s := range []HostPickSurface{HostPickOnCreate, HostPickOnDeliver, HostPickOnTask} {
 		require.NoError(t, s.Require("--host", full, nil, "box"))

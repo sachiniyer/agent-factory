@@ -85,6 +85,8 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// the remaining refusal and is checked by its own path on both sides.
 		rosterMutable := true
 		data.TabRosterMutable = &rosterMutable
+		tabManagement := i.capabilitiesLocked().TabManagement
+		data.TabManagement = &tabManagement
 		if provider, ok := i.backend.(runtimeCleanupProvider); ok {
 			// Stage the exact off-box teardown identity privately on every snapshot.
 			// ForStorage publishes it for a UserKilled tombstone, an unknown cleanup
@@ -508,6 +510,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		Account:                  data.Account,
 		Host:                     data.Host,
 		archivedWorkspace:        cloneArchivedWorkspace(data.ArchivedWorkspace),
+		projectedTabManagement:   data.TabManagement != nil && *data.TabManagement,
 		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),

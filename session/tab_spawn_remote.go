@@ -160,3 +160,20 @@ func (i *Instance) closeOffBoxTab(tab *Tab) error {
 	}
 	return nil
 }
+
+// ReconcileTabManagementSnapshot adopts the daemon's projected tab-management
+// verdict onto a client row, reporting whether it changed. nil (an older daemon)
+// leaves the row's own derivation in force (#5953).
+func (i *Instance) ReconcileTabManagementSnapshot(v *bool) bool {
+	if v == nil {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.projectedTabManagement == *v {
+		return false
+	}
+	i.projectedTabManagement = *v
+	i.touchLocked()
+	return true
+}

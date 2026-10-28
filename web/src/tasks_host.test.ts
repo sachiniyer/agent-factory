@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildTask, type AddTaskInput } from "./tasks.js";
+import { buildTask, hostSelection, type AddTaskInput } from "./tasks.js";
 
 const input: AddTaskInput = {
   name: "Nightly", projectPath: "/repo", trigger: "cron", cron: "0 9 * * *",
@@ -15,4 +15,11 @@ test("buildTask sends the picked listed host and an empty one when none is picke
   assert.equal(buildTask(input).host, "");
   assert.equal(buildTask({ ...input, host: "" }).host, "");
   assert.equal(JSON.stringify(buildTask(input)).includes('"host":"box1"'), false);
+});
+
+// #5967: clearing a task's host to "Repo backend" must survive the re-render.
+test("an untouched host field keeps its seed; a touched one keeps its value, even empty", () => {
+  assert.equal(hostSelection(false, "", "box1"), "box1");
+  assert.equal(hostSelection(true, "", "box1"), "");
+  assert.equal(hostSelection(true, "box2", "box1"), "box2");
 });

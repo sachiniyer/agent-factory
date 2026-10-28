@@ -420,6 +420,12 @@ type InstanceData struct {
 	// nil therefore means only "not projected", and ForStorage sets it back to nil
 	// so a derived verdict still never reaches instances.json.
 	TabRosterMutable *bool `json:"tab_roster_mutable,omitempty"`
+	// TabManagement is Capabilities.TabManagement projected (#5953): whether this
+	// session may gain shell and process tabs. For an off-box row the daemon lifts
+	// it from the agent-server's advertisement, which a client's snapshot row
+	// cannot read, so without the projection the TUI refuses new remote tabs.
+	// A pointer so that false survives the wire; ForStorage clears it.
+	TabManagement *bool `json:"tab_management,omitempty"`
 	// RuntimeCleanupStateUnknown is the independent retention marker for a sandbox
 	// teardown whose completion could not be determined. The next restore must
 	// retry RuntimeCleanup before it can safely provision a replacement. It is not
