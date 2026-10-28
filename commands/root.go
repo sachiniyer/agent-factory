@@ -414,6 +414,7 @@ func init() {
 	rootCmd.AddCommand(agentServerCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(tokenCmd)
+	rootCmd.AddCommand(targetCmd)
 	rootCmd.AddCommand(accountsCmd)
 	rootCmd.AddCommand(quotaCmd)
 	rootCmd.AddCommand(api.SessionsCmd)

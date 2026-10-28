@@ -174,6 +174,17 @@ fallback):
 | `--daemon-url` | `AF_DAEMON_URL` | The daemon's URL: `http://host:port` or `ws://host:port` (the two are equivalent). `https://host` / `wss://host` are accepted too (the same pair) for a daemon behind a TLS front such as `tailscale serve` or a reverse proxy; the certificate is verified against the system CAs and there is no option to skip verification. The daemon itself serves plaintext HTTP. |
 | `--token` | `AF_DAEMON_TOKEN` | The bearer token from `af token show`. |
 
+### Save the target once
+
+`af target set <url> [--token-stdin]` stores the URL (and, read from stdin so it
+never reaches argv, the token) in this machine's af home with `0600`
+permissions. Precedence is `--daemon-url`/`--token`, then `AF_DAEMON_URL`/
+`AF_DAEMON_TOKEN`, then the saved target. The saved token is only ever sent to
+the saved URL, never to a host named by a flag or env var. `af target show`
+prints which target an invocation uses and why (never the token); `af target
+clear` forgets it. A saved file that is unreadable, malformed or readable by
+other users is refused rather than falling back to the local daemon.
+
 Flags take precedence over the environment. When `--daemon-url` (or
 `AF_DAEMON_URL`) is unset, `af` uses the local Unix socket exactly as before —
 the remote path is entirely opt-in.

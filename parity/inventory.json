@@ -328,6 +328,24 @@
       "notes": "A credential-bootstrap verb: the web must already HAVE the token to talk to the daemon, so it cannot be where you go to get it. Rotating from the web would sever the rotating client."
     },
     {
+      "id": "daemon.client-target",
+      "title": "Save, show and clear the remote daemon a client targets",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/targetcmd.go"
+      },
+      "verdict": "deliberate",
+      "notes": "Client-side configuration of WHICH daemon to talk to (W9.6): flag, then env, then this saved target. The web is served by the daemon it talks to and has no 'point me elsewhere' knob; the TUI reads the same saved target through apiclient.NewTargeted, so it follows it with no control of its own."
+    },
+    {
       "id": "enum.agent-programs",
       "title": "Offer the full set of agent programs af supports",
       "tui": {
@@ -1785,6 +1803,9 @@
       "af tasks show": "task.health",
       "af tasks trigger": "task.trigger",
       "af tasks update": "task.edit",
+      "af target clear": "daemon.client-target",
+      "af target set": "daemon.client-target",
+      "af target show": "daemon.client-target",
       "af token rotate": "daemon.token",
       "af token show": "daemon.token",
       "af upgrade": "install.upgrade",
@@ -2182,6 +2203,11 @@
       "af tasks update --prompt-file": "task.edit.prompt-file",
       "af tasks update --target-session": "task.edit",
       "af tasks update --watch-cmd": "task.edit",
+      "af target --help": "meta.discovery",
+      "af target clear --help": "meta.discovery",
+      "af target set --help": "meta.discovery",
+      "af target set --token-stdin": "daemon.client-target",
+      "af target show --help": "meta.discovery",
       "af token --help": "meta.discovery",
       "af token rotate --help": "meta.discovery",
       "af token rotate --json": "cli.json-envelope",
