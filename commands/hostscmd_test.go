@@ -18,6 +18,7 @@ type hostsFake struct {
 	hosts   map[string]config.HostConfig
 	def     string
 	sets    [][2]string
+	edits   []config.HostsEdit
 	checks  []daemon.CheckHostRequest
 	reply   daemon.CheckHostResponse
 	checkEr error
@@ -26,7 +27,31 @@ type hostsFake struct {
 
 func installHostsFake(t *testing.T, f *hostsFake) {
 	t.Helper()
-	pl, ps, pc := hostsLoad, hostsConfigSet, hostsCheckProbe
+	pl, ps, pc, pe, pp := hostsLoad, hostsConfigSet, hostsCheckProbe, hostsEditApply, hostsPosture
+	hostsPosture = func() string { return "" }
+	f.edits = nil
+	hostsEditApply = func(edit config.HostsEdit) (daemon.SetConfigValueResponse, error) {
+		f.edits = append(f.edits, edit)
+		switch edit.Op {
+		case config.HostsEditAdd:
+			if _, ok := f.hosts[edit.Name]; ok {
+				return daemon.SetConfigValueResponse{}, errors.New("host \"" + edit.Name + "\" is already listed")
+			}
+			f.hosts[edit.Name] = *edit.Host
+		case config.HostsEditRemove:
+			if err := config.ValidateHostPick(f.hosts, edit.Name); err != nil {
+				return daemon.SetConfigValueResponse{}, err
+			}
+			if f.def == edit.Name {
+				if !edit.ClearDefault {
+					return daemon.SetConfigValueResponse{}, errors.New("host is the default_host; pass --clear-default")
+				}
+				f.def = ""
+			}
+			delete(f.hosts, edit.Name)
+		}
+		return daemon.SetConfigValueResponse{}, nil
+	}
 	hostsLoad = func() (map[string]config.HostConfig, string, error) {
 		out := map[string]config.HostConfig{}
 		for k, v := range f.hosts {
@@ -54,7 +79,7 @@ func installHostsFake(t *testing.T, f *hostsFake) {
 		return f.reply, f.checkEr
 	}
 	t.Cleanup(func() {
-		hostsLoad, hostsConfigSet, hostsCheckProbe = pl, ps, pc
+		hostsLoad, hostsConfigSet, hostsCheckProbe, hostsEditApply, hostsPosture = pl, ps, pc, pe, pp
 		hostsAddIdentityFile, hostsAddWorkspaceRoot, hostsAddHostKeyPosture = "", "", ""
 		hostsAddDefault, hostsAddNoCheck, hostsRemoveClearDefault, hostsJSONFlag = false, false, false, false
 	})
@@ -132,6 +157,7 @@ func TestHostsAdd_RefusesBadInputBeforeWritingAnything(t *testing.T) {
 		require.Error(t, err, args)
 	}
 	assert.Empty(t, f.sets, "nothing is written for a refused add")
+	assert.Len(t, f.edits, 1, "only the duplicate reached the writer, which refused it")
 	assert.Empty(t, f.checks)
 }
 
@@ -166,7 +192,8 @@ func TestHostsRemove_DefaultNeedsAnExplicitClear(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, f.hosts, "a")
 	assert.Equal(t, "", f.def)
-	require.Equal(t, "default_host", f.sets[0][0], "the default is cleared before the list is rewritten")
+	require.Len(t, f.edits, 2, "one edit per remove; the writer clears the default inside the same lock hold")
+	assert.True(t, f.edits[1].ClearDefault)
 
 	_, err = runHosts(t, hostsRemoveCmd, "ghost")
 	assert.Error(t, err, "an unlisted name is refused")
