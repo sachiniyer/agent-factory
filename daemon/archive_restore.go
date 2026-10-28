@@ -28,12 +28,16 @@ import (
 // that was pushed (and docker/hook, which always push), gets a fresh sandbox that
 // clones the pushed branch back (#1592 Phase 4 PR6).
 func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance, title string) (string, error) {
+	what := "re-provisioning its sandbox"
+	if instance.ArchivedWorkspace() != nil {
+		what = "restoring its preserved workspace"
+	}
 	if err := instance.RestoreFromArchive(); err != nil {
 		// On a re-provision/relaunch failure RestoreFromArchive left the instance
 		// Lost; persist that and surface the failure (an explicit retry re-provisions
 		// from the still-pushed branch).
 		m.persistInstance(repoID, instance)
-		return "", fmt.Errorf("failed to restore remote session %q (re-provisioning its sandbox): %w", title, err)
+		return "", fmt.Errorf("failed to restore remote session %q (%s): %w", title, what, err)
 	}
 	// A FRESH sandbox now backs this session, so its accumulated remote-loss
 	// failures describe a sandbox that is gone (#1794). Reset BEFORE the persist

@@ -339,3 +339,56 @@ func TestAgentServerServesNoWebShell(t *testing.T) {
 	require.Contains(t, string(body), "serves no web UI")
 	require.Contains(t, string(body), "http://localhost:8443")
 }
+
+// shutdownRecorder is an AgentServer that records which way the workspace was
+// stopped.
+type shutdownRecorder struct {
+	session.AgentServer
+	killed, preserved int
+}
+
+func (r *shutdownRecorder) Kill(bool) error { r.killed++; return nil }
+
+func (r *shutdownRecorder) StopPreservingWorkspace() error { r.preserved++; return nil }
+
+// #5947 review (B): a server that adopted a preserved workspace must never take
+// the workspace down with it, whatever stops it.
+func TestShutdownOfAnAdoptingServerPreservesTheWorkspace(t *testing.T) {
+	adopted := &shutdownRecorder{}
+	hs := &headlessServer{adopted: true, as: adopted}
+	if err := hs.shutdownWorkspace(); err != nil {
+		t.Fatal(err)
+	}
+	if adopted.killed != 0 || adopted.preserved != 1 {
+		t.Fatalf("adopting server stop: killed=%d preserved=%d, want 0 and 1", adopted.killed, adopted.preserved)
+	}
+
+	ordinary := &shutdownRecorder{}
+	hs = &headlessServer{as: ordinary}
+	if err := hs.shutdownWorkspace(); err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.killed != 1 || ordinary.preserved != 0 {
+		t.Fatalf("ordinary server stop: killed=%d preserved=%d, want 1 and 0", ordinary.killed, ordinary.preserved)
+	}
+}
+
+// An adopting server whose runtime has no safe stop leaves the workspace alone
+// rather than falling back to the destructive one.
+func TestShutdownOfAnAdoptingServerWithoutASafeStopKillsNothing(t *testing.T) {
+	killOnly := &killOnlyServer{}
+	hs := &headlessServer{adopted: true, as: killOnly}
+	if err := hs.shutdownWorkspace(); err == nil {
+		t.Fatal("expected a refusal: no workspace-preserving stop is available")
+	}
+	if killOnly.killed != 0 {
+		t.Fatalf("an adopting server fell back to Kill (%d calls)", killOnly.killed)
+	}
+}
+
+type killOnlyServer struct {
+	session.AgentServer
+	killed int
+}
+
+func (r *killOnlyServer) Kill(bool) error { r.killed++; return nil }

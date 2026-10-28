@@ -1,14 +1,21 @@
 package session
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -186,7 +193,12 @@ func TestAgentServerCommandCarriesTheAdoptedWorktree(t *testing.T) {
 func TestRestorePreservedWorkspaceDecision(t *testing.T) {
 	newRow := func(branch string) (*Instance, *ArchivedWorkspaceData) {
 		w := &ArchivedWorkspaceData{Host: "box", Dir: "/d"}
-		return &Instance{Title: "t", Branch: branch, archivedWorkspace: cloneArchivedWorkspace(w)}, w
+		backend, teardown, err := restoreRuntimeCleanup("t", "sandbox", &RuntimeCleanupData{Sandbox: &SandboxRuntimeCleanupData{
+			SSHCommand: "ssh recorded-host", SessionDir: "/d",
+		}})
+		require.NoError(t, err)
+		return &Instance{Title: "t", Branch: branch, backend: backend, runtimeTeardown: teardown,
+			archivedWorkspace: cloneArchivedWorkspace(w)}, w
 	}
 	t.Run("present: adopted, nothing replaced", func(t *testing.T) {
 		inst, w := newRow("b")
@@ -270,4 +282,125 @@ func TestRollbackAdoptionRestoresThePreservedRecordAndKeepsTheWorkspace(t *testi
 	assert.Equal(t, w, inst.ArchivedWorkspace(), "restored as a preserved archive, so a retry adopts it again")
 	assert.FileExists(t, filepath.Join(dir, "workspace", "work.txt"), "the work stays")
 	assert.NoDirExists(t, filepath.Join(dir, "account"), "credentials synced for the attempt do not stay")
+}
+
+// fakeSSH writes an ssh stand-in that logs its argv and answers with out (or exits
+// with code), so a test can see which transport a command rode.
+func fakeSSH(t *testing.T, log, out string, code int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-ssh")
+	body := "#!/bin/sh\necho \"$@\" >> " + shellQuote(log) + "\n"
+	if out != "" {
+		body += "echo " + shellQuote(out) + "\n"
+	}
+	body += "exit " + itoa(code) + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o755))
+	return path
+}
+
+// #5947 review (C): the proof reaches the host through the transport the row
+// recorded. A host list or repo config that changed since the archive is never
+// consulted, so a different machine cannot answer GONE for this workspace.
+func TestAdoptProofRidesTheRecordedTransport(t *testing.T) {
+	recordedLog := filepath.Join(t.TempDir(), "recorded.log")
+	currentLog := filepath.Join(t.TempDir(), "current.log")
+	recorded := fakeSSH(t, recordedLog, "GONE", 0)
+	current := fakeSSH(t, currentLog, "PRESENT /elsewhere/wt", 0)
+
+	backend, teardown, err := restoreRuntimeCleanup("t", "sandbox", &RuntimeCleanupData{Sandbox: &SandboxRuntimeCleanupData{
+		SSHCommand: recorded + " recorded-host", SessionDir: "/remote/af-sessions/x",
+	}})
+	require.NoError(t, err)
+	inst := &Instance{Title: "t", backend: backend, runtimeTeardown: teardown,
+		archivedWorkspace: &ArchivedWorkspaceData{Dir: "/remote/af-sessions/x"}}
+
+	tr, err := inst.recordedTransport()
+	require.NoError(t, err)
+	assert.Equal(t, recorded+" recorded-host", tr.SSHCmd)
+
+	spec := ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/remote/af-sessions/x", Branch: "b", Transport: tr}}
+	// What a provision composes for its shell, with the current configuration
+	// offering a different machine.
+	p := &sandboxProvisioner{spec: spec, sshCmd: adoptedTransportOr(spec, current+" current-host")}
+	w := &sandboxWorkspace{shell: p, spec: spec}
+	_, err = w.adoptWorkspace(time.Minute)
+	assert.ErrorIs(t, err, ErrPreservedWorkspaceGone)
+
+	got, rerr := os.ReadFile(recordedLog)
+	require.NoError(t, rerr)
+	assert.Contains(t, string(got), "recorded-host")
+	_, serr := os.Stat(currentLog)
+	assert.True(t, os.IsNotExist(serr), "the current configuration's host must never be asked")
+}
+
+func TestAdoptProofOnAnUnreachableRecordedHostIsAnErrorNeverGone(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "ssh.log")
+	unreachable := fakeSSH(t, log, "", 255)
+	p := &sandboxProvisioner{sshCmd: unreachable + " recorded-host"}
+	w := &sandboxWorkspace{shell: p, spec: ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/d", Branch: "b"}}}
+	_, err := w.adoptWorkspace(time.Minute)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrPreservedWorkspaceGone)
+}
+
+func TestRecordedTransportCarriesTheSSHIdentityAndNeedsOne(t *testing.T) {
+	t.Run("a row with no recorded transport cannot be probed", func(t *testing.T) {
+		inst := &Instance{Title: "t", backend: &LocalBackend{}}
+		_, err := inst.recordedTransport()
+		require.Error(t, err)
+	})
+	t.Run("an ssh row keeps its recorded config, posture and pin", func(t *testing.T) {
+		backend, teardown, err := restoreRuntimeCleanup("t", "ssh", &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+			Config:     config.SSHConfig{Host: "recorded.example", User: "u"},
+			SessionDir: "/remote/af-sessions/x", HostName: "buildbox",
+			HostKeyVerification: config.SSHHostKeyStrict,
+		}})
+		require.NoError(t, err)
+		inst := &Instance{Title: "t", backend: backend, runtimeTeardown: teardown}
+		tr, err := inst.recordedTransport()
+		require.NoError(t, err)
+		require.NotNil(t, tr.SSH)
+		assert.Equal(t, "recorded.example", tr.SSH.Config.Host)
+		assert.Equal(t, "buildbox", tr.SSH.HostName)
+		assert.Contains(t, tr.SSHCmd, "recorded.example")
+		assert.NotNil(t, tr.Prepare)
+	})
+}
+
+func TestAdoptedTransportOrPrefersTheRecordedOne(t *testing.T) {
+	assert.Equal(t, "current", adoptedTransportOr(ProvisionSpec{}, "current"))
+	assert.Equal(t, "current", adoptedTransportOr(ProvisionSpec{Adopt: &AdoptSpec{}}, "current"))
+	assert.Equal(t, "recorded -p 22", adoptedTransportOr(
+		ProvisionSpec{Adopt: &AdoptSpec{Transport: &RecordedTransport{SSHCmd: " recorded -p 22 "}}}, "current"))
+}
+
+// #5947 review (A): the gate between "the tunnel listens" and the first agent RPC.
+func TestWaitAdoptedServerReady(t *testing.T) {
+	prev := adoptReadyTimeout
+	t.Cleanup(func() { adoptReadyTimeout = prev })
+
+	t.Run("waits through a not-yet-ready server", func(t *testing.T) {
+		adoptReadyTimeout = 10 * time.Second
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if calls.Add(1) < 3 {
+				http.Error(w, "starting", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"status": "ok"}})
+		}))
+		defer srv.Close()
+		require.NoError(t, waitAdoptedServerReady(strings.TrimPrefix(srv.URL, "http://"), "tok", "t"))
+		assert.GreaterOrEqual(t, calls.Load(), int32(3))
+	})
+	t.Run("a tunnel that never answers is an error", func(t *testing.T) {
+		adoptReadyTimeout = 600 * time.Millisecond
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		addr := ln.Addr().String()
+		require.NoError(t, ln.Close()) // the port now refuses, like a tunnel whose ssh exited
+		err = waitAdoptedServerReady(addr, "tok", "t")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "did not answer")
+	})
 }

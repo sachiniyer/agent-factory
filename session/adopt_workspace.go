@@ -29,6 +29,44 @@ type AdoptSpec struct {
 	// OldPID is the previous agent-server's pid, so a survivor is refused rather
 	// than started beside.
 	OldPID string
+	// Transport is how the archived row reached its host, as it recorded it: the
+	// composed ssh command (pinned address, host-key posture) and the config it came
+	// from. Every host command of the adoption — the GONE probe first of all —
+	// rides it, never the current host list or repo config.
+	Transport *RecordedTransport
+}
+
+// RecordedTransport is a preserved workspace's own route to its host.
+type RecordedTransport struct {
+	// SSHCmd is the recorded, address-pinned ssh invocation.
+	SSHCmd string
+	// Prepare readies the recorded host-key store (accept-new) before the first
+	// command, as the reap does.
+	Prepare func() error
+	// SSH is the recorded ssh cleanup identity of the ssh backend, kept as the
+	// adopted runtime's identity; nil for the sandbox backend.
+	SSH *SSHRuntimeCleanupData
+}
+
+// recordedTransport reads the route to the host from the row's retained cleanup
+// identity. A row without one cannot prove anything about its host.
+func (i *Instance) recordedTransport() (*RecordedTransport, error) {
+	p := i.sandboxProvisioner()
+	if p == nil || strings.TrimSpace(p.sshCmd) == "" {
+		return nil, fmt.Errorf("session %q recorded no transport to its host, so its preserved workspace cannot be checked; kill the session to remove it", i.Title)
+	}
+	t := &RecordedTransport{SSHCmd: p.sshCmd}
+	if provider, ok := i.currentBackend().(runtimeCleanupProvider); ok {
+		if data := provider.runtimeCleanupData(); data != nil && data.SSH != nil {
+			c := *data.SSH
+			cfg := c.Config
+			cfg.Host, cfg.Port = normalizeLegacySSHAddress(cfg.Host, cfg.Port)
+			posture := c.HostKeyVerification
+			t.SSH = &c
+			t.Prepare = func() error { return prepareSSHHostKeyStore(cfg, posture) }
+		}
+	}
+	return t, nil
 }
 
 // ErrPreservedWorkspaceGone reports that the host positively answered that the
@@ -173,7 +211,11 @@ func (i *Instance) restorePreservedWorkspace(w *ArchivedWorkspaceData) (*Archive
 // restorePreservedWorkspaceWith is restorePreservedWorkspace with the provisioning
 // injected, so the adopt-or-replace decision is testable without a host.
 func (i *Instance) restorePreservedWorkspaceWith(w *ArchivedWorkspaceData, reprovision func(*AdoptSpec) error) (*ArchivedWorkspaceData, error) {
-	err := reprovision(&AdoptSpec{SessionDir: w.Dir, Branch: i.Branch, OldPID: i.preservedRemotePID()})
+	transport, err := i.recordedTransport()
+	if err != nil {
+		return nil, err
+	}
+	err = reprovision(&AdoptSpec{SessionDir: w.Dir, Branch: i.Branch, OldPID: i.preservedRemotePID(), Transport: transport})
 	if err == nil {
 		return w, nil
 	}
@@ -250,4 +292,73 @@ func (i *Instance) LaunchAdopted(conv *AgentConversationData) error {
 		return fmt.Errorf("adopted launch: session %q has no local runtime", i.Title)
 	}
 	return b.Respawn(i)
+}
+
+// adoptReadyTimeout bounds how long an adopting launch waits for the new
+// agent-server to answer through its tunnel; a var so a test can shorten it.
+var adoptReadyTimeout = 20 * time.Second
+
+// waitAdoptedServerReady polls the agent-server's health through the forward
+// until it answers with the session's token. It is the readiness gate between
+// "the tunnel is up" and the first agent RPC.
+func waitAdoptedServerReady(localAddr, token, title string) error {
+	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: "http://" + localAddr, Token: token}, title)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(adoptReadyTimeout)
+	for {
+		_, err := rc.health()
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the reattached agent-server did not answer through its tunnel within %s: %w", adoptReadyTimeout, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// adoptedTransportOr is the ssh invocation a provision uses: the archived row's
+// recorded one when adopting, else the one the current configuration yields.
+func adoptedTransportOr(spec ProvisionSpec, current string) string {
+	if spec.Adopt != nil && spec.Adopt.Transport != nil {
+		return strings.TrimSpace(spec.Adopt.Transport.SSHCmd)
+	}
+	return current
+}
+
+// beginAdoption is provision()'s first step when adopting: the session dir is the
+// archive's, verified read-only, and nothing in it is created or rewritten.
+func (p *sandboxProvisioner) beginAdoption(w *sandboxWorkspace) error {
+	w.SessionDir = p.spec.Adopt.SessionDir
+	p.sessionDir = w.SessionDir
+	wt, err := w.adoptWorkspace(sshShortStepTimeout)
+	if err != nil {
+		return err
+	}
+	w.adoptedWorktree = wt
+	return nil
+}
+
+// clearStaleAdoptedCallbackSocket removes the previous run's callback socket from
+// the preserved dir. A -R onto an existing socket fails the whole tunnel
+// (ExitOnForwardFailure): the local port would answer the readiness probe and
+// then vanish. The reattach after a daemon restart clears it for the same reason.
+func (p *sandboxProvisioner) clearStaleAdoptedCallbackSocket() {
+	if p.spec.Adopt != nil {
+		p.clearStaleCallbackSocket()
+	}
+}
+
+// awaitAdoptedServer gates an adopting launch on the agent-server answering
+// through the forward. A listening local port only proves ssh bound it.
+func (p *sandboxProvisioner) awaitAdoptedServer(localAddr, token string) error {
+	if p.spec.Adopt == nil {
+		return nil
+	}
+	if err := waitAdoptedServerReady(localAddr, token, p.spec.Title); err != nil {
+		return p.sandboxErr(err)
+	}
+	return nil
 }
