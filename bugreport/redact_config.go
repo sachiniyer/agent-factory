@@ -170,7 +170,7 @@ func encodeStringForGrammar(value string, kind redactionTextKind) (string, error
 func isConfigShellPath(path []string) bool {
 	if len(path) == 1 {
 		switch path[0] {
-		case "on_archive_command", "post_worktree_commands", "sandbox_ssh":
+		case "move_cmd", "on_archive_command", "post_worktree_commands", "sandbox_ssh":
 			return true
 		}
 	}

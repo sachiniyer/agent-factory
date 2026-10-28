@@ -195,7 +195,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	w := &sandboxWorkspace{shell: p, spec: p.spec, program: p.program}
 	// Before anything is created on the host: a missing tool refuses the create
 	// with its fix instead of failing a later step half-provisioned (#5571 W2.3).
-	if err := w.checkHostPrereqs(sshShortStepTimeout); err != nil {
+	if err := w.checkHostPrereqs(p.sshCmd, sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
 	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
@@ -487,6 +487,24 @@ func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 	if p.startTunnelFn != nil {
 		return p.startTunnelFn(remoteAddr)
 	}
+	localAddr, err := p.openTunnel(remoteAddr)
+	if err != nil {
+		return "", err
+	}
+	// The supervisor starts only after the FIRST generation proves ready: an
+	// ssh that cannot establish at all is a provision failure (reaped as one),
+	// not an outage to retry — the re-dial loop exists for transports that die
+	// AFTER they once worked.
+	go p.superviseTunnel()
+	return localAddr, nil
+}
+
+// openTunnel spawns the first -L generation and waits for its forward to answer,
+// WITHOUT starting the supervisor. Reattach (#5571 W1.5) probes the agent-server
+// through this generation before deciding whether to adopt it: supervision —
+// and with it the latched stop a failed attempt would need — begins only once
+// the probe has accepted the runtime.
+func (p *sandboxProvisioner) openTunnel(remoteAddr string) (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", fmt.Errorf("backend=%s: opening a local port for the tunnel failed: %w", p.label(), err)
@@ -517,11 +535,6 @@ func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 	if err := waitForSandboxTunnelFn(p.label(), localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
 		return "", err
 	}
-	// The supervisor starts only after the FIRST generation proves ready: an
-	// ssh that cannot establish at all is a provision failure (reaped as one),
-	// not an outage to retry — the re-dial loop exists for transports that die
-	// AFTER they once worked.
-	go p.superviseTunnel()
 	return localAddr, nil
 }
 

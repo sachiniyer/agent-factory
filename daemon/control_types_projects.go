@@ -150,3 +150,18 @@ type ListProjectsRequest struct{}
 type ListProjectsResponse struct {
 	Projects []config.Project `json:"projects"`
 }
+
+// SetProjectColorRequest sets the display color of a registered project (ID, a
+// prj_… registry id). Color is a hex color such as "#2f5fd8"; an empty Color
+// clears it. Web clients paint the session frame and the favicon with it.
+type SetProjectColorRequest struct {
+	ID    string `json:"id"`
+	Color string `json:"color"`
+}
+
+// SetProjectColorResponse carries the updated project, with its normalized
+// #rrggbb color. OK is always true on a nil error.
+type SetProjectColorResponse struct {
+	OK      bool           `json:"ok"`
+	Project config.Project `json:"project"`
+}

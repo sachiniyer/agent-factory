@@ -806,6 +806,16 @@ func RebindProject(req RebindProjectRequest) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// SetProjectColor asks the daemon to set or clear a registered project's
+// display color (`af projects color`).
+func SetProjectColor(req SetProjectColorRequest) (config.Project, error) {
+	var resp SetProjectColorResponse
+	if err := callDaemon("SetProjectColor", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
 // SendPromptWithStatus asks the daemon to send a prompt and returns the
 // delivery observation made by the runtime's existing bounded submit path.
 func SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, error) {
@@ -901,6 +911,17 @@ func ListAccounts(req ListAccountsRequest) (ListAccountsResponse, error) {
 	var resp ListAccountsResponse
 	if err := callDaemon("ListAccounts", req, &resp); err != nil {
 		return ListAccountsResponse{}, err
+	}
+	return resp, nil
+}
+
+// QuotaReport reads the daemon host's per-agent usage/quota report (#2983) —
+// the same records→quota.Build read `af quota` makes locally, served so a
+// remote or UI client cannot paint a different answer.
+func QuotaReport(req QuotaReportRequest) (QuotaReportResponse, error) {
+	var resp QuotaReportResponse
+	if err := callDaemon("QuotaReport", req, &resp); err != nil {
+		return QuotaReportResponse{}, err
 	}
 	return resp, nil
 }

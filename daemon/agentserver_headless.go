@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,6 +51,17 @@ type headlessServer struct {
 	// implementation over tmux (same runtime as the daemon's local sessions),
 	// exposed here over the wire.
 	as session.AgentServer
+	// inst is the workspace's session.Instance itself — the tab roster the
+	// /v1/agent/tab-* routes bind to (through the tabs narrowing below) and the
+	// resolving arm bindTab falls back to when the AgentServer lacks the
+	// id-native plane. hs.as never does (it is inst.AgentServer()), so in
+	// production the fallback is dead code; the field exists so the route has
+	// the same bind surface the daemon's streamHandler does.
+	inst *session.Instance
+	// tabs is the roster the /v1/agent/tab-* routes create, close, and read —
+	// in production the SAME Instance inst points at, narrowed to the five
+	// methods the routes need so a wire-shape test can substitute a small fake.
+	tabs tabKeeper
 	// title is the workspace's session title, echoed in the startup banner so a
 	// driver knows which id to name on the /v1/sessions/{id}/stream path.
 	title string
@@ -62,6 +74,32 @@ type headlessServer struct {
 	// archive collapses concurrent /v1/agent/archive requests onto one in-flight
 	// archive (#2997 finding 2). See singleFlightArchive.
 	archive singleFlightArchive
+}
+
+// tabKeeper is the tab-roster surface the /v1/agent/tab-* routes bind to
+// (#5571 W4.3). It is *session.Instance narrowed to exactly the methods the
+// routes call — the routes never touch tmux, the worktree, or persistence
+// themselves — so the wire contract can be exercised without a started session.
+// Every method is the Instance admission path (AddShellTabWithID keeps the
+// started/archived/account fences; CloseTabByID is the same close the daemon's
+// own route issues) — a remote caller gets no looser path than a local one.
+type tabKeeper interface {
+	// TabsData projects the roster (agent tab first) plus each tab's exit
+	// evidence — the /v1/agent/tabs payload.
+	TabsData() []session.TabData
+	// RecordProcessTabExits probes un-recorded process tabs before a roster
+	// read so a tab whose command already finished does not report a stale
+	// absence — the read side of stampProcessTabExit's restore path.
+	RecordProcessTabExits()
+	// AddShellTabWithID spawns a shell tab, assigning the daemon-supplied id
+	// verbatim (idempotency key for the replayed create).
+	AddShellTabWithID(id string) (*session.Tab, error)
+	// AddProcessTabWithID spawns a process tab under the supplied id; command
+	// and name are the request's own fields.
+	AddProcessTabWithID(id, command, requestedName string) (*session.Tab, error)
+	// CloseTabByID closes the tab a stable id names — ErrTabGone when it names
+	// nothing, which the shared envelope maps to 404.
+	CloseTabByID(tabID string) error
 }
 
 // singleFlightArchive makes a second /v1/agent/archive request JOIN the archive
@@ -182,6 +220,9 @@ type AgentServerOptions struct {
 	// SessionEnvPassthrough carries exact operator-approved variable names from
 	// the outer runtime. Values remain in this host's environment.
 	SessionEnvPassthrough []string
+	// Branch is the exact branch the daemon named for this session (#5571 W2.4).
+	// Empty derives it from this host's own branch_prefix, as before.
+	Branch string
 	// Version is this binary's own build stamp, echoed in the startup banner so
 	// the provisioning daemon can persist which agent-server generation the
 	// session runs (#5571 W1.1 — reattach keys off it). Empty means the banner
@@ -292,6 +333,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,
+		BranchName:   opts.Branch,
 		// The in-sandbox agent-server ALWAYS runs the local runtime (tmux + git
 		// worktree against RepoPath) — it IS the sandbox (§1.2). Force it explicitly
 		// so a workspace whose repo config declares backend=docker/ssh/hook does
@@ -304,6 +346,8 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 
 	hs := &headlessServer{
 		as:     instance.AgentServer(),
+		inst:   instance,
+		tabs:   instance,
 		title:  opts.Title,
 		events: newEventsHub(),
 	}
@@ -400,6 +444,12 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
 	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
+	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
+	// exit evidence, over the same envelope dispatch. These are the routes the
+	// "tab-api" feature token on /v1/health advertises.
+	mux.HandleFunc("/v1/agent/tab-create", rpcHandler(hs.TabCreate))
+	mux.HandleFunc("/v1/agent/tab-close", rpcHandler(hs.TabClose))
+	mux.HandleFunc("/v1/agent/tabs", rpcHandler(hs.Tabs))
 
 	// WS data plane — same paths, same broker, same wire as the daemon (§1.1: all
 	// over the same routes the daemon mux already serves).
@@ -416,9 +466,41 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	return mux
 }
 
-// healthHandler answers GET /v1/health with a trivial liveness envelope.
+// agentServerWireFeatures is the capability token list /v1/health advertises
+// (#5571 W4.3): `version` says which af build answered, `features` says which
+// surfaces it speaks, so a driving daemon can learn what a sandbox agent-server
+// offers BEFORE calling a route that might not exist on an older build — the
+// additive-contract answer to wire drift, where a missing token means degrade
+// rather than fail. Tokens name route clusters, not the implementation, so a
+// client tests "tab-api" rather than inferring it from the version string.
+var agentServerWireFeatures = []string{
+	// "tab-api": POST /v1/agent/tab-create, /v1/agent/tab-close, and
+	// /v1/agent/tabs — stable-id create/close plus the roster with exit
+	// evidence.
+	"tab-api",
+	// "tab-id-addressing": ?tab_id= on the WS stream and tab_id on preview —
+	// the id-addressed data plane (ws_pty.go's bindTab picks the binding).
+	"tab-id-addressing",
+}
+
+// agentHealthResponse is GET /v1/health's payload: liveness, the build version
+// the banner also carries, and the wire features this server speaks (#5571
+// W4.3).
+type agentHealthResponse struct {
+	OK       bool     `json:"ok"`
+	Version  string   `json:"version"`
+	Features []string `json:"features"`
+}
+
+// healthHandler answers GET /v1/health with liveness plus the version/features
+// advertisement — the property that makes the route a capability probe, not
+// just a ping.
 func (hs *headlessServer) healthHandler(w http.ResponseWriter, r *http.Request) {
-	writeHTTPSuccess(w, r, map[string]bool{"ok": true})
+	writeHTTPSuccess(w, r, agentHealthResponse{
+		OK:       true,
+		Version:  Version(),
+		Features: agentServerWireFeatures,
+	})
 }
 
 // --- control REST: 1:1 mirror of session.AgentServer -----------------------
@@ -498,11 +580,15 @@ func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) erro
 	return nil
 }
 
-// agentPreviewRequest selects tab Tab's content; Full=true returns the entire
-// scrollback history, false the visible screen.
+// agentPreviewRequest selects a tab's content; Full=true returns the entire
+// scrollback history, false the visible screen. TabID addresses the tab by its
+// stable id and takes precedence over the ordinal Tab, exactly as the daemon's
+// own PreviewRequest resolves — a stale id is a 404 (session.ErrTabGone through
+// rpcHandler), never a silent fallback to whatever sits at Tab (#5571 W4.3).
 type agentPreviewRequest struct {
-	Tab  int  `json:"tab"`
-	Full bool `json:"full"`
+	TabID string `json:"tab_id,omitempty"`
+	Tab   int    `json:"tab"`
+	Full  bool   `json:"full"`
 	// Grid asks for the per-row grid capture with cursor and size (#5571 W4.2).
 	// A server that predates it ignores the field and never sets HasGrid, which
 	// is how the client knows to keep the joined Content.
@@ -530,7 +616,13 @@ type agentPreviewResponse struct {
 }
 
 func (hs *headlessServer) Preview(req agentPreviewRequest, resp *agentPreviewResponse) error {
-	snapshot, err := hs.as.Preview(req.Tab, req.Full)
+	var snapshot session.PreviewSnapshot
+	var err error
+	if req.TabID != "" {
+		snapshot, err = hs.as.PreviewByID(req.TabID, req.Full)
+	} else {
+		snapshot, err = hs.as.Preview(req.Tab, req.Full)
+	}
 	if err != nil {
 		return err
 	}
@@ -545,7 +637,13 @@ func (hs *headlessServer) Preview(req agentPreviewRequest, resp *agentPreviewRes
 	if !ok {
 		return nil
 	}
-	pane, gerr := gs.PreviewGrid(req.Tab)
+	var pane session.PaneSnapshot
+	var gerr error
+	if req.TabID != "" {
+		pane, gerr = gs.PreviewGridByID(req.TabID)
+	} else {
+		pane, gerr = gs.PreviewGrid(req.Tab)
+	}
 	if gerr != nil {
 		// The joined Content above is still a valid answer; the client falls
 		// back to it when HasGrid is absent.
@@ -558,6 +656,125 @@ func (hs *headlessServer) Preview(req agentPreviewRequest, resp *agentPreviewRes
 		resp.Modes, resp.HasModes = pane.Modes, true
 	}
 	return nil
+}
+
+// agentTabCreateRequest asks the workspace to spawn one tab under the daemon's
+// STABLE id (#5571 W4.3). Kind is the tabKindVocabulary wire name — "shell" or
+// "process" are the only kinds this route creates (web/vscode tabs carry no
+// tmux here and are metadata the daemon stages itself; the agent tab is made
+// with the session). ID is verbatim: the driving daemon is the id authority, and
+// the id doubles as the create's idempotency key — a retry that repeats id+kind
+// (and command, for a process tab) answers with the tab the first create made;
+// an id collision on a different shape refuses. Empty ID mints a fresh id, for
+// callers that do not hold the authority.
+type agentTabCreateRequest struct {
+	ID      string `json:"id,omitempty"`
+	Kind    string `json:"kind"`
+	Command string `json:"command,omitempty"`
+	Name    string `json:"name,omitempty"`
+}
+
+// agentTabCreateResponse returns the created tab as the roster row every
+// /v1/agent/tabs caller reads — one shape, so the create answer and the roster
+// can never drift.
+type agentTabCreateResponse struct {
+	Tab session.TabData `json:"tab"`
+}
+
+// TabCreate spawns a shell or process tab inside the workspace. It is deliberately
+// NOT a second admission path: it delegates to the same Instance.AddShellTabWithID /
+// AddProcessTabWithID the daemon's own tab verbs use, so every fence (started,
+// archived, account-swap, local-worktree availability) applies identically to a
+// remote caller.
+func (hs *headlessServer) TabCreate(req agentTabCreateRequest, resp *agentTabCreateResponse) error {
+	tabs, err := hs.tabStore()
+	if err != nil {
+		return err
+	}
+	var tab *session.Tab
+	switch req.Kind {
+	case session.TabKindName(session.TabKindShell):
+		tab, err = tabs.AddShellTabWithID(req.ID)
+	case session.TabKindName(session.TabKindProcess):
+		if strings.TrimSpace(req.Command) == "" {
+			return fmt.Errorf("a %q tab requires a non-empty command", req.Kind)
+		}
+		tab, err = tabs.AddProcessTabWithID(req.ID, req.Command, req.Name)
+	default:
+		return fmt.Errorf("unsupported tab kind %q: tab-create makes %q and %q tabs",
+			req.Kind, session.TabKindName(session.TabKindShell), session.TabKindName(session.TabKindProcess))
+	}
+	if err != nil {
+		return err
+	}
+	// Answer the roster row, not a second projection of the Tab: /v1/agent/tabs
+	// and this response share tabDataLocked, so fields like kind_name and the
+	// exit record can never drift between them.
+	for _, td := range tabs.TabsData() {
+		if td.ID == tab.ID {
+			resp.Tab = td
+			return nil
+		}
+	}
+	return fmt.Errorf("created tab %q is absent from the roster", tab.ID)
+}
+
+// agentTabCloseRequest names the tab to close by its stable id — never an
+// ordinal: an ordinal close on a remote wire is the misroute the id exists to
+// prevent.
+type agentTabCloseRequest struct {
+	ID string `json:"id"`
+}
+
+// TabClose closes the tab req.ID names through the same CloseTabByID the
+// daemon's own close path issues, so its broker teardown and stream ends fire
+// identically. A stale or empty id is a 404 through the shared ErrTabGone
+// mapping; an empty id fails validation first.
+func (hs *headlessServer) TabClose(req agentTabCloseRequest, resp *agentOKResponse) error {
+	if req.ID == "" {
+		return fmt.Errorf("a stable tab id is required")
+	}
+	tabs, err := hs.tabStore()
+	if err != nil {
+		return err
+	}
+	if err := tabs.CloseTabByID(req.ID); err != nil {
+		return err
+	}
+	resp.OK = true
+	return nil
+}
+
+// agentTabsResponse is the roster: every tab with its stable id, kind, name,
+// and — for process tabs — the exit evidence RecordProcessTabExits just
+// refreshed (status, time, stopped_by).
+type agentTabsResponse struct {
+	Tabs []session.TabData `json:"tabs"`
+}
+
+// Tabs answers the workspace's tab roster. It refreshes process-exit evidence
+// first: a process tab whose command finished since the last roster read would
+// otherwise report a stale un-exited row forever — the restore path stamps this
+// on load, but a LIVE sandbox has no load, so the roster read is where a live
+// exit gets recorded.
+func (hs *headlessServer) Tabs(_ struct{}, resp *agentTabsResponse) error {
+	tabs, err := hs.tabStore()
+	if err != nil {
+		return err
+	}
+	tabs.RecordProcessTabExits()
+	resp.Tabs = tabs.TabsData()
+	return nil
+}
+
+// tabStore returns the roster the tab routes act on, or refuses when this
+// server was built without one (a unit test exercising only the non-tab
+// surface). The refusal beats a nil-pointer panic in the handler.
+func (hs *headlessServer) tabStore() (tabKeeper, error) {
+	if hs.tabs == nil {
+		return nil, fmt.Errorf("this agent-server has no tab roster")
+	}
+	return hs.tabs, nil
 }
 
 type agentAliveResponse struct {
@@ -648,9 +865,21 @@ func (hs *headlessServer) streamHandler(w http.ResponseWriter, r *http.Request) 
 		writeHTTPError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	sub, err := hs.as.Subscribe(tab, since)
+	// The same binding selection the daemon's streamHandler makes (#5571 W4.3):
+	// a ?tab_id= binds the id-native plane — which the in-sandbox server's local
+	// AgentServer always has — and a missing ?tab_id= stays an ordinal for
+	// legacy drivers that predate the parameter. This supersedes the "ordinal
+	// only" rule this handler used to carry: the sandbox's tab set is no longer
+	// fixed now that /v1/agent/tab-create can grow it, so an id-addressed
+	// connection must NEVER re-resolve through a shifting ordinal.
+	binding, err := bindTab(hs.as, hs.inst, r.URL.Query().Get("tab_id"), tab)
 	if err != nil {
-		writeHTTPError(w, r, http.StatusInternalServerError, err)
+		writeHTTPError(w, r, httpStatusForTab(err), err)
+		return
+	}
+	sub, err := binding.subscribe(since)
+	if err != nil {
+		writeHTTPError(w, r, httpStatusForTab(err), err)
 		return
 	}
 	w.Header().Set(streamSeqHeader, strconv.FormatUint(uint64(sub.Seq()), 10))
@@ -662,11 +891,7 @@ func (hs *headlessServer) streamHandler(w http.ResponseWriter, r *http.Request) 
 		_ = sub.Close()
 		return
 	}
-	// The in-sandbox headless server is addressed by ordinal only: the orchestrator's
-	// remoteAgentServer has already resolved any stable ?tab_id= to an index before
-	// forwarding it here (#1738), and a sandbox's tab set is fixed for its lifetime,
-	// so there is nothing to re-resolve — pin the ordinal.
-	servePTYStream(ordinalTabBinding{as: hs.as, tab: tab}, sub, conn)
+	servePTYStream(binding, sub, conn)
 }
 
 // streamInfoHandler answers GET /v1/sessions/{id}/stream-info with where the

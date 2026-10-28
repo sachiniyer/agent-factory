@@ -172,6 +172,12 @@ func remoteCreateInputs(inPlace bool) (workspace, program string, err error) {
 			"and this machine's current directory names a repository the daemon may not have. "+
 			"Pass --repo <path on the daemon host>", apiclient.RemoteTargetURL())
 	}
+	// A relative path would resolve against the DAEMON's cwd and could pick a
+	// different checkout than the one typed, so refuse it here and name why
+	// (the daemon refuses it too; #5743).
+	if _, rerr := config.ResolveDaemonHostPath(repoFlag); rerr != nil {
+		return "", "", fmt.Errorf("--repo: %w", rerr)
+	}
 	program = createProgramFlag
 	if program != "" {
 		if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
@@ -202,6 +208,7 @@ func routedCreateSession(req daemon.CreateSessionRequest) (*session.InstanceData
 		return nil, err
 	}
 	defer c.CloseIdleConnections()
+	req.ValidateFirst = true // the daemon's host owns account/preflight answers (#5744)
 	data, err := c.CreateSession(req)
 	return data, remoteMutationError("create", err)
 }
