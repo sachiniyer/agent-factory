@@ -47,6 +47,9 @@ import (
 // controlServer resolves an AgentServer out of the multi-session Manager,
 // headlessServer holds the one it owns directly.
 type headlessServer struct {
+	// adopted is set when this server was started over a preserved worktree
+	// (#5571 W8.6); its non-first-time launch respawns the agent there.
+	adopted bool
 	// as is the single workspace's agent-server — the local in-process
 	// implementation over tmux (same runtime as the daemon's local sessions),
 	// exposed here over the wire.
@@ -226,6 +229,10 @@ type AgentServerOptions struct {
 	// Branch is the exact branch the daemon named for this session (#5571 W2.4).
 	// Empty derives it from this host's own branch_prefix, as before.
 	Branch string
+	// AdoptWorktree is an existing linked worktree this server binds instead of
+	// creating one (#5571 W8.6). The provisioning daemon proved it present and on
+	// Branch before starting this process.
+	AdoptWorktree string
 	// PolicyFile is the daemon-resolved operator policy (config.AgentPolicy).
 	// When set, this process answers every config read from it and never reads
 	// or creates anything under its own host's af home (#5571 W2.5); a file it
@@ -387,7 +394,14 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("agent-server: %w", err)
 	}
 
+	if opts.AdoptWorktree != "" {
+		if err := instance.AdoptExistingWorktree(opts.AdoptWorktree); err != nil {
+			return fmt.Errorf("agent-server: %w", err)
+		}
+	}
+
 	hs := &headlessServer{
+		adopted: opts.AdoptWorktree != "",
 		as:      instance.AgentServer(),
 		inst:    instance,
 		program: resolvedProgram,
@@ -588,6 +602,18 @@ func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResp
 }
 
 func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
+	if hs.adopted && !req.FirstTimeSetup && hs.inst != nil {
+		// A reattached workspace (W8.6): respawn the agent in the existing worktree
+		// with the recorded conversation. Nothing is created and no hook runs.
+		if err := hs.inst.LaunchAdopted(req.Conversation); err != nil {
+			return err
+		}
+		resp.OK = true
+		if conv := hs.inst.AgentConversation(); conv.HasID() {
+			resp.Conversation = &conv
+		}
+		return nil
+	}
 	var codexSnap session.ConversationCaptureSnapshot
 	codex := tmux.DetectAgentFromCommand(hs.program) == tmux.ProgramCodex
 	if hs.inst != nil && req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {

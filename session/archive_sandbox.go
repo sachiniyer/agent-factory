@@ -175,20 +175,7 @@ func (i *Instance) recordArchivePush(branch string) {
 // the pushed branch state — the code survives via GitHub; a fresh agent runs on
 // it (the pre-archive conversation lived only in the disposed sandbox).
 func (i *Instance) RestoreSandbox() error {
-	if err := i.reprovisionRemote(); err != nil {
-		return err
-	}
-	if err := i.Start(true); err != nil {
-		// The sandbox is up but the agent failed to launch on it — reap the
-		// freshly provisioned sandbox and clear its wiring so a retry re-provisions
-		// from a clean state instead of stranding a container/remote (#1726).
-		if cleanupErr := i.teardownAfterStartFailure(); cleanupErr != nil {
-			return fmt.Errorf("agent start failed and the replacement sandbox's cleanup state is unknown: %w",
-				errors.Join(err, cleanupErr))
-		}
-		return err
-	}
-	return nil
+	return restoreSandboxRuntime(i, false)
 }
 
 // recoverSandbox re-establishes a Lost/restoring sandbox session in place: it
@@ -200,27 +187,63 @@ func (i *Instance) RestoreSandbox() error {
 // transition owns the liveness precondition; ConfirmLive clears the restore fence
 // on success, exactly as the local respawn does.
 func recoverSandbox(i *Instance) error {
-	if err := i.reprovisionRemote(); err != nil {
+	return restoreSandboxRuntime(i, true)
+}
+
+// restoreSandboxRuntime is the body RestoreSandbox and recoverSandbox share. A row
+// whose archive kept its workspace reattaches it (W8.6) and launches the agent
+// with its recorded conversation; any other row gets a fresh sandbox.
+func restoreSandboxRuntime(i *Instance, confirmLive bool) error {
+	adopted, err := i.provisionForRestore()
+	if err != nil {
 		return err
 	}
-	if err := i.Start(true); err != nil {
-		// Same leak guard as RestoreSandbox: reap the fresh sandbox and reset the
-		// remote wiring on a Start failure so the Lost-restore loop's next retry
-		// re-provisions cleanly rather than stacking a second sandbox on the first
-		// still-running one (#1726).
+	if err := i.Start(adopted == nil); err != nil {
+		if adopted != nil {
+			// The workspace is the archive's, not this attempt's: keep it. Reaping
+			// here is what a fresh sandbox's failed start gets, and would delete
+			// the only copy of the work.
+			i.rollbackAdoption(adopted)
+			return fmt.Errorf("the agent did not start in the reattached workspace at %s, which was left as archived: %w", adopted.Dir, err)
+		}
+		// The sandbox is up but the agent failed to launch on it — reap the
+		// freshly provisioned sandbox and clear its wiring so a retry re-provisions
+		// from a clean state instead of stranding a container/remote (#1726).
 		if cleanupErr := i.teardownAfterStartFailure(); cleanupErr != nil {
 			return fmt.Errorf("agent start failed and the replacement sandbox's cleanup state is unknown: %w",
 				errors.Join(err, cleanupErr))
 		}
 		return err
 	}
-	// A sandbox recover re-provisions unconditionally — there is no remote
-	// reattach — so the runtime ConfirmLive publishes is always a replacement
-	// (#4222). Stamp the verdict before the edge so the run-end classifier
-	// inside it can interrupt a still-in-flight task run.
+	if adopted != nil {
+		// The work is back on a live agent; the row no longer owes a preserved
+		// workspace.
+		i.mu.Lock()
+		i.archivedWorkspace = nil
+		i.touchLocked()
+		i.mu.Unlock()
+	}
+	if !confirmLive {
+		return nil
+	}
+	// A reattach starts a new agent process even though the workspace is the same,
+	// and a fresh sandbox is a replacement outright (#4222). Stamp the verdict
+	// before the edge so the run-end classifier inside it can interrupt a task run
+	// still in flight.
 	i.markAgentRuntimeReplaced(true)
 	_ = i.Transition(ConfirmLive())
 	return nil
+}
+
+// provisionForRestore brings up the runtime a restore launches the agent on. It
+// returns the preserved workspace record when it ADOPTED that workspace (the
+// launch is then a reattach, not a first-time setup) and nil when it provisioned
+// a fresh sandbox.
+func (i *Instance) provisionForRestore() (*ArchivedWorkspaceData, error) {
+	if w := i.preservedWorkspaceOwed(); w != nil {
+		return i.restorePreservedWorkspace(w)
+	}
+	return nil, i.reprovisionRemoteWith(nil)
 }
 
 // reprovisionRemote provisions a FRESH sandbox for this instance and rebinds the
@@ -229,11 +252,19 @@ func recoverSandbox(i *Instance) error {
 // branch, so the new sandbox clones the pushed state back; on success the new
 // backend + remote agent-server endpoint + teardown replace the old (dead) ones.
 func (i *Instance) reprovisionRemote() error {
-	// Backstop for every route that re-provisions (restore, Lost recovery, the
-	// restore loop): replacing the runtime reaps its host directory, which for a row
-	// archived without a push is the only copy of the work (#5571 W8.5).
-	if err := i.RestoreRefusedForPreservedWorkspace(); err != nil {
-		return err
+	_, err := i.provisionForRestore()
+	return err
+}
+
+// reprovisionRemoteWith is reprovisionRemote with the adoption choice made. With
+// adopt nil it replaces the runtime; with adopt set it provisions over the
+// preserved workspace and reaps nothing.
+func (i *Instance) reprovisionRemoteWith(adopt *AdoptSpec) error {
+	// Backstop for a caller that reaches the replacing path directly: it reaps the
+	// host directory, which for a row archived without a push is the only copy of
+	// the work (#5571 W8.5). The restore routes go through provisionForRestore.
+	if adopt == nil && i.preservedWorkspaceOwed() != nil {
+		return fmt.Errorf("session %q: its preserved workspace must be reattached, not replaced (#5571 W8.6)", i.Title)
 	}
 	// Bound the hook's lifetime to this attempt: clear it on every exit so a
 	// hook registered for this call cannot survive to fire on a later call.
@@ -258,6 +289,11 @@ func (i *Instance) reprovisionRemote() error {
 		Branch:                i.Branch,
 		Host:                  i.Host,
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
+		Adopt:                 adopt,
+	}
+	if adopt != nil {
+		// Nothing is cloned or fetched when adopting.
+		spec.RestoreBranch = ""
 	}
 	i.mu.RUnlock()
 	spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(spec.RepoRoot)
@@ -351,23 +387,25 @@ func (i *Instance) reprovisionRemote() error {
 	creds := i.sandboxCreds
 	i.mu.RUnlock()
 
-	// A failed archive/recovery can leave the old sandbox wiring live. Reap it
-	// before provisioning a replacement so bindProvisionResult never discards its
-	// only cleanup handle. An unknown outcome keeps the old wiring installed for a
-	// real retry instead of provisioning a second sandbox on a guess.
-	if err := i.reapRemoteRuntimeForReplacement(); err != nil {
-		// Retirement failed: clear any registered hook so it is not inherited by a
-		// later call or fired at the wrong point.
-		i.takeOnSandboxRetired()
-		return fmt.Errorf("cannot re-provision session %q: previous sandbox cleanup state is unknown: %w", i.Title, err)
-	}
-	// The old sandbox is now provably gone: fire the one-shot hook before
-	// continuing. This is the earliest point from which a new Recover episode
-	// can legitimately begin. Pre-reap failures are excluded because the old
-	// sandbox may still be live, and firing there would let repeated pre-reap
-	// failures reset the budget indefinitely.
-	if fn := i.takeOnSandboxRetired(); fn != nil {
-		fn()
+	if adopt == nil {
+		// A failed archive/recovery can leave the old sandbox wiring live. Reap it
+		// before provisioning a replacement so bindProvisionResult never discards its
+		// only cleanup handle. An unknown outcome keeps the old wiring installed for a
+		// real retry instead of provisioning a second sandbox on a guess.
+		if err := i.reapRemoteRuntimeForReplacement(); err != nil {
+			// Retirement failed: clear any registered hook so it is not inherited by a
+			// later call or fired at the wrong point.
+			i.takeOnSandboxRetired()
+			return fmt.Errorf("cannot re-provision session %q: previous sandbox cleanup state is unknown: %w", i.Title, err)
+		}
+		// The old sandbox is now provably gone: fire the one-shot hook before
+		// continuing. This is the earliest point from which a new Recover episode
+		// can legitimately begin. Pre-reap failures are excluded because the old
+		// sandbox may still be live, and firing there would let repeated pre-reap
+		// failures reset the budget indefinitely.
+		if fn := i.takeOnSandboxRetired(); fn != nil {
+			fn()
+		}
 	}
 	// Mint AFTER the reap, through the same helper the create path uses (#3068).
 	//
@@ -434,6 +472,12 @@ func (i *Instance) reprovisionRemote() error {
 	// The sandbox is up but its endpoint could not be wired — reap it so a bad
 	// restore never leaks a container/remote.
 	if bindErr := i.bindProvisionResult(res); bindErr != nil {
+		if adopt != nil {
+			// Reaping an adopting provision would delete the preserved workspace.
+			// Keep its cleanup identity so a kill still reaps it, and say so.
+			i.retainProvisionResultCleanup(res)
+			return fmt.Errorf("failed to bind the reattached workspace for session %q (left as archived): %w", i.Title, bindErr)
+		}
 		return fmt.Errorf("failed to bind re-provisioned sandbox for session %q: %w",
 			i.Title, i.discardUnusableReplacement(res, bindErr))
 	}

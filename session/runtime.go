@@ -58,6 +58,10 @@ func ParseBackendKind(s string) (BackendKind, error) {
 // source, and optional restore branch used to start an `af agent-server` for one
 // workspace. Each runtime reads its own settings from the resolved repo config.
 type ProvisionSpec struct {
+	// Adopt, when set, provisions over a workspace an archive preserved on the
+	// host instead of creating one (#5571 W8.6): nothing is cloned, fetched or
+	// reaped, and the dir is verified read-only first.
+	Adopt *AdoptSpec
 	// RepoRoot is the absolute repo root the session is created against.
 	RepoRoot string
 	// Title is the session title. A sandbox runtime uses it as the single

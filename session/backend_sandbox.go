@@ -102,7 +102,7 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
-		return ProvisionResult{}, p.reapProvisionFailure(err)
+		return ProvisionResult{}, p.provisionFailure(err)
 	}
 	return res, nil
 }
@@ -242,18 +242,30 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.checkHostPrereqs(p.hostReadinessKey(), sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
-	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
-	}
-	w.resolveSessionDirSymlinks(sshShortStepTimeout)
-	p.sessionDir = w.SessionDir
-	// The identity is repo-local (#5571 W2.7), so it is written after the clone
-	// that creates the repository.
-	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
-	}
-	if err := w.configureGit(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
+	if adopt := p.spec.Adopt; adopt != nil {
+		// A preserved workspace (W8.6): the dir already exists and is verified
+		// read-only; nothing below that creates, clones or rewrites the tree runs.
+		w.SessionDir = adopt.SessionDir
+		p.sessionDir = w.SessionDir
+		wt, err := w.adoptWorkspace(sshShortStepTimeout)
+		if err != nil {
+			return ProvisionResult{}, err
+		}
+		w.adoptedWorktree = wt
+	} else {
+		if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
+		w.resolveSessionDirSymlinks(sshShortStepTimeout)
+		p.sessionDir = w.SessionDir
+		// The identity is repo-local (#5571 W2.7), so it is written after the clone
+		// that creates the repository.
+		if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
+		if err := w.configureGit(sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
 	}
 	// The binary stage is platform-aware (#5571 W2.2): probe the host's uname,
 	// pick the af build it can actually run (sandbox.binary override / the
