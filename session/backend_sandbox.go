@@ -156,9 +156,10 @@ type sandboxProvisioner struct {
 	// endpoint every consumer dials, fixed at provision and re-bound verbatim
 	// on every re-dial so a consumer's cached URL is never stale — and forward
 	// embeds the remote agent-server's listen address it targets. reverseFwds
-	// is W3.4's -R slot (the in-sandbox callback): empty here; each element is
-	// composed into the spawn as `-R "$N"` so a future reverse forward gets
-	// the same ExitOnForwardFailure fatality, group teardown, and supervision.
+	// is W3.4's -R slot (the in-sandbox callback), set at provision when a
+	// credential was granted; each element is composed into the spawn as
+	// `-R "$N"` so the reverse forward gets the same ExitOnForwardFailure
+	// fatality, group teardown, and supervision.
 	tunnel      *tunnelChild
 	forward     string
 	localAddr   string
@@ -247,6 +248,19 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	// dead grant out of the launched agent-server's environment (#5571 W3.1,
 	// PR #5577 review — see revalidateCallbackBeforeEnv for why this point).
 	callbackLost := w.revalidateCallbackBeforeEnv()
+	// The callback's carrier is decided BEFORE its env is committed: a granted
+	// credential with no -R to ride is as dead as a revoked one, so it degrades
+	// the same way rather than leaving the agent a URL nothing answers (W3.4).
+	reverse, carrierLost := w.callbackReverseForward()
+	if callbackLost == "" {
+		callbackLost = carrierLost
+	}
+	p.reapMu.Lock()
+	p.reverseFwds = nil
+	if reverse != "" {
+		p.reverseFwds = []string{reverse}
+	}
+	p.reapMu.Unlock()
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}

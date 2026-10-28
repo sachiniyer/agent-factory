@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/config"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -185,90 +183,46 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 	assert.False(t, admits(bare, request("/v1/TestOnlyAdmitted", secret)))
 }
 
-func TestMintSandboxCallbackFenced_RefusesWithoutRequireToken(t *testing.T) {
+// The mint no longer reads network.listen_addr or network.require_token
+// (#5571 W3.4): the callback rides the supervised connection's -R to the
+// dedicated sandbox endpoint, so its only precondition is that the endpoint is
+// listening. A default-config daemon (loopback listener, token not required) must
+// therefore mint.
+func TestMintSandboxCallbackFenced_NeedsOnlyTheEndpoint(t *testing.T) {
 	m := &Manager{}
 
-	_, err := m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), daemonTestConfig(false, "10.0.0.5:8443"), "sess-a")
-	require.Error(t, err, "a credential against a listener that demands none enforces nothing")
-	assert.Contains(t, err.Error(), requireTokenFixHint,
-		"the refusal must name the one-line fix, or the operator is left guessing")
-
-	// Refused BEFORE minting: nothing may be left in the registry for a provision
-	// that did not happen.
-	_, ok := m.sandboxTokens.sessionFor("")
-	assert.False(t, ok)
+	// Endpoint down: refused BEFORE minting, leaving nothing in the registry.
+	_, err := m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), "sess-a")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sandbox callback endpoint is not running")
 	assert.Empty(t, m.sandboxTokens.bySession, "a refused mint must leave no credential behind")
+	assert.NotEmpty(t, m.callbackUnavailableReason(), "the picker must say what the create would")
 
-	// An empty listen_addr has nothing to call back to, and is refused separately
-	// so the message can say which of the two is wrong.
-	_, err = m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), daemonTestConfig(true, ""), "sess-a")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "listen_addr")
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	assert.Empty(t, m.callbackUnavailableReason())
 
-	// A BIND address is not a dialable one, and every way it can fail that test is
-	// refused (#3012 review). From inside a sandbox a wildcard names the SANDBOX;
-	// so does loopback, even more definitively — and nothing forwards a callback
-	// the other way, since the ssh runtime tunnels daemon→sandbox only. Port 0
-	// names nothing fixed at all.
-	// "10.0.0.5:" is the OTHER spelling of a kernel-selected port: SplitHostPort
-	// returns port "" with no error, so a check against the literal "0" alone let it
-	// through and produced "http://10.0.0.5:" (#3012 review).
-	// Every case here is a SPELLING the previous version of this check missed, and
-	// they are listed rather than reduced because each one was a separate review
-	// finding: an unspecified address and a zero port each have an open-ended set of
-	// textual forms, and matching literals recognised whichever ones I happened to
-	// think of. The code now parses instead — net.IP.IsUnspecified and
-	// net.LookupPort — so this table's job is to keep proving that.
-	for _, addr := range []string{
-		// Unspecified, four ways. net.Listen binds all of them identically.
-		"0.0.0.0:8443", ":8443", "[::]:8443", "[0:0:0:0:0:0:0:0]:8443", "[::ffff:0.0.0.0]:8443",
-		// Port zero, four ways. All resolve to 0 and mean "kernel picks".
-		"10.0.0.5:0", "10.0.0.5:", "10.0.0.5:00", "10.0.0.5:000",
-		// Loopback, three ways — the third is a NAME, and names are the reason the
-		// host must now be a literal IP at all.
-		"127.0.0.1:8443", "[::1]:8443", "localhost:8443",
-		// Loopback aliases: unbounded as a set (any /etc/hosts entry), which is why
-		// the rule is "literal IP" rather than a list of names to reject.
-		"ip6-localhost:8443", "localhost.localdomain:8443",
-		// A hostname is resolved by the SANDBOX, not by this daemon, so af cannot
-		// know what it points at over there — refused even when it looks routable.
-		"af-host.internal:8443",
-		// A zone identifier names an interface on the DAEMON's host, and its raw "%"
-		// is an invalid escape to Go's URL parser. net.ParseIP refuses it, so the
-		// literal-IP rule covers this too.
-		"[fe80::1234%eth0]:8443",
-	} {
-		_, err = m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), daemonTestConfig(true, addr), "sess-a")
-		require.Errorf(t, err, "listen_addr %q is not dialable from a sandbox", addr)
-		assert.Emptyf(t, m.sandboxTokens.bySession, "a refused mint must leave no credential behind (%s)", addr)
-	}
-
-	// Loopback must be refused for being UNDIALABLE, not for the posture: telling
-	// an operator to set require_loopback_token would send them to a key that buys
-	// a well-enforced credential their sandbox still cannot use.
-	_, err = m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), daemonTestConfig(true, "127.0.0.1:8443"), "sess-a")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reaches ITSELF")
-	assert.NotContains(t, err.Error(), "require_loopback_token")
-
-	grant, err := m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), daemonTestConfig(true, "10.0.0.5:8443"), "sess-a")
+	grant, err := m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), "sess-a")
 	require.NoError(t, err)
-	assert.Equal(t, "http://10.0.0.5:8443", grant.URL)
-
-	// A service-name port resolves into the URL as a NUMBER, because an HTTP client
-	// inside the sandbox dials a port, not an /etc/services entry.
-	namedGrant, nerr := m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), daemonTestConfig(true, "10.0.0.5:http"), "sess-b")
-	require.NoError(t, nerr)
-	assert.Equal(t, "http://10.0.0.5:80", namedGrant.URL)
+	assert.Equal(t, "/tmp/af-home/sandbox-callback.sock", grant.Socket)
+	assert.Regexp(t, `^http://127\.0\.0\.1:[0-9]{5}$`, grant.URL,
+		"the URL names a loopback port on the SANDBOX, never the client listener")
 	assert.NotEmpty(t, grant.Token)
 	owner, ok := m.sandboxTokens.sessionFor(grant.Token)
 	require.True(t, ok)
 	assert.Equal(t, "sess-a", owner)
-}
 
-// daemonTestConfig is the minimal config the refusal reads.
-func daemonTestConfig(requireToken bool, listenAddr string) *config.Config {
-	return &config.Config{RequireToken: requireToken, ListenAddr: listenAddr}
+	// Clearing the endpoint (daemon shutdown) refuses again.
+	m.setSandboxEndpointSocket("")
+	_, err = m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), "sess-b")
+	require.Error(t, err)
+
+	// A fence that moved during the window voids the mint.
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	stale := m.sandboxTokens.invalidationCount()
+	m.sandboxTokens.revokeAll()
+	_, err = m.mintSandboxCallbackFenced(stale, "sess-c")
+	require.Error(t, err)
+	assert.Empty(t, m.sandboxTokens.bySession["sess-c"])
 }
 
 // A credential does not outlive the listener it was minted against (#3012 review).

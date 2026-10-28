@@ -232,8 +232,8 @@ func newTunnelChild(cmd *exec.Cmd, ll *tunnelLifeline) *tunnelChild {
 // stop can reach. The caller owns registration: registerSandboxTunnel before
 // this, stopTunnel via reap on every failure after.
 //
-// The spawn composes p.forward plus p.reverseFwds — W3.4's -R slot, empty for
-// this slice — so every re-dial re-establishes the same endpoint contract.
+// The spawn composes p.forward plus p.reverseFwds — W3.4's -R slot, empty when no
+// callback was granted — so every re-dial re-establishes the same endpoint contract.
 func (p *sandboxProvisioner) provisionTunnelChild() (*tunnelChild, error) {
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
@@ -317,7 +317,7 @@ func killTunnel(t *tunnelChild) {
 // `reverse` is W3.4's slot for -R forwards (the in-sandbox callback): each
 // element is composed as `-R "$N"` after the -L spec, so it gets the same
 // ExitOnForwardFailure fatality, the same process-group teardown, and the same
-// supervision on every re-dial. Empty today.
+// supervision on every re-dial.
 func (p *sandboxProvisioner) spawnTunnel(forward string, reverse ...string) (*exec.Cmd, *tunnelLifeline, error) {
 	script := p.sshCmd + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`
 	args := []string{forward}

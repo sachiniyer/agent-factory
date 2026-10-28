@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -336,10 +339,47 @@ func (w *sandboxWorkspace) revalidateCallbackBeforeEnv() string {
 		return ""
 	}
 	if err := w.spec.CallbackRevalidate(); err != nil {
-		w.spec.CallbackURL, w.spec.CallbackToken = "", ""
+		w.spec.CallbackURL, w.spec.CallbackToken, w.spec.CallbackSocket = "", "", ""
 		return err.Error()
 	}
 	return ""
+}
+
+// callbackReverseForward returns the `-R` spec that carries the sandbox's
+// loopback callback port to the daemon's dedicated sandbox endpoint socket
+// (#5571 W3.4): `127.0.0.1:<port>:<socket>`. Both halves come from the daemon's
+// own mint — the port from the URL it issued, the socket from its endpoint —
+// so nothing a repo or the sandbox supplies picks where the credential goes.
+// ssh binds the remote end on the loopback address only (explicit, never
+// "localhost", which can resolve to ::1 and leave 127.0.0.1 free for another
+// process to answer), and ExitOnForwardFailure makes a taken port fatal to the
+// provision rather than silently routing the credential to a stranger.
+//
+// No credential, or one with no socket, yields no forward and no reason. A
+// credential whose carrier cannot be built clears the grant and returns why,
+// like a revalidation loss.
+func (w *sandboxWorkspace) callbackReverseForward() (string, string) {
+	if w.spec.CallbackToken == "" {
+		return "", ""
+	}
+	fail := func(why string) (string, string) {
+		w.spec.CallbackURL, w.spec.CallbackToken, w.spec.CallbackSocket = "", "", ""
+		return "", "the callback forward could not be built: " + why
+	}
+	u, err := url.Parse(w.spec.CallbackURL)
+	if err != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Port() == "" {
+		return fail("the callback URL is not a loopback http address")
+	}
+	if port, perr := strconv.Atoi(u.Port()); perr != nil || port < 1 || port > 65535 {
+		return fail("the callback port is out of range")
+	}
+	sock := w.spec.CallbackSocket
+	// "port:local_socket" is ssh's -R grammar, so a colon (or a space) in the
+	// path would be re-parsed as part of it.
+	if sock == "" || !filepath.IsAbs(sock) || strings.ContainsAny(sock, ": \t\n") {
+		return fail("the daemon's sandbox endpoint socket path is unusable")
+	}
+	return "127.0.0.1:" + u.Port() + ":" + sock, ""
 }
 
 // writeCallbackEnv puts the daemon URL and the per-session callback token on the
