@@ -223,10 +223,12 @@ func (c *Client) AddTask(t task.Task, actor task.Actor) error {
 }
 
 // AddTaskResult is AddTask returning the record the daemon stored, or nil when
-// the daemon predates the field or answered a committed-with-warning error.
+// the daemon predates the field or answered a committed-with-warning error. For a
+// remote target it also asks the daemon to validate the task's project path on its
+// own host (#5859).
 func (c *Client) AddTaskResult(t task.Task, actor task.Actor) (*task.Task, error) {
 	var resp daemon.AddTaskResponse
-	if err := c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &resp); err != nil {
+	if err := c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Task, nil
@@ -246,7 +248,7 @@ func (c *Client) AddTaskResult(t task.Task, actor task.Actor) (*task.Task, error
 // actor names the calling surface for the audit trail — see AddTask.
 func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
 	var resp daemon.UpdateTaskResponse
-	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor)}, &resp); err != nil {
+	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil

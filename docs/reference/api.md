@@ -70,8 +70,8 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/SendProposalChanges` | `session_id` | Send the session its unseen proposal edits as a prompt now when the agent is Ready, or on the next tick where it is, and return its push status. |
 | `POST` | `/v1/ListOnComplete` | — | List task spawned-session lifecycle choices and consequences, least destructive first. |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
-| `POST` | `/v1/AddTask` | `task`, `actor` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |
-| `POST` | `/v1/UpdateTask` | `id`, `update`, `expect`, `actor` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit. |
+| `POST` | `/v1/AddTask` | `task`, `actor`, `validate_path` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |
+| `POST` | `/v1/UpdateTask` | `id`, `update`, `expect`, `actor`, `validate_path` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit. |
 | `POST` | `/v1/RemoveTask` | `id`, `expect` | Remove a task by ID. |
 | `POST` | `/v1/RestartTask` | `id`, `expect` | Stop and replace one enabled watch task without overlapping its process tree. |
 | `POST` | `/v1/TriggerTask` | `id`, `expect` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). |
