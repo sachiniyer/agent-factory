@@ -12,8 +12,11 @@ like a local one. Tab admission follows what each kind needs: shell/process tabs
 need a local PTY and process, and VS Code needs a daemon-side worktree/editor, so
 those remain local-only. A metadata-only web tab spawns neither and can be added
 to an off-box session (docker, ssh, sandbox, hook) when its target is an external
-HTTPS URL. Loopback targets still need an agent-side relay and are refused for
-now; plain HTTP cannot be framed by the HTTPS web UI. Admitted remote web tabs
+HTTPS URL, or a loopback address (including `--port`): the daemon's web-tab proxy
+reaches the workspace's own `127.0.0.1:<port>` through the agent-server's port
+relay over the session's existing connection, so the tab shows the dev server
+running inside the sandbox, never a daemon-host port. Plain HTTP external URLs
+cannot be framed by the HTTPS web UI. Admitted remote web tabs
 can be closed, renamed, and reordered like local web tabs.
 
 | Backend | Where the agent runs | Selected with |
@@ -389,6 +392,19 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 3. It streams the `af` binary onto the remote and starts an **`af agent-server`**
    bound to `127.0.0.1:0` (a random loopback port — never exposed on the remote's
    public interface), behind the same bearer-token protocol (plain HTTP).
+
+   The bearer token is **per-session**: the daemon derives it from a 0600
+   `sandbox-runtime-key` in its own AF home plus a per-session nonce, and writes
+   it to `af-server-token` (0600) in the session directory, where the remote
+   `af agent-server` reads it — beside its own binary, never through a flag or
+   an environment variable, so nothing the agent-server spawns can inherit it.
+   The session record persists the agent-server's address and version and the
+   nonce reference (`token_ref`) — never the token — so the identity a reattach
+   or a cleanup needs survives a daemon restart. The reference also rides in the
+   agent-server's own environment as `AF_TOKEN_REF` so a host-side
+   `/proc/<pid>/environ` probe can bind the live process to the record; it is
+   the one variable that probe may read, and it never reaches agent or shell
+   panes.
 4. It opens an **SSH local-forward tunnel** from a daemon-local loopback port to
    that remote port and drives the agent-server over `http://127.0.0.1:<localport>`.
    Attach, preview, prompts, and the live terminal stream all flow through the one
@@ -602,6 +618,12 @@ inherit it. A local token is never copied to the SSH host implicitly.
 
 ### Testing
 
+CI runs `TestSandboxDaemonE2E` (`.github/workflows/sandbox-e2e.yml`, on every master
+push and nightly): a real daemon on a default config drives a `backend = "sandbox"`
+session against a containerized sshd host through its own RPCs (create, prompt,
+preview, tab, archive, restore, kill, and a task-fired create). `make
+backend-sandbox-e2e` runs it by hand; it is not a routine local gate.
+
 `make backend-ssh-roundtrip` runs the real end-to-end SSH round-trips on a host
 with Docker: it stands up a throwaway `sshd`+git+tmux container as the ssh target
 (no external host, no dependency on the box's own sshd), creates a session on the
@@ -670,7 +692,7 @@ repo on your infra, starts an **`af agent-server`** there, and echoes that
 server's authed endpoint (`{url, token}`); the daemon then
 drives the session over that `ws://` stream — so a hook session matches a local,
 docker, or ssh one on attach, type, resize, preview, archive/restore, and kill.
-Like the other off-box backends it admits only external HTTPS web tabs; shell,
+Like the other off-box backends it admits web tabs (external HTTPS, or loopback via the port relay); shell,
 process, and VS Code tabs need a daemon-side worktree.
 
 ```json

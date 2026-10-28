@@ -94,6 +94,14 @@ export interface LostRestoreWait {
 
 export type PromptDeliveryStatus = "delivered" | "not-delivered" | "sent-unverified" | "could-not-confirm";
 
+/** Live remote-probe outage projection (#5571 W1.3): `since` (RFC3339) anchors
+ *  the first unanswered probe of the episode, `error` is the last transport
+ *  failure — already collapsed, bounded, and token-redacted by the daemon. */
+export interface UnreachableData {
+  since?: string;
+  error?: string;
+}
+
 /** Durable identity transaction retained until its replacement mission settles. */
 export interface AccountSwapData {
   manual?: boolean;
@@ -188,6 +196,11 @@ export interface SessionData {
   lost_restore_failure?: LostRestoreFailure;
   /** Present while the restore loop defers a retry on the environment (#5295). */
   lost_restore_wait?: LostRestoreWait;
+  /** Daemon-projected remote-probe outage (#5571 W1.3). An observation flag,
+   *  not a liveness: it coexists with running/ready/lost and says af's view of
+   *  this row cannot currently be re-confirmed. The daemon already bounds and
+   *  token-redacts `error`; clients render it verbatim. */
+  unreachable?: UnreachableData;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */

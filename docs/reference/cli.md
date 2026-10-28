@@ -922,6 +922,8 @@ Settable keys:
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root} (global-only)
+  default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
 require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
@@ -2156,6 +2158,7 @@ af sessions create [title] [flags]
 | `--account` | `string` | Credential account `name` to run the agent as (register it with af accounts add; defaults to this project's default_accounts entry for the agent, else the ambient identity) |
 | `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, sandbox, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run "af sessions backends" for which of these this project can actually use, and why not |
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
+| `--host` | `string` | Listed host to run the session on, by name from the global host list (af config set hosts …); implies --backend ssh. Run "af sessions backends" to see each host and whether it is usable |
 | `--in-place` |  | Alias for --here |
 | `--name` | `string` | Session title (alternative to positional <title>) |
 | `--program` | `string` | Program to run (one of: claude, codex, aider, gemini, amp, opencode, devin; defaults to config default) |
@@ -2545,6 +2548,11 @@ gets one more Enter only when it is exactly the single paste chip bound to this
 delivery and nothing in the composer changed; every other staged shape is
 reported sent-unverified. It is never re-pasted.
 
+If --create made the session but could not confirm its start, the command still
+exits 0: the JSON carries a warning, the status stays could-not-confirm, and
+stderr says the session was created. Do not retry; inspect it with
+'af sessions list'.
+
 With --all, broadcast a single prompt to every live session in scope:
 
     af sessions send-prompt --all "<prompt>"
@@ -2634,11 +2642,13 @@ the session (auto-suffixed -2, -3, …). So the name you pass is not always the
 name you get — the resolved tab name is printed on success, and that is the one
 the other tab verbs address.
 
-For remote sessions, only external HTTPS web tabs are admitted. That kind is
-metadata-only: it needs no PTY and spawns no process in the missing daemon-side
-worktree. Shell, process, and VS Code tabs still require local runtime/worktree
-resources, while loopback web targets still need a relay through the off-box
-agent and plain HTTP cannot be framed by an HTTPS Agent Factory UI.
+For remote sessions, web tabs are admitted. That kind is metadata-only: it needs
+no PTY and spawns no process. An external HTTPS URL is iframed
+directly, and a loopback target (including --port) is served from the session's
+own workspace through the agent-server's port relay, so it shows what listens on
+that port in the sandbox rather than on the daemon host. Plain-HTTP external URLs
+cannot be framed by an HTTPS Agent Factory UI. Shell, process, and VS Code tabs
+still require local runtime/worktree resources.
 
 ```
 af sessions tab-create <title> [flags]

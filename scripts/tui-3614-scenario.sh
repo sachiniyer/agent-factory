@@ -123,6 +123,22 @@ print(sum(w(c) for c in line[:i]))
 PY
 }
 
+# _last_cell_col LINE NEEDLE — like _cell_col, but the LAST occurrence.
+_last_cell_col() {
+    python3 - "$1" "$2" <<'PY'
+import sys, unicodedata
+line, needle = sys.argv[1], sys.argv[2]
+i = line.rfind(needle)
+if i < 0:
+    print(-1); raise SystemExit
+def w(ch):
+    if ch == '\u200d' or unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1
+print(sum(w(c) for c in line[:i]))
+PY
+}
+
 # --- #3614: the rail row must not overflow, and must keep its dot -----------
 #
 # 88 columns puts the rail at exactly its 22-column minimum: the grid clamps it
@@ -177,37 +193,40 @@ budget below it is now off by one (#3614/#3430)"
     _af_log "=== rail: PASS ==="
 }
 
-# --- #723: a modal must not erase the background left of itself --------------
+# --- #723: a modal must not leave or erase background beside itself ----------
 #
-# The A/B from the issue, driven through the real compositor — as a DIFFERENTIAL
-# oracle, because the capture is not a trustworthy cell grid for clustered
-# content (see the note at the top of this file) and any column arithmetic on it
-# would be measuring the harness rather than af.
+# History: #723 was a rune-wise prefix cut read with a grapheme-aware width, so a
+# clustered row's prefix came up short and the padding blanked real background
+# cells left of the modal. #5297 then changed the compositor's policy: on every
+# row the modal OCCUPIES the cells either side of it are blank backdrop, never
+# the background's own cells; only rows outside the modal's vertical span keep
+# their backdrop. That makes the old oracle ("the clustered row keeps its dot
+# beside the modal") vacuous (#5697): a surviving dot can only sit on a row the
+# modal does not touch, where no compositing happens at all.
 #
-# Two sessions with identical row shapes are on screen: one titled with the ZWJ
-# family, one plain. Both rail rows carry a ● status dot at the rail's right
-# edge. The prefix left of an overlay was cut with a rune-wise truncator while
-# its width was read with the grapheme-aware one, so on a row carrying a cluster
-# the prefix came up short by the amount the two disagree — six cells for this
-# family — and the padding blanked that many real background cells immediately
-# left of the modal. On the plain row the two agree and nothing is blanked.
+# The oracle that can still fail is the policy itself, checked ON rows inside
+# the modal's vertical band:
+#   * the clustered row and the plain row both sit inside the band, and each
+#     carried a ● dot within a cluster's width of the modal's left edge before it
+#     opened, so the dot WOULD be written there by a compositor that copies or
+#     cuts the background (the #723 cut, or a regression of #5297);
+#   * after the modal opens neither row keeps any ●, i.e. the margin is blank;
+#   * the modal's own right edge is at the same column on both rows, so a
+#     miscounted prefix on the clustered row would shift it;
+# Mutation check (see the PR body): restoring the background prefix on modal
+# rows fails the "margin is blank" assertion at the width this finds.
 #
-# So the plain row's dot is the CONTROL and the clustered row's dot is the
-# assertion: same row shape, same modal, same column, and the only difference is
-# the cluster.
-#
-# The geometry is SEARCHED FOR rather than hard-coded. The check needs the dot to
-# be background (left of the modal) and inside the erased window, which is a band
-# of terminal widths that moves whenever the help text or the rail clamp changes.
-# Searching means the gate re-derives it instead of quietly going vacuous, and if
-# no width in the sweep works the scenario fails loudly rather than passing on a
-# geometry where the defect could not have shown.
+# The geometry is SEARCHED FOR (widths and heights) rather than hard-coded, and
+# if nothing in the sweep puts both rows in the band the scenario fails loudly
+# instead of passing where the defect could not have shown.
 drive_overlay_background() {
-    _af_log "=== overlay: the modal must not erase background left of itself (#723) ==="
+    _af_log "=== overlay: modal rows have blank margins, rows outside keep the backdrop (#723/#5297) ==="
 
-    local width zwj_row plain_row found=""
-    for width in 200 190 180 210 170 160; do
-        af_resize "$width" 40 || return 1
+    local width height zwj_row plain_row found="" screen
+    local top bottom modal_line plain_line dot_col modal_col plain_edge zwj_edge
+    for height in 40 30 24 20 16 14 12; do
+    for width in $(seq 90 2 200); do
+        af_resize "$width" "$height" || return 1
         af_ensure_nav
         zwj_row="$(_tree_row_of "$ANCHOR_HEAD")"
         plain_row="$(_tree_row_of "$PLAIN_TITLE")"
@@ -216,39 +235,66 @@ drive_overlay_background() {
         # modal to erase.
         af_capture | sed -n "${zwj_row}p"   | grep -qF '●' || continue
         af_capture | sed -n "${plain_row}p" | grep -qF '●' || continue
+        plain_line="$(af_capture | sed -n "${plain_row}p")"
+        dot_col="$(_cell_col "$plain_line" '●')"
 
-        af_send '?'
-        af_wait_for 'Managing:|Workspace:' "$AF_DRIVER_TIMEOUT" 'help overlay' || return 1
-        # The control decides whether this width can discriminate: if the modal
-        # covers the dot column, BOTH rows lose their dot and a pass below would
-        # mean nothing.
-        if af_capture | sed -n "${plain_row}p" | grep -qF '●'; then
-            found="$width"
-            break
+        af_send '/'
+        af_wait_for 'Search sessions' "$AF_DRIVER_TIMEOUT" 'search overlay' || return 1
+        screen="$(af_capture)"
+        top="$(printf '%s\n' "$screen" | grep -n -m1 '╭' | cut -d: -f1)"
+        bottom="$(printf '%s\n' "$screen" | grep -n '╰' | tail -1 | cut -d: -f1)"
+        if [ -n "$top" ] && [ -n "$bottom" ] \
+            && [ "$zwj_row" -ge "$top" ] && [ "$zwj_row" -le "$bottom" ] \
+            && [ "$plain_row" -ge "$top" ] && [ "$plain_row" -le "$bottom" ]; then
+            # The modal's left edge is its top border's corner; a `│` on a row
+            # is NOT usable here, the rail has its own divider.
+            modal_line="$(printf '%s\n' "$screen" | sed -n "${top}p")"
+            modal_col="$(_cell_col "$modal_line" '╭')"
+            # Its right border is the last `│` on each row, which shifts if a
+            # row's prefix was mis-measured.
+            plain_edge="$(_last_cell_col "$(printf '%s\n' "$screen" | sed -n "${plain_row}p")" '│')"
+            zwj_edge="$(_last_cell_col "$(printf '%s\n' "$screen" | sed -n "${zwj_row}p")" '│')"
+            # The dot has to be where the modal now is, or a copying compositor
+            # would not have shown it either.
+            if [ "$modal_col" -gt "$dot_col" ] && [ "$((modal_col - dot_col))" -le 7 ]; then
+                found="${width}x${height}"
+                break 2
+            fi
         fi
         af_send Escape
-        af_wait_gone 'Managing:' "$AF_DRIVER_TIMEOUT" 'help overlay closed' || return 1
+        af_wait_gone 'Search sessions' "$AF_DRIVER_TIMEOUT" 'search overlay closed' || return 1
+    done
     done
 
     if [ -z "$found" ]; then
         af_capture >&2
-        _af_fail "no terminal width in the sweep leaves the ● dot as background beside the help \
-overlay, so this check cannot discriminate. Re-derive the geometry (the dot must sit LEFT of the \
-modal and within one cluster's width of it) rather than deleting the check — a vacuous pass here \
-is how #723 stayed closed for three months."
+        _af_fail "no terminal size in the sweep puts BOTH dotted rows inside the search overlay's \
+vertical span with the ● dot within a cluster's width of its left edge, so this check cannot \
+discriminate. Re-derive the geometry rather than deleting the check — a vacuous pass here is how \
+#723 stayed closed for three months, and how this check sat vacuous after #5297 (#5697)."
         return 1
     fi
 
-    if ! af_capture | sed -n "${zwj_row}p" | grep -qF '●'; then
+    local row
+    for row in "$plain_row" "$zwj_row"; do
+        if printf '%s\n' "$screen" | sed -n "${row}p" | grep -qF '●'; then
+            af_capture >&2
+            _af_fail "row $row is inside the overlay's vertical span at ${found} but still shows a ● \
+beside the modal: the margin on a modal-occupied row must be blank backdrop, never the \
+background's own cells (#5297/#723)"
+            return 1
+        fi
+    done
+    if [ "$plain_edge" != "$zwj_edge" ]; then
         af_capture >&2
-        _af_fail "the overlay erased background left of itself on the clustered row at ${found} \
-columns: its ● dot is gone while the plain control row kept its own (#723)"
+        _af_fail "the modal's right edge is at column $plain_edge on the plain row but \
+$zwj_edge on the clustered row at ${found}: the clustered row's prefix was mis-measured (#723)"
         return 1
     fi
-    _af_log "=== overlay: PASS at ${found} columns (clustered row kept its background dot; plain row is the control) ==="
+    _af_log "=== overlay: PASS at ${found} (both rows in the band, margins blank, edge aligned) ==="
 
     af_send Escape
-    af_wait_gone 'Managing:' "$AF_DRIVER_TIMEOUT" 'help overlay closed' || return 1
+    af_wait_gone 'Search sessions' "$AF_DRIVER_TIMEOUT" 'search overlay closed' || return 1
 }
 
 # --- zones: the #3585 contract must still hold ------------------------------
@@ -264,7 +310,7 @@ drive_confirmation_zone() {
     af_focus_tree || return 1
 
     for _ in $(seq 1 12); do
-        if af_capture | grep -qE "▾[[:space:]]+${ANCHOR_HEAD}" && af_capture | grep -qF 'D kill'; then
+        if af_capture | grep -qE "▾[[:space:]]+${ANCHOR_HEAD}" && af_capture | grep -qF 'D delete'; then
             break
         fi
         af_send j
@@ -274,7 +320,7 @@ drive_confirmation_zone() {
     af_wait_for 'to cancel|esc cancel' "$AF_DRIVER_TIMEOUT" 'kill confirmation' || return 1
 
     local needle row line col
-    needle='to cancel'
+    needle='esc cancel'
     row="$(_row_of "$needle")"
     [ -n "$row" ] || { _af_fail "confirmation instruction row not found"; return 1; }
     line="$(af_capture | sed -n "${row}p")"

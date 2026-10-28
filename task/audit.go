@@ -204,6 +204,7 @@ func (t *Task) resetStoreOwnedFields(now time.Time) {
 	t.Audit = nil
 	t.LastRunAt = nil
 	t.LastRunStatus = ""
+	t.LastRunID, t.LastRunStartedAt = "", nil
 	t.DroppedEvents = 0
 	if t.CreatedAt.IsZero() || t.CreatedAt.After(now) {
 		t.CreatedAt = now

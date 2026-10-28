@@ -194,6 +194,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		InPlace:                        req.InPlace,
 		ForceRemote:                    req.ForceRemote,
 		Backend:                        session.BackendKind(req.Backend),
+		Host:                           req.Host,
 		ResumeConversation:             req.resumeConversation,
 		RestoreTabs:                    req.restoreTabs,
 		PendingRecreateNotice:          req.pendingRecreateNotice,
@@ -616,6 +617,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	}
 	backendOpts := session.InstanceOptions{
 		Backend:     session.BackendKind(req.Backend),
+		Host:        req.Host,
 		ForceRemote: req.ForceRemote,
 		InPlace:     req.InPlace,
 	}

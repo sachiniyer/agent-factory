@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -119,7 +120,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// always-visible Projects section's per-repo counts stay live (#1590).
 		// Read here (not in the handler) to keep the daemon RPC off the event
 		// loop; its error is carried separately so a hiccup keeps the last rows.
-		allReposData, allReposErr := allRepos()
+		allReposData, allReposErr := allRepos(context.Background())
 		return snapshotFetchedMsg{
 			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
 			tasks: tasks, tasksErr: tasksErr, repoID: repoID,
@@ -702,6 +703,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileTaskRunState(d.TaskRunActive, d.TaskRunIdleEdgeHeld, d.TaskRunTurnGateHeld) {
 		changed = true
 	}
+	// The outage flag is daemon truth on every snapshot: this is the reconcile
+	// path for rows the snapshot updates IN PLACE, where FromInstanceData never
+	// runs (#5571 W1.3).
+	if inst.ReconcileUnreachable(d.Unreachable) {
+		changed = true
+	}
 	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
 	// the daemon poll computes Running/Ready/Lost/Archived/LimitReached (the #935
 	// liveness) and the TUI renders it. Applied UNCONDITIONALLY — daemon liveness
@@ -804,7 +811,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// no-op rather than a behavior change: ReconcileTabsFromData already returns
 	// early for an instance with no local worktree, which is every sandbox
 	// instance (#1874).
-	if inst.Capabilities().TabManagement {
+	{
 		// Capture the slot→identity list before the tab reconcile mutates it: an
 		// out-of-band tab change (another client, `af sessions tab-delete` /
 		// `tab-rename`, daemon-side) must apply the SAME pane close/rebind

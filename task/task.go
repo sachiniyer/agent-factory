@@ -113,6 +113,11 @@ type Task struct {
 	CreatedAt     time.Time  `json:"created_at"`
 	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
 	LastRunStatus string     `json:"last_run_status,omitempty"`
+	// LastRunID / LastRunStartedAt identify the run LastRunStatus describes
+	// (see RunKey, RecordRunStatus): daemon-owned, never patchable, and absent on
+	// rows written before they existed — a row without a key accepts any writer.
+	LastRunID        string     `json:"last_run_id,omitempty"`
+	LastRunStartedAt *time.Time `json:"last_run_started_at,omitempty"`
 	// DroppedEvents is the cumulative count of watch-source events discarded by
 	// the per-minute delivery cap. It is daemon-owned history, not a task
 	// definition field: create clears a client-supplied value and updates cannot
@@ -605,6 +610,13 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 // concurrent writer. applied reports whether the row was written; when it was
 // not, the returned Task is the unmodified row.
 func UpdateTaskStatusIf(taskID string, lastRunAt *time.Time, lastRunStatus string, guard func(Task) bool) (Task, bool, error) {
+	return updateTaskStatusLocked(taskID, lastRunAt, lastRunStatus, guard, nil)
+}
+
+// updateTaskStatusLocked is the single store write behind every last-run status
+// change: guard decides, mutate (optional) adds fields beside the status, and
+// both run under the task-file lock against the row as committed.
+func updateTaskStatusLocked(taskID string, lastRunAt *time.Time, lastRunStatus string, guard func(Task) bool, mutate func(*Task)) (Task, bool, error) {
 	if err := ValidateTaskID(taskID); err != nil {
 		return Task{}, false, err
 	}
@@ -640,6 +652,9 @@ func UpdateTaskStatusIf(taskID string, lastRunAt *time.Time, lastRunStatus strin
 					tasks[i].LastRunAt = lastRunAt
 				}
 				tasks[i].LastRunStatus = lastRunStatus
+				if mutate != nil {
+					mutate(&tasks[i])
+				}
 				row = i
 				found = true
 				break

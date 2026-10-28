@@ -116,6 +116,16 @@ type InstanceData struct {
 	// row that reloads INERT drops it on load instead: no automatic retry can
 	// reach that row, so the record would report an armed retry forever.
 	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
+	// Unreachable projects a live remote-probe outage (#5571 W1.3): the
+	// daemon's observation stopped being answered at Since, and Error is the
+	// last transport failure — collapsed, bounded, and token-redacted before it
+	// was stored on the record, so it is safe to ride every client surface. It
+	// is an observation flag, not a liveness: it coexists with Running/Ready/
+	// Lost and suppresses the destructive lifecycle verbs for the flag's
+	// duration. Projection-only like IdleReason above: ForStorage scrubs it so
+	// a restarted daemon re-derives the claim from its own probes rather than
+	// inheriting an outage it never observed.
+	Unreachable *UnreachableData `json:"unreachable,omitempty"`
 
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
 	// pane churn. Callers capture it before sending so churn racing the delivery is
@@ -147,11 +157,28 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunInterrupted records that the run ended interrupted by a runtime
+	// replacement — Lost-restore respawn or load-time re-spawn — rather than on
+	// an agent-idle completion edge (#4222). Persisted because the daemon's
+	// startup reconcile must recognize the row: a pending fire marker that
+	// still names it describes an occurrence that was never delivered to the
+	// replacement runtime, so adopting the row as the fire's product would
+	// misreport the interrupted run as started and discharge a prompt that was
+	// never replayed. omitempty + additive: an older record decodes to false —
+	// indistinguishable from a normally-ended run, which is the pre-fix
+	// reading and matches it.
+	TaskRunInterrupted bool `json:"task_run_interrupted,omitempty"`
 	// TaskRunFailurePending records that the run ended failed (initial prompt
 	// proven undelivered, #5278) and the task's errored status has not yet been
 	// acknowledged as written (#5646). omitempty + additive: an older record
 	// decodes to false, the pre-fix behaviour.
 	TaskRunFailurePending bool `json:"task_run_failure_pending,omitempty"`
+	// TaskRunPromptBound records that the run's prompt boundary was bound at
+	// least once (#5644). A cleared task_run_prompt_attempt_at can mean "never
+	// bound" or "bound then retired by a runtime replacement" (handoff); only
+	// the former may end the run failed on a PromptNotDelivered verdict.
+	// Persisted while the run is in flight, same as the boundary it qualifies.
+	TaskRunPromptBound bool `json:"task_run_prompt_bound,omitempty"`
 	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
 	// a handoff mission was still owed (#4429), so the next idle observation
 	// after the mission is retired ends the run.
@@ -277,6 +304,8 @@ type InstanceData struct {
 	// ambient account would spend the wrong quota while still displaying the
 	// account it was created with.
 	Account string `json:"account,omitempty"`
+	// Host is the listed host the session was placed on (#5571 W6.3); additive.
+	Host string `json:"host,omitempty"`
 	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
 	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
 	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`
@@ -311,6 +340,20 @@ type InstanceData struct {
 	// respawns from them. Additive + omitempty on the TabData.ID rollforward
 	// precedent: records written before this field simply have none.
 	PendingTabCleanup []TabCleanupData `json:"pending_tab_cleanup,omitempty"`
+	// RebuildTeardownPending records that a recovery rebuilt this worktree at a
+	// new identity while sessions bound to it still answered has-session, and
+	// the teardown of those stale panes is unconfirmed. The next attempt cannot
+	// re-derive a committed rebuild from os.Stat (the rebuilt directory
+	// exists), so the obligation to remove the pre-rebuild panes — whose cwd is
+	// the deleted inode — persists (#5370, #5371 review). Set at rebuild commit,
+	// cleared only once every bound name and cleanup handle is confirmed gone.
+	RebuildTeardownPending bool `json:"rebuild_teardown_pending,omitempty"`
+	// RebuildTeardownOriginalStartupStateUnknown is a storage-only rollback
+	// fence: a current reader removes it before interpreting the row, while the
+	// previous release sees StartupStateUnknown and leaves the row undriven —
+	// it would otherwise find the rebuilt worktree present, skip the rebuild,
+	// reattach the deleted-inode pane, and mark it Running (#5370, #5371 review).
+	RebuildTeardownOriginalStartupStateUnknown *bool `json:"rebuild_teardown_original_startup_state_unknown,omitempty"`
 	// AgentConversation mirrors the Agent tab's provider conversation id for
 	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
 	AgentConversation *AgentConversationData `json:"agent_conversation,omitempty"`
@@ -473,44 +516,6 @@ func (d InstanceData) UsesLocalTmux() bool {
 	return d.BackendType == "" || d.BackendType == "local"
 }
 
-// RestoreArchiveRollbackFence removes the previous-release safety projection
-// from a persisted row. FromInstanceData uses it before reconstructing an
-// Instance; storage-only cleanup paths use it before manually reconstructing a
-// GitWorktree. Keeping that decoding here prevents a current daemon from
-// mistaking its own old-reader fence for the session's real ownership.
-func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
-	if d.ArchiveReport == nil || d.ArchiveReport.RollbackFence == nil {
-		return d
-	}
-	fence := d.ArchiveReport.RollbackFence
-	d.StartupStateUnknown = fence.OriginalStartupStateUnknown
-	d.Worktree.ExternalWorktree = fence.OriginalExternalWorktree
-	d.Worktree.BranchCreatedByUs = cloneBoolPointer(fence.OriginalBranchCreatedByUs)
-	if fence.RelocationRecoveryProjected {
-		d.Worktree.RelocationRecovery = archiveRollbackRelocationRecovery(fence.OriginalRelocationRecovery)
-	}
-	return d
-}
-
-// RestoreRuntimeCleanupRollbackFence removes the ordinary-sandbox projection
-// ForStorage writes so a current reader interprets the row as the ordinary
-// session it is, not the retention row a previous release needs to see. The
-// previous release's FromInstanceData only rebuilds a teardown for a UserKilled
-// tombstone or an unknown-cleanup row, so ForStorage publishes an ordinary
-// sandbox row's RuntimeCleanup under a projected RuntimeCleanupStateUnknown=true
-// and saves the real false here. A current reader restores the real value before
-// deciding whether the row is unknown-cleanup or ordinary; a rolled-back reader
-// ignores this additive field and treats the projected row as a retention row,
-// rebuilding and preserving the handle instead of orphaning the runtime.
-func (d InstanceData) RestoreRuntimeCleanupRollbackFence() InstanceData {
-	if d.OriginalRuntimeCleanupStateUnknown == nil {
-		return d
-	}
-	d.RuntimeCleanupStateUnknown = *d.OriginalRuntimeCleanupStateUnknown
-	d.OriginalRuntimeCleanupStateUnknown = nil
-	return d
-}
-
 // ForClientRead converts a storage row into the same bounded shape emitted by a
 // live daemon snapshot. Disk fallback callers must not expose the complete
 // report or the compatibility-only ownership flags merely because the daemon is
@@ -534,6 +539,11 @@ func (d InstanceData) ForClientRead() InstanceData {
 	if err == nil {
 		d = restored
 	}
+	// Reverse projection order — see FromInstanceData: the rebuild-teardown
+	// projector runs last of the pending projections in ForStorage (after
+	// relocation), so its restore runs here, ahead of the handoff and
+	// account-swap restores.
+	d = d.RestoreRebuildTeardownRollbackFence()
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()

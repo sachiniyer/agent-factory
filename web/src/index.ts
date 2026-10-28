@@ -37,6 +37,7 @@ import {
   getConfig,
   isMutationCommittedError,
   isMutationOutcomeUncertain,
+  isProjectReboundError,
   handoffSession,
   listBackends,
   listDirectory,
@@ -1282,6 +1283,15 @@ let rebindInFlightGeneration = 0;
  *  registry rather than claiming success or failure. */
 const REBIND_ANSWER_MS = 30_000;
 
+/** How long the registry re-read that re-arms a conflicted rebind may run.
+ *  fetch carries no timeout, so without a bound a never-settling read would
+ *  leave an open modal busy forever — and a dismissed modal's definitive
+ *  refusal would never surface (#4888 review). On the bound the read's late
+ *  answer is dropped and the UI converges to the same end state a failed read
+ *  reaches: the fenced refetch still re-reads the registry, and the original
+ *  refusal is reported. */
+const REBIND_REFRESH_MS = 10_000;
+
 /** The one notice for a rebind whose outcome is not known — unanswered within
  *  REBIND_ANSWER_MS, or failed in transport. The selection is left alone; the
  *  refreshed project list is where the user sees what actually happened. */
@@ -1326,7 +1336,11 @@ function followConfirmedRebind(projectId: string, tok: string, connection: numbe
  *    transport — never follows: the registry is re-read, the selection is left
  *    alone, and one notice says so. A reply that arrives after the wait only
  *    re-reads the registry;
- *  - a definitive refusal is shown inline and re-arms the form. */
+ *  - a definitive refusal is shown inline and re-arms the form. The request
+ *    carries the root this modal was opened on, so a rebind that another client
+ *    beat to the registry is refused rather than silently overwriting it (#4822);
+ *    that refusal re-reads the registry first and re-arms against the root the
+ *    project is bound to now. */
 function openRebindProject(projectId: string, label: string): void {
   if (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
     // Escape dismissed the modal while the daemon was still deciding. A second
@@ -1337,7 +1351,15 @@ function openRebindProject(projectId: string, label: string): void {
   }
   // The root the registration points at NOW: a selection still on it is the user
   // still in this rebind, which a confirmed success may follow.
-  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  const shown = store.get().registeredProjects.find((r) => r.id === projectId);
+  const oldRoot = shown?.root ?? null;
+  // The (root, checkout id) pair the next submission tells the daemon it
+  // expects (#4822 spec): it starts as the pair the switcher showed, and moves
+  // only when a "rebound elsewhere" refusal re-reads the registry and reports
+  // the pair it records now — a same-path reclone changes the checkout half
+  // while leaving the root spelling alone.
+  let expectedRoot = oldRoot;
+  let expectedCheckoutID = shown?.checkout_id ?? null;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -1385,6 +1407,74 @@ function openRebindProject(projectId: string, label: string): void {
         // has not left the old root. Decided at reply time — nothing is carried
         // forward to a later read.
         const stillHere = (): boolean => modal === m || (oldRoot !== null && store.get().selectedProject === oldRoot);
+        // Another rebind moved the project after this modal read it: nothing was
+        // written. Re-read the registry, then re-arm the form against the root it
+        // reports now, so the user decides again knowing where the project is.
+        // The read that re-arms the form is ALSO the registry refresh — it is
+        // committed through commitRegisteredProjects, the same reconciliation a
+        // fenced refetch lands in — because a snapshot used only to re-arm and
+        // never stored leaves the switcher (and the next attempt's expected
+        // root) on the pre-rebind registry whenever the refresh loses.
+        const reArmAfterRebound = (e: unknown): void => {
+          // The end state a bound or failed read converges to: the fenced
+          // refetch still re-reads the registry so the switcher cannot keep
+          // showing the refused root, and the original refusal is reported —
+          // inline when the modal is still up, else as the tab error it was
+          // promised.
+          const missed = (): void => {
+            if (!current()) return;
+            refreshRegisteredProjects();
+            if (modal !== m) {
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          };
+          // The read runs through projectsRefetcher so its commit joins the
+          // same latest-request fence as every other registry refresh — a
+          // late conflict answer can no longer overwrite a newer refresh
+          // that committed while it was in flight (#4888 review). The
+          // re-arm then reads the committed store state; REBIND_REFRESH_MS
+          // still bounds how long the modal waits on it before missed().
+          let readSettled = false;
+          const bound = window.setTimeout(() => {
+            if (readSettled) return;
+            readSettled = true;
+            missed();
+          }, REBIND_REFRESH_MS);
+          void projectsRefetcher.refresh()
+            .then(() => {
+              if (readSettled) return;
+              readSettled = true;
+              window.clearTimeout(bound);
+              if (!current()) return;
+              // A read under a credential this page no longer holds says nothing
+              // it may act on; the form still re-arms, on the daemon's message.
+              const own = token === tok;
+              if (own && store.get().projectsError) {
+                // The fenced read failed — same end state as the bound.
+                missed();
+                return;
+              }
+              const now = own ? store.get().registeredProjects.find((p) => p.id === projectId) : undefined;
+              if (own) {
+                if (now !== undefined) {
+                  expectedRoot = now.root;
+                  expectedCheckoutID = now.checkout_id;
+                }
+                // Settle anything that raced this read — the same trailing
+                // fenced refetch followConfirmedRebind uses.
+                refreshRegisteredProjects();
+              }
+              if (modal !== m) {
+                surfaceTabError(e);
+                return;
+              }
+              m.setBusy(false);
+              m.setError(now !== undefined ? `Rebound elsewhere, to ${now.root} · submit again to move it from there` : errorText(e));
+            });
+        };
         const unknownOutcome = (): void => {
           if (modal === m) closeModal();
           refreshRegisteredProjects();
@@ -1397,7 +1487,7 @@ function openRebindProject(projectId: string, label: string): void {
           if (!current() || !settle()) return;
           unknownOutcome();
         }, REBIND_ANSWER_MS);
-        void rebindProject(projectId, path, tok)
+        void rebindProject(projectId, path, tok, expectedRoot, expectedCheckoutID)
           .then(() => {
             if (!current()) return;
             if (!settle()) {
@@ -1437,6 +1527,10 @@ function openRebindProject(projectId: string, label: string): void {
               // an intermediary). Re-arming the form would invite a second move of
               // the durable identity. Only a definitive daemon refusal re-arms.
               unknownOutcome();
+              return;
+            }
+            if (isProjectReboundError(e)) {
+              reArmAfterRebound(e);
               return;
             }
             if (modal !== m) {
@@ -2009,7 +2103,10 @@ async function reconcileConfigRead(candidate: string, attempt: LatestRequest): P
  *  action, from "af could not look". */
 const accountsRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: listAccounts,
+  // The refetch reads every agent's defaults, never a single repo's — wrap
+  // rather than pass listAccounts directly, whose second parameter is
+  // repoPath, so an AbortSignal the refetcher hands out could never land in it.
+  fetch: (tok) => listAccounts(tok),
   commit: (resp) => {
     store.set({
       accounts: { ...store.get().accounts, entries: resp.entries, agents: resp.agents, error: "", loaded: true },
@@ -2296,9 +2393,17 @@ function requestTaskResync(): void {
  *  initial connect): on a resync a transport blip must LEAVE the last-known list up,
  *  exactly as refreshTasks does — blanking it to [] would drop a registered project
  *  out of the switcher on a transient failure. */
+/** Bounds one registry read. fetch carries no deadline, so a daemon that
+ *  accepts and never answers would keep the request — and its per-origin
+ *  connection-pool slot — pending forever, and every conflict timer or settle
+ *  refetch that calls refreshRegisteredProjects would pile up one more (#4888
+ *  review). 30s is far past anything a local registry read should take. */
+const REGISTRY_READ_MS = 30_000;
+
 const projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
+  timeoutMs: REGISTRY_READ_MS,
   commit: commitRegisteredProjects,
   onError: (e: unknown) => store.set({ projectsError: errorText(e) }),
 });
@@ -2468,7 +2573,14 @@ function doTriggerTask(task: TaskData): void {
   }
   void triggerTask(task, tok)
     .then(refreshTasks)
-    .catch((e) => surfaceTabError(e));
+    .catch((e) => {
+      // A committed run (auto-created session, start unconfirmed) still moved
+      // last-run: refetch, and show the warning rather than a plain success.
+      if (isMutationCommittedError(e)) {
+        refreshTasks();
+      }
+      surfaceTabError(e);
+    });
 }
 
 /**

@@ -328,7 +328,8 @@ test("shared scope exposes both decisions and performance skips only on a known 
   assert.match(perf, /^ {4}if: needs\.web-selftest-scope\.outputs\.perf == 'true'$/m);
   assert.match(yaml, /perf: \$\{\{ steps\.scope\.outputs\.perf \}\}/);
   // Heavy jobs are off pull_request and on for every other event.
-  assert.match(yaml, /if \[ "\$\{GITHUB_EVENT_NAME\}" = "pull_request" \]; then\n\s+heavy=false selftest=false perf=false/);
+  assert.match(yaml, /heavy=false selftest=false perf=false tui=false\n\s+if \[ "\$\{GITHUB_EVENT_NAME\}" = "pull_request" \]; then/);
+  assert.match(yaml, /else\n\s+heavy=true perf=true selftest=true tui=true/);
 });
 
 test("performance scope CLI fails open for an unreadable diff and emits its own output key", () => {
@@ -425,4 +426,42 @@ test("the visual gate diffs stills against committed goldens and cannot regenera
   // each update run would hand a human noise to review as if it were a change.
   assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", AF_UPDATE_GOLDENS: "1" }).updateSnapshots, "changed",
     "update mode belongs to AF_UPDATE_GOLDENS runs a human reviews, and rewrites only goldens the gate rejects");
+});
+
+test("web-selftest.yml's standalone and called runs never share a concurrency group (#5660)", () => {
+  // In a called workflow github.workflow is the caller's name, so keying on it
+  // is what stops pr.yml's reusable call and the standalone master push run
+  // from cancelling each other on the same ref.
+  const yaml = readWorkflow("web-selftest.yml");
+  const group = /^ {2}group: (.+)$/m.exec(yaml.slice(yaml.indexOf("\nconcurrency:\n")))[1];
+  assert.match(group, /github\.workflow == 'Web selftest' && 'standalone' \|\| 'called'/);
+  assert.match(group, /github\.event_name == 'schedule' && '-nightly'/);
+  assert.match(group, /github\.event_name == 'workflow_dispatch' && '-dispatch'/);
+  assert.match(yaml, /^ {2}cancel-in-progress: true$/m);
+});
+
+const { TUI_PATHS, scopeTui } = require("./web-selftest-scope.js");
+
+test("TUI driver selftest runs on PRs that touch the TUI surface and only those", () => {
+  for (const changed of ["ui/sidebar.go", "app/app.go", "keys/keys.go", "session/tmux/tmux.go",
+    "scripts/tui-driver.sh", "scripts/tui-driver-selftest.sh", "scripts/testbox.sh",
+    "scripts/container/Dockerfile.web-selftest", ".github/workflows/tui-driver-selftest.yml"]) {
+    assert.equal(scopeTui([changed]).run, true, changed);
+  }
+  for (const changed of ["daemon/x.go", "docs/dev/index.md", "web/src/ui.ts", "config/manifest.go", "apps/x.go", "uix/y.go"]) {
+    assert.equal(scopeTui([changed]).run, false, changed);
+  }
+  assert.equal(scopeTui([]).run, false);
+  for (const pattern of TUI_PATHS) {
+    assert.equal(pattern.endsWith("/**") ? pattern.slice(0, -3).includes("*") : pattern.includes("*"), false, pattern);
+  }
+});
+
+test("surface jobs are gated by the scope job and listed in Build's needs", () => {
+  const yaml = readWorkflow("pr.yml");
+  assert.deepEqual(jobNeeds(yaml, "tui-driver-selftest"), ["web-selftest-scope"]);
+  assert.match(yaml, /^ {4}if: needs\.web-selftest-scope\.outputs\.tui == 'true'$/m);
+  assert.match(yaml, /^ {4}uses: \.\/\.github\/workflows\/tui-driver-selftest\.yml$/m);
+  assert.ok(jobNeeds(yaml, "build").includes("tui-driver-selftest"));
+  assert.match(readWorkflow("tui-driver-selftest.yml"), /^ {2}workflow_call:$/m);
 });
