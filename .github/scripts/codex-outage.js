@@ -153,7 +153,31 @@ async function readForcePushes(api, repo, number) {
 // — commit, compare, recursive tree. A read that cannot be answered throws out
 // of retryRead and aborts the sweep rather than silently narrowing the
 // covering-head set to the merged head alone (#4241).
-async function readUpdateBranchContentHead(api, root, pull) {
+//
+// One narrow exception (#5776): a stacked PR records a sibling head branch as
+// its base, and auto-merge deletes that branch when the stack collapses. The
+// gate's proof compares against the base BRANCH, which no longer exists, so
+// the proof cannot be run at all. A recorded base SHA cannot stand in for it —
+// the proof needs the base TIP the update-branch merge was cut from, and the
+// recorded SHA is the base as of the last PR update. So that PR is classified
+// as unprovable (no content head; its covering set is the merged head alone,
+// the same answer as a merge the proof rejects) and the reason is logged. It
+// applies only when the compare answers 404 AND a second read confirms the
+// base ref is gone; any other failure (5xx, rate limit, auth, a 404 with the
+// ref still present) still throws and aborts the sweep, as #4629 designed.
+class BaseRefDeleted extends Error {}
+
+async function baseRefIsGone(api, root, baseRefName) {
+  try {
+    await api(`${root}/git/ref/heads/${baseRefName}`, { singlePage: true });
+    return false;
+  } catch (error) {
+    if (ghHttpStatus(error) === 404) return true;
+    throw error;
+  }
+}
+
+async function readUpdateBranchContentHead(api, root, pull, log = console.error) {
   const headSha = pull.head?.sha;
   const baseRefName = pull.base?.ref;
   if (!headSha || !baseRefName) return null;
@@ -164,8 +188,16 @@ async function readUpdateBranchContentHead(api, root, pull) {
     rest: {
       repos: {
         getCommit: ({ ref }) => single(`commits/${ref}`),
-        compareCommitsWithBasehead: ({ basehead, per_page }) =>
-          single(`compare/${basehead}?per_page=${per_page || 100}`),
+        compareCommitsWithBasehead: async ({ basehead, per_page }) => {
+          try {
+            return await single(`compare/${basehead}?per_page=${per_page || 100}`);
+          } catch (error) {
+            if (ghHttpStatus(error) === 404 && await baseRefIsGone(api, root, baseRefName)) {
+              throw new BaseRefDeleted(`base branch ${baseRefName} no longer exists`);
+            }
+            throw error;
+          }
+        },
       },
       git: {
         getTree: ({ tree_sha, recursive }) =>
@@ -174,13 +206,19 @@ async function readUpdateBranchContentHead(api, root, pull) {
     },
   };
   const [owner, name] = root.split('/');
-  return require('./auto-gate.js').codexEvidence.updateBranchContentHead({
-    github,
-    context: { repo: { owner, repo: name } },
-    baseRefName,
-    headSha,
-    headParents: head.parents.map(parent => ({ oid: parent.sha })),
-  });
+  try {
+    return await require('./auto-gate.js').codexEvidence.updateBranchContentHead({
+      github,
+      context: { repo: { owner, repo: name } },
+      baseRefName,
+      headSha,
+      headParents: head.parents.map(parent => ({ oid: parent.sha })),
+    });
+  } catch (error) {
+    if (!(error instanceof BaseRefDeleted)) throw error;
+    log(`codex-outage: PR #${pull.number} content head unprovable — ${error.message}; counting its merged head only (#5776)`);
+    return null;
+  }
 }
 
 // An incomplete sweep carries the last complete episodes verbatim and says so:

@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // Options for creating a new instance
@@ -97,6 +98,10 @@ type InstanceOptions struct {
 	// behavior of resolving the current on-disk value when provisioning begins.
 	// A pointer distinguishes an explicitly configured empty prefix from nil.
 	BranchPrefix *string
+	// BranchName, when set, is the exact branch a fresh local worktree is
+	// created on, instead of one derived from BranchPrefix and the title. The
+	// in-sandbox agent-server sets it to the name the DAEMON chose (#5571 W2.4).
+	BranchName string
 	// ResumeConversation asks the first launch to come up on a provider
 	// conversation a previous record held, rather than starting a new one
 	// (#2616). Set only by the daemon's root-agent heal, which replaces the
@@ -180,6 +185,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// launch_cmd, which does the clone on the user's infra).
 	if kind.ProvisionsOffBox() {
 		spec.CloneURL = originRemoteURL(absPath)
+		spec.Branch = daemonBranchForTitle(opts)
 	}
 	// Mint through the SHARED helper, which the replacement path uses too, so the
 	// two cannot diverge on which kinds get a credential or on what a refusal
@@ -215,6 +221,8 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		}
 		return res, err
 	}
+	res.Branch = spec.Branch
+
 	// A refused or absent credential did not stop provisioning — it must stop
 	// being silent instead. The reason rides the result onto the instance's
 	// durable record so every surface can say "af callback unavailable: …"
@@ -242,6 +250,20 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		res.CallbackUnavailable = rerr.Error()
 	}
 	return res, nil
+}
+
+// daemonBranchForTitle names the branch an off-box session works on, from the
+// daemon's frozen branch_prefix snapshot — the same derivation the local runtime
+// uses — so the sandbox's worktree does not re-derive it from the host's own
+// config (#5571 W2.4).
+func daemonBranchForTitle(opts InstanceOptions) string {
+	prefix := ""
+	if opts.BranchPrefix != nil {
+		prefix = *opts.BranchPrefix
+	} else if cfg, err := config.LoadConfig(); err == nil {
+		prefix = cfg.BranchPrefix
+	}
+	return git.BranchForTitle(prefix, opts.Title)
 }
 
 // reapUnusableSandbox tears down a sandbox that was provisioned but must not be
@@ -594,6 +616,9 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		sandboxCreds: opts.SandboxCredentials,
 		TaskID:       opts.TaskID,
 		Title:        opts.Title,
+		// The daemon-named branch of an off-box session, known from the first
+		// frame rather than after the first push (#5571 W2.4). Empty for local.
+		Branch: res.Branch,
 		// A task delivery's run begins here and ends when the agent goes idle
 		// (#1892). Only a task-spawned session has a run to bound; a user's session
 		// is never counted against a cap.
@@ -614,6 +639,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		inPlace:               opts.InPlace,
 		branchPrefix:          branchPrefix,
 		branchPrefixResolved:  opts.BranchPrefix != nil,
+		branchName:            strings.TrimSpace(opts.BranchName),
 		carriedConversation:   opts.ResumeConversation,
 		carriedTabs:           append([]TabData(nil), opts.RestoreTabs...),
 		carriedRecreateNotice: opts.PendingRecreateNotice,

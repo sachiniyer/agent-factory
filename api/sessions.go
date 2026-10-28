@@ -457,7 +457,9 @@ pointing at one).`,
 			Prompt:   createPromptFlag,
 			InPlace:  inPlace,
 			Backend:  createBackendFlag,
-			Host:     createHostFlag,
+			// A remote daemon owns the account and preflight answers (#5744).
+			ValidateFirst: apiclient.IsRemoteTarget(),
+			Host:          createHostFlag,
 		})
 		if err != nil {
 			return jsonError(err)
