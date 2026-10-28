@@ -2556,9 +2556,6 @@
           "task.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
           },
-          "task.host": {
-            "gap": "task.host"
-          },
           "task.sandbox_owner": {
             "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."
           },
@@ -2595,9 +2592,6 @@
           },
           "update.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
-          },
-          "update.host": {
-            "gap": "task.host"
           },
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
@@ -2800,9 +2794,6 @@
         },
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
-        },
-        "update.host": {
-          "gap": "task.host"
         }
       },
       "AddTask": {
@@ -2862,9 +2853,6 @@
         },
         "task.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
-        },
-        "task.host": {
-          "gap": "task.host"
         },
         "task.sandbox_owner": {
           "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."
