@@ -151,11 +151,13 @@ type Sidebar struct {
 	seenSelSeq uint64
 
 	// treeCollapsed is the display-selected instance whose tab children the
-	// user explicitly collapsed (h/←). Keyed by pointer so a #765 same-title
-	// kill+recreate swap — which mints a new instance carrying the old title —
-	// is detected and the override cleared; every newly selected instance
-	// starts auto-expanded (collapse-by-default applies to non-selected
-	// instances).
+	// user explicitly collapsed (h/←). Matched by SESSION identity (sameSession:
+	// the stable ID, pointer for a legacy id-less row) so a #765 same-title
+	// kill+recreate swap — which mints a new instance and ID carrying the old
+	// title — is detected and the override cleared, while a same-session pointer
+	// replacement (instanceStartedMsg swapping a disk-built copy, #5651) keeps
+	// the user's fold. Every newly selected instance starts auto-expanded
+	// (collapse-by-default applies to non-selected instances).
 	treeCollapsed *session.Instance
 
 	// lastCursor* remember the identity of the last instance-section row the
@@ -322,21 +324,46 @@ func (s *Sidebar) structureSig() string {
 	// identifies the partition, so it catches both a single archive/restore and
 	// a same-count swap.
 	_, archived := partitionByArchived(s.proj.GetInstances())
-	return fmt.Sprintf("%d|%s|%d|%t|%p|%v",
-		s.proj.Version(), selTitle, slots, expandable, s.treeCollapsed, archived)
+	return fmt.Sprintf("%d|%s|%d|%t|%s|%v",
+		s.proj.Version(), selTitle, slots, expandable, collapsedKey(s.treeCollapsed), archived)
 }
 
 // instanceExpanded reports whether inst's tab children are currently shown:
 // the display-selected instance auto-expands (matched by title so a #765
 // same-title swap keeps the subtree open) unless it is transient or the user
-// explicitly collapsed it. The collapse override is keyed by pointer so a
-// same-title kill+recreate swap drops it — the old session's fold cannot pass
-// through to the replacement. Everything else is collapsed — the keep-row-
+// explicitly collapsed it. The collapse override is keyed by session identity
+// so a same-title kill+recreate swap (new ID) drops it — the old session's fold
+// cannot pass through to the replacement — while a pointer swap of the same
+// session keeps it. Everything else is collapsed — the keep-row-
 // count-manageable default for non-selected instances.
 func (s *Sidebar) instanceExpanded(inst *session.Instance) bool {
 	sel := s.proj.GetSelectedInstance()
 	if sel == nil || inst == nil || sel.Title != inst.Title {
 		return false
 	}
-	return tree.Expandable(inst) && s.treeCollapsed != inst
+	return tree.Expandable(inst) && !sameSession(s.treeCollapsed, inst)
+}
+
+// sameSession reports whether a and b are the same logical session: the same
+// pointer, or the same non-empty stable ID. A legacy pre-#1195 row carries ID ""
+// and is only ever its own pointer, so two id-less instances never match.
+func sameSession(a, b *session.Instance) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a == b || (a.ID != "" && a.ID == b.ID)
+}
+
+// collapsedKey is the structure-signature form of the collapse override: the
+// session identity, so a same-session pointer replacement does not look like a
+// structural change.
+func collapsedKey(inst *session.Instance) string {
+	switch {
+	case inst == nil:
+		return ""
+	case inst.ID != "":
+		return "id:" + inst.ID
+	default:
+		return fmt.Sprintf("%p", inst)
+	}
 }

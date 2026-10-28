@@ -177,8 +177,9 @@ func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 	// Each failingStep names a docker argv shape emitted by one provision
 	// step; matching it makes the fake fail that call. The matchers read argv
 	// the way the steps emit it: the detached exec carries a literal "-d"
-	// flag, the banner poll carries a literal "cat" plus the banner path —
-	// the path alone also appears inside startAgentServer's redirect script.
+	// flag, the banner poll is the one non-detached exec whose script carries
+	// the liveness marker — the banner path alone also appears inside
+	// startAgentServer's redirect script.
 	failingSteps := map[string]func(args []string) bool{
 		"docker run":         func(args []string) bool { return args[0] == "run" },
 		"configureGit":       func(args []string) bool { return args[0] == "exec" && containsArg(args, "user.email") },
@@ -189,7 +190,7 @@ func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 		// A banner read whose every `docker exec` fails — the daemon-side
 		// exec state is itself a data-root write, so the fs verdict applies.
 		"readBanner": func(args []string) bool {
-			return args[0] == "exec" && exactArg(args, "cat") && containsArg(args, dockerBannerPath)
+			return args[0] == "exec" && !exactArg(args, "-d") && containsArg(args, dockerBannerPath) && containsArg(args, remoteProcAlive)
 		},
 		// `docker port` is read-only and its parse failures are af's own —
 		// local errors get their own regression test below.

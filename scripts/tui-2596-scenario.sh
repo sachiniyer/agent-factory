@@ -20,9 +20,21 @@ source /src/scripts/tui-driver.sh
 export AF_DRIVER_COLS=144 AF_DRIVER_ROWS=30
 export AF_DRIVER_REPO="$HOME/sandbox/mock-repo"
 
-# The month field is restricted, so no preset matches and schedule.ParseCron
-# falls the picker back to Custom with the expression preserved verbatim.
-CRON='0 0 1 1 *'
+# A dated cron is restricted in day-of-month AND month, so no preset matches and
+# schedule.ParseCron falls the picker back to Custom with the expression
+# preserved verbatim.
+#
+# The fixture is derived from TODAY, not fixed (#5689): the picker words its
+# preview by how far away the next run is (the ISO-dated far-out note beyond the
+# 60-day threshold, the short "Jan 02 15:04" form inside it), so any fixed date
+# eventually lands on the wrong side of the window — `0 0 1 1 *` did from
+# 2026-11-02, and a clock-derived expectation then broke on January 1 itself,
+# when the next run is a year out again. There is no clock seam in the TUI binary
+# to inject a reference date through, so hold the DISTANCE constant instead: the
+# date 90 days from now is always a real calendar date, and its next occurrence
+# is always ~90 days out, on every day of the year.
+far_date="$(date -d '+90 days' +'%-d %-m')"   # "<day-of-month> <month>"
+CRON="0 0 ${far_date} *"
 
 af_reset_sandbox
 af_set_config 'default_program = "claude"
@@ -55,7 +67,9 @@ af_refute_screen "Custom: ${cron_re}" \
 # What must survive: the editable input still carries the expression, and the
 # preview line spends itself on the one thing that input cannot say.
 af_assert_screen "Cron.*${cron_re}" 'the editable Cron input still shows the expression'
-af_assert_screen 'Next run [A-Z][a-z][a-z] [0-9][0-9] [0-9][0-9]:[0-9][0-9]' \
+# 90 days out is past the 60-day far-out threshold, so the preview line carries
+# the ISO-dated note; the year is not asserted, only that a full date is shown.
+af_assert_screen 'Next run [0-9]{4}-[0-9][0-9]-[0-9][0-9]' \
     'the preview line shows the next fire time instead'
 
 # Belt and braces on the whole pane: with the editor open over the rail the
@@ -84,7 +98,7 @@ af_send ']'
 # [!], not [✓]: an expression that matches no date can never fire, and #3623
 # marks such a task on its COLLAPSED row — the row you are not looking at, which
 # is where "enabled and permanently silent" used to read as healthy.
-af_wait_for '▾\[!\]  yearly-audit' "$AF_DRIVER_TIMEOUT" 'automations row focused and expanded'
+af_wait_for '▾  \[!\] yearly-audit' "$AF_DRIVER_TIMEOUT" 'automations row focused and expanded'
 # The absence now LEADS the line, ahead of the expression it is about (#3623):
 # the rail is 36 columns here and 22 at its minimum, and it clips from the right,
 # so a reason sitting behind the trigger is the half that gets cut — leaving a

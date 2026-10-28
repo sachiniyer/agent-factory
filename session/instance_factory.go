@@ -81,6 +81,11 @@ type InstanceOptions struct {
 	// `backend` config key. Empty means "resolve from config" — which defaults
 	// to local, so an unset Backend keeps the local default byte-identical.
 	Backend BackendKind
+	// Host names the listed host (global `hosts`, #5571 W6.3) the session runs on.
+	// It selects the ssh runtime: with Backend empty the kind resolves to ssh, and
+	// with any other explicit Backend the create is refused. Empty means "no pick"
+	// — the default_host applies only where the resolved backend is ssh.
+	Host string
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
 	// git worktree+branch. The worktree is marked external so kill/cleanup
@@ -129,6 +134,14 @@ type InstanceOptions struct {
 	// on the Instance: a removed global grant must disappear from later respawns,
 	// handoffs, archive restores, and config-agent launches without a restart.
 	ProvisionSessionEnvPassthrough []string
+	// CallbackUnavailable declares that no daemon callback was delivered to the
+	// process building this instance. It is set by the in-sandbox agent-server
+	// (daemon/agentserver_headless.go), which learns the fact from the absence
+	// of AF_DAEMON_URL/AF_DAEMON_TOKEN in its environment — its Instance has no
+	// mint error to quote, so it records the generic undelivered reason. The
+	// daemon-side create path instead learns the reason from the mint itself
+	// and arrives through ProvisionResult.CallbackUnavailable.
+	CallbackUnavailable bool
 }
 
 // backendFactory provisions the already-resolved runtime for a new Instance,
@@ -156,6 +169,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		RepoRoot:              absPath,
 		Title:                 opts.Title,
 		Program:               opts.Program,
+		Host:                  opts.Host,
 		SessionEnvPassthrough: provisionSessionEnv,
 	}
 	// An off-box runtime clones the workspace from the repo's origin (epic
@@ -190,32 +204,42 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		}
 		spec.Account = account
 	}
-	cred, err := mintForProvision(&spec, kind, opts.SandboxCredentials)
-	if err != nil {
-		return ProvisionResult{}, err
-	}
+	cred := mintForProvision(&spec, kind, opts.SandboxCredentials)
 	res, err := rt.Provision(spec)
 	if err != nil {
+		// A minted credential must not outlive a sandbox that never came up —
+		// the same fail-closed rule the replacement path's replacementLive defer
+		// enforces for the identical exit (#5571 W3.1).
+		if cred.Granted() && opts.SandboxCredentials != nil {
+			opts.SandboxCredentials.Revoke()
+		}
 		return res, err
+	}
+	// A refused or absent credential did not stop provisioning — it must stop
+	// being silent instead. The reason rides the result onto the instance's
+	// durable record so every surface can say "af callback unavailable: …"
+	// instead of leaving the agent to discover af commands all fail (#5571 W3.1).
+	// A runtime may already have set the reason — the mid-provision loss the
+	// provisioner detects just before committing the env is more precise than
+	// the mint's, so it wins.
+	if res.CallbackUnavailable == "" {
+		res.CallbackUnavailable = cred.UnavailableReason
 	}
 	// Revalidate now that the sandbox exists: provisioning is the long window, and
 	// a listener move or an auth change inside it leaves the sandbox holding a
 	// credential that was revoked while it was being written in.
 	//
-	// A failure here must REAP what was just provisioned. NewInstance discards the
-	// ProvisionResult of a failed factory call, so nothing downstream retains
-	// res.Teardown — returning the error alone leaks the sandbox with no handle
-	// left to reap it (#3065 review). This is the same discipline every other
-	// failure exit on a provisioned runtime already follows; a new exit does not
-	// get to skip it.
-	//
-	// And when that reap cannot CONFIRM the sandbox is gone, the identity travels
-	// out with the error so the daemon can tombstone it and keep retrying (#3480).
-	// Reaping was never the gap here; the gap was that an unconfirmed reap left
-	// nothing behind but a sentence.
+	// A failure here DEGRADES the same way a refused mint does — the sandbox is
+	// provisioned, runnable and owned, just callback-less, so reaping it would
+	// destroy a session that is merely missing one capability (#5571 W3.1). The
+	// dead grant is revoked for tidiness (the invalidation sweep already voided
+	// it), and the reason replaces the earlier one: "the credential died
+	// mid-provision" is more specific than a bare absence.
 	if rerr := revalidateAfterProvision(cred); rerr != nil {
-		who := sandboxIdentity{id: opts.ID, title: opts.Title, path: absPath, createdAt: opts.CreatedAt, repoIdentityPath: opts.RepoIdentityPath}
-		return ProvisionResult{}, discardUnusableSandbox(who, res, opts.SandboxCredentials, rerr)
+		if opts.SandboxCredentials != nil {
+			opts.SandboxCredentials.Revoke()
+		}
+		res.CallbackUnavailable = rerr.Error()
 	}
 	return res, nil
 }
@@ -231,10 +255,10 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 //
 // Where the handle GOES is the caller's business, and the only thing that
 // differs between the create and the replacement paths: retain installs it, and
-// nil means the caller has nowhere to put one (see discardUnusableSandbox). The
-// classification is NOT the caller's business, because a branch that re-derives
-// it drifts — #3475 is exactly that drift, two adjacent exits in
-// reprovisionRemote answering this condition differently.
+// nil means the caller has nowhere to put one. The classification is NOT the
+// caller's business, because a branch that re-derives it drifts — #3475 is
+// exactly that drift, two adjacent exits in reprovisionRemote answering this
+// condition differently.
 //
 // A KNOWN teardown error still means the runtime is gone, per the runtimes'
 // best-effort contract, so it is logged and the cause is returned alone.
@@ -256,41 +280,6 @@ func reapUnusableSandbox(title string, res ProvisionResult, cause error, retain 
 	return cause
 }
 
-// discardUnusableSandbox is the CREATE path's exit for a sandbox that was
-// provisioned but must not be used: reap it, and revoke the credential minted
-// for it.
-//
-// Both halves matter and both were missing. The runtime leaks without the reap,
-// because the caller drops the ProvisionResult on error and with it the only
-// cleanup handle. The credential leaks without the revoke, because it is
-// registered against a session whose sandbox no longer exists — a token minted
-// for a runtime that is gone, which is the state this feature exists to prevent.
-//
-// Its retainer CAPTURES rather than installs, because create fails before an
-// Instance exists: there is nothing to hang a handle on, so the identity leaves
-// through the returned error as a cleanup-only record instead (#3480). The
-// replacement path has an instance and installs directly — see
-// Instance.discardUnusableReplacement.
-//
-// Going through the hook rather than inspecting the returned error is the
-// load-bearing part. The hook fires ONLY from reapUnusableSandbox's
-// unknown-teardown branch, so the orphan is classified by what the TEARDOWN
-// answered. Testing TeardownStateUnknown on the combined error instead asks a
-// different question — cause can carry a teardown sentinel of its own — and
-// produced an orphan record, a durable tombstone and a held title for a sandbox
-// the reap had already confirmed gone.
-func discardUnusableSandbox(who sandboxIdentity, res ProvisionResult, creds SandboxCredentials, cause error) error {
-	if creds != nil {
-		creds.Revoke()
-	}
-	unconfirmed := false
-	err := reapUnusableSandbox(who.title, res, cause, func(ProvisionResult) { unconfirmed = true })
-	if !unconfirmed {
-		return err
-	}
-	return newSandboxOrphanError(who, res, err)
-}
-
 // resolveBackendKind decides which runtime a new session uses, in precedence
 // order: an explicit --backend flag (opts.Backend) wins; then the legacy
 // ForceRemote hook selector; otherwise the repo's `backend` config key, which
@@ -303,6 +292,14 @@ func discardUnusableSandbox(who sandboxIdentity, res ProvisionResult, creds Sand
 // session). A config that loads but declares an invalid backend value surfaces
 // that error — misconfiguration should fail the create, not silently run local.
 func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, error) {
+	if opts.Host != "" {
+		// A host pick is an ssh placement. An explicit backend that is not ssh
+		// contradicts it; refuse rather than guess which was meant.
+		if opts.Backend != "" && opts.Backend != BackendSSH {
+			return "", fmt.Errorf("--host %q places a session on a listed host over ssh, which contradicts --backend %s; drop one of them", opts.Host, opts.Backend)
+		}
+		return BackendSSH, nil
+	}
 	if opts.Backend != "" {
 		return ParseBackendKind(string(opts.Backend))
 	}
@@ -606,6 +603,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		repoIdentityPath:      opts.RepoIdentityPath,
 		Program:               opts.Program,
 		Account:               opts.Account,
+		Host:                  opts.Host,
 		accountAgent:          accountAgent,
 		Height:                0,
 		Width:                 0,
@@ -622,7 +620,23 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		backend:               backend,
 		remoteClient:          remoteClient,
 		runtimeTeardown:       res.Teardown,
+		callbackUnavailable:   callbackUnavailableReasonFor(opts, res),
 	}, nil
+}
+
+// callbackUnavailableReasonFor picks the callback-absence reason a new instance
+// records. The provisioning path's reason wins — it names what the mint or the
+// post-provision revalidation actually refused; the caller's bare declaration
+// (the in-sandbox agent-server noticing no callback env) is the generic
+// fallback, recorded so the instance's own guidance can stop teaching af verbs.
+func callbackUnavailableReasonFor(opts InstanceOptions, res ProvisionResult) string {
+	if res.CallbackUnavailable != "" {
+		return res.CallbackUnavailable
+	}
+	if opts.CallbackUnavailable {
+		return callbackUndeliveredReason
+	}
+	return ""
 }
 
 func resolvedProgramMarker(opts InstanceOptions) string {

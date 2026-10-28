@@ -174,6 +174,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "af's own `af agent-server …` line. The operator's program is embedded, but shell-QUOTED as a " +
 			"--program argument; it reaches a shell only later, in the container, through the pane path above.",
 	}},
+	"session/backend_docker.go:(*dockerProvisioner).readBanner": {{
+		class: afAuthored,
+		note: "the banner poll script — `cat <banner>; kill -0 $(cat <pidfile>)` — composed from af " +
+			"constants only; the operator's program name never reaches it",
+	}},
 	"session/backend_docker.go:(*dockerProvisioner).execSh": {{
 		class: afAuthored, note: "af's container setup scripts (chmod, mkdir), composed with shellQuote",
 	}},
@@ -188,6 +193,17 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		class: afAuthored,
 		note: "groupPinScript, a const in the same file; the spawner pid and its start stamp " +
 			"arrive as $1/$2 positional parameters, never spliced into the script text",
+	}},
+
+	"session/host_program.go:(hostProgramProber).probe": {{
+		class: afAuthored,
+		note: "the login-shell program probe (`command -v -- \"$1\"`, fenced by a nonce) — af-authored " +
+			"const scripts; the operator's program name arrives as a POSITIONAL argument, never in the " +
+			"script text, which is the #5571 W2.1 contract",
+	}},
+	"session/host_program.go:(hostProgramProber).probePath": {{
+		class: afAuthored,
+		note:  "the PATH-only variant of the same probe — the hostProbePathOnly const, no positional input at all",
 	}},
 
 	// ---- not a shell at all ----

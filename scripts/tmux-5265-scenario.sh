@@ -69,6 +69,10 @@ SENTINEL_RE='af5265-sentinel-[a-z]+-not-a-real-key'
 # --- provenance ----------------------------------------------------------
 git config --global --add safe.directory /src 2>/dev/null || true
 BRANCH_SHA="${AF_BRANCH_SHA:-$(git -C /src rev-parse HEAD 2>/dev/null || true)}"
+# The vuln control must stay the PRE-FIX revision (the parent of #5270): the moving
+# origin/master carries the fix, so the master-rel leg could never show the leak.
+# `testbox.sh scenario` archives this pinned SHA in place of origin/master.
+AF_CONTROL_SHA=aa0442a434b8da77457e3dc7ad359207c8398c4b
 MASTER_SHA="${AF_MASTER_SHA:-$(git -C /src rev-parse origin/master 2>/dev/null || true)}"
 [ -n "$BRANCH_SHA" ] || { record "FAIL: branch SHA unknown — pass AF_BRANCH_SHA"; exit 1; }
 [ -n "$MASTER_SHA" ] || { record "FAIL: master SHA unknown — pass AF_MASTER_SHA"; exit 1; }

@@ -41,6 +41,7 @@ func stubForwardEnv(t *testing.T) string {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	pg, pp := upgradeValidateGrace, upgradeValidatePoll
+	prg := upgradeCandidateRestoreGrace
 	ag, ap := awaitActivationGrace, awaitActivationPoll
 	cg, cp := adoptConfirmGrace, adoptConfirmPoll
 	pHealth := upgradeRecoveryHealthFn
@@ -56,6 +57,7 @@ func stubForwardEnv(t *testing.T) string {
 	pReady := waitForDaemonReadyFn
 	t.Cleanup(func() {
 		upgradeValidateGrace, upgradeValidatePoll = pg, pp
+		upgradeCandidateRestoreGrace = prg
 		awaitActivationGrace, awaitActivationPoll = ag, ap
 		adoptConfirmGrace, adoptConfirmPoll = cg, cp
 		upgradeRecoveryHealthFn = pHealth
@@ -71,6 +73,7 @@ func stubForwardEnv(t *testing.T) string {
 		waitForDaemonReadyFn = pReady
 	})
 	upgradeValidateGrace, upgradeValidatePoll = 500*time.Millisecond, time.Millisecond
+	upgradeCandidateRestoreGrace = 500 * time.Millisecond
 	awaitActivationGrace, awaitActivationPoll = 500*time.Millisecond, time.Millisecond
 	adoptConfirmGrace, adoptConfirmPoll = 500*time.Millisecond, time.Millisecond
 	// Ready by default: the arm-observation tests that care override this.

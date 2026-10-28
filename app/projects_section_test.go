@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
 // TestProjectsSection_TabFocusRingIncludesProjects is the #1588 follow-up
@@ -164,7 +167,7 @@ func TestProjectsSection_SnapshotRefreshUpdatesRowsLive(t *testing.T) {
 	h := newTestHome(t)
 	// The pane's rows come from the poll's carried all-repos data, not this
 	// fetcher — keep it inert so a stray call can't interfere.
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return nil, nil
 	}))
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
@@ -210,4 +213,94 @@ func TestProjectsSection_SnapshotRefreshUpdatesRowsLive(t *testing.T) {
 	})
 	assert.Equal(t, 3, rowByRoot()[repoB].SessionCount,
 		"a failed cross-repo read keeps the last-known counts")
+}
+
+// TestProjectsSection_FailedSnapshotMergesFreshRegistryRows pins the #4888
+// round-7 review finding: a failed SESSION half does not make the registry
+// half of the same build disposable. When a rebind moved a record between
+// polls, discarding the fresh registry union would leave the moved record's
+// old root on screen for as long as the poll stays unhealthy — the sidebar
+// must merge fresh registry truth into its last-known rows (registry fields
+// replace registry fields; session rows and counts survive as last-known),
+// the same merge the picker's SetRebindConflictPreserving applies.
+func TestProjectsSection_FailedSnapshotMergesFreshRegistryRows(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = "/repos/active"
+	h.setSidebarProjects([]overlay.Project{
+		{Name: "alpha", Root: "/old/alpha", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/alpha", SessionCount: 4, InPlaceCount: 1},
+		{Name: "sessions", Root: "/repos/sessions", RepoID: "repo-sess", SessionCount: 3},
+	}, false)
+
+	// The poll's session half failed; its registry half read fine and shows
+	// the alpha record rebound to a different repo (RepoID changed).
+	changed := h.applySidebarProjects([]overlay.Project{
+		{Name: "alpha", Root: "/new/alpha", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/new/alpha"},
+	}, false, errors.New("daemon snapshot unavailable"))
+	require.True(t, changed, "fresh registry truth still reaches the section")
+
+	rows := map[string]ui.SidebarProject{}
+	for _, r := range h.projects.Projects() {
+		rows[r.RepoID] = r
+	}
+	require.Contains(t, rows, "repo-new")
+	assert.Equal(t, "/new/alpha", rows["repo-new"].Root,
+		"the moved record's row refreshes to where the registry binds it now")
+	assert.Zero(t, rows["repo-new"].SessionCount,
+		"the moved registration must not inherit counts tallied against the old repo")
+	require.Contains(t, rows, "repo-old")
+	assert.Equal(t, 4, rows["repo-old"].SessionCount,
+		"the old repo's sessions keep a session-only row with its last-known tallies")
+	assert.Equal(t, 1, rows["repo-old"].InPlaceCount)
+	require.Contains(t, rows, "repo-sess")
+	assert.Equal(t, 3, rows["repo-sess"].SessionCount,
+		"an unrelated session-derived row survives the failed fetch")
+}
+
+// TestProjectsSection_DegradedRegistryKeepsRegistryRows pins the mirror image
+// of TestProjectsSection_FailedSnapshotMergesFreshRegistryRows (#4888 review):
+// the session snapshot LANDED but the registry read degraded, so the fresh
+// list holds live session rows and no registry records. Installing wholesale
+// would drop every registry-backed row behind a read that cannot prove
+// absence; the merge preserves them and grafts a same-repo session row onto
+// the stale identity so live counts win. The preserved row's own counts clear
+// though — the landed snapshot is the count authority and proved them zero.
+func TestProjectsSection_DegradedRegistryKeepsRegistryRows(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = "/repos/active"
+	h.setSidebarProjects([]overlay.Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", RegistryID: "prj_aaa", RegistryRoot: "/repos/alpha", RegistryCheckoutID: "chk_old", SessionCount: 4},
+		{Name: "gone", Root: "/repos/gone", RepoID: "repo-gone", RegistryID: "prj_ggg", RegistryRoot: "/repos/gone", SessionCount: 2},
+	}, false)
+
+	// The poll's registry half failed; its session half read fine and reports
+	// live counts — alpha's sessions grew, and the repo-gone row has no live
+	// counterpart.
+	changed := h.applySidebarProjects([]overlay.Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", SessionCount: 5},
+	}, true, nil)
+	require.True(t, changed, "fresh session truth still reaches the section")
+
+	rows := map[string]ui.SidebarProject{}
+	for _, r := range h.projects.Projects() {
+		rows[r.RepoID] = r
+	}
+	require.Contains(t, rows, "repo-alpha")
+	assert.Equal(t, 5, rows["repo-alpha"].SessionCount,
+		"the live session row wins the count — the stale registry row must not shadow it")
+	require.Contains(t, rows, "repo-gone",
+		"absence unproven under a degraded read — the registry row stays")
+	assert.Equal(t, 0, rows["repo-gone"].SessionCount,
+		"the landed session snapshot is the count authority — an uncovered repo's tally clears (#4888 review)")
+
+	// And the graft restored alpha's registration identity: the shadow list
+	// keeps the rebind affordance the pane rows cannot carry.
+	var alpha *overlay.Project
+	for i, r := range h.sidebarProjects {
+		if r.RepoID == "repo-alpha" {
+			alpha = &h.sidebarProjects[i]
+		}
+	}
+	require.NotNil(t, alpha)
+	assert.Equal(t, "prj_aaa", alpha.RegistryID,
+		"the grafted row carries the registration identity, not a stale duplicate")
 }
