@@ -122,7 +122,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// different repo than the active scope — is intentionally outside this list
 	// and is surfaced below.
 	var reloadErr error
-	tasks, err := tasksForScope(m.repoRoot, m.repoID)
+	tasks, err := m.activeTasks(m.repoRoot, m.repoID)
 	if err == nil {
 		// Like refreshTasks, a successful read clears load errors separately
 		// from replacing the task data and its transient pane state.
@@ -201,6 +201,11 @@ func (m *home) handleTaskCreate() tea.Cmd {
 // path that resolves to a different repo. Used when the list could not be
 // reloaded to show the absence directly (#5667).
 func boundOutsideActiveScope(activeRepoID, projectPath string) bool {
+	if isRemoteTarget() {
+		// The path is on the daemon's host; this machine cannot resolve it to a
+		// repo, so only registry mode is known to be out of scope.
+		return activeRepoID == ""
+	}
 	return activeRepoID == "" || config.RepoIDForPath(projectPath) != activeRepoID
 }
 

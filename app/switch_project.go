@@ -491,7 +491,7 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 // nothing. Switching to the already-active project is a no-op inside
 // switchProject.
 func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
-	repo, err := config.RepoFromPath(root)
+	repo, err := m.repoContextForSelection(root, "")
 	if err != nil {
 		return m, m.handleError(fmt.Errorf("cannot open project %q: %w", filepath.Base(root), err))
 	}
@@ -557,16 +557,7 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var target *config.RepoContext
 	if proj, ok := m.projectPickerOverlay.SelectedProject(); ok {
-		var repo *config.RepoContext
-		var err error
-		if isRemoteTarget() {
-			// The row's root is a path on the daemon's host: probing it with
-			// this machine's git would fail or, worse, find an unrelated local
-			// repo at the same path.
-			repo = remoteRepoContext(proj.Root, proj.RepoID)
-		} else {
-			repo, err = config.RepoFromPath(proj.Root)
-		}
+		repo, err := m.repoContextForSelection(proj.Root, proj.RepoID)
 		if err != nil {
 			m.closeProjectPicker()
 			return m, m.handleError(fmt.Errorf("cannot open project %q: %w", proj.Name, err))
@@ -770,7 +761,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// unrestorable record is skipped, so the switch is committed from here on.
 	m.materializeSnapshot(data)
 
-	if tasks, err := tasksForScope(repo.Root, repo.ID); err != nil {
+	if tasks, err := m.activeTasks(repo.Root, repo.ID); err != nil {
 		log.WarningLog.Printf("switch project: failed to load tasks for %s: %v", repo.Root, err)
 		m.store.SetTasks(nil)
 		m.automations.TaskPane().ResetTasks(nil)

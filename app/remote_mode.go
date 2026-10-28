@@ -9,7 +9,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -24,7 +23,7 @@ import (
 
 // remoteReadTimeout bounds one remote registry/task read made from the poll or
 // the event loop, so an unreachable target degrades the view instead of hanging it.
-const remoteReadTimeout = 5 * time.Second
+var remoteReadTimeout = 5 * time.Second
 
 // remoteListProjects reads the target's project registry. A seam so the app
 // tests can stub it without dialing a daemon.
@@ -49,21 +48,120 @@ var remoteListTasks = func() ([]task.Task, error) {
 	return c.ListTasks(ctx)
 }
 
-// tasksForScope is the TUI's task loader for the active project: the local
-// tasks.json normally, the target's tasks in remote mode. An empty repoID is
+// remoteReads is one poll's worth of the target's registry and tasks. It is
+// fetched OFF the event loop (the snapshot poll's tea.Cmd, or the pre-loop
+// launch) and delivered to the loop in snapshotFetchedMsg; nothing on the
+// Update/View path ever dials the target for these.
+type remoteReads struct {
+	projects    []config.Project
+	projectsErr error
+	tasks       []task.Task
+	tasksErr    error
+}
+
+// remoteCache is the loop-owned copy of the last remoteReads. A failed read
+// keeps the previous rows (stale but responsive) and records the error, which
+// the Projects section renders as a degraded registry.
+type remoteCache struct {
+	projects       []config.Project
+	projectsErr    error
+	projectsLoaded bool
+	tasks          []task.Task
+	tasksErr       error
+	tasksLoaded    bool
+}
+
+func (c *remoteCache) apply(r *remoteReads) {
+	if r == nil {
+		return
+	}
+	c.projectsErr, c.tasksErr = r.projectsErr, r.tasksErr
+	if r.projectsErr == nil {
+		c.projects, c.projectsLoaded = r.projects, true
+	}
+	if r.tasksErr == nil {
+		c.tasks, c.tasksLoaded = r.tasks, true
+	}
+}
+
+// fetchRemoteReads reads the target's registry and tasks concurrently, each
+// bounded by remoteReadTimeout. The client's own deadline is minutes, so the
+// bound is enforced here: a target that accepts the connection and never
+// answers costs one timeout per poll in the background goroutine, not a frozen
+// TUI. Call it only off the event loop.
+func fetchRemoteReads() *remoteReads {
+	type projectsResult struct {
+		p   []config.Project
+		err error
+	}
+	type tasksResult struct {
+		t   []task.Task
+		err error
+	}
+	pc, tc := make(chan projectsResult, 1), make(chan tasksResult, 1)
+	go func() { p, err := remoteListProjects(); pc <- projectsResult{p, err} }()
+	go func() { t, err := remoteListTasks(); tc <- tasksResult{t, err} }()
+	timeout := time.After(remoteReadTimeout)
+	out := &remoteReads{}
+	gotP, gotT := false, false
+	for !gotP || !gotT {
+		select {
+		case r := <-pc:
+			out.projects, out.projectsErr, gotP = r.p, r.err, true
+		case r := <-tc:
+			out.tasks, out.tasksErr, gotT = r.t, r.err, true
+		case <-timeout:
+			err := fmt.Errorf("the daemon at %s did not answer within %s", apiclient.RemoteTargetURL(), remoteReadTimeout)
+			if !gotP {
+				out.projectsErr = err
+			}
+			if !gotT {
+				out.tasksErr = err
+			}
+			return out
+		}
+	}
+	return out
+}
+
+// activeTasks is the TUI's task loader for the active project on the EVENT LOOP:
+// the local tasks.json normally; in remote mode the poll's cached copy of the
+// target's tasks, filtered to the project (no network here). An empty repoID is
 // registry mode — no active scope — and yields no tasks either way.
-func tasksForScope(repoRoot, repoID string) ([]task.Task, error) {
+func (m *home) activeTasks(repoRoot, repoID string) ([]task.Task, error) {
 	if !isRemoteTarget() {
 		return task.LoadTasksForKnownRepo(repoRoot, repoID)
 	}
 	if repoID == "" {
 		return nil, nil
 	}
-	all, err := remoteListTasks()
-	if err != nil {
-		return nil, err
+	if !m.remote.tasksLoaded {
+		return nil, m.remote.tasksErr
 	}
-	return filterTasksToProject(all, repoRoot, repoID), nil
+	return filterTasksToProject(m.remote.tasks, repoRoot, repoID), nil
+}
+
+// repoContextForSelection resolves a chosen project row to a RepoContext — the
+// one place every selection entry point (picker, sidebar Enter, mouse, rebind
+// follow-up) goes through. Remotely the row's root is a path on the daemon's
+// host, so the context comes from the row's registry identity, never from a
+// local git probe.
+func (m *home) repoContextForSelection(root, repoID string) (*config.RepoContext, error) {
+	if !isRemoteTarget() {
+		return config.RepoFromPath(root)
+	}
+	if repoID == "" {
+		for _, p := range m.sidebarProjects {
+			if p.Root == root {
+				repoID = p.RepoID
+				break
+			}
+		}
+	}
+	if repoID == "" {
+		return nil, fmt.Errorf("%s is not in the daemon's project list yet; wait for the next refresh", root)
+	}
+	return remoteRepoContext(root, repoID), nil
 }
 
 // filterTasksToProject keeps the tasks owned by one project. The recorded
@@ -96,11 +194,10 @@ func remoteRepoContext(root, repoID string) *config.RepoContext {
 // and the session snapshot it served. There is no root_agents union (that is a
 // LOCAL config key) and no path probing: identity is the registry's own.
 func (m *home) buildRemoteProjectList(data []session.InstanceData) ([]overlay.Project, bool) {
-	registered, err := remoteListProjects()
-	degraded := err != nil
-	if err != nil {
-		registered = nil
-	}
+	// The cached registry, never a dial: this runs on the event loop. A failed
+	// refresh leaves the last good rows and reports the registry as degraded.
+	registered := m.remote.projects
+	degraded := m.remote.projectsErr != nil || !m.remote.projectsLoaded
 	type aggregate struct {
 		root           string
 		count, inPlace int
@@ -123,14 +220,14 @@ func (m *home) buildRemoteProjectList(data []session.InstanceData) ([]overlay.Pr
 		id := config.ReconciledRepoIDForProject(p)
 		ensure(id, filepath.Clean(p.Root))
 		records[id] = p
-		roots[pathutil.ResolveForCompare(filepath.Clean(p.Root))] = id
+		roots[filepath.Clean(p.Root)] = id
 	}
 	for _, d := range data {
 		if session.IsArchivedData(d) || d.Worktree.RepoPath == "" {
 			continue
 		}
 		root := filepath.Clean(d.Worktree.RepoPath)
-		id, ok := roots[pathutil.ResolveForCompare(root)]
+		id, ok := roots[root]
 		if !ok {
 			id = config.RepoIDFromRoot(root)
 		}
