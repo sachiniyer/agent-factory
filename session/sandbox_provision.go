@@ -220,8 +220,18 @@ func (w *sandboxWorkspace) seedFromBundle(timeout time.Duration) error {
 	for _, ref := range w.spec.SeedRefs {
 		args = append(args, shellQuote(ref+":"+ref))
 	}
-	script := fmt.Sprintf("git -C %s fetch %s %s && rm -f %s",
-		shellQuote(w.WorkspacePath()), shellQuote(dst), strings.Join(args, " "), shellQuote(dst))
+	// git refuses to fetch into the branch a non-bare repo has checked out, and
+	// the clone has the origin's default branch checked out — the very branch a
+	// session working on it brings (#5685). Detach HEAD first: the clone was made
+	// a moment ago and is clean, so this moves nothing on disk, and the session's
+	// worktree is created later by the agent-server on its own branch. An unborn
+	// HEAD (empty origin) cannot be detached and has no checkout to protect, so
+	// --update-head-ok is the safe spelling there.
+	ws := shellQuote(w.WorkspacePath())
+	script := fmt.Sprintf(
+		"if git -C %[1]s rev-parse -q --verify HEAD >/dev/null; then git -C %[1]s checkout -q --detach && git -C %[1]s fetch %[2]s %[3]s; "+
+			"else git -C %[1]s fetch --update-head-ok %[2]s %[3]s; fi && rm -f %[2]s",
+		ws, shellQuote(dst), strings.Join(args, " "))
 	if out, err := w.shell.Run(timeout, script, nil, true); err != nil {
 		return fmt.Errorf("seeding the remote workspace from the move bundle failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
