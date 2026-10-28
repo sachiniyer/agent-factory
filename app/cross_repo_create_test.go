@@ -400,7 +400,9 @@ func TestSaveContentPaneState_CrossRepoRetargetQueuesBindingNotice(t *testing.T)
 	// path field was seeded with repoA (the task's stored ProjectPath), so its
 	// existing length is len(repoA) — backspace once per rune to clear it.
 	press := func(k tea.KeyMsg) { _, _ = h.handleStateTasks(k) }
-	for i := 0; i < 6; i++ {
+	// Name → trigger → trigger value → prompt → target → on-complete → max runs
+	// (#4180; a stop even when the shape cannot carry a cap) → path.
+	for i := 0; i < 7; i++ {
 		press(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	require.True(t, tp.IsTextFieldFocused(),
@@ -491,7 +493,9 @@ func TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeOnCommittedWarning(t 
 		"showTasksOverlay drops into the selected task's edit form when a task is seeded")
 	// Tab to the Path field, clear it, and enter B's root to retarget the task.
 	press := func(k tea.KeyMsg) { _, _ = h.handleStateTasks(k) }
-	for i := 0; i < 6; i++ {
+	// Name → trigger → trigger value → prompt → target → on-complete → max runs
+	// (#4180; a stop even when the shape cannot carry a cap) → path.
+	for i := 0; i < 7; i++ {
 		press(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	require.True(t, tp.IsTextFieldFocused(),
@@ -585,7 +589,9 @@ func TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeWhenReloadFails(t *te
 	require.True(t, tp.IsEditing(),
 		"showTasksOverlay drops into the selected task's edit form when a task is seeded")
 	press := func(k tea.KeyMsg) { _, _ = h.handleStateTasks(k) }
-	for i := 0; i < 6; i++ {
+	// Name → trigger → trigger value → prompt → target → on-complete → max runs
+	// (#4180; a stop even when the shape cannot carry a cap) → path.
+	for i := 0; i < 7; i++ {
 		press(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	require.True(t, tp.IsTextFieldFocused(),
