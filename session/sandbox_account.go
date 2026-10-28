@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -254,7 +255,7 @@ func readAccountArchive(data []byte, allowed []string) (map[string][]byte, error
 }
 
 func writeFileAtomic0600(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := config.MkdirAllUnderAFHome(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".af-account-*")
