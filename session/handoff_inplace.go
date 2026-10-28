@@ -19,8 +19,8 @@ import (
 // resolving the NEW agent's program on the host (W2.1) — the daemon's own absolute
 // path for an agent would be the wrong machine's.
 //
-// Not carried here: an account (W7.6 owns account handoff — a scoped session is
-// refused), the conversation id of the new agent (W7.2), and the branch work
+// Not carried here: an account across agents (an account change on the same agent is
+// W7.6, account_swap_offbox.go; a scoped session is refused here), the conversation id of the new agent (W7.2), and the branch work
 // summary in the mission brief (the daemon holds no worktree for a sandbox
 // session, so the brief names the goal but not the commits).
 
@@ -72,6 +72,13 @@ func (s *localAgentServer) CanSwapAgent() (bool, error) { return true, nil }
 // swap, commit. The mission is delivered by the DRIVING daemon over the ordinary
 // prompt path, so no delivery happens here.
 func (i *Instance) swapAgentInPlace(target string) (string, error) {
+	return i.swapAgentInPlaceWith(target, nil)
+}
+
+// swapAgentInPlaceWith is swapAgentInPlace with a step that runs between the
+// confirmed stop of the old agent and the start of the new one (the account
+// handoff's scope rotation). A failing step aborts the swap before anything starts.
+func (i *Instance) swapAgentInPlaceWith(target string, afterStop func() error) (string, error) {
 	target = strings.TrimSpace(target)
 	if account, _ := i.AccountSelection(); account != "" {
 		return "", i.accountSwapRefusal(account)
@@ -79,6 +86,17 @@ func (i *Instance) swapAgentInPlace(target string) (string, error) {
 	plan, err := i.PrepareAgentSwap(target)
 	if err != nil {
 		return "", fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", i.Title, target, err)
+	}
+	if afterStop != nil {
+		prev := plan.afterStop
+		plan.afterStop = func() error {
+			if prev != nil {
+				if err := prev(); err != nil {
+					return err
+				}
+			}
+			return afterStop()
+		}
 	}
 	if err := i.Transition(BeginHandoff()); err != nil {
 		return "", err
@@ -108,9 +126,9 @@ func (i *Instance) accountSwapRefusal(account string) error {
 }
 
 // RefuseOffBoxAccountHandoff refuses `handoff --account` on a session whose
-// workspace is off-box. Moving an account across a sandbox boundary needs the
-// credential sync and relaunch work of W7.4/W7.6, so until then it is refused up
-// front, before anything is stopped.
+// workspace is off-box and that is not the W7.6 rotation (OffBoxAccountHandoffApplies):
+// a sandbox session that carries no account has none to move. Refused up front,
+// before anything is stopped.
 func (i *Instance) RefuseOffBoxAccountHandoff() error {
 	i.mu.RLock()
 	remote := i.capabilitiesLocked().Workspace == WorkspaceRemote

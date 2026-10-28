@@ -495,6 +495,9 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// W7.5: swap the agent for another in this workspace. Advertised as the
 	// "agent-swap" feature.
 	mux.HandleFunc("/v1/agent/swap-agent", rpcHandler(hs.SwapAgent))
+	// W7.6: rotate the account scope and relaunch. Advertised as the
+	// "account-swap" feature.
+	mux.HandleFunc("/v1/agent/swap-account", rpcHandler(hs.SwapAccount))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -538,6 +541,9 @@ var agentServerWireFeatures = []string{
 	// "agent-swap": POST /v1/agent/swap-agent — replace the agent with another
 	// in this workspace, resolving the new agent's program on this host (#5571 W7.5).
 	session.SwapAgentFeature,
+	// "account-swap": POST /v1/agent/swap-account — rotate the staged account
+	// scope in and relaunch the agent on it (#5571 W7.6).
+	session.AccountSwapFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version
@@ -873,6 +879,22 @@ func (hs *headlessServer) SwapAgent(req agentSwapRequest, resp *agentSwapRespons
 		return session.ErrHandoffUnsupported
 	}
 	program, err := sw.SwapAgentTo(req.Target)
+	if err != nil {
+		return err
+	}
+	resp.OK = true
+	resp.Program = program
+	return nil
+}
+
+// SwapAccount rotates the staged account scope in and relaunches the agent. The
+// request names nothing: the scope is derived from this server's own environment.
+func (hs *headlessServer) SwapAccount(_ struct{}, resp *agentSwapResponse) error {
+	sw, ok := hs.as.(session.AccountSwapper)
+	if !ok {
+		return session.ErrAccountSwapUnsupported
+	}
+	program, err := sw.SwapAccountInPlace()
 	if err != nil {
 		return err
 	}
