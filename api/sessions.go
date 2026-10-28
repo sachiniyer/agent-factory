@@ -243,7 +243,7 @@ func whoamiSession(tmuxName string) (*session.InstanceData, error) {
 // caller. Otherwise — operator credential, older daemon — the tmux path is
 // unchanged.
 func resolveSelfSession() (*session.InstanceData, error) {
-	if os.Getenv("AF_DAEMON_TOKEN") != "" {
+	if apiclient.HasDaemonToken() {
 		if row, ok, err := callerSessionFn(); err == nil && ok {
 			return &row, nil
 		}
