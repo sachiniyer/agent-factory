@@ -204,3 +204,39 @@ test("cyclePane reports rail mode through onFocusChange when the target has no t
   view.cyclePane(1);
   assert.equal(first.blurred(), 1);
 });
+
+// --- a pane-header click must move the keyboard with the focus (#4341) -------
+//
+// The mousedown listener createPane installs used to call focusPane() bare. A click
+// on the xterm surface masked that (xterm focuses its own textarea), but the pane
+// HEADER is a sibling of the xterm host, so a header click moved focusedId / the
+// highlight / the status line while the previous pane's textarea kept DOM focus and
+// every keystroke still reached the session the user thought they had left.
+
+test("a pane click focuses the clicked terminal, not just the highlight", async () => {
+  const { view, internals, ids, first, second } = await stageTwoPanes(true);
+
+  (view as unknown as { onPaneMouseDown: (id: string) => void }).onPaneMouseDown(ids[1] as string);
+
+  assert.equal(internals.focusedId, ids[1], "the highlight/bookkeeping moves to the clicked pane");
+  assert.equal(second.focused(), 1, "the clicked pane's terminal must take DOM focus");
+  assert.equal(first.focused(), 0, "the previous pane must not be re-focused");
+});
+
+test("a click on a pane with NO terminal blurs the pane that had the keyboard", async () => {
+  const { view, internals, ids, first } = await stageTwoPanes(false);
+
+  (view as unknown as { onPaneMouseDown: (id: string) => void }).onPaneMouseDown(ids[1] as string);
+
+  assert.equal(internals.focusedId, ids[1]);
+  assert.equal(first.blurred(), 1, "the old terminal must stop receiving keystrokes");
+});
+
+test("a click on the already-focused pane does not re-focus or blur anything", async () => {
+  const { view, ids, first } = await stageTwoPanes(true);
+
+  (view as unknown as { onPaneMouseDown: (id: string) => void }).onPaneMouseDown(ids[0] as string);
+
+  assert.equal(first.focused(), 0, "xterm handles clicks on its own surface");
+  assert.equal(first.blurred(), 0);
+});
