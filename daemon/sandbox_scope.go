@@ -289,12 +289,34 @@ func (s *controlServer) listTasksScoped(ctx context.Context, req ListTasksReques
 	}
 	kept := make([]task.Task, 0, len(resp.Tasks))
 	for _, t := range resp.Tasks {
-		if sandboxTaskInProject(t, proj) {
-			kept = append(kept, t)
+		// Watch tasks are not part of a sandbox's surface at all (their command
+		// is a host-side script), and every kept record is projected: the full
+		// record carries the daemon's absolute project path and repo id.
+		if sandboxTaskInProject(t, proj) && strings.TrimSpace(t.WatchCmd) == "" {
+			kept = append(kept, sandboxSafeTask(t))
 		}
 	}
 	resp.Tasks = kept
 	return nil
+}
+
+// sandboxSafeTask projects a task to what a sandbox may learn about it. Built by
+// CONSTRUCTION, like sandboxSafeInstanceData: a field added to task.Task later is
+// withheld until someone decides otherwise. Withheld: ProjectPath, RepoID, Host,
+// Program, WatchCmd, OnComplete, SandboxOwner and the scheduler's arming/audit
+// internals — host layout and operator state.
+func sandboxSafeTask(t task.Task) task.Task {
+	return task.Task{
+		ID:            t.ID,
+		Name:          t.Name,
+		Prompt:        t.Prompt,
+		CronExpr:      t.CronExpr,
+		TargetSession: t.TargetSession,
+		Enabled:       t.Enabled,
+		CreatedAt:     t.CreatedAt,
+		LastRunAt:     t.LastRunAt,
+		LastRunStatus: t.LastRunStatus,
+	}
 }
 
 func (s *controlServer) removeTaskScoped(ctx context.Context, req RemoveTaskRequest, resp *RemoveTaskResponse) error {

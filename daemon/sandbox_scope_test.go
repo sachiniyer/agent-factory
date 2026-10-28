@@ -241,10 +241,17 @@ func TestSandboxScope_TabVerbsActOnTheOwnSessionOnly(t *testing.T) {
 		assert.Errorf(t, checkSandboxTabKind(req), "%s is served by the daemon host", name)
 	}
 
-	for _, route := range []string{"/v1/CreateTab", "/v1/CloseTab", "/v1/RenameTab", "/v1/ReorderTab"} {
-		body := `{"id":"` + f.peer.ID + `","command":"x","tab_name":"t","new_name":"n"}`
-		f.assertRefused(t, route, body, "a peer's tabs")
-		f.assertRefused(t, route, `{"id":"`+f.other.ID+`","command":"x","tab_name":"t","new_name":"n"}`, "another project's tabs")
+	// Request bodies decode strictly, so each route gets only its own fields:
+	// a body with a foreign field never reaches the authorization.
+	extra := map[string]string{
+		"/v1/CreateTab":  `,"command":"x"`,
+		"/v1/CloseTab":   `,"tab_name":"t"`,
+		"/v1/RenameTab":  `,"tab_name":"t","new_name":"n"`,
+		"/v1/ReorderTab": `,"tab_name":"t","new_index":1`,
+	}
+	for route, fields := range extra {
+		f.assertRefused(t, route, `{"id":"`+f.peer.ID+`"`+fields+`}`, "a peer's tabs")
+		f.assertRefused(t, route, `{"id":"`+f.other.ID+`"`+fields+`}`, "another project's tabs")
 	}
 	f.assertRefused(t, "/v1/CreateTab", `{"id":"`+f.me.ID+`","kind":"web","port":3000}`, "web tabs are proxied by the daemon host")
 	f.assertRefused(t, "/v1/CreateTab", `{"id":"`+f.me.ID+`","kind":"vscode"}`, "VS Code tabs run on the daemon host")
@@ -305,6 +312,9 @@ func TestSandboxScope_TasksDeliverPromptsInsideTheProject(t *testing.T) {
 	_, out := f.call(t, f.secret, "/v1/ListTasks", `{}`)
 	assert.Contains(t, out, "t-mine")
 	assert.NotContains(t, out, "t-foreign", "another project's tasks must not be listed")
+	assert.NotContains(t, out, "t-watch", "watch tasks are not part of a sandbox's surface")
+	assert.NotContains(t, out, path, "the daemon's project path must not reach a sandbox")
+	assert.NotContains(t, out, f.repoA, "nor the retained repo id")
 	_, opOut := f.call(t, "operator-token", "/v1/ListTasks", `{}`)
 	assert.Contains(t, opOut, "t-foreign", "anti-vacuous: the operator sees every project's tasks")
 
@@ -457,4 +467,23 @@ func TestStampSandboxTaskOverwritesCallerProvenance(t *testing.T) {
 	assert.Empty(t, got.RepoID)
 	assert.Empty(t, got.Host)
 	assert.Empty(t, got.OnComplete)
+}
+
+func TestSandboxSafeTaskWithholdsHostState(t *testing.T) {
+	full := task.Task{
+		ID: "t", Name: "n", Prompt: "p", CronExpr: "0 * * * *", TargetSession: "peer", Enabled: true,
+		WatchCmd: "./w.sh", OnComplete: "kill", Host: "h1", ProjectPath: "/host/proj", RepoID: "r1",
+		Program: "claude", SandboxOwner: "sess-a", MaxConcurrentRuns: 3,
+	}
+	got := sandboxSafeTask(full)
+	assert.Equal(t, "t", got.ID)
+	assert.Equal(t, "peer", got.TargetSession)
+	assert.Empty(t, got.ProjectPath)
+	assert.Empty(t, got.RepoID)
+	assert.Empty(t, got.WatchCmd)
+	assert.Empty(t, got.Host)
+	assert.Empty(t, got.Program)
+	assert.Empty(t, got.SandboxOwner)
+	assert.Empty(t, got.OnComplete)
+	assert.Zero(t, got.MaxConcurrentRuns)
 }
