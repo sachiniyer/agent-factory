@@ -335,7 +335,16 @@ func (s *remoteAgentServer) StopPreservingWorkspace() error {
 		br.close()
 	}
 	s.closeRelays()
-	return s.rc.call("/v1/agent/stop", struct{}{}, nil)
+	if err := s.rc.call("/v1/agent/stop", struct{}{}, nil); err != nil {
+		// The agent was not proven stopped, so the session carries on: lift the
+		// latch so the next subscribe, input or resize dials a fresh broker rather
+		// than failing "is being terminated" for as long as the row lives (#5869).
+		s.mu.Lock()
+		s.closed = false
+		s.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (s *remoteAgentServer) Kill(_ bool) error {
