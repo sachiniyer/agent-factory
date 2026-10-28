@@ -130,6 +130,16 @@ type ProjectPickerOverlay struct {
 	// sessionless project may be missing, and the picker must say so instead
 	// of presenting the list as complete.
 	degraded bool
+	// snapshotDegraded marks a failed cross-repo session snapshot fetch: the
+	// rows still render from the registry/active/root_agents union, but every
+	// project's live SessionCount/InPlaceCount is silently zeroed (the fetch
+	// that populates them never answered). The destructive D path gates on
+	// this — those zeroed counts are exactly what would let
+	// deleteProjectConfirmMessage's "total == 0" branch claim "It has no live
+	// sessions" for a project whose live sessions the daemon will still
+	// archive and tear down, consent obtained on copy the data behind it
+	// never confirmed (#1973 / #1985).
+	snapshotDegraded bool
 }
 
 // NewProjectPickerOverlay creates a picker over the given projects (already
@@ -155,6 +165,20 @@ func (p *ProjectPickerOverlay) SetWidth(width int) { p.width = width }
 // SetDegraded records whether the project registry read failed (#3298), so
 // the picker warns that the list may be incomplete.
 func (p *ProjectPickerOverlay) SetDegraded(degraded bool) { p.degraded = degraded }
+
+// SetSnapshotDegraded records whether the picker's cross-repo session snapshot
+// fetch failed. The rows still render, but every live SessionCount/InPlaceCount
+// in them is silently zeroed; callers read this via SnapshotDegraded to gate
+// the destructive D path so delete-project's consent copy cannot claim "no
+// live sessions" against counts the fetch behind it never confirmed
+// (#1973 / #1985).
+func (p *ProjectPickerOverlay) SetSnapshotDegraded(degraded bool) { p.snapshotDegraded = degraded }
+
+// SnapshotDegraded reports whether the cross-repo session snapshot fetch
+// failed. The destructive D path reads it to refuse delete-project rather
+// than render a consent dialog whose session counts the data behind it never
+// confirmed (#1973 / #1985).
+func (p *ProjectPickerOverlay) SnapshotDegraded() bool { return p.snapshotDegraded }
 
 // SetMaxSize sets the maximum outer size the rendered overlay may occupy.
 func (p *ProjectPickerOverlay) SetMaxSize(width, height int) {
@@ -436,13 +460,25 @@ func (p *ProjectPickerOverlay) Render() string {
 	}
 
 	lines := []string{title, ""}
-	if p.degraded {
-		// A failed registry read may hide every registered sessionless
-		// project — say so rather than render the remainder as complete
-		// (#3298). Only the list states it: the add/rebind forms show no
-		// list, and their rows are budgeted without it.
+	// The two degraded halves collapse to a single notice line when both
+	// fail: with two separate lines the chrome alone exceeds the text rect
+	// at the declared minimum terminal height (ui/layout/grid.go
+	// HardMinHeight=10), which PlaceOverlay refuses to composite — one extra
+	// row makes the whole TUI background disappear. A single combined line
+	// bounds the chrome so the dialog stays rendered in every degraded
+	// combination, while a watcher reading only the notice can still tell
+	// which half(es) failed. Only the list states it: the add/rebind forms
+	// show no list, and their rows are budgeted without it.
+	switch {
+	case p.degraded && p.snapshotDegraded:
+		warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
+		lines = append(lines, truncateOverlayLine(warnStyle.Render("Cannot read registry · Snapshot failed · D disabled"), cw))
+	case p.degraded:
 		warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
 		lines = append(lines, truncateOverlayLine(warnStyle.Render("Cannot read registry · list may be incomplete"), cw))
+	case p.snapshotDegraded:
+		warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
+		lines = append(lines, truncateOverlayLine(warnStyle.Render("Snapshot failed · D disabled (counts unknown)"), cw))
 	}
 
 	// Reserve rows for the fixed chrome (title, blank, blank, hint — plus the
@@ -567,7 +603,7 @@ func finishRender(style lipgloss.Style, fit, textRect layout.Rect, lines []strin
 // degraded notice when present).
 func (p *ProjectPickerOverlay) listRowWindow(textHeight int) (start, end int, showAbove, showBelow bool) {
 	avail := textHeight - 4
-	if p.degraded {
+	if p.degraded || p.snapshotDegraded {
 		avail--
 	}
 	if avail < 1 {
@@ -609,7 +645,7 @@ func (p *ProjectPickerOverlay) RegisterZones(reg *zones.Registry, origin layout.
 	textRect := overlayTextRect(fit, style)
 	start, end, showAbove, _ := p.listRowWindow(textRect.H)
 	firstRowLine := 2 // title + blank
-	if p.degraded {
+	if p.degraded || p.snapshotDegraded {
 		firstRowLine++
 	}
 	if showAbove {

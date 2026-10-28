@@ -55,7 +55,7 @@ af_refute_screen "Custom: ${cron_re}" \
 # What must survive: the editable input still carries the expression, and the
 # preview line spends itself on the one thing that input cannot say.
 af_assert_screen "Cron.*${cron_re}" 'the editable Cron input still shows the expression'
-af_assert_screen 'Next run [A-Z][a-z][a-z] [0-9][0-9] [0-9][0-9]:[0-9][0-9]' \
+af_assert_screen 'Next run [0-9]{4}-[0-9][0-9]-[0-9][0-9]' \
     'the preview line shows the next fire time instead'
 
 # Belt and braces on the whole pane: with the editor open over the rail the
@@ -84,7 +84,7 @@ af_send ']'
 # [!], not [✓]: an expression that matches no date can never fire, and #3623
 # marks such a task on its COLLAPSED row — the row you are not looking at, which
 # is where "enabled and permanently silent" used to read as healthy.
-af_wait_for '▾\[!\]  yearly-audit' "$AF_DRIVER_TIMEOUT" 'automations row focused and expanded'
+af_wait_for '▾  \[!\] yearly-audit' "$AF_DRIVER_TIMEOUT" 'automations row focused and expanded'
 # The absence now LEADS the line, ahead of the expression it is about (#3623):
 # the rail is 36 columns here and 22 at its minimum, and it clips from the right,
 # so a reason sitting behind the trigger is the half that gets cut — leaving a

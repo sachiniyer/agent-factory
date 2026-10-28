@@ -44,6 +44,14 @@ import (
 // evidence whether the interrupted attempt already satisfied it.
 
 const taskStatusAbortedShutdown = "aborted: daemon shutting down"
+
+// taskStatusAbortedRuntimeReplaced records a run that never completed because
+// its runtime was replaced — a Lost-restore respawn or a daemon restart that
+// spawned a fresh process — without the run's prompt being replayed (#4222).
+// The aborted: prefix keeps a pending fire replayable, same as the shutdown
+// member: the occurrence did not run to completion.
+const taskStatusAbortedRuntimeReplaced = "aborted: runtime replaced"
+
 const taskStatusAbortedPrefix = "aborted:"
 
 // errTaskFireReconcile marks a reconcile failure — the interrupted attempt's
@@ -302,6 +310,17 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		if !matched {
 			continue
 		}
+		// A row whose task run was interrupted by a runtime replacement is not
+		// this fire's delivered product (#4222 review): the prompted process is
+		// gone and its replacement was never replayed the prompt, so the
+		// recorded occurrence is still owed. Adopting it would stamp "started"
+		// over the interrupted run's aborted status and discharge a delivery
+		// that never landed. The row stays — its interrupted work is kept —
+		// while the fire falls through to a fresh delivery, and the leftover
+		// path below already declines to reap an identity this row still owns.
+		if data.TaskRunInterrupted {
+			continue
+		}
 		// An adopted tombstone or uncertain row is already owned by the retained-
 		// failure machinery — the fire is consumed, not restarted underneath it.
 		status := "started"
@@ -390,15 +409,23 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 
 	// A persisted row that owns any of the discovered identities makes them
 	// foreign — someone's real session, restored row, or archive holds this
-	// title, worktree path, or branch. The adoption scan above already claimed
-	// everything that is this attempt's own, so a match here means the residue
-	// is not ours to reap OR quarantine; a fresh create mints a new suffix
-	// around it.
+	// title, sanitized tmux name, worktree path, or branch. This function
+	// reaps, probes, and kills by the sanitized tmux name, and that sanitizer
+	// collapses distinct titles onto one name (e.g. "api/refactor" and
+	// "api_refactor" both map to af_<repoHash>_api_refactor while branch
+	// sanitization keeps '/' distinct), so a row owning that name is foreign
+	// exactly as for title/branch/path — leaving it alone prevents the kill
+	// path from destroying an unrelated live session. The adoption scan above
+	// already claimed everything that is this attempt's own, so a match here
+	// means the residue is not ours to reap OR quarantine; a fresh create
+	// mints a new suffix around it.
 	for i := range rows {
-		d := &rows[i]
-		if d.Title == fire.Title ||
-			(wtPath != "" && d.Worktree.WorktreePath == wtPath) ||
-			(branch != "" && (d.Branch == branch || d.Worktree.BranchName == branch)) {
+		if why := taskFireForeignRowReason(&rows[i], fire, identityRoot, sanitized, wtPath, branch); why != "" {
+			// Visible, not silent: this is the one place af declines to reap or
+			// quarantine residue that may be its own, and a user debugging a
+			// colliding create needs to see which row made that call (#5696).
+			log.WarningLog.Printf("task %s: leaving interrupted-fire residue for %q alone — persisted session %q owns its %s",
+				t.ID, fire.Title, rows[i].Title, why)
 			return nil, nil
 		}
 	}
@@ -507,6 +534,47 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 			BranchCreatedByUs: createdByUs,
 		},
 	}, nil
+}
+
+// taskFireForeignRowReason names the identity through which a persisted row
+// owns one of the fire's discovered artifacts, or "" when it owns none.
+//
+// The tmux identity is compared against the row's tmux identity fields ONLY —
+// TmuxName, each tab's TmuxName, and, for a legacy row that recorded none, the
+// name its TITLE sanitizes to. It is never compared against Worktree.SessionName:
+// that field holds the raw session title on ordinary rows and the sanitized
+// name only on this function's own leftover records, so a session merely
+// TITLED like the sanitized name would impersonate the fire's tmux identity and
+// shield its genuine leftovers (#5696). Those leftover records carry the same
+// name in TmuxName, so they still match.
+func taskFireForeignRowReason(d *session.InstanceData, fire *taskFireMarker, identityRoot, sanitized, wtPath, branch string) string {
+	if d.Title == fire.Title {
+		return "title"
+	}
+	if sanitized != "" && taskFireRowOwnsTmuxName(d, identityRoot, sanitized) {
+		return "tmux session name"
+	}
+	if wtPath != "" && d.Worktree.WorktreePath == wtPath {
+		return "worktree path"
+	}
+	if branch != "" && (d.Branch == branch || d.Worktree.BranchName == branch) {
+		return "branch"
+	}
+	return ""
+}
+
+// taskFireRowOwnsTmuxName reports whether the row's real tmux identity is name.
+func taskFireRowOwnsTmuxName(d *session.InstanceData, identityRoot, name string) bool {
+	if d.TmuxName == name {
+		return true
+	}
+	for _, tab := range d.Tabs {
+		if tab.TmuxName == name {
+			return true
+		}
+	}
+	return d.TmuxName == "" && len(d.Tabs) == 0 && d.Title != "" &&
+		tmux.SanitizedNameForRepo(d.Title, identityRoot) == name
 }
 
 // taskFireTmuxEvidence reports whether a live tmux session proves it belongs to
