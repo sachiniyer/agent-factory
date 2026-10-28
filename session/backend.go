@@ -59,6 +59,10 @@ type Capabilities struct {
 	// InteractiveInput: raw key / prompt injection works — SendKeys/
 	// SendPrompt drive a live PTY rather than returning "not supported".
 	InteractiveInput bool
+	// LoopbackRelay: the daemon can reach a loopback port INSIDE the workspace
+	// through the agent-server's port relay (W5.1, #5571), so a web tab pointing
+	// at 127.0.0.1:N is served from the workspace rather than the daemon host.
+	LoopbackRelay bool
 	// Handoff: the session's agent program can be swapped in place, keeping the
 	// same workspace and branch (#2013). Local-worktree only for now — a sandbox
 	// backend would have to re-launch the agent inside the provisioned sandbox
@@ -82,6 +86,11 @@ type Capabilities struct {
 // Each refusal names the requirement that is actually unmet, because a user told
 // "not supported on this backend" cannot tell that from a kind that could work.
 func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
+	// A docs tab edits a proposal in the daemon's own store, so where the
+	// workspace runs does not matter.
+	if kind == TabKindDocs {
+		return nil
+	}
 	switch TabKindRequires(kind) {
 	case TabNeedsMetadataOnly:
 		// A web tab spawns nothing and reads nothing, so the KIND needs nothing
@@ -100,6 +109,15 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		// own endpoint, not the per-tab PTY frame stream, whose lifetime is a
 		// terminal subscription and which a large web response would head-of-line
 		// block.
+		//
+		// A runtime with the agent-server port relay (W5.1) lifts exactly this
+		// blocker: the daemon's proxy dials the workspace's own loopback through
+		// the relay, never its own TCP stack, so a loopback target is admitted as
+		// it is locally. The refusals below are about what a BROWSER can frame and
+		// stay in force.
+		if IsLoopbackWebTarget(target) && c.LoopbackRelay {
+			return nil
+		}
 		if IsLoopbackWebTarget(target) {
 			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, so it would serve the daemon's own %s — see #3062", target, target)
 		}

@@ -2,6 +2,7 @@ package session
 
 import (
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -62,15 +63,19 @@ func builtInProgramOverride(resolved *config.ResolvedConfig, agent, command stri
 	// First-run materialization writes DefaultConfig to config.toml, so the
 	// effective leaf is reported as global even though its exact value came from
 	// af's detected built-in. Compare against the built-in candidate from the same
-	// resolution instead of trusting the winner's location. A user/repo value is
-	// admitted only when it is byte-for-byte the command af independently detected
-	// for this process; a different path or argument remains undeclared.
+	// resolution instead of trusting the winner's location. The comparison is on
+	// parsed argv, not bytes (#5487): af versions disagree on whether the detected
+	// path was persisted quoted or bare, and those spellings are the same words.
+	// A user/repo value is admitted only when it runs the identical argv af
+	// independently detected for this process — a different path, an extra or
+	// reordered word, or anything the literal parse cannot prove (an expansion,
+	// an assignment prefix, an operator) remains undeclared.
 	for _, candidate := range value.Candidates {
 		if candidate.Layer != config.SourceBuiltIn.String() || !candidate.Present {
 			continue
 		}
 		builtIn, stringValue := candidate.Value.(string)
-		return stringValue && builtIn == command
+		return stringValue && sessionenv.LiteralCommandsEqual(builtIn, command)
 	}
 	return false
 }
@@ -93,6 +98,16 @@ func resolveProgramForAgent(i *Instance, agent string) string {
 // asked (#4430 review).
 func resolveProgramForPath(path, agent string) string {
 	return config.ResolveProgram(resolveConfigForPath(path), agent)
+}
+
+// ResolveProgramForPath is the exported form of resolveProgramForPath for
+// out-of-package callers that must apply configured overrides before doing
+// their own resolution — a directly-invoked `af agent-server` resolves the
+// configured command's executable on its host, and the key-level override
+// lookup must happen first or the absolute path can no longer match
+// program_overrides entries (#5578 review).
+func ResolveProgramForPath(path, agent string) string {
+	return resolveProgramForPath(path, agent)
 }
 
 func resolveConfigForInstance(i *Instance) *config.Config {

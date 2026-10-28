@@ -40,6 +40,12 @@ on:
         default: ''
         type: string
 
+concurrency:
+  # A newer master push supersedes a stale run: the tip is the question. Keyed on
+  # workflow + ref, so PRs, merge_group entries and master never share a group.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # GITHUB_TOKEN defaults to read-only; the deploy job needs to publish the Pages
 # artifact and mint the OIDC token actions/deploy-pages exchanges.
 permissions:
@@ -52,6 +58,10 @@ jobs:
   build:
     name: Build & verify
     runs-on: ubuntu-latest
+    # deployments: read lets the deploy decision find the last deployed commit.
+    permissions:
+      contents: read
+      deployments: read
     outputs:
       docs_changed: ${{ steps.docs_changes.outputs.docs_changed }}
     steps:
@@ -67,53 +77,18 @@ jobs:
         # substitution into the program text. verify_sha is a free-form input, so
         # substituting it would let anyone who can dispatch this workflow run
         # `$(…)` in the build workspace — before upload-pages-artifact, on a run
-        # that can publish Pages.
+        # that can publish Pages. The decision itself lives in
+        # scripts/docs-deploy-changed.sh (tested): it diffs against the last
+        # DEPLOYED commit so a run cancelled by the concurrency group above can
+        # never strand docs (#5659).
         env:
           EVENT_NAME: ${{ github.event_name }}
           DEPLOY_DOCS: ${{ inputs.deploy_docs }}
           VERIFY_SHA: ${{ inputs.verify_sha }}
           EVENT_BEFORE: ${{ github.event.before }}
           EVENT_SHA: ${{ github.sha }}
-        run: |
-          # …and it is validated as well as quoted: belt and braces, because the
-          # value also reaches `git`, and a full commit SHA is the only thing it
-          # is ever meant to be.
-          if [[ -n "$VERIFY_SHA" && ! "$VERIFY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::verify_sha must be a full 40-character commit SHA"
-            exit 1
-          fi
-
-          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$DEPLOY_DOCS" != "auto" ]]; then
-            echo "docs_changed=$DEPLOY_DOCS" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # 'auto' and push share this path. On a dispatch there is no
-          # github.event.before, so the diff below falls to `git diff-tree` on
-          # the commit itself — the merge commit's own change set, which is
-          # exactly what the suppressed push run would have examined.
-          before="$EVENT_BEFORE"
-          after="${VERIFY_SHA:-$EVENT_SHA}"
-
-          # An explicitly named commit is always diffed on its own, never against
-          # a `before` that belongs to a different event.
-          if [[ -n "$VERIFY_SHA" || -z "$before" || "$before" =~ ^0+$ ]]; then
-            changed="$(git diff-tree --no-commit-id --name-only -r "$after")"
-          else
-            changed="$(git diff --name-only "$before" "$after")"
-          fi
-
-          docs_changed=false
-          while IFS= read -r path; do
-            case "$path" in
-              docs/*|mkdocs.yml|README.md|commands/docs_gen.go|requirements-docs.txt|scripts/gen-docs.sh)
-                docs_changed=true
-                break
-                ;;
-            esac
-          done <<< "$changed"
-
-          echo "docs_changed=$docs_changed" >> "$GITHUB_OUTPUT"
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/docs-deploy-changed.sh >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@v6

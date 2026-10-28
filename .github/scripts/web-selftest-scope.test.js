@@ -261,7 +261,7 @@ test("pr.yml calls the web selftest workflow, and it is scoped rather than uncon
     "pr.yml must call web-selftest.yml as a reusable workflow — that is the only way Build can `needs` it",
   );
   assert.deepEqual(jobNeeds(yaml, "web-selftest"), ["web-selftest-scope"]);
-  assert.match(yaml, /^ {4}if: needs\.web-selftest-scope\.outputs\.run == 'true'$/m);
+  assert.match(yaml, /^ {4}if: needs\.web-selftest-scope\.outputs\.selftest == 'true'$/m);
 });
 
 test("web-selftest.yml is callable AND runs on master", () => {
@@ -325,12 +325,10 @@ test("shared scope exposes both decisions and performance skips only on a known 
   const yaml = readWorkflow("pr.yml");
   assert.deepEqual(jobNeeds(yaml, "perf"), ["web-selftest-scope"]);
   const perf = yaml.slice(yaml.indexOf("\n  perf:\n"), yaml.indexOf("\n  test-macos:\n"));
-  assert.match(perf, /^ {4}if: needs\.web-selftest-scope\.outputs\.perf_run == 'true'$/m);
-  assert.match(yaml, /perf_run: \$\{\{ steps\.scope\.outputs\.perf_run \}\}/);
-  assert.match(yaml, /node \.github\/scripts\/web-selftest-scope\.js changed-paths\.txt perf >> "\$GITHUB_OUTPUT"/);
-  assert.match(yaml, /git diff --no-renames --name-only/);
-  assert.equal((yaml.match(/echo "perf_run=true" >> "\$GITHUB_OUTPUT"/g) ?? []).length, 2,
-    "unknown events and missing base parents both run performance");
+  assert.match(perf, /^ {4}if: needs\.web-selftest-scope\.outputs\.perf == 'true'$/m);
+  assert.match(yaml, /perf: \$\{\{ steps\.scope\.outputs\.perf \}\}/);
+  // Heavy jobs are off pull_request and on for every other event.
+  assert.match(yaml, /if \[ "\$\{GITHUB_EVENT_NAME\}" = "pull_request" \]; then\n\s+heavy=false selftest=false perf=false/);
 });
 
 test("performance scope CLI fails open for an unreadable diff and emits its own output key", () => {
@@ -427,4 +425,16 @@ test("the visual gate diffs stills against committed goldens and cannot regenera
   // each update run would hand a human noise to review as if it were a change.
   assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", AF_UPDATE_GOLDENS: "1" }).updateSnapshots, "changed",
     "update mode belongs to AF_UPDATE_GOLDENS runs a human reviews, and rewrites only goldens the gate rejects");
+});
+
+test("web-selftest.yml's standalone and called runs never share a concurrency group (#5660)", () => {
+  // In a called workflow github.workflow is the caller's name, so keying on it
+  // is what stops pr.yml's reusable call and the standalone master push run
+  // from cancelling each other on the same ref.
+  const yaml = readWorkflow("web-selftest.yml");
+  const group = /^ {2}group: (.+)$/m.exec(yaml.slice(yaml.indexOf("\nconcurrency:\n")))[1];
+  assert.match(group, /github\.workflow == 'Web selftest' && 'standalone' \|\| 'called'/);
+  assert.match(group, /github\.event_name == 'schedule' && '-nightly'/);
+  assert.match(group, /github\.event_name == 'workflow_dispatch' && '-dispatch'/);
+  assert.match(yaml, /^ {2}cancel-in-progress: true$/m);
 });

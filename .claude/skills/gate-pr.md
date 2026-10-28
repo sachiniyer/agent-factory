@@ -4,6 +4,31 @@ description: Gate and merge YOUR OWN pull request — CI, the Codex review for t
 user_invocable: true
 ---
 
+# Throughput mode (current policy, 2026-10-27)
+
+**The Auto Gate is disabled. Everything below the "Legacy gate procedure"
+heading applies only if it is re-enabled.** Today:
+
+1. Run the local checks from CLAUDE.md (gofmt, build, vet, golangci-lint
+   `--fast`, file-length, changed-package tests) and push. Do not wait for review
+   or play-tests.
+2. `Build` + `Lint` must be green on the **current** head, and the PR must not be
+   conflicting (`git merge origin/master`, resolve, push — never force-push). The
+   auto-merger (`.github/auto-merge.md`) then squash-merges it; you do not merge
+   by hand.
+3. A **P1** Codex finding blocks the merge until you fix it and reply
+   `RESOLVED in <sha>` on the thread. **P2/P3 are advisory**: fix if cheap, else
+   reply `ACCEPTED: <reason>`. Never write `ACCEPTED` for something you will fix.
+4. To stop a PR merging, add the `no-auto-merge` label.
+5. Play-tests and broader verification run on master. A regression they (or the
+   post-merge composition check) find is fixed forward on master, ahead of other
+   work. The nightly stable release preflight (full `go vet` + `-race` suite)
+   stays the hard gate before anything reaches users.
+
+---
+
+# Legacy gate procedure (only if the Auto Gate is re-enabled)
+
 # Gate your own pull request
 
 **You own your PR end to end, including the merge.** Nobody reviews it before it
@@ -590,7 +615,7 @@ writing files the commit does not contain. Tear it down with `git worktree
 remove --force "$WT"` when you are done — not with `rm -rf`, which leaves the
 worktree registered and blocks the next run's `git worktree add`.
 
-- **Cheap checks locally, the matrix in CI.** Run `gofmt -l .`, `go build ./...`, `golangci-lint run --timeout=3m --fast`, `scripts/lint-file-length.sh`, and `go test` on **only the package you changed**. When the diff touched a generated-docs input — a Cobra def in `commands/` or `api/`, `daemon/httproutes.go`, the `session/` usage text, `design/`, the `web/src` shells, recovery goldens, or a generator — also run `scripts/gen-docs.sh` and require a clean `git status --porcelain` on the generated paths (the full list is in CLAUDE.md's Lint section and mirrors `docs.yml`). Leave `deadcode` to CI — it is whole-program reachability analysis rather than a lint, and the fleet running it concurrently took this box to a load average of 36; the Lint job runs it on every push. Do **not** run `make test-container`, `make remote-roundtrip-container`, or `make playtest-container` as a routine gate — CI runs `go test -race ./...` on every push, so a local container run duplicates it while rebuilding the whole Go tree; ~20 sessions doing that concurrently took the shared box to a load average of 160. Push, then fix what CI reports on your PR head. One targeted container run is fine to reproduce a CI failure you cannot diagnose from the logs — then stop.
+- **Cheap checks locally, the matrix in CI.** Run `gofmt -l .`, `go build ./...`, `go vet ./...`, `golangci-lint run --timeout=3m --fast`, `scripts/lint-file-length.sh`, and `go test` on **only the package you changed**. When the diff touched a generated-docs input — a Cobra def in `commands/` or `api/`, `daemon/httproutes.go`, the `session/` usage text, `design/`, the `web/src` shells, recovery goldens, or a generator — also run `scripts/gen-docs.sh` and require a clean `git status --porcelain` on the generated paths (the full list is in CLAUDE.md's Lint section and mirrors `docs.yml`). Leave `deadcode` to CI — it is whole-program reachability analysis rather than a lint, and the fleet running it concurrently took this box to a load average of 36; the Lint job runs it on every push. Do **not** run `make test-container`, `make remote-roundtrip-container`, or `make playtest-container` as a routine gate — CI runs `go test -race ./...` on every push, so a local container run duplicates it while rebuilding the whole Go tree; ~20 sessions doing that concurrently took the shared box to a load average of 160. Push, then fix what CI reports on your PR head. One targeted container run is fine to reproduce a CI failure you cannot diagnose from the logs — then stop.
 - **Never bare `go test ./...` on the host. If your change is in `daemon/` or `app/`, run no tests for it locally at all — push and let CI test it.** Not `go test ./daemon/`, not a `-run`-scoped subset, not `-race`. This is a safety rule rather than a performance one: those tests spawn real `af` daemons and drive real tmux on a box where the maintainer's own daemon and ~15 live sessions are running, so a local run risks killing production sessions, not just burning CPU. `go test $(go list ./... | grep -vE '/(daemon|app)')` if you need breadth elsewhere.
 - **Watch every new test FAIL first**, against the unmodified tree. Quote the failure in the PR. A test never observed red is not evidence.
 - **TUI changes: drive the real TUI.** `app/` tests swap the backend factory and cannot see real provisioning — a green unit suite proves nothing about them. The scenario subcommand needs a script path:

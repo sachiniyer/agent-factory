@@ -115,7 +115,23 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 		// owned it is gone" is already answered, and leaving it live means a copied
 		// token keeps authenticating until a recovery happens to replace it — or
 		// until the daemon restarts, if none ever does.
+		//
+		// The reap answered definitively on this branch (a known error is a
+		// definite answer, not an unknown one) and latched, so af's teardown
+		// obligation is discharged and the backend's immutable cleanup identity
+		// points at a runtime af already reaped. Clear it too, but leave the
+		// in-memory wiring (runtimeTeardown/remoteClient/agentSrv) for the
+		// abort-to-Lost retry: the in-process re-provision reaps through that
+		// closure (reapRemoteRuntimeForReplacement), not this field.
+		// resetRemoteRuntime clears the same identity on the success path where
+		// the wiring is also dropped; without it here, an ordinary sandbox row's
+		// ForStorage projection persists the discharged handle and a restart's
+		// FromInstanceData rebuilds a teardown for a runtime af already reaped
+		// (#5559 review). The unknown-outcome branch above returns before this
+		// point, so only a runtime whose reap answered definitively and latched
+		// reaches here.
 		i.revokeSandboxCredential()
+		i.clearDischargedRuntimeCleanup()
 		return branch, fmt.Errorf("pushed branch %q but failed to tear the sandbox down for session %q: %w", branch, i.Title, err)
 	}
 	// 4. Drop the dead remote wiring so the instance is an inert archived record
@@ -195,6 +211,11 @@ func recoverSandbox(i *Instance) error {
 		}
 		return err
 	}
+	// A sandbox recover re-provisions unconditionally — there is no remote
+	// reattach — so the runtime ConfirmLive publishes is always a replacement
+	// (#4222). Stamp the verdict before the edge so the run-end classifier
+	// inside it can interrupt a still-in-flight task run.
+	i.markAgentRuntimeReplaced(true)
 	_ = i.Transition(ConfirmLive())
 	return nil
 }
@@ -222,6 +243,7 @@ func (i *Instance) reprovisionRemote() error {
 		Program:               i.Program,
 		CloneURL:              originRemoteURL(i.Path),
 		RestoreBranch:         i.Branch,
+		Host:                  i.Host,
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 	}
 	i.mu.RUnlock()
@@ -313,10 +335,12 @@ func (i *Instance) reprovisionRemote() error {
 	// possibly-live sandbox keeps working, and only a runtime that is provably gone
 	// is replaced by a fresh mint. Minting before this point severed callback from
 	// exactly that retained runtime, permanently and silently.
-	cred, err := mintForProvision(&spec, kind, creds)
-	if err != nil {
-		return fmt.Errorf("cannot re-provision session %q: its callback credential could not be re-issued, and restoring it without one would silently leave its agent unable to call af: %w", i.Title, err)
-	}
+	// Mint through the same shared helper the create path uses, which DEGRADES
+	// on refusal rather than failing: a restored sandbox without callback is
+	// more useful than no restore at all, and the reason rides the result onto
+	// the durable record so the surfaces say why instead of the agent
+	// discovering af commands silently fail (#5571 W3.1).
+	cred := mintForProvision(&spec, kind, creds)
 	// ARMED HERE, disarmed only once the replacement is bound and live (#3065
 	// review). Every exit below this line abandons a credential minted for a
 	// sandbox that either does not exist or cannot be used, and unlike the create
@@ -339,6 +363,11 @@ func (i *Instance) reprovisionRemote() error {
 	if err != nil {
 		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, err)
 	}
+	// A runtime-set reason (the mid-provision loss detected before the env
+	// commit, PR #5577 review) is more precise than the mint's — keep it.
+	if res.CallbackUnavailable == "" {
+		res.CallbackUnavailable = cred.UnavailableReason
+	}
 	// EVERY exit below this line disposes of the replacement through
 	// discardUnusableReplacement — the same reason the credential revoke above is a
 	// defer rather than a line per branch. What the exits share is not the message
@@ -347,11 +376,17 @@ func (i *Instance) reprovisionRemote() error {
 	// bind exit retaining an unconfirmed cleanup handle and the revalidation exit
 	// beside it discarding one.
 	//
-	// Same post-provision revalidation the create path performs. Doing it in one
-	// and not the other is exactly how these two drifted the first time.
+	// Same post-provision revalidation the create path performs — and the same
+	// degrade (#5571 W3.1): the replacement is provisioned, runnable and already
+	// replacing the old sandbox, so discarding it for a dead callback would trade
+	// a working session for a clean failure. The dead grant is revoked for
+	// tidiness, the reason overrides the mint's (it is the more specific cause),
+	// and binding proceeds into a callback-less session.
 	if rerr := revalidateAfterProvision(cred); rerr != nil {
-		return fmt.Errorf("re-provisioned sandbox for session %q, but its callback credential was invalidated while it was being provisioned: %w",
-			i.Title, i.discardUnusableReplacement(res, rerr))
+		if creds != nil {
+			creds.Revoke()
+		}
+		res.CallbackUnavailable = rerr.Error()
 	}
 	// The sandbox is up but its endpoint could not be wired — reap it so a bad
 	// restore never leaks a container/remote.
@@ -389,6 +424,7 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 	i.backend = res.Backend
 	i.remoteClient = rc
 	i.runtimeTeardown = res.Teardown
+	i.callbackUnavailable = res.CallbackUnavailable
 	i.touchLocked()
 	if i.runtimeCleanupStateUnknown {
 		i.runtimeCleanupStateUnknown = false
@@ -451,6 +487,18 @@ func (i *Instance) resetRemoteRuntime() {
 	i.agentSrv = nil
 	i.remoteClient = nil
 	i.runtimeTeardown = nil
+	// A confirmed reap discharged the off-box runtime this backend's immutable
+	// cleanup identity points at. Clear it under the same lock so the next
+	// checkpoint stages no RuntimeCleanup for a runtime af already reaped:
+	// otherwise a restart's FromInstanceData would rebuild a teardown handle
+	// from it and a later kill/recovery would act on a resource it no longer
+	// owns (#5553 review). The unknown-outcome path returns before this point,
+	// so only a provably-gone runtime reaches here. The reaper itself is the
+	// provisioner's (bound to runtimeTeardown, already nilled above), not this
+	// field, so clearing it does not affect a teardown still in flight.
+	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
+		provider.clearRuntimeCleanupData()
+	}
 	if i.runtimeCleanupStateUnknown {
 		i.runtimeCleanupStateUnknown = false
 		i.touchLocked()
@@ -489,6 +537,31 @@ func (i *Instance) revokeSandboxCredential() {
 	if creds != nil {
 		creds.Revoke()
 	}
+}
+
+// clearDischargedRuntimeCleanup drops the backend's immutable cleanup identity
+// after a reap that answered definitively and latched but left the in-memory
+// wiring in place for a retry. It is the ArchiveSandbox known-failure branch's
+// analogue of resetRemoteRuntime's cleanup clear: the reap returned a known
+// error (a definite answer, success or a definite failure) and latched, so
+// af's teardown obligation is discharged and the cleanup identity points at a
+// runtime af already reaped, but the row aborts to Lost and the in-process
+// retry (reapRemoteRuntimeForReplacement) still needs the in-memory
+// runtimeTeardown/remoteClient/agentSrv to re-enter the reap. Only the
+// persisted identity is cleared, so a restart's FromInstanceData cannot
+// rebuild a teardown for the reaped runtime and the next checkpoint stages no
+// RuntimeCleanup for it (#5559 review). The unknown-outcome branch returns
+// before this is reached, so only a runtime whose reap answered definitively
+// and latched discharges here.
+func (i *Instance) clearDischargedRuntimeCleanup() {
+	i.mu.Lock()
+	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
+		if provider.runtimeCleanupData() != nil {
+			provider.clearRuntimeCleanupData()
+			i.touchLocked()
+		}
+	}
+	i.mu.Unlock()
 }
 
 // markRuntimeCleanupStateUnknown makes an indeterminate reap durable without

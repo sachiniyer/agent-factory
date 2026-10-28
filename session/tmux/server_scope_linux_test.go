@@ -563,7 +563,7 @@ func TestDedicatedServerWrapperAppliesLiveRotationPolicy(t *testing.T) {
 	tmuxShim := filepath.Join(dir, "tmux")
 	script := `#!/bin/sh
 : >"$AF_TEST_TMUX_READY"
-while [ ! -f "$AF_TEST_TMUX_RELEASE" ]; do sleep 0.01; done
+` + testguard.BoundedGateWait(releasePath, 10*time.Millisecond, 5*time.Minute) + `
 cat "$AF_TEST_TMUX_PAYLOAD" >&2
 exit 42
 `

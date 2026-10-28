@@ -279,7 +279,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/RebindProject",
-		Description: "Move a registered project's stable identity (id, a prj_… registry id) to the checkout at path — the repair after that checkout was moved or recloned elsewhere. Path resolves on the daemon's filesystem; the rebind refuses a root another project already owns.",
+		Description: "Move a registered project's stable identity (id, a prj_… registry id) to the checkout at path — the repair after that checkout was moved or recloned elsewhere. Path resolves on the daemon's filesystem; the rebind refuses a root another project already owns. With expected_root and expected_checkout_id (the pair the caller last saw the project bound to — a same-path reclone changes the checkout half while the root spelling stays), it applies only if the registry still records both, and otherwise answers 409 project_rebound; omitted, last writer wins.",
 		requestType: reflect.TypeOf(RebindProjectRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProject) },
 	},
@@ -299,6 +299,13 @@ var httpRoutes = []HTTPRoute{
 		Description: "Set or clear (empty color) the display color of a registered project (id, a prj_… registry id) — a hex color such as #2f5fd8 that web clients use for the session frame and the favicon.",
 		requestType: reflect.TypeOf(SetProjectColorRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetProjectColor) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/RebindProjectGuarded",
+		Description: "Guarded twin of RebindProject: requires expected_root or expected_checkout_id and exists only on daemons that enforce the pair — a daemon predating it answers the marked 404, which clients map to an upgrade refusal rather than letting the precondition drop silently.",
+		requestType: reflect.TypeOf(RebindProjectRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProjectGuarded) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -391,6 +398,19 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(GetConfigRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetConfig) },
 	},
+	// The explain read (#4803): the same ResolvedValue `af config get --explain`
+	// prints, served so the UIs answer "which layer supplied this" through the
+	// identical resolver. Not sandboxAllowed: candidate locations are absolute
+	// host paths, and reading them hands a compromised sandbox the operator's
+	// filesystem layout — the same reconnaissance ListProjects/ListDirectory
+	// are denied for.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ExplainConfig",
+		Description: "Explain one global config key's provenance: every source candidate with its value, location, and the reason it won, was shadowed, was absent, or is disallowed.",
+		requestType: reflect.TypeOf(ExplainConfigRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ExplainConfig) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SetConfigValue",
@@ -415,6 +435,105 @@ var httpRoutes = []HTTPRoute{
 		Description: "Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically).",
 		requestType: reflect.TypeOf(UnsetConfigValueRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UnsetConfigValue) },
+	},
+	// Proposals (docs/dev/proposals/proposal-mode/api.md).
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ListProposals",
+		Description: "List a project's proposals, newest edit first. Name the project with exactly one of session_id, repo_id or repo_path (a path on the daemon host).",
+		requestType: reflect.TypeOf(ListProposalsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListProposals) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/GetProposal",
+		Description: "Describe one proposal for the Docs tab: head commit, docs, unused templates, open question count, and attached sessions.",
+		requestType: reflect.TypeOf(GetProposalRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetProposal) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/StartProposal",
+		Description: "Create a proposal from templates, attach the session to it, open its Docs tab, and return the rules for the agent.",
+		requestType: reflect.TypeOf(StartProposalRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.StartProposal) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/AttachProposal",
+		Description: "Attach the session to a proposal (or, with no slug, report its current one), open its Docs tab, and return the rules.",
+		requestType: reflect.TypeOf(AttachProposalRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AttachProposal) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/DetachProposal",
+		Description: "Remove the session's proposal attachment and cursor, and close its Docs tab.",
+		requestType: reflect.TypeOf(DetachProposalRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DetachProposal) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/AddProposalDoc",
+		Description: "Add a doc to a proposal from a template, or blank, and commit it as the given author.",
+		requestType: reflect.TypeOf(AddProposalDocRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AddProposalDoc) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ReadProposalDoc",
+		Description: "Read a proposal doc and the commit it is at, after committing its uncommitted edits as external.",
+		requestType: reflect.TypeOf(ReadProposalDocRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ReadProposalDoc) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SaveProposalDoc",
+		Description: "Save a proposal doc as a human edit against a base commit; merges with git merge-file, and answers 409 proposal_conflict with ours/theirs/base when the edits conflict.",
+		requestType: reflect.TypeOf(SaveProposalDocRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SaveProposalDoc) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/WriteProposalDoc",
+		Description: "Replace a proposal doc and commit it as the given author, with no merge.",
+		requestType: reflect.TypeOf(WriteProposalDocRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.WriteProposalDoc) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/PullProposalChanges",
+		Description: "Return the edits to the session's proposal that it has not seen, then move its cursor.",
+		requestType: reflect.TypeOf(PullProposalChangesRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PullProposalChanges) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/CheckpointProposal",
+		Description: "Commit the session's edits to its proposal as its own and move its cursor past them.",
+		requestType: reflect.TypeOf(CheckpointProposalRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CheckpointProposal) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SetProposalPushMode",
+		Description: "Set the push mode (auto or manual) of the session's Docs tabs for its proposal, and return its push status.",
+		requestType: reflect.TypeOf(SetProposalPushModeRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetProposalPushMode) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/HoldProposalPush",
+		Description: "Hold the session's pending proposal push until the next human save, and return its push status.",
+		requestType: reflect.TypeOf(HoldProposalPushRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HoldProposalPush) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SendProposalChanges",
+		Description: "Send the session its unseen proposal edits as a prompt now when the agent is Ready, or on the next tick where it is, and return its push status.",
+		requestType: reflect.TypeOf(SendProposalChangesRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SendProposalChanges) },
 	},
 	// Tasks.
 	{

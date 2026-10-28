@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiclient"
@@ -211,6 +212,23 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	// sessions), which get their final dialog straight away.
 	reserved := session.IsReservedTitle(selectedTitle)
 	var cleanupImpact *session.WorktreeCleanupImpact
+	var loss killLossAssessment
+	// An unreachable row keeps Kill available — that is the deliberate escape
+	// hatch for a wedged remote — but the confirmation must say what the flag
+	// means: af cannot verify the teardown lands, and the sandbox may keep
+	// running with everything it never pushed (#5571 W1.3). The flag is
+	// in-memory, so this warning costs no I/O and rides every kill path below,
+	// pending and direct alike.
+	if u := selected.UnreachableSnapshot(); u != nil {
+		age := time.Since(u.Since)
+		if age < 0 {
+			age = 0
+		}
+		loss.warnings = append(loss.warnings, fmt.Sprintf(
+			"Warning: af cannot reach this session's sandbox — unreachable for %s (%s). "+
+				"The sandbox may still be running and holding unpushed work, and af cannot confirm the remote teardown.",
+			age.Round(time.Second), u.Error))
+	}
 	if selected.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 		// GetWorktreeCleanupImpact is an in-memory snapshot, intentionally not
 		// gated on started (unlike GetGitWorktree), so a session that HAS a
@@ -223,10 +241,10 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 			cleanupImpact = &impact
 		}
 		if hasWorktree && impact.RemoveWorktree && impact.Path != "" {
-			return m, m.openPendingKillConfirm(selectedTitle, reserved, cleanupImpact, killAction)
+			return m, m.openPendingKillConfirm(selectedTitle, reserved, cleanupImpact, loss, killAction)
 		}
 	}
-	return m, m.openKillConfirm(selectedTitle, reserved, cleanupImpact, killLossAssessment{}, killAction)
+	return m, m.openKillConfirm(selectedTitle, reserved, cleanupImpact, loss, killAction)
 }
 
 // killInstanceCmd returns a tea.Cmd that performs the actual session teardown
@@ -267,12 +285,25 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 			// daemon liveness so the user can retry the kill.
 			_ = inst.Transition(session.RevertKill())
 		}
-		// A wedged LOCAL daemon has an in-interface recovery: offer to restart it
-		// (#2479) instead of surfacing a shell command. A remote daemon is on
-		// another machine, so the local restart cannot help — fall through to the
-		// plain message there.
-		if errors.Is(msg.err, errDaemonUnresponsive) && !isRemoteTarget() {
-			return m, m.offerDaemonRestart(msg.target.title)
+		// A wedged daemon took the kill request and went quiet
+		// (errDaemonUnresponsive), so the teardown may have landed with only the
+		// reply lost — the outcome is unknown. A LOCAL daemon has an in-interface
+		// recovery: offer to restart it (#2479) instead of surfacing a shell
+		// command. A REMOTE daemon is on another machine, so the local restart
+		// cannot help; route it to the "could not be confirmed" message below
+		// rather than the "session is retained" recovery, which would invite a
+		// second kill of a session that may already be gone. This matches on
+		// errDaemonUnresponsive directly because killSessionThroughDaemon rewraps
+		// the timeout with a single %w, dropping context.DeadlineExceeded from
+		// the chain that mutationOutcomeUnknown (below) would otherwise key on —
+		// so a remote timeout cannot be recognized as uncertain there and must
+		// be routed here (#4824).
+		if errors.Is(msg.err, errDaemonUnresponsive) {
+			if !isRemoteTarget() {
+				return m, m.offerDaemonRestart(msg.target.title)
+			}
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("killing session '%s'", msg.target.title), "the sidebar", msg.err))
 		}
 		// The daemon may have torn the session down with only the reply lost
 		// (#4824). The fence still reverts above — holding it would strand the
@@ -879,6 +910,8 @@ func webTabAttachGuard(inst *session.Instance, tabIdx int) error {
 			agentproto.RedactAccessTokenURL(tabs[tabIdx].URL))
 	case session.TabKindVSCode:
 		return fmt.Errorf("this is a VS Code tab — view it in the web UI; a terminal can't render the editor")
+	case session.TabKindDocs:
+		return fmt.Errorf("this is a Docs tab — the proposal editor is web only; view it in the web UI")
 	default:
 		return nil
 	}

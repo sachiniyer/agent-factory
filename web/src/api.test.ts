@@ -20,6 +20,8 @@ import {
   handoffSession,
   isMutationCommittedError,
   isMutationOutcomeUncertain,
+  isProjectReboundError,
+  PROJECT_REBOUND_ERROR_CODE,
   killSession,
   listBackends,
   listDirectory,
@@ -98,6 +100,36 @@ test("Snapshot carries daemon identity and lifecycle admission timing with its r
   assert.equal(snapshot.operationLockTimeoutMs, 30_000);
   assert.equal(snapshot.operationClockMs, 12_345);
   assert.equal(snapshot.daemonBootId, "daemon-a");
+  // A healthy daemon omits skipped_repos (omitempty on the Go side), so the web
+  // decodes nothing here — no incompleteness notice. Guards the happy path against
+  // a regression that would render a spurious "sessions hidden" banner (#4742).
+  assert.deepEqual(snapshot.skippedRepos, undefined);
+});
+
+test("Snapshot carries the daemon's startup-skipped repos so the rail can surface them (#4742)", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        instances: [{ id: "survivor" }],
+        skipped_repos: [
+          { repo_id: "abc123", reason: "corrupted-instances-json" },
+          { repo_id: "def456", reason: "rows-failed-to-load", failed_rows: 3 },
+        ],
+      },
+      error: null,
+    }),
+  }) as unknown as Response;
+  const snapshot = await fetchSessionSnapshot("tok");
+  // The incompleteness channel must be plumbed through verbatim: the rail renders
+  // its notice from these, and the daemon's reason codes are the contract. Before
+  // the fix the web decoded only `instances` and silently dropped the skip set.
+  assert.equal(snapshot.sessions[0]?.id, "survivor");
+  assert.equal(snapshot.skippedRepos?.length, 2);
+  assert.deepEqual(snapshot.skippedRepos?.[0], { repo_id: "abc123", reason: "corrupted-instances-json" });
+  assert.deepEqual(snapshot.skippedRepos?.[1], { repo_id: "def456", reason: "rows-failed-to-load", failed_rows: 3 });
 });
 
 // The backend-on-create contract (#1933). The daemon already accepted `backend`;
@@ -244,6 +276,39 @@ test("resumeFromLimit surfaces a successful response's committed settlement warn
   assert.equal(err.status, 200);
   assert.equal(err.code, "mutation_committed");
   assert.match(err.message, /settlement pending/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
+test("resumeFromLimit surfaces a not-performed resume's committed rebuild warning, not the generic no-op reason", async () => {
+  // The respawn-rebuilt-then-failed path (daemon/limit.go) returns ok:false with a
+  // committed mutation warning: the rebuild mutated durable state even though the
+  // resume did not complete. The web must surface that committed warning rather
+  // than the ok:false "another operation owns its retry" reason, which would hide
+  // an unsafe-to-repeat committed mutation behind a generic retryable no-op.
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: false,
+        reason: "the session changed or another operation owns its retry",
+        code: "mutation_committed",
+        warning: "re-spawn for \"feature\" failed after recovery rebuilt its worktree",
+      },
+      error: null,
+    }),
+  });
+
+  const err = await resumeFromLimit("id-repoB", "feature", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError, "a committed mutation must surface as ApiError, not a plain Error");
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /rebuilt its worktree/);
+  assert.doesNotMatch(err.message, /another operation owns/);
   assert.equal(isMutationCommittedError(err), true);
 });
 
@@ -1040,6 +1105,84 @@ test("rebindProject posts id + verbatim path to RebindProject", async () => {
   assert.equal(cap.body.id, "prj_0123456789abcdef0123456789abcdef");
   assert.equal(cap.body.path, "~/repos/moved", "the path is forwarded unchanged for the daemon to resolve");
   assert.equal(cap.auth, "Bearer tok");
+});
+
+test("rebindProject sends the observed pair as expected_root + expected_checkout_id", async () => {
+  const cap = stubFetch();
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok", "/old", "chk_observed");
+  assert.ok(
+    cap.url.endsWith("/v1/RebindProjectGuarded"),
+    `a guarded send hits the guarded route — the route is the capability check (#4888 review), posted to ${cap.url}`,
+  );
+  assert.equal(cap.body.expected_root, "/old", "the daemon compares the registry against the root the UI showed (#4822)");
+  assert.equal(
+    cap.body.expected_checkout_id,
+    "chk_observed",
+    "the checkout half is what catches a same-path reclone the root spelling cannot (#4822 spec)",
+  );
+});
+
+test("rebindProject omits the precondition when no pair was observed", async () => {
+  const cap = stubFetch();
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok");
+  assert.ok(!("expected_root" in cap.body), "no observed root sends no precondition, not an empty one");
+  assert.ok(
+    !("expected_checkout_id" in cap.body),
+    "no observed checkout sends no field — an empty one would be a guard that cannot hold",
+  );
+});
+
+test("a project_rebound refusal classifies as a definitive rebind conflict", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 409,
+    json: async () => ({
+      data: null,
+      error: { message: "project prj_A was rebound elsewhere", code: PROJECT_REBOUND_ERROR_CODE, daemon_rejected: true },
+    }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").catch((e: unknown) => e);
+  assert.ok(isProjectReboundError(err), "the code identifies the conflict");
+  assert.equal(isMutationOutcomeUncertain(err), false, "a conflict is a refusal, not an unknown outcome");
+});
+
+test("rebindProject translates the guarded route's marked 404 into the upgrade remedy", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({
+      data: null,
+      error: { message: 'unknown route "/v1/RebindProjectGuarded"', daemon_rejected: true },
+    }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, true, "the absent route proves no guarded handler ran");
+  assert.match(err.message, /predates guarded rebinds/);
+  assert.match(err.message, /upgrade it, or rebind from the daemon host/);
+});
+
+test("rebindProject keeps an unmarked 404 unconfirmed rather than unsupported", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({ data: null, error: { message: "proxy could not read the upstream response" } }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, false);
+  assert.equal(isMutationOutcomeUncertain(err), true, "an intermediary's 404 never claims route absence");
+  assert.doesNotMatch(err.message, /predates guarded rebinds/);
 });
 
 test("rebindProject returns the rebound project", async () => {

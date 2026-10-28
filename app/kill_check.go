@@ -85,7 +85,7 @@ type killLossCheckedMsg struct {
 // cleanup impact); the confirm is withheld until the checks land, because the
 // bare prompt may only show with positive evidence that nothing unmerged is lost
 // (#2022). It returns the cmd that runs the checks.
-func (m *home) openPendingKillConfirm(title string, reserved bool, impact *session.WorktreeCleanupImpact, action tea.Cmd) tea.Cmd {
+func (m *home) openPendingKillConfirm(title string, reserved bool, impact *session.WorktreeCleanupImpact, base killLossAssessment, action tea.Cmd) tea.Cmd {
 	cmd := m.confirmAction(killConfirmMessage(title, "", reserved, impact), action)
 	dialog := m.confirmationOverlay
 	dialog.SetPending(killCheckPendingNote)
@@ -94,12 +94,19 @@ func (m *home) openPendingKillConfirm(title string, reserved bool, impact *sessi
 	check := killLossCheck
 	worktree := *impact
 	return tea.Batch(cmd, func() tea.Msg {
+		loss := check(worktree)
+		// In-memory warnings captured at open — the unreachable-sandbox notice
+		// (#5571 W1.3) — lead; the assessed git findings trail them.
+		loss.warnings = append(base.warnings, loss.warnings...)
+		if loss.severe == "" {
+			loss.severe = base.severe
+		}
 		return killLossCheckedMsg{
 			dialog:   dialog,
 			title:    title,
 			reserved: reserved,
 			impact:   impact,
-			loss:     check(worktree),
+			loss:     loss,
 			action:   action,
 		}
 	})

@@ -198,7 +198,7 @@ const codexUpdateCheckConfigKey = "check_for_update_on_startup"
 //     for it, and af's dismisser answers the picker exactly as it does on a
 //     launch the flag never touched.
 func EnsureCodexUpdateCheckDisabled(command string) string {
-	tokens, ends := splitShellTokens(command)
+	tokens, ends := SplitShellTokens(command)
 	// The flag must land on codex's own argv, so the executable is located
 	// through the account boundary's own parser — never a later token that
 	// merely names codex (`my-chat --persona codex`), never a bare-name
@@ -230,7 +230,7 @@ func EnsureCodexUpdateCheckDisabled(command string) string {
 // make this call — `FOO=/tmp/check_for_update_on_startup codex` or `codex -c
 // model=check_for_update_on_startup` would read as "the operator already
 // chose", launch WITHOUT the flag, and re-expose the picker. Tokens arrive
-// unquoted from splitShellTokens; the key is whatever precedes the operand's
+// unquoted from SplitShellTokens; the key is whatever precedes the operand's
 // first '='. Scanning stops at the end-of-options terminator — `codex -- -c
 // x=y` passes that text as a prompt, not an override. Repeated overrides
 // resolve the way codex resolves them — the last operand wins.

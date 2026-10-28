@@ -514,7 +514,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 		// Lost (#1108): the tmux session vanished with no kill on record —
 		// same synchronous-with-the-sidebar treatment as Dead, but the message
 		// says what happened rather than implying a plain corpse.
-		p.setFallbackState("Session lost — its tmux session is gone.")
+		p.setFallbackState(lostSessionCopy(instance))
 		p.mu.Unlock()
 		return nil
 	}
@@ -579,6 +579,12 @@ func vscodeTabPlaceholder() string {
 	return "Open this VS Code tab in the web UI."
 }
 
+// docsTabPlaceholder is the TUI pane for a proposal Docs tab. The editor is web
+// only, so the pane names the proposal and the way to read it from a terminal.
+func docsTabPlaceholder(slug string) string {
+	return fmt.Sprintf("The Docs tab is web only. Open it in the web UI to edit proposal %s.\n\nIn a terminal, run: af proposal path %s", slug, slug)
+}
+
 // tabPlaceholder returns the TUI placeholder for a tab kind the terminal cannot
 // render, and ok=false for kinds it can (agent/shell/process, which have a PTY).
 // Shared by updateShell and canEnterScrollModeLocked so the two never diverge.
@@ -588,6 +594,8 @@ func tabPlaceholder(tab *session.Tab) (string, bool) {
 		return webTabPlaceholder(tab.URL), true
 	case session.TabKindVSCode:
 		return vscodeTabPlaceholder(), true
+	case session.TabKindDocs:
+		return docsTabPlaceholder(tab.Proposal), true
 	default:
 		return "", false
 	}
@@ -640,7 +648,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		if caps.TerminalTab {
 			p.setFallbackState("Enter to open a remote terminal.")
 		} else {
-			p.setFallbackState("Set remote_hooks.terminal_cmd for a remote terminal.\nUse the Agent tab for output.")
+			p.setFallbackState("This tab streams from the sandbox.\nSelect the Agent tab for session output.")
 		}
 		p.mu.Unlock()
 		return nil
@@ -715,9 +723,31 @@ func (p *TabPane) String() string {
 	}
 	rect := layout.Rect{W: p.width, H: p.height}
 
-	// In scroll/copy mode always use the viewport.
+	// In scroll/copy mode always use the viewport. Render with an unbounded
+	// content width so the raw (possibly wider) scrollback rows survive the
+	// viewport's own MaxWidth truncation — view.View() clips wide rows with an
+	// empty tail (no marker), so a naive fitLine(view.View()) pass would only
+	// see lines already trimmed to p.width and add nothing. Then apply the same
+	// per-line fitLine ellipsis pass the normal-mode branch uses (#4175) so a
+	// cut that drops real content gets a visible … like every other surface.
+	// The width/style are restored before returning so scroll geometry (which
+	// depends on Width/Height, not Style) is untouched. Trailing pad spaces are
+	// trimmed first: viewport pads short rows to the widest visible row with
+	// spaces, and without trimming those fitLine's raw measure would mark a
+	// blank tail as lost content and append a spurious ….
 	if p.scroll.Active() {
-		return layout.ClampToRect(p.viewport.View(), rect)
+		savedW := p.viewport.Width
+		savedStyle := p.viewport.Style
+		p.viewport.Width = 0
+		p.viewport.Style = savedStyle.UnsetMaxWidth()
+		view := p.viewport.View()
+		p.viewport.Width = savedW
+		p.viewport.Style = savedStyle
+		viewLines := strings.Split(view, "\n")
+		for i := range viewLines {
+			viewLines[i] = fitLine(strings.TrimRight(viewLines[i], " "), p.width)
+		}
+		return layout.ClampToRect(strings.Join(viewLines, "\n"), rect)
 	}
 
 	if p.content.fallback {
@@ -847,7 +877,7 @@ func (p *TabPane) canEnterScrollModeLocked(instance *session.Instance, activeTab
 			p.setFallbackState("Session no longer running.")
 			return false
 		case session.LiveLost:
-			p.setFallbackState("Session lost — its tmux session is gone.")
+			p.setFallbackState(lostSessionCopy(instance))
 			return false
 		}
 	}
@@ -910,7 +940,16 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	case instance.GetLiveness() == session.LiveDead:
 		p.setFallbackState("Session no longer running.")
 	case instance.GetLiveness() == session.LiveLost:
-		p.setFallbackState("Session lost — its tmux session is gone.")
+		p.setFallbackState(lostSessionCopy(instance))
 	}
 	return nil
+}
+
+// lostSessionCopy names what was lost without naming a mechanism the row does
+// not have: a sandbox session has no daemon-side tmux session.
+func lostSessionCopy(instance *session.Instance) string {
+	if instance != nil && instance.Capabilities().Workspace == session.WorkspaceRemote {
+		return "Session lost — its sandbox is not reachable."
+	}
+	return "Session lost — its tmux session is gone."
 }

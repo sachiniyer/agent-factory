@@ -310,25 +310,30 @@ func TestTaskRunFailedManualSendKeepsArmedWindow(t *testing.T) {
 }
 
 // Chrome observed while the boundary says the prompt never landed is not
-// evidence for it (#5221 review): recording it would fake a satisfied window
-// and freeze the boundary so a later redelivery could never re-arm.
+// evidence for it (#5221 review): recording it would fake a satisfied window.
+// And once the initial delivery's proven failure has ended the run (#5278), no
+// later send re-arms it — a retry is a NEW run's affair, not this one's.
 func TestTaskRunChromeOnFailedBoundaryDoesNotBlockRedelivery(t *testing.T) {
 	inst := taskRunSession(t)
 
 	t0 := time.Now().Add(-time.Minute)
 	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, t0))
+	require.False(t, inst.TaskRunActive(),
+		"the proven-undelivered initial send ends the run where the verdict lands")
 
 	// Unrelated in-turn chrome (the operator started work by hand) must not
 	// record — the prompt provably never arrived.
 	require.False(t, inst.RecordTaskRunTurn(t0.Add(5*time.Second)),
 		"chrome cannot evidence a turn on a prompt that provably never landed")
 
-	// So the redelivery still re-arms the boundary — not frozen by a stale stamp.
+	// A later send still records its session-level evidence, but nothing
+	// re-binds the boundary of a run that already ended.
 	t1 := time.Now().Add(-10 * time.Second)
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
-	require.True(t, inst.RecordTaskRunTurn(t1.Add(2*time.Second)))
+	require.False(t, inst.RecordTaskRunTurn(t1.Add(2*time.Second)))
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive())
+	require.True(t, inst.TaskRunFailed())
 }
 
 // A row persisted by a release that predates the task-scoped fields restores
@@ -380,19 +385,26 @@ func TestTaskRunLegacyRowAdoptsLatestSessionSend(t *testing.T) {
 	require.False(t, reloaded.TaskRunActive())
 }
 
-// A send that affirmatively failed delivery does not arm the task boundary at
-// all — the pane provably took nothing, so there is no delivery window to
-// hold. The row still reads prompt-not-delivered from the session-level
-// evidence; the run itself ends on the idle edge exactly as it did before the
-// gate existed.
+// A send that affirmatively failed delivery does not arm the task boundary —
+// the pane provably took nothing, so there is no delivery window to hold —
+// and when it is the run's INITIAL send the run ends failed where the verdict
+// lands (#5278): an unarmed gate would otherwise let the first idle edge read
+// as a completion and hand on_complete a session whose prompt never landed.
+// The row still reads prompt-not-delivered from the session-level evidence.
 func TestTaskRunFailedSendDoesNotArmTheBoundary(t *testing.T) {
 	inst := taskRunSession(t)
 
 	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now()))
-
-	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
-		"an unarmed gate ends the run on the idle edge — master behavior on this seam")
+		"the proven-undelivered initial delivery ends the run where the verdict lands")
+	require.True(t, inst.TaskRunFailed())
+	require.True(t, inst.ConsumeTaskRunFailed(), "the daemon's status stamp is armed")
+	require.False(t, inst.ConsumeTaskRunFailed(), "one-shot per process")
+
+	// The idle edge after the fact is no longer the run's ending.
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive())
+	require.True(t, inst.TaskRunFailed())
 
 	reason, _ := inst.IdleReasonSnapshot()
 	require.Equal(t, IdleReasonPromptNotDelivered, reason,
@@ -609,21 +621,34 @@ func TestTaskRunQuietArmDoesNotInheritStaleChurnAcrossRestart(t *testing.T) {
 // A failed first send must not come back from a restart as an armed
 // boundary (#5221 review): while the daemon is up, recordPromptAttemptLocked
 // refuses to bind a PromptNotDelivered attempt, and the restore-side
-// adoption of the session-level send must apply the same exclusion — the
-// first Ready observation ends the run exactly as it would have without the
-// restart, not five minutes later off the silent fallback.
+// adoption of the session-level send applies the same exclusion. With #5278
+// the run the verdict ended stays ended: a row persisted mid-flight by a
+// daemon that predates the end-at-verdict rule — active marker set, boundary
+// unbound, last send proven undelivered — reloads with the run already
+// failed rather than holding a concurrency slot on a gate that can never
+// arm, and the first Ready observation can never be claimed as its finish.
 func TestTaskRunFailedSendDoesNotRestoreAsArmedBoundary(t *testing.T) {
 	inst := taskRunSession(t)
-	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now().Add(-time.Minute)))
 
 	data := inst.ToInstanceData()
+	// The persisted shape a pre-#5278 daemon wrote mid-flight after its send
+	// proved undelivered: run marker still set, no boundary bound, and the
+	// session-level verdict on record.
+	data.LastPromptAttemptAt = time.Now().Add(-time.Minute)
+	data.LastPromptDeliveryStatus = PromptNotDelivered
 	data.BackendType = "docker"
 	reloaded, err := FromInstanceData(data.ForStorage())
 	require.NoError(t, err)
 
+	require.False(t, reloaded.TaskRunActive(),
+		"the proven-undelivered run ends failed at load, matching the un-restarted end")
+	require.True(t, reloaded.TaskRunFailed())
+	require.True(t, reloaded.ConsumeTaskRunFailed(),
+		"the load path re-arms the status stamp so the restart still reports the outcome")
+
 	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, reloaded.TaskRunActive(),
-		"a proven-failed send is no boundary — restore matches the un-restarted run's first-Ready end")
+		"a proven-failed send is no boundary — no Ready observation completes this run")
 }
 
 // A hole in the capture streak — failed probes or a stalled status loop —
@@ -753,4 +778,50 @@ func TestTaskRunFailedCaptureBreaksObservationStreak(t *testing.T) {
 	require.True(t, inst.TaskRunActive(),
 		"the frame after a failed capture re-anchors the streak — only 20s of observed silence, not 50s")
 	require.True(t, inst.taskRunTurnGateHeld)
+}
+
+// A restart between the failure edge and the daemon's status stamp must not
+// lose the failure (#5646): the edge persists TaskRunActive=false, so the
+// active-gated re-derivation cannot see it — the durable pending flag re-arms
+// the stamp, and the daemon's acknowledgement retires it.
+func TestTaskRunFailureSurvivesRestartBeforeStamp(t *testing.T) {
+	inst := taskRunSession(t)
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now()))
+	require.False(t, inst.TaskRunActive())
+
+	data := inst.ToInstanceData()
+	require.True(t, data.TaskRunFailurePending, "the failure edge persists a pending acknowledgement")
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.False(t, reloaded.TaskRunActive())
+	require.True(t, reloaded.TaskRunFailed(), "the completion predicate still tells the failed run apart")
+	require.True(t, reloaded.ConsumeTaskRunFailed(), "the stamp is re-armed after the restart")
+
+	reloaded.AckTaskRunFailureStamped()
+	require.False(t, reloaded.ToInstanceData().TaskRunFailurePending,
+		"an acknowledged stamp is not re-driven by the next restart")
+}
+
+// #5644: a handoff clears the pane-relative boundary, but the original prompt
+// provably landed. A PromptNotDelivered on the replacement mission's send must
+// not end that run failed — in memory, and after a restart.
+func TestTaskRunHandoffReplacementFailureDoesNotFailBoundRun(t *testing.T) {
+	inst := taskRunSession(t)
+	require.True(t, inst.RecordPromptAttempt(PromptDelivered, time.Now()), "the original prompt binds the boundary")
+	inst.ClearIdleEvidence() // the runtime swap zeroes the pane-relative boundary
+
+	inst.RecordPromptAttempt(PromptNotDelivered, time.Now()) // replacement mission failed
+	require.True(t, inst.TaskRunActive(), "a run whose prompt landed is not ended failed by a replacement send")
+	require.False(t, inst.TaskRunFailed())
+	require.False(t, inst.ConsumeTaskRunFailed())
+
+	data := inst.ToInstanceData()
+	require.True(t, data.TaskRunPromptBound)
+	data.TaskRunPromptAttemptAt = time.Time{}
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.True(t, reloaded.TaskRunActive(), "the load-time re-derivation honours the bound bit too")
+	require.False(t, reloaded.TaskRunFailed())
 }

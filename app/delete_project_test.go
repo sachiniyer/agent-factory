@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,7 +115,7 @@ func armDeleteProjectDialog(t *testing.T, data []session.InstanceData) (*home, s
 func armDeleteProjectDialogAt(t *testing.T, data []session.InstanceData, w, hgt int) (*home, string) {
 	t.Helper()
 	h := newTestHome(t)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return data, nil
 	}))
 	resizeHome(h, w, hgt)
@@ -380,7 +382,7 @@ func TestDeleteActiveProjectLeavesStaleScopeAndZombieRow(t *testing.T) {
 	// One live session for the active project, pointing its identity at the
 	// active root so the live-session row merges with the line-288 pre-seed.
 	live := []session.InstanceData{deleteProjectSession("alpha", false)}
-	restoreFetcher := SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	restoreFetcher := SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return live, nil
 	})
 	t.Cleanup(restoreFetcher)
@@ -418,7 +420,7 @@ func TestDeleteActiveProjectLeavesStaleScopeAndZombieRow(t *testing.T) {
 	// remain, which buildProjectListFrom skips (IsArchivedData, line 148). The
 	// registry row is gone. The only remaining source for the repoID is the
 	// line-288 active pre-seed.
-	SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) { return nil, nil })
+	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) { return nil, nil })
 
 	model, _ = h.handleProjectDeleted(done)
 	h = model.(*home)
@@ -460,7 +462,7 @@ func TestDeleteActiveProjectClosesOpenPanes(t *testing.T) {
 	h.repoRoot = deleteProjectTestRoot
 	h.repoID = repoID
 
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return []session.InstanceData{deleteProjectSession("alpha", false)}, nil
 	}))
 	resizeHome(h, 120, 45)
@@ -487,7 +489,7 @@ func TestDeleteActiveProjectClosesOpenPanes(t *testing.T) {
 	t.Cleanup(func() { deleteProjectThroughDaemon = prev })
 	// Post-delete: the daemon archived the project's sessions, so the snapshot
 	// the next refreshSidebarProjects reads carries nothing for this repoID.
-	SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) { return nil, nil })
+	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) { return nil, nil })
 
 	done := projectDeletedMsg{root: deleteProjectTestRoot, repoID: repoID, name: "acme", archived: 1}
 	model, _ := h.handleProjectDeleted(done)
@@ -525,7 +527,7 @@ func TestDeleteActiveProjectFromSidebarRescopes(t *testing.T) {
 			RepoPath: decoyRoot, WorktreePath: decoyRoot, SessionName: "decoy",
 		},
 	}
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return []session.InstanceData{deleteProjectSession("alpha", false), decoySession}, nil
 	}))
 	resizeHome(h, 120, 45)
@@ -560,7 +562,7 @@ func TestDeleteActiveProjectFromSidebarRescopes(t *testing.T) {
 	// Post-delete snapshot: the daemon archived the active project's sessions;
 	// the decoy's session survives, so the section still holds the decoy row —
 	// and the re-scope must have removed the active row, not the whole section.
-	SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return []session.InstanceData{decoySession}, nil
 	})
 
@@ -608,7 +610,7 @@ func TestDeleteNonActiveProjectLeavesActiveScopeIntact(t *testing.T) {
 
 	deletedRoot := "/repos/to-delete"
 	deletedID := config.RepoIDFromRoot(deletedRoot)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return []session.InstanceData{{
 			Title: "beta",
 			Worktree: session.GitWorktreeData{
@@ -636,7 +638,7 @@ func TestDeleteNonActiveProjectLeavesActiveScopeIntact(t *testing.T) {
 	t.Cleanup(func() { deleteProjectThroughDaemon = prev })
 	// Post-delete: the daemon archived the to-delete project's sessions, so the
 	// snapshot no longer carries it; the active project's pre-seed is unaffected.
-	SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) { return nil, nil })
+	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) { return nil, nil })
 
 	done := projectDeletedMsg{root: deletedRoot, repoID: deletedID, name: "to-delete", archived: 1}
 	model, _ := h.handleProjectDeleted(done)
@@ -677,7 +679,7 @@ func TestDeleteActiveProjectReScopesOnCommittedWarning(t *testing.T) {
 	h.repoRoot = deleteProjectTestRoot
 	h.repoID = repoID
 
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		return []session.InstanceData{deleteProjectSession("alpha", false)}, nil
 	}))
 	resizeHome(h, 120, 45)
@@ -695,7 +697,7 @@ func TestDeleteActiveProjectReScopesOnCommittedWarning(t *testing.T) {
 	// longer carries it; the registry entry may or may not be gone (the
 	// committed warning's whole point is that the non-transactional follow-up
 	// failed), but the re-scope fires identically either way.
-	SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) { return nil, nil })
+	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) { return nil, nil })
 
 	startMsg := startDeleteProjectMsg{root: deleteProjectTestRoot, repoID: repoID, name: "acme"}
 	done, ok := h.deleteProjectCmd(startMsg)().(projectDeletedMsg)
@@ -727,4 +729,161 @@ func TestDeleteActiveProjectReScopesOnCommittedWarning(t *testing.T) {
 	// alongside the re-scope (the fix must not suppress the warning).
 	notice := h.errBox.FullError()
 	assert.Contains(t, notice, warningText, "the committed warning must surface via handleError alongside the re-scope")
+}
+
+// armDeleteProjectDialogFor fails the picker's cross-repo snapshot fetch and
+// opens the picker, returning the home in stateSwitchProject with the picker's
+// SnapshotDegraded set. It is the failing-fetch half of armDeleteProjectDialog
+// (which always succeeds): same fixture (active root = deleteProjectTestRoot,
+// real derivation through showProjectPickerOverlay), but the fetcher returns
+// nil/err so every count in the union is silently zeroed. The active-root
+// pre-seed in buildProjectListFromCounted still surfaces the project row even
+// with no snapshot data, exactly the shape a real Ctrl+P hits when the daemon
+// is briefly unreachable on a remote target.
+func armDeleteProjectDialogFor(t *testing.T) *home {
+	t.Helper()
+	h := newTestHome(t)
+	repoID := config.RepoIDFromRoot(deleteProjectTestRoot)
+	h.repoRoot = deleteProjectTestRoot
+	h.repoID = repoID
+
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		return nil, errors.New("daemon unavailable")
+	}))
+	resizeHome(h, 120, 45)
+	h.refreshSidebarProjects()
+	h.relayout()
+
+	require.NotEmpty(t, h.projects.Projects(),
+		"the active-root pre-seed must surface the project row even with no snapshot")
+	require.Equal(t, 0, h.projects.Projects()[0].SessionCount,
+		"a failed fetch zeroes the count — this is the state the consent copy would lie about without the gate")
+
+	h.showProjectPickerOverlay()
+	require.NotNil(t, h.projectPickerOverlay)
+	require.True(t, h.projectPickerOverlay.SnapshotDegraded(),
+		"showProjectPickerOverlay must surface the failed snapshot fetch as the picker's SnapshotDegraded state")
+	return h
+}
+
+// TestDeleteProjectPickerRefusesWhenSnapshotFetchFails pins the #1973/#1985
+// consent-copy hazard the report names: when the picker's cross-repo session
+// snapshot fetch fails, buildProjectList silently zeros every project's
+// SessionCount/InPlaceCount. Before the fix, the destructive D path opened
+// the confirmation against those zeroed counts, so the consent copy rendered
+// "It has no live sessions — it just leaves the projects list" — a no-op
+// delete the user agreed to — for a project whose live sessions the daemon
+// would still archive and tear down. The fix surfaces the fetch failure as
+// the picker's SnapshotDegraded state and gates D on it, failing closed like
+// switchProject does on its own snapshot fetch.
+func TestDeleteProjectPickerRefusesWhenSnapshotFetchFails(t *testing.T) {
+	h := armDeleteProjectDialogFor(t)
+
+	// The picker must announce D is gated, so the silent-zero counts are not
+	// presented as the truth. This is the only on-screen cue beside the
+	// refuse notice — the footer hint still advertises D delete (consistent
+	// with rebindDeny, which advertises b too), so the notice has to land.
+	pickerText := dialogText(h.projectPickerOverlay.Render())
+	assert.Contains(t, pickerText, "Snapshot failed",
+		"the picker must announce the failed snapshot fetch rather than render the zeroed counts as the truth")
+	assert.Contains(t, pickerText, "D disabled",
+		"the picker must tell the user D is gated on the failed fetch")
+
+	// Pressing D refuses the destructive action: the picker stays open, no
+	// confirmation dialog opens against the zeroed counts, and a user-visible
+	// notice tells the user to reopen the picker (Ctrl+P) to retry once the
+	// daemon recovers — the same realistic transient the report describes.
+	model, cmd := h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	h = model.(*home)
+	require.Equal(t, stateSwitchProject, h.state,
+		"D on a snapshot-degraded picker must NOT open the delete confirmation")
+	require.Nil(t, h.confirmationOverlay,
+		"no consent dialog may be opened against counts the fetch behind it never confirmed")
+	require.NotNil(t, h.projectPickerOverlay,
+		"the picker stays open so the user can cancel (Esc) or retry")
+
+	// The refuse must reach the user — the same surface every other "af
+	// deliberately declined this action" goes to, naming why af refused and
+	// how to retry. full go round: the errBox has the notice set before the
+	// returned cmd (the 3s clear-after-delay) runs.
+	notice := h.errBox.FullError()
+	require.NotEmpty(t, notice, "the refuse must surface a user-visible notice, not a silent no-op")
+	assert.Contains(t, notice, "cannot delete project",
+		"the notice must name the project the user tried to delete")
+	assert.Contains(t, notice, "live-session counts are unavailable",
+		"the notice must explain WHY the delete was refused — the consent copy would have lied")
+	assert.Contains(t, notice, "Ctrl+P",
+		"the notice must tell the user how to retry once the daemon recovers")
+	assert.NotContains(t, notice, "no live sessions",
+		"the refusal must never itself claim a no-op delete — that is the exact false copy the gate exists to prevent")
+	_ = cmd
+}
+
+// TestDeleteProjectPickerProceedsWhenSnapshotFetchSucceeds is the control
+// half of TestDeleteProjectPickerRefusesWhenSnapshotFetchFails: with a
+// healthy snapshot fetch, the picker's SnapshotDegraded is false and D opens
+// the real confirmation that prints the honest split. This pins the gate so
+// it never refuses on a healthy fetch — the consent-copy hazard is the
+// silent-zero case, not the honest-count one.
+func TestDeleteProjectPickerProceedsWhenSnapshotFetchSucceeds(t *testing.T) {
+	h := newTestHome(t)
+	repoID := config.RepoIDFromRoot(deleteProjectTestRoot)
+	h.repoRoot = deleteProjectTestRoot
+	h.repoID = repoID
+
+	// Healthy fetch: one ordinary session on the active root — the case the
+	// consent copy MUST print "1 session archived — restorable" for.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		return []session.InstanceData{deleteProjectSession("alpha", false)}, nil
+	}))
+	resizeHome(h, 120, 45)
+	h.refreshSidebarProjects()
+	h.relayout()
+	require.Len(t, h.projects.Projects(), 1)
+	require.Equal(t, 1, h.projects.Projects()[0].SessionCount,
+		"precondition: a healthy fetch populates the count")
+
+	h.showProjectPickerOverlay()
+	require.False(t, h.projectPickerOverlay.SnapshotDegraded(),
+		"a healthy fetch must NOT mark the picker degraded — gating that refused on healthy counts would be the inverse bug")
+	pickerText := dialogText(h.projectPickerOverlay.Render())
+	assert.NotContains(t, pickerText, "D disabled",
+		"a healthy picker must not advertise D as disabled")
+	assert.NotContains(t, pickerText, "Snapshot failed",
+		"a healthy picker must not warn about a failed snapshot fetch")
+
+	model, _ := h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	h = model.(*home)
+	require.Equal(t, stateConfirm, h.state,
+		"D on a healthy picker opens the real delete-project confirmation — the gate is fail-closed, not fail-open")
+	require.NotNil(t, h.confirmationOverlay)
+
+	dialog := dialogText(h.confirmationOverlay.Render())
+	assert.Contains(t, dialog, "1 session archived — restorable",
+		"the consent copy must state the honest split, not the silent-zero no-op")
+	assert.NotContains(t, dialog, "no live sessions",
+		"the consent copy must NOT enter the total == 0 branch when the snapshot fetch succeeded")
+}
+
+// TestDeleteProjectPickerRefuseKeepsSelectionForEsc is the fail-closed
+// follow-through the report's recommended fix needs: the gate must not just
+// refuse D, it must leave the picker navigable (Esc still cancels, the cursor
+// stays where the user put it) so the user can dismiss without a fresh Ctrl+P
+// dispatch firing the gate again. Otherwise the picker becomes a dead-end
+// modal the only exit from is the gate's own retry loop.
+func TestDeleteProjectPickerRefuseKeepsSelectionForEsc(t *testing.T) {
+	h := armDeleteProjectDialogFor(t)
+	model, _ := h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	h = model.(*home)
+	require.Equal(t, stateSwitchProject, h.state, "precondition: D was refused, picker still open")
+	require.NotNil(t, h.projectPickerOverlay)
+
+	// Esc still closes the picker from the same state, with no D-shaped
+	// dispatch in the way; the dismissed overlay takes the cursor and state
+	// back to default, exactly as an ordinary cancel.
+	model, _ = h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEsc})
+	h = model.(*home)
+	require.Nil(t, h.projectPickerOverlay, "Esc must close the picker after a refused D")
+	require.Equal(t, stateDefault, h.state,
+		"Esc after a refused D must return the model to default state, not strand it")
 }

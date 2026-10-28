@@ -49,17 +49,50 @@ const legacyGuardNoop = "#!/bin/sh\nexit 0\n"
 // Since #1043 there is exactly one entry: the "af" skill, whose body is
 // afUsageReference (systemprompt.go) — the same text every other agent receives
 // via its own skill/context file (agentskill.go) — so no agent's af knowledge can
-// drift.
-var pluginCommands = map[string]string{
-	"af.md": "---\n" +
-		"allowed-tools: Bash(af:*)\n" +
-		"description: " + AfSkillDescription + "\n" +
-		"argument-hint: [request]\n" +
-		"---\n" +
-		"\n" +
-		afUsageReference + "\n" +
-		"\n" +
-		"User request (may be empty): $ARGUMENTS\n",
+// drift. A callbackless session gets afUsageReferenceCallbackless instead: the
+// file lives under this host's af config dir, and a host whose sessions cannot
+// reach the daemon must not be taught af verbs that all fail (#5571 W3.1).
+func pluginCommands(callbackUnavailable bool) map[string]string {
+	body := afUsageReference
+	if callbackUnavailable {
+		body = afUsageReferenceCallbackless
+	}
+	return map[string]string{
+		"af.md": "---\n" +
+			"allowed-tools: Bash(af:*)\n" +
+			"description: " + afSkillDescriptionInside + "\n" +
+			"argument-hint: [request]\n" +
+			"---\n" +
+			"\n" +
+			body + "\n" +
+			"\n" +
+			"User request (may be empty): $ARGUMENTS\n",
+	}
+}
+
+// afProposalSkillName names the model-invoked proposal skill. Claude loads a
+// slash command body only when the request matches its description, so the
+// proposal entry point needs its own skill with a proposal-shaped trigger.
+const afProposalSkillName = "proposal"
+
+// pluginSkills maps a skill directory under skills/ to its SKILL.md. Like
+// pluginCommands, ensurePluginDir writes every entry and prunes undeclared ones.
+// A callbackless session gets none: every skill here teaches af verbs, which is
+// exactly the content a session that cannot reach the daemon must not see
+// (#5571 W3.1).
+func pluginSkills(callbackUnavailable bool) map[string]string {
+	if callbackUnavailable {
+		return nil
+	}
+	return map[string]string{
+		afProposalSkillName: "---\n" +
+			"name: " + afProposalSkillName + "\n" +
+			"description: " + afProposalTrigger + ". Starts or attaches an Agent Factory (af) proposal instead of writing docs into the repository.\n" +
+			"allowed-tools: Bash(af:*)\n" +
+			"---\n" +
+			"\n" +
+			afUsageProposalsInside + "\n",
+	}
 }
 
 // ensurePluginDir creates the plugin directory with its manifest and slash
@@ -70,13 +103,22 @@ var pluginCommands = map[string]string{
 // stray .md in commands/ that isn't in the map, and disarms the stale hook an
 // older af wrote — so inserts, edits, and removes all propagate on the next
 // session start.
-func ensurePluginDir() (string, error) {
+func ensurePluginDir(callbackUnavailable bool) (string, error) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
 	}
 
-	pluginDir := filepath.Join(configDir, "plugin")
+	// The callbackless variant gets its own directory for the same reason the
+	// aider seam gets its own filename: sessions on a shared remote user share
+	// this config dir, and two variants at one path flap — the later launch
+	// rewrites the plugin the earlier session is about to read (#5571 W3.1,
+	// PR #5577 review).
+	pluginName := "plugin"
+	if callbackUnavailable {
+		pluginName = "plugin-callbackless"
+	}
+	pluginDir := filepath.Join(configDir, pluginName)
 	commandsDir := filepath.Join(pluginDir, "commands")
 	hooksDir := filepath.Join(pluginDir, "hooks")
 	manifestDir := filepath.Join(pluginDir, ".claude-plugin")
@@ -113,6 +155,8 @@ func ensurePluginDir() (string, error) {
 		return "", err
 	}
 
+	commands := pluginCommands(callbackUnavailable)
+
 	// Prune stale command files no longer declared in pluginCommands so
 	// removed/renamed skills don't linger as orphan slash commands.
 	entries, err := os.ReadDir(commandsDir)
@@ -123,7 +167,7 @@ func ensurePluginDir() (string, error) {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
 			continue
 		}
-		if _, ok := pluginCommands[entry.Name()]; ok {
+		if _, ok := commands[entry.Name()]; ok {
 			continue
 		}
 		if err := os.Remove(filepath.Join(commandsDir, entry.Name())); err != nil && !os.IsNotExist(err) {
@@ -132,12 +176,52 @@ func ensurePluginDir() (string, error) {
 	}
 
 	// Write command files
-	for name, content := range pluginCommands {
+	for name, content := range commands {
 		path := filepath.Join(commandsDir, name)
 		if err := config.AtomicWriteFileRefusingLink(path, []byte(content), 0644); err != nil {
 			return "", err
 		}
 	}
 
+	if err := syncPluginSkills(filepath.Join(pluginDir, "skills"), pluginSkills(callbackUnavailable)); err != nil {
+		return "", err
+	}
+
 	return pluginDir, nil
+}
+
+// syncPluginSkills writes every entry of skills under skillsDir and prunes
+// skill directories it does not declare. A pruned directory loses only its
+// SKILL.md and is then removed only if empty, so nothing else in it is deleted.
+func syncPluginSkills(skillsDir string, skills map[string]string) error {
+	if err := config.MkdirAllUnderAFHome(skillsDir, 0755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, ok := skills[entry.Name()]; ok {
+			continue
+		}
+		dir := filepath.Join(skillsDir, entry.Name())
+		if err := config.RemoveFileRefusingLink(filepath.Join(dir, "SKILL.md")); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		_ = os.Remove(dir)
+	}
+	for name, content := range skills {
+		dir := filepath.Join(skillsDir, name)
+		if err := config.MkdirAllUnderAFHome(dir, 0755); err != nil {
+			return err
+		}
+		if err := config.AtomicWriteFileRefusingLink(filepath.Join(dir, "SKILL.md"), []byte(content), 0644); err != nil {
+			return err
+		}
+	}
+	return nil
 }

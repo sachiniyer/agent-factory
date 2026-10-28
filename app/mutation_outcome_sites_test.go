@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -295,7 +296,7 @@ func TestSaveTaskRemove_UncertainOutcomeIsNotAFailure(t *testing.T) {
 func countAllReposReads(t *testing.T) *atomic.Int32 {
 	t.Helper()
 	var n atomic.Int32
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
 		n.Add(1)
 		return nil, nil
 	}))

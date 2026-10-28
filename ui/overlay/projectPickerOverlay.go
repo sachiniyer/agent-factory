@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -41,6 +42,12 @@ type Project struct {
 	// highest-priority path (a live session, the active workspace). Whether a
 	// rebind MOVED the record is judged against this, never the display root.
 	RegistryRoot string
+	// RegistryCheckoutID is the checkout marker the registration recorded —
+	// the second half of the guarded rebind's observed pair (#4822 spec). A
+	// reclone at the same path mints a new marker, so root spelling alone
+	// cannot see the checkout the picker displayed being replaced. Empty on a
+	// pre-marker record, which a guarded rebind always refuses.
+	RegistryCheckoutID string
 	// MissingPath marks a registry-backed row whose recorded root the registry
 	// reports absent (path_exists=false) — the checkout moved or was recloned,
 	// which is exactly what rebind repairs.
@@ -129,6 +136,16 @@ type ProjectPickerOverlay struct {
 	// sessionless project may be missing, and the picker must say so instead
 	// of presenting the list as complete.
 	degraded bool
+	// snapshotDegraded marks a failed cross-repo session snapshot fetch: the
+	// rows still render from the registry/active/root_agents union, but every
+	// project's live SessionCount/InPlaceCount is silently zeroed (the fetch
+	// that populates them never answered). The destructive D path gates on
+	// this — those zeroed counts are exactly what would let
+	// deleteProjectConfirmMessage's "total == 0" branch claim "It has no live
+	// sessions" for a project whose live sessions the daemon will still
+	// archive and tear down, consent obtained on copy the data behind it
+	// never confirmed (#1973 / #1985).
+	snapshotDegraded bool
 }
 
 // NewProjectPickerOverlay creates a picker over the given projects (already
@@ -155,10 +172,36 @@ func (p *ProjectPickerOverlay) SetWidth(width int) { p.width = width }
 // the picker warns that the list may be incomplete.
 func (p *ProjectPickerOverlay) SetDegraded(degraded bool) { p.degraded = degraded }
 
+// SetSnapshotDegraded records whether the picker's cross-repo session snapshot
+// fetch failed. The rows still render, but every live SessionCount/InPlaceCount
+// in them is silently zeroed; callers read this via SnapshotDegraded to gate
+// the destructive D path so delete-project's consent copy cannot claim "no
+// live sessions" against counts the fetch behind it never confirmed
+// (#1973 / #1985).
+func (p *ProjectPickerOverlay) SetSnapshotDegraded(degraded bool) { p.snapshotDegraded = degraded }
+
+// SnapshotDegraded reports whether the cross-repo session snapshot fetch
+// failed. The destructive D path reads it to refuse delete-project rather
+// than render a consent dialog whose session counts the data behind it never
+// confirmed (#1973 / #1985).
+func (p *ProjectPickerOverlay) SnapshotDegraded() bool { return p.snapshotDegraded }
+
 // SetMaxSize sets the maximum outer size the rendered overlay may occupy.
 func (p *ProjectPickerOverlay) SetMaxSize(width, height int) {
 	p.maxWidth = width
 	p.maxHeight = height
+}
+
+// SetSelectedIndex moves the cursor onto the given row — the click action for a
+// project row or the trailing "+ Add project…" row, mirroring the public
+// *SelectionOverlay.SetSelectedIndex the sibling pickers expose. Out-of-range
+// indices no-op. The add-row index (== len(p.all)) is a valid target: Enter on
+// it drops into add mode, so a click on it does the same; the caller synthesizes
+// Enter after this, exactly as the sibling pickers do.
+func (p *ProjectPickerOverlay) SetSelectedIndex(idx int) {
+	if idx >= 0 && idx < p.rowCount() {
+		p.selectedIdx = idx
+	}
 }
 
 // IsSubmitted reports whether the user chose an existing project (a switch).
@@ -170,6 +213,15 @@ func (p *ProjectPickerOverlay) SelectedProject() (Project, bool) {
 		return p.all[p.selectedIdx], true
 	}
 	return Project{}, false
+}
+
+// Projects exposes the picker's current row set — for callers verifying what a
+// conflict merge produced, where a single highlighted row cannot describe the
+// split a RepoID-changing rebind leaves behind.
+func (p *ProjectPickerOverlay) Projects() []Project {
+	out := make([]Project, len(p.all))
+	copy(out, p.all)
+	return out
 }
 
 // HighlightedProject names the existing row under the cursor, excluding the
@@ -244,6 +296,25 @@ func (p *ProjectPickerOverlay) SetRebindError(msg string) {
 	// user can correct the path and resubmit.
 	p.rebindPending = false
 	p.rebindErr = msg
+}
+
+// SetRebindConflict answers the in-flight rebind with the daemon's "rebound
+// elsewhere" refusal (#4822): another rebind moved the registration after this
+// picker read it. projects is the caller's just-refreshed project list, and the
+// open picker is REBUILT from it rather than patched in place — the conflict
+// moved the registration, so the row's Root, RepoID, name and missing-path
+// state are all stale, and an Esc back to a list still showing them would let
+// Enter select a checkout the registry no longer records (#4888 review).
+// The rebind target is re-read from the rebuilt list too: its fresh
+// RegistryRoot is what the re-armed form's next submission expects, so Enter
+// retries against the root the user was just told rather than being refused
+// again on the root it was opened with. A target whose record vanished keeps
+// its last row — resubmitting against a deleted registration fails
+// definitively, as it should.
+func (p *ProjectPickerOverlay) SetRebindConflict(msg string, projects []Project) {
+	p.all = projects
+	p.reseatAfterConflictRebuild()
+	p.SetRebindError(msg)
 }
 
 // SetRebindDenied refuses rebind before it can submit, carrying the refusal
@@ -423,26 +494,31 @@ func (p *ProjectPickerOverlay) Render() string {
 	}
 
 	lines := []string{title, ""}
-	if p.degraded {
-		// A failed registry read may hide every registered sessionless
-		// project — say so rather than render the remainder as complete
-		// (#3298). Only the list states it: the add/rebind forms show no
-		// list, and their rows are budgeted without it.
+	// The two degraded halves collapse to a single notice line when both
+	// fail: with two separate lines the chrome alone exceeds the text rect
+	// at the declared minimum terminal height (ui/layout/grid.go
+	// HardMinHeight=10), which PlaceOverlay refuses to composite — one extra
+	// row makes the whole TUI background disappear. A single combined line
+	// bounds the chrome so the dialog stays rendered in every degraded
+	// combination, while a watcher reading only the notice can still tell
+	// which half(es) failed. Only the list states it: the add/rebind forms
+	// show no list, and their rows are budgeted without it.
+	switch {
+	case p.degraded && p.snapshotDegraded:
+		warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
+		lines = append(lines, truncateOverlayLine(warnStyle.Render("Cannot read registry · Snapshot failed · D disabled"), cw))
+	case p.degraded:
 		warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
 		lines = append(lines, truncateOverlayLine(warnStyle.Render("Cannot read registry · list may be incomplete"), cw))
+	case p.snapshotDegraded:
+		warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
+		lines = append(lines, truncateOverlayLine(warnStyle.Render("Snapshot failed · D disabled (counts unknown)"), cw))
 	}
 
 	// Reserve rows for the fixed chrome (title, blank, blank, hint — plus the
 	// degraded notice when present) and window the navigable rows into what
 	// remains.
-	avail := textRect.H - 4
-	if p.degraded {
-		avail--
-	}
-	if avail < 1 {
-		avail = 1
-	}
-	start, end, showAbove, showBelow := budgetedSelectionWindow(p.selectedIdx, p.rowCount(), avail, 0)
+	start, end, showAbove, showBelow := p.listRowWindow(textRect.H)
 	if showAbove {
 		lines = append(lines, truncateOverlayLine(overflowStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
 	}
@@ -551,4 +627,69 @@ func finishRender(style lipgloss.Style, fit, textRect layout.Rect, lines []strin
 		style = style.Height(fit.H)
 	}
 	return ui.RenderDialog(style, strings.Join(lines, "\n"))
+}
+
+// listRowWindow returns the navigable-row window the list branch of Render
+// paints, shared with RegisterZones so the rows registered as click targets
+// are exactly the rows on screen — a windowing change moves the zones with it
+// instead of leaving them pointing at stale cells. available is the row budget
+// Render reserves after the fixed chrome (title, blank, blank, hint — plus the
+// degraded notice when present).
+func (p *ProjectPickerOverlay) listRowWindow(textHeight int) (start, end int, showAbove, showBelow bool) {
+	avail := textHeight - 4
+	if p.degraded || p.snapshotDegraded {
+		avail--
+	}
+	if avail < 1 {
+		avail = 1
+	}
+	start, end, showAbove, showBelow = budgetedSelectionWindow(p.selectedIdx, p.rowCount(), avail, 0)
+	return start, end, showAbove, showBelow
+}
+
+// RegisterZones registers one full-width clickable zone per visible project
+// row (and the trailing "+ Add project…" row) — the same primitive every
+// sibling picker's *SelectionOverlay registers, so a left press on a row
+// selects and submits it like j/k + enter instead of being silently swallowed.
+// The add/rebind path-input forms register nothing: their only interactive
+// surface is the text field, which a row click could not submit, so the
+// keyboard remains the only driver there exactly as it already is in keyboard
+// mode.
+//
+// Row identity comes from the SAME window plan Render paints, not from the
+// rendered text, so a project whose name collides with chrome or another row
+// cannot bind its click to the wrong target. The line offset is the dialog's
+// top inset plus the deterministic list layout (title, blank, the degraded
+// notice, the above-overflow row), mirroring *SearchOverlay's renderFrame-
+// derived firstRow.
+func (p *ProjectPickerOverlay) RegisterZones(reg *zones.Registry, origin layout.Point) {
+	if reg == nil || p.adding || p.rebinding {
+		return
+	}
+	rendered := p.Render()
+	width := renderedWidth(rendered)
+	style := searchOverlayStyle()
+	fit := fitOverlayContent(p.width, 0, p.maxWidth, p.maxHeight, style)
+	if fit.W <= 0 {
+		fit.W = p.width
+	}
+	if fit.W <= 0 {
+		fit.W = 1
+	}
+	textRect := overlayTextRect(fit, style)
+	start, end, showAbove, _ := p.listRowWindow(textRect.H)
+	firstRowLine := 2 // title + blank
+	if p.degraded || p.snapshotDegraded {
+		firstRowLine++
+	}
+	if showAbove {
+		firstRowLine++
+	}
+	rowLine := style.GetBorderTopSize() + style.GetPaddingTop() + firstRowLine
+	for i := start; i < end; i++ {
+		reg.Register(zones.OverlaySelectRow(i), layout.Rect{
+			X: origin.X, Y: origin.Y + rowLine, W: width, H: 1,
+		})
+		rowLine++
+	}
 }

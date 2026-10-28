@@ -12,11 +12,12 @@ import (
 )
 
 var (
-	tabCreateCommandFlag string
-	tabCreateNameFlag    string
-	tabCreateKindFlag    string
-	tabCreateURLFlag     string
-	tabCreatePortFlag    int
+	tabCreateCommandFlag  string
+	tabCreateNameFlag     string
+	tabCreateKindFlag     string
+	tabCreateURLFlag      string
+	tabCreatePortFlag     int
+	tabCreateProposalFlag string
 )
 
 // bindTabCreateFlags registers the tab-create flags on c, bound to the shared
@@ -24,9 +25,10 @@ var (
 func bindTabCreateFlags(c *cobra.Command) {
 	c.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in a process tab (required when --kind is empty)")
 	c.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell)")
-	c.Flags().StringVar(&tabCreateKindFlag, "kind", "", "Tab kind: \"shell\" for a $SHELL terminal, empty for a process command, \"web\" for a URL/iframe, or \"vscode\" for VS Code")
+	c.Flags().StringVar(&tabCreateKindFlag, "kind", "", "Tab kind: \"shell\" for a $SHELL terminal, empty for a process command, \"web\" for a URL/iframe, \"vscode\" for VS Code, or \"docs\" for a proposal's Docs tab")
 	c.Flags().StringVar(&tabCreateURLFlag, "url", "", "Web tab target URL (with --kind web): a localhost dev-server address or an external https URL")
 	c.Flags().IntVar(&tabCreatePortFlag, "port", 0, "Web tab convenience for --url http://localhost:<port> (with --kind web)")
+	c.Flags().StringVar(&tabCreateProposalFlag, "proposal", "", "Proposal `slug` the Docs tab edits (required with --kind docs)")
 }
 
 // bindTabDeleteFlags registers the tab-delete flag on c, bound to the shared
@@ -69,11 +71,16 @@ preview works even when the web UI is viewed remotely (Tailscale/SSH); an extern
 URL is iframed directly (best-effort — many sites block embedding). The web tab
 renders as an iframe in the web UI and as a placeholder in the TUI.
 
+Docs tab (--kind docs --proposal <slug>): the web UI's editor for a proposal of
+the session's project (see af proposal). It has no process. The TUI shows a
+placeholder, because the editor is web only. af proposal start and attach create
+this tab for you.
+
 The tab persists and reconnects across a daemon/af restart like every other
 tab — for a process tab "reconnect" means reattach-only, never re-running the
 command (see above).
 
---name sets a process, web, or VS Code tab's name — the handle every other tab
+--name sets a process, web, VS Code, or docs tab's name — the handle every other tab
 verb addresses it by. A shell tab does not accept --name: its canonical name is
 "shell" (auto-suffixed on collision), while the TUI renders the
 presentation-only label "Terminal". Other names are sanitized before use:
@@ -82,11 +89,13 @@ the session (auto-suffixed -2, -3, …). So the name you pass is not always the
 name you get — the resolved tab name is printed on success, and that is the one
 the other tab verbs address.
 
-For remote sessions, only external HTTPS web tabs are admitted. That kind is
-metadata-only: it needs no PTY and spawns no process in the missing daemon-side
-worktree. Shell, process, and VS Code tabs still require local runtime/worktree
-resources, while loopback web targets still need a relay through the off-box
-agent and plain HTTP cannot be framed by an HTTPS Agent Factory UI.`,
+For remote sessions, web tabs are admitted. That kind is metadata-only: it needs
+no PTY and spawns no process. An external HTTPS URL is iframed
+directly, and a loopback target (including --port) is served from the session's
+own workspace through the agent-server's port relay, so it shows what listens on
+that port in the sandbox rather than on the daemon host. Plain-HTTP external URLs
+cannot be framed by an HTTPS Agent Factory UI. Shell, process, and VS Code tabs
+still require local runtime/worktree resources.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTabCreate,
 }
@@ -111,6 +120,9 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 	// accept a kind the daemon would reject. It stays a pre-check purely to fail
 	// fast with a flag-shaped message; the daemon re-validates regardless.
 	kind, explicitKind := session.ParseTabKindName(tabCreateKindFlag)
+	if strings.TrimSpace(tabCreateProposalFlag) != "" && (!explicitKind || kind != session.TabKindDocs) {
+		return jsonError(fmt.Errorf("--proposal is only valid for a docs tab (--kind docs)"))
+	}
 	switch {
 	case tabCreateKindFlag != "" && !explicitKind:
 		return jsonError(fmt.Errorf("--kind must be empty or one of %s, got %q",
@@ -144,6 +156,16 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 		}
 		if strings.TrimSpace(tabCreateCommandFlag) != "" {
 			return jsonError(fmt.Errorf("--command is not valid for a vscode tab (--kind vscode)"))
+		}
+	case explicitKind && kind == session.TabKindDocs:
+		if strings.TrimSpace(tabCreateProposalFlag) == "" {
+			return jsonError(fmt.Errorf("--kind docs requires --proposal <slug>"))
+		}
+		if urlSupplied || portSupplied {
+			return jsonError(fmt.Errorf("--url/--port are not valid for a docs tab (--kind docs)"))
+		}
+		if strings.TrimSpace(tabCreateCommandFlag) != "" {
+			return jsonError(fmt.Errorf("--command is not valid for a docs tab (--kind docs)"))
 		}
 	case explicitKind && kind == session.TabKindShell:
 		if strings.TrimSpace(tabCreateCommandFlag) != "" {
@@ -188,14 +210,15 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 		wireKind = ""
 	}
 	created, err := createTabViaDaemon(daemon.CreateTabRequest{
-		Title:   args[0],
-		RepoID:  repoID,
-		Command: tabCreateCommandFlag,
-		Name:    tabCreateNameFlag,
-		Shell:   isShell,
-		Kind:    wireKind,
-		URL:     tabCreateURLFlag,
-		Port:    tabCreatePortFlag,
+		Title:    args[0],
+		RepoID:   repoID,
+		Command:  tabCreateCommandFlag,
+		Name:     tabCreateNameFlag,
+		Shell:    isShell,
+		Kind:     wireKind,
+		URL:      tabCreateURLFlag,
+		Port:     tabCreatePortFlag,
+		Proposal: tabCreateProposalFlag,
 	})
 	if err != nil {
 		return jsonError(err)

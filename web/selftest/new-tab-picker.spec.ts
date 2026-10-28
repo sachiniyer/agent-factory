@@ -29,7 +29,8 @@ async function carrySessionActionsToPhone(
   await sessionActions.click();
   await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
   await page.setViewportSize({ width: 390, height: 844 });
-  const controls = page.getByRole("button", { name: "More app controls", exact: true });
+  const controls = page.getByRole("button", { name: "More app controls", exact: true, includeHidden: true });
+  await expect(controls).toBeVisible();
   await controls.focus();
   await page.keyboard.press("Enter");
   await expect(controls).toHaveAttribute("aria-expanded", "true");
@@ -88,7 +89,7 @@ for (const width of [1280, 390]) {
     await page.keyboard.press("Escape");
     await expect(menu).toBeHidden();
     if (width <= 768) {
-      const controls = page.getByRole("button", { name: "More app controls", exact: true });
+      const controls = page.getByRole("button", { name: "More app controls", exact: true, includeHidden: true });
       await expect(controls).toHaveAttribute("aria-expanded", "false");
       // A shortcut-opened picker restores navigation, even when it had to open
       // both enclosing phone disclosures to make the picker reachable.
@@ -338,7 +339,7 @@ test("desktop picker stays visible after phone recomposition", async ({ page, re
   // Closing clears the active callback. Reopening the same control must restore
   // it so the next responsive recomposition anchors the menu again.
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole("button", { name: "More app controls", exact: true }).click();
+  await page.getByRole("button", { name: "More app controls", exact: true, includeHidden: true }).click();
   await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
   await page.keyboard.press("t");
   await expect(menu).toBeVisible();
@@ -434,7 +435,8 @@ for (const key of ["Enter", "Space"]) {
     await sessionActions.click();
     await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
     await page.setViewportSize({ width: 390, height: 844 });
-    const controls = page.getByRole("button", { name: "More app controls", exact: true });
+    const controls = page.getByRole("button", { name: "More app controls", exact: true, includeHidden: true });
+    await expect(controls).toBeVisible();
     await controls.focus();
     await page.keyboard.press(key);
     await expect(controls).toHaveAttribute("aria-expanded", "true");
@@ -582,10 +584,11 @@ for (const shortcut of ["Alt+j", "Alt+k", "Alt+w"] as const) {
     });
     await sessionActions.click();
     await page.setViewportSize({ width: 390, height: 844 });
-    const controls = page.getByRole("button", { name: "More app controls", exact: true });
+    const controls = page.getByRole("button", { name: "More app controls", exact: true, includeHidden: true });
     // Pointer activation is an outside mousedown and correctly dismisses the inner
     // disclosure. Use the finding's no-mousedown keyboard path so the Alt chord is
     // the first user action that can invalidate the carried state.
+    await expect(controls).toBeVisible();
     await controls.focus();
     await page.keyboard.press("Enter");
     await expect(sessionActions).toHaveAttribute("aria-expanded", "true");

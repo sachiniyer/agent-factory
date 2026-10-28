@@ -75,6 +75,9 @@ type CreateSessionRequest struct {
 	// flag): one of local|docker|ssh|hook. Empty resolves from the repo's
 	// `backend` config key, defaulting to local.
 	Backend string `json:"backend,omitempty"`
+	// Host picks a listed host (the global `hosts` table) for the session — the
+	// `--host` create flag. It selects the ssh runtime; empty means no pick.
+	Host string `json:"host,omitempty"`
 
 	// allowReserved lets the daemon's own root-agent ensure loop (#1106)
 	// create the reserved "root" title that reserveCreate rejects for
@@ -304,6 +307,16 @@ type DeliverPromptRequest struct {
 // when this call created the target session, "sent" when it sent into an
 // existing session, and "parked: usage limit" when task provenance made it skip
 // a limit-reached target — the same vocabulary deliverTaskPrompt records.
+//
+// DeliverPrompt auto-creates its target through the same Manager.CreateSession
+// the createSession handler reaches, so it inherits the same committed-outcome
+// contract: a create that provisioned a sandbox but could not confirm its
+// teardown/startup is a durable mutation, not a clean failure a caller may
+// freely retry. The response stays successful on that committed path so the
+// marker rides the envelope and callDaemon's CommittedOutcome() carrier check
+// reconstructs it — mirroring CreateSession/KillSession/ArchiveSession and the
+// other mutating handlers (#3357). VALUE embed, never a pointer: gob elides
+// zero values (see control_expect_gob_test.go and #1700).
 type DeliverPromptResponse struct {
 	Status         string                       `json:"status"`
 	DeliveryStatus session.PromptDeliveryStatus `json:"delivery_status"`
@@ -311,6 +324,7 @@ type DeliverPromptResponse struct {
 	// initial prompt is already owned by resume, from an existing limited target
 	// whose watch event still needs queue replay.
 	PromptRetained bool `json:"prompt_retained,omitempty"`
+	MutationOutcome
 }
 
 // CreateTabRequest asks the daemon to spawn a tab in the target session's
@@ -360,6 +374,9 @@ type CreateTabRequest struct {
 	// Port is a convenience for a web tab: when set (and URL is empty) the target
 	// becomes http://localhost:<port>.
 	Port int `json:"port,omitempty"`
+	// Proposal is the slug a docs tab (Kind=="docs") edits. It must exist in the
+	// session's project, and it is refused for every other kind.
+	Proposal string `json:"proposal,omitempty"`
 	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
 	// the daemon resolves the target session by id first, so web and retained TUI
 	// tab-create actions cannot hit a same-title replacement (#1592 Phase 5 PR7,
@@ -580,6 +597,9 @@ type PingRequest struct{}
 // reports through Ping. It is deliberately narrower than config.Config: status
 // only needs the listener/auth values that can differ after a supported
 // hand-edit, and Ping must never become a general config or secret export.
+// One overlay is not boot state: RequireToken also reads true while the #5183
+// upgrade-probation token floor is armed, because that is what the control
+// listener enforces.
 type DaemonBootConfig struct {
 	ListenAddr           string `json:"listen_addr"`
 	RequireToken         bool   `json:"require_token"`
@@ -594,6 +614,18 @@ type PingResponse struct {
 	// safe account-aware admission rules. Older daemons omit the field, decode
 	// as false, and therefore never receive the destructive mutation.
 	AccountHandoff bool `json:"account_handoff,omitempty"`
+	// HostPick is an affirmative capability: this daemon honors
+	// CreateSessionRequest.Host (#5571 W6.3). A daemon that predates the field
+	// decodes the request without it and silently creates the session on the repo's
+	// default backend, so a client sending a host pick must see true here first.
+	// Older daemons omit the field and decode as false.
+	HostPick bool `json:"host_pick,omitempty"`
+	// (The guarded-rebind capability is its wire method instead of a Ping bit —
+	// #4888 review: RebindProjectGuarded exists only on daemons that enforce
+	// the expected_root/expected_checkout_id pair, so a guarded send is refused
+	// by a pre-guard daemon rather than applied unconditionally, and no probe
+	// is consulted since a Ping answered by one daemon can never vouch for
+	// the one a proxy might route the mutation to.)
 	// Version is the af build version the responding daemon is running, so a
 	// client can compare it against its own and detect skew (#1044). It rides
 	// Ping because Ping is the one RPC that answers throughout the daemon's
@@ -718,6 +750,33 @@ type GetConfigResponse struct {
 	// user which file it is editing (a user with AF_HOME set is otherwise left
 	// guessing).
 	Path string `json:"path"`
+}
+
+// ExplainConfigRequest asks for one global config key's layer-by-layer
+// provenance — the explain half of the config read surface (#4803, the UI half
+// of #2216). The TUI and web editors render the effective value; this is how
+// they answer which layer supplied it, through the identical resolver
+// `af config get <key> --explain` prints rather than a second precedence
+// implementation.
+type ExplainConfigRequest struct {
+	// Key is the manifest key to explain — a top-level key or a dotted leaf
+	// (root_agent resolves through its specialized four-layer trace).
+	Key string `json:"key"`
+}
+type ExplainConfigResponse struct {
+	// Explanation is config.ResolvedValue verbatim: effective value, default,
+	// merge policy, precedence, every source candidate with its result and
+	// reason, and per-leaf origins for composite values.
+	Explanation config.ResolvedValue `json:"explanation"`
+	// Scope names the scope the explanation describes. "global" is the only
+	// scope served: project-scoped provenance follows the project-config read
+	// surface, the same staging as config.read-project's UI half.
+	Scope string `json:"scope"`
+	// RunningValueChecked is always false: the trace resolves on-disk sources
+	// fresh per call, never the running daemon's in-memory config — the same
+	// contract `af config get --explain` prints. Carried so a client surfaces
+	// the distinction rather than leaving a reader to assume it.
+	RunningValueChecked bool `json:"running_value_checked"`
 }
 
 // SetConfigValueRequest sets one key, exactly as `af config set key value` does.

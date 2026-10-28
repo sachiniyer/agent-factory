@@ -11,6 +11,7 @@ import type { IconName } from "./icon.js";
 import {
   archiveWarningText,
   attentionReason,
+  callbackUnavailableText,
   canHandoff,
   type DotKind,
   idleReasonDetail,
@@ -27,6 +28,8 @@ import {
   rowDot,
   rowStatus,
   rowTitle,
+  unreachableDetail,
+  sessionWarningText,
 } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
@@ -227,6 +230,37 @@ test("title prefixes match render.go precedence", () => {
     "[model changed] [lost] [remote] w",
     "the diagnostic remains outermost when state and backend prefixes coexist",
   );
+  // [unreachable] is a complete-pair-only, static marker — it sits just inside
+  // [model changed], mirroring render.go (#5571 W1.3).
+  assert.equal(
+    rowTitle(sess({
+      title: "w", liveness: Liveness.Lost, backend_type: "remote",
+      unreachable: { since: "2026-08-10T12:00:00Z", error: "dial tcp: i/o timeout" },
+    })),
+    "[unreachable] [lost] [remote] w",
+  );
+  assert.equal(
+    rowTitle(sess({ title: "w", unreachable: { error: "no since" } })),
+    "w",
+    "a half-formed projection earns no marker",
+  );
+});
+
+test("unreachable detail mirrors the TUI outage line", () => {
+  const now = new Date("2026-08-10T15:00:00Z");
+  assert.equal(
+    unreachableDetail(
+      sess({ unreachable: { since: "2026-08-10T14:57:00Z", error: "ssh: connection reset" } }),
+      now,
+    ),
+    "unreachable 3m ago · ssh: connection reset",
+  );
+  assert.equal(unreachableDetail(sess({}), now), "");
+  assert.equal(
+    unreachableDetail(sess({ unreachable: { since: "bad", error: "down" } }), now),
+    "",
+    "an unparseable since renders nothing rather than half a claim",
+  );
 });
 
 // The Go renderer reads the same issue fixtures: changing either surface's
@@ -269,6 +303,31 @@ test("archive warning retains the daemon's source location for the persistent ba
   const warning = "restore completed with an incomplete archive: complete original tree retained at /retained/source";
   assert.equal(archiveWarningText(sess({ archive_warning: warning })), warning);
   assert.equal(archiveWarningText(sess({ archive_warning: "   " })), "");
+});
+
+test("callback warning renders under the shared prefix (#5571 W3.1)", () => {
+  const reason = "the listener moved while the sandbox was being provisioned";
+  assert.equal(
+    callbackUnavailableText(sess({ callback_unavailable: reason })),
+    `af callback unavailable: ${reason}`,
+  );
+  assert.equal(callbackUnavailableText(sess({ callback_unavailable: "   " })), "");
+  assert.equal(callbackUnavailableText(sess({})), "");
+});
+
+test("the persistent banner joins archive and callback warnings without dropping either", () => {
+  const session = sess({
+    archive_warning: "restore completed with an incomplete archive",
+    callback_unavailable: "require_token is false",
+  });
+  assert.equal(
+    sessionWarningText(session),
+    "restore completed with an incomplete archive · af callback unavailable: require_token is false",
+  );
+  // One notice alone renders bare — no dangling separator.
+  assert.equal(sessionWarningText(sess({ callback_unavailable: "x" })), "af callback unavailable: x");
+  assert.equal(sessionWarningText(sess({ archive_warning: "y" })), "y");
+  assert.equal(sessionWarningText(sess({})), "");
 });
 
 test("[fresh context] note mirrors session.RootRecreateContext.Note (#2629)", () => {
@@ -550,3 +609,11 @@ function isoTodayAt(hour: number, min: number): string {
   d.setHours(hour, min, 0, 0);
   return d.toISOString();
 }
+
+test("rowTitle prefixes [remote] for every off-box backend like the TUI (#4336)", () => {
+  for (const b of ["docker", "ssh", "sandbox", "remote"]) {
+    assert.equal(rowTitle(sess({ title: "w", backend_type: b })), "[remote] w", b);
+  }
+  assert.equal(rowTitle(sess({ title: "w", backend_type: "local" })), "w");
+  assert.equal(rowTitle(sess({ title: "w" })), "w");
+});

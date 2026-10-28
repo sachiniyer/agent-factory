@@ -70,8 +70,9 @@ func createdTaskStatus(data session.InstanceData) string {
 // "Did not change" is NOT the same as "is idle", which is the whole reason the
 // working check sits here. The caller reaches this branch on pane STILLNESS, and
 // stillness is only evidence of idleness for agents that repaint while they work
-// (claude/codex animate a spinner + elapsed timer; amp does not — it holds a
-// static frame through every quiet gap in a turn). So before settling Ready, ask
+// (codex animates a spinner + elapsed timer; amp holds a static frame through
+// every quiet gap in a turn; claude animates one but was still seen holding a
+// still pane mid-turn). So before settling Ready, ask
 // the agent: a pane that says it is working IS working, and stays Running. See
 // task.IsWorkingContent for why a debounce cannot stand in for this.
 //
@@ -98,7 +99,7 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	if task.IsWorkingContent(content, agent) {
 		// Still mid-turn behind a still pane: hold Running so the #1766 status dot
 		// stays dark. Settling Ready here is the green flash (#1766 says green ==
-		// waiting for you), and it is not merely cosmetic — a Ready amp is what
+		// waiting for you), and it is not merely cosmetic — a Ready session is what
 		// `af sessions watch` unblocks on and what tells a user their turn is done.
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
 		return
@@ -396,7 +397,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		if manual && (originalLiveness == session.LiveRunning || originalLiveness == session.LiveReady) {
 			// The pending manual transaction is the recovery obligation. A healthy
 			// handoff must never manufacture quota evidence for the selected account.
-			return instance.Transition(session.ObserveLiveness(originalLiveness))
+			// Bookkeeping after a refused respawn, not a pane observation: the observe
+			// path's rebuild-teardown guard would park LiveLost (#5371 review).
+			return instance.RestoreLivenessUnderResumeFence(originalLiveness)
 		}
 		return m.reparkLimitUnderResumeFence(instance, resetAt)
 	}
@@ -686,6 +689,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		instance.SetRelocationSettleNotify(func(i *session.Instance) error {
 			return m.persistInstanceErr(repoID, i)
 		})
+		// Rebuild-teardown obligation must be durable; nil notify refuses (#5371).
+		instance.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
+		instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error { return m.stopVSCodeForInstance(key, i.ID) })
 		if accountSwap != nil {
 			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
 			if rerr == nil {
@@ -704,10 +710,52 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 					// detached child may still write this worktree, so preserve the
 					// pending mission but suppress automatic retries until inspection.
 					instance.MarkStartupStateUnknown()
-					if perr := m.persistSettlement(repoID, key, instance); perr != nil {
-						rerr = errors.Join(rerr, perr)
-					}
 				}
+			}
+			// Persist the instance even on failure, matching the sibling recovery
+			// paths (lostrestore.go, restore.go): Respawn shares LocalBackend.respawn,
+			// so reaching this line can mean it rebuilt a vanished worktree —
+			// recreating the branch, flipping branchCreatedByUs and rewriting
+			// baseCommitSHA — before a later step (tmux spawn, setupTabs) failed.
+			// Without this write the in-memory flag is lost, so after a daemon
+			// restart the instance reloads a stale branchCreatedByUs=false; the
+			// next recovery skips the rebuild (the worktree now exists) and the
+			// flag stays wrong, so kill never deletes the branch and it is
+			// orphaned (#1532/#1841/#2883). The poll does not cover it —
+			// persistPollChange writes only on a liveness/reset-time change, and
+			// the re-parked row matches the one the poll already knows. A
+			// SETTLEMENT, not best-effort: the auto-resume scheduler has no
+			// caller to report a failed write to and the retry set is what makes
+			// the state durable (#2883). persistSettlement also captures
+			// MarkStartupStateUnknown applied above for the blind-teardown case.
+			// Error-returning, not the logging wrapper: the committed arm below must
+			// not claim "recorded" for a write that failed (#3353 review), so the
+			// outcome of this persist is part of the message — mirroring restore.go's
+			// manual-restore path.
+			persistErr := m.persistSettlement(repoID, key, instance)
+			if persistErr != nil {
+				rerr = errors.Join(rerr, persistErr)
+			}
+			// A rebuild that already mutated durable workspace state before the
+			// later failure committed that mutation — report it as committed,
+			// not as an untouched, freely retryable failure, the way restore.go
+			// does for the manual restore path (#3236). The git side lives on
+			// disk regardless of the record write; a raw error reading as
+			// failed-nothing-committed about a mutation that landed would
+			// mislead a retry. Use failure-specific wording: when the persist
+			// itself failed the on-disk row is still stale until a retry, so the
+			// message must not claim the rebuilt state is recorded.
+			var rebuilt *session.RecoverRebuiltWorkspaceError
+			if errors.As(rerr, &rebuilt) {
+				failure := fmt.Errorf(
+					"re-spawn for %q failed after recovery rebuilt its worktree at %s; the rebuilt state is recorded — retry the resume: %w",
+					requestedTitle, instance.GetWorktreePath(), rerr)
+				if persistErr != nil {
+					failure = fmt.Errorf(
+						"re-spawn for %q failed after recovery rebuilt its worktree at %s, and the rebuilt state could not be written to disk (%v) — retry the resume once the cause clears: %w",
+						requestedTitle, instance.GetWorktreePath(), persistErr, rerr)
+				}
+				return resumeNotPerformed, &mutationCommittedError{err: failure}
 			}
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}

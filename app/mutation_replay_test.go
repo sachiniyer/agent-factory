@@ -109,7 +109,7 @@ func tuiMutations() map[string]func() error {
 		},
 		"/v1/RegisterProject": func() error { return registerProjectThroughDaemon("/r") },
 		"/v1/RebindProject": func() error {
-			_, err := rebindProjectThroughDaemon("prj", "/r")
+			_, err := rebindProjectThroughDaemon("prj", "", "", "/r")
 			return err
 		},
 		"/v1/ConfirmHandoffDelivery": func() error {

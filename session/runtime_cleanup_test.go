@@ -495,9 +495,48 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := &Instance{ID: tc.name + "-id", Title: tc.name + "-cleanup", Path: "/repo", backend: tc.backend}
-			if liveStored := inst.ToInstanceData().ForStorage(); liveStored.RuntimeCleanup != nil {
-				t.Fatalf("ordinary live record persisted cleanup handle: %#v", liveStored.RuntimeCleanup)
+			// The KilledWithoutLiveRuntime fix: a sandbox row's off-box runtime
+			// SURVIVES a daemon restart. Persisting the cleanup handle on the
+			// ordinary (non-killed) snapshot is exactly what lets the next load
+			// rebuild a real teardown handle and reap for real — instead of
+			// staging an unearned "nothing owed" marker from the reload-inert
+			// backend's nil runtimeTeardown alone and orphaning a still-live
+			// ssh workspace or hook-provisioned sandbox. The tombstone path still
+			// publishes its handle (verified below), but ordinary sandbox rows
+			// now publish theirs too.
+			liveStored := inst.ToInstanceData().ForStorage()
+			if liveStored.RuntimeCleanup == nil {
+				t.Fatalf("ordinary live %s sandbox record must persist its cleanup handle so a restart can rebuild a teardown that reaps for real: %#v", tc.name, liveStored.RuntimeCleanup)
 			}
+			if liveStored.UserKilled || liveStored.KilledWithoutLiveRuntime {
+				t.Fatalf("ordinary live %s sandbox record must not look tombstoned: user_killed=%v marker=%v", tc.name, liveStored.UserKilled, liveStored.KilledWithoutLiveRuntime)
+			}
+			liveRaw, err := json.Marshal(liveStored)
+			if err != nil {
+				t.Fatalf("marshal ordinary live %s record: %v", tc.name, err)
+			}
+			var liveDecoded InstanceData
+			if err := json.Unmarshal(liveRaw, &liveDecoded); err != nil {
+				t.Fatalf("unmarshal ordinary live %s record: %v", tc.name, err)
+			}
+			liveDecoded = liveDecoded.ForStorage()
+			if !reflect.DeepEqual(liveDecoded.RuntimeCleanup, liveStored.RuntimeCleanup) {
+				t.Fatalf("ordinary live %s cleanup handle changed across JSON+ForStorage:\n got %#v\nwant %#v", tc.name, liveDecoded.RuntimeCleanup, liveStored.RuntimeCleanup)
+			}
+			// The production refresh path hands the unmarshalled row DIRECTLY to
+			// FromInstanceData — exactly as daemon.go does — so its rebuild branch
+			// can restore the off-box teardown handle from the persisted cleanup
+			// data. A non-nil handle on the reloaded row means a kill committed
+			// against it reaps for real instead of running the no-op path the
+			// inert-only reload would produce.
+			liveRestored, err := FromInstanceData(liveDecoded)
+			if err != nil {
+				t.Fatalf("restore ordinary live %s record: %v", tc.name, err)
+			}
+			if liveRestored.runtimeTeardown == nil {
+				t.Fatalf("ordinary live %s sandbox record reloaded with no teardown handle — the rebuild path did not restore it, so a kill would stage the unearned nothing-owed marker", tc.name)
+			}
+
 			inst.userKilled = true
 			stored := inst.ToInstanceData().ForStorage()
 			if stored.RuntimeCleanup == nil {

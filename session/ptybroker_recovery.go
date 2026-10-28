@@ -252,6 +252,16 @@ func (b *ptyBroker) recoverCapture(onlyIfNoHealthyCapture bool) {
 	// readLoop begins feeding and waking subscribers IMMEDIATELY — the barrier is what
 	// keeps those bytes behind the repaint built below (#1975).
 	if err := b.ensureCaptureStartedLocked(); err != nil {
+		// A held dead pane is not a broken dial — pipe-pane refuses it
+		// FOREVER, so there is nothing to re-dial (#5330). The armed
+		// subscribers are released onto a repaint of the dead pane's screen:
+		// the buffer's bottom-anchored tail plus the "Pane is dead" marker,
+		// built by the same Snapshot path a live recovery uses. A respawn
+		// arrives through resetCapture, not through here.
+		if b.ch.PaneDead() {
+			rp = b.recoveryRepaint()
+			return
+		}
 		// Same reasoning as the stop-error split in ensureCaptureStartedLocked, and
 		// this is the site that fires MORE often: a failed dial is the unreachable
 		// -endpoint case, which the stop path never even reaches. redialLoop gives
@@ -357,6 +367,19 @@ func redialDelay(attempt int) time.Duration {
 // healthy capture appearing (a subscribe beat us to it).
 func (b *ptyBroker) redialLoop() {
 	for {
+		// A held dead pane is terminal, not an outage: pipe-pane refuses it
+		// forever, so there is nothing to re-dial (#5330). Run the guarded
+		// recovery ONCE — it releases the attached subscribers onto a repaint
+		// of the dead pane's screen — then stop driving. A respawn arrives
+		// through resetCapture, not through here. Cheap to ask each iteration
+		// — the loop only runs while a capture is unhealthy.
+		if b.ch.PaneDead() {
+			b.recoverDeadUpstream()
+			b.mu.Lock()
+			b.redialing = false
+			b.mu.Unlock()
+			return
+		}
 		b.mu.Lock()
 		healthy := b.capturing && !b.captureEnded
 		if b.closed || healthy || len(b.subs) == 0 {
@@ -419,8 +442,19 @@ func (b *ptyBroker) redialLoop() {
 // subscriber re-read that state.
 func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp *repaintSnapshot) {
 	b.mu.Lock()
+	// A replay-capable channel (remote ?since) re-delivers the outage window as
+	// ordinary ring bytes, so a subscriber whose cursor still sits inside the
+	// ring consumes that history as PTYData — installing the repaint would show
+	// the screen those very bytes already produced and then replay them on top
+	// of it. Only a subscriber evicted behind the discard's new base still
+	// needs the repaint: it can never see the replayed window. On a fresh-pane
+	// channel (tmux respawn) nothing replays, so the repaint stays universal.
+	replays := false
+	if rc, ok := b.ch.(interface{ ReplaysHistory() bool }); ok {
+		replays = rc.ReplaysHistory()
+	}
 	for _, s := range armed {
-		if rp != nil && len(rp.data) > 0 {
+		if rp != nil && len(rp.data) > 0 && !(replays && s.cursor >= b.base) {
 			s.pendingRepaint = rp
 		}
 		s.repaintArmed = false
@@ -432,5 +466,57 @@ func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp *repaintSnapshot)
 	// so ring its doorbell directly; wake() is a coalescing no-op when already signaled.
 	for _, s := range armed {
 		s.wake()
+	}
+}
+
+// defaultPaneDeathPollInterval is how often a live capture asks whether its
+// pane has died. Per-broker (ptyBroker.paneDeathPoll) so tests compress it on
+// their own broker instead of writing a global a sibling test's watcher reads.
+const defaultPaneDeathPollInterval = time.Second
+
+// watchPaneDeath notices a watched pane dying under a live capture (#5618).
+//
+// tmux keeps pipe-pane attached to a remain-on-exit dead pane, so the capture
+// never EOFs: readLoop never exits and redialLoop — the only other driver of the
+// dead-pane repaint (#5330) — never runs. Death must therefore be polled. One
+// bounded display-message per interval per live capture, none per frame; the
+// watcher lives exactly as long as the capture it was started with (quit is
+// closed by that capture's teardown).
+//
+// On death it latches captureEnded, exactly as a spontaneous readLoop exit
+// would, and runs the guarded recovery: that stops the stale capture, arms the
+// barrier, finds the pane dead on restart, and releases every attached
+// subscriber onto the dead screen. The capture is not restarted, so the watcher
+// ends there; a later subscribe consults PaneDead up front.
+func (b *ptyBroker) watchPaneDeath(quit <-chan struct{}) {
+	defer b.watchers.Done()
+	t := time.NewTicker(b.paneDeathPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-quit:
+			return
+		case <-b.closedCh:
+			return
+		case <-t.C:
+		}
+		if !b.ch.PaneDead() {
+			continue
+		}
+		b.mu.Lock()
+		select {
+		case <-quit: // a teardown replaced this capture while we were asking
+			b.mu.Unlock()
+			return
+		default:
+		}
+		if b.closed || !b.capturing {
+			b.mu.Unlock()
+			return
+		}
+		b.captureEnded = true
+		b.mu.Unlock()
+		b.recoverDeadUpstream()
+		return
 	}
 }
