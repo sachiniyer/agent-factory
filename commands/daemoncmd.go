@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -306,7 +307,7 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 			fmt.Fprintf(w, "  tcp listener:   %s (refused)\n", info.Listeners.TCPListenAddr)
 			fmt.Fprintf(w, "    refused:      %s\n", info.Listeners.TCPRefusalReason)
 		default:
-			fmt.Fprintf(w, "  tcp listener:   %s (not bound)\n", info.Listeners.TCPListenAddr)
+			fmt.Fprintf(w, "  tcp listener:   %s (%s)\n", info.Listeners.TCPListenAddr, notBoundNote(info.Listeners.TCPBindError, info.Listeners.BindRetrying))
 		}
 		// The web-tab preview listener (#1856). Only printed when configured, so an
 		// operator who never set network.preview_listen_addr sees no extra line.
@@ -316,7 +317,7 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 		case info.Listeners.PreviewBound:
 			fmt.Fprintf(w, "  preview listen: %s (bound)\n", info.Listeners.PreviewBoundAddr)
 		default:
-			fmt.Fprintf(w, "  preview listen: %s (not bound)\n", info.Listeners.PreviewListenAddr)
+			fmt.Fprintf(w, "  preview listen: %s (%s)\n", info.Listeners.PreviewListenAddr, notBoundNote(info.Listeners.PreviewBindError, info.Listeners.BindRetrying))
 		}
 	}
 	fmt.Fprintf(w, "  control socket: %s (%s)\n", info.ControlSocket, presence(info.ControlSocketFile))
@@ -407,7 +408,11 @@ func presence(exists bool) string {
 var daemonStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Report daemon liveness, config freshness, and supervision",
-	Long: `Print a read-only snapshot of the background daemon: whether it is responding
+	Long: `With --daemon-url (or AF_DAEMON_URL, or a saved target) this reads the TARGET's
+health route and reports whether it responds, its version, phase and boot
+identity — never this machine's sockets or autostart unit.
+
+Print a read-only snapshot of the background daemon: whether it is responding
 on the control socket, the control and HTTP socket paths (and whether their
 files are present), the recorded and responding pids, whether the installed
 autostart unit owns that responding process, whether the config on disk matches
@@ -421,6 +426,11 @@ machine-readable form wrapped in the shared {data,error} envelope.`,
 		log.Initialize(false)
 		defer log.Close()
 
+		// A remote target's status is the target's, read from its health route;
+		// this machine's sockets, pid and autostart unit say nothing about it.
+		if apiclient.IsRemoteTarget() {
+			return runRemoteDaemonStatus(cmd)
+		}
 		info := collectDaemonStatus()
 		if daemonStatusJSON {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(info))
@@ -930,4 +940,18 @@ func ensureDaemonForTasks() {
 			return
 		}
 	}
+}
+
+// notBoundNote words a listener that is configured but not accepting: the last
+// bind failure and, when the daemon is still retrying it in the background
+// (#5571 W9.9), that it will keep trying.
+func notBoundNote(bindErr string, retrying bool) string {
+	note := "not bound"
+	if retrying {
+		note += ", retrying"
+	}
+	if bindErr != "" {
+		note += ": " + bindErr
+	}
+	return note
 }

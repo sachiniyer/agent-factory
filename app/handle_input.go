@@ -36,7 +36,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
-		m.pendingBackend = ""
+		m.pendingBackend, m.pendingHost = "", ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
 		m.pendingProgramChosen = false
@@ -142,6 +142,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// have.
 		backendKind, backendKindErr := session.BackendKindFor(session.InstanceOptions{
 			Backend: session.BackendKind(m.pendingBackend),
+			Host:    m.pendingHost,
 		}, instance.Path)
 		if backendKindErr == nil && backendKind == session.BackendHook {
 			if !session.RemoteHookTitleHasSpecificSlug(title) {
@@ -243,8 +244,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingPrompt = ""
 		// Same reasoning for the backend picked in the ctrl+r field (#1933): read it
 		// on the loop, clear it with the rest of the naming state.
-		backend := m.pendingBackend
-		m.pendingBackend = ""
+		backend, host := m.pendingBackend, m.pendingHost
+		m.pendingBackend, m.pendingHost = "", ""
 		m.backendPickerPending = false
 		// And for the ctrl+o account field (#3844), on the loop for the same
 		// reason — sendAccount already captured its value above.
@@ -280,6 +281,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// the repo's config", so an untouched field is byte-identical to
 				// every create before this field existed.
 				Backend: backend,
+				Host:    host,
 				// The credential account picked in the naming form's ctrl+o field
 				// (#3844), forwarded verbatim as CreateSessionRequest.Account — the
 				// field `af sessions create --account` fills. Empty means "the ambient
@@ -380,7 +382,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
-		m.pendingBackend = ""
+		m.pendingBackend, m.pendingHost = "", ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
 		m.pendingProgramChosen = false
@@ -459,7 +461,7 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	// cancel paths clear both too, but this is the authoritative reset: it also
 	// covers a create that ended by any route other than Enter/Esc/ctrl+c.
 	m.pendingPrompt = ""
-	m.pendingBackend = ""
+	m.pendingBackend, m.pendingHost = "", ""
 	m.pendingProgramChosen = false
 	m.remoteDefaultPending = false
 	m.remoteProgramCatalog = nil

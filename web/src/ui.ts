@@ -61,6 +61,7 @@ import {
   sessionWarningText,
 } from "./status.js";
 import type { AccountsState } from "./accounts.js";
+import type { QuotaState } from "./quota.js";
 import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
@@ -305,6 +306,12 @@ export interface AppState {
    *  daemon host, not a manifest key, and merging the two would be the category
    *  error #3385 asks this surface to avoid. */
   accounts: AccountsState;
+  /** the daemon's usage/quota report (QuotaReport, #2983), the Usage section's
+   *  data. It rides in the config view's state for the same reason `accounts`
+   *  does — it renders there — and is not config: it is computed from the
+   *  daemon host's session records, so merging it into `config` would be the
+   *  same category error. */
+  quota: QuotaState;
   /** the persisted theme preference (redesign PR1): System follows the OS, Light/Dark
    *  force a mode. The config view's Theme picker sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
@@ -1516,7 +1523,7 @@ export class AppShell {
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
     // config.toml applies to every repo — so unlike the tasks pane it re-renders on
     // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.themeChoice);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;

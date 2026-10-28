@@ -283,12 +283,16 @@ func TestProvisionMintsAndPersistsTheRuntimeIdentity(t *testing.T) {
 	require.NoError(t, os.WriteFile(afBin, []byte("fake-af-biny"), 0o755))
 
 	var tokenStdin, envStdin string
+	stageBinaryReply := binaryStageReplies(t, afBin)
 	p := &sandboxProvisioner{
 		sshCmd: "ssh fake-target",
 		afBin:  afBin,
 		spec:   ProvisionSpec{Title: "w1.1 session", CloneURL: "https://example.invalid/repo.git"},
 	}
 	p.runCommandFn = func(_ time.Duration, script string, stdin io.Reader, _ bool) ([]byte, error) {
+		if out, ok := stageBinaryReply(script); ok {
+			return out, nil
+		}
 		read := func() string {
 			if stdin == nil {
 				return ""
@@ -362,12 +366,16 @@ func TestProvisionRefusesABannerOnTheWrongCredential(t *testing.T) {
 	afBin := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(afBin, []byte("fake-af-biny"), 0o755))
 
+	stageBinaryReply := binaryStageReplies(t, afBin)
 	p := &sandboxProvisioner{
 		sshCmd: "ssh fake-target",
 		afBin:  afBin,
 		spec:   ProvisionSpec{Title: "s", CloneURL: "https://example.invalid/repo.git"},
 	}
 	p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		if out, ok := stageBinaryReply(script); ok {
+			return out, nil
+		}
 		switch {
 		case strings.Contains(script, "mktemp -d"):
 			return []byte("/remote/dir\n"), nil

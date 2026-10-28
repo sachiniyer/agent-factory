@@ -43,7 +43,7 @@ func TestTaskPaneEditActionFooterFollowsFocus(t *testing.T) {
 	}
 	textStop := map[int]bool{
 		taskFocusName: true, taskFocusTriggerValue: true,
-		taskFocusPrompt: true, taskFocusTarget: true, taskFocusPath: true,
+		taskFocusPrompt: true, taskFocusTarget: true, taskFocusHost: true, taskFocusPath: true,
 	}
 	for stop := 0; stop < taskFocusCount; stop++ {
 		tp.focusIndex = stop

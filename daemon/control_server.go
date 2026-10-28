@@ -63,6 +63,9 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.AccountHandoff = true
 	resp.HostPick = true
+	resp.DeliverHostPick = true
+	resp.TaskHost = true
+	resp.ConfigHostsEdit = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
@@ -285,7 +288,7 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	result, wroteDigest, err := config.SetGlobalConfigValueWithDigest(req.Key, req.Value)
+	result, wroteDigest, err := writeGlobalConfig(req)
 	if err != nil {
 		return err
 	}
@@ -450,7 +453,20 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	}
 	// A remote client sends the project path as typed; expand ~ against this
 	// daemon's home before anything resolves it.
-	req.RepoPath = config.ExpandTilde(strings.TrimSpace(req.RepoPath))
+	// A still-relative path would resolve against the DAEMON's working directory
+	// and could silently pick a different checkout, so it is refused (#5743).
+	if strings.TrimSpace(req.RepoPath) != "" {
+		resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
+		if err != nil {
+			return err
+		}
+		req.RepoPath = resolved
+	}
+	if req.ValidateFirst {
+		if err := validateCreateFirst(req); err != nil {
+			return err
+		}
+	}
 	req.Program = trimProgramEnumIfBare(req.Program)
 	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)
@@ -612,12 +628,13 @@ func (s *controlServer) archiveSession(ctx context.Context, req *ArchiveSessionR
 	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
 	// commits it, and publishes the full projection inside its operation lock. That
 	// keeps lifecycle event order identical to operation order (#2680).
-	archivedPath, _, err := s.manager.ArchiveSession(*req)
+	archivedPath, archived, err := s.manager.ArchiveSession(*req)
 	if !resp.record(err) {
 		return err
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
+	resp.ArchivedWorkspace = archived.ArchivedWorkspace
 	return nil
 }
 

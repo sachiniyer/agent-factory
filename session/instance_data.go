@@ -56,6 +56,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		RuntimeStartID:           i.runtimeStartID,
 		Account:                  i.Account,
 		Host:                     i.Host,
+		ArchivedWorkspace:        cloneArchivedWorkspace(i.archivedWorkspace),
 		AccountAgent:             i.accountAgent,
 		AccountAutoSelected:      i.accountAutoSelected,
 		AccountLimitObservations: append([]AccountLimitObservationData(nil), i.accountLimitObservations...),
@@ -232,6 +233,11 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	}
 	if len(i.Tabs) > 0 {
 		data.AgentConversation = conversationDataPtr(i.Tabs[0].Conversation)
+	} else if i.reportedConversation.HasID() {
+		// A reloaded off-box row has no agent tab until Launch seeds one, but it
+		// still holds the conversation its agent-server reported (#5826): writing
+		// the row back must not drop the resume handle.
+		data.AgentConversation = conversationDataPtr(i.reportedConversation)
 	}
 
 	// Only include worktree data if gitWorktree is initialized
@@ -501,6 +507,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		runtimeStartID:           data.RuntimeStartID,
 		Account:                  data.Account,
 		Host:                     data.Host,
+		archivedWorkspace:        cloneArchivedWorkspace(data.ArchivedWorkspace),
 		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
@@ -556,11 +563,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// Pick backend based on persisted BackendType.
 	switch {
 	case isSandboxBackendType(data.BackendType):
-		// A sandbox session (docker/ssh/hook, #1592 Phase 4 PR6/PR7) has no
+		// A sandbox session (docker/ssh/sandbox/hook, #1592 Phase 4 PR6/PR7) has no
 		// daemon-side worktree or tmux to reconstruct — its workspace lived in a
-		// container/remote/user-provisioned sandbox that does not survive a daemon
-		// restart; only its pushed branch on origin does. Rebuild only an INERT
-		// sandbox backend so the row still classifies as its runtime
+		// container/remote/user-provisioned sandbox. The load itself is inert: an
+		// ssh/sandbox row that persisted a runtime identity is reattached afterwards
+		// by restoreInstances (W1.5); any other row relies on its pushed branch on
+		// origin. Rebuild only an INERT sandbox backend so the row still classifies as its runtime
 		// (Type/Capabilities) for archive + restore; the live runtime is
 		// re-provisioned on restore (re-running launch_cmd for hook), never
 		// reconstructed here.
@@ -579,6 +587,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// From both sources: rows that were on the roster when the record was written,
 		// and rows a previous recovery staged but never drained.
 		instance.pendingMetadataTabs = append(metadataTabsFrom(data), data.PendingTabs...)
+		// The recorded conversation survives the reload (#5826): the agent tab is
+		// seeded by the next Launch, so the handle waits in reportedConversation,
+		// is sent on that launch, and is written back by every checkpoint meanwhile.
+		instance.reportedConversation = persistedConversationOf(data)
 		// A kill tombstone is a durable promise to FINISH teardown after a restart;
 		// an unknown cleanup outcome is the same obligation without terminal kill
 		// intent. An ordinary sandbox row carries a persisted RuntimeCleanup handle
@@ -595,9 +607,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// ever touching the row. Archived sandboxes were already reaped before
 		// becoming Archived, so deleting their record needs no remote cleanup
 		// handle; the archived ForStorage branch scrubs RuntimeCleanup, so the
-		// handle here is naturally nil for those rows.
+		// handle here is naturally nil for those rows — except a preserved
+		// workspace (below).
 		hadPersistedCleanupHandle := isSandboxBackendType(data.BackendType) && data.RuntimeCleanup != nil
-		if liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle) {
+		// A preserved unpushed archive keeps its handle on purpose (#5867): its
+		// workspace is still on the host, and a kill of the row must reap it.
+		preservedArchive := liveness == LiveArchived && hadPersistedCleanupHandle && data.keepsPreservedWorkspaceHandle()
+		if preservedArchive || (liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle)) {
 			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
 			if cleanupErr != nil {
 				if data.UserKilled && data.RuntimeCleanup == nil && data.KilledWithoutLiveRuntime {
@@ -809,9 +825,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return inertReturn(), nil
 	}
 
-	// A non-archived sandbox session (docker/ssh/hook) cannot be driven on load: its
-	// container/remote is gone after a daemon restart and only its pushed branch
-	// on origin survives (#1592 Phase 4 PR6). Load it INERT + Lost — started stays
+	// A non-archived sandbox session (docker/ssh/sandbox/hook) cannot be driven on
+	// load: the reattach (W1.5) is a separate step, run by restoreInstances after
+	// the rows are published, and only for ssh/sandbox rows with a persisted
+	// runtime identity. Everything else (docker, hook, pre-W1.1 rows, a failed
+	// reattach) recovers by re-provisioning from the branch pushed to origin
+	// (#1592 Phase 4 PR6). Load it INERT + Lost — started stays
 	// false, so the status poll and the Lost-restore loop both pass it by (the
 	// #1028 started=false fence) — and let an explicit restore re-provision a fresh
 	// sandbox from the branch. Skipping Start also avoids driving the recursive

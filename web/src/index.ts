@@ -49,6 +49,7 @@ import {
   listTasks,
   setConfigValue,
   listAccounts,
+  quotaReport,
   registerAccount as registerAccountRPC,
   startAccountLogin,
   loadToken,
@@ -73,9 +74,11 @@ import {
   terminalFontSizesFromConfig,
 } from "./terminal-font.js";
 import { emptyAccountsState } from "./accounts.js";
+import { emptyQuotaState } from "./quota.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
+import type { HostOption } from "./backends.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
 import {
   addProjectModal,
@@ -164,6 +167,7 @@ const store = new Store<AppState>({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  quota: emptyQuotaState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -226,6 +230,12 @@ const connectionGate = createLatestRequestGate();
  *  Tokenless ("") is a valid credential (#1696), so a null token — not a falsy one —
  *  is the "not authorized yet" case. Rejecting there is safe: every caller degrades
  *  to the repo default rather than blocking its form. */
+/** The listed hosts for a project (ListBackends.hosts, #5571 W6.3). */
+const loadHosts = (repoPath: string): Promise<HostOption[]> =>
+  token === null
+    ? Promise.reject(new Error("not authorized"))
+    : listBackends(repoPath, token).then((catalog) => catalog.hosts ?? []);
+
 const loadPrograms = (repoPath: string): Promise<ProgramCatalog> =>
   token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 /** The create form's account registry (#3844). The registry itself is not
@@ -714,6 +724,9 @@ function switchView(view: View): void {
     // section shows them as they are NOW, including an account registered from
     // the CLI or logged in from the TUI since this tab was opened.
     refreshAccounts();
+    // And the usage report (#2983): a session parked at a limit since this tab
+    // was opened is exactly the signal the section exists to show.
+    refreshQuota();
   }
 }
 
@@ -2156,6 +2169,30 @@ function refreshAccounts(): void {
   accountsRefetcher.refresh();
 }
 
+/** The usage/quota read (#2983), fenced like the accounts read and for the same
+ *  reason: entering the view fetches, and an older response must not land after
+ *  a newer one and redisplay a parked session that has since resumed.
+ *
+ *  A failure becomes the SECTION's own message rather than a tab error, matching
+ *  accounts: an empty section would read as "no usage to report", which is the
+ *  fabricated-answer shape this report exists to refuse. */
+const quotaRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], error: "", loaded: true },
+    });
+  },
+  onError: (err: unknown) => {
+    store.set({ quota: { ...store.get().quota, error: errorText(err) } });
+  },
+});
+
+function refreshQuota(): void {
+  quotaRefetcher.refresh();
+}
+
 /** Records the outcome of an account action on the row that produced it. */
 function setAccountStatus(agent: string, name: string, message: string, error: boolean): void {
   store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
@@ -2548,6 +2585,7 @@ function openAddTask(): void {
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -2596,6 +2634,7 @@ function openEditTask(task: TaskData): void {
     editTaskModal(projects, task, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -2605,6 +2644,9 @@ function openEditTask(task: TaskData): void {
         const m = modal;
         m.setBusy(true);
         const value = buildTask(input);
+        // `host` is patched only when CHANGED (undefined drops out of the JSON): an
+        // unrelated edit must not re-validate, and fail on, a host removed from the
+        // list since the task was written.
         void updateTask(
           task,
           {
@@ -2614,6 +2656,7 @@ function openEditTask(task: TaskData): void {
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
             on_complete: value.on_complete ?? "",
+            host: (input.host ?? "") !== (task.host ?? "") ? input.host ?? "" : undefined,
             project_path: input.projectPath,
             program: input.program,
           },
@@ -3049,6 +3092,7 @@ function stopStream(): void {
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
   accountsRefetcher.invalidate();
+  quotaRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

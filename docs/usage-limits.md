@@ -202,16 +202,24 @@ accounts, keep agent credential variables out of your shell startup files.
 
 ### Docker and backend boundaries
 
-Account selection supports local and Docker sessions and requires tmux 3.2 or
+Account selection supports local and Docker sessions, and ssh sessions on a host in
+the global host list, and requires tmux 3.2 or
 newer. Docker bind-mounts the selected credential directory read-write so token
 refreshes reach the real account. This differs from
 `docker.mount_agent_credentials`, which opts into mounting an ambient agent
 credential read-only. Account selection must establish the selected identity
 or refuse the create; it never silently uses an ambient login.
 
-SSH, sandbox, and hook backends refuse account selection because af cannot
-ensure refreshed credentials are written back. Automatic account replacement
-also excludes Docker; see [Opt-in auto-resume](#opt-in-auto-resume).
+On an ssh session placed on a listed host (`--host <name>`), af syncs the account's
+credential files into that session's own directory on the host, writes refreshes
+back, and removes them at kill and archive; see
+[Session-scoped account sync](backends.md#session-scoped-account-sync-listed-hosts).
+A `default_accounts` entry is applied the same way, and on a target that is not a
+listed host it is not applied (the session runs on the host's own credentials)
+rather than failing the create. An explicit `--account` on an unlisted ssh target,
+or on a sandbox or hook target, is refused with the remedy. Automatic account
+replacement also excludes Docker and every off-box session; see
+[Opt-in auto-resume](#opt-in-auto-resume).
 
 ### Account-scoped handoff
 
@@ -322,6 +330,24 @@ shows a `[limit]` badge, and — when the banner carried a parseable reset time 
 (ready), or dead. The badge clears automatically once the session resumes work
 (whether you resume it, the daemon auto-resumes it, or the banner scrolls away
 on its own).
+
+## The usage report
+
+`af quota` prints a per-agent report of the same signal, answered on all three
+surfaces identically — the TUI and web render it as the **Usage** section of
+the config view, the CLI as a table:
+
+- **TUI**: open the config overlay (`,`) and scroll to **Usage**.
+- **Web**: open the **Config** view; Usage sits under Accounts.
+- **CLI**: `af quota` — and `af quota --daemon-url <url>` reports on the
+  remote daemon's host, not yours.
+
+Each row keeps two things apart on purpose: **quota** is what the provider
+reports about the account's ceiling — `not reported` everywhere today, because
+no supported agent exposes a quota API and af does not guess one — while
+**observed** is what af's own sessions show (running counts, a session parked
+at a wall, and the earliest recorded reset). A record file af could not read
+makes the report say so rather than look complete.
 
 ## Manual retry
 
@@ -532,9 +558,11 @@ blocked on:
   resolved command and configuration; it does not carry approval settings from
   the outgoing agent. See [Agent approval
   behavior](configuration.md#agent-approval-behavior).
-- **Local-worktree sessions only.** A docker/ssh/hook session runs its agent
-  inside a provisioned sandbox, where swapping the agent is a different
-  lifecycle; those sessions refuse the handoff rather than half-perform it.
+- **Off-box handoff depends on the sandbox's agent-server.** An ssh or sandbox
+  session whose agent-server advertises `agent-swap` can be handed off in
+  place — the sandbox swaps the agent in the same workspace and resolves the
+  new agent's program on its own host. An account-scoped sandbox session, and
+  docker or hook sessions, cannot be handed off yet.
 
 Handing off is **reversible**. Each agent's conversation history is stored per
 directory, so the outgoing agent's thread is still in the worktree — hand back

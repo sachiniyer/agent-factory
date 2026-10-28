@@ -105,8 +105,10 @@ Working style:
   on Codex, play-tests or a maintainer. P1 Codex findings must be fixed (reply
   `RESOLVED in <sha>`); P2/P3 are advisory — fix if cheap, else reply
   `ACCEPTED: <reason>`. Play-tests and the wider suites verify on master, not
-  before merge, and a regression they find is fixed forward on master as the
-  highest-priority work. The nightly stable release preflight (full `go vet`
+  before merge, except `Performance and visual baselines` and the `TUI driver
+  selftest`, which additionally gate PRs whose diffs touch their surface; a
+  regression they find is fixed forward on master as the highest-priority work.
+  The nightly stable release preflight (full `go vet`
   plus the `-race` suite) remains the hard gate between master and users. To
   keep a PR from merging, label it `no-auto-merge` (or `hold`). The audit trail
   is in PR descriptions and issue close-out comments, not pre-approval. The old

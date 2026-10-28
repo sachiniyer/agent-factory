@@ -510,6 +510,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "sandbox.binary",
+		Type:       "string",
+		Default:    `""`,
+		Purpose:    "A daemon-local path to an `af` binary the sandbox/ssh backends stream to remote hosts instead of the daemon's own binary or a release download — the override for air-gapped hosts · global-only: the daemon reads and streams the path, so a repo-settable value could install an arbitrary binary on every host.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "hosts",
 		Type:       "table",
 		Default:    "none",
