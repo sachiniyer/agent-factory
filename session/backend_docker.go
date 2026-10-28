@@ -719,6 +719,9 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	for _, name := range p.spec.SessionEnvPassthrough {
 		args = append(args, "--session-env", name)
 	}
+	if branch := strings.TrimSpace(p.spec.Branch); branch != "" {
+		args = append(args, "--branch", branch)
+	}
 	// This is an execution binding, not a path proof. The copied af enters a
 	// dedicated mode that derives the allowlist from these exact args and execs
 	// its current binary into agent-server; no argv spelling authorizes recursion.

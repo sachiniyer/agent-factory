@@ -433,6 +433,9 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	for _, name := range w.spec.SessionEnvPassthrough {
 		args = append(args, "--session-env", name)
 	}
+	if branch := strings.TrimSpace(w.spec.Branch); branch != "" {
+		args = append(args, "--branch", branch)
+	}
 	// AF_TOKEN_REF rides the handoff's per-invocation extras — the one channel
 	// that reaches THIS process's exec-time environment — rather than
 	// sessionenv's common allowlist, which is also the pane allowlist: joining

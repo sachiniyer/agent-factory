@@ -14,6 +14,7 @@ type orderedReprovisionRuntime struct {
 	events *[]string
 	res    ProvisionResult
 	err    error
+	got    *ProvisionSpec
 }
 
 type cleanupFailingStartBackend struct {
@@ -24,7 +25,10 @@ func (b *cleanupFailingStartBackend) Start(*Instance, bool) error {
 	return fmt.Errorf("start failed")
 }
 
-func (r *orderedReprovisionRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {
+func (r *orderedReprovisionRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
+	if r.got != nil {
+		*r.got = spec
+	}
 	if r.events != nil {
 		*r.events = append(*r.events, "provision")
 	}
@@ -401,4 +405,23 @@ func TestReprovisionRemote_ConfirmedReapDropsDischargedCleanupHandle(t *testing.
 	restored, err := FromInstanceData(reloaded)
 	require.NoError(t, err, "restore the reloaded row")
 	assert.Nil(t, restored.runtimeTeardown, "the reloaded row rebuilt a teardown handle for a runtime af already reaped")
+}
+
+// TestReprovisionRemote_ForwardsThePersistedBranch proves the replacement
+// agent-server is told the exact branch the restore fetch materialized, rather
+// than re-deriving one from its own branch_prefix (#5571 W2.4).
+func TestReprovisionRemote_ForwardsThePersistedBranch(t *testing.T) {
+	var got ProvisionSpec
+	rt := &orderedReprovisionRuntime{got: &got, err: fmt.Errorf("stop after provision")}
+	defer SetRuntimeForTest(BackendDocker, func() Runtime { return rt })()
+
+	i := &Instance{
+		Title:   "s",
+		Path:    t.TempDir(),
+		Branch:  "root/s",
+		backend: &dockerBackend{containerID: "old"},
+	}
+	_ = i.reprovisionRemote()
+	assert.Equal(t, "root/s", got.RestoreBranch)
+	assert.Equal(t, "root/s", got.Branch)
 }

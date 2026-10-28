@@ -26,6 +26,7 @@ var (
 	agentServerListen          string
 	agentServerRepo            string
 	agentServerTitle           string
+	agentServerBranch          string
 	agentServerProgram         string
 	agentServerProgramResolved bool
 	agentServerSessionEnv      []string
@@ -72,6 +73,7 @@ branch before shutdown), not this server's.`,
 			ListenAddr:            agentServerListen,
 			RepoPath:              repo,
 			Title:                 agentServerTitle,
+			Branch:                agentServerBranch,
 			Program:               agentServerProgram,
 			ProgramResolved:       agentServerProgramResolved,
 			SessionEnvPassthrough: agentServerSessionEnv,
@@ -108,6 +110,8 @@ func init() {
 		"Repository path the workspace runs against (default: current directory)")
 	agentServerCmd.Flags().StringVar(&agentServerTitle, "title", "",
 		"Session title for the workspace (required)")
+	agentServerCmd.Flags().StringVar(&agentServerBranch, "branch", "",
+		"Exact git branch for the workspace's worktree (default: derived from branch_prefix and the title)")
 	agentServerCmd.Flags().StringVar(&agentServerProgram, "program", "",
 		"Agent program to run (default: the configured default_program)")
 	agentServerCmd.Flags().BoolVar(&agentServerProgramResolved, "program-resolved", false,
