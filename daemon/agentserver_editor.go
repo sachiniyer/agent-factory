@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -40,8 +42,24 @@ type agentEditor struct {
 	hook func() (vscodeEndpoint, error)
 }
 
+// editorNamespace names this workspace's own record directory. Sessions on one host
+// share an ssh user and an af home, and a host can also run an af daemon (the
+// daemon-on-a-sandbox topology): the daemon's shutdown sweep, its orphan sweep and
+// `af stop` list the daemon's directory only, and this workspace's editor records
+// live in a directory of their own, so neither can match the other's processes.
+// Keyed by the stable id, it also keeps one session's sweeps off another's.
+func (hs *headlessServer) editorNamespace() string {
+	sum := sha256.Sum256([]byte(hs.inst.ID))
+	return "ws-" + hex.EncodeToString(sum[:6])
+}
+
 func (hs *headlessServer) editorSupervisor() *vscodeSupervisor {
-	hs.editor.once.Do(func() { hs.editor.sup = newVSCodeSupervisor() })
+	hs.editor.once.Do(func() {
+		hs.editor.sup = newVSCodeSupervisor()
+		if !hs.hasNoEditorIdentity() {
+			hs.editor.sup.namespace = hs.editorNamespace()
+		}
+	})
 	return hs.editor.sup
 }
 

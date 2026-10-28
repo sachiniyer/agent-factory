@@ -126,6 +126,7 @@ func TestAgentServerTeardownLeavesAnotherSessionsEditorAlone(t *testing.T) {
 	newServer := func(id string) *headlessServer {
 		hs := &headlessServer{inst: &session.Instance{ID: id}}
 		sup := newVSCodeSupervisor()
+		sup.namespace = hs.editorNamespace()
 		sup.configuredBinary = func() string { return binary }
 		sup.startGrace = 5 * time.Second
 		hs.editor.once.Do(func() { hs.editor.sup = sup })
@@ -195,4 +196,66 @@ func TestRemoteEditorMissingMessageNamesTheHost(t *testing.T) {
 	writeVSCodeNoticePage(rec, missing.Error())
 	assert.Contains(t, rec.Body.String(), "build-box")
 	assert.NotContains(t, rec.Body.String(), "set vscode_server_binary in config.toml)", "not the local hint")
+}
+
+// Codex P1 (#5818): a host can run an af daemon AND a session's agent-server. The
+// daemon's shutdown sweep reaps every owner record in its directory; the editor an
+// agent-server started must never be in it (and the daemon's must never be in the
+// agent-server's). Disjoint by construction: separate record namespaces.
+func TestDaemonShutdownSweepNeverReapsAnAgentServersEditorAndViceVersa(t *testing.T) {
+	shortAFHome(t)
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	mk := func(ns string) *vscodeSupervisor {
+		v := newVSCodeSupervisor()
+		v.namespace = ns
+		v.configuredBinary = func() string { return binary }
+		v.startGrace = 5 * time.Second
+		t.Cleanup(v.Stop)
+		return v
+	}
+	startOn := func(v *vscodeSupervisor, key, id string) *vscodeServer {
+		_, err := v.ensureServerForInstance(key, id, t.TempDir())
+		if err != nil && !errors.Is(err, errVSCodeStarting) {
+			t.Fatalf("start editor %s: %v", id, err)
+		}
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		s := v.servers[key]
+		require.NotNil(t, s)
+		return s
+	}
+	hs := &headlessServer{inst: &session.Instance{ID: "session-x"}}
+	ns := hs.editorNamespace()
+	require.NotEmpty(t, ns)
+	require.NotEqual(t, vscodeNamespaceDirName(""), vscodeNamespaceDirName(ns))
+
+	// Direction 1: the daemon's shutdown sweep (a restarted supervisor with empty
+	// memory, as after an upgrade) leaves the agent-server's editor running.
+	agent := mk(ns)
+	agentEditor := startOn(agent, hs.agentEditorKey(), "session-x")
+	daemonOld := mk("")
+	daemonEditor := startOn(daemonOld, "daemon-key", "daemon-session")
+	restarted := newVSCodeSupervisor() // the daemon after a restart: empty memory
+	require.NoError(t, restarted.stopAllPersisted())
+	select {
+	case <-daemonEditor.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the daemon's own sweep did not reap the daemon's editor, so the test proves nothing")
+	}
+	require.True(t, agentEditor.alive(), "the daemon's shutdown sweep reaped an editor an agent-server started")
+	ownerFiles, err := allPersistedVSCodeOwnersIn(ns)
+	require.NoError(t, err)
+	require.Len(t, ownerFiles, 1, "the agent-server's owner record must be untouched")
+
+	// Direction 2: the agent-server's sweep leaves a daemon editor running.
+	daemonEditor2 := startOn(mk(""), "daemon-key-2", "daemon-session-2")
+	agentRestarted := newVSCodeSupervisor()
+	agentRestarted.namespace = ns
+	require.NoError(t, agentRestarted.stopAllPersisted())
+	select {
+	case <-agentEditor.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the agent-server's own sweep did not reap its editor, so the test proves nothing")
+	}
+	require.True(t, daemonEditor2.alive(), "an agent-server's sweep reaped the host daemon's editor")
 }
