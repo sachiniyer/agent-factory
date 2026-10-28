@@ -62,6 +62,7 @@ func TestRemoteProjectListKeepsStaleRowsAndReportsDegradedWhenTheTargetFails(t *
 // event loop nothing.
 func TestRemoteHungTargetNeverBlocksTheEventLoop(t *testing.T) {
 	stubRemote(t)
+	t.Setenv("AF_DAEMON_URL", "http://box.example:8443")
 	pp, pt, pto := remoteListProjects, remoteListTasks, remoteReadTimeout
 	t.Cleanup(func() { remoteListProjects, remoteListTasks, remoteReadTimeout = pp, pt, pto })
 	// A hung target: only the caller's context ends the read.
@@ -74,11 +75,11 @@ func TestRemoteHungTargetNeverBlocksTheEventLoop(t *testing.T) {
 	start := time.Now()
 	reads := fetchRemoteReads(context.Background())
 	require.Less(t, time.Since(start), 2*time.Second)
-	require.ErrorContains(t, reads.projectsErr, "did not answer")
-	require.ErrorContains(t, reads.tasksErr, "did not answer")
+	require.ErrorContains(t, reads.projectsErr, "the daemon at http://box.example:8443 did not answer within 100ms")
+	require.ErrorContains(t, reads.tasksErr, "the daemon at http://box.example:8443 did not answer within 100ms")
 
 	// The model's lifetime context also ends the read, well before the deadline.
-	remoteReadTimeout = time.Minute
+	remoteReadTimeout = time.Minute // the owner cancel below, not this, must end the read
 	owner, cancelOwner := context.WithCancel(context.Background())
 	finished := make(chan *remoteReads, 1)
 	go func() { finished <- fetchRemoteReads(owner) }()
@@ -92,14 +93,20 @@ func TestRemoteHungTargetNeverBlocksTheEventLoop(t *testing.T) {
 
 	// Every loop-side consumer reads the cache and never dials, so none can wait
 	// on the target (the stubs above would block until their context ends).
+	//
+	// The cache holds the timeout the poll delivered. The error a consumer returns
+	// from it is that earlier, already-delivered one, handed back at once; the
+	// timing assertion is what proves nothing here waited again.
 	m := &home{repoID: "aaaaaaaaaaaa", repoRoot: "/srv/box/alpha"}
 	m.remote.apply(reads)
+	loopStart := time.Now()
 	_, degraded := m.buildProjectListFrom(nil)
 	require.True(t, degraded)
 	_, err := m.activeTasks(m.repoRoot, m.repoID)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "http://box.example:8443 did not answer", "the poll's timeout, from the cache")
 	_, err = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa")
 	require.NoError(t, err)
+	require.Less(t, time.Since(loopStart), 250*time.Millisecond, "no loop-side call waited on the hung target")
 }
 
 // Every selection entry point resolves through the target's row, not local git.

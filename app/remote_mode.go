@@ -48,6 +48,16 @@ var remoteListTasks = func(ctx context.Context) ([]task.Task, error) {
 	return c.ListTasks(ctx)
 }
 
+// remoteTargetLabel names the target the user configured, so a message about a
+// silent daemon says which one. It falls back to a generic noun rather than
+// printing "the daemon at " with nothing after it.
+func remoteTargetLabel() string {
+	if url := apiclient.RemoteTargetURL(); url != "" {
+		return "the daemon at " + url
+	}
+	return "the target daemon"
+}
+
 // remoteReads is one poll's worth of the target's registry and tasks. It is
 // fetched OFF the event loop (the snapshot poll's tea.Cmd, or the pre-loop
 // launch) and delivered to the loop in snapshotFetchedMsg; nothing on the
@@ -106,7 +116,7 @@ func fetchRemoteReads(parent context.Context) *remoteReads {
 	go func() { defer wg.Done(); out.tasks, out.tasksErr = listTasks(ctx) }()
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
-		unanswered := fmt.Errorf("the daemon at %s did not answer within %s", apiclient.RemoteTargetURL(), remoteReadTimeout)
+		unanswered := fmt.Errorf("%s did not answer within %s", remoteTargetLabel(), remoteReadTimeout)
 		if out.projectsErr != nil {
 			out.projectsErr = unanswered
 		}
