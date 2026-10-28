@@ -514,30 +514,16 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	switch m.remoteSandboxLiveness(inst) {
 	case probeAlive:
 		m.info().Printf("restore of lost session %q (repo %s): restored after 0 attempts; its existing remote sandbox answered alive, so the Lost mark was cleared without re-provisioning", inst.Title, repoID)
-		_ = inst.Transition(session.ObserveLiveness(session.LiveRunning))
-		inst.ClearLostRestoreFailure()
-		inst.ClearLostRestoreWait()
-		// The answered probe is transport evidence: the outage flag retires
-		// with the mark it was explaining (#5571 W1.3).
-		inst.ClearUnreachable()
-		// Clear before the persist, same ordering rule as the recovery path below:
-		// the answered probe already ended the loss episode, and leaving the stale
-		// count in place across a disk write lets a blip in that window re-mark the
-		// very session we just proved alive.
-		m.clearRemoteLoss(stableSessionKey(repoID, inst))
-		m.mu.Lock()
-		delete(m.lostRestoreStates, stateKey)
-		// Deliberately NOT clearing lostRestoreConfirmations here: the flap
-		// history is the bound's only memory of prior restore-die cycles, and a
-		// lucky blip-heal is not an operator intervention — clearing on an
-		// automatic heal would let a flapping session reset its own bound
-		// (#5238). The manual restore.go path is the off-ramp that clears it.
-		m.mu.Unlock()
-		if err := m.persistSettlement(repoID, key, inst); err != nil {
-			m.warn().Printf("restore of lost session %q was confirmed alive but its healed state is not yet durable: %v", inst.Title, err)
-		}
+		m.healLostRemoteRestored(repoID, key, stateKey, inst)
 		return
 	case probeUnknown:
+		// Unreachable, or af holds no handle and the host has not proven the
+		// runtime gone. If the row persisted its runtime identity, try to RE-BIND
+		// it (W1.5) rather than wait: a host that came back heals with no
+		// re-provision (#5571 W1.6).
+		if m.reattachLostRemote(repoID, key, stateKey, inst) {
+			return
+		}
 		m.mu.Lock()
 		logIt := !st.remoteUnknownLogged
 		st.remoteUnknownLogged = true

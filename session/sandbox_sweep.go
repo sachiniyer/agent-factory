@@ -103,6 +103,22 @@ func (r SweepRow) Identity() (dir, ref string) {
 	return "", ""
 }
 
+// cleanupProvisioner rebuilds, with no I/O, the provisioner a persisted row's
+// cleanup handle describes, or nil for a row that is not an ssh/sandbox runtime.
+func cleanupProvisioner(row SweepRow) *sandboxProvisioner {
+	backend, _, err := restoreRuntimeCleanup(row.Title, row.BackendType, row.Cleanup)
+	if err != nil {
+		return nil
+	}
+	switch b := backend.(type) {
+	case *sandboxBackend:
+		return b.provisioner
+	case *sshBackend:
+		return b.provisioner
+	}
+	return nil
+}
+
 // sweepHostState is everything the persisted rows say about one host.
 type sweepHostState struct {
 	label string
@@ -133,18 +149,7 @@ func SweepSandboxOrphans(rows []SweepRow, minAge time.Duration, stillOwned func(
 func sweepHostsOf(rows []SweepRow) []*sweepHostState {
 	hosts := map[string]*sweepHostState{}
 	for _, row := range rows {
-		// No I/O: rebuilds only the cleanup-capable backend from the stored handle.
-		backend, _, err := restoreRuntimeCleanup(row.Title, row.BackendType, row.Cleanup)
-		if err != nil {
-			continue
-		}
-		var prov *sandboxProvisioner
-		switch b := backend.(type) {
-		case *sandboxBackend:
-			prov = b.provisioner
-		case *sshBackend:
-			prov = b.provisioner
-		}
+		prov := cleanupProvisioner(row)
 		if prov == nil || prov.sessionDir == "" || !path.IsAbs(prov.sessionDir) {
 			continue
 		}

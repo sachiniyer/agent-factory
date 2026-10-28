@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -305,7 +306,39 @@ func (m *Manager) remoteSandboxLivenessWithin(instance *session.Instance, timeou
 	if !isRemoteWorkspace(instance) {
 		return probeAbsent // a local session has no remote sandbox to preserve
 	}
-	return aliveWithin(instance.AgentServer(), timeout)
+	return verifiedAbsence(instance, aliveWithin(instance.AgentServer(), timeout), timeout)
+}
+
+// proveRuntimeGoneFn is the positive-evidence probe behind probeAbsent; a package
+// var so a test can place a row on either side of the proof without an ssh host.
+var proveRuntimeGoneFn = func(i *session.Instance, timeout time.Duration) (bool, string) {
+	return i.ProveRuntimeGone(timeout)
+}
+
+// verifiedAbsence is the one place probeAbsent is earned for an ssh/sandbox row
+// (#5571 W1.6). aliveWithin reports probeAbsent for af's clientless "not
+// provisioned" sentinel — but that sentinel means af holds no HANDLE, which is
+// also what a row whose host was unreachable at daemon start looks like, and a
+// missing handle is never evidence that the workspace is gone. The sentinel is
+// therefore upgraded to absence only when the host itself proves it
+// (Instance.ProveRuntimeGone); otherwise it is probeUnknown, which every caller
+// already refuses on and retries. Other probe results pass through unchanged,
+// as do docker/hook rows, whose absence evidence is the container runtime's.
+func verifiedAbsence(instance *session.Instance, p livenessProbe, timeout time.Duration) livenessProbe {
+	if p != probeAbsent || !isRemoteWorkspace(instance) {
+		return p
+	}
+	switch instance.ToInstanceData().BackendType {
+	case "ssh", "sandbox":
+	default:
+		return p
+	}
+	ok, why := proveRuntimeGoneFn(instance, timeout)
+	if ok {
+		return probeAbsent
+	}
+	log.WarningLog.Printf("remote session %q: af holds no handle to its runtime, but its absence is not proven (%s); keeping its work", instance.Title, why)
+	return probeUnknown
 }
 
 // noteRuntimeReplaced retires observations owned by the prior runtime after a
@@ -576,7 +609,7 @@ func probeLivenessForOperator(instance *session.Instance, as session.AgentServer
 // and answers directly.
 func probeLivenessWithin(instance *session.Instance, as session.AgentServer, timeout time.Duration) livenessProbe {
 	if isRemoteWorkspace(instance) {
-		return aliveWithin(as, timeout)
+		return verifiedAbsence(instance, aliveWithin(as, timeout), timeout)
 	}
 	alive, err := as.Alive()
 	if err != nil {
