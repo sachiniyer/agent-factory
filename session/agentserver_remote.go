@@ -622,23 +622,11 @@ func (c *remoteClientlessChannel) Resize(rows, cols uint16) error {
 // the first live byte, mirroring tmux capture-pane. The WS stream carries only
 // future output, so without this a just-opened remote pane would render blank.
 func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
-	snapshot, err := c.rc.preview(c.tab, false)
-	if err != nil {
-		return PaneSnapshot{}, err
-	}
-	// REST Preview carries only the screen, not the cursor position, so the repaint
-	// omits cursor restore for remote panes (HasCursor stays false). It is also
-	// -J-joined (the agent-server's Preview uses CapturePaneContent), NOT the grid form
-	// buildRepaint's per-row positioning wants (#1688) — so a wrapped logical line
-	// re-wraps by the client width here. This is a known screen-only best-effort
-	// limitation of the still-dark remote runtime (no cursor cascade to corrupt, since
-	// HasCursor is false); productizing it needs the agent-server to expose a grid
-	// capture + cursor over REST, mirroring tmuxClientlessChannel.Snapshot.
-	return PaneSnapshot{
-		Screen:   []byte(snapshot.Content),
-		Modes:    snapshot.Modes,
-		HasModes: snapshot.HasModes,
-	}, nil
+	// The grid form (one line per row, no -J) plus cursor and size, so the
+	// repaint lands exactly at any client width (#1688, #5571 W4.2). Against an
+	// agent-server that predates it, previewGrid returns the joined screen only
+	// and the repaint stays the screen-only best effort it was.
+	return c.rc.previewGrid(c.tab)
 }
 
 // activeConn returns the live capture socket and its context, or an error if
@@ -820,9 +808,32 @@ func (c *remoteAgentClient) preview(tab int, full bool) (PreviewSnapshot, error)
 		return PreviewSnapshot{}, err
 	}
 	return PreviewSnapshot{
-		Content:  resp.Content,
-		Modes:    resp.Modes,
-		HasModes: resp.HasModes,
+		Content:         resp.Content,
+		Modes:           resp.Modes,
+		HasModes:        resp.HasModes,
+		LinesAbove:      resp.LinesAbove,
+		LinesAboveKnown: resp.LinesAboveKnown,
+	}, nil
+}
+
+// previewGrid is the repaint capture: the pane as one line per row with its
+// cursor, modes and size (#5571 W4.2). A sandbox that predates the grid answers
+// with the joined Content and no has_grid, and the result is then today's
+// screen-only snapshot — same bytes, no cursor, no size — so an old agent-server
+// degrades instead of failing.
+func (c *remoteAgentClient) previewGrid(tab int) (PaneSnapshot, error) {
+	var resp agentPreviewResp
+	if err := c.call("/v1/agent/preview", agentPreviewReq{Tab: tab, Grid: true}, &resp); err != nil {
+		return PaneSnapshot{}, err
+	}
+	if !resp.HasGrid {
+		return PaneSnapshot{Screen: []byte(resp.Content), Modes: resp.Modes, HasModes: resp.HasModes}, nil
+	}
+	return PaneSnapshot{
+		Screen:    []byte(resp.Grid),
+		CursorRow: resp.CursorRow, CursorCol: resp.CursorCol, HasCursor: resp.HasCursor,
+		Modes: resp.Modes, HasModes: resp.HasModes,
+		Rows: resp.Rows, Cols: resp.Cols, HasSize: resp.HasSize,
 	}, nil
 }
 
@@ -926,12 +937,23 @@ type agentSnapshotResp struct {
 type agentPreviewReq struct {
 	Tab  int  `json:"tab"`
 	Full bool `json:"full"`
+	Grid bool `json:"grid,omitempty"`
 }
 
 type agentPreviewResp struct {
-	Content  string         `json:"content"`
-	Modes    terminal.Modes `json:"terminal_modes,omitempty"`
-	HasModes bool           `json:"has_terminal_modes,omitempty"`
+	Content         string         `json:"content"`
+	Modes           terminal.Modes `json:"terminal_modes,omitempty"`
+	HasModes        bool           `json:"has_terminal_modes,omitempty"`
+	LinesAbove      int            `json:"lines_above,omitempty"`
+	LinesAboveKnown bool           `json:"lines_above_known,omitempty"`
+	HasGrid         bool           `json:"has_grid,omitempty"`
+	Grid            string         `json:"grid,omitempty"`
+	HasCursor       bool           `json:"has_cursor,omitempty"`
+	CursorRow       int            `json:"cursor_row,omitempty"`
+	CursorCol       int            `json:"cursor_col,omitempty"`
+	HasSize         bool           `json:"has_size,omitempty"`
+	Rows            uint16         `json:"rows,omitempty"`
+	Cols            uint16         `json:"cols,omitempty"`
 }
 
 type agentAliveResp struct {

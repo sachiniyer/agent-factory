@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"fmt"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"sync"
 )
 
@@ -198,6 +200,23 @@ func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) 
 		return s.inst.PreviewTabSnapshot(tab, full)
 	}
 	b := s.inst.currentBackend()
+	// A tmux-backed agent tab measures the lines above its visible capture (#3169)
+	// in the same command as the content, so a remote client can tell a complete
+	// capture from a partial one (#5571 W4.2). Fall through to the backend path
+	// on any miss; the count is an enhancement, never a requirement.
+	if !full {
+		s.inst.mu.RLock()
+		ts := s.inst.tmuxLocked()
+		started := s.inst.started
+		s.inst.mu.RUnlock()
+		if ts != nil && started {
+			if content, above, known, cerr := captureVisibleWithCount(ts); cerr == nil {
+				snap := previewSnapshotWithModes(content, ts)
+				snap.LinesAbove, snap.LinesAboveKnown = above, known
+				return snap, nil
+			}
+		}
+	}
 	var (
 		content string
 		err     error
@@ -214,6 +233,25 @@ func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) 
 	ts := s.inst.tmuxLocked()
 	s.inst.mu.RUnlock()
 	return previewSnapshotWithModes(content, ts), nil
+}
+
+// PreviewGrid captures tab `tab`'s pane through the same code the local
+// clientless channel repaints from, so a remote subscriber gets the exact grid,
+// cursor, modes and size a local one does (#5571 W4.2). A tab with no tmux pane
+// has no grid to give.
+func (s *localAgentServer) PreviewGrid(tab int) (PaneSnapshot, error) {
+	s.inst.mu.RLock()
+	var ts *tmux.TmuxSession
+	if tab == 0 {
+		ts = s.inst.tmuxLocked()
+	} else {
+		ts = s.inst.tabTmuxAtLocked(tab)
+	}
+	s.inst.mu.RUnlock()
+	if ts == nil {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab %d: no tmux pane to capture a grid from", s.inst.Title, tab)
+	}
+	return tmuxPaneSnapshot(ts)
 }
 
 // PreviewByID binds directly to the tmux/backend target selected under the
