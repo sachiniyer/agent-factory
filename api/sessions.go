@@ -243,7 +243,7 @@ func whoamiSession(tmuxName string) (*session.InstanceData, error) {
 // caller. Otherwise — operator credential, older daemon — the tmux path is
 // unchanged.
 func resolveSelfSession() (*session.InstanceData, error) {
-	if os.Getenv("AF_DAEMON_TOKEN") != "" {
+	if apiclient.HasDaemonToken() {
 		if row, ok, err := callerSessionFn(); err == nil && ok {
 			return &row, nil
 		}
@@ -444,6 +444,11 @@ pointing at one).`,
 			return jsonError(err)
 		}
 
+		if createHostFlag != "" {
+			if err := requireHostPickSupport(createHostFlag); err != nil {
+				return jsonError(err)
+			}
+		}
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
 			Title:    createTitle,
 			RepoPath: workspace,
@@ -487,6 +492,18 @@ pointing at one).`,
 				// parsing: `--name=-worker` is a valid title, and `af sessions kill
 				// '-worker'` still exits "unknown shorthand flag". The terminator lives in
 				// that helper so no call site has to remember it (#3432).
+				shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, data.Title)))
+		}
+		// The same check for the host pick, on what came BACK: the capability probe
+		// above is the primary guard, but a proxy can route the create to a
+		// different daemon than the one that answered Ping, and a row that does not
+		// carry the picked host was not placed on it.
+		if createHostFlag != "" && data.Host != createHostFlag {
+			return jsonError(fmt.Errorf(
+				"session %q was created but the daemon did not record host %q — it was not placed on that host. "+
+					"The running daemon predates host picks; upgrade it (af daemon restart after an upgrade) and recreate. "+
+					"Remove the misplaced session with `%s`",
+				data.Title, createHostFlag,
 				shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, data.Title)))
 		}
 

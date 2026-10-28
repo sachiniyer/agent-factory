@@ -192,10 +192,23 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		log.WarningLog.Printf("daemon web listener(s): %v", recErr)
 	}
 
+	// The dedicated sandbox callback endpoint (#5571 W3.4). Non-fatal like the
+	// web listeners: a daemon that cannot bind it still serves everything else,
+	// and sandbox creates degrade through the W3.1 path.
+	var sandboxEP *sandboxEndpoint
+	if epPath, pathErr := SandboxEndpointSocketPath(); pathErr != nil {
+		log.WarningLog.Printf("daemon sandbox callback endpoint disabled: %v", pathErr)
+	} else if ep, epErr := startSandboxEndpoint(mux, &manager.sandboxTokens, epPath); epErr != nil {
+		log.WarningLog.Printf("daemon sandbox callback endpoint disabled: %v", epErr)
+	} else {
+		sandboxEP = ep
+	}
+
 	var closeOnce sync.Once
 	var closeErr error
 	return func() error {
 		closeOnce.Do(func() {
+			_ = sandboxEP.close()
 			// Stop route admission before closing the listeners. Close cancels
 			// context-aware calls immediately; the request drain below joins every
 			// already-dispatched ordinary RPC, including context-free archive/kill
