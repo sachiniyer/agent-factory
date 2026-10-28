@@ -42,6 +42,9 @@ type SandboxCredential struct {
 	// URL and Token are injected into the sandbox as AF_DAEMON_URL and
 	// AF_DAEMON_TOKEN. Empty when no credential was granted.
 	URL, Token string
+	// Ref is the opaque reference Token derives from (W3.6); see
+	// ProvisionSpec.CallbackRef.
+	Ref string
 	// Socket is the daemon-side socket the -R forward for URL terminates on
 	// (ProvisionSpec.CallbackSocket).
 	Socket string
@@ -87,6 +90,16 @@ type SandboxCredentials interface {
 	Revoke()
 }
 
+// CallbackRestorer is the optional half of SandboxCredentials a daemon-backed
+// minter implements to survive a restart (#5571 W3.6): RestoreCallback
+// re-registers, for this session, the credential derived from a ref the row
+// persisted, so the sandbox's already-delivered AF_DAEMON_TOKEN keeps working
+// without a re-provision. Optional so a minter that cannot (a test double)
+// simply leaves the callback down.
+type CallbackRestorer interface {
+	RestoreCallback(ref string) error
+}
+
 // mintForProvision fills spec's callback fields for a kind that provisions a
 // sandbox, and returns the credential so the caller can revalidate it after
 // provisioning.
@@ -129,7 +142,7 @@ func mintForProvision(spec *ProvisionSpec, kind BackendKind, creds SandboxCreden
 	if err != nil {
 		return SandboxCredential{UnavailableReason: err.Error()}
 	}
-	spec.CallbackURL, spec.CallbackToken, spec.CallbackSocket = cred.URL, cred.Token, cred.Socket
+	spec.CallbackURL, spec.CallbackToken, spec.CallbackSocket, spec.CallbackRef = cred.URL, cred.Token, cred.Socket, cred.Ref
 	// The runtime must be able to re-check the grant before it commits the env
 	// to the host — the post-provision revalidation the caller runs is already
 	// too late to keep a dead token out of the launched server's environment

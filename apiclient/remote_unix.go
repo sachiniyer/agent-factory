@@ -5,9 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
-	"path/filepath"
-	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/unixurl"
 )
 
 // A unix:///absolute/path target is how an in-sandbox af reaches the daemon
@@ -22,17 +21,15 @@ import (
 // not send its credential anywhere else.
 
 // parseUnixDaemonURL recognises a unix:// target. ok is false for any other
-// scheme, which the caller parses as http/ws.
+// scheme, which the caller parses as http/ws. The socket path is percent-decoded
+// symmetrically with the provisioner's unixurl.Build, so any byte the filesystem
+// allows in the path survives (#5870).
 func parseUnixDaemonURL(daemonURL string) (socket string, ok bool, err error) {
-	u, perr := url.Parse(strings.TrimSpace(daemonURL))
-	if perr != nil || !strings.EqualFold(u.Scheme, "unix") {
-		return "", false, nil
+	socket, ok, err = unixurl.Parse(daemonURL)
+	if err != nil {
+		return "", true, fmt.Errorf("invalid --daemon-url %q: a unix target must be unix:///absolute/clean/path.sock with the path percent-escaped", daemonURL)
 	}
-	path := u.Path
-	if u.Host != "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return "", true, fmt.Errorf("invalid --daemon-url %q: a unix target must be unix:///absolute/clean/path.sock", daemonURL)
-	}
-	return path, true, nil
+	return socket, ok, nil
 }
 
 // newRemoteUnix is NewRemote over a unix socket: bearer token on every call, the

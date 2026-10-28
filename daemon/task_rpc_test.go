@@ -67,6 +67,8 @@ func TestControlAddTask_WritesAndArmsSchedule(t *testing.T) {
 
 	var resp AddTaskResponse
 	require.NoError(t, srv.AddTask(AddTaskRequest{Task: enabledCronTask("bbbb0001", "")}, &resp))
+	require.NotNil(t, resp.Task, "AddTask returns the stored record so a client's cache advances from the daemon's copy")
+	assert.Equal(t, "bbbb0001", resp.Task.ID)
 	assert.True(t, resp.OK)
 
 	tasks, err := task.LoadTasks()
