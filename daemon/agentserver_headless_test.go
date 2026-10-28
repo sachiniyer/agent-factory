@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -349,5 +351,33 @@ func TestHeadlessWorkspaceFactsMissingWorkspace(t *testing.T) {
 	}
 	if facts.Exists {
 		t.Fatalf("a deleted workspace must report Exists=false, got %+v", facts)
+	}
+}
+
+// The kill warning must describe the agent's linked worktree, not the clone root
+// it hangs off (#5796 review).
+func TestHeadlessWorkspaceFactsMeasuresLinkedWorktree(t *testing.T) {
+	root := t.TempDir() // the clone root: deliberately not a git repo
+	wt := t.TempDir()
+	if out, err := exec.Command("git", "-C", wt, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "scratch"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := session.FromInstanceData(session.InstanceData{
+		Title: "linked", Path: root, Status: session.Archived, BackendType: "local",
+		Worktree: session.GitWorktreeData{RepoPath: root, WorktreePath: wt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := &headlessServer{inst: inst}
+	var facts session.WorkspaceFacts
+	if err := hs.WorkspaceFacts(struct{}{}, &facts); err != nil {
+		t.Fatal(err)
+	}
+	if !facts.Exists || facts.DirtyFiles != 1 || len(facts.Unverified) != 0 {
+		t.Fatalf("expected the linked worktree's one untracked file, measured cleanly; got %+v", facts)
 	}
 }

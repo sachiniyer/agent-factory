@@ -67,6 +67,12 @@ var workspaceGitTimeout = 5 * time.Second
 // reads. It is the agent-server's half of WorkspaceFacts.
 func MeasureWorkspace(dir string) WorkspaceFacts {
 	st, err := os.Stat(dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Only confirmed absence may say the workspace is gone: a permission or I/O
+		// failure leaves its contents unknown, and reassuring the user there would
+		// invite a kill over work that may still exist.
+		return WorkspaceFacts{Exists: true, Unverified: []string{"exists"}}
+	}
 	if err != nil || !st.IsDir() {
 		return WorkspaceFacts{}
 	}

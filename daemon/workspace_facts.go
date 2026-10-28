@@ -25,6 +25,18 @@ type WorkspaceFactsResponse struct {
 	Facts    session.WorkspaceFacts `json:"facts"`
 }
 
+// workspaceFactsTarget picks the lookup namespace. An explicit stable ID is
+// resolved as an ID alone: agentServerForStream would read it as a title once a
+// repo scope is present, so a session whose title differs from its ID would never
+// be found, and a stale ID must refuse rather than fall back to a title that now
+// names a different session. Without an ID the repo-scoped title is authoritative.
+func workspaceFactsTarget(req WorkspaceFactsRequest) streamTarget {
+	if req.ID != "" {
+		return streamTarget{stableID: req.ID, idOnly: true}
+	}
+	return authoritativeStreamTarget(req.Title, req.RepoID)
+}
+
 // WorkspaceFacts measures a session's workspace through its agent-server.
 func (s *controlServer) WorkspaceFacts(req WorkspaceFactsRequest, resp *WorkspaceFactsResponse) error {
 	if err := s.requireManagerReady(); err != nil {
@@ -33,11 +45,7 @@ func (s *controlServer) WorkspaceFacts(req WorkspaceFactsRequest, resp *Workspac
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	key := req.ID
-	if key == "" {
-		key = req.Title
-	}
-	_, instance, err := s.manager.agentServerForStream(key, req.RepoID)
+	_, instance, err := s.manager.agentServerForStreamTarget(workspaceFactsTarget(req))
 	if err != nil {
 		return err
 	}

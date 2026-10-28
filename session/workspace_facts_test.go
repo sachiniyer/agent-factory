@@ -25,6 +25,14 @@ func TestMeasureWorkspace(t *testing.T) {
 		assert.Empty(t, f.Unverified)
 	})
 
+	t.Run("an unanswerable stat is unverified, not missing", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "file")
+		require.NoError(t, os.WriteFile(file, nil, 0o644))
+		f := MeasureWorkspace(filepath.Join(file, "child")) // ENOTDIR, not ENOENT
+		assert.True(t, f.Exists)
+		assert.Equal(t, []string{"exists"}, f.Unverified)
+	})
+
 	t.Run("clean repo with a remote", func(t *testing.T) {
 		origin := t.TempDir()
 		wsGit(t, origin, "init", "-q", "--bare")
