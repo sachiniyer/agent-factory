@@ -328,6 +328,24 @@
       "notes": "A credential-bootstrap verb: the web must already HAVE the token to talk to the daemon, so it cannot be where you go to get it. Rotating from the web would sever the rotating client."
     },
     {
+      "id": "daemon.client-target",
+      "title": "Save, show and clear the remote daemon a client targets",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/targetcmd.go"
+      },
+      "verdict": "deliberate",
+      "notes": "Client-side configuration of WHICH daemon to talk to (W9.6): flag, then env, then this saved target. The web is served by the daemon it talks to and has no 'point me elsewhere' knob; the TUI reads the same saved target through apiclient.NewTargeted, so it follows it with no control of its own."
+    },
+    {
       "id": "enum.agent-programs",
       "title": "Offer the full set of agent programs af supports",
       "tui": {
@@ -695,7 +713,7 @@
     },
     {
       "id": "session.create.opt.backend",
-      "title": "Choose the session's backend (local/docker/ssh/hook) per session",
+      "title": "Choose the session's backend (local/docker/ssh/sandbox/hook) per session",
       "tui": {
         "status": "yes",
         "pointer": "keys/keys.go KeySetBackend (ctrl+r) -> app/backend_picker.go openBackendPicker + handleStateSelectBackend -> app/session_control.go sessionStartRequest.Backend"
@@ -706,7 +724,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:242,328 --backend local|docker|ssh|hook"
+        "pointer": "api/sessions.go:242,328 --backend local|docker|ssh|sandbox|hook"
       },
       "verdict": "parity",
       "issue": "#5290",
@@ -1785,6 +1803,9 @@
       "af tasks show": "task.health",
       "af tasks trigger": "task.trigger",
       "af tasks update": "task.edit",
+      "af target clear": "daemon.client-target",
+      "af target set": "daemon.client-target",
+      "af target show": "daemon.client-target",
       "af token rotate": "daemon.token",
       "af token show": "daemon.token",
       "af upgrade": "install.upgrade",
@@ -1962,6 +1983,7 @@
       "af agent-server --branch": "meta.internal",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
+      "af agent-server --policy-file": "meta.internal",
       "af agent-server --program": "meta.internal",
       "af agent-server --program-resolved": "meta.internal",
       "af agent-server --repo": "meta.internal",
@@ -2181,6 +2203,11 @@
       "af tasks update --prompt-file": "task.edit.prompt-file",
       "af tasks update --target-session": "task.edit",
       "af tasks update --watch-cmd": "task.edit",
+      "af target --help": "meta.discovery",
+      "af target clear --help": "meta.discovery",
+      "af target set --help": "meta.discovery",
+      "af target set --token-stdin": "daemon.client-target",
+      "af target show --help": "meta.discovery",
       "af token --help": "meta.discovery",
       "af token rotate --help": "meta.discovery",
       "af token rotate --json": "cli.json-envelope",
@@ -2463,6 +2490,9 @@
           "task.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
           },
+          "task.host": {
+            "gap": "task.host"
+          },
           "task.repo_id": {
             "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
           }
@@ -2496,6 +2526,9 @@
           },
           "update.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
+          },
+          "update.host": {
+            "gap": "task.host"
           },
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
@@ -2693,6 +2726,9 @@
         },
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
+        },
+        "update.host": {
+          "gap": "task.host"
         }
       },
       "AddTask": {
@@ -2752,6 +2788,9 @@
         },
         "task.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
+        },
+        "task.host": {
+          "gap": "task.host"
         },
         "task.repo_id": {
           "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."

@@ -59,6 +59,11 @@ type Manager struct {
 	// side to fail on.
 	sandboxTokens sandboxTokenRegistry
 
+	// sandboxEndpointSocket is the live dedicated sandbox callback endpoint's
+	// socket path (#5571 W3.4); nil or empty while it is not listening. The mint
+	// reads it instead of the client listener's address and auth posture.
+	sandboxEndpointSocket atomic.Pointer[string]
+
 	// previewSecret is the HMAC key from which the web-tab PREVIEW listener derives
 	// a PER-TAB credential (#1856 step 3): the origin label for (sessionID, tabID) is
 	// previewTabHostLabel(previewSecret, sid, tid). It is minted once, in memory, at

@@ -212,3 +212,125 @@ func routedCreateSession(req daemon.CreateSessionRequest) (*session.InstanceData
 	data, err := c.CreateSession(req)
 	return data, remoteMutationError("create", err)
 }
+
+// W9.3: tab and project verbs follow the target. Same rules as the lifecycle
+// verbs above: a remote target never falls back to the local socket or spawns a
+// local daemon, and an uncertain mutation outcome is reported, not re-sent.
+
+func routedCreateTab(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.CreateTab(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return daemon.CreateTabResponse{}, err
+	}
+	defer c.CloseIdleConnections()
+	resp, err := c.CreateTab(req)
+	return resp, remoteMutationError("tab-create", err)
+}
+
+func routedCloseTab(req daemon.CloseTabRequest) (string, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.CloseTab(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return "", err
+	}
+	defer c.CloseIdleConnections()
+	name, err := c.CloseTab(req)
+	return name, remoteMutationError("tab-delete", err)
+}
+
+func routedRenameTab(req daemon.RenameTabRequest) (string, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.RenameTab(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return "", err
+	}
+	defer c.CloseIdleConnections()
+	name, err := c.RenameTab(req)
+	return name, remoteMutationError("tab-rename", err)
+}
+
+func routedReorderTab(req daemon.ReorderTabRequest) (string, int, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.ReorderTab(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return "", 0, err
+	}
+	defer c.CloseIdleConnections()
+	resp, err := c.ReorderTab(req)
+	return resp.Name, resp.Index, remoteMutationError("tab-reorder", err)
+}
+
+func routedRegisterProject(req daemon.RegisterProjectRequest) (config.Project, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.RegisterProject(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return config.Project{}, err
+	}
+	defer c.CloseIdleConnections()
+	p, err := c.RegisterProject(req.Path)
+	return p, remoteMutationError("projects add", err)
+}
+
+func routedRebindProject(req daemon.RebindProjectRequest) (config.Project, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.RebindProject(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return config.Project{}, err
+	}
+	defer c.CloseIdleConnections()
+	p, err := c.RebindProject(req.ID, req.ExpectedRoot, req.ExpectedCheckoutID, req.Path)
+	return p, remoteMutationError("projects rebind", err)
+}
+
+func routedDeleteProject(req daemon.DeleteProjectRequest) (daemon.DeleteProjectResponse, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.DeleteProject(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return daemon.DeleteProjectResponse{}, err
+	}
+	defer c.CloseIdleConnections()
+	resp, err := c.DeleteProject(req)
+	return resp, remoteMutationError("projects delete", err)
+}
+
+// routedListProjects reads the registry of whichever daemon is targeted. A
+// remote read has no local fallback: this machine's registry would answer a
+// question about the daemon's host.
+func routedListProjects() ([]config.Project, error) {
+	if !apiclient.IsRemoteTarget() {
+		return config.ListProjects()
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return nil, err
+	}
+	defer c.CloseIdleConnections()
+	return c.ListProjects()
+}
+
+// remoteProjectPath validates a project path for a remote target. It is sent AS
+// TYPED: resolving it here would expand ~ against the caller's home and make a
+// relative path absolute against a directory the daemon cannot see. A relative
+// path is refused, since the daemon has no working directory of ours to resolve
+// it against (it refuses the same, so a value that passes here is what it gets).
+func remoteProjectPath(raw string) (string, error) {
+	if _, err := config.ResolveDaemonHostPath(raw); err != nil {
+		return "", fmt.Errorf("against the daemon at %s: %w", apiclient.RemoteTargetURL(), err)
+	}
+	return raw, nil
+}

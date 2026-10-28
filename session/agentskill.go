@@ -342,13 +342,11 @@ func ensureDevinSkillDir() (string, error) {
 // cannot use, and --read is a per-instance seam, so the variant lands here.
 var aiderReadDoc = "<!-- " + afSkillMarker + " -->\n\n" + afUsageReference + "\n"
 
-var aiderReadDocCallbackless = "<!-- " + afSkillMarker + " -->\n\n" + afUsageReferenceCallbackless + "\n"
-
-func aiderReadDocFor(callbackUnavailable bool) string {
-	if callbackUnavailable {
-		return aiderReadDocCallbackless
+func aiderReadDocFor(caps guidanceCaps) string {
+	if caps == fullGuidanceCaps {
+		return aiderReadDoc
 	}
-	return aiderReadDoc
+	return "<!-- " + afSkillMarker + " -->\n\n" + caps.Reference() + "\n"
 }
 
 // aiderReadFilePath returns the path of the af-owned aider context file, under the
@@ -361,14 +359,14 @@ func aiderReadDocFor(callbackUnavailable bool) string {
 // two variants at one path flap — a later launch could overwrite the file an
 // earlier session then reads, teaching a working session that af is dead or a
 // callbackless one verbs that fail (#5571 W3.1, PR #5577 review).
-func aiderReadFilePath(callbackUnavailable bool) (string, error) {
+func aiderReadFilePath(caps guidanceCaps) (string, error) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
 	}
 	name := "af-skill.md"
-	if callbackUnavailable {
-		name = "af-skill-callbackless.md"
+	if key := caps.key(); key != "" {
+		name = "af-skill-" + key + ".md"
 	}
 	return filepath.Join(configDir, "aider", name), nil
 }
@@ -378,12 +376,12 @@ func aiderReadFilePath(callbackUnavailable bool) (string, error) {
 // file exists but is NOT af-managed — the caller must then skip injecting --read
 // rather than point it at a file we do not own. A non-af file at our own path is
 // nearly impossible (af owns the dir), but the marker guard is honored uniformly.
-func ensureAiderReadFile(callbackUnavailable bool) (string, error) {
-	path, err := aiderReadFilePath(callbackUnavailable)
+func ensureAiderReadFile(caps guidanceCaps) (string, error) {
+	path, err := aiderReadFilePath(caps)
 	if err != nil {
 		return "", err
 	}
-	wrote, err := writeAfMarkedFile(path, aiderReadDocFor(callbackUnavailable))
+	wrote, err := writeAfMarkedFile(path, aiderReadDocFor(caps))
 	if err != nil {
 		return "", err
 	}

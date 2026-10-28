@@ -417,9 +417,16 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 2. It creates a fresh per-session directory under `~/.af-sessions` on the remote
    (or under the picked host's `workspace_root`, see [configuration.md](configuration.md))
    and clones the repo (from the repo's `origin` remote) into `workspace/` there.
-3. It streams the `af` binary onto the remote and starts an **`af agent-server`**
-   bound to `127.0.0.1:0` (a random loopback port — never exposed on the remote's
-   public interface), behind the same bearer-token protocol (plain HTTP).
+3. It probes the remote's platform (`uname -s`/`uname -m`), picks an `af` binary
+   the host can run — `sandbox.binary` if set, else the daemon's own binary on a
+   matching platform, else the sha256-verified release artifact for the remote's
+   platform — and installs it under `~/.af-bin/` (a per-host cache the
+   next sessions reuse when the cached file's sha256 still matches). It then runs
+   `af version` **on the remote** and refuses to launch unless the staged binary
+   reports the daemon's own version. Only then does it start an
+   **`af agent-server`** bound to `127.0.0.1:0` (a random loopback port — never
+   exposed on the remote's public interface), behind the same bearer-token
+   protocol (plain HTTP).
 
    The bearer token is **per-session**: the daemon derives it from a 0600
    `sandbox-runtime-key` in its own AF home plus a per-session nonce, and writes
@@ -629,10 +636,13 @@ inherit it. A local token is never copied to the SSH host implicitly.
 - An SSH server you can log into with a key, permitting **TCP forwarding**
   (`AllowTcpForwarding yes` — the default on most distros; the runtime reaches the
   remote agent-server through an SSH local-forward tunnel).
-- `git`, `tmux`, `sh`, and a libc/architecture compatible with the daemon's `af`
-  binary (a **static** `af` build, `CGO_ENABLED=0`, runs on any base). The `af`
-  binary is streamed onto the remote for you — always version-matched to the
-  daemon, so there is nothing to pre-install.
+- `git`, `tmux`, `sh`, and a platform af ships a binary for (Linux/Darwin on
+  amd64/arm64; the linux release artifact streamed to a host is a separate
+  static `CGO_ENABLED=0` build, so the host's libc is not a constraint there). The `af` binary is installed onto the remote for you — the
+  daemon's own build on a same-platform host, the matching release artifact
+  (`agent-factory-linux-<arch>-static` on linux) otherwise, always version-checked against the daemon — so there is nothing to
+  pre-install. For an air-gapped or unbuilt-platform host set the global
+  `sandbox.binary` key to a daemon-local `af` build for that host.
 - The agent CLIs you intend to run (claude, codex, aider, gemini, …).
 - The repo must have an `origin` remote the **remote host** can clone from
   (GitHub for a real repo; a `file://` path for a self-contained test).
@@ -674,7 +684,10 @@ in your terminal, including a jump host, a `ProxyCommand`, a bastion, or any fla
 cleanup steps over it. Your `ssh_config`, `known_hosts`, and host-key posture are
 the whole authority here; af adds none of its own. It is global-only and
 operator-owned, because af **executes** it on the daemon host (see
-[Configuration](configuration.md)).
+[Configuration](configuration.md)). The remote `af` binary is staged exactly as
+the `ssh` backend stages it — platform-probed, cached under
+`~/.af-bin/`, sha256- and version-verified — and the same global-only
+`sandbox.binary` override applies.
 
 > **Known limitation: af cannot pin a `sandbox.ssh` target to one machine.**
 > af runs a separate invocation of your command for each step — the setup
@@ -702,7 +715,20 @@ operator-owned, because af **executes** it on the daemon host (see
 >   making the address the destination: that forces a `HostKeyAlias`, and no alias
 >   value satisfies both a plain `[name]:port` entry and a certificate principal.
 >
-> Tracked in #3086, which is deliberately left open for this half.
+> The `sandbox.ssh` half was closed as won't-fix in #3086 (2026-08-11): af cannot
+> know which word of your command is the host, so the two workarounds above are
+> the supported answer.
+
+### Operator config on the sandbox
+
+The daemon resolves your policy once and writes it to `af-policy.json` beside the
+session (docker: `/tmp/af-policy.json`); the sandbox's `af agent-server` reads that
+file and nothing else. It never reads or creates `~/.agent-factory/config.toml` on
+the host. The file carries `global_agent_skills`, `worktree_root`, `branch_prefix`,
+`session_env_passthrough`, the program overrides you wrote, and the repo's
+`post_worktree_commands` as the daemon sees them — uncommitted `.agent-factory`
+edits and hooks saved in the TUI included. It never carries `sandbox.ssh`, `hosts`,
+`move_cmd` or accounts.
 
 ---
 
@@ -808,14 +834,54 @@ capabilities — `Archive` and `Recover` are both supported. All four are declar
 off-box in one place (`backendProvisionsOffBox`), and all four share a single
 capability declaration, so none of them can differ from the others here without
 that being a deliberate change. Parity is not total: they declare
-`TabManagement` and `Handoff` off, which is why an off-box session carries only
+`TabManagement` off (and `Handoff`, which an ssh or sandbox session's agent-server lifts when it advertises `agent-swap`), which is why an off-box session carries only
 its agent tab plus any external HTTPS web tabs (the one metadata-only kind
 admitted off-box). A **Lost** sandbox session (one whose
-sandbox answered that its agent is gone) is reachable, so recovery pushes its
-work to `origin` before replacing it (anything unpushed would be destroyed by
+sandbox answered that its agent is gone) is reachable, so recovery **relaunches
+the agent in place**: the sandbox's agent-server stops the agent (if it is still
+running) and starts it again in its existing workspace with the provider's resume.
+The branch, the tree and any uncommitted work are untouched, and nothing is pushed,
+reaped, re-cloned or re-provisioned. The same relaunch serves `retry-limit` on a
+dead agent. A sandbox built before the relaunch route existed (it advertises the
+`relaunch` feature on `/v1/health`) falls back to replacing the sandbox: recovery
+then pushes its work to `origin` first (anything unpushed would be destroyed by
 the re-clone) — and refuses to replace if that push fails. Unreachability alone
 is not death — it does not mark a sandbox Lost, and restore refuses to replace a
 sandbox it cannot reach.
+
+### Host requirements, credentials and restarts
+
+What the sandbox host needs, and what af does to it:
+
+- **Tools.** `git`, `tmux` and a POSIX `sh` on the
+  non-interactive `PATH` of the ssh login (af sends its provisioning scripts as
+  one ssh argument that the remote login shell parses). The static `af` binary
+  af copies over also has to run there: see the glibc rule under
+  [Docker](#docker-backend) for the dynamic build.
+- **Git identity is rewritten.** Provisioning runs `git config --global`
+  on the host to set `user.name` "Agent Factory" and `user.email`
+  `af@agent-factory.local`, and adds `safe.directory "*"`. That is the host
+  user's global git config, so point `sandbox.ssh` at a user whose global git
+  identity you do not mind changing.
+- **Credentials.** The clone uses value-free GitHub credentials: no token value is
+  written into the clone's config. The per-session agent-server token goes
+  through stdin into a `0600` file in the session directory, never through argv
+  or the environment of a process the agent starts.
+- **Callback credential.** For the agent inside the sandbox to call back into
+  the daemon (`AF_DAEMON_URL`/`AF_DAEMON_TOKEN`), the daemon needs
+  `network.require_token = true` and a `network.listen_addr` that is a literal,
+  non-loopback IP the sandbox can reach, with a listener actually accepting on it.
+  When that is not the case the create is **not** refused: the session is created
+  without a callback credential and the reason is reported (`callback_unavailable_reason`
+  in the backend picker). Only the `/v1/Snapshot` route is admitted for this
+  credential, answering with the caller's own session.
+- **Daemon restart.** The agent-server is started with `nohup`, so it
+  outlives a daemon restart on the host, and on start the daemon reattaches
+  to it: it re-dials the tunnel and rebinds the same agent-server, with no
+  re-provision. A row that cannot be reattached (no persisted runtime identity,
+  or the agent-server is gone) stays Lost, and recovery pushes its work to
+  `origin`, then re-provisions a fresh sandbox from the branch. An unreachable
+  host alone is not death and never triggers that replacement.
 
 ### What survives, and what doesn't
 
