@@ -683,7 +683,7 @@ A create always re-checks the host live.
 ### Operations
 
 - **Find a session's remote files:** they live under `~/.af-sessions/<title>.XXXXXX`
-  on `ssh.host`.
+  on `ssh.host` (or under the picked host's `workspace_root` if set).
 - **Reap a leaked session** (should never be needed — kill reaps automatically):
   `ssh <host> 'pkill -f "agent-server --listen"; rm -rf ~/.af-sessions/<dir>'`.
 
