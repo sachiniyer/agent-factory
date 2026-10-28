@@ -409,13 +409,20 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 
 	// A persisted row that owns any of the discovered identities makes them
 	// foreign — someone's real session, restored row, or archive holds this
-	// title, worktree path, or branch. The adoption scan above already claimed
-	// everything that is this attempt's own, so a match here means the residue
-	// is not ours to reap OR quarantine; a fresh create mints a new suffix
-	// around it.
+	// title, sanitized tmux name, worktree path, or branch. This function
+	// reaps, probes, and kills by the sanitized tmux name, and that sanitizer
+	// collapses distinct titles onto one name (e.g. "api/refactor" and
+	// "api_refactor" both map to af_<repoHash>_api_refactor while branch
+	// sanitization keeps '/' distinct), so a row owning that name is foreign
+	// exactly as for title/branch/path — leaving it alone prevents the kill
+	// path from destroying an unrelated live session. The adoption scan above
+	// already claimed everything that is this attempt's own, so a match here
+	// means the residue is not ours to reap OR quarantine; a fresh create
+	// mints a new suffix around it.
 	for i := range rows {
 		d := &rows[i]
 		if d.Title == fire.Title ||
+			(sanitized != "" && (d.TmuxName == sanitized || d.Worktree.SessionName == sanitized)) ||
 			(wtPath != "" && d.Worktree.WorktreePath == wtPath) ||
 			(branch != "" && (d.Branch == branch || d.Worktree.BranchName == branch)) {
 			return nil, nil
