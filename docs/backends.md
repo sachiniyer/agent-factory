@@ -410,9 +410,16 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 2. It creates a fresh per-session directory under `~/.af-sessions` on the remote
    (or under the picked host's `workspace_root`, see [configuration.md](configuration.md))
    and clones the repo (from the repo's `origin` remote) into `workspace/` there.
-3. It streams the `af` binary onto the remote and starts an **`af agent-server`**
-   bound to `127.0.0.1:0` (a random loopback port — never exposed on the remote's
-   public interface), behind the same bearer-token protocol (plain HTTP).
+3. It probes the remote's platform (`uname -s`/`uname -m`), picks an `af` binary
+   the host can run — `sandbox.binary` if set, else the daemon's own binary on a
+   matching platform, else the sha256-verified release artifact for the remote's
+   platform — and installs it under `~/.af-bin/` (a per-host cache the
+   next sessions reuse when the cached file's sha256 still matches). It then runs
+   `af version` **on the remote** and refuses to launch unless the staged binary
+   reports the daemon's own version. Only then does it start an
+   **`af agent-server`** bound to `127.0.0.1:0` (a random loopback port — never
+   exposed on the remote's public interface), behind the same bearer-token
+   protocol (plain HTTP).
 
    The bearer token is **per-session**: the daemon derives it from a 0600
    `sandbox-runtime-key` in its own AF home plus a per-session nonce, and writes
@@ -622,10 +629,13 @@ inherit it. A local token is never copied to the SSH host implicitly.
 - An SSH server you can log into with a key, permitting **TCP forwarding**
   (`AllowTcpForwarding yes` — the default on most distros; the runtime reaches the
   remote agent-server through an SSH local-forward tunnel).
-- `git`, `tmux`, `sh`, and a libc/architecture compatible with the daemon's `af`
-  binary (a **static** `af` build, `CGO_ENABLED=0`, runs on any base). The `af`
-  binary is streamed onto the remote for you — always version-matched to the
-  daemon, so there is nothing to pre-install.
+- `git`, `tmux`, `sh`, and a platform af ships a binary for (Linux/Darwin on
+  amd64/arm64; the linux release artifact streamed to a host is a separate
+  static `CGO_ENABLED=0` build, so the host's libc is not a constraint there). The `af` binary is installed onto the remote for you — the
+  daemon's own build on a same-platform host, the matching release artifact
+  (`agent-factory-linux-<arch>-static` on linux) otherwise, always version-checked against the daemon — so there is nothing to
+  pre-install. For an air-gapped or unbuilt-platform host set the global
+  `sandbox.binary` key to a daemon-local `af` build for that host.
 - The agent CLIs you intend to run (claude, codex, aider, gemini, …).
 - The repo must have an `origin` remote the **remote host** can clone from
   (GitHub for a real repo; a `file://` path for a self-contained test).
@@ -667,7 +677,10 @@ in your terminal, including a jump host, a `ProxyCommand`, a bastion, or any fla
 cleanup steps over it. Your `ssh_config`, `known_hosts`, and host-key posture are
 the whole authority here; af adds none of its own. It is global-only and
 operator-owned, because af **executes** it on the daemon host (see
-[Configuration](configuration.md)).
+[Configuration](configuration.md)). The remote `af` binary is staged exactly as
+the `ssh` backend stages it — platform-probed, cached under
+`~/.af-bin/`, sha256- and version-verified — and the same global-only
+`sandbox.binary` override applies.
 
 > **Known limitation: af cannot pin a `sandbox.ssh` target to one machine.**
 > af runs a separate invocation of your command for each step — the setup

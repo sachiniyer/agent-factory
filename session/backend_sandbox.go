@@ -94,6 +94,10 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		// auto-detected daemon path, which the sandbox's filesystem does not
 		// have. The agent-server resolves it on the host's login PATH (#5571).
 		program: remoteProgramForHost(cfg, spec.Program),
+		// sandbox.binary is the operator's daemon-local override for air-gapped
+		// or unbuilt hosts (#5571 W2.2) — global-only config, so it can never be
+		// repo-supplied.
+		sandboxBinary: strings.TrimSpace(cfg.Config.SandboxBinary),
 	}
 	res, err := p.provision()
 	if err != nil {
@@ -110,6 +114,10 @@ type sandboxProvisioner struct {
 	sshCmd  string
 	afBin   string
 	program string
+	// sandboxBinary is the operator's sandbox.binary override — a daemon-local
+	// af build to stream instead of the daemon's own binary or a release
+	// fetch (#5571 W2.2). Empty in production means "platform selection".
+	sandboxBinary string
 	// backendLabel is the name the OWNING backend puts on this transport's errors.
 	// Empty means "sandbox". Since #3052 `backend = "ssh"` provisions through this
 	// same type, and an auth, host-key, clone, tunnel or cleanup failure reported
@@ -209,17 +217,13 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
-	binary, err := os.Open(p.afBin)
-	if err != nil {
-		return ProvisionResult{}, fmt.Errorf("backend=%s: opening the af binary %q to stream to the sandbox failed: %w", p.label(), p.afBin, err)
-	}
-	copyErr := w.copyAfBinary(sshProvisionStepTimeout, binary)
-	_ = binary.Close()
-	if copyErr != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(copyErr)
-	}
-	if err := p.verifyCopiedBinary(); err != nil {
-		return ProvisionResult{}, err
+	// The binary stage is platform-aware (#5571 W2.2): probe the host's uname,
+	// pick the af build it can actually run (sandbox.binary override / the
+	// daemon's own binary / a sha256-verified release artifact), install it
+	// into the host's shared cache, and run `af version` on the host before
+	// any agent-server launch is attempted.
+	if err := p.stageRemoteBinary(w); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	// Mint the session's runtime identity BEFORE the agent-server launches
 	// (#5571 W1.1): the derived token reaches it only through the 0600 file
@@ -430,9 +434,10 @@ func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string,
 	// much later somewhere unrelated. That reasoning holds ONLY while nothing else
 	// catches a truncated copy.
 	//
-	// Two things make bounding the right call here instead. verifyCopiedBinary now
-	// compares the byte count ON the sandbox, so a truncated copy fails AT the copy
-	// rather than silently. And a zero WaitDelay is not neutral: os/exec documents
+	// Two things make bounding the right call here instead. installRemoteBinary
+	// now compares the sha256 ON the sandbox (#5571 W2.2), so a truncated copy
+	// fails AT the copy rather than silently. And a zero WaitDelay is not neutral:
+	// os/exec documents
 	// that it makes Wait block until every orphaned descriptor-holder closes, which
 	// for this backend is precisely the ProxyCommand/wrapper it exists to support —
 	// so the copy's advertised timeout would not bound provisioning at all.
@@ -442,32 +447,6 @@ func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string,
 	// partial result the kill leaves behind.
 	cmd.WaitDelay = sandboxTunnelWaitDelay
 	return cmd
-}
-
-// verifyCopiedBinary re-checks the streamed `af` ON THE SANDBOX, because the
-// copy's failure mode is silent. A short write, a cut stream, or a full disk all
-// leave a binary that exists and is executable but is not the one we sent; the
-// next step would then fail with "exec format error" or a version mismatch far
-// from the cause. Comparing the byte count against the local file turns that
-// into an error naming the copy.
-func (p *sandboxProvisioner) verifyCopiedBinary() error {
-	local, err := os.Stat(p.afBin)
-	if err != nil {
-		return fmt.Errorf("backend=%s: cannot stat the local af binary %q: %w", p.label(), p.afBin, err)
-	}
-	remotePath := p.sessionDir + "/" + sshAfBinaryName
-	out, err := p.Run(sshShortStepTimeout, "wc -c < "+shellQuote(remotePath), nil, false)
-	if err != nil {
-		return fmt.Errorf("backend=%s: cannot verify the streamed af binary on the sandbox: %w", p.label(), err)
-	}
-	got := strings.TrimSpace(string(out))
-	want := fmt.Sprintf("%d", local.Size())
-	if got != want {
-		return fmt.Errorf("backend=%s: the af binary streamed to %s is %s bytes but the local one is %s — "+
-			"the copy was truncated, so the sandbox holds a binary that would fail later with an unrelated error; "+
-			"retry the session", p.label(), remotePath, got, want)
-	}
-	return nil
 }
 
 // startTunnel runs `<sandbox_ssh> -N -L <local>:<remote>` as a long-lived child.
