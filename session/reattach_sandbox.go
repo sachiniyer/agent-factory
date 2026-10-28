@@ -69,6 +69,11 @@ func (i *Instance) ReattachSandbox() error {
 	if p.startTunnelFn != nil {
 		localAddr, err = p.startTunnelFn(p.remoteAddr)
 	} else {
+		// The old connection died with the daemon; a socket its sshd left behind
+		// would fail the -R bind (ExitOnForwardFailure) for good.
+		if p.callbackForwardPersisted() {
+			p.clearStaleCallbackSocket()
+		}
 		var withCallback bool
 		localAddr, withCallback, err = p.openTunnelForReattach()
 		if err == nil && !withCallback && p.callbackForwardPersisted() && callbackLost == "" {
@@ -168,6 +173,11 @@ func (p *sandboxProvisioner) restoreCallbackIdentity(ref, reverse string) {
 	}
 	p.reapMu.Lock()
 	p.callbackRef, p.reverseFwds = ref, []string{reverse}
+	// The carrier is a socket inside the session's own directory; remembering it
+	// lets the first dial and every re-dial clear one a killed sshd left behind.
+	if p.sessionDir != "" {
+		p.callbackSocket = p.sessionDir + "/" + sandboxCallbackSocketName
+	}
 	p.reapMu.Unlock()
 }
 

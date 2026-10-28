@@ -51,7 +51,6 @@ func (c *sandboxCredentials) Mint() (session.SandboxCredential, error) {
 	}
 	registry := &c.manager.sandboxTokens
 	return session.SandboxCredential{
-		URL:    grant.URL,
 		Token:  grant.Token,
 		Ref:    grant.Ref,
 		Socket: grant.Socket,
@@ -63,7 +62,7 @@ func (c *sandboxCredentials) Mint() (session.SandboxCredential, error) {
 			if grant.stillValid(registry) {
 				return nil
 			}
-			return errSandboxCallbackInvalidated(grant.URL)
+			return errSandboxCallbackInvalidated(grant.Socket)
 		},
 	}, nil
 }

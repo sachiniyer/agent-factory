@@ -396,6 +396,9 @@ type Instance struct {
 	// runtime cleanup handle, which a teardown clears: restore and recovery
 	// re-provision from this so a pick never silently moves to another machine.
 	Host string `json:"host,omitempty"`
+	// archivedWorkspace records where this archived off-box session's work lives
+	// (#5571 W8.5); nil for a live row or one archived before the field.
+	archivedWorkspace *ArchivedWorkspaceData
 	// accountAgent is the agent namespace Account was selected in. It must be
 	// durable rather than re-derived at refresh time: a program_overrides edit
 	// after the pin can resolve the recorded Program to a different agent's
@@ -454,6 +457,17 @@ type Instance struct {
 	// the resolved command can actually express it, and the conversation the
 	// session ends up with is whatever the launch plan committed to Tabs[0].
 	carriedConversation AgentConversationData
+
+	// reportedConversation is the last conversation a remote agent-server reported
+	// (RecordReportedConversation), held until the daemon-side agent tab exists to
+	// carry it. Guarded by mu.
+	reportedConversation AgentConversationData
+	// conversationUnpersisted is set when a remote agent-server reported a
+	// conversation identity that changed the row and the change has not yet been
+	// durably written (#5826). The daemon's poll persistence reads it as a
+	// durable change of its own and clears it only after the write succeeds, so
+	// a failed write is retried on the next tick. Guarded by mu.
+	conversationUnpersisted bool
 
 	// carriedTabs is the tab roster a PREVIOUS record held, to be rebuilt onto
 	// this instance once its agent tab is live (#2628). It has the same single

@@ -128,12 +128,21 @@ type ProvisionSpec struct {
 	// Only off-box runtimes (docker/ssh/hook) honor it; the in-process local
 	// runtime never clones, so it is a no-op there.
 	RestoreBranch string
+	// GitUserName and GitUserEmail are the operator's committer identity on the
+	// daemon host, written into the off-box workspace's repo-local git config
+	// (#5571 W2.7). Empty falls back to a placeholder identity.
+	GitUserName  string
+	GitUserEmail string
 	// Branch is the git branch the daemon named for this session (its frozen
 	// branch_prefix over the title). Off-box runtimes hand it to the
 	// agent-server so the in-sandbox worktree uses exactly this name instead of
 	// re-deriving it from the host's own config, and the instance records it at
 	// create (#5571 W2.4). Empty leaves the agent-server to derive it.
 	Branch string
+	// AgentPolicy is the daemon-resolved operator policy (config.AgentPolicy as
+	// JSON) the runtime writes beside the session for the agent-server to read
+	// instead of its own host's config (#5571 W2.5). Empty means none.
+	AgentPolicy []byte
 	// SeedBundlePath, when set, seeds the sandbox workspace from a local git
 	// bundle (a W7.9 session move) instead of only a fresh clone: after cloning,
 	// the bundle is streamed to the sandbox and SeedRefs are fetched from it as
@@ -151,6 +160,12 @@ type ProvisionSpec struct {
 	// container's `af` would look up an account that does not exist in it — so an
 	// off-box backend has to carry the resolved DIRECTORY and place it itself.
 	Account sessionenv.Account
+	// AccountSyncHost is the name of the LISTED host (global host list, W6.1) this
+	// provision may send Account's credentials to (#5571 W7.3). It is the only
+	// licence: set by the ssh runtime when the host resolved to a host-list entry,
+	// never from a repository's own config. Empty with a non-empty Account means
+	// the target is not licensed and the provision refuses rather than send.
+	AccountSyncHost string
 	// SessionEnvPassthrough contains exact global-only variable names approved
 	// for the agent. Sandboxed runtimes pass names, never values, to their
 	// version-matched agent-server.

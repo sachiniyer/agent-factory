@@ -156,6 +156,9 @@ func (i *Instance) recordArchivePush(branch string) {
 	defer i.mu.Unlock()
 	changed := i.Branch != branch
 	i.Branch = branch
+	// A push archive publishes the branch and reaps the host directory, so the
+	// work now lives on origin (#5571 W8.5).
+	i.archivedWorkspace = &ArchivedWorkspaceData{Host: i.Host, Pushed: true, Branch: branch}
 	if branch != "" && !i.archivePushCompleted {
 		i.archivePushCompleted = true
 		changed = true
@@ -226,6 +229,12 @@ func recoverSandbox(i *Instance) error {
 // branch, so the new sandbox clones the pushed state back; on success the new
 // backend + remote agent-server endpoint + teardown replace the old (dead) ones.
 func (i *Instance) reprovisionRemote() error {
+	// Backstop for every route that re-provisions (restore, Lost recovery, the
+	// restore loop): replacing the runtime reaps its host directory, which for a row
+	// archived without a push is the only copy of the work (#5571 W8.5).
+	if err := i.RestoreRefusedForPreservedWorkspace(); err != nil {
+		return err
+	}
 	// Bound the hook's lifetime to this attempt: clear it on every exit so a
 	// hook registered for this call cannot survive to fire on a later call.
 	// After a successful reap (below) the hook is already taken and fired, so
@@ -251,9 +260,15 @@ func (i *Instance) reprovisionRemote() error {
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 	}
 	i.mu.RUnlock()
+	spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(spec.RepoRoot)
 	if backend == nil {
 		return fmt.Errorf("cannot re-provision session %q: no backend on record", i.Title)
 	}
+	policy, perr := agentPolicyFor(spec.RepoRoot, nil)
+	if perr != nil {
+		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, perr)
+	}
+	spec.AgentPolicy = policy
 	kind, err := backendKindForType(backend.Type())
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)

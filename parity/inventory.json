@@ -328,6 +328,24 @@
       "notes": "A credential-bootstrap verb: the web must already HAVE the token to talk to the daemon, so it cannot be where you go to get it. Rotating from the web would sever the rotating client."
     },
     {
+      "id": "daemon.client-target",
+      "title": "Save, show and clear the remote daemon a client targets",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/targetcmd.go"
+      },
+      "verdict": "deliberate",
+      "notes": "Client-side configuration of WHICH daemon to talk to (W9.6): flag, then env, then this saved target. The web is served by the daemon it talks to and has no 'point me elsewhere' knob; the TUI reads the same saved target through apiclient.NewTargeted, so it follows it with no control of its own."
+    },
+    {
       "id": "enum.agent-programs",
       "title": "Offer the full set of agent programs af supports",
       "tui": {
@@ -362,6 +380,44 @@
       },
       "verdict": "deliberate",
       "notes": "Collects host-side logs and redacted state; must work when af is too broken to render a UI."
+    },
+    {
+      "id": "host.manage",
+      "title": "Add, list, check and remove sandbox hosts in one command",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/hostscmd.go af hosts add|list|check|remove: add writes the W6.1 entry through the admission-gated `config set hosts` path, then runs daemon.CheckHost and prints each missing tool with its fix"
+      },
+      "verdict": "real-gap",
+      "issue": "#5571",
+      "notes": "W10.5 of the sandbox-parity epic. The CLI half landed first. The web and TUI equivalents (an add-host form that writes the same entry and shows the same CheckHost result) are the remaining half, tracked on #5571's W10.5 plan comment; when they land, flip those cells to yes. Connectivity stays the operator's: af opens no tunnel and edits no ssh config."
+    },
+    {
+      "id": "host.check",
+      "title": "Probe a listed host for the tools a sandbox session needs and record its readiness",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "doctor/hosts.go checkListedHosts -> daemon/control_client.go CheckHost (POST /v1/CheckHost); the daemon's supervisor also refreshes every listed host on a timer (daemon/checkhost.go)"
+      },
+      "verdict": "deliberate",
+      "issue": "#5571",
+      "notes": "W2.3 of the sandbox-parity epic. A diagnostic, like install.doctor: the TUI and web pickers do not run it, they READ its result (HostOption.readiness/note on ListBackends), which the daemon refreshes on a ~10 minute jittered timer and on `af doctor`. The RPC refuses a name outside the global host list before anything is dialed, and stays out of the sandbox credential scope (sandboxAllowed is false): a probe dials the operator's hosts."
     },
     {
       "id": "install.doctor",
@@ -729,7 +785,7 @@
       },
       "verdict": "real-gap",
       "issue": "#5571",
-      "notes": "W6.3 of the sandbox-parity epic. The wire field (CreateSessionRequest.Host) and the CLI flag landed first; ListBackends already returns the per-host catalog (hosts, default_host) for the pickers. The TUI naming-form picker and the web New-session select are the remaining W6.3 surfaces, tracked on #5571 and claimed in its W6.3 plan comment; when they land, flip those cells to yes and delete the two field_coverage gap declarations for `host`."
+      "notes": "W6.3 of the sandbox-parity epic. The wire field (CreateSessionRequest.Host) and the CLI flags (`sessions create --host`, `sessions send-prompt --create --host`, via DeliverPromptRequest.Host) landed first; ListBackends already returns the per-host catalog (hosts, default_host) for the pickers. The TUI naming-form picker and the web New-session select are the remaining W6.3 surfaces, tracked on #5571 and claimed in its W6.3 plan comment; when they land, flip those cells to yes and delete the two field_coverage gap declarations for `host`."
     },
     {
       "id": "session.create.opt.inplace",
@@ -1440,6 +1496,25 @@
       "notes": "Both halves shipped: #3960 added the TUI On done selector and #3961 added the web add/edit picker, closing #3959. All surfaces offer task.OnCompleteValues() in canonical order; the web receives values and shared task.OnCompleteHint consequences through ListOnComplete, and the TUI uses the same hint function. Create and update send the selected verb, with the task store canonicalizing keep to empty. Target-session tasks render the inapplicability reason instead of a live selector. The web preserves an existing policy on catalog failure and shows the failure beneath the field."
     },
     {
+      "id": "task.host",
+      "title": "Place the sessions a task creates on a listed host (global `hosts`)",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go af tasks add/update --host -> task.Task.Host / TaskUpdate.Host; the daemon's task store refuses a name outside the global host list (task/host.go validateTaskHost) and daemon/taskrun.go sends it as CreateSessionRequest.Host / DeliverPromptRequest.Host"
+      },
+      "verdict": "real-gap",
+      "issue": "#5571",
+      "notes": "W6.3 of the sandbox-parity epic. The task field, its validation against the global host list and the run path landed with the CLI; the TUI task form and web task modal remain, tracked on #5571 in the W6.3 plan comment. When they land, flip those cells to yes and delete the four field_coverage gap declarations for `host`."
+    },
+    {
       "id": "task.remove",
       "title": "Remove a task",
       "tui": {
@@ -1606,7 +1681,7 @@
       "id": "proposal.agent-workflow",
       "title": "Start or attach a session to a proposal and sync its edits",
       "tui": {
-        "status": "no",
+        "status": "n/a",
         "pointer": ""
       },
       "web": {
@@ -1619,13 +1694,13 @@
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Not yet: proposal mode step 2a (docs/dev/proposals/proposal-mode/api.md) puts these verbs on daemon routes, which the CLI calls and the web can call. Step 2b adds the web Docs tab, which start and attach open beside the agent; step 3 adds push from that tab. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
+      "notes": "Step 2a (docs/dev/proposals/proposal-mode/api.md) put these verbs on daemon routes, which the CLI calls and the web can call. The remaining gap is web-only: step 2b adds the web Docs tab, which start and attach open beside the agent. The tui cell is n/a rather than a gap: goals.md's non-goals state 'The TUI does not get an editor. The Docs tab is web only.', so the TUI has no proposal-editing analogue by design; future.md's read-only TUI view is a different, later capability, not this one."
     },
     {
       "id": "proposal.docs",
       "title": "List, read and edit the docs of a proposal",
       "tui": {
-        "status": "no",
+        "status": "n/a",
         "pointer": ""
       },
       "web": {
@@ -1638,14 +1713,14 @@
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Not yet: proposal mode step 2a adds the daemon routes (docs/dev/proposals/proposal-mode/api.md) and moves this CLI onto them. SaveProposalDoc, the three-way human save, has no CLI verb: it is for the web editor. Step 2b adds the web Docs tab (doc strip, live-preview editor, add-doc menu) over those routes. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
+      "notes": "Step 2a added the daemon routes (docs/dev/proposals/proposal-mode/api.md) and moved this CLI onto them. SaveProposalDoc, the three-way human save, has no CLI verb: it is for the web editor. The remaining gap is web-only: step 2b adds the web Docs tab (doc strip, live-preview editor, add-doc menu) over those routes. The tui cell is n/a rather than a gap: goals.md lists a TUI editor as a non-goal, and future.md's read-only TUI view is a different, later capability — it would flip this cell to partial for the read half if it lands, not to yes."
     },
     {
       "id": "proposal.docs-tab",
       "title": "Open the Docs tab of a proposal beside the agent",
       "tui": {
-        "status": "no",
-        "pointer": "ui/tab_pane.go docsTabPlaceholder"
+        "status": "n/a",
+        "pointer": "ui/tab_pane.go:582 docsTabPlaceholder"
       },
       "web": {
         "status": "no",
@@ -1657,13 +1732,13 @@
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Proposal mode step 2a adds the docs tab kind (session.TabKindDocs) and creates it from af proposal start and attach. Step 2b renders it in the web UI as the proposal editor. The TUI shows a placeholder that says the tab is web only: goals.md lists a TUI editor as a non-goal."
+      "notes": "Step 2a added the docs tab kind (session.TabKindDocs), created by af proposal start/attach; step 2b renders it in the web UI as the proposal editor — the remaining gap is that web cell. The tui cell is n/a: goals.md lists a TUI editor as a non-goal ('The Docs tab is web only'), and the TUI's handling of an existing docs tab IS docsTabPlaceholder — a pane that says so and hands the user `af proposal path <slug>` for a terminal view, which is the surface's designed analogue rather than a missing editor."
     },
     {
       "id": "proposal.push",
       "title": "Send the user's proposal edits to the agent as a prompt",
       "tui": {
-        "status": "no",
+        "status": "n/a",
         "pointer": ""
       },
       "web": {
@@ -1676,7 +1751,7 @@
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Proposal mode step 3a (docs/dev/proposals/proposal-mode/api.md, Push) adds the daemon push: auto mode sends the unseen edits 10 s after the last human save when the agent is Ready. The CLI sets the mode and sends now. Step 3b adds the web push chip (mode switch, countdown, Hold, Send now) over these routes. HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown, and the next save releases it. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal."
+      "notes": "Step 3a (docs/dev/proposals/proposal-mode/api.md, Push) added the daemon push: auto mode sends the unseen edits 10 s after the last human save when the agent is Ready; the CLI sets the mode and sends now. Step 3b adds the web push chip (mode switch, countdown, Hold, Send now) over these routes — the remaining gap is that web cell. HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown, and the next save releases it. The tui cell is n/a: goals.md lists a TUI editor as a non-goal, and with no TUI proposal edits there is nothing for a TUI push affordance to send."
     }
   ],
   "ledger": {
@@ -1766,6 +1841,13 @@
       "af tasks show": "task.health",
       "af tasks trigger": "task.trigger",
       "af tasks update": "task.edit",
+      "af hosts add": "host.manage",
+      "af hosts check": "host.manage",
+      "af hosts list": "host.manage",
+      "af hosts remove": "host.manage",
+      "af target clear": "daemon.client-target",
+      "af target set": "daemon.client-target",
+      "af target show": "daemon.client-target",
       "af token rotate": "daemon.token",
       "af token show": "daemon.token",
       "af upgrade": "install.upgrade",
@@ -1801,6 +1883,7 @@
       "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListAccounts": "session.accounts",
+      "POST /v1/CheckHost": "host.check",
       "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListDirectory": "project.browse",
       "POST /v1/ListProjects": "project.list",
@@ -1943,6 +2026,7 @@
       "af agent-server --branch": "meta.internal",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
+      "af agent-server --policy-file": "meta.internal",
       "af agent-server --program": "meta.internal",
       "af agent-server --program-resolved": "meta.internal",
       "af agent-server --repo": "meta.internal",
@@ -2045,6 +2129,7 @@
       "af sessions --json": "cli.json-envelope",
       "af sessions --repo": "project.switch",
       "af sessions archive --help": "meta.discovery",
+      "af sessions archive --push": "session.archive",
       "af sessions archive --self": "session.archive",
       "af sessions attach --help": "meta.discovery",
       "af sessions backends --help": "meta.discovery",
@@ -2086,6 +2171,7 @@
       "af sessions send-prompt --all": "session.send-prompt.broadcast",
       "af sessions send-prompt --all-repos": "session.send-prompt.broadcast",
       "af sessions send-prompt --create": "session.send-prompt",
+      "af sessions send-prompt --host": "session.create.opt.host",
       "af sessions send-prompt --help": "meta.discovery",
       "af sessions send-prompt --include-root": "session.send-prompt.broadcast",
       "af sessions send-prompt --program": "session.send-prompt",
@@ -2133,6 +2219,7 @@
       "af tasks --repo": "project.switch",
       "af tasks add --cron": "task.add",
       "af tasks add --help": "meta.discovery",
+      "af tasks add --host": "task.host",
       "af tasks add --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks add --name": "task.add",
       "af tasks add --on-complete": "task.on-complete",
@@ -2150,6 +2237,7 @@
       "af tasks update --cron": "task.edit",
       "af tasks update --enabled": "task.toggle",
       "af tasks update --help": "meta.discovery",
+      "af tasks update --host": "task.host",
       "af tasks update --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks update --name": "task.edit",
       "af tasks update --on-complete": "task.on-complete",
@@ -2159,6 +2247,23 @@
       "af tasks update --prompt-file": "task.edit.prompt-file",
       "af tasks update --target-session": "task.edit",
       "af tasks update --watch-cmd": "task.edit",
+      "af target --help": "meta.discovery",
+      "af target clear --help": "meta.discovery",
+      "af target set --help": "meta.discovery",
+      "af target set --token-stdin": "daemon.client-target",
+      "af hosts --help": "meta.discovery",
+      "af hosts --json": "cli.json-envelope",
+      "af hosts add --default": "host.manage",
+      "af hosts add --host-key-verification": "host.manage",
+      "af hosts add --identity-file": "host.manage",
+      "af hosts add --no-check": "host.manage",
+      "af hosts add --workspace-root": "host.manage",
+      "af hosts add --help": "meta.discovery",
+      "af hosts check --help": "meta.discovery",
+      "af hosts list --help": "meta.discovery",
+      "af hosts remove --clear-default": "host.manage",
+      "af hosts remove --help": "meta.discovery",
+      "af target show --help": "meta.discovery",
       "af token --help": "meta.discovery",
       "af token rotate --help": "meta.discovery",
       "af token rotate --json": "cli.json-envelope",
@@ -2254,6 +2359,13 @@
           },
           "host": {
             "gap": "session.create.opt.host"
+          }
+        }
+      },
+      "ArchiveSessionRequest": {
+        "tui": {
+          "push": {
+            "ok": "Opt-in: the default archive preserves the workspace and publishes nothing (W8.5); publishing the branch before the sandbox is reaped is an explicit CLI choice (`sessions archive --push`). The TUI and web archive actions take the default until the restore half (W8.6) makes the pushed path a pickable choice."
           }
         }
       },
@@ -2385,6 +2497,9 @@
           "task.dropped_events": {
             "ok": "Daemon-owned watch-delivery history (#4357): the supervisor advances it only when the per-minute source cap discards an event, and task.AddTaskChecked clears any client-supplied value. A surface setting it would forge loss that did not occur."
           },
+          "task.sandbox_owner": {
+            "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."
+          },
           "task.repo_id": {
             "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
           }
@@ -2444,6 +2559,12 @@
           "task.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
           },
+          "task.host": {
+            "gap": "task.host"
+          },
+          "task.sandbox_owner": {
+            "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."
+          },
           "task.repo_id": {
             "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
           }
@@ -2477,6 +2598,9 @@
           },
           "update.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
+          },
+          "update.host": {
+            "gap": "task.host"
           },
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
@@ -2652,6 +2776,11 @@
           "ok": "Opt-in used by the remote CLI, which cannot run the host-owned account and preflight checks itself; the web's pickers offer only accounts and backends the daemon already reported, so it does not need the daemon to repeat them (#5744)."
         }
       },
+      "ArchiveSession": {
+        "push": {
+          "ok": "Opt-in: the default archive preserves the workspace and publishes nothing (W8.5); publishing the branch before the sandbox is reaped is an explicit CLI choice (`sessions archive --push`). The TUI and web archive actions take the default until the restore half (W8.6) makes the pushed path a pickable choice."
+        }
+      },
       "CreateTab": {
         "url": {
           "gap": "session.tab.create.web"
@@ -2674,6 +2803,9 @@
         },
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
+        },
+        "update.host": {
+          "gap": "task.host"
         }
       },
       "AddTask": {
@@ -2733,6 +2865,12 @@
         },
         "task.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
+        },
+        "task.host": {
+          "gap": "task.host"
+        },
+        "task.sandbox_owner": {
+          "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."
         },
         "task.repo_id": {
           "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."

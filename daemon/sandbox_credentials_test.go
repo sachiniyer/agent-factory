@@ -92,7 +92,7 @@ func TestSandboxCredentials_MintReadsTheLiveEndpoint(t *testing.T) {
 	cred, err := creds.Mint()
 	require.NoError(t, err, "the minter must read the endpoint live, not the state captured when it was built")
 	assert.Equal(t, "/tmp/af-home/sandbox-callback.sock", cred.Socket)
-	assert.Regexp(t, `^http://127\.0\.0\.1:[0-9]+$`, cred.URL)
+	assert.Empty(t, cred.URL, "the sandbox-side address is the provisioner's, never a TCP port")
 	assert.NotEmpty(t, cred.Token)
 
 	// And it revokes through the same object — what the runtime lifecycle calls

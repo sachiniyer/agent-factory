@@ -2,7 +2,6 @@ package session
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -111,11 +110,10 @@ func chooseListedHost(pick string, cfg *config.ResolvedConfig) (string, *config.
 	if name == "" {
 		return "", nil, nil
 	}
-	entry, ok := cfg.Hosts[name]
-	if !ok {
-		return "", nil, fmt.Errorf("backend=ssh: host %q is not in the host list %v; add it under [hosts.%s] in the global config or pick a listed host",
-			name, sortedHostNames(cfg.Hosts), name)
+	if err := config.ValidateHostPick(cfg.Hosts, name); err != nil {
+		return "", nil, fmt.Errorf("backend=ssh: %w", err)
 	}
+	entry := cfg.Hosts[name]
 	// The same validation `af config set` and the loader run, so an entry that
 	// reached cfg some other way (a test, a stale in-memory copy) cannot be
 	// created against, and the catalog cannot call it usable.
@@ -129,15 +127,6 @@ func chooseListedHost(pick string, cfg *config.ResolvedConfig) (string, *config.
 		return "", nil, fmt.Errorf("backend=ssh: host %q sets use_ssh_config, which sessions cannot use yet (this path composes ssh itself); remove use_ssh_config for this host", name)
 	}
 	return name, &entry, nil
-}
-
-func sortedHostNames(hosts map[string]config.HostConfig) []string {
-	names := make([]string, 0, len(hosts))
-	for n := range hosts {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // HostUnusableReason reports why a create picking the listed host name would

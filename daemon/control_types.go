@@ -185,12 +185,22 @@ type ArchiveSessionRequest struct {
 	// follow-up). Retained TUI actions send it; one-shot CLI callers resolve by
 	// {Title, RepoID}.
 	ID string `json:"id"`
+	// Push publishes an off-box session's branch to origin before its sandbox is
+	// reaped. The default (false) publishes nothing: the agent stops and the
+	// workspace stays on its host, owned by the archived row (#5571 W8.5).
+	// docker and hook sessions keep no host directory to leave in place, so they
+	// push whatever this says.
+	Push bool `json:"push,omitempty"`
 }
 
 type ArchiveSessionResponse struct {
 	OK bool `json:"ok"`
 	// ArchivedPath is the new on-disk location of the relocated worktree.
 	ArchivedPath string `json:"archived_path"`
+	// ArchivedWorkspace says where an off-box session's work lives after the
+	// archive: the preserved directory on its host, or the pushed branch (#5571
+	// W8.5). Absent for a local archive.
+	ArchivedWorkspace *session.ArchivedWorkspaceData `json:"archived_workspace,omitempty"`
 	// Warning is the FLAT, pre-#3036 wire field, retained for the one direction
 	// the envelope structurally cannot serve: gob encodes the embedded
 	// MutationOutcome as a NESTED field, so a NEWER daemon answering an OLDER
@@ -291,6 +301,10 @@ type DeliverPromptRequest struct {
 	RepoPath string `json:"repo_path"`
 	Program  string `json:"program"`
 	Prompt   string `json:"prompt"`
+	// Host picks a listed host for the session this call CREATES when the target
+	// does not exist (#5571 W6.3); ignored when the prompt lands in an existing
+	// session. Same semantics and validation as CreateSessionRequest.Host.
+	Host string `json:"host,omitempty"`
 	// TaskRepoID is the task's retained project binding. Like CreateSession's
 	// TaskID, it is daemon-internal provenance carried over GOB and excluded from
 	// HTTP/JSON so a client cannot forge task authority. DeliverPrompt compares it
@@ -299,6 +313,11 @@ type DeliverPromptRequest struct {
 	// retain a provable not-attempted outcome without claiming TaskID ownership.
 	TaskRepoID string `json:"-"`
 	TaskOrigin bool   `json:"-"`
+	// SandboxOwner is the sandbox session that created the task being delivered
+	// (task.Task.SandboxOwner, #5571 W3.5). Daemon-internal like TaskRepoID: it
+	// rides the gob loopback only. When set the delivery is re-authorized against
+	// the owner's project and NEVER auto-creates its target.
+	SandboxOwner string `json:"-"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a
@@ -626,6 +645,12 @@ type PingResponse struct {
 	// default backend, so a client sending a host pick must see true here first.
 	// Older daemons omit the field and decode as false.
 	HostPick bool `json:"host_pick,omitempty"`
+	// DeliverHostPick and TaskHost are the same capability for the other two wire
+	// fields a pick rides on: DeliverPromptRequest.Host (send-prompt --create) and
+	// Task.Host / TaskUpdate.Host. Separate bits because a daemon from between the
+	// two releases honors one and silently drops the other.
+	DeliverHostPick bool `json:"deliver_host_pick,omitempty"`
+	TaskHost        bool `json:"task_host,omitempty"`
 	// (The guarded-rebind capability is its wire method instead of a Ping bit —
 	// #4888 review: RebindProjectGuarded exists only on daemons that enforce
 	// the expected_root/expected_checkout_id pair, so a guarded send is refused

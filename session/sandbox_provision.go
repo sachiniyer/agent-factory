@@ -1,13 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -182,13 +181,11 @@ func (w *sandboxWorkspace) resolveSessionDirSymlinks(timeout time.Duration) {
 	}
 }
 
-// configureGit sets a git identity and marks every directory safe on the remote
-// so the clone + worktree creation don't trip on "dubious ownership" or a missing
-// committer identity.
+// configureGit writes the committer identity into the clone's repo-local git
+// config. It runs AFTER the clone and never writes the remote user's global
+// config (#5571 W2.7).
 func (w *sandboxWorkspace) configureGit(timeout time.Duration) error {
-	script := `git config --global user.email "af@agent-factory.local" && ` +
-		`git config --global user.name "Agent Factory" && ` +
-		`git config --global --add safe.directory "*"`
+	script := gitIdentityCommand(w.WorkspacePath(), w.spec.GitUserName, w.spec.GitUserEmail)
 	out, err := w.shell.Run(timeout, script, nil, true)
 	if err != nil {
 		return fmt.Errorf("git config on the remote failed (is git installed there?): %s: %w", strings.TrimSpace(string(out)), err)
@@ -303,6 +300,9 @@ func (w *sandboxWorkspace) writeRuntimeIdentity(timeout time.Duration) error {
 		return fmt.Errorf("writing the sandbox agent-server token failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	envBody := fmt.Sprintf("%s=%s\n", runtimetoken.RefEnvName, shellQuote(w.tokenRef))
+	if name, value, ok := w.accountEnv(); ok {
+		envBody += fmt.Sprintf("%s=%s\n", name, shellQuote(value))
+	}
 	envScript := "umask 077 && cat > " + shellQuote(w.IdentityEnvPath())
 	out, err = w.shell.Run(timeout, envScript, strings.NewReader(envBody), false)
 	if err != nil {
@@ -334,19 +334,39 @@ func (w *sandboxWorkspace) revalidateCallbackBeforeEnv() string {
 	return ""
 }
 
-// callbackReverseForward returns the `-R` spec that carries the sandbox's
-// loopback callback port to the daemon's dedicated sandbox endpoint socket
-// (#5571 W3.4): `127.0.0.1:<port>:<socket>`. Both halves come from the daemon's
-// own mint — the port from the URL it issued, the socket from its endpoint —
-// so nothing a repo or the sandbox supplies picks where the credential goes.
-// ssh binds the remote end on the loopback address only (explicit, never
-// "localhost", which can resolve to ::1 and leave 127.0.0.1 free for another
-// process to answer), and ExitOnForwardFailure makes a taken port fatal to the
-// provision rather than silently routing the credential to a stranger.
+// sandboxCallbackSocketName is the callback carrier's file name inside the
+// session directory.
+const sandboxCallbackSocketName = "af-callback.sock"
+
+// sandboxSocketPathMax keeps the remote socket path inside sun_path (108 bytes
+// on Linux, 104 on macOS) with margin.
+const sandboxSocketPathMax = 100
+
+// CallbackSocketPath is the unix socket, inside the session's 0700 directory,
+// that the supervised connection's -R creates on the sandbox host.
+func (w *sandboxWorkspace) CallbackSocketPath() string {
+	return w.SessionDir + "/" + sandboxCallbackSocketName
+}
+
+// callbackReverseForward returns the `-R` spec that carries a socket inside the
+// session directory to the daemon's dedicated sandbox endpoint socket (#5571
+// W3.4, #5799): `<session dir>/af-callback.sock:<daemon endpoint socket>`, and
+// points the credential's URL at it (`unix://<path>`).
 //
-// No credential, or one with no socket, yields no forward and no reason. A
-// credential whose carrier cannot be built clears the grant and returns why,
-// like a revalidation loss.
+// The carrier is a unix socket, not a loopback TCP port, because a TCP port is
+// visible to and bindable by every uid on a shared sandbox host: while the
+// forward is down mid-re-dial another user could take the port and receive the
+// bearer credential the in-sandbox af keeps sending. The session directory is
+// created 0700 by mktemp for the ssh user, so no other uid can traverse it to
+// connect to, or pre-create, the socket; sshd creates the socket 0600
+// (StreamLocalBindMask defaults to 0177). While the forward is down the path is
+// a stale or missing socket, so the client's dial fails and retries — it has no
+// other address to fall back to.
+//
+// Both halves come from af: the daemon's own mint supplies the endpoint, the
+// provisioner the session directory. No credential, or one with no endpoint
+// socket, yields no forward; a credential whose carrier cannot be built clears
+// the grant and returns why, like a revalidation loss.
 func (w *sandboxWorkspace) callbackReverseForward() (string, string) {
 	if w.spec.CallbackToken == "" {
 		return "", ""
@@ -355,20 +375,19 @@ func (w *sandboxWorkspace) callbackReverseForward() (string, string) {
 		w.spec.CallbackURL, w.spec.CallbackToken, w.spec.CallbackSocket, w.spec.CallbackRef = "", "", "", ""
 		return "", "the callback forward could not be built: " + why
 	}
-	u, err := url.Parse(w.spec.CallbackURL)
-	if err != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Port() == "" {
-		return fail("the callback URL is not a loopback http address")
-	}
-	if port, perr := strconv.Atoi(u.Port()); perr != nil || port < 1 || port > 65535 {
-		return fail("the callback port is out of range")
-	}
-	sock := w.spec.CallbackSocket
-	// "port:local_socket" is ssh's -R grammar, so a colon (or a space) in the
+	remote := w.CallbackSocketPath()
+	// "remote:local" is ssh's -R grammar, so a colon (or whitespace) in either
 	// path would be re-parsed as part of it.
-	if sock == "" || !filepath.IsAbs(sock) || strings.ContainsAny(sock, ": \t\n") {
+	if w.SessionDir == "" || !strings.HasPrefix(remote, "/") || len(remote) > sandboxSocketPathMax ||
+		strings.ContainsAny(remote, ": \t\n") {
+		return fail("the session directory's socket path is unusable on the sandbox host")
+	}
+	local := w.spec.CallbackSocket
+	if local == "" || !filepath.IsAbs(local) || strings.ContainsAny(local, ": \t\n") {
 		return fail("the daemon's sandbox endpoint socket path is unusable")
 	}
-	return "127.0.0.1:" + u.Port() + ":" + sock, ""
+	w.spec.CallbackURL = "unix://" + remote
+	return remote + ":" + local, ""
 }
 
 // writeCallbackEnv puts the daemon URL and the per-session callback token on the
@@ -394,6 +413,21 @@ func (w *sandboxWorkspace) writeCallbackEnv(timeout time.Duration) error {
 		// The token is NOT in this message: the script names the path, not the
 		// value, and the value only ever travelled on stdin.
 		return fmt.Errorf("writing the sandbox callback environment failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// writePolicy writes spec.AgentPolicy over stdin with umask 077, like the
+// callback env: the policy names hook commands, which the operator may not want
+// world-readable on a shared host. No-op without a policy.
+func (w *sandboxWorkspace) writePolicy(timeout time.Duration) error {
+	if len(w.spec.AgentPolicy) == 0 {
+		return nil
+	}
+	script := "umask 077 && cat > " + shellQuote(w.PolicyPath())
+	out, err := w.shell.Run(timeout, script, bytes.NewReader(w.spec.AgentPolicy), false)
+	if err != nil {
+		return fmt.Errorf("writing the sandbox operator policy failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
@@ -470,6 +504,9 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	if branch := strings.TrimSpace(w.spec.Branch); branch != "" {
 		args = append(args, "--branch", branch)
 	}
+	if len(w.spec.AgentPolicy) > 0 {
+		args = append(args, "--policy-file", w.PolicyPath())
+	}
 	// AF_TOKEN_REF rides the handoff's per-invocation extras — the one channel
 	// that reaches THIS process's exec-time environment — rather than
 	// sessionenv's common allowlist, which is also the pane allowlist: joining
@@ -477,6 +514,13 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	// agent-server spawns. The ref is a nonce, but the rule keeps the
 	// credential-class channel narrow on principle (#5571 W1.1 approval).
 	extras := append(append([]string{}, w.spec.SessionEnvPassthrough...), runtimetoken.RefEnvName)
+	// W7.3: the account's own variable reaches the agent-server and, through
+	// --session-env, the agent — pointing it at the session-scoped account dir.
+	// The VALUE lives in the 0600 identity env file, never in argv.
+	if name, _, ok := w.accountEnv(); ok {
+		args = append(args, "--session-env", name)
+		extras = append(extras, name)
+	}
 	// The marker re-execs the staged binary it is already running, so a symlinked
 	// session directory changes no launch-side identity comparison: there is none
 	// here — policy and the agent-server effect are derived from the same
@@ -555,6 +599,12 @@ func (w *sandboxWorkspace) BannerPath() string    { return w.SessionDir + "/" + 
 func (w *sandboxWorkspace) CallbackEnvPath() string { return w.SessionDir + "/" + sshCallbackEnvName }
 
 const sshCallbackEnvName = "af-callback.env"
+
+// PolicyPath is the 0600 file holding the daemon-resolved operator policy the
+// agent-server reads instead of this host's config (#5571 W2.5).
+func (w *sandboxWorkspace) PolicyPath() string { return w.SessionDir + "/" + sshPolicyName }
+
+const sshPolicyName = "af-policy.json"
 
 // IdentityEnvPath is the 0600 env file holding only AF_TOKEN_REF — the launch
 // sources it unconditionally so the token reference lands in the agent-server's
