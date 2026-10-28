@@ -506,11 +506,14 @@ func reapWatchGroupLeader(cmd *exec.Cmd, anchor *watchGroupAnchor, beforeKill ..
 // both cases, after which the read ends are closed here, loudly: the leftover's
 // later writes fail with EPIPE instead.
 //
-// parked, when non-nil, reports a reader that is deliberately not reading
-// because a usage-limit backlog is backpressuring it (waitForLimitQueueCapacity):
-// the pipe is the lossless buffer then, so the wait continues rather than
-// closing it, and ends when the park does (a stop breaks it).
-func awaitWatchReaders(taskID string, groupKilled bool, grace time.Duration, readEnds []*os.File, parked func() bool, done ...<-chan struct{}) {
+// working, when non-nil, reports a reader that is not idle: it is delivering an
+// event (a synchronous delivery can outlast grace while later events wait in the
+// pipe), made progress during the last grace, or is parked on usage-limit
+// backpressure (waitForLimitQueueCapacity). The pipe is the lossless buffer in
+// those cases, so the wait continues rather than closing it; only a reader that
+// sat idle for a whole grace is treated as held by an escaped writer. The bound
+// may stop WAITING; it never discards events not yet delivered (#4321 review).
+func awaitWatchReaders(taskID string, groupKilled bool, grace time.Duration, readEnds []*os.File, working func() bool, done ...<-chan struct{}) {
 	timeout := time.After(grace)
 	for _, ch := range done {
 	wait:
@@ -519,7 +522,7 @@ func awaitWatchReaders(taskID string, groupKilled bool, grace time.Duration, rea
 			case <-ch:
 				break wait
 			case <-timeout:
-				if parked != nil && parked() {
+				if working != nil && working() {
 					timeout = time.After(grace)
 					continue
 				}

@@ -264,6 +264,13 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 // delivers synchronously, so a slow delivery backpressures the script's
 // stdout pipe rather than reordering events.
 type taskWatcher struct {
+	// readerBusy counts stdout deliveries in flight and readerProgress counts
+	// lines read or delivered; awaitWatchReaders reads them (via readerWorking)
+	// to tell a reader still processing already-emitted events — whose data sits
+	// in the kernel pipe — from one blocked on a writer that never closes (#4321).
+	readerBusy     atomic.Int32
+	readerProgress atomic.Uint64
+
 	taskID string
 	name   string
 	cmdStr string
@@ -643,9 +650,39 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 		waitErr = lifeline.shellResult(waitErr)
 	}
 	close(stdoutWritersStopped)
-	awaitWatchReaders(w.taskID, groupKilled, w.sup.stopGrace, []*os.File{r, stderrR}, w.limitBackpressureParked, readerDone, stderrDone)
+	awaitWatchReaders(w.taskID, groupKilled, w.sup.stopGrace, []*os.File{r, stderrR}, w.readerWorking(), readerDone, stderrDone)
 
 	return tail, waitErr
+}
+
+// deliverLine hands one complete stdout line to handleEvent, marking the reader
+// busy for its duration: a synchronous delivery (session creation, prompt
+// delivery) can outlast stopGrace, and awaitWatchReaders must not mistake that
+// reader for one stuck on an escaped writer and close the pipe with later
+// events still staged in it (#4321 review).
+func (w *taskWatcher) deliverLine(line string, tail *tailBuffer) {
+	w.readerBusy.Add(1)
+	defer func() {
+		w.readerBusy.Add(-1)
+		w.readerProgress.Add(1)
+	}()
+	w.handleEvent(line, tail)
+}
+
+// readerWorking returns a stateful predicate for awaitWatchReaders: true while
+// the stdout reader is delivering an event, has read or delivered anything since
+// the previous call, or is parked on usage-limit backpressure. Only a reader that
+// is idle — blocked in Read with nothing arriving for a whole grace — is treated
+// as held by an escaped writer. The bound may stop WAITING; it never discards
+// events the reader has yet to deliver.
+func (w *taskWatcher) readerWorking() func() bool {
+	last := w.readerProgress.Load()
+	return func() bool {
+		cur := w.readerProgress.Load()
+		progressed := cur != last
+		last = cur
+		return progressed || w.readerBusy.Load() > 0 || w.limitBackpressureParked()
+	}
 }
 
 // consumeLines turns newline-terminated stdout lines into events. Lines over
@@ -669,9 +706,10 @@ func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer, stdoutWritersS
 			return
 		}
 		chunk, err := br.ReadSlice('\n')
+		w.readerProgress.Add(1)
 		switch {
 		case err == nil:
-			w.handleEvent(strings.TrimRight(string(chunk), "\r\n"), tail)
+			w.deliverLine(strings.TrimRight(string(chunk), "\r\n"), tail)
 		case errors.Is(err, bufio.ErrBufferFull):
 			// ReadSlice's buffer filled before a newline: keep the first
 			// maxWatchLineBytes as the event and discard the rest of the line.
@@ -697,7 +735,7 @@ func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer, stdoutWritersS
 				return
 			}
 			log.WarningLog.Printf("watch task %s: stdout line exceeded %d bytes; truncated (%d bytes discarded)", w.taskID, maxWatchLineBytes, discarded)
-			w.handleEvent(line, tail)
+			w.deliverLine(line, tail)
 		case errors.Is(err, io.EOF):
 			if len(chunk) > 0 {
 				log.WarningLog.Printf("watch task %s: discarding %d bytes of unterminated stdout output (events must be newline-terminated lines)", w.taskID, len(chunk))
