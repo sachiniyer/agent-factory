@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"fmt"
-	"math/rand/v2"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -162,23 +160,6 @@ func errSandboxEndpointDown() error {
 	return fmt.Errorf("refusing to give this sandbox a callback credential: the daemon's sandbox callback endpoint is not running, so a callback would have nothing to reach. Check the daemon log for its bind failure")
 }
 
-// sandboxCallbackPortLow/High bound the sandbox-side loopback port a callback
-// binds. A sandbox host is shared by its sessions, so the port is chosen per
-// mint; a collision is fatal to that one provision (ssh's ExitOnForwardFailure)
-// and never silently routes a credential to whichever process answers.
-const (
-	sandboxCallbackPortLow  = 20000
-	sandboxCallbackPortSpan = 40000
-)
-
-// sandboxCallbackURLForPort is the URL the in-sandbox af dials: a loopback port
-// on the SANDBOX, which the supervised connection's -R carries to the daemon's
-// dedicated endpoint. 127.0.0.1 is spelled out, never a name, so what answers is
-// the forward and not whatever "localhost" resolves to over there.
-func sandboxCallbackURLForPort(port int) string {
-	return "http://127.0.0.1:" + strconv.Itoa(port)
-}
-
 // mintSandboxCallbackFenced issues a sandbox callback credential with the fence
 // sampled by the CALLER, for a caller that reads an input of its own first.
 //
@@ -191,7 +172,6 @@ func (m *Manager) mintSandboxCallbackFenced(fence uint64, sessionID string) (san
 	if err != nil {
 		return sandboxGrant{}, err
 	}
-	url := sandboxCallbackURLForPort(sandboxCallbackPortLow + rand.IntN(sandboxCallbackPortSpan))
 	// Revalidate-and-refuse rather than lock, deliberately. Holding the listener
 	// lock across a mint inverts the order bindWebLocked already uses (listener lock
 	// -> revokeAll -> registry lock) and is a deadlock waiting to happen. Refusing
@@ -203,9 +183,9 @@ func (m *Manager) mintSandboxCallbackFenced(fence uint64, sessionID string) (san
 	}
 	if m.sandboxTokens.invalidationCount() != fence {
 		m.sandboxTokens.revoke(sessionID)
-		return sandboxGrant{}, errSandboxCallbackInvalidated(url)
+		return sandboxGrant{}, errSandboxCallbackInvalidated(socket)
 	}
-	return sandboxGrant{URL: url, Token: token, Socket: socket, fence: fence}, nil
+	return sandboxGrant{Token: token, Socket: socket, fence: fence}, nil
 }
 
 // sandboxEndpointOrRefusal returns the socket the running endpoint listens on,
@@ -238,9 +218,10 @@ func (m *Manager) callbackUnavailableReason() string {
 // slow part and therefore the widest window (#3065 review). Minting revalidates
 // its own window; only the create knows when provisioning finished.
 type sandboxGrant struct {
-	URL   string
 	Token string
-	// Socket is the endpoint socket the -R forward for URL terminates on.
+	// Socket is the daemon-side endpoint socket the -R forward terminates on. The
+	// sandbox-side address is the provisioner's to choose (a socket inside the
+	// session's own directory), so the grant carries no URL.
 	Socket string
 	// fence is the registry's invalidation count at the moment this grant's inputs
 	// were first read. Unexported: it is meaningless outside a comparison against
@@ -256,6 +237,6 @@ func (g sandboxGrant) stillValid(r *sandboxTokenRegistry) bool {
 
 // errSandboxCallbackInvalidated refuses a credential that was voided while it was
 // being issued, or while the sandbox it was issued for was provisioned.
-func errSandboxCallbackInvalidated(url string) error {
-	return fmt.Errorf("refusing to give this sandbox a callback credential: outstanding callback credentials were revoked while this session was being provisioned, so the callback address %q may already be dead. Retry the create", url)
+func errSandboxCallbackInvalidated(socket string) error {
+	return fmt.Errorf("refusing to give this sandbox a callback credential: outstanding callback credentials were revoked while this session was being provisioned, so the callback to %q may already be dead. Retry the create", socket)
 }

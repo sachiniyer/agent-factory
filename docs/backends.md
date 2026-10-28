@@ -714,6 +714,17 @@ the `ssh` backend stages it — platform-probed, cached under
 > know which word of your command is the host, so the two workarounds above are
 > the supported answer.
 
+### Operator config on the sandbox
+
+The daemon resolves your policy once and writes it to `af-policy.json` beside the
+session (docker: `/tmp/af-policy.json`); the sandbox's `af agent-server` reads that
+file and nothing else. It never reads or creates `~/.agent-factory/config.toml` on
+the host. The file carries `global_agent_skills`, `worktree_root`, `branch_prefix`,
+`session_env_passthrough`, the program overrides you wrote, and the repo's
+`post_worktree_commands` as the daemon sees them — uncommitted `.agent-factory`
+edits and hooks saved in the TUI included. It never carries `sandbox.ssh`, `hosts`,
+`move_cmd` or accounts.
+
 ---
 
 ## Hook backend (bring-your-own-provisioner)

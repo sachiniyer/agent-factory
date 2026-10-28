@@ -172,6 +172,10 @@ type sandboxProvisioner struct {
 	forward     string
 	localAddr   string
 	reverseFwds []string
+	// callbackSocket is the sandbox-side socket the -R slot creates, removed
+	// before a re-dial so a socket file a killed sshd left behind cannot make the
+	// bind fail forever (the client would otherwise retry a dead path).
+	callbackSocket string
 
 	reapMu  sync.Mutex
 	reaped  bool
@@ -212,10 +216,12 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	w.resolveSessionDirSymlinks(sshShortStepTimeout)
 	p.sessionDir = w.SessionDir
-	if err := w.configureGit(sshShortStepTimeout); err != nil {
+	// The identity is repo-local (#5571 W2.7), so it is written after the clone
+	// that creates the repository.
+	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
-	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
+	if err := w.configureGit(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	// The binary stage is platform-aware (#5571 W2.2): probe the host's uname,
@@ -261,10 +267,15 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	p.reapMu.Lock()
 	p.reverseFwds = nil
+	p.callbackSocket = ""
 	if reverse != "" {
 		p.reverseFwds = []string{reverse}
+		p.callbackSocket = w.CallbackSocketPath()
 	}
 	p.reapMu.Unlock()
+	if err := w.writePolicy(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}

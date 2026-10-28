@@ -92,6 +92,11 @@ func (b *remoteAgentBackend) Launch(i *Instance, firstTimeSetup bool) error {
 	// landed there would be read as the agent by every consumer (#3062). Draining
 	// here rather than at load is what keeps that ordering true.
 	i.appendPendingMetadataTabsLocked()
+	// The launch RPC reported the conversation it came up on, before the agent tab
+	// existed to hold it (W7.2).
+	if i.reportedConversation.HasID() {
+		i.setAgentConversationLocked(i.reportedConversation)
+	}
 	i.mu.Unlock()
 	return nil
 }

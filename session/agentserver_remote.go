@@ -145,9 +145,21 @@ func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
 }
 
 func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
-	err := s.rc.call("/v1/agent/launch", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup}
+	// Send the recorded conversation so a launch resumes exactly it (#5571 W7.2).
+	// The server resumes it only where its own store still holds it.
+	if s.inst != nil {
+		if conv := s.inst.AgentConversation(); conv.HasID() {
+			req.Conversation = &conv
+		}
+	}
+	var resp agentLaunchResp
+	err := s.rc.call("/v1/agent/launch", req, &resp)
 	if err == nil {
 		s.idNative() // warm the feature advertisement (#5571 W4.5)
+		if s.inst != nil && resp.Conversation != nil {
+			s.inst.RecordReportedConversation(*resp.Conversation)
+		}
 	}
 	return err
 }
@@ -179,6 +191,11 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 	captured := resp.Updated || resp.HasPrompt || resp.Baseline || resp.Content != ""
 	if resp.Captured != nil {
 		captured = *resp.Captured
+	}
+	// The server captures a conversation the provider only exposes after launch
+	// (a Codex rollout) and reports it on later polls (#5571 W7.2).
+	if s.inst != nil && resp.Conversation != nil {
+		s.inst.RecordReportedConversation(*resp.Conversation)
 	}
 	return Observation{
 		Updated:     resp.Updated,
@@ -809,6 +826,14 @@ func splitHTTPBaseURL(raw string) (httpBase, wsBase string, err error) {
 
 type agentLifecycleReq struct {
 	FirstTimeSetup bool `json:"first_time_setup"`
+	// Conversation is the daemon's recorded conversation for a launch to resume
+	// (#5571 W7.2). Absent for a first launch and for a pre-field server.
+	Conversation *AgentConversationData `json:"conversation,omitempty"`
+}
+
+// agentLaunchResp carries back the conversation the server launched or resumed.
+type agentLaunchResp struct {
+	Conversation *AgentConversationData `json:"conversation,omitempty"`
 }
 
 type agentSnapshotResp struct {
@@ -822,6 +847,9 @@ type agentSnapshotResp struct {
 	// review): nil resolves to the legacy contract — an all-false frame is
 	// unconfirmed, positive evidence marks the capture real.
 	Captured *bool `json:"captured,omitempty"`
+	// Conversation is the conversation identity the server has for the agent, once
+	// it has one (#5571 W7.2).
+	Conversation *AgentConversationData `json:"conversation,omitempty"`
 }
 
 type agentPreviewReq struct {

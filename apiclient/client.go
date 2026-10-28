@@ -24,6 +24,7 @@ package apiclient
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,7 +66,12 @@ type TransportError struct {
 	NotSent bool
 }
 
-func (e *TransportError) Error() string { return e.Err.Error() }
+func (e *TransportError) Error() string {
+	if hint := tlsVerifyHint(e.Err); hint != "" {
+		return e.Err.Error() + " — " + hint
+	}
+	return e.Err.Error()
+}
 func (e *TransportError) Unwrap() error { return e.Err }
 
 // IsTransportError reports whether err (or anything it wraps) is a TransportError
@@ -392,4 +398,19 @@ func (c *Client) setAuth(h http.Header) {
 	if c.token != "" {
 		h.Set(agentproto.AuthHeader, agentproto.BearerScheme+c.token)
 	}
+}
+
+// tlsVerifyHint names the remedy for a failed certificate check against an
+// https:// or wss:// target (W9.5). The client verifies against the system CAs
+// and offers no way to skip that, so the only fixes are on the certificate side.
+func tlsVerifyHint(err error) string {
+	var unknown x509.UnknownAuthorityError
+	var invalid x509.CertificateInvalidError
+	var host x509.HostnameError
+	if errors.As(err, &unknown) || errors.As(err, &invalid) || errors.As(err, &host) {
+		return "the daemon's TLS certificate is not trusted by this machine's system CAs; " +
+			"point --daemon-url at an endpoint with a certificate this machine trusts " +
+			"(for example the HTTPS name `tailscale serve` prints), or install the CA — af has no option to skip verification"
+	}
+	return ""
 }

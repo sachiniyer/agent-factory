@@ -390,11 +390,12 @@ func init() {
 	// Persistent so they apply to the bare TUI and every `af sessions ...`/`af
 	// tasks ...` subcommand. Unset ⇒ the local unix socket (unchanged); each has
 	// an AF_DAEMON_* env fallback resolved in apiclient. The remote listener is
-	// plain HTTP (no TLS), so --daemon-url is an http:///ws:// URL; a wss:///https://
-	// URL is rejected with an HTTP-only error pointing at http://.
+	// plain HTTP; a client reaches it over http:///ws:// directly, or over
+	// https:///wss:// through a TLS front (tailscale serve, a proxy), verified
+	// against the system CAs (W9.5).
 	rootCmd.PersistentFlags().StringVar(&apiclient.FlagDaemonURL, "daemon-url", "",
-		"Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket "+
-			"(env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed.")
+		"Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket "+
+			"(env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve.")
 	// NOTE: no backticks in these usage strings. pflag's UnquoteUsage treats the
 	// first backticked span as the flag's arg-name placeholder, so `af token
 	// show` would render "--token af token show" instead of "--token string" on
@@ -413,6 +414,7 @@ func init() {
 	rootCmd.AddCommand(agentServerCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(tokenCmd)
+	rootCmd.AddCommand(targetCmd)
 	rootCmd.AddCommand(accountsCmd)
 	rootCmd.AddCommand(quotaCmd)
 	rootCmd.AddCommand(api.SessionsCmd)
