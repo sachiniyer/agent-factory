@@ -83,17 +83,33 @@ func (f *editorPortFixture) do(port int, path string, cookies ...*http.Cookie) *
 	return rec
 }
 
-// bootstrap mints and spends a bootstrap token for sid on its port, returning the cookie.
-func (f *editorPortFixture) bootstrap(t *testing.T, sid string, port int) *http.Cookie {
+// bootstrapRaw mints and spends a bootstrap token for sid on port, presenting any
+// cookies the "browser" already holds, and returns the response.
+func (f *editorPortFixture) bootstrapRaw(t *testing.T, sid string, port int, held ...*http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
 	tok, err := f.m.editorPorts.mintBootstrap(sid)
 	require.NoError(t, err)
-	rec := f.do(port, editorPortBootstrapPath+"?t="+url.QueryEscape(tok))
-	require.Equal(t, http.StatusSeeOther, rec.Code)
-	require.Equal(t, "/", rec.Header().Get("Location"), "the key must not live on in a URL")
-	cookies := rec.Result().Cookies()
-	require.Len(t, cookies, 1)
-	return cookies[0]
+	return f.do(port, editorPortBootstrapPath+"?t="+url.QueryEscape(tok), held...)
+}
+
+func editorPortCookie(rec *httptest.ResponseRecorder, name string) *http.Cookie {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// bootstrap runs a first-visit bootstrap (a browser holding nothing) and returns the
+// session's key cookie. A first visit clears origin storage and then enters the editor.
+func (f *editorPortFixture) bootstrap(t *testing.T, sid string, port int) *http.Cookie {
+	t.Helper()
+	rec := f.bootstrapRaw(t, sid, port)
+	require.Equal(t, http.StatusOK, rec.Code)
+	c := editorPortCookie(rec, editorPortCookieName(port))
+	require.NotNil(t, c)
+	return c
 }
 
 func TestEditorPort_NoCookieIsRefused(t *testing.T) {
@@ -111,8 +127,8 @@ func TestEditorPort_BootstrapSetsAHardenedCookieThenTheSessionIsServed(t *testin
 	req.Header.Set("X-Forwarded-Proto", "https")
 	rec := httptest.NewRecorder()
 	f.cs.editorPortHandler(f.portA, rec, req)
-	require.Equal(t, http.StatusSeeOther, rec.Code)
-	c := rec.Result().Cookies()[0]
+	c := editorPortCookie(rec, editorPortCookieName(f.portA))
+	require.NotNil(t, c)
 	assert.Equal(t, editorPortCookieName(f.portA), c.Name)
 	assert.True(t, c.HttpOnly)
 	assert.True(t, c.Secure, "HTTPS front door => Secure")
@@ -140,7 +156,7 @@ func TestEditorPort_ReplayedBootstrapIsRefused(t *testing.T) {
 	tok, err := f.m.editorPorts.mintBootstrap(f.sidA)
 	require.NoError(t, err)
 	path := editorPortBootstrapPath + "?t=" + tok
-	require.Equal(t, http.StatusSeeOther, f.do(f.portA, path).Code)
+	require.Equal(t, http.StatusOK, f.do(f.portA, path).Code)
 	replay := f.do(f.portA, path)
 	assert.Equal(t, http.StatusForbidden, replay.Code)
 	assert.Empty(t, replay.Result().Cookies())
@@ -236,4 +252,87 @@ func TestEditorPort_CookieNeverReachesTheEditor(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "keep", Value: "1"})
 	forwardAppCookies(req)
 	assert.Equal(t, "keep=1", req.Header.Get("Cookie"))
+}
+
+// The property of the reassignment finding: after a port changes owner, no browser
+// may expose the previous session's origin-scoped storage to the new session's editor.
+func TestEditorPort_FirstBootstrapClearsOriginStorage(t *testing.T) {
+	f := newEditorPortFixture(t)
+	rec := f.bootstrapRaw(t, f.sidA, f.portA)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Clear-Site-Data"), `"storage"`)
+	assert.NotContains(t, rec.Header().Get("Clear-Site-Data"), "cookies", "the key cookie set on this response must survive")
+	assert.Contains(t, rec.Body.String(), "indexedDB", "the script covers origins where Clear-Site-Data is ignored (plain HTTP)")
+	assert.NotNil(t, editorPortCookie(rec, editorPortEpochCookieName(f.portA)))
+
+	// The same browser re-bootstrapping (restart, expired key) keeps its storage.
+	epoch := editorPortCookie(rec, editorPortEpochCookieName(f.portA))
+	again := f.bootstrapRaw(t, f.sidA, f.portA, epoch)
+	assert.Equal(t, http.StatusSeeOther, again.Code)
+	assert.Empty(t, again.Header().Get("Clear-Site-Data"))
+}
+
+func TestEditorPort_ReclaimedPortsFirstBootstrapClearsThePreviousOwnersStorage(t *testing.T) {
+	f := newEditorPortFixture(t)
+	// B's session is gone: replace it by an untracked owner of its port.
+	e := f.m.editorPorts
+	e.mu.Lock()
+	delete(e.alloc, f.sidB)
+	e.alloc["ghost"] = f.portB
+	e.mu.Unlock()
+	old := f.bootstrapRaw(t, "ghost", f.portB)
+	oldEpoch := editorPortCookie(old, editorPortEpochCookieName(f.portB))
+	require.NotNil(t, oldEpoch)
+
+	// The pool is full (A tracked, ghost gone), so a new session takes ghost's port.
+	port, err := f.m.editorPortFor(f.cs, "newcomer")
+	require.NoError(t, err)
+	require.Equal(t, f.portB, port)
+	require.NotEqual(t, oldEpoch.Value, e.epochFor(port), "a reassigned port gets a fresh epoch")
+
+	// A browser (maybe on another device) still holding the OLD owner's epoch is told
+	// to clear on its first bootstrap for the new owner...
+	first := f.bootstrapRaw(t, "newcomer", port, oldEpoch)
+	require.Equal(t, http.StatusOK, first.Code)
+	assert.Contains(t, first.Header().Get("Clear-Site-Data"), `"storage"`)
+	// ...and not again once it carries the new epoch.
+	newEpoch := editorPortCookie(first, editorPortEpochCookieName(port))
+	require.NotNil(t, newEpoch)
+	second := f.bootstrapRaw(t, "newcomer", port, newEpoch)
+	assert.Equal(t, http.StatusSeeOther, second.Code)
+	assert.Empty(t, second.Header().Get("Clear-Site-Data"))
+
+	// The old owner's key no longer works on the reassigned port.
+	oldKey := &http.Cookie{Name: editorPortCookieName(port), Value: editorPortCookie(old, editorPortCookieName(port)).Value}
+	assert.Equal(t, http.StatusUnauthorized, f.do(port, "/", oldKey).Code)
+}
+
+func TestEditorPort_ReassignmentPrefersTheLongestIdlePort(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	cfg := config.DefaultConfig()
+	cfg.EditorOriginPorts = "9100-9102"
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+	e := m.editorPorts
+	e.listen = func(int) (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+	t.Cleanup(func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		for p := range e.servers {
+			e.dropServerLocked(p)
+		}
+	})
+	e.mu.Lock()
+	e.loaded = true
+	e.freed[9100] = 1000 // freed most recently
+	e.freed[9101] = 500  // freed longest ago
+	e.mu.Unlock()
+	cs := &controlServer{manager: m}
+	var got []int
+	for _, id := range []string{"one", "two", "three"} {
+		p, err := m.editorPortFor(cs, id)
+		require.NoError(t, err)
+		got = append(got, p)
+	}
+	assert.Equal(t, []int{9102, 9101, 9100}, got, "never-used first, then least recently freed")
 }

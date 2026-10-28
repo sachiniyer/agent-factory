@@ -609,6 +609,18 @@ cookie: another session's key, a replayed bootstrap URL, or the key of an archiv
 session is refused. Keys are in memory, so a daemon restart means the next editor open
 bootstraps again. The path `/_af/editor-bootstrap` is reserved on these ports.
 
+**A reassigned port never shows a previous session's storage.** Browser storage belongs to the
+origin, and an origin is a port, so when a full pool hands the port of an archived or gone
+session to a new one, every browser that visited the old editor still holds its localStorage,
+IndexedDB, caches and service workers for that origin. Each assignment therefore gets a fresh
+epoch, remembered per browser in a second `HttpOnly` cookie. A bootstrap from a browser whose
+epoch is missing or older is answered with a page that clears the origin's storage before
+entering the editor, using `Clear-Site-Data` where the browser honours it (secure contexts) and
+a script everywhere else, including a plain-HTTP tailnet origin. A browser that already carries
+the current epoch, for example after a daemon restart, keeps its storage. Reassignment prefers the
+port that has been free longest, which shortens the window in which any browser can still hold an
+old owner's state.
+
 Unset (the default), nothing is bound and a remote viewer keeps the same-origin editor. If the
 pool is full the editor stays on the same-origin mirror and the daemon's error names
 `network.editor_origin_ports`. See [`network.editor_origin_ports`](configuration.md).
