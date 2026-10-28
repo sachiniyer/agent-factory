@@ -7,6 +7,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -454,10 +456,22 @@ func TestSwapSameTitle_PartialRosterThenTabArrives(t *testing.T) {
 	// would never run (#5729). The daemon's row is a separate instance whose data
 	// carries the new roster.
 	require.Len(t, recreated.GetTabs(), 2, "precondition: the live row has not seen 'a' yet")
+	// ReconcileTabsFromData is a no-op for an instance with no agent tmux session
+	// or git worktree (a bare fake-backend row), so give the live row both — a
+	// mock-exec session, never a real tmux — before the snapshot lands. "a" is a
+	// web tab: it needs no tmux sibling to reconnect.
+	cmdExec, _ := nameKeyedTmuxExec()
+	recreated.SetTmuxSession(tmux.NewTmuxSessionWithDeps("dup-agent", "claude",
+		tabHotkeysPty{t: t, cmdExec: cmdExec}, cmdExec))
+	gw, err := git.NewGitWorktreeFromStorage(t.TempDir(), t.TempDir(), "dup", "dup", "", false, true)
+	require.NoError(t, err)
+	recreated.SetGitWorktreeForTest(gw)
 	daemonRow := instanceWithFakeBackend(t, "dup")
 	daemonRow.ID = recreated.ID
 	daemonRow.CreatedAt = recreated.CreatedAt
-	addSwapTabs(t, daemonRow, "fresh", "agent", "b", "a")
+	addSwapTabs(t, daemonRow, "fresh", "agent", "b")
+	daemonRow.AddWebTabForTest("a", "http://localhost:3000")
+	daemonRow.GetTabs()[2].ID = "fresh-a"
 	h.reconcileSnapshot([]session.InstanceData{
 		first.ToInstanceData(), daemonRow.ToInstanceData(), last.ToInstanceData(),
 	})
