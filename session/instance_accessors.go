@@ -839,6 +839,15 @@ func (i *Instance) AddTabForTest(name string, kind TabKind) {
 	i.touchLocked()
 }
 
+// AddTabWithIDForTest is AddTabForTest with a chosen stable id — the identity an
+// off-box tab is streamed by (#5571 W4.8), which a bare AddTabForTest leaves empty.
+func (i *Instance) AddTabWithIDForTest(id, name string, kind TabKind) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Tabs = append(i.Tabs, &Tab{ID: id, Name: name, Kind: kind})
+	i.touchLocked()
+}
+
 // AddWebTabForTest appends a web tab carrying url. Test-only: the URL is the
 // whole payload of a web tab, so tests that assert it survives a lifecycle step
 // (archive → restore, #1809) need to seed one. It bypasses AddWebTab's started /
