@@ -2,10 +2,14 @@ package app
 
 import (
 	"bytes"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/charmbracelet/x/vt"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // #6063: the restore sequence is written only when an attach took the terminal,
@@ -46,4 +50,62 @@ func TestAttachMarksTheTerminalTaken(t *testing.T) {
 	var out bytes.Buffer
 	h.releaseTerminalToAttach(&out)
 	assert.True(t, h.tookTerminal.Load())
+}
+
+// #6071: the scroll-margin reset homes the cursor, so the erase-below must not run
+// from the top-left. Pin the exact bytes, then replay them over a screen holding
+// prior output and the launch line: everything the shell drew survives and only
+// what is below its cursor is erased.
+func TestTerminalExitRestoreKeepsTheMainScreen(t *testing.T) {
+	const want = "\x1b[?1003l\x1b[?1002l\x1b[?1000l" +
+		"\x1b[?1015l\x1b[?1006l\x1b[?1005l" +
+		"\x1b[?1004l\x1b[?2004l" +
+		"\x1b[?1l\x1b>" +
+		"\x1b[?7h" +
+		"\x1b[r" +
+		"\x1b[?1049l" +
+		"\x1b7" + "\x1b[r" + "\x1b8" +
+		"\x1b[0m" +
+		"\x1b[?25h" +
+		"\r\x1b[J"
+	require.Equal(t, want, terminalExitRestore)
+
+	emu := vt.NewEmulator(40, 8)
+	_, err := emu.WriteString("old output 1\r\nold output 2\r\n$ af\r\n$ ")
+	require.NoError(t, err)
+	// Stale attach residue below the shell's cursor.
+	_, err = emu.WriteString("\x1b7\x1b[6;1Hstale attach frame\x1b8")
+	require.NoError(t, err)
+	before := emu.CursorPosition()
+
+	_, err = emu.WriteString(terminalExitRestore)
+	require.NoError(t, err)
+
+	got := emu.String()
+	for _, keep := range []string{"old output 1", "old output 2", "$ af"} {
+		assert.Contains(t, got, keep, "main-screen content above the cursor survives")
+	}
+	assert.NotContains(t, got, "stale attach frame", "the residue below the cursor is erased")
+	assert.Equal(t, before.Y, emu.CursorPosition().Y, "the cursor stays on the shell's line")
+}
+
+// #6072: on a fatal signal the attach's own termios restore completes BEFORE the
+// signal is re-raised, and the guard adds the escape sequences between them.
+func TestExitOnSignalRestoresBeforeReRaising(t *testing.T) {
+	h := &home{}
+	h.tookTerminal.Store(true)
+	var events []string
+	var out bytes.Buffer
+	exitOnSignal(h, syscall.SIGHUP, &out,
+		func() { events = append(events, "restore-attached") },
+		func(s syscall.Signal) {
+			events = append(events, "kill")
+			assert.Equal(t, terminalExitRestore, out.String(), "escape restore is written before the kill")
+			assert.Equal(t, syscall.SIGHUP, s)
+		})
+	assert.Equal(t, []string{"restore-attached", "kill"}, events)
+
+	events = nil
+	exitOnSignal(h, os.Interrupt, &out, func() { events = append(events, "restore-attached") }, func(syscall.Signal) { events = append(events, "kill") })
+	assert.Equal(t, []string{"restore-attached", "kill"}, events, "os.Interrupt is a syscall.Signal and also re-raises")
 }

@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/sachiniyer/agent-factory/apiclient"
 )
 
 // terminalExitRestore is written once af is done with the terminal, on every exit
@@ -20,7 +22,9 @@ import (
 // shell lands on. The final "\r\x1b[J" erases from the shell's cursor down — never
 // above it, so the launch line stays (the #4785 trap: clearing the whole main
 // screen leaves a blank pane) — which is exactly where an attach frame that
-// reached the main screen sits.
+// reached the main screen sits. DECSTBM (the scroll-region reset) homes the
+// cursor as a side effect, so the cursor is saved and restored around it; without
+// that the erase ran from the top-left and wiped the whole screen (#6071).
 const terminalExitRestore = "" +
 	"\x1b[?1003l\x1b[?1002l\x1b[?1000l" + // mouse tracking off
 	"\x1b[?1015l\x1b[?1006l\x1b[?1005l" + // mouse encodings off
@@ -29,7 +33,9 @@ const terminalExitRestore = "" +
 	"\x1b[?7h" + // autowrap on
 	"\x1b[r" + // scroll region = full screen (alt buffer)
 	"\x1b[?1049l" + // leave the alt screen (a no-op if already on the main one)
+	"\x1b7" + // save the shell's cursor: DECSTBM below homes it (#6071)
 	"\x1b[r" + // scroll region again on the main buffer
+	"\x1b8" + // and put the cursor back, so the erase below starts where the shell was
 	"\x1b[0m" + // SGR reset
 	"\x1b[?25h" + // cursor visible
 	"\r\x1b[J" // erase from the shell's cursor down
@@ -59,16 +65,30 @@ func (m *home) guardTerminalOnSignal(out io.Writer) func() {
 	go func() {
 		select {
 		case sig := <-sigs:
-			m.restoreTerminalAtExit(out)
-			signal.Reset(sig)
-			if s, ok := sig.(syscall.Signal); ok {
+			exitOnSignal(m, sig, out, apiclient.RestoreAttachedTerminal, func(s syscall.Signal) {
+				signal.Reset(s)
 				_ = syscall.Kill(os.Getpid(), s)
-			}
+			})
 		case <-done:
 		}
 	}()
 	return func() {
 		signal.Stop(sigs)
 		close(done)
+	}
+}
+
+// exitOnSignal is the guard's reaction, with its two side effects injected so the
+// ordering is testable. Exactly one owner restores termios: while an attach holds
+// the terminal that is the attach's own hand-back (restoreAttached), which is
+// idempotent and so safe against the attach's own signal watcher getting the same
+// signal; this guard only adds the escape-sequence restore and re-raises. The
+// termios restore must complete BEFORE the re-raise, or the process dies with the
+// terminal raw (#6072).
+func exitOnSignal(m *home, sig os.Signal, out io.Writer, restoreAttached func(), kill func(syscall.Signal)) {
+	restoreAttached()
+	m.restoreTerminalAtExit(out)
+	if s, ok := sig.(syscall.Signal); ok {
+		kill(s)
 	}
 }
