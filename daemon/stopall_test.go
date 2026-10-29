@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -41,7 +42,33 @@ func spawnFakeDaemonWithHome(t *testing.T, home string) int {
 	testguard.StartGroupProcess(t, cmd)
 	pid := cmd.Process.Pid
 	waitForArgv(t, pid, argv0)
+	if home != "" {
+		waitForHomeEnv(t, pid, home)
+	}
 	return pid
+}
+
+// waitForHomeEnv blocks until pid's environ is readable and carries
+// AGENT_FACTORY_HOME=home.
+//
+// waitForArgv alone is not enough for a test that goes on to classify the fake by
+// its home (classifyDaemonHome). It proves only that the exec happened as far as
+// argv; the environ is a separate /proc read with no ordering guarantee against
+// it, and one that comes back empty or refused is not an answer. The classifier is
+// deliberately fail-closed on that: an environ it could not read is
+// daemonUnverifiable, never foreign, so a "must be treated as foreign" assertion
+// would fail on the setup's timing rather than on the code under test (#6129).
+func waitForHomeEnv(t *testing.T, pid int, home string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, status := proctree.LookupEnv(pid, "AGENT_FACTORY_HOME"); status == proctree.EnvFound && got == home {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	got, status := proctree.LookupEnv(pid, "AGENT_FACTORY_HOME")
+	t.Fatalf("fake daemon pid %d never exposed AGENT_FACTORY_HOME=%q (got %q, status %v)", pid, home, got, status)
 }
 
 // fakeBinDir returns a temp dir for a fake daemon binary that is NOT under
