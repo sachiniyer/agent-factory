@@ -244,7 +244,11 @@ func appendKeyedSchemeSpans(spans []redactspan.Span, s string) []redactspan.Span
 	for _, loc := range keyedSchemeSecret.FindAllStringSubmatchIndex(s, -1) {
 		if len(loc) >= 6 && loc[3] < loc[1] {
 			scheme := s[loc[4]:loc[5]]
-			if quotedKeyBeforeProse(s[loc[2]:loc[3]], s[loc[5]:loc[1]]) {
+			// The scheme word is part of the value: judged without it, a
+			// mixed-case scheme ("CustomScheme") before a lowercase token reads as
+			// prose here while appendKeyValueSpans still redacts the scheme,
+			// stranding the credential behind it.
+			if quotedKeyBeforeProse(s[loc[2]:loc[3]], s[loc[4]:loc[1]]) {
 				continue
 			}
 			// The whole-field marker is not evidence of the historical stranded

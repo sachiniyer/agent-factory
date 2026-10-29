@@ -46,3 +46,24 @@ func TestScrubStillCatchesCredentialsAfterQuotedKey(t *testing.T) {
 		}
 	}
 }
+
+// TestScrubQuotedKeyMixedCaseSchemeStrandsNoToken pins the #6057 review: the
+// prose check must judge the WHOLE scheme value. A mixed-case scheme before an
+// all-lowercase token was judged on the token alone, read as prose, and was
+// skipped by the keyed-scheme matcher while appendKeyValueSpans still redacted
+// the scheme — leaving `"auth": [redacted-secret] abcdefghijklmnop`, a
+// credential in the log that only a second scrub removed.
+func TestScrubQuotedKeyMixedCaseSchemeStrandsNoToken(t *testing.T) {
+	for _, in := range []string{
+		`"auth": CustomScheme abcdefghijklmnop`,
+		`'auth': CustomScheme abcdefghijklmnop`,
+	} {
+		got := Scrub(in)
+		if strings.Contains(got, "abcdefghijklmnop") {
+			t.Errorf("token stranded after a redacted scheme: in %q out %q", in, got)
+		}
+		if again := Scrub(got); again != got {
+			t.Errorf("not idempotent: in %q once %q twice %q", in, got, again)
+		}
+	}
+}
