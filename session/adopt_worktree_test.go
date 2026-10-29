@@ -2,10 +2,15 @@ package session
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -72,4 +77,47 @@ func TestAdoptExistingWorktreeIsNotForPersistedOrLocalInstances(t *testing.T) {
 	inst.hostedRemotely = false
 	require.NoError(t, inst.adoptExistingWorktree())
 	assert.Nil(t, inst.gitWorktree, "only a hosted instance derives its handle at restore")
+}
+
+// A deleted worktree whose agent survived is rebuilt only after that agent is
+// stopped: rebuilding under it leaves a stale writer attached to the new tree
+// (#5995 review).
+func TestAdoptExistingWorktreeStopsASurvivingAgentBeforeRebuilding(t *testing.T) {
+	inst, gw, _ := hostedWorkspace(t)
+	path := gw.GetWorktreePath()
+	require.NoError(t, os.RemoveAll(path))
+
+	var mu sync.Mutex
+	killed, treeAtKill := false, "unset"
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			mu.Lock()
+			defer mu.Unlock()
+			args := strings.Join(c.Args, " ")
+			switch {
+			case strings.Contains(args, "kill-session"):
+				killed = true
+				if _, err := os.Stat(path); os.IsNotExist(err) {
+					treeAtKill = "absent"
+				} else {
+					treeAtKill = "present"
+				}
+			case strings.Contains(args, "has-session"):
+				if killed {
+					return &exec.ExitError{}
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte(""), nil },
+	}
+	inst.setTmuxLocked(tmux.NewTmuxSessionWithDeps("restart-adopt", "claude", nil, cmdExec))
+
+	require.NoError(t, inst.adoptExistingWorktree())
+	mu.Lock()
+	defer mu.Unlock()
+	assert.True(t, killed, "the surviving agent must be stopped")
+	assert.Equal(t, "absent", treeAtKill, "the agent must be stopped BEFORE the tree is rebuilt")
+	_, err := os.Stat(filepath.Join(path, "work.txt"))
+	assert.NoError(t, err, "the worktree is rebuilt once the agent is stopped")
 }
