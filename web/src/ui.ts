@@ -156,6 +156,29 @@ export function isActionableSession(s: SessionData): s is ActionableSession {
   );
 }
 
+/** Whether a row may be opened (selected into a pane, attached, walked by j/k).
+ *  Every lifecycle-actionable row can. The reserved root agent can too, though the
+ *  daemon withholds archive/restore from it by design (#5406), so lifecycle_action
+ *  alone would leave a healthy root unclickable. Root still fails closed on the same
+ *  durable causes that make any other row inert (#4394). Opening is deliberately
+ *  separate from the lifecycle verbs: those stay keyed to isActionableSession, so
+ *  root never grows an Archive or Restore control. */
+export function isOpenableSession(s: SessionData): s is SessionData & { id: string } {
+  if (isActionableSession(s)) {
+    return true;
+  }
+  return (
+    s.is_root === true &&
+    typeof s.id === "string" &&
+    s.id !== "" &&
+    !isCreating(s) &&
+    s.user_killed !== true &&
+    s.startup_state_unknown !== true &&
+    s.pending_account_swap === undefined &&
+    !s.unreachable
+  );
+}
+
 export type RetryActionPresentation = {
   kind: "limit" | "handoff";
   label: string;
@@ -3326,9 +3349,9 @@ export function sessionRow(
   const status = rowStatus(s);
   const operator = operatorKind(s);
   const creating = isCreating(s);
-  const actionable = isActionableSession(s);
+  const actionable = isOpenableSession(s);
   const killable = isKillableSession(s);
-  const managed = actionable || killable;
+  const managed = isActionableSession(s) || killable;
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   // The outage detail outranks the idle reason: it explains why every other
