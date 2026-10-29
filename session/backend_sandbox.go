@@ -212,6 +212,12 @@ type sandboxProvisioner struct {
 	stopped   bool
 	stoppedCh chan struct{}
 
+	// runCtx, when set, parents every command Run starts, so cancelling it kills
+	// the ssh process group. nil means context.Background (a create, which must
+	// not be torn down by anything but its own timeout). Set only by an advisory
+	// probe (CheckHost), which a daemon shutdown has to be able to abandon.
+	runCtx context.Context
+
 	// runCommandFn is a per-instance seam so a test can drive the traps below
 	// without a real sshd. Production leaves it nil.
 	runCommandFn func(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error)
@@ -359,6 +365,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	log.InfoLog.Printf("sandbox runtime: session %q running via %q (dir %s), agent-server tunneled at %s",
 		p.spec.Title, p.sshCmd, p.sessionDir, endpoint.URL)
 	return ProvisionResult{
+		// Only the branch this runtime actually handed the agent-server via
+		// --branch is the one it ran on (#5971). A runtime that does not take
+		// the daemon's name leaves this empty rather than guess.
+		Branch: strings.TrimSpace(p.spec.Branch),
 		Backend: &sandboxBackend{
 			// The command the sandbox's agent-server was bound to launch
 			// (#5108) — recorded as runtime evidence when the launch RPC
@@ -418,7 +428,11 @@ func (p *sandboxProvisioner) Run(timeout time.Duration, script string, stdin io.
 }
 
 func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	parent := p.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	cmd := p.buildRunCommand(ctx, script, stdin)

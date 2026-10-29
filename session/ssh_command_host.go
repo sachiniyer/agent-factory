@@ -91,6 +91,16 @@ func sshCommandForHost(h config.HostConfig, globalPosture, dialAddr string, dial
 	return strings.Join(parts, " "), nil
 }
 
+// OperatorSSHCommand is the ssh invocation af itself uses for the listed host h,
+// without a remote command: what an operator runs (append a command such as
+// `true`) to test the very connection af will make. Printed remedies use this
+// rather than formatting `ssh user@host:port` by hand, which is not ssh syntax —
+// OpenSSH reads `box:2222` as a hostname on port 22 (#5852). The composition is
+// pure: it touches no filesystem state and dials nothing.
+func OperatorSSHCommand(h config.HostConfig, globalPosture string) (string, error) {
+	return sshCommandForHost(h, globalPosture, "", 0)
+}
+
 // chooseListedHost resolves which listed host a create uses: the named pick, or
 // else — only when the repo supplies no [ssh] host of its own — the global
 // default_host. It returns a nil host for "use the repo's [ssh] settings".

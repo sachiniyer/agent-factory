@@ -558,9 +558,11 @@ blocked on:
   resolved command and configuration; it does not carry approval settings from
   the outgoing agent. See [Agent approval
   behavior](configuration.md#agent-approval-behavior).
-- **Local-worktree sessions only.** A docker/ssh/hook session runs its agent
-  inside a provisioned sandbox, where swapping the agent is a different
-  lifecycle; those sessions refuse the handoff rather than half-perform it.
+- **Off-box handoff depends on the sandbox's agent-server.** An ssh or sandbox
+  session whose agent-server advertises `agent-swap` can be handed off in
+  place — the sandbox swaps the agent in the same workspace and resolves the
+  new agent's program on its own host. An account-scoped sandbox session, and
+  docker or hook sessions, cannot be handed off yet.
 
 Handing off is **reversible**. Each agent's conversation history is stored per
 directory, so the outgoing agent's thread is still in the worktree — hand back

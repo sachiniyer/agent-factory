@@ -269,6 +269,15 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"RebindProject":        blockedDuringProbation,
 	"SetProjectColor":      blockedDuringProbation,
 	"RebindProjectGuarded": blockedDuringProbation,
+	// WorkspaceFacts is a read: it asks an already-bound session's agent-server (or
+	// the local disk) to run git status, rev-list and for-each-ref over the
+	// session's own workspace and reports what it counted. It opens no connection
+	// the session does not already hold (unlike CheckHost), writes no state and
+	// records no verdict, so there is nothing for a rolled-back daemon to leave
+	// behind. A kill confirmation must not have to wait out a probation for the
+	// facts it warns with; a refusal would read as "unmeasured", which is the
+	// worse answer.
+	"WorkspaceFacts": allowedDuringProbation,
 	// AccountLogin registers a credential directory in the daemon host's
 	// agent-factory home and starts a process on it (#3384). Both halves are
 	// mutations of the very candidate an upgrade supervisor is mid-validation on,

@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,13 +153,42 @@ func accountVersion(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// accountArchiveLimit is the hard byte bound on a write-back stream: every file
-// the agent's scope may hold at its per-file cap, plus tar's block overhead. The
-// archive is read UNDER this bound — the command is killed the moment it is
-// crossed — never buffered first, so a hostile host cannot grow the daemon past it.
+// tarBlock and tarRecord are tar's real arithmetic: an archive is a sequence of
+// 512-byte blocks — a header block, the data rounded UP to a block, and a trailer of
+// two zero blocks — and the whole archive is then padded to a multiple of the
+// RECORD size. GNU tar's default blocking factor is 20 (a 10,240-byte record); a
+// writer told `-b 1` pads to 512 instead. The bound below holds for either.
+const (
+	tarBlock  = 512
+	tarRecord = 20 * tarBlock
+)
+
+func roundUp(n, to int64) int64 { return (n + to - 1) / to * to }
+
+// tarArchiveSize is the exact size tar writes for regular files of the given sizes
+// (names short enough for a plain header, which every credential name is), padded to
+// record bytes.
+func tarArchiveSize(sizes []int64, record int64) int64 {
+	var n int64
+	for _, size := range sizes {
+		n += tarBlock + roundUp(size, tarBlock)
+	}
+	n += 2 * tarBlock // the end-of-archive marker
+	return roundUp(n, record)
+}
+
+// accountArchiveLimit is the hard byte bound on a write-back stream: the LARGEST
+// archive an honest tar can produce for this agent's credential files, every one at
+// its per-file cap, padded to a full default record. A credential of exactly the
+// cap therefore fits (#5901) — the bound is tar's own arithmetic, not an estimate —
+// and anything larger is the host misbehaving. The archive is read UNDER this
+// bound, never buffered first, so a hostile host cannot grow the daemon past it.
 func accountArchiveLimit(agent string) int64 {
-	n := int64(len(accountCredentialRel[agent]))
-	return n*(accountSyncMaxFileBytes+2048) + 2048 + 1024
+	sizes := make([]int64, len(accountCredentialRel[agent]))
+	for i := range sizes {
+		sizes[i] = accountSyncMaxFileBytes
+	}
+	return tarArchiveSize(sizes, tarRecord)
 }
 
 // writeBackAccount reads the credential files back from the host and replaces the
@@ -180,6 +208,13 @@ func accountArchiveLimit(agent string) int64 {
 //     account is never resurrected. The check and the replacement happen under one
 //     lock per registry file.
 func (w *sandboxWorkspace) writeBackAccount(timeout time.Duration) (accountWriteBack, error) {
+	return w.writeBackAccountFrom(w.AccountDir(), timeout)
+}
+
+// writeBackAccountFrom is writeBackAccount for a scope directory other than the
+// live one: the account handoff reads the OUTGOING account from the directory it
+// was rotated to, with the same allowlist, bound, validation and CAS.
+func (w *sandboxWorkspace) writeBackAccountFrom(dir string, timeout time.Duration) (accountWriteBack, error) {
 	var res accountWriteBack
 	apply, err := w.accountSyncApplies()
 	if err != nil || !apply {
@@ -192,11 +227,14 @@ func (w *sandboxWorkspace) writeBackAccount(timeout time.Duration) (accountWrite
 		quoted = append(quoted, shellQuote(rel))
 	}
 	// Missing files are skipped, and a scope that is already gone (a repeated
-	// teardown) reads back as nothing rather than as an error. head -c bounds the
-	// honest case on the host's side too; the local limit is the authoritative one.
-	script := "cd " + shellQuote(w.AccountDir()) + " 2>/dev/null || exit 0; " +
+	// teardown) reads back as nothing rather than as an error. tar is the LAST
+	// stage, so the command's exit status is tar's own: a file that shrank while it
+	// was read ("padding with zeros", exit 1) fails the whole read instead of
+	// arriving as a structurally valid archive (#5902). There is no limiter in the
+	// pipeline to mask it — the bound is enforced locally, as the stream is read.
+	script := "cd " + shellQuote(dir) + " 2>/dev/null || exit 0; " +
 		"list=$(for f in " + strings.Join(quoted, " ") + "; do [ -f \"$f\" ] && printf '%s\\n' \"$f\"; done); " +
-		"[ -n \"$list\" ] || exit 0; printf '%s\\n' \"$list\" | tar -cf - -T - | head -c " + strconv.FormatInt(limit+1, 10)
+		"[ -n \"$list\" ] || exit 0; printf '%s\\n' \"$list\" | tar -cf - -T -"
 	var out []byte
 	if ls, ok := w.shell.(limitedShell); ok {
 		out, err = ls.RunLimited(timeout, script, limit)
@@ -366,9 +404,22 @@ func buildAccountArchive(dir string, rels []string, seed map[string][]byte) ([]b
 // within the size bound. Anything else refuses the whole archive: a name that is
 // not on the list, a link, a directory traversal.
 func readAccountArchive(data []byte, allowed []string) (map[string][]byte, error) {
-	ok := map[string]bool{}
+	// The archive names are UNTRUSTED. They are only ever used to LOOK UP an entry in
+	// the allowlist: the map the caller receives is keyed by the allowlisted constant
+	// that matched, never by a string derived from the archive's own header, so no
+	// archive-controlled value can reach a filesystem path (the go/zipslip class).
+	canonical := make(map[string]string, len(allowed))
 	for _, a := range allowed {
-		ok[a] = true
+		if !filepath.IsLocal(a) {
+			return nil, fmt.Errorf("internal: allowlisted credential name %q is not a local path", a)
+		}
+		canonical[a] = a
+	}
+	// A complete archive ends in tar's end-of-archive marker. One cut off at a
+	// block boundary after a whole entry would otherwise read as a clean, shorter
+	// archive.
+	if !hasTarTrailer(data) {
+		return nil, fmt.Errorf("unreadable archive: it does not end with tar's end-of-archive marker (truncated)")
 	}
 	out := map[string][]byte{}
 	tr := tar.NewReader(bytes.NewReader(data))
@@ -380,9 +431,17 @@ func readAccountArchive(data []byte, allowed []string) (map[string][]byte, error
 		if err != nil {
 			return nil, fmt.Errorf("unreadable archive: %w", err)
 		}
-		name := strings.TrimPrefix(h.Name, "./")
-		if !ok[name] || h.Typeflag != tar.TypeReg {
+		name, listed := canonical[strings.TrimPrefix(h.Name, "./")]
+		if !listed || h.Typeflag != tar.TypeReg {
+			// A traversal ("../x"), an absolute path, a link, or any name that is not
+			// exactly an allowlisted credential file: the whole archive is refused.
 			return nil, fmt.Errorf("unexpected archive entry %q", h.Name)
+		}
+		if !filepath.IsLocal(name) {
+			return nil, fmt.Errorf("unexpected archive entry %q", h.Name)
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("archive entry %q appears twice", h.Name)
 		}
 		if h.Size > accountSyncMaxFileBytes {
 			return nil, fmt.Errorf("archive entry %q is over the %d-byte bound", h.Name, accountSyncMaxFileBytes)
@@ -391,8 +450,43 @@ func readAccountArchive(data []byte, allowed []string) (map[string][]byte, error
 		if err != nil {
 			return nil, err
 		}
+		if int64(len(b)) != h.Size {
+			return nil, fmt.Errorf("archive entry %q holds %d bytes but its header says %d", h.Name, len(b), h.Size)
+		}
+		if err := validateCredentialContent(name, b); err != nil {
+			return nil, err
+		}
 		out[name] = b
 	}
+}
+
+// hasTarTrailer reports whether data ends with at least the two zero blocks tar
+// writes to close an archive (record padding only adds more zeros).
+func hasTarTrailer(data []byte) bool {
+	if len(data) < 2*tarBlock {
+		return false
+	}
+	for _, c := range data[len(data)-2*tarBlock:] {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// validateCredentialContent refuses content that cannot be a credential a real
+// agent wrote: empty (a file truncated to nothing would erase a valid login), or
+// carrying a NUL byte (zero padding where the file shrank under tar — every
+// credential file is text). It is the last gate before the registry is touched, and
+// an independent one: it does not trust the transport's exit status.
+func validateCredentialContent(name string, data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("archive entry %q is empty; refusing to replace a credential with nothing", name)
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return fmt.Errorf("archive entry %q contains NUL bytes (a file that shrank while it was read); refusing to replace a credential with corrupted content", name)
+	}
+	return nil
 }
 
 func writeFileAtomic0600(path string, data []byte) error {

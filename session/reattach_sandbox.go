@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/log"
@@ -66,19 +67,24 @@ func (i *Instance) ReattachSandbox() error {
 	callbackLost := i.restoreCallbackForReattach(p)
 
 	var localAddr string
+	callbackConfirmed := false
 	if p.startTunnelFn != nil {
 		localAddr, err = p.startTunnelFn(p.remoteAddr)
+		// The test seam has no -R to confirm: it stands in for a confirmed one.
+		callbackConfirmed = true
 	} else {
 		// The old connection died with the daemon; a socket its sshd left behind
 		// would fail the -R bind (ExitOnForwardFailure) for good.
 		if p.callbackForwardPersisted() {
 			p.clearStaleCallbackSocket()
 		}
+		var note string
 		var withCallback bool
-		localAddr, withCallback, err = p.openTunnelForReattach()
-		if err == nil && !withCallback && p.callbackForwardPersisted() && callbackLost == "" {
-			callbackLost = "the callback forward could not be re-established on reattach (the sandbox host may still hold the old forward's port); it is retried each time the connection is re-dialed"
+		localAddr, withCallback, note, err = p.openTunnelForReattach()
+		if err == nil && note != "" && callbackLost == "" {
+			callbackLost = note
 		}
+		callbackConfirmed = withCallback
 	}
 	if err != nil {
 		p.abandonUnadoptedTunnel()
@@ -103,12 +109,16 @@ func (i *Instance) ReattachSandbox() error {
 	// the replacement and point the row at a reaped runtime.
 	i.mu.Lock()
 	stillCurrent := i.remoteClient == nil && i.backend == b && !i.userKilled && i.liveness != LiveArchived
+	// Adopting the same runtime provisions nothing, so the recorded callback
+	// state travels with it (#5974): bindProvisionResult installs the result's
+	// reason verbatim, and an empty one would read as a healthy reprovision.
+	priorCallbackReason := i.callbackUnavailable
 	i.mu.Unlock()
 	if !stillCurrent {
 		p.abandonUnadoptedTunnel()
 		return ErrReattachIneligible
 	}
-	if err := i.bindProvisionResult(ProvisionResult{Backend: b, Endpoint: endpoint, Teardown: p.reap}); err != nil {
+	if err := i.bindProvisionResult(ProvisionResult{Backend: b, Endpoint: endpoint, Teardown: p.reap, CallbackUnavailable: priorCallbackReason}); err != nil {
 		p.abandonUnadoptedTunnel()
 		return fmt.Errorf("reattach %q: %w", i.Title, err)
 	}
@@ -123,14 +133,23 @@ func (i *Instance) ReattachSandbox() error {
 		i.Tabs = []*Tab{newRemoteAgentTab()}
 	}
 	i.appendPendingMetadataTabsLocked()
-	// The loader rewrote a live row to Lost because nothing was bound; the
-	// runtime answered, so it is live again. The next status poll refines Ready
-	// into the agent's real state.
-	i.liveness = LiveReady
-	// A callback that could not be brought back is said out loud on the row, not
-	// left as an agent whose af verbs fail silently; an earlier recorded reason
-	// (a degraded create) is the more precise one and is kept.
-	if callbackLost != "" && i.callbackUnavailable == "" {
+	// The loader rewrote a live row to Lost because nothing was bound. The
+	// runtime answered, which proves reachability and nothing about what the
+	// agent is doing: a daemon that restarted under a working agent must not
+	// publish it as idle (ClassifyActivity and `af sessions watch` read this).
+	// Running is the conservative claim; the agent-server's status sweep settles
+	// it to the observed state — its first post-reattach capture is a Baseline
+	// that preserves this value, and idle needs observed silence (#5973).
+	i.liveness = LiveRunning
+	// The callback state is preserved until positive evidence says otherwise
+	// (the W3.6 health rule, #5974): a reason recorded at create or on an
+	// earlier reattach stays unless THIS reattach restored the credential and
+	// confirmed the forward; a callback that could not be brought back is said
+	// out loud rather than left as an agent whose af verbs fail silently.
+	switch {
+	case callbackConfirmed && callbackLost == "" && p.callbackForwardPersisted():
+		i.callbackUnavailable = ""
+	case callbackLost != "" && i.callbackUnavailable == "":
 		i.callbackUnavailable = callbackLost
 	}
 	i.touchLocked()
@@ -215,22 +234,74 @@ func (i *Instance) restoreCallbackForReattach(p *sandboxProvisioner) string {
 	return ""
 }
 
+// Bounds for confirming the callback -R after a reattach dial. Vars so tests
+// can shrink them.
+var (
+	callbackForwardConfirmTimeout = 6 * time.Second
+	callbackForwardConfirmPoll    = 250 * time.Millisecond
+)
+
+// confirmCallbackForward is positive evidence the -R was accepted (#5896). The
+// local -L listener answers before ssh has processed the remote-forward
+// replies, so a dial proves nothing about the -R: sshd's acceptance shows only
+// as the callback socket existing on the sandbox host (the stale one was
+// removed before the dial, so a socket now is the fresh one), and a rejection
+// as the ExitOnForwardFailure exit of the ssh child. Polled because the reply
+// is asynchronous. A var so tests can stand in for the sandbox host.
+var confirmCallbackForward = func(p *sandboxProvisioner) error {
+	p.reapMu.Lock()
+	sock, child := p.callbackSocket, p.tunnel
+	p.reapMu.Unlock()
+	if sock == "" {
+		return errors.New("the callback socket path on the sandbox host is unknown")
+	}
+	deadline := time.Now().Add(callbackForwardConfirmTimeout)
+	var last error
+	for {
+		if child != nil {
+			select {
+			case <-child.done:
+				return errors.New("ssh exited after the remote forward was rejected")
+			default:
+			}
+		}
+		if _, err := p.Run(sshShortStepTimeout, "test -S "+shellQuote(sock), nil, true); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the sandbox host never bound %s: %w", sock, last)
+		}
+		time.Sleep(callbackForwardConfirmPoll)
+	}
+}
+
 // openTunnelForReattach opens the first transport generation with the persisted
-// callback -R. The data plane is the point of a reattach, and ssh's
-// ExitOnForwardFailure makes a -R whose remote port the sandbox host still
-// holds (the old connection's sshd side not yet reaped) fatal to the whole
-// generation. So on failure with a callback forward present it retries once
-// WITHOUT it, reports that it did, and leaves the forward in place for the
-// supervisor to re-establish on its next re-dial. The original error is the one
-// returned when the data plane cannot open either way.
-func (p *sandboxProvisioner) openTunnelForReattach() (localAddr string, withCallback bool, err error) {
+// callback -R and only reports the callback as up (withCallback) once
+// confirmCallbackForward saw sshd accept it (#5896). The data plane is the
+// point of a reattach, and ssh's ExitOnForwardFailure makes a -R the sandbox
+// host rejects fatal to the whole generation. So when the -R is rejected, or
+// cannot be confirmed, it retries once WITHOUT it, returns why in note, and
+// leaves the forward in place for the supervisor to re-establish on its next
+// re-dial. The original error is the one returned when the data plane cannot
+// open either way.
+func (p *sandboxProvisioner) openTunnelForReattach() (localAddr string, withCallback bool, note string, err error) {
 	localAddr, err = p.openTunnel(p.remoteAddr)
 	if err == nil {
-		return localAddr, p.callbackForwardPersisted(), nil
+		if !p.callbackForwardPersisted() {
+			return localAddr, false, "", nil
+		}
+		if cerr := confirmCallbackForward(p); cerr == nil {
+			return localAddr, true, "", nil
+		} else {
+			err = cerr
+		}
 	}
 	if !p.callbackForwardPersisted() {
-		return "", false, err
+		return "", false, "", err
 	}
+	note = "the callback forward could not be confirmed on reattach (" + err.Error() + "); it is retried each time the connection is re-dialed"
 	p.abandonUnadoptedTunnel()
 	p.reapMu.Lock()
 	saved := p.reverseFwds
@@ -241,7 +312,7 @@ func (p *sandboxProvisioner) openTunnelForReattach() (localAddr string, withCall
 	p.reverseFwds = saved
 	p.reapMu.Unlock()
 	if retryErr != nil {
-		return "", false, err
+		return "", false, "", err
 	}
-	return localAddr, false, nil
+	return localAddr, false, note, nil
 }

@@ -488,6 +488,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
 	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
+	mux.HandleFunc("/v1/agent/workspace-facts", rpcHandler(hs.WorkspaceFacts))
 	mux.HandleFunc("/v1/agent/stop", rpcHandler(hs.StopPreserving))
 	// W7.1: stop the agent and start it again in this workspace, resuming the
 	// provider's conversation. Advertised as the "relaunch" feature.
@@ -495,6 +496,10 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// W7.5: swap the agent for another in this workspace. Advertised as the
 	// "agent-swap" feature.
 	mux.HandleFunc("/v1/agent/swap-agent", rpcHandler(hs.SwapAgent))
+	// W7.6: rotate the account scope and relaunch. Advertised as the
+	// "account-swap" feature.
+	mux.HandleFunc("/v1/agent/swap-account", rpcHandler(hs.SwapAccount))
+	mux.HandleFunc("/v1/agent/swap-account-status", rpcHandler(hs.SwapAccountStatus))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -538,6 +543,9 @@ var agentServerWireFeatures = []string{
 	// "agent-swap": POST /v1/agent/swap-agent — replace the agent with another
 	// in this workspace, resolving the new agent's program on this host (#5571 W7.5).
 	session.SwapAgentFeature,
+	// "account-swap": POST /v1/agent/swap-account — rotate the staged account
+	// scope in and relaunch the agent on it (#5571 W7.6).
+	session.AccountSwapFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version
@@ -966,4 +974,14 @@ func (hs *headlessServer) eventsHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	serveEvents(hs.events, conn)
+}
+
+// WorkspaceFacts measures this server's workspace for the daemon's kill
+// confirmation (#5571 W8.2). Read-only: git status/rev-list/for-each-ref/reflog.
+func (hs *headlessServer) WorkspaceFacts(_ struct{}, resp *session.WorkspaceFacts) error {
+	if hs.inst == nil {
+		return fmt.Errorf("this agent-server has no workspace")
+	}
+	*resp = session.MeasureWorkspaceAt(hs.inst.GetWorktreePath(), hs.inst.Path)
+	return nil
 }

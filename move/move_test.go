@@ -127,6 +127,8 @@ type fakeSteps struct {
 	failAt  string
 	reaped  int
 	reapErr error
+	// destTree, when set, is what the destination reports it holds.
+	destTree string
 }
 
 func (f *fakeSteps) step(name string) error {
@@ -139,6 +141,15 @@ func (f *fakeSteps) step(name string) error {
 func (f *fakeSteps) Quiesce(context.Context, Session, bool) error { return f.step("quiesce") }
 func (f *fakeSteps) Provision(context.Context, Session, Host, *Snapshot) (string, func() error, error) {
 	return "/ws", func() error { f.reaped++; return f.reapErr }, f.step("provision")
+}
+func (f *fakeSteps) VerifyDestination(_ context.Context, _ Session, _ Host, snap *Snapshot) (string, error) {
+	if err := f.step("verify"); err != nil {
+		return "", err
+	}
+	if f.destTree != "" {
+		return f.destTree, nil
+	}
+	return snap.Tree, nil
 }
 func (f *fakeSteps) SyncAccount(context.Context, Session, Host) error { return f.step("account") }
 func (f *fakeSteps) StartAgent(context.Context, Session, Host) error  { return f.step("start") }
@@ -153,10 +164,10 @@ func TestRunOrderingAndAbortSemantics(t *testing.T) {
 
 	f := &fakeSteps{}
 	require.NoError(t, Run(context.Background(), f, s, h, opt))
-	require.Equal(t, []string{"quiesce", "provision", "account", "start", "switch", "archive"}, f.calls)
+	require.Equal(t, []string{"quiesce", "provision", "verify", "account", "start", "switch", "archive"}, f.calls)
 	require.Zero(t, f.reaped)
 
-	for _, failAt := range []string{"quiesce", "provision", "account", "start", "switch"} {
+	for _, failAt := range []string{"quiesce", "provision", "verify", "account", "start", "switch"} {
 		f := &fakeSteps{failAt: failAt}
 		require.ErrorContains(t, Run(context.Background(), f, s, h, opt), failAt+" failed")
 		require.NotContains(t, f.calls, "archive", failAt)

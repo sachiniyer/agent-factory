@@ -94,9 +94,12 @@ func parseMountPoints(mountinfo string) ([]string, error) {
 // root is reported by enclosingMount instead).
 func mountPointsUnder(points []string, root string) []string {
 	root = path.Clean(root)
+	// "/" already ends in a separator: root+"/" would be "//" and match nothing,
+	// silently pruning no mount under the filesystem root.
+	prefix := strings.TrimSuffix(root, "/") + "/"
 	var found []string
 	for _, mp := range points {
-		if mp != root && strings.HasPrefix(mp, root+"/") {
+		if mp != root && strings.HasPrefix(mp, prefix) {
 			found = append(found, mp)
 		}
 	}
@@ -249,6 +252,17 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	if err != nil {
 		return dockerStepErr(fmt.Errorf("backend=docker: refusing to chown the session HOME and workspace for the image's default user %s: the container mount table is unusable: %w", owner, err), dockerOpLocal)
 	}
+	// The recursive chown runs only on a resolved HOME that is a proper,
+	// non-system directory. A HOME that resolves to "/" (an operator HOME=/ via
+	// run_args, or a symlink to it) would otherwise re-own the whole container
+	// filesystem and reach any host bind the prune missed (#5950); the refusal
+	// comes before any chown is built, let alone run.
+	if err := unchownableHome(realHome); err != nil {
+		return dockerStepErr(fmt.Errorf("backend=docker: refusing to chown the session HOME for the image's default user %s: %w", owner, err), dockerOpLocal)
+	}
+	if realWorkspace == "/" {
+		return dockerStepErr(fmt.Errorf("backend=docker: refusing to chown the session workspace for the image's default user %s: it resolves to /", owner), dockerOpLocal)
+	}
 	steps := []string{fmt.Sprintf("mkdir -p %s %s", shellQuote(home), shellQuote(workspace))}
 	// Only a directory whose containing mount is the container's own root
 	// filesystem is af's to re-own. One AT or BENEATH any other mount (a host
@@ -272,6 +286,29 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 			owner, strings.TrimSpace(string(out)), err), dockerOpRootExec)
 	}
 	p.containerUser = owner
+	return nil
+}
+
+// systemDirs are directories a session HOME must never resolve to: re-owning
+// one recursively reaches the system, devices and host-visible mounts.
+var systemDirs = map[string]bool{
+	"/": true, "/bin": true, "/boot": true, "/dev": true, "/etc": true, "/home": true,
+	"/lib": true, "/lib32": true, "/lib64": true, "/media": true, "/mnt": true,
+	"/opt": true, "/proc": true, "/run": true, "/sbin": true, "/srv": true,
+	"/sys": true, "/tmp": true, "/usr": true, "/var": true,
+}
+
+// unchownableHome reports why the resolved (symlink-free) HOME may not be
+// chowned recursively, or nil when it is a proper non-root, non-system
+// directory. Mounts beneath it are pruned separately from the mount table.
+func unchownableHome(realHome string) error {
+	h := path.Clean(realHome)
+	if h == "/" {
+		return fmt.Errorf("the HOME %q resolves to the filesystem root, and a recursive chown there would re-own the whole container filesystem including any host mount — set the container's HOME to a dedicated directory (docker.run_args -e HOME=…) or use an image whose default user has a home", realHome)
+	}
+	if systemDirs[h] {
+		return fmt.Errorf("the HOME %q resolves to the system directory %s, which is not af's to re-own — set the container's HOME to a dedicated directory (docker.run_args -e HOME=…)", realHome, h)
+	}
 	return nil
 }
 

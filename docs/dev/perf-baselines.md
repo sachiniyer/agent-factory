@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1023251.000 | 1023251.000–1023251.000 | 0.000 | 1074413.550 |
-| gzip_bytes | 228542.000 | 228542.000–228542.000 | 0.000 | 239969.100 |
+| raw_bytes | 1067070.000 | 1067070.000–1067070.000 | 0.000 | 1120423.500 |
+| gzip_bytes | 240430.000 | 240430.000–240430.000 | 0.000 | 252451.500 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -283,6 +283,11 @@ cursor and task schedule/next-run metadata (which depends on the daemon's curren
 clock). The surrounding task rows, names, controls and layout remain checked.
 Metadata is hidden with screenshot-only CSS so it stays behind the task-form
 modal; a rectangle mask would paint over the new form stills' fields.
+The Config view's two manifest-size numbers (the header count and the folded
+advanced tier's "Show N advanced settings") are stated as a literal `N` for the
+instant of each capture, so adding a config key no longer invalidates every
+config golden. Their boxes and layout are still captured; the DOM text is
+restored after the shot (`withManifestSizeFrozen`, web-demo.spec.ts).
 The agent-tab still uses completed output in both themes, rather than racing an
 intermediate line as a video can. This gives intentional redesigns a stable oracle.
 

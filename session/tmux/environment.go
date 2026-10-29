@@ -3,6 +3,7 @@ package tmux
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -215,6 +216,23 @@ type agentConfigRoot struct {
 	label      string
 	variable   string
 	homeSubdir string
+	// blankHomeFallsBack is whether a HOME that is set but empty falls through to
+	// the OS account home. Codex resolves its home through Rust's home_dir, which
+	// ignores an empty HOME; Gemini's os.homedir() returns the empty string
+	// as-is, so an empty HOME there is a path af cannot name.
+	blankHomeFallsBack bool
+}
+
+// osAccountHome is the home directory of the account this process runs as: what
+// an agent falls back to when HOME is absent (Rust's home_dir and libuv's
+// uv_os_homedir both read the passwd entry). The launched agent is a child of
+// this process, so it is the same account. A var so tests can name a home.
+var osAccountHome = func() (string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return u.HomeDir, nil
 }
 
 // agentConfigRoots lists the agents whose config root af follows through a
@@ -223,7 +241,7 @@ type agentConfigRoot struct {
 // to (`process.env.GEMINI_CLI_HOME || os.homedir()`, #3387), so its default is
 // HOME itself. Both treat an empty value as unset.
 var agentConfigRoots = map[string]agentConfigRoot{
-	ProgramCodex:  {label: "Codex", variable: "CODEX_HOME", homeSubdir: ".codex"},
+	ProgramCodex:  {label: "Codex", variable: "CODEX_HOME", homeSubdir: ".codex", blankHomeFallsBack: true},
 	ProgramGemini: {label: "Gemini", variable: "GEMINI_CLI_HOME"},
 }
 
@@ -258,26 +276,46 @@ func ConfigRootFromCommand(agent, command, workingDir string) (string, error) {
 		}
 		return override.Value, override.Set, nil
 	}
-	resolve := func(path string) string {
+	// A relative path resolves against the launch cwd. When af could not
+	// establish that cwd (a wrapper may chdir before exec) the path has no
+	// location af can name, so it is an error, never the worktree.
+	resolve := func(name, path string) (string, error) {
 		if filepath.IsAbs(path) {
-			return filepath.Clean(path)
+			return filepath.Clean(path), nil
 		}
-		return filepath.Clean(filepath.Join(launch.WorkingDir, path))
+		if !launch.WorkingDirKnown() {
+			return "", fmt.Errorf("%s is the relative path %q and af cannot tell which directory the launched command runs in; use an absolute path so af can follow where %s reads its config", name, path, spec.label)
+		}
+		return filepath.Clean(filepath.Join(launch.WorkingDir, path)), nil
 	}
 
 	if root, set, err := effective(spec.variable); err != nil {
 		return "", err
 	} else if set && strings.TrimSpace(root) != "" {
-		return resolve(root), nil
+		return resolve(spec.variable, root)
 	}
 	home, set, err := effective("HOME")
 	if err != nil {
 		return "", err
 	}
-	if !set || strings.TrimSpace(home) == "" {
-		return "", fmt.Errorf("%s is unset and the launched command has no literal HOME fallback", spec.variable)
+	blank := set && strings.TrimSpace(home) == ""
+	switch {
+	case !set || (blank && spec.blankHomeFallsBack):
+		// No HOME reaches the agent (`env -i`, `env -u HOME`, a daemon without
+		// one): it reads the OS account home, exactly as it will at launch.
+		osHome, herr := osAccountHome()
+		if herr != nil || strings.TrimSpace(osHome) == "" {
+			return "", fmt.Errorf("%s and HOME are unset and af could not look up the account home %s falls back to: %v", spec.variable, spec.label, herr)
+		}
+		home = osHome
+	case blank:
+		return "", fmt.Errorf("%s is unset and HOME is empty, which %s reads as a relative path af cannot name", spec.variable, spec.label)
 	}
-	return filepath.Join(resolve(home), spec.homeSubdir), nil
+	resolved, err := resolve("HOME", home)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolved, spec.homeSubdir), nil
 }
 
 // CodexHomeFromCommand resolves the rollout store the launched command will
