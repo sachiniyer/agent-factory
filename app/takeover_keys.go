@@ -61,20 +61,32 @@ func (r takeoverRoute) prefix() string {
 }
 
 // attachArgs is the tmux command sequence: create the private session, route its
-// keys, attach, and tell the user which key leaves. A byte tmux has no ctrl
+// keys, say which key leaves (its status line), then attach. A byte tmux has no ctrl
 // spelling for degrades to the plain attach to the shared session.
 func (r takeoverRoute) attachArgs() []string {
 	if r.key == "" {
 		return []string{"attach-session", "-t", r.session}
 	}
+	// Everything is configured BEFORE the attach: commands queued after an
+	// attaching command do not run until that client has gone, so a hint or a
+	// binding placed after it would arrive too late (the TUI driver selftest
+	// caught exactly that). The has-session guard keeps the previous behaviour for
+	// a login that exited between the daemon's answer and this start: `new-session
+	// -t` accepts a missing target and would create an unrelated shell, where
+	// `attach-session -t` failed, so a vanished session is an error again. The
+	// private session is created detached, and destroy-unattached is set last,
+	// immediately before the attach, so the server does not reap it while it is
+	// still being routed.
 	return []string{
-		"new-session", "-t", r.session, "-s", r.group, ";",
-		"set-option", "-t", r.group, "destroy-unattached", "on", ";",
+		"has-session", "-t", "=" + r.session, ";",
+		"new-session", "-d", "-t", r.session, "-s", r.group, ";",
 		"set-option", "-t", r.group, "prefix", r.prefix(), ";",
 		"set-option", "-t", r.group, "prefix2", "None", ";",
 		"set-option", "-t", r.group, "key-table", r.table, ";",
 		"bind-key", "-T", r.table, r.key, "detach-client", ";",
-		"display-message", "-d", "4000", r.display + " leaves",
+		"set-option", "-t", r.group, "status-right", r.display + " leaves", ";",
+		"set-option", "-t", r.group, "destroy-unattached", "on", ";",
+		"attach-session", "-t", r.group,
 	}
 }
 

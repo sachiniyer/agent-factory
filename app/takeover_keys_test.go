@@ -21,6 +21,7 @@ import (
 // (server-client.c: "prefix always takes precedence").
 type fakeTmux struct {
 	sessions map[string]*fakeSession
+	failed   bool
 	tables   map[string]map[string]string // table -> key -> command
 }
 
@@ -40,8 +41,19 @@ func newFakeTmux(shared ...string) *fakeTmux {
 // run applies one `;`-separated command group.
 func (f *fakeTmux) run(t *testing.T, args []string) {
 	t.Helper()
+	f.failed = false
 	for _, c := range splitTmuxSequence(args) {
+		if f.failed {
+			return
+		}
 		switch c[0] {
+		case "has-session":
+			require.Equal(t, "-t", c[1])
+			require.True(t, strings.HasPrefix(c[2], "="), "exact-match target: %v", c)
+			if _, ok := f.sessions[strings.TrimPrefix(c[2], "=")]; !ok {
+				f.failed = true // tmux aborts the rest of the sequence
+				return
+			}
 		case "new-session":
 			var group, of string
 			for i := 1; i < len(c)-1; i++ {
@@ -58,7 +70,7 @@ func (f *fakeTmux) run(t *testing.T, args []string) {
 			require.Equal(t, "-t", c[1])
 			sess, ok := f.sessions[c[2]]
 			require.True(t, ok, "set-option targets an existing session: %v", c)
-			sess.opts[c[3]] = c[4]
+			sess.opts[c[3]] = strings.Join(c[4:], " ")
 		case "bind-key":
 			require.Equal(t, "-T", c[1], "never a root/-n binding: %v", c)
 			if f.tables[c[2]] == nil {
@@ -70,7 +82,9 @@ func (f *fakeTmux) run(t *testing.T, args []string) {
 			delete(f.tables, c[3])
 		case "kill-session":
 			delete(f.sessions, c[2])
-		case "attach-session", "display-message":
+		case "attach-session":
+			_, ok := f.sessions[c[2]]
+			require.True(t, ok, "attach targets the private session: %v", c)
 		default:
 			t.Fatalf("unmodelled tmux command %v", c)
 		}
@@ -209,4 +223,34 @@ func TestBareAttachCleanupTouchesOnlyItsOwnClient(t *testing.T) {
 	assert.True(t, strings.HasPrefix(group, "af-takeover-"))
 	assert.NotEqual(t, group, execAccountLoginAttach("af-config-9", "/sock").Args[slices.Index(execAccountLoginAttach("af-config-9", "/sock").Args, "-s")+1],
 		"every client gets its own private session")
+}
+
+// The has-session guard: a login that vanished between the daemon's answer and
+// the takeover is an error again, never a fresh unrelated shell (new-session -t
+// accepts a missing target and creates one).
+func TestTakeoverRefusesAVanishedLoginSession(t *testing.T) {
+	cw, _ := config.ParseDetachKey("ctrl-w")
+	r := newTakeoverRoute("gone", cw, "ctrl+w")
+	assert.Equal(t, []string{"has-session", "-t", "=gone", ";"}, r.attachArgs()[:4],
+		"the guard comes first, exact-match")
+
+	f := newFakeTmux() // the login session no longer exists
+	f.run(t, r.attachArgs())
+	assert.True(t, f.failed)
+	assert.Empty(t, f.sessions, "nothing was created, no stray shell")
+	assert.Empty(t, f.tables)
+}
+
+// Everything that routes keys or shows the hint runs before the attach; commands
+// queued after an attaching command only run once that client has gone.
+func TestTakeoverConfiguresBeforeItAttaches(t *testing.T) {
+	cw, _ := config.ParseDetachKey("ctrl-w")
+	args := newTakeoverRoute("login", cw, "ctrl+w").attachArgs()
+	assert.Equal(t, "attach-session", args[len(args)-3], "the attach is the last command")
+	assert.Equal(t, []string{"attach-session", "-t"}, args[len(args)-3:len(args)-1])
+	assert.NotContains(t, args[len(args)-3:], ";")
+	joined := strings.Join(args, " ")
+	assert.Contains(t, joined, "status-right ctrl+w leaves")
+	assert.Less(t, strings.Index(joined, "bind-key"), strings.Index(joined, "attach-session"))
+	assert.Less(t, strings.Index(joined, "destroy-unattached on"), strings.Index(joined, "attach-session"))
 }
