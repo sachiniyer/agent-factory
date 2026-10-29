@@ -103,12 +103,12 @@ func TestSessionsTabsAliasesRegistered(t *testing.T) {
 // that narrow boundary instead of preserving the old all-remote refusal.
 func TestSessionsTabHelpExplainsRemoteMetadataOnlyBoundary(t *testing.T) {
 	createHelp := sessionsTabCreateCmd.Long
-	for _, want := range []string{"remote sessions", "external HTTPS", "no PTY", "no process"} {
+	for _, want := range []string{"remote sessions", "external HTTPS", "no PTY", "no process", `"tab-api"`} {
 		if !strings.Contains(createHelp, want) {
 			t.Errorf("tab-create help is missing %q:\n%s", want, createHelp)
 		}
 	}
-	if strings.Contains(createHelp, "Not available for remote sessions") {
+	if strings.Contains(createHelp, "still\nrequire local") || strings.Contains(createHelp, "Not available for remote sessions") {
 		t.Errorf("tab-create help still claims the admitted remote web flow is unavailable:\n%s", createHelp)
 	}
 
@@ -117,10 +117,11 @@ func TestSessionsTabHelpExplainsRemoteMetadataOnlyBoundary(t *testing.T) {
 		"tab-rename":  sessionsTabRenameCmd.Long,
 		"tab-reorder": sessionsTabReorderCmd.Long,
 	} {
-		if !strings.Contains(help, "remote sessions") || !strings.Contains(help, "metadata-only web tabs") {
+		if !strings.Contains(help, "remote sessions") || !strings.Contains(help, "metadata-only web tabs") ||
+			!strings.Contains(help, `"tab-api"`) {
 			t.Errorf("%s help does not name the admitted remote roster boundary:\n%s", name, help)
 		}
-		if strings.Contains(help, "tabs are fixed") || strings.Contains(help, "Not available for remote sessions") {
+		if strings.Contains(help, "never admitted there") || strings.Contains(help, "tabs are fixed") || strings.Contains(help, "Not available for remote sessions") {
 			t.Errorf("%s help still claims every remote roster is fixed:\n%s", name, help)
 		}
 	}
