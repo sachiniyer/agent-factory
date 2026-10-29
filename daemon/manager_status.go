@@ -900,7 +900,15 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// Fresh output. Only a live pane produces bytes, and a dead one yields "" —
 		// so this is affirmative on its own, no probe needed.
 		observedAlive = true
-		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
+		if obs.Captured && task.AgentStoppedContent(content, instance.ResolvedAgent()) {
+			// The frame says the agent gave up (codex "Reconnect failed") and its
+			// elapsed timer repaints forever: churn is not evidence of work here
+			// (#6055). Settle like an idle pane, so the row reads Ready — the
+			// waiting-for-you dot — instead of a Running that never ends.
+			m.resolveIdleLiveness(instance, content, epoch)
+		} else {
+			_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
+		}
 	case hasPrompt:
 		// A matched prompt means the CAPTURE SUCCEEDED: hasPrompt is a substring test
 		// over content, and every failure path in HasUpdated returns content "". So
