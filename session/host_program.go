@@ -85,11 +85,13 @@ const hostProgramProbeWaitDelay = time.Second
 // because the probe runs under the account's real login shell, and the POSIX
 // argv semantics the original probe assumed do not hold for fish or the csh
 // family: fish has no $1 (it numbers its arguments through $argv) and its $PATH
-// is a list, not a colon-separated string; csh/tcsh map -c's trailing args to
-// $1.. (there is no POSIX $0 placeholder, so a leading "af-probe" $0 lands the
-// nonce in $2) and tcsh rejects -l outright ("valid only if -l is the only flag
-// specified"), so the csh family reaches login mode through the argv[0] "-"
-// convention instead. hostProbeSpec turns the basename into the right argv.
+// is a list, not a colon-separated string; the csh family cannot reach login
+// mode through -c — BSD csh sets loginsh only for `argc == 2 && argv[1] ==
+// "-l"` (its argv[0] "-" convention needs argc == 1, which -c breaks), and tcsh
+// accepts -l only as the sole flag — so the csh family runs `<shell> -l`
+// reading the probe script from stdin, a true login shell that sources both
+// .cshrc and .login before running it. hostProbeSpec turns the basename into the
+// right argv (and stdin, for the csh family).
 const (
 	// POSIX family (sh, bash, dash, ksh, mksh, zsh): run as
 	// `<shell> -l -c hostProbePathOnly af-probe <nonce>`, so $0 = af-probe and
@@ -99,19 +101,30 @@ const (
 	// $argv = (af-probe, nonce) and the nonce is $argv[2]; $PATH is a list that
 	// is joined back into the colon-separated form the walk expects.
 	hostProbePathOnlyFish = `printf '\n%s\n%s\n' $argv[2] (string join : -- $PATH)`
-	// csh/tcsh: run as `<login> -c hostProbePathOnlyCsh <nonce>` (the login shell
-	// is reached through the argv[0] "-" convention), and -c's trailing args are
-	// $1.. with no $0 placeholder, so the nonce is $1 already.
-	hostProbePathOnlyCsh = `printf '\n%s\n%s\n' "$1" "$PATH"`
+	// csh/tcsh: run as `<shell> -l` reading the probe script from stdin. BSD csh
+	// sets loginsh only for `argc == 2 && argv[1] == "-l"` (its argv[0] "-"
+	// convention needs argc == 1, which -c breaks), so the -c form the POSIX
+	// family uses never reaches login mode: ~/.login is skipped and a PATH set
+	// there is lost even though the nonce prints. tcsh accepts -l only alone as
+	// well. `<shell> -l` is a login shell that sources .cshrc and .login, then
+	// runs the script from stdin; there are no positional parameters under stdin,
+	// so the nonce is inlined (hex, safe inside csh double quotes). The csh
+	// printf verbs are doubled (%%s) so the one Go verb (%s) carries the nonce.
+	// The script ends with a newline because BSD csh leaves a final unterminated
+	// stdin line unexecuted (tcsh runs it either way).
+	hostProbePathOnlyCsh = `printf '\n%%s\n%%s\n' "%s" "$PATH"
+`
 )
 
 // hostProgramRunner executes one probe on the local host. execPath is the
 // binary to execve; argv is the full argument vector the shell sees, so argv[0]
-// is the login name — the shell executable for the POSIX and fish families,
-// "-basename" for the csh/tcsh family, which reaches login mode that way. Tests
-// inject a fake so the exact argv — login flags, positional argument,
-// uninterpolated script — is what gets asserted.
-type hostProgramRunner func(ctx context.Context, execPath string, argv []string) ([]byte, error)
+// is the login name (the shell executable for the POSIX, fish, and csh
+// families). stdin, when non-empty, is the probe script piped to the shell
+// instead of a -c argument — the csh family reads it this way because `<shell>
+// -l` cannot take -c and still be a login shell. Tests inject a fake so the
+// exact argv — login flags, positional argument, uninterpolated script, stdin —
+// is what gets asserted.
+type hostProgramRunner func(ctx context.Context, execPath string, argv []string, stdin string) ([]byte, error)
 
 // hostProgramProber carries the inputs of a host-side program resolution so
 // tests can drive resolveProgramOnHost without a real login shell.
@@ -273,12 +286,22 @@ func canExecuteFile(path string) bool {
 // of quietly degrading to the spawning environment PATH.
 func (p hostProgramProber) probePath(ctx context.Context) (path string, probed bool) {
 	nonce := p.nonce()
-	script, loginName, pre, trail := hostProbeSpec(p.shell, nonce)
+	script, loginName, pre, trail, viaStdin := hostProbeSpec(p.shell, nonce)
 	argv := []string{loginName}
 	argv = append(argv, pre...)
-	argv = append(argv, "-c", script)
-	argv = append(argv, trail...)
-	out, runErr := p.run(ctx, p.shell, argv)
+	var stdin string
+	if viaStdin {
+		// The csh family runs the probe script on stdin under `<shell> -l` (a
+		// true login shell) instead of `-c script`, because -c cannot be a login
+		// shell for BSD csh (its loginsh test needs argc == 2 with -l) or tcsh
+		// (-l is valid only alone). The nonce is inlined into the script rather
+		// than passed as a positional, since stdin carries no argv.
+		stdin = script
+	} else {
+		argv = append(argv, "-c", script)
+		argv = append(argv, trail...)
+	}
+	out, runErr := p.run(ctx, p.shell, argv, stdin)
 	path, fence := parseHostProbeOutput(string(out), nonce)
 	if !fence {
 		reason := "the nonce fence was not present in the login shell's output"
@@ -294,27 +317,31 @@ func (p hostProgramProber) probePath(ctx context.Context) (path string, probed b
 }
 
 // hostProbeSpec turns the account's login shell basename into the probe script
-// and the argv pieces (other than the invariant -c flag) that drive the PATH
-// probe. fish and the csh/tcsh family don't share the POSIX positional-argv
-// convention: fish numbers its arguments through $argv and exposes $PATH as a
-// list, and tcsh rejects -l except as the sole argument (so the csh/tcsh family
-// reaches login mode through the argv[0] "-" convention and puts the nonce in
-// $1 with no $0 placeholder). Splitting the -c flag out of this keeps the single
+// and the argv pieces that drive the PATH probe. fish and the csh/tcsh family
+// don't share the POSIX positional-argv convention: fish numbers its arguments
+// through $argv and exposes $PATH as a list, and the csh family cannot reach
+// login mode under -c (BSD csh's loginsh test is `argc == 2 && argv[1] ==
+// "-l"`, and tcsh accepts -l only alone), so the csh family runs `<shell> -l`
+// reading the probe script from stdin instead. viaStdin reports whether the
+// script is fed on stdin (csh family) rather than as a -c argument (POSIX and
+// fish); splitting the -c flag out of the csh path keeps the single
 // shell-invocation site — and the #3566 drain-gate entry — in probePath, where
 // the program-name-never-reaches-a-shell proof lives.
-func hostProbeSpec(shell, nonce string) (script, loginName string, pre, trail []string) {
+func hostProbeSpec(shell, nonce string) (script, loginName string, pre, trail []string, viaStdin bool) {
 	switch filepath.Base(shell) {
 	case "fish":
 		// fish has no $0-like positional; -l is its login flag, $argv is the list.
-		return hostProbePathOnlyFish, shell, []string{"-l"}, []string{"af-probe", nonce}
+		return hostProbePathOnlyFish, shell, []string{"-l"}, []string{"af-probe", nonce}, false
 	case "csh", "tcsh":
-		// The login shell is reached by an argv[0] that starts with "-", the
-		// universal csh-family login convention (tcsh's -l flag is valid only
-		// alone). The nonce is $1, since csh/tcsh has no POSIX $0 placeholder.
-		return hostProbePathOnlyCsh, "-" + filepath.Base(shell), nil, []string{nonce}
+		// `<shell> -l` is a login shell that sources .cshrc and .login, then
+		// runs the script from stdin — the only login-mode form both BSD csh and
+		// tcsh accept (BSD csh requires argc == 2 with -l; tcsh rejects -l
+		// combined with -c). There are no positionals under stdin, so the nonce
+		// is inlined into the script.
+		return fmt.Sprintf(hostProbePathOnlyCsh, nonce), shell, []string{"-l"}, nil, true
 	default:
 		// POSIX family: -l selects the login shell, $0 = af-probe, $1 = nonce.
-		return hostProbePathOnly, shell, []string{"-l"}, []string{"af-probe", nonce}
+		return hostProbePathOnly, shell, []string{"-l"}, []string{"af-probe", nonce}, false
 	}
 }
 
@@ -427,15 +454,19 @@ func loginShellName(getenv func(string) string) string {
 // execProbeRunner runs one probe with the same hardening as the claude
 // first-run probe (#856): own process group so rc-file children die with the
 // shell, WaitDelay so a backgrounded pipe-holder cannot stall the read. The
-// executable is execPath; argv[0] is the login name the shell sees, which is
-// execPath for the POSIX and fish families and "-basename" for the csh/tcsh
-// family (its login-shell convention).
-func execProbeRunner(ctx context.Context, execPath string, argv []string) ([]byte, error) {
+// executable is execPath; argv[0] is the login name the shell sees (the shell
+// path for the POSIX, fish, and csh families). stdin, when non-empty, is the
+// probe script piped to the shell — the csh family runs under `<shell> -l`
+// this way, since -c cannot be a login shell there.
+func execProbeRunner(ctx context.Context, execPath string, argv []string, stdin string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, hostProgramProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, execPath, argv[1:]...)
 	if len(argv) > 0 {
 		cmd.Args[0] = argv[0]
+	}
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

@@ -92,7 +92,7 @@ func TestResolveProgramOnHostMatchesARealShell(t *testing.T) {
 			// answer for ".": that case is verbatim and still equal.
 			prober := hostProgramProber{
 				shell: sh, host: "fixture", processPATH: "",
-				run: func(_ context.Context, _ string, argv []string) ([]byte, error) {
+				run: func(_ context.Context, _ string, argv []string, _ string) ([]byte, error) {
 					return []byte("\n" + argv[len(argv)-1] + "\n" + tc.path + "\n"), nil
 				},
 				canExecute: canExecuteFile,
@@ -201,7 +201,7 @@ func TestResolveProgramOnHostRefusesFieldSplitEnvAssignments(t *testing.T) {
 			}
 			prober := hostProgramProber{
 				shell: sh, host: "fixture",
-				run: func(_ context.Context, _ string, argv []string) ([]byte, error) {
+				run: func(_ context.Context, _ string, argv []string, _ string) ([]byte, error) {
 					return []byte("\n" + argv[len(argv)-1] + "\n" + pathEnv + "\n"), nil
 				},
 				canExecute: canExecuteFile,

@@ -47,7 +47,7 @@ func TestE2EProductionResolveProgramOnHost(t *testing.T) {
 				profilePath = filepath.Join(home, ".config/fish/conf.d/test.fish")
 			case "csh":
 				profile = fmt.Sprintf("setenv PATH %s:$PATH\n", agentBin)
-				profilePath = filepath.Join(home, ".cshrc")
+				profilePath = filepath.Join(home, ".login")
 			case "tcsh":
 				profile = fmt.Sprintf("setenv PATH %s:$PATH\n", agentBin)
 				profilePath = filepath.Join(home, ".login")

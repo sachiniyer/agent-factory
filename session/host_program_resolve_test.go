@@ -29,7 +29,7 @@ func executableFile(t *testing.T, dir, name string) string {
 
 // loginPATHProber answers the PATH probe with loginPATH after profile noise.
 func loginPATHProber(profile, loginPATH string) hostProgramProber {
-	return newTestProber(func(_ context.Context, _ string, argv []string) ([]byte, error) {
+	return newTestProber(func(_ context.Context, _ string, argv []string, _ string) ([]byte, error) {
 		return probeReply(argv, profile, loginPATH), nil
 	})
 }
@@ -102,7 +102,7 @@ func TestResolveProgramOnHostTable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var argvs [][]string
-			prober := newTestProber(func(_ context.Context, _ string, argv []string) ([]byte, error) {
+			prober := newTestProber(func(_ context.Context, _ string, argv []string, _ string) ([]byte, error) {
 				argvs = append(argvs, append([]string(nil), argv...))
 				return probeReply(argv, tc.profile, loginDir), nil
 			})
@@ -150,7 +150,7 @@ func TestResolveProgramOnHostComputedExecutable(t *testing.T) {
 		`env -u "$NAME" claude`,
 	} {
 		t.Run(program, func(t *testing.T) {
-			prober := newTestProber(func(context.Context, string, []string) ([]byte, error) {
+			prober := newTestProber(func(context.Context, string, []string, string) ([]byte, error) {
 				t.Fatal("a refused command must not probe")
 				return nil, nil
 			})
@@ -261,7 +261,7 @@ func TestResolveProgramOnHostRunsVerbatimWhatItCannotResolve(t *testing.T) {
 
 // A command with no executable word fails like an empty program.
 func TestResolveProgramOnHostAllAssignmentsIsNoExecutable(t *testing.T) {
-	prober := newTestProber(func(context.Context, string, []string) ([]byte, error) {
+	prober := newTestProber(func(context.Context, string, []string, string) ([]byte, error) {
 		t.Fatal("no executable word — no probe may run")
 		return nil, nil
 	})

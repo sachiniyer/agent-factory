@@ -214,7 +214,7 @@ var shellSiteRegistry = map[string][]classifiedSite{
 
 	"session/host_program.go:(hostProgramProber).probePath": {{
 		class: afAuthored,
-		note:  "the login-shell PATH probe — the hostProbePathOnly / hostProbePathOnlyFish / hostProbePathOnlyCsh consts (one per login-shell family); the program name never reaches a shell (#5571 W2.1, #5768), only the nonce is a positional argument",
+		note:  "the login-shell PATH probe — the hostProbePathOnly / hostProbePathOnlyFish / hostProbePathOnlyCsh consts (one per login-shell family); the program name never reaches a shell (#5571 W2.1, #5768). POSIX/fish carry the nonce as a positional argument under -c; the csh family runs `<shell> -l` reading the script from stdin (BSD csh cannot reach login mode under -c) with the nonce inlined into the script text",
 	}},
 
 	// ---- not a shell at all ----

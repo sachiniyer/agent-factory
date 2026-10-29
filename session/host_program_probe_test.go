@@ -30,14 +30,15 @@ func captureProbeWarnings(t *testing.T) *logtest.Buffer {
 }
 
 // captureProbeArgs runs one probePath through a recording runner and returns
-// the execPath and the full argv the shell would see. The recorded argv is the
-// subject; the canned fenced answer only ends the run cleanly.
-func captureProbeArgs(shell string) (execPath string, argv []string) {
+// the execPath, the full argv the shell would see, and the stdin script (the
+// csh family's probe vector). The recorded argv and stdin are the subjects; the
+// canned fenced answer only ends the run cleanly.
+func captureProbeArgs(shell string) (execPath string, argv []string, stdin string) {
 	p := hostProgramProber{
 		shell: shell, host: "h", processPATH: "",
-		run: func(_ context.Context, ep string, a []string) ([]byte, error) {
-			execPath, argv = ep, append([]string(nil), a...)
-			return []byte("\n" + a[len(a)-1] + "\n/login/bin\n"), nil
+		run: func(_ context.Context, ep string, a []string, in string) ([]byte, error) {
+			execPath, argv, stdin = ep, append([]string(nil), a...), in
+			return []byte("\nN\n/login/bin\n"), nil
 		},
 		canExecute: func(string) bool { return true },
 		nonce:      func() string { return "N" },
@@ -48,33 +49,34 @@ func captureProbeArgs(shell string) (execPath string, argv []string) {
 
 // The probe picks an argv family from the login-shell basename. POSIX shells
 // keep the $0 placeholder and the -l flag; fish uses $argv[2] and -l; the csh
-// family reaches login mode through the argv[0] "-" convention (tcsh rejects
-// -l combined with -c) and puts the nonce in $1 with no $0 placeholder. The
-// executable (execPath) and the shell's own argv[0] differ only for csh/tcsh.
+// family runs `<shell> -l` reading the probe script from stdin (the only login
+// form both BSD csh and tcsh accept), with the nonce inlined into the script.
 func TestProbePathArgvMatchesLoginShellFamily(t *testing.T) {
 	cases := []struct {
-		name     string
-		shell    string
-		wantExec string
-		wantArgv []string
+		name      string
+		shell     string
+		wantExec  string
+		wantArgv  []string
+		wantStdin string
 	}{
-		{"sh", "/bin/sh", "/bin/sh", []string{"/bin/sh", "-l", "-c", hostProbePathOnly, "af-probe", "N"}},
-		{"bash", "/bin/bash", "/bin/bash", []string{"/bin/bash", "-l", "-c", hostProbePathOnly, "af-probe", "N"}},
-		{"dash", "/usr/bin/dash", "/usr/bin/dash", []string{"/usr/bin/dash", "-l", "-c", hostProbePathOnly, "af-probe", "N"}},
-		{"ksh", "/bin/ksh", "/bin/ksh", []string{"/bin/ksh", "-l", "-c", hostProbePathOnly, "af-probe", "N"}},
-		{"mksh", "/usr/bin/mksh", "/usr/bin/mksh", []string{"/usr/bin/mksh", "-l", "-c", hostProbePathOnly, "af-probe", "N"}},
-		{"zsh", "/bin/zsh", "/bin/zsh", []string{"/bin/zsh", "-l", "-c", hostProbePathOnly, "af-probe", "N"}},
-		{"fish", "/usr/bin/fish", "/usr/bin/fish", []string{"/usr/bin/fish", "-l", "-c", hostProbePathOnlyFish, "af-probe", "N"}},
-		{"csh", "/bin/csh", "/bin/csh", []string{"-csh", "-c", hostProbePathOnlyCsh, "N"}},
-		{"tcsh", "/usr/bin/tcsh", "/usr/bin/tcsh", []string{"-tcsh", "-c", hostProbePathOnlyCsh, "N"}},
-		{"csh-under-usr-bin", "/usr/bin/csh", "/usr/bin/csh", []string{"-csh", "-c", hostProbePathOnlyCsh, "N"}},
-		{"unknown defaults to POSIX", "/opt/bin/weirdshell", "/opt/bin/weirdshell", []string{"/opt/bin/weirdshell", "-l", "-c", hostProbePathOnly, "af-probe", "N"}},
+		{"sh", "/bin/sh", "/bin/sh", []string{"/bin/sh", "-l", "-c", hostProbePathOnly, "af-probe", "N"}, ""},
+		{"bash", "/bin/bash", "/bin/bash", []string{"/bin/bash", "-l", "-c", hostProbePathOnly, "af-probe", "N"}, ""},
+		{"dash", "/usr/bin/dash", "/usr/bin/dash", []string{"/usr/bin/dash", "-l", "-c", hostProbePathOnly, "af-probe", "N"}, ""},
+		{"ksh", "/bin/ksh", "/bin/ksh", []string{"/bin/ksh", "-l", "-c", hostProbePathOnly, "af-probe", "N"}, ""},
+		{"mksh", "/usr/bin/mksh", "/usr/bin/mksh", []string{"/usr/bin/mksh", "-l", "-c", hostProbePathOnly, "af-probe", "N"}, ""},
+		{"zsh", "/bin/zsh", "/bin/zsh", []string{"/bin/zsh", "-l", "-c", hostProbePathOnly, "af-probe", "N"}, ""},
+		{"fish", "/usr/bin/fish", "/usr/bin/fish", []string{"/usr/bin/fish", "-l", "-c", hostProbePathOnlyFish, "af-probe", "N"}, ""},
+		{"csh", "/bin/csh", "/bin/csh", []string{"/bin/csh", "-l"}, fmt.Sprintf(hostProbePathOnlyCsh, "N")},
+		{"tcsh", "/usr/bin/tcsh", "/usr/bin/tcsh", []string{"/usr/bin/tcsh", "-l"}, fmt.Sprintf(hostProbePathOnlyCsh, "N")},
+		{"csh-under-usr-bin", "/usr/bin/csh", "/usr/bin/csh", []string{"/usr/bin/csh", "-l"}, fmt.Sprintf(hostProbePathOnlyCsh, "N")},
+		{"unknown defaults to POSIX", "/opt/bin/weirdshell", "/opt/bin/weirdshell", []string{"/opt/bin/weirdshell", "-l", "-c", hostProbePathOnly, "af-probe", "N"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			execPath, argv := captureProbeArgs(tc.shell)
+			execPath, argv, stdin := captureProbeArgs(tc.shell)
 			assert.Equal(t, tc.wantExec, execPath, "execPath is the shell binary")
 			assert.Equal(t, tc.wantArgv, argv, "argv is the family-specific probe vector")
+			assert.Equal(t, tc.wantStdin, stdin, "stdin carries the probe script for the csh family")
 		})
 	}
 }
@@ -86,19 +88,21 @@ func TestHostProbeSpecByFamily(t *testing.T) {
 	cases := []struct {
 		name, shell, wantScript, wantLogin string
 		wantPre, wantTrail                 []string
+		wantStdin                          bool
 	}{
-		{"sh", "/bin/sh", hostProbePathOnly, "/bin/sh", []string{"-l"}, []string{"af-probe", "N"}},
-		{"fish", "/usr/bin/fish", hostProbePathOnlyFish, "/usr/bin/fish", []string{"-l"}, []string{"af-probe", "N"}},
-		{"csh", "/bin/csh", hostProbePathOnlyCsh, "-csh", nil, []string{"N"}},
-		{"tcsh", "/usr/bin/tcsh", hostProbePathOnlyCsh, "-tcsh", nil, []string{"N"}},
+		{"sh", "/bin/sh", hostProbePathOnly, "/bin/sh", []string{"-l"}, []string{"af-probe", "N"}, false},
+		{"fish", "/usr/bin/fish", hostProbePathOnlyFish, "/usr/bin/fish", []string{"-l"}, []string{"af-probe", "N"}, false},
+		{"csh", "/bin/csh", fmt.Sprintf(hostProbePathOnlyCsh, "N"), "/bin/csh", []string{"-l"}, nil, true},
+		{"tcsh", "/usr/bin/tcsh", fmt.Sprintf(hostProbePathOnlyCsh, "N"), "/usr/bin/tcsh", []string{"-l"}, nil, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			script, login, pre, trail := hostProbeSpec(tc.shell, "N")
+			script, login, pre, trail, viaStdin := hostProbeSpec(tc.shell, "N")
 			assert.Equal(t, tc.wantScript, script)
 			assert.Equal(t, tc.wantLogin, login)
 			assert.Equal(t, tc.wantPre, pre)
 			assert.Equal(t, tc.wantTrail, trail)
+			assert.Equal(t, tc.wantStdin, viaStdin)
 		})
 	}
 }
@@ -110,7 +114,7 @@ func TestProbePathWarnsWhenFenceAbsent(t *testing.T) {
 	warn := captureProbeWarnings(t)
 	p := hostProgramProber{
 		shell: "/usr/bin/fish", host: "off-box.example", processPATH: "/spawn/bin",
-		run: func(context.Context, string, []string) ([]byte, error) {
+		run: func(context.Context, string, []string, string) ([]byte, error) {
 			// fish with the OLD POSIX script: $1 expands to nothing, no fence.
 			return []byte("\n\n/login/bin\n"), nil
 		},
@@ -132,7 +136,7 @@ func TestProbePathWarnsAndIncludesRunErrorWhenFenceAbsent(t *testing.T) {
 	warn := captureProbeWarnings(t)
 	p := hostProgramProber{
 		shell: "/usr/bin/tcsh", host: "off-box", processPATH: "/spawn/bin",
-		run: func(context.Context, string, []string) ([]byte, error) {
+		run: func(context.Context, string, []string, string) ([]byte, error) {
 			return nil, fmt.Errorf("Unknown option: `-l'")
 		},
 		canExecute: func(string) bool { return true },
@@ -150,7 +154,7 @@ func TestProbePathReturnsLoginPathAndStaysQuietWhenFenced(t *testing.T) {
 	warn := captureProbeWarnings(t)
 	p := hostProgramProber{
 		shell: "/bin/sh", host: "h", processPATH: "/spawn/bin",
-		run: func(_ context.Context, _ string, argv []string) ([]byte, error) {
+		run: func(_ context.Context, _ string, argv []string, _ string) ([]byte, error) {
 			return []byte("/home/operator\nwelcome back\n" + argv[len(argv)-1] + "\n/login/a:/login/b\n"), nil
 		},
 		canExecute: func(string) bool { return true },
@@ -167,7 +171,7 @@ func TestProbePathReturnsLoginPathAndStaysQuietWhenFenced(t *testing.T) {
 // PATH as the login-shell PATH (the original silent #5727).
 func TestResolveProgramOnHostDiagnosticLabelsProcessPATHWhenProbeFails(t *testing.T) {
 	warn := captureProbeWarnings(t)
-	p := newTestProber(func(_ context.Context, _ string, _ []string) ([]byte, error) {
+	p := newTestProber(func(_ context.Context, _ string, _ []string, _ string) ([]byte, error) {
 		// A fence-less probe: the login PATH never reaches the answer.
 		return []byte("profile noise with no fence\n/login/bin/claude\n"), nil
 	})
@@ -211,7 +215,7 @@ func TestResolveProgramOnHostDiagnosticLabelsLoginShellPATHWhenProbed(t *testing
 func TestResolveProgramOnHostResolvesFromProcessPATHAndWarnsWhenProbeFails(t *testing.T) {
 	warn := captureProbeWarnings(t)
 	bin := executableFile(t, t.TempDir(), "my-agent")
-	p := newTestProber(func(context.Context, string, []string) ([]byte, error) {
+	p := newTestProber(func(context.Context, string, []string, string) ([]byte, error) {
 		return nil, fmt.Errorf("off-box probe broke")
 	})
 	p.shell = "/usr/bin/fish"
@@ -250,13 +254,13 @@ func TestLoginShellNamePassesNonPOSIXShellsThrough(t *testing.T) {
 // case writes a PATH-setting startup file under a private HOME and asserts the
 // sentinel the profile added is in the probed PATH.
 //
-// csh/tcsh use .cshrc here (rather than .login) because the csh-family probe
-// runs under `<shell> -c` with the argv[0] "-" login convention: both bsd-csh
-// and tcsh read .cshrc for ANY invocation (login or not), while only tcsh extends
-// that to .login for a non-interactive -c shell — a tcsh-vs-bsd-csh divergence
-// the probe cannot paper over. .cshrc is the file BOTH implementations read
-// under -c, so the round-trip exercises the fix's contract for both. A
-// separate tcsh-only case verifies .login is additionally reached.
+// The csh family now runs `<shell> -l` reading the probe script from stdin — a
+// true login shell that sources BOTH .cshrc and .login for both BSD csh and
+// tcsh (the old argv[0] "-" + -c form only reached .login for tcsh; BSD csh
+// sets loginsh only for `argc == 2 && argv[1] == "-l"`, which -c broke). The
+// `.login` cases for csh and tcsh are the regression the fix is about: a PATH
+// set in ~/.login must be adopted, where BSD csh used to skip it silently. The
+// `.cshrc` cases cover the file both implementations read for any invocation.
 // Skipped where the shell is absent (no fish/csh/tcsh on the dev/CI POSIX-only
 // images); the shells needed are installed by `apt-get install -y fish csh tcsh`.
 func TestProbePathRealLoginShellAdoptsLoginPathForNonPOSIXFamilies(t *testing.T) {
@@ -269,6 +273,7 @@ func TestProbePathRealLoginShellAdoptsLoginPathForNonPOSIXFamilies(t *testing.T)
 	}{
 		{"fish", "fish", ".config/fish/conf.d/af-probe-test.fish", "set -gx PATH %s $PATH\n", true},
 		{"csh", "csh", ".cshrc", "setenv PATH %s:$PATH\n", false},
+		{"csh-login", "csh", ".login", "setenv PATH %s:$PATH\n", false},
 		{"tcsh", "tcsh", ".cshrc", "setenv PATH %s:$PATH\n", false},
 		{"tcsh-login", "tcsh", ".login", "setenv PATH %s:$PATH\n", false},
 	}
