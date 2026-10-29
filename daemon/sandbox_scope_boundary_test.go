@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/hostlayout"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -129,17 +130,39 @@ func TestSandboxScope_NoResponseCarriesTheDaemonHostLayout(t *testing.T) {
 	assert.Contains(t, opErr, otherPath, "the expectation mismatch error does carry the path for the operator (status %d)", code)
 }
 
-// The scrub itself: raw and JSON-escaped spellings, longest first, nothing
-// shredded by short strings.
-func TestScrubSandboxBody(t *testing.T) {
-	layout := []string{"/home/op/proj", "/home/op/proj/.worktrees/s1", "/", "", "ab", "/srv/a&b"}
-	body := []byte(`{"p":"/home/op/proj/.worktrees/s1","q":"/home/op/proj","r":"/srv/a&b/x","s":"keep /tmp ab"}`)
-	got := string(scrubSandboxBody(body, layout))
-	assert.NotContains(t, got, "/home/op")
-	assert.NotContains(t, got, `a&b`)
-	assert.NotContains(t, got, "/srv/a&b")
-	assert.Contains(t, got, "keep /tmp ab", "short and root entries must not shred ordinary text")
-	assert.Equal(t, 3, strings.Count(got, sandboxWithheld), "the worktree path is replaced whole, not as project path plus a tail")
+// A string an instance's projection noted is withheld by the very next sandbox
+// response, including one created a moment ago: the layout is maintained as
+// producers note it, not recomputed per request, so nothing on the response path
+// walks sessions or takes their locks (internal/hostlayout).
+func TestSandboxResponsesWithholdWhatAProjectionJustNoted(t *testing.T) {
+	f := newScopeFixture(t)
+	fresh := "/srv/just-created-" + t.Name() + "/worktrees/child"
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "child", Path: fresh, Program: "claude"})
+	require.NoError(t, err)
+	_ = inst.ToInstanceData() // the projection a create response is built from
+
+	handler := scrubbedSandboxResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"error":{"message":"cannot use ` + fresh + `"}}`))
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/x", nil))
+	assert.NotContains(t, rec.Body.String(), fresh)
+	assert.Contains(t, rec.Body.String(), hostlayout.Withheld)
+	_ = f
+}
+
+// No admitted route streams: the response boundary buffers a whole response, and
+// Flush is a no-op, so a streaming handler admitted to the scope would stall
+// until it finished. Every admitted route is a request/response RPC.
+func TestSandboxScope_NoAdmittedRouteStreams(t *testing.T) {
+	for _, rt := range servedHTTPRoutes() {
+		if rt.sandboxAllowed {
+			assert.Equalf(t, http.MethodPost, rt.Method, "%s is admitted to the sandbox scope but is not a request/response POST RPC", rt.Path)
+			for _, streaming := range []string{"stream", "attach", "events", "preview", "ws"} {
+				assert.NotContainsf(t, strings.ToLower(rt.Path), streaming, "%s looks like a streaming route", rt.Path)
+			}
+		}
+	}
 }
 
 // The create response is the manager's complete InstanceData; a sandbox gets the
