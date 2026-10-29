@@ -758,3 +758,70 @@ test("focusSuccessorAfterDrop: the sibling that grew into the dropped leaf's reg
   assert.equal(focusSuccessorAfterDrop(null, B, survivors), null);
   assert.equal(focusSuccessorAfterDrop(a, a.id, new Set()), null);
 });
+
+// #6001: a lower legacy tab closes while a later legacy tab receives its real id.
+// Positional pairing bound the new id to the CLOSED tab and dropped the live pane.
+function twoLegacyTree(closedFirst: boolean): LayoutNode {
+  resetIds();
+  const l = (id: string, tab: number) => ({ kind: "leaf", id, tab }) as LayoutNode;
+  const inner: LayoutNode = { kind: "split", id: "S2", dir: "row", ratio: 0.5, a: l("Lclosed", 1), b: l("Lshell", 2) };
+  const swapped: LayoutNode = { kind: "split", id: "S2", dir: "row", ratio: 0.5, a: l("Lshell", 2), b: l("Lclosed", 1) };
+  return { kind: "split", id: "S1", dir: "row", ratio: 0.5, a: l("Lagent", 0), b: closedFirst ? inner : swapped };
+}
+
+for (const closedFirst of [true, false]) {
+  test(`a closed legacy tab is never paired with a new real id — names pair exactly (#6001, closed ${closedFirst ? "first" : "last"})`, () => {
+    const prev = ["id-agent", "1:closed", "1:shell"];
+    const next = ["id-agent", "id-shell"];
+    const out = validate(
+      remapByIdentity(twoLegacyTree(closedFirst), prev, next, ["0:agent", "1:shell"]),
+      next.length,
+    );
+    const ls = leaves(out);
+    assert.ok(ls.some((l) => l.id === "Lshell"), "the live shell pane survives");
+    assert.ok(!ls.some((l) => l.id === "Lclosed"), "the closed legacy tab's pane goes");
+    assert.equal(ls.find((l) => l.id === "Lshell")!.tab, 1);
+  });
+}
+
+test("without names, an ambiguous gap keeps every candidate alive instead of guessing a pairing (#6001)", () => {
+  const prev = ["id-agent", "1:closed", "1:shell"];
+  const next = ["id-agent", "id-shell"];
+  const ls = leaves(validate(remapByIdentity(twoLegacyTree(false), prev, next), next.length));
+  assert.ok(ls.some((l) => l.id === "Lshell"), "the live shell pane is not dropped by a wrong pairing");
+});
+
+test("a renamed-then-backfilled tab falls back to the gap rule; a gap with no new id still closes (#6001)", () => {
+  // The id's kind:name no longer matches (renamed), so no exact pair — but a new real
+  // id sits in the gap, so the candidate stays alive; the trailing gap has none.
+  resetIds();
+  const l = (id: string, tab: number) => ({ kind: "leaf", id, tab }) as LayoutNode;
+  const tree: LayoutNode = { kind: "split", id: "S", dir: "row", ratio: 0.5, a: l("Lold", 1), b: l("Lagent", 0) };
+  const out = remapByIdentity(tree, ["id-agent", "1:old"], ["id-agent", "id-new"], ["0:agent", "1:renamed"]);
+  assert.equal(leaves(out).length, 2, "the renamed-backfilled pane is kept");
+});
+
+// #6025: an ambiguous gap-fallback candidate must never displace a pane whose
+// backfill was matched exactly.
+for (const closedFirst of [true, false]) {
+  test(`fallback candidate does not evict an exactly-matched live pane (#6025, closed ${closedFirst ? "first" : "last"})`, () => {
+    resetIds();
+    const l = (id: string, tab: number) => ({ kind: "leaf", id, tab }) as LayoutNode;
+    const rest: LayoutNode = {
+      kind: "split", id: "S2", dir: "row", ratio: 0.5,
+      a: l("Lagent", 0),
+      b: { kind: "split", id: "S3", dir: "row", ratio: 0.5, a: l("Lold", 1), b: l("Lshell", 2) },
+    };
+    const tree: LayoutNode = closedFirst
+      ? { kind: "split", id: "S1", dir: "row", ratio: 0.5, a: l("Lclosed", 3), b: rest }
+      : { kind: "split", id: "S1", dir: "row", ratio: 0.5, a: rest, b: l("Lclosed", 3) };
+    const prev = ["id-agent", "1:old", "1:shell", "1:closed"];
+    const next = ["id-agent", "id-renamed", "id-shell"];
+    const out = validate(remapByIdentity(tree, prev, next, ["0:agent", "1:renamed", "1:shell"]), next.length);
+    const ls = leaves(out);
+    assert.ok(ls.some((x) => x.id === "Lshell" && x.tab === 2), "the exactly-matched shell pane keeps its slot");
+    assert.ok(!ls.some((x) => x.id === "Lclosed"), "the closed tab's pane goes");
+    assert.ok(ls.some((x) => x.id === "Lold"), "the renamed-backfilled pane is kept by the fallback");
+    assert.ok(ls.some((x) => x.id === "Lagent"));
+  });
+}

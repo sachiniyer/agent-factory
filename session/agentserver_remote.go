@@ -77,7 +77,16 @@ type remoteAgentServer struct {
 	// the sandbox's tab-id-addressing advertisement.
 	idBrokers map[string]*ptyBroker
 	// goneTabs are ids whose tab closed: terminal for subscriptions (#5963).
-	goneTabs     map[string]bool
+	goneTabs map[string]bool
+	// agentTabSynced is the agent-tab id the sandbox is known to hold (#5997).
+	agentTabSynced string
+	// ordBound holds the brokers of tabs opened through the ordinal plane,
+	// keyed by the stable id they resolved to (agentserver_remote_ordinal.go).
+	ordBound map[string]*ptyBroker
+	// boundChannel and idChannel, when set, replace the remote WS channel a
+	// broker is built over (test seams; production leaves them nil).
+	boundChannel func(tabID string) clientlessChannel
+	idChannel    func(tabID string) clientlessChannel
 	idPlaneKnown bool
 	idPlane      bool
 	features     []string
@@ -277,58 +286,6 @@ func (s *remoteAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryS
 	return resp.Status, nil
 }
 
-// --- data plane: one remote WS per tab, fanned by the shared ptyBroker ---
-
-// ensureBroker lazily builds the ptyBroker for tab `tab`, bound to a remote WS
-// clientlessChannel. Refuses once Kill has latched closed (the #1632 guard): a
-// Subscribe racing teardown must not dial a fresh WS to a sandbox being torn down.
-func (s *remoteAgentServer) ensureBroker(tab int) (*ptyBroker, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, fmt.Errorf("remote session %q is being terminated", s.rc.title)
-	}
-	if br := s.brokers[tab]; br != nil {
-		return br, nil
-	}
-	if s.brokers == nil {
-		s.brokers = make(map[int]*ptyBroker)
-	}
-	br := newPTYBroker(newRemoteClientlessChannel(s.rc, tab))
-	s.brokers[tab] = br
-	return br, nil
-}
-
-func (s *remoteAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, error) {
-	br, err := s.ensureBroker(tab)
-	if err != nil {
-		return nil, err
-	}
-	return br.subscribe(since)
-}
-
-func (s *remoteAgentServer) Input(tab int, b []byte) error {
-	// The off-box runtime's PTY input path, same reason as the local one (#3865).
-	// It has no InputTab: a remote roster is fixed, so ws_pty.go's id-native
-	// binding never selects this runtime.
-	if err := s.noteAdoption(); err != nil {
-		return err
-	}
-	br, err := s.ensureBroker(tab)
-	if err != nil {
-		return err
-	}
-	return br.input(b)
-}
-
-func (s *remoteAgentServer) Resize(tab int, rows, cols uint16) error {
-	br, err := s.ensureBroker(tab)
-	if err != nil {
-		return err
-	}
-	return br.resize(rows, cols)
-}
-
 // trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
 // StopPreservingWorkspace stops the remote agent and closes this side's data
 // plane without running the runtime teardown, so the workspace stays on its host
@@ -336,15 +293,9 @@ func (s *remoteAgentServer) Resize(tab int, rows, cols uint16) error {
 func (s *remoteAgentServer) StopPreservingWorkspace() error {
 	s.mu.Lock()
 	s.closed = true
-	brokers := s.brokers
-	s.brokers = nil
-	idBrokers := s.idBrokers
-	s.idBrokers = nil
+	all := s.takeBrokersLocked()
 	s.mu.Unlock()
-	for _, br := range brokers {
-		br.close()
-	}
-	for _, br := range idBrokers {
+	for _, br := range all {
 		br.close()
 	}
 	s.closeRelays()
@@ -366,15 +317,9 @@ func (s *remoteAgentServer) Kill(_ bool) error {
 	// racing Subscribe can't resurrect one, then kill the remote workspace over REST.
 	s.mu.Lock()
 	s.closed = true
-	brokers := s.brokers
-	s.brokers = nil
-	idBrokers := s.idBrokers
-	s.idBrokers = nil
+	all := s.takeBrokersLocked()
 	s.mu.Unlock()
-	for _, br := range brokers {
-		br.close()
-	}
-	for _, br := range idBrokers {
+	for _, br := range all {
 		br.close()
 	}
 	s.closeRelays()

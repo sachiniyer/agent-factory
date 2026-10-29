@@ -12867,7 +12867,7 @@ test("a head with no PR Validation run is dispatched once and the decision names
     validation,
     /^ {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}$/m,
   );
-  assert.match(validation, /^ {2}cancel-in-progress: true$/m);
+  assert.match(validation, /^ {2}cancel-in-progress: \$\{\{ github\.ref != 'refs\/heads\/master' \}\}$/m);
 });
 
 test("a head whose PR Validation run is queued or running is left alone", async () => {

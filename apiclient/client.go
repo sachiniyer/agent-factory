@@ -255,6 +255,14 @@ func (c *Client) call(method string, req any, resp any) error {
 // no error and no way out. Passing a ctx here cancels the in-flight request for
 // real, so the caller's goroutine unwinds instead of leaking.
 func (c *Client) callCtx(ctx context.Context, method string, req any, resp any) error {
+	return c.callCtxMin(ctx, 0, method, req, resp)
+}
+
+// callCtxMin is callCtx with a floor on the remote overall deadline: the call
+// waits max(requestTimeout, minWait). It is for the few RPCs whose server-side
+// work is bounded by a documented budget longer than the generic REST bound. A
+// client with no overall deadline (the local socket) is unaffected.
+func (c *Client) callCtxMin(ctx context.Context, minWait time.Duration, method string, req any, resp any) error {
 	reqBody, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("apiclient: marshal request: %w", err)
@@ -268,7 +276,7 @@ func (c *Client) callCtx(ctx context.Context, method string, req any, resp any) 
 	// in-memory snapshot as before, unless the caller bounds it explicitly.
 	if c.requestTimeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.requestTimeout)
+		ctx, cancel = context.WithTimeout(ctx, max(c.requestTimeout, minWait))
 		defer cancel()
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpBase+"/v1/"+method, bytes.NewReader(reqBody))

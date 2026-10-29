@@ -167,15 +167,14 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},
-	"daemon_poll_interval": {kind: cfgDuration, validate: func(_, v string) error { return validateDaemonPollIntervalValue(v) }},
-	"watcher_events_per_minute": {kind: cfgInt, validate: func(_, v string) error {
-		return requirePositiveInt("watcher_events_per_minute", v)
-	}},
-	"log_max_size_mb":    {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
-	"log_max_backups":    {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
-	"branch_prefix":      {kind: cfgString},
-	"on_archive_command": {kind: cfgString},
-	"move_cmd":           {kind: cfgString},
+	"daemon_poll_interval":      {kind: cfgDuration, validate: func(_, v string) error { return validateDaemonPollIntervalValue(v) }},
+	"watcher_events_per_minute": {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("watcher_events_per_minute", v) }},
+	"log_max_size_mb":           {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
+	"log_max_backups":           {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
+	"branch_prefix":             {kind: cfgString},
+	"on_archive_command":        {kind: cfgString},
+	"move_cmd":                  {kind: cfgString},
+	"projects_root":             {kind: cfgString, validate: validateProjectsRoot},
 	"worktree_root": {kind: cfgString, validate: func(_, v string) error {
 		if !validateWorktreeRootValue(v) {
 			return fmt.Errorf("worktree_root must be one of [%s, %s], got %q", WorktreeRootSubdirectory, WorktreeRootSibling, v)

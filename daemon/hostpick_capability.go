@@ -37,9 +37,14 @@ var (
 // the caller's surface names the pick ("--host" on the CLI, "the host pick" in
 // the TUI). A Ping that could not be answered (pingErr) refuses too: "could not
 // verify" must never mean "send it anyway".
+//
+// The probe error is quoted, not wrapped (#5968): the probe is a READ, and
+// nothing was sent, so a caller classifying the returned error as a mutation
+// outcome must not inherit the read's uncertainty (a timeout or a lost response
+// would otherwise read as "the write may have landed" and discard the draft).
 func (s HostPickSurface) Require(label string, resp PingResponse, pingErr error, host string) error {
 	if pingErr != nil {
-		return fmt.Errorf("%s %q was not sent: could not confirm the daemon supports host picks: %w", label, host, pingErr)
+		return fmt.Errorf("%s %q was not sent: could not confirm the daemon supports host picks: %v", label, host, pingErr)
 	}
 	if s.Bit(resp) {
 		return nil

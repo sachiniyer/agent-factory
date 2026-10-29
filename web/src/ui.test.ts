@@ -28,6 +28,7 @@ import {
   canCreateTabKind,
   canCloseTabs,
   canMutateTabRoster,
+  offeredNewTabKinds,
 } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { InFlightOp, Liveness, type SessionData } from "./types.js";
@@ -698,6 +699,16 @@ test("restore skips confirmation only for known local backends (#4017)", () => {
   for (const backend_type of ["docker", "ssh", "sandbox", "remote", "future-backend"]) {
     assert.equal(restoreRequiresConfirmation(sess({ backend_type })), true);
   }
+});
+
+test("an archived session offers no new-tab kinds even when its tab_kinds allow them", () => {
+  const tab_kinds = [{ kind: "shell", allowed: true }, { kind: "vscode", allowed: true }];
+  assert.deepEqual(offeredNewTabKinds(sess({ backend_type: "local", tab_kinds })), ["shell", "vscode"]);
+  assert.deepEqual(
+    offeredNewTabKinds(sess({ backend_type: "local", liveness: Liveness.Archived, tab_kinds })),
+    [],
+    "the daemon refuses CreateTab on an archived session, so t/T must stay inert",
+  );
 });
 
 // The skipped-repo reason/repair-hint helpers (#4742). The daemon stamps stable

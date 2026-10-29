@@ -103,7 +103,7 @@ const AfInstallCommand = `curl -fsSL https://raw.githubusercontent.com/sachiniye
 // did.
 const (
 	afTabsLead         = `Tabs (extra processes and views in your instance's worktree; no limit on how many). `
-	afTabsRestrictions = `Shell, process, and VS Code tabs require a local session; web tabs work on remote sessions too — an external HTTPS URL is framed directly, and a loopback target (--port is loopback) shows whatever listens on that port inside the session's own workspace. `
+	afTabsRestrictions = `Shell and process tabs require a local session; web and VS Code tabs work on remote sessions too — an external HTTPS URL is framed directly, a loopback target (--port is loopback) shows whatever listens on that port inside the session's own workspace, and a VS Code tab opens the editor running on the session's host (code-server or openvscode-server must be installed there). `
 	afTabsTail         = `The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.`
 	afTabLineShell     = `  af sessions tab-create <title> --kind shell                    Terminal tab running $SHELL in the worktree (the same Terminal the TUI/web opens)`
 	afTabLineProcess   = `  af sessions tab-create <title> --command <cmd> [--name <tab>]   Process tab running <cmd> in the worktree; prints the tab name; persists across restarts`
@@ -265,6 +265,29 @@ func shellQuote(s string) string {
 // (codex/gemini/amp/devin/opencode) keep the full doc: they are opted into
 // globally, so one file cannot vary per session.
 func injectSystemPrompt(resolved string, target skillTarget, caps guidanceCaps) string {
+	return injectSystemPromptWithEnv(resolved, target, caps, launchEnv{})
+}
+
+// launchEnv is the launch's own environment inputs: the session's merged
+// exact-name pass-through list and the directory the pane starts in. The
+// opencode seam asks whether a name the user supplied will survive the pane's
+// filter, and that answer depends on both (#5981). The zero value gives the
+// conservative "no extras, remote workDir" answer. It is deliberately not part
+// of skillTarget, which identifies WHERE the skill lands and is compared by
+// value.
+type launchEnv struct {
+	passthrough []string
+	workDir     string
+}
+
+// launchEnvFor is the launch environment of session i starting in workDir.
+func launchEnvFor(i *Instance, workDir string) launchEnv {
+	return launchEnv{passthrough: SessionEnvPassthroughForInstance(i), workDir: workDir}
+}
+
+// injectSystemPromptWithEnv is injectSystemPrompt for a launch whose
+// environment inputs are known.
+func injectSystemPromptWithEnv(resolved string, target skillTarget, caps guidanceCaps, env launchEnv) string {
 	switch tmux.DetectAgentFromCommand(resolved) {
 	case tmux.ProgramClaude:
 		pluginDir, err := ensurePluginDir(caps)
@@ -348,7 +371,7 @@ func injectSystemPrompt(resolved string, target skillTarget, caps guidanceCaps) 
 		// behavior) and the pane still gets af's config. The inline-assignment
 		// channel (opencodeCarriesConfigEnv) is in the command string, which
 		// FilterForCommand never touches, so it is not subject to this gate.
-		if opencodeCarriesConfigEnv(resolved) || opencodeExportedConfigReachesPane(resolved) {
+		if opencodeCarriesConfigEnv(resolved) || opencodeExportedConfigReachesPane(resolved, env.passthrough, env.workDir) {
 			// INFO, not WARNING (#2166): the user pointed OPENCODE_CONFIG at
 			// their own file (program_overrides assignment OR exported env var
 			// that the pane's allowlist will actually deliver) and af is
@@ -415,21 +438,29 @@ func injectSystemPrompt(resolved string, target skillTarget, caps guidanceCaps) 
 // for, and a non-attributable spelling is exactly the case the credential grant
 // refuses.
 //
-// This helper mirrors the pane's grant decision so the env-channel guard does
-// not skip af's injection for a value the pane will never see — which would
-// leave the pane with neither the user's config nor af's, while the INFO log
-// claims the user's value was honored. workDir is unknown at this call site
-// (the daemon that runs injectSystemPrompt does not know the pane's working
-// directory), so the empty value is the same conservative default
-// GrantAgentForCommand uses for a remote host: it denies every non-absolute
-// spelling, which is exactly the class whose env does not survive the pane's
-// filter. An absolute path inside the real pane workDir is attributed here but
-// denied by the pane's own grant — for that rare spelling the env guard still
-// fires and the pane still gets nothing, matching the pre-env-channel behavior
-// and no worse than the silent skip this guard replaced.
-func opencodeExportedConfigReachesPane(resolved string) bool {
+// This helper asks the pane's own filter (FilterForCommand over the grant the
+// launch uses) so the env-channel guard does not skip af's injection for a value
+// the pane will never see — which would leave the pane with neither the user's
+// config nor af's, while the INFO log claims the user's value was honored. The
+// converse matters as much: a value the user explicitly named in the session's
+// pass-through list reaches the pane even for a spelling the grant refuses, and
+// af must not shadow it with a command-prefix assignment (#5981). passthrough
+// and workDir are the launch's own (launchEnv carries them); zero values give
+// the conservative "no extras, remote workDir" answer.
+func opencodeExportedConfigReachesPane(resolved string, passthrough []string, workDir string) bool {
 	if os.Getenv("OPENCODE_CONFIG") == "" {
 		return false
 	}
-	return sessionenv.GrantAgentForCommand(resolved, os.Environ(), "") == tmux.ProgramOpencode
+	// Ask the pane's own filter rather than re-deriving its rules: the value
+	// reaches the pane when FilterForCommand keeps it, whether the opencode
+	// allowlist admits it (an attributable command) or the operator named it in
+	// the pass-through list (which survives for an unattributable spelling too).
+	source := os.Environ()
+	agent := sessionenv.GrantAgentForCommand(resolved, source, workDir)
+	for _, entry := range sessionenv.FilterForCommand(source, agent, resolved, passthrough) {
+		if name, value, ok := strings.Cut(entry, "="); ok && name == "OPENCODE_CONFIG" && value != "" {
+			return true
+		}
+	}
+	return false
 }

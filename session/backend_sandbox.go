@@ -76,11 +76,20 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=sandbox: cannot resolve repo config for %q: %w", spec.RepoRoot, err)
 	}
-	if err := BackendConfigError(BackendSandbox, cfg); err != nil {
-		return ProvisionResult{}, err
-	}
-	if spec.CloneURL == "" {
-		return ProvisionResult{}, missingOriginError(BackendSandbox, spec.RepoRoot)
+	adopting := spec.Adopt != nil
+	if adopting {
+		// The archived row's own recorded transport reaches the host, whatever the
+		// current sandbox.ssh says (#5571 W8.6); there is nothing to clone.
+		if spec.Adopt.Transport == nil || strings.TrimSpace(spec.Adopt.Transport.SSHCmd) == "" {
+			return ProvisionResult{}, errors.New("backend=sandbox: the archived row recorded no transport to reach its preserved workspace")
+		}
+	} else {
+		if err := BackendConfigError(BackendSandbox, cfg); err != nil {
+			return ProvisionResult{}, err
+		}
+		if spec.CloneURL == "" {
+			return ProvisionResult{}, missingOriginError(BackendSandbox, spec.RepoRoot)
+		}
 	}
 	afBin, err := sshSelfBinary()
 	if err != nil {
@@ -89,7 +98,7 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 
 	p := &sandboxProvisioner{
 		spec:   spec,
-		sshCmd: strings.TrimSpace(cfg.SandboxSSH),
+		sshCmd: adoptedTransportOr(spec, strings.TrimSpace(cfg.SandboxSSH)),
 		afBin:  afBin,
 		// The wire program is the configured name and flags — never af's
 		// auto-detected daemon path, which the sandbox's filesystem does not
@@ -102,7 +111,7 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
-		return ProvisionResult{}, p.reapProvisionFailure(err)
+		return p.failedProvision(err)
 	}
 	return res, nil
 }
@@ -242,18 +251,24 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.checkHostPrereqs(p.hostReadinessKey(), sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
-	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
-	}
-	w.resolveSessionDirSymlinks(sshShortStepTimeout)
-	p.sessionDir = w.SessionDir
-	// The identity is repo-local (#5571 W2.7), so it is written after the clone
-	// that creates the repository.
-	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
-	}
-	if err := w.configureGit(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
+	if p.spec.Adopt != nil {
+		if err := p.beginAdoption(w); err != nil {
+			return ProvisionResult{}, err
+		}
+	} else {
+		if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
+		w.resolveSessionDirSymlinks(sshShortStepTimeout)
+		p.sessionDir = w.SessionDir
+		// The identity is repo-local (#5571 W2.7), so it is written after the clone
+		// that creates the repository.
+		if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
+		if err := w.configureGit(sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
 	}
 	// The binary stage is platform-aware (#5571 W2.2): probe the host's uname,
 	// pick the af build it can actually run (sandbox.binary override / the
@@ -305,6 +320,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		p.callbackSocket = w.CallbackSocketPath()
 	}
 	p.reapMu.Unlock()
+	p.clearStaleAdoptedCallbackSocket()
 	if err := w.writePolicy(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
@@ -354,6 +370,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	localAddr, err := p.startTunnel(banner.Addr)
 	if err != nil {
+		return ProvisionResult{}, err
+	}
+
+	if err := p.awaitAdoptedServer(localAddr, token); err != nil {
 		return ProvisionResult{}, err
 	}
 

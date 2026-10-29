@@ -1,6 +1,9 @@
 package session
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // Closing one tab: the destructive tab verb. Where tab_arrange.go's rename and
 // reorder never touch tmux, a close ends a real process — and, since #1592 Phase
@@ -34,7 +37,17 @@ func (i *Instance) closeTabByID(tabID, gen string) error {
 		exists = false
 	}
 	if !exists {
+		absent := idx < 0 || idx >= len(i.Tabs) || i.Tabs[idx].ID != tabID
 		i.mu.Unlock()
+		if gen != "" && absent {
+			// A conditional close is the daemon's retry of an unconfirmed one. The
+			// row may be gone only because an earlier close removed it and then
+			// failed its teardown, leaving a retained handle: "gone" is not the
+			// truth until that handle is spent (#6022).
+			if err := i.settleRetainedTeardown(tabID); err != nil {
+				return err
+			}
+		}
 		return fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
 	}
 	if idx == 0 {
@@ -43,8 +56,73 @@ func (i *Instance) closeTabByID(tabID, gen string) error {
 	}
 	tab := i.removeTabLocked(idx)
 	handle, rh := i.stageCleanupLocked(tab)
+	i.dropAdoptedIntentsLocked(tabID)
 	i.mu.Unlock()
 	return i.settleRemovedTab(tab, handle, rh)
+}
+
+// teardownGate serializes teardown attempts for one tab id.
+type teardownGate struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockTeardown serializes teardown attempts for one tab: the close that removed
+// it, a conditional close retrying a failed teardown, and the startup sweep.
+// The reserved name and the pending-close record are released only by the
+// attempt that confirms the teardown, and only while it holds this gate, so a
+// slower or superseded attempt is never still running against a name another
+// attempt already freed for a new tab (#6030). Callers must not hold i.mu. The
+// returned func releases the gate; an empty id is not serialized.
+func (i *Instance) lockTeardown(tabID string) (unlock func()) {
+	if tabID == "" {
+		return func() {}
+	}
+	i.mu.Lock()
+	if i.tabTeardown == nil {
+		i.tabTeardown = map[string]*teardownGate{}
+	}
+	g := i.tabTeardown[tabID]
+	if g == nil {
+		g = &teardownGate{}
+		i.tabTeardown[tabID] = g
+	}
+	g.refs++
+	i.mu.Unlock()
+	g.mu.Lock()
+	return func() {
+		g.mu.Unlock()
+		i.mu.Lock()
+		if g.refs--; g.refs == 0 {
+			delete(i.tabTeardown, tabID)
+		}
+		i.mu.Unlock()
+	}
+}
+
+// settleRetainedTeardown re-attempts the teardown of every cleanup handle a
+// closed tab id still holds and retires the ones now confirmed. A nil return
+// means nothing for tabID remains; a non-nil one means a command may still be
+// running, so the caller must not report the tab as gone.
+func (i *Instance) settleRetainedTeardown(tabID string) error {
+	defer i.lockTeardown(tabID)()
+	var first error
+	for _, h := range i.PendingTabCleanup() {
+		if h.TabID != tabID {
+			continue
+		}
+		if _, err := killTabCleanupSession(h, false); err != nil {
+			if first == nil {
+				first = fmt.Errorf("session %q tab id %q: teardown of the closed tab is still unconfirmed: %w", i.Title, tabID, err)
+			}
+			continue
+		}
+		i.mu.Lock()
+		i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, &h)
+		i.touchLocked()
+		i.mu.Unlock()
+	}
+	return first
 }
 
 // stageCleanupLocked records, in the SAME critical section that removes the tab,
@@ -65,6 +143,7 @@ func (i *Instance) stageCleanupLocked(tab *Tab) (*TabCleanupData, *RemoteTabClea
 // precisely BECAUSE its write failed), so the handle lives in memory until the
 // next successful persist carries it to disk.
 func (i *Instance) settleRemovedTab(tab *Tab, handle *TabCleanupData, rh *RemoteTabCleanupData) error {
+	defer i.lockTeardown(tab.ID)()
 	err := i.closeRemovedTab(tab)
 	if err != nil {
 		return err
@@ -161,8 +240,10 @@ func (i *Instance) CloseTabByIDWithCommit(
 		i.mu.Unlock()
 		return CommittedTabClose{}, err
 	}
+	i.dropAdoptedIntentsLocked(tabID)
 	i.mu.Unlock()
 
+	defer i.lockTeardown(tab.ID)()
 	teardownErr := i.closeRemovedTab(tab)
 	if teardownErr != nil || (handle == nil && rh == nil) {
 		// Unconfirmed: the handle stays, and the daemon's startup sweep (tmux) or

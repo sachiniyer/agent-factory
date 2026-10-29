@@ -168,8 +168,8 @@ same fixed light/dark values, never a derived or user-supplied palette.
 ### Terminal chrome
 
 Use surface and a border outline, with heading-sized ink for the one-line
-Session · Tab title. Keyboard ownership replaces that outline with accent and
-adds the word Keyboard. Green is never focus. Preview is a word in the same
+Session · Tab title. Keyboard ownership replaces that outline with accent; the
+TUI title also adds · keyboard, and the web adds no label. Green is never focus. Preview is a word in the same
 title, not another frame colour. Chrome uses space-2 insets; the agent terminal
 grid gets no decorative inset and retains its own ANSI output. Enter and ctrl+]
 continue to transfer keyboard ownership; Escape still reaches the attached agent.

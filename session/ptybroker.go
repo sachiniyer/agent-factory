@@ -769,6 +769,13 @@ func (b *ptyBroker) remove(id uint64) {
 	}
 }
 
+// liveSubscribers reports how many subscriptions are attached right now.
+func (b *ptyBroker) liveSubscribers() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subs)
+}
+
 // close tears down the broker: every subscriber's NextEvent returns io.EOF and
 // the clientless capture is stopped. Called when the session is killed.
 func (b *ptyBroker) close() { b.shutdown(false); b.watchers.Wait() }

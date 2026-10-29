@@ -505,6 +505,28 @@ export class ConfigPane {
         && active.type === "text"
         ? { start: active.selectionStart, end: active.selectionEnd }
         : null;
+    // The row's Save button (button.af-config-save) is the primary commit gesture
+    // for a text row — the only row kind that renders a Save button (checkbox and
+    // select rows commit on `change` and return early in renderControl). A click,
+    // or a Tab onto it followed by Enter, leaves the button holding DOM focus, and
+    // its own commit() rebuilds the pane and detaches that focused button. The
+    // captures above do not name it: `wasEditing` gates on `active ===
+    // editingInput` (false here — the button, not the input, holds focus), and
+    // `focusedConfigControlKey` gates on select/checkbox/text INPUT while the
+    // button itself carries no `aria-label`. So a save via the Save button left the
+    // restoration ladder with no matching rung and focus silently fell to <body> —
+    // the exact hazard this method's own header comment warns about (the next
+    // `[`/`]` then cycled the top-level view; other printable keys were swallowed).
+    // Capture the row's key from its input's `aria-label` (set to `e.key` on every
+    // text row) and re-locate the rebuilt row's input after the rebuild, the same
+    // `.af-config-list [aria-label=…]` lookup the `focusedConfigControlKey` branch
+    // uses — restored below as that branch's sibling.
+    const saveFocusedKey =
+      active instanceof HTMLButtonElement
+        && active.closest(".af-config-list") !== null
+        && active.classList.contains("af-config-save")
+        ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null
+        : null;
     // The config list is always the same list — one global manifest — so a rebuild
     // never legitimately starts at the top. Keeping the place matters most right after
     // a save, which is exactly when this fires.
@@ -558,6 +580,21 @@ export class ConfigPane {
           focusedConfigTextCaret.end ?? focusedConfigTextCaret.start,
         );
       }
+    } else if (saveFocusedKey !== null) {
+      // A save committed via the row's Save button rebuilt the pane while the
+      // button held focus; the focused button was detached and, with no matching
+      // restoration rung, focus fell to <body> (the body-focus hazard this method
+      // exists to prevent). Hand focus to the rebuilt row's text input — the
+      // control the user was operating — via its `aria-label`, reusing the
+      // `focusedConfigControlKey` branch's lookup + preventScroll. The just-saved
+      // row's edit is closed (`editing` cleared in update()), so this does not
+      // re-open it; the rebuilt input shows the daemon's re-read value and its Save
+      // button is again disabled via `canCommit`.
+      this.el
+        .querySelector<HTMLElement>(
+          `.af-config-list [aria-label="${CSS.escape(saveFocusedKey)}"]`,
+        )
+        ?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector<HTMLElement>('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
