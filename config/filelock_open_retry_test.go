@@ -3,11 +3,13 @@ package config
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // Acquiring the lock never fails because of another writer: a transient ENOENT
@@ -32,13 +34,13 @@ func TestOpenLockWithRetry(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			_, err := openLockWithRetry(func() (*os.File, error) {
+			_, err := openLockWithRetry("x.lock", func() (*os.File, error) {
 				calls++
 				if calls <= len(tc.failures) {
 					return nil, &os.PathError{Op: "open", Path: "x.lock", Err: tc.failures[calls-1]}
 				}
 				return nil, nil
-			})
+			}, nil)
 			require.Equal(t, tc.wantCalls, calls)
 			if tc.wantErr == nil {
 				require.NoError(t, err)
@@ -47,4 +49,43 @@ func TestOpenLockWithRetry(t *testing.T) {
 			require.True(t, errors.Is(err, tc.wantErr), "got %v", err)
 		})
 	}
+}
+
+// A pinned directory that is REPLACED (removed and recreated under the same name:
+// `stow -D && stow`, a restored home) makes openat(O_CREAT) through the stale fd
+// report ENOENT forever. The lock must re-pin from the path and acquire in the
+// directory the path now names, and the body must see that directory.
+func TestWithFollowedFileLock_RepinsAReplacedDirectory(t *testing.T) {
+	prevN, prevB := lockOpenAttempts, lockOpenBackoff
+	lockOpenAttempts, lockOpenBackoff = 5, time.Microsecond
+	t.Cleanup(func() { lockOpenAttempts, lockOpenBackoff = prevN, prevB })
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "home")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	path := filepath.Join(dir, "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte("x = 1\n"), 0o644))
+
+	// The window between pinning and waiting for the lock — where a peer's
+	// stow/chezmoi run replaces the directory.
+	followedLockRaceHookForTest = func() {
+		require.NoError(t, os.RemoveAll(dir))
+		require.NoError(t, os.Mkdir(dir, 0o755))
+		require.NoError(t, os.WriteFile(path, []byte("x = 2\n"), 0o644))
+	}
+	t.Cleanup(func() { followedLockRaceHookForTest = nil })
+
+	ran := false
+	err := withFollowedFileLock(path, func(locked lockedTarget) error {
+		ran = true
+		var pinned, now unix.Stat_t
+		require.NoError(t, unix.Fstat(locked.dirFD, &pinned))
+		require.NoError(t, unix.Stat(dir, &now))
+		require.True(t, sameInode(&pinned, &now), "the body must see the directory the path now names")
+		return nil
+	})
+	require.NoError(t, err)
+	require.True(t, ran, "the lock must still be acquired after the directory was replaced")
+	_, statErr := os.Stat(path + ".lock")
+	require.NoError(t, statErr, "the lock file lives in the new directory")
 }
