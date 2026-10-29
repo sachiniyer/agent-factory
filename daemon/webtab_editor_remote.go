@@ -39,11 +39,25 @@ func (m *Manager) remoteEditorTarget(instance *session.Instance, repoID, title s
 	if !ok {
 		return webTabTarget{Kind: kind}, fmt.Errorf("this session's workspace is off-box and its runtime cannot run an editor there; refusing to open one on the daemon host")
 	}
+	key := daemonInstanceKey(repoID, title)
+	// Never START an editor for a session whose last VS Code tab is already gone:
+	// the target was resolved before a close could take the tab away (#6089).
+	if err := m.remoteEditorWanted(instance, key, title); err != nil {
+		return webTabTarget{Kind: kind}, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), editorStartTimeout)
 	defer cancel()
 	st, err := er.EnsureEditor(ctx)
 	if err != nil {
 		return webTabTarget{Kind: kind}, err
+	}
+	if st.State != agentproto.EditorStateMissing {
+		// Something may now be running on the host. Re-ask, AFTER the start, whether
+		// it still has a reason to: the close that removed the tab can have run its
+		// stop in the window this start was in flight.
+		if err := m.guardRemoteEditorStart(instance, key, title, func() { m.stopRemoteEditor(instance) }); err != nil {
+			return webTabTarget{Kind: kind}, err
+		}
 	}
 	switch st.State {
 	case agentproto.EditorStateReady:
@@ -55,6 +69,47 @@ func (m *Manager) remoteEditorTarget(instance *session.Instance, repoID, title s
 		return webTabTarget{Kind: kind}, fmt.Errorf("the workspace editor reported unknown state %q", st.State)
 	}
 	return webTabTarget{URL: vscodeUpstreamURL, Transport: m.editorRelayTransport(instance, repoID, title), Kind: kind, RelayedEditor: true}, nil
+}
+
+// remoteEditorWanted reports why a remote editor should NOT run for this session
+// right now, or nil. It is the remote counterpart of stopVSCodeIfUnwanted's checks:
+// the exact instance is still tracked under its key, the session may still gain a
+// process (not archived or mid-archive), it is not killed, and it still has a VS
+// Code tab.
+func (m *Manager) remoteEditorWanted(instance *session.Instance, key, title string) error {
+	if err := m.requireCurrentVSCodeInstance(instance, key, title); err != nil {
+		return err
+	}
+	if err := instance.TabSpawnBlocked(); err != nil {
+		return err
+	}
+	if instance.UserKilled() {
+		return fmt.Errorf("session %q has been killed", title)
+	}
+	if !instanceHasVSCodeTab(instance) {
+		return fmt.Errorf("the VS Code tab of session %q was closed", title)
+	}
+	return nil
+}
+
+// guardRemoteEditorStart is the closing half of the start window (#6089). The
+// remote start does not take the session's op-lock (it blocks on the network), so
+// a CloseTab can finish its stop and remove the last VS Code tab while the start
+// is still in flight, leaving an editor no tab will ever stop. After the start,
+// re-check; if the editor is unwanted, stop it via stop and return why.
+// CloseTab's commit callback stops the remote editor once more while the roster is
+// staged, which together makes the invariant hold on timing rather than on luck:
+// either this check runs after the tab left the roster and stops the editor, or
+// that final stop runs after this start finished.
+func (m *Manager) guardRemoteEditorStart(instance *session.Instance, key, title string, stop func()) error {
+	err := m.remoteEditorWanted(instance, key, title)
+	if err != nil {
+		stop()
+		// Drop the cached relay transport and any W5.2 editor-origin key with it.
+		m.evictRelayTransport(key)
+		m.editorPorts.invalidate(instance.ID)
+	}
+	return err
 }
 
 // editorRelayTransport is relayTransport's twin for the editor: one cached
