@@ -655,7 +655,15 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	// This is an execution binding, not a path proof. The copied af enters a
 	// dedicated mode that derives the allowlist from these exact args and execs
 	// its current binary into agent-server; no argv spelling authorizes recursion.
-	filteredInner, err := sessionenv.WrapAgentServerCommand(dockerAfBinaryPath, p.spec.SessionEnvPassthrough, args)
+	// An account-bound container's agent-server drops every competing credential
+	// the image or docker.run_args put in its environment (#5863).
+	var filteredInner string
+	var err error
+	if _, ok := sessionenv.SupportsAccounts(p.spec.Account.Agent); ok && p.spec.Account.Dir != "" {
+		filteredInner, err = sessionenv.WrapAgentServerAccountCommand(dockerAfBinaryPath, p.spec.Account.Agent, p.spec.SessionEnvPassthrough, args)
+	} else {
+		filteredInner, err = sessionenv.WrapAgentServerCommand(dockerAfBinaryPath, p.spec.SessionEnvPassthrough, args)
+	}
 	if err != nil {
 		return "", fmt.Errorf("backend=docker: preparing filtered agent-server environment failed: %w", err)
 	}

@@ -20,4 +20,8 @@ func WrapAgentServerCommand(string, []string, []string) (string, error) {
 	return "", fmt.Errorf("agent-server session environments are unsupported on windows")
 }
 
+func WrapAgentServerAccountCommand(string, string, []string, []string) (string, error) {
+	return "", fmt.Errorf("agent-server session environments are unsupported on windows")
+}
+
 func HandleInternalExec() {}
