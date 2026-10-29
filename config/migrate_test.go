@@ -46,6 +46,7 @@ sandbox_ssh = 'ssh sandbox-host'
 sandbox_binary = '/opt/af-custom'
 listen_addr = '0.0.0.0:8443'
 preview_listen_addr = '127.0.0.1:8444'
+editor_origin_ports = '9100-9119'
 require_token = true
 require_loopback_token = true
 allow_unauthenticated_network = true

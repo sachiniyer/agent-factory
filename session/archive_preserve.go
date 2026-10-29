@@ -149,22 +149,6 @@ func (i *Instance) ArchiveSandboxPreserving() (ArchivedWorkspaceData, error) {
 	return loc, nil
 }
 
-// RestoreRefusedForPreservedWorkspace explains why a restore must not re-provision
-// an archived row whose work was preserved on its host and never pushed: a fresh
-// sandbox would clone a branch origin does not have. Reattaching the preserved
-// workspace is W8.6; until then the way back is an archive with a push.
-func (i *Instance) RestoreRefusedForPreservedWorkspace() error {
-	w := i.ArchivedWorkspace()
-	if w == nil || w.Pushed || w.Dir == "" {
-		return nil
-	}
-	where := w.Dir
-	if w.Host != "" {
-		where = w.Host + ":" + w.Dir
-	}
-	return fmt.Errorf("session %q was archived without pushing: its work is preserved at %s, and restoring from a preserved workspace is not available yet (#5571 W8.6); the work is untouched, and you can push it from the host", i.Title, where)
-}
-
 // sandboxProvisioner is this session's provisioner, or nil for a backend with none.
 func (i *Instance) sandboxProvisioner() *sandboxProvisioner {
 	switch b := i.currentBackend().(type) {

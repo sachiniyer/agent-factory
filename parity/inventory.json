@@ -510,6 +510,25 @@
       "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio\u2194TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes \u2014 running it by hand does nothing useful. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
     },
     {
+      "id": "task.path-validate",
+      "title": "Task project paths are checked on the daemon host (validate_path)",
+      "tui": {
+        "status": "yes",
+        "pointer": "apiclient AddTask/UpdateTask set validate_path for a remote target; a local TUI validates in ui/task_pane_edit.go"
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "apiclient AddTask/UpdateTask set validate_path for a remote target (af tasks add/update --daemon-url); a local CLI validates on this machine"
+      },
+      "verdict": "real-gap",
+      "issue": "#5859",
+      "notes": "The daemon refuses a task whose project path is not a git repository on ITS host when the request sets validate_path. Remote CLI and TUI clients set it automatically; the web task form still sends neither the flag nor a client-side check, so a typo'd path is accepted and fails at fire time. When the web modal sends validate_path, flip its cell to yes and delete the two web_rpcs field_coverage gaps."
+    },
+    {
       "id": "project.add",
       "title": "Register a new project",
       "tui": {
@@ -772,20 +791,20 @@
       "id": "session.create.opt.host",
       "title": "Choose which listed host (global `hosts`) the session runs on, per session",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "app/backend_picker.go backendChoicesFrom appends one row per ListBackends.hosts to the ctrl+r backend field; choosing one sets home.pendingHost -> sessionStartRequest.Host -> daemon.CreateSessionRequest.Host (app/handle_input.go, app/session_control.go)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/backends.ts backendChoices adds a `host:<name>` row per ListBackends.hosts to the New-session select; web/src/api.ts createSession sends it as `host` (never as a backend)"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/sessions.go createHostFlag --host <name> -> daemon.CreateSessionRequest.Host (registered in api/api.go); `af sessions backends` lists each host and its availability via ListBackends.hosts"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5571",
-      "notes": "W6.3 of the sandbox-parity epic. The wire field (CreateSessionRequest.Host) and the CLI flags (`sessions create --host`, `sessions send-prompt --create --host`, via DeliverPromptRequest.Host) landed first; ListBackends already returns the per-host catalog (hosts, default_host) for the pickers. The TUI naming-form picker and the web New-session select are the remaining W6.3 surfaces, tracked on #5571 and claimed in its W6.3 plan comment; when they land, flip those cells to yes and delete the two field_coverage gap declarations for `host`."
+      "notes": "W6.3 of the sandbox-parity epic. Every create surface now picks from the daemon's ListBackends.hosts: the CLI flags (`sessions create --host`, `sessions send-prompt --create --host`), the TUI naming-form backend field and the web New-session select. Each lists an unusable host with the daemon's reason and refuses it, and the daemon refuses a name outside the global list with the same message (config.ValidateHostPick)."
     },
     {
       "id": "session.create.opt.inplace",
@@ -1463,19 +1482,19 @@
       "id": "task.max-concurrent-runs",
       "title": "Cap a watch task's in-flight session count",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/task_pane_edit.go renderCapField — Max runs row, create and edit"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/tasks.ts taskFormModal cap input; edit sent inline at web/src/index.ts openEditTask"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:645 af tasks add/update --max-concurrent-runs"
+        "pointer": "api/api.go:862 af tasks add/update --max-concurrent-runs"
       },
-      "verdict": "unclear",
-      "notes": "A watch-task concurrency cap (task.Task/TaskUpdate.MaxConcurrentRuns) added on master. The CLI sets it via --max-concurrent-runs; the TUI task form and web do not expose it. Same class as the other task-edit gaps: the TUI can edit tasks (so this is a missing FIELD, #1935-adjacent) and the web cannot edit tasks at all (#1935). Niche enough that whether the UIs should surface it is an owner call. Not filed pending that."
+      "verdict": "parity",
+      "notes": "Surfaced on both UIs in #4180, following the on_complete gated-field pattern exactly: a text input on watch/no-target shapes, the daemon's own reason in place of it otherwise. Both UIs ask ONE predicate — task.CapUnavailableReason, with the web's twin pinned by task/testdata/cap_vectors.json — and parse input by the shared task.ParseCapInput rule (empty = 0 = unlimited; negatives, non-integers, and values above the safe-integer ceiling refused identically)."
     },
     {
       "id": "task.on-complete",
@@ -1499,20 +1518,20 @@
       "id": "task.host",
       "title": "Place the sessions a task creates on a listed host (global `hosts`)",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/task_pane.go taskFocusHost + editHost (the \"Host:\" row in ui/task_pane_edit.go); a create lands via app/home_tasks.go task.Task{Host: draft.Host}, an edit via task.DiffTask -> TaskUpdate.Host"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/tasks.ts the Host select in taskFormModal (fed by ListBackends.hosts through loadHosts) and buildTask; web/src/index.ts openEditTask sends a `host` patch only when it changed"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/api.go af tasks add/update --host -> task.Task.Host / TaskUpdate.Host; the daemon's task store refuses a name outside the global host list (task/host.go validateTaskHost) and daemon/taskrun.go sends it as CreateSessionRequest.Host / DeliverPromptRequest.Host"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5571",
-      "notes": "W6.3 of the sandbox-parity epic. The task field, its validation against the global host list and the run path landed with the CLI; the TUI task form and web task modal remain, tracked on #5571 in the W6.3 plan comment. When they land, flip those cells to yes and delete the four field_coverage gap declarations for `host`."
+      "notes": "W6.3 of the sandbox-parity epic. All three surfaces set the task host; the daemon's task store refuses a name outside the global host list (task/host.go validateTaskHost) with the shared config.ValidateHostPick message, so the free-text TUI field cannot save a typo. The web picks from the daemon's catalog and carries a seeded host the catalog no longer lists, so an unrelated edit never clears it."
     },
     {
       "id": "task.remove",
@@ -2023,6 +2042,7 @@
       "af accounts login --help": "meta.discovery",
       "af accounts login --json": "cli.json-envelope",
       "af accounts login --no-attach": "session.account-login",
+      "af agent-server --adopt-worktree": "meta.internal",
       "af agent-server --branch": "meta.internal",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
@@ -2297,6 +2317,46 @@
       "web_rpcs: keyed by RPC method -> json field."
     ],
     "requests": {
+      "SetConfigValueRequest": {
+        "tui": {
+          "hosts_edit": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.clear_default": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.host": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.name": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.op": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.host.host": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.host.user": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.host.port": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.host.identity_file": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.host.workspace_root": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.host.host_key_verification": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.host.use_ssh_config": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          }
+        }
+      },
       "RebindProjectRequest": {
         "cli": {
           "expected_root": {
@@ -2356,9 +2416,6 @@
           },
           "in_place": {
             "gap": "session.create.opt.inplace"
-          },
-          "host": {
-            "gap": "session.create.opt.host"
           }
         }
       },
@@ -2446,6 +2503,9 @@
       },
       "AddTaskRequest": {
         "cli": {
+          "validate_path": {
+            "ok": "The local socket is the same host as the CLI, which validates the path itself; a remote target goes through apiclient, whose AddTask sets validate_path for every remote client."
+          },
           "task.store_generation": {
             "ok": "Derived at READ time and never a client input (#3684): it is a digest of the tasks.json bytes the load decoded, stamped beside the ordinal by the same helper and stripped by saveTasks with it. It says WHICH VERSION of the store a row number refers to, so two reads can tell whether they saw the same file; a surface that sent one would be naming a generation it did not read, and the next load would overwrite it."
           },
@@ -2555,12 +2615,6 @@
           },
           "task.dropped_events": {
             "ok": "Daemon-owned watch-delivery history (#4357): the supervisor advances it only when the per-minute source cap discards an event, and task.AddTaskChecked clears any client-supplied value. A surface setting it would forge loss that did not occur."
-          },
-          "task.max_concurrent_runs": {
-            "gap": "task.max-concurrent-runs"
-          },
-          "task.host": {
-            "gap": "task.host"
           },
           "task.sandbox_owner": {
             "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."
@@ -2597,10 +2651,7 @@
             "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.max_concurrent_runs": {
-            "gap": "task.max-concurrent-runs"
-          },
-          "update.host": {
-            "gap": "task.host"
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's Max runs row (ui/task_pane_edit.go renderCapField) writes task.Task.MaxConcurrentRuns and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
           },
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
@@ -2608,11 +2659,17 @@
           "expect.project_path": {
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
+          "update.host": {
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's Host row (ui/task_pane_edit.go, editHost) writes task.Task.Host and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
+          },
           "update.on_complete": {
             "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's On-done row (ui/task_pane_edit.go renderOnCompleteSelector) writes task.Task.OnComplete and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
           }
         },
         "cli": {
+          "validate_path": {
+            "ok": "Same as AddTaskRequest: validated locally on the local socket, and set by apiclient for a remote target."
+          },
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           },
@@ -2740,6 +2797,44 @@
       "PruneSessionsRequest": {}
     },
     "web_rpcs": {
+      "SetConfigValue": {
+        "hosts_edit": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.clear_default": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.host": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.name": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.op": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.host.host": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.host.user": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.host.port": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.host.identity_file": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.host.workspace_root": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.host.host_key_verification": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.host.use_ssh_config": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        }
+      },
       "ListAccounts": {
         "agent": {
           "ok": "The web section lists EVERY agent's accounts at once — it renders one group per agent and a register form under each — so it never narrows the read. The filter exists for `af accounts list <agent>`, where a caller asked for one agent; a UI that sent it would have to decide which agent the operator meant before showing them the list they came for."
@@ -2765,9 +2860,6 @@
         },
         "in_place": {
           "gap": "session.create.opt.inplace"
-        },
-        "host": {
-          "gap": "session.create.opt.host"
         },
         "force_remote": {
           "ok": "The web reaches the hook backend explicitly via backend='hook' — its picker never emits force_remote, and the explicit backend wins over the legacy selector (session/instance_factory.go). Same reason the CLI's force_remote cell is `ok`."
@@ -2798,17 +2890,17 @@
         }
       },
       "UpdateTask": {
+        "validate_path": {
+          "gap": "task.path-validate"
+        },
         "actor": {
           "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
-        },
-        "update.max_concurrent_runs": {
-          "gap": "task.max-concurrent-runs"
-        },
-        "update.host": {
-          "gap": "task.host"
         }
       },
       "AddTask": {
+        "validate_path": {
+          "gap": "task.path-validate"
+        },
         "actor": {
           "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
         },
@@ -2862,12 +2954,6 @@
         },
         "task.dropped_events": {
           "ok": "Daemon-owned watch-delivery history (#4357): the supervisor advances it only when the per-minute source cap discards an event, and task.AddTaskChecked clears any client-supplied value. A surface setting it would forge loss that did not occur."
-        },
-        "task.max_concurrent_runs": {
-          "gap": "task.max-concurrent-runs"
-        },
-        "task.host": {
-          "gap": "task.host"
         },
         "task.sandbox_owner": {
           "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."

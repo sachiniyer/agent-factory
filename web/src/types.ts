@@ -361,6 +361,9 @@ export interface OnCompleteOption {
  */
 export interface TaskData {
   on_complete?: string;
+  /** Listed host (global `hosts`) the sessions this task creates are placed on;
+   *  absent means the repo's backend decides (#5571 W6.3). */
+  host?: string;
   id: string;
   name?: string;
   prompt: string;
@@ -371,6 +374,10 @@ export interface TaskData {
   watch_cmd?: string;
   /** Route deliveries into this session by title (empty ⇒ a fresh session per run). */
   target_session?: string;
+  /** Cap on in-flight sessions for a watch task (#1892): 0/absent = unlimited.
+   *  Meaningful only on a watch task with no target_session — the shape
+   *  task.CapApplies describes — and absent on any task that cannot carry one. */
+  max_concurrent_runs?: number;
   /** The repo root the task belongs to — the project it groups under. */
   project_path: string;
   /** The agent program; empty resolves the repo default at run time. */
@@ -434,11 +441,18 @@ export interface TaskData {
  */
 export interface TaskUpdate {
   on_complete?: string;
+  /** "" clears the pick; absent leaves it alone. */
+  host?: string;
   name?: string;
   prompt?: string;
   cron_expr?: string;
   watch_cmd?: string;
   target_session?: string;
+  /** New cap on a watch task's in-flight sessions (#4180). The edit form always
+   *  sends it: unlike the CLI's gob socket, JSON keeps an explicit 0, which is
+   *  how a cap is reverted to unlimited (task.TaskUpdate.MaxConcurrentRuns is a
+   *  *int for exactly this reason). */
+  max_concurrent_runs?: number;
   /** The repo root the task belongs to — the project it groups under. Present so
    *  the edit form can move a task between projects (#1935); the Go task.TaskUpdate
    *  struct carries it, and the TUI already edits it (ui/task_pane_edit.go). */

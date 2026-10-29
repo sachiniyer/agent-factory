@@ -28,50 +28,6 @@ func TestArchivedWorkspaceRoundTripsThroughStorage(t *testing.T) {
 	assert.Equal(t, "/home/u/.af-sessions/s1", inst.ArchivedWorkspace().Dir)
 }
 
-func TestRestoreRefusedForPreservedWorkspace(t *testing.T) {
-	build := func(w *ArchivedWorkspaceData) *Instance {
-		inst, err := FromInstanceData(InstanceData{
-			ID: "s1", Title: "t", Path: t.TempDir(), Status: Archived, BackendType: "local", ArchivedWorkspace: w,
-			Worktree: GitWorktreeData{RepoPath: "/r", WorktreePath: "/r/wt"},
-		})
-		require.NoError(t, err)
-		return inst
-	}
-	t.Run("an unpushed preserved workspace is refused and named", func(t *testing.T) {
-		err := build(&ArchivedWorkspaceData{Host: "box", Dir: "/d"}).RestoreRefusedForPreservedWorkspace()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "box:/d")
-		assert.Contains(t, err.Error(), "W8.6")
-	})
-	t.Run("a pushed archive restores as before", func(t *testing.T) {
-		assert.NoError(t, build(&ArchivedWorkspaceData{Pushed: true, Branch: "b"}).RestoreRefusedForPreservedWorkspace())
-	})
-	t.Run("a row archived before the field restores as before", func(t *testing.T) {
-		assert.NoError(t, build(nil).RestoreRefusedForPreservedWorkspace())
-	})
-}
-
-// Every re-provisioning route reaps the host directory first; the guard sits in
-// reprovisionRemote so none of them (restore, Lost recovery, the restore loop) can
-// replace a runtime whose directory holds the only copy of unpushed work.
-func TestReprovisionRefusesPreservedUnpushedWorkspace(t *testing.T) {
-	inst, err := FromInstanceData(InstanceData{
-		ID: "s1", Title: "t", Path: t.TempDir(), Status: Archived, BackendType: "local",
-		Worktree:          GitWorktreeData{RepoPath: "/r", WorktreePath: "/r/wt"},
-		ArchivedWorkspace: &ArchivedWorkspaceData{Dir: "/d"},
-	})
-	require.NoError(t, err)
-	for name, call := range map[string]func() error{
-		"reprovisionRemote": inst.reprovisionRemote,
-		"RestoreSandbox":    inst.RestoreSandbox,
-		"recoverSandbox":    func() error { return recoverSandbox(inst) },
-	} {
-		err := call()
-		require.Error(t, err, name)
-		assert.Contains(t, err.Error(), "W8.6", name)
-	}
-}
-
 // attachStoppableAgent gives inst a live remote client whose agent-server serves
 // /v1/agent/stop, counting the calls and refusing them when failStop is set.
 func attachStoppableAgent(t *testing.T, inst *Instance, failStop bool) *atomic.Int32 {

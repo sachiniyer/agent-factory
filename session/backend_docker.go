@@ -478,6 +478,10 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	teardown := p.reap
 	log.InfoLog.Printf("docker runtime: session %q running in container %s, agent-server at %s", p.spec.Title, p.shortID(), endpoint.URL)
 	return ProvisionResult{
+		// Only the branch this runtime actually handed the agent-server via
+		// --branch is the one it ran on (#5971). A runtime that does not take
+		// the daemon's name leaves this empty rather than guess.
+		Branch: strings.TrimSpace(p.spec.Branch),
 		Backend: &dockerBackend{
 			// The command the in-container agent-server was bound to launch
 			// (#5108) — the host-resolved value reported back in the banner

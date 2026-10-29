@@ -32,14 +32,19 @@ export function currentMode(): ThemeMode {
   try { return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; }
   catch { return "dark"; }
 }
-function surface(mode: ThemeMode): string {
+function surface(mode: ThemeMode, token = "--af-surface"): string {
   const probe = document.createElement("span");
   probe.dataset.afTheme = mode;
   probe.hidden = true;
   document.documentElement.append(probe);
-  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
+  const color = getComputedStyle(probe).getPropertyValue(token).trim();
   probe.remove();
   return color;
+}
+/** Every background a theme's accent can sit on, per mode. */
+export function themeSurfaces(): { light: string[]; dark: string[] } {
+  const both = (mode: ThemeMode): string[] => [surface(mode), surface(mode, "--af-surface-raised")];
+  return { light: both("light"), dark: both("dark") };
 }
 export function themeColorMetaContents(choice: ThemeChoice): { light: string; dark: string } {
   return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };

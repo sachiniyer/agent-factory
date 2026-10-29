@@ -44,6 +44,13 @@ surface — each overrides the repo config for that one session:
   alone (or choosing **Repo default**) keeps the repo's own setting.
 - **Web** — the backend select in the new-session modal, same list, same rule.
 
+A host from your global [`hosts` list](configuration.md) is picked the same way and
+places the session on that host over ssh: `af sessions create --host <name>` (or
+`af sessions send-prompt --create --host <name>`, or `--host` on `af tasks add`), a
+`host: <name>` row in the TUI's `ctrl+r` list and the web's backend select, and a
+**Host** field in the task forms. Every surface refuses a name that is not in the
+list with the same message, and lists an unusable host with the reason.
+
 !!! note "`af agent-server` is a backend, not the web UI"
     The non-local backends work by running an **`af agent-server`** in the remote
     workspace — a headless, single-workspace process that a daemon dials and
@@ -655,6 +662,16 @@ ssh config, and a host that is unreachable or missing a tool is still saved, wit
 the fix printed and a non-zero exit so a script notices. These verbs act on this
 machine's host list and daemon, so they refuse a remote `--daemon-url`.
 
+With `--json` every outcome is exactly one envelope on **stdout** and nothing on
+stderr. A failure is `{"data": null, "error": {...}}`. When the host was saved
+and a later step did not finish, `data` carries the entry or the probe result
+and `error.code` says which: `mutation_committed` (saved, but the probe or the
+default pick could not run) or `host_not_ready` (saved and probed, not ready
+yet). The exit code is non-zero in both. Concurrent `add`, `remove` and
+`af config set` never lose each other's change: the edit is applied by the
+writer as one read-modify-write under the exclusive config file lock, so
+concurrent writers wait their turn instead of failing or retrying.
+
 A host in the global `hosts` list is probed for `git`, `tmux` (3.2 or newer) and
 `gh` without creating a session on it. `af doctor` shows one row per listed host
 (ready, blocked with the missing tool, or unreachable), and the daemon repeats
@@ -666,7 +683,7 @@ A create always re-checks the host live.
 ### Operations
 
 - **Find a session's remote files:** they live under `~/.af-sessions/<title>.XXXXXX`
-  on `ssh.host`.
+  on `ssh.host` (or under the picked host's `workspace_root` if set).
 - **Reap a leaked session** (should never be needed — kill reaps automatically):
   `ssh <host> 'pkill -f "agent-server --listen"; rm -rf ~/.af-sessions/<dir>'`.
 
@@ -818,12 +835,15 @@ them. The script runs on the daemon box, never from repository config.
   only); `AF_SSH_DEST` — the destination (`user@host` or an ssh alias);
   `AF_SSH_FULL` — the complete command including the destination. So
   `rsync -e "$AF_SSH" file "$AF_SSH_DEST:dir/"` and
-  `$AF_SSH "$AF_SSH_DEST" 'cmd'` reach the same machine af does. The same three
+  `sh -c "$AF_SSH \"\$@\"" af-ssh "$AF_SSH_DEST" 'cmd'` reach the same machine af does.
+  The variables are shell command lines that may contain quoted options (a
+  `ProxyCommand` with spaces), so never expand them unquoted: run them through
+  `sh -c` with positional arguments, as `examples/move-script/move.sh` does. The same three
   values are in the JSON as `ssh`, `ssh_dest` and `ssh_full`. A free-form
   `sandbox.ssh` command already embeds its host and af cannot split it, so there
   `AF_SSH` and `AF_SSH_DEST` are empty and only `AF_SSH_FULL` is set: run
-  `$AF_SSH_FULL 'cmd'` and, instead of `rsync -e`, pipe tar:
-  `tar -C src -c . | $AF_SSH_FULL 'tar -C dir -x'`.
+  `sh -c "$AF_SSH_FULL \"\$@\"" af-ssh-full 'cmd'` and, instead of `rsync -e`, pipe tar:
+  `tar -C src -c . | sh -c "$AF_SSH_FULL \"\$@\"" af-ssh-full 'tar -C dir -x'`.
 - **exit:** `0` continues; anything else aborts. Any failure before the session
   row switches leaves the local session running exactly as before and reaps the
   half-built sandbox workspace.
@@ -867,6 +887,17 @@ config, so the host's own login is neither read nor replaced.
   Replacement is atomic, mode 0600, credential files only. Teardown writes back one
   last time, then removes the scope. A refresh that loses the race stays on the host
   and is discarded with the session; fan-out to live sessions is not built yet.
+- **`handoff --account` and limit failover work on a listed host.** The new account is
+  staged beside the live scope while the old agent still runs; the agent-server then
+  stops the agent, moves the old scope aside, moves the new one into place and starts
+  the agent again, so the old agent never writes into the new account's files. The old
+  account is written back (the same compare-and-swap) and removed. The agent keeps its
+  identity environment from launch, so the swap is within the **same agent** — a
+  cross-agent `--to` with `--account` is refused. The replacement starts a **fresh
+  conversation** (a transcript lives in the old account's store) and is told so, with
+  the session's task. Every refusal (an unlisted host, an unattributed command, an
+  account of another agent, an older sandbox without the route) happens before anything
+  is stopped. A failure inside the host puts the old scope back.
 - **Sessions on one host share its ssh user**, so they can read each other's
   workspaces and synced credentials, exactly as local worktrees share one user
   today. A Unix user per session is a later hardening, not part of this contract.
@@ -900,8 +931,9 @@ its agent tab plus any external HTTPS web tabs (the one metadata-only kind
 admitted off-box). A **Lost** sandbox session (one whose
 sandbox answered that its agent is gone) is reachable, so recovery **relaunches
 the agent in place**: the sandbox's agent-server stops the agent (if it is still
-running) and starts it again in its existing workspace with the provider's resume.
-The branch, the tree and any uncommitted work are untouched, and nothing is pushed,
+running) and starts it again in its existing workspace with the provider's resume,
+rebuilding the worktree on the recorded branch if it was deleted. The branch, the
+tree and any uncommitted work are otherwise untouched, and nothing is pushed,
 reaped, re-cloned or re-provisioned. The same relaunch serves `retry-limit` on a
 dead agent. A sandbox built before the relaunch route existed (it advertises the
 `relaunch` feature on `/v1/health`) falls back to replacing the sandbox: recovery
