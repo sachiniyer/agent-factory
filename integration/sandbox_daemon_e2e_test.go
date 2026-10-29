@@ -145,11 +145,23 @@ func TestSandboxDaemonE2E(t *testing.T) {
 	commitWork()
 	// Uncommitted state the restore must hand back exactly: a staged file, an
 	// unstaged edit, an untracked file and an ignored one.
-	host.exec(t, "cd "+workspace()+" && echo staged > staged.txt && git add staged.txt && echo edited >> e2e-work.txt && echo loose > untracked.txt && echo '*.ign' >> $(git rev-parse --git-dir)/info/exclude && echo ignored > keep.ign")
+	// Every step must succeed: a fixture step that silently fails leaves the
+	// fingerprint comparing two identical gaps. The exclude file is resolved with
+	// --git-path (a linked worktree's info/exclude lives in the common dir) and its
+	// directory is created first.
+	host.execOK(t, "cd "+workspace()+" && echo staged > staged.txt && git add staged.txt && echo edited >> e2e-work.txt && echo loose > untracked.txt && "+
+		"ex=$(git rev-parse --git-path info/exclude) && mkdir -p \"$(dirname \"$ex\")\" && echo '*.ign' >> \"$ex\" && echo ignored > keep.ign")
+	// stdout only, and every file must exist: a missing one fails loudly rather than
+	// reading as an identical absence before and after.
 	treeState := func() string {
-		return host.exec(t, "cd "+workspace()+" && git status --porcelain --ignored && git rev-parse HEAD && cat e2e-work.txt staged.txt untracked.txt keep.ign")
+		return host.execOK(t, "cd "+workspace()+" && git status --porcelain --ignored && git rev-parse HEAD && cat e2e-work.txt staged.txt untracked.txt keep.ign")
 	}
 	stateAtArchive := treeState()
+	for _, want := range []string{"A  staged.txt", "?? untracked.txt", "!! keep.ign"} {
+		if !strings.Contains(stateAtArchive, want) {
+			t.Fatalf("the fixture does not hold %q, so the fingerprint would not cover it:\n%s", want, stateAtArchive)
+		}
+	}
 
 	// --- default archive (W8.5): nothing is published, the workspace stays -------
 	var archived daemon.ArchiveSessionResponse
