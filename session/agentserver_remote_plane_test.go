@@ -81,6 +81,7 @@ type planeHarness struct {
 	mu      sync.Mutex
 	modern  bool
 	failing bool
+	noTabs  bool // a legacy agent-server: no tab API, so /v1/agent/tabs is a 404
 	s       *remoteAgentServer
 	ord     map[string]*planeChannel
 	id      map[string]*planeChannel
@@ -96,6 +97,13 @@ func newPlaneHarness(t *testing.T, tabIDs ...string) *planeHarness {
 	// The SANDBOX's own roster: agent tab first, then the given tabs in the order
 	// the sandbox holds them. A local reorder on the daemon never changes it.
 	ws.mux.HandleFunc("/v1/agent/tabs", func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		noTabs := h.noTabs
+		h.mu.Unlock()
+		if noTabs {
+			http.NotFound(w, r)
+			return
+		}
 		rows := []TabData{{ID: "sandbox-agent", Kind: TabKindAgent, Name: agentTabName}}
 		for _, id := range tabIDs {
 			rows = append(rows, TabData{ID: id, Kind: TabKindShell, Name: id})
@@ -114,6 +122,9 @@ func newPlaneHarness(t *testing.T, tabIDs ...string) *planeHarness {
 			return
 		}
 		features := []string{tabAPIFeature}
+		if h.noTabsLocked() {
+			features = nil
+		}
 		if modern {
 			features = append(features, tabIDAddressingFeature)
 		}
@@ -143,6 +154,8 @@ func newPlaneHarness(t *testing.T, tabIDs ...string) *planeHarness {
 	t.Cleanup(func() { _ = h.s.Kill(false) })
 	return h
 }
+
+func (h *planeHarness) noTabsLocked() bool { return h.noTabs }
 
 func (h *planeHarness) setProbe(failing, modern bool) {
 	h.mu.Lock()
@@ -388,4 +401,62 @@ func TestSnapshotAfterLocalReorderAddressesTheBoundTab(t *testing.T) {
 		_, _, err := h.s.wireTarget("ghost")
 		require.ErrorIs(t, err, ErrTabGone)
 	})
+}
+
+// The agent tab is pinned to slot 0 on both rosters and cannot be confused with
+// another tab, so it stays subscribable whatever the health probe says — on a
+// legacy agent-server with no tab API too (#6082).
+func TestLegacyAgentTabStaysSubscribableWhateverTheProbeSays(t *testing.T) {
+	const seeds, depth = 100, 16
+	for seed := int64(1); seed <= seeds; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		h := newPlaneHarness(t)
+		h.mu.Lock()
+		h.noTabs = true
+		h.mu.Unlock()
+		agentID := h.s.inst.Tabs[0].ID
+		var live []PTYSubscription
+		var trace []string
+		fail := func(format string, args ...any) {
+			t.Helper()
+			require.FailNowf(t, "invariant broken", "seed %d after %v: %s", seed, trace, fmt.Sprintf(format, args...))
+		}
+		h.setProbe(true, false) // the first probe misses
+		for step := 0; step < depth; step++ {
+			switch rng.Intn(6) {
+			case 0:
+				trace = append(trace, "probe-fails")
+				h.setProbe(true, false)
+			case 1:
+				trace = append(trace, "probe-answers-legacy")
+				h.setProbe(false, false)
+				h.s.idNative()
+			case 2, 3:
+				trace = append(trace, "subscribe-agent")
+				sub, err := h.s.SubscribeTab(agentID, 0)
+				if err != nil {
+					fail("subscribing to the agent tab: %v", err)
+				}
+				live = append(live, sub)
+			case 4:
+				trace = append(trace, "input-agent")
+				if err := h.s.InputTab(agentID, []byte("x")); len(live) > 0 && err != nil {
+					fail("input to a live agent tab: %v", err)
+				}
+			default:
+				if len(live) > 0 {
+					trace = append(trace, "end")
+					_ = live[0].Close()
+					live = live[1:]
+				}
+			}
+			tab, byID, err := h.s.wireTarget(agentID)
+			if err != nil || (byID == "" && tab != 0) {
+				fail("agent tab wire target = (%d,%q,%v), want slot 0", tab, byID, err)
+			}
+		}
+		for _, sub := range live {
+			_ = sub.Close()
+		}
+	}
 }
