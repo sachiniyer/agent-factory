@@ -88,7 +88,7 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 	if target == "" && t.SandboxOwner != "" {
 		// A sandbox-created task never spawns a session: that would run on the
 		// daemon host. Skip the run with a recorded reason, never fall back.
-		return "", false, notAttempted(sandboxRefusal("task %s was created by a sandbox and has no target session; it never starts one", t.ID))
+		return "", false, notAttempted(sandboxRefusal("a sandbox-created task has no target session; it never starts one"))
 	}
 	if target == "" {
 		data, err := createSessionForTask(CreateSessionRequest{

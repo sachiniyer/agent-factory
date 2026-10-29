@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -37,8 +38,33 @@ var (
 	errSandboxOutOfScope = errors.New("not permitted for a sandbox credential")
 )
 
-func sandboxRefusal(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", errSandboxOutOfScope, fmt.Sprintf(format, args...))
+// sandboxRefusal is the one constructor of a refusal for a sandbox credential. Its
+// text is a CONSTANT, never formatted: a refusal that reflected what the caller
+// sent (a backend, a title, a path) would hand the caller a probe of the daemon
+// host's layout, because the response boundary withholds layout strings and the
+// reflected guess then comes back withheld only if it is a real one (#6014). The
+// constant texts are registered as they are used, which is how the response
+// boundary tells a typed refusal from any other error (see sandboxRefusalText).
+func sandboxRefusal(text string) error {
+	sandboxRefusalTexts.Store(text, struct{}{})
+	return fmt.Errorf("%w: %s", errSandboxOutOfScope, text)
+}
+
+// sandboxRefusalTexts is the closed set of refusal texts sandboxRefusal has been
+// given. Bounded: every call site passes a constant.
+var sandboxRefusalTexts sync.Map
+
+// sandboxRefusalMessage reports whether msg is exactly a typed refusal.
+func sandboxRefusalMessage(msg string) bool {
+	text, ok := strings.CutPrefix(msg, errSandboxOutOfScope.Error()+": ")
+	if !ok {
+		return false
+	}
+	// A refusal raised before a send carries the not-delivered marker (a pre-flight
+	// tag, constant text) after it.
+	text = strings.TrimSuffix(text, "; "+notDeliveredMarker)
+	_, known := sandboxRefusalTexts.Load(text)
+	return known
 }
 
 // instanceBackendType is the persisted backend type of a tracked session. A
@@ -253,7 +279,7 @@ func checkSandboxCreate(req CreateSessionRequest) error {
 		return sandboxRefusal("a sandbox creates sessions on a listed host only (--host); it cannot start one on the daemon box")
 	}
 	if b := strings.TrimSpace(req.Backend); b != "" && b != "ssh" {
-		return sandboxRefusal("a sandbox creates sessions through a listed host (the ssh runtime), not backend %q", b)
+		return sandboxRefusal("a sandbox creates sessions through a listed host (the ssh runtime) only")
 	}
 	if req.InPlace {
 		return sandboxRefusal("--here attaches the daemon host's own working tree")
@@ -451,7 +477,7 @@ func (m *Manager) checkSandboxTaskDelivery(owner, deliveryRepoID, title string) 
 		return "", sandboxRefusal("the target is not in the project the task was created in")
 	}
 	if inst.IsArchived() {
-		return "", sandboxRefusal("the target session %q is archived", title)
+		return "", sandboxRefusal("the target session is archived")
 	}
 	return inst.ID, nil
 }
@@ -469,7 +495,7 @@ func (m *Manager) sandboxDeliveryGuard(id, repoID string) func(*session.Instance
 			return err
 		}
 		if inst.IsArchived() {
-			return sandboxRefusal("the target session %q is archived", inst.Title)
+			return sandboxRefusal("the target session is archived")
 		}
 		return nil
 	}

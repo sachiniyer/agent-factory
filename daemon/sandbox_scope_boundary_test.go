@@ -133,22 +133,158 @@ func TestSandboxScope_NoResponseCarriesTheDaemonHostLayout(t *testing.T) {
 // A string an instance's projection noted is withheld by the very next sandbox
 // response, including one created a moment ago: the layout is maintained as
 // producers note it, not recomputed per request, so nothing on the response path
-// walks sessions or takes their locks (internal/hostlayout).
+// walks sessions or takes their locks (internal/hostlayout). Daemon-originated
+// fields are scrubbed; the values of caller-text keys come back verbatim.
 func TestSandboxResponsesWithholdWhatAProjectionJustNoted(t *testing.T) {
-	f := newScopeFixture(t)
 	fresh := "/srv/just-created-" + t.Name() + "/worktrees/child"
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "child", Path: fresh, Program: "claude"})
 	require.NoError(t, err)
 	_ = inst.ToInstanceData() // the projection a create response is built from
 
 	handler := scrubbedSandboxResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"error":{"message":"cannot use ` + fresh + `"}}`))
+		_, _ = w.Write([]byte(`{"data":{"last_run_status":"errored: ` + fresh + `","prompt":"` + fresh + `"},"error":null}`))
 	}))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/x", nil))
-	assert.NotContains(t, rec.Body.String(), fresh)
-	assert.Contains(t, rec.Body.String(), hostlayout.Withheld)
-	_ = f
+	var env struct {
+		Data map[string]string `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
+	assert.NotContains(t, env.Data["last_run_status"], fresh, "a daemon-originated field is scrubbed")
+	assert.Contains(t, env.Data["last_run_status"], hostlayout.Withheld)
+	assert.Equal(t, fresh, env.Data["prompt"], "a caller-text value comes back exactly as stored")
+}
+
+// Errors never reflect input: a typed refusal passes unchanged, any other message
+// is replaced by a fixed one, and the daemon path inside it is gone with it.
+func TestSandboxErrorsAreTypedOrFixed(t *testing.T) {
+	hostlayout.Default.Note("/srv/err-test/secret-project")
+	_ = sandboxRefusal("that session is not available to this credential") // registers the text
+	typedRefusal := errSandboxOutOfScope.Error() + ": that session is not available to this credential"
+	for name, tc := range map[string]struct {
+		status  int
+		message string
+		code    string
+		want    string
+	}{
+		"a typed refusal is kept":      {500, typedRefusal, "", typedRefusal},
+		"a pre-flight refusal is kept": {500, typedRefusal + "; " + notDeliveredMarker, "", typedRefusal + "; " + notDeliveredMarker},
+		"a lookalike prefix is not":    {500, errSandboxOutOfScope.Error() + ": /srv/err-test/secret-project", "", sandboxGenericFailureMsg},
+		"a validation error":           {400, `backend "/srv/err-test/secret-project" is not supported`, "", sandboxGenericRequestMsg},
+		"a decode error":               {400, `malformed JSON request body: json: unknown field "/srv/err-test/secret-project"`, "", sandboxGenericRequestMsg},
+		"a server error":               {500, "open /srv/err-test/secret-project/.git: permission denied", "", sandboxGenericFailureMsg},
+		"a committed follow-up":        {500, "task saved but reload failed in /srv/err-test/secret-project", "mutation_committed", sandboxCommittedMsg},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{"data": nil, "error": map[string]any{"message": tc.message, "code": tc.code, "stored_id": "ab12cd34"}})
+			require.NoError(t, err)
+			out := sanitizeSandboxBody("/v1/x", tc.status, raw)
+			var env struct {
+				Error struct {
+					Message  string `json:"message"`
+					Code     string `json:"code"`
+					StoredID string `json:"stored_id"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(out, &env))
+			assert.Equal(t, tc.want, env.Error.Message)
+			assert.NotContains(t, string(out), "secret-project")
+			assert.Equal(t, tc.code, env.Error.Code, "the machine-readable code survives")
+			assert.Equal(t, "ab12cd34", env.Error.StoredID, "and so does the stored id")
+		})
+	}
+}
+
+// DIFFERENTIAL: a response never depends on whether a caller-supplied string is
+// in the host layout (#6014 review: the scrub made guessed paths an existence
+// oracle). For every admitted route and every string field of its request, a guess
+// that IS in the layout (A) and one that is not (B) must produce responses that
+// are identical except for the literal guess, or contain neither.
+func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) {
+	f := newScopeFixture(t)
+	f.useScheduler()
+	guessA := f.me.Path // a real project path: noted by NewInstance
+	guessB := "/srv/not-a-real-project-b3e1"
+	require.NotEqual(t, hostlayout.Default.ScrubString(guessA), guessA, "anti-vacuous: guess A is in the layout")
+	require.Equal(t, hostlayout.Default.ScrubString(guessB), guessB, "and guess B is not")
+	addStoreTask(t, task.Task{ID: "t-mine", Prompt: "p", CronExpr: "0 * * * *", TargetSession: "peer", ProjectPath: f.me.Path})
+
+	const G = "%G%"
+	type shape struct{ route, body string }
+	task_ := func(field string) string {
+		base := map[string]string{"prompt": "p", "cron_expr": "0 * * * *", "target_session": "peer"}
+		base[field] = G
+		raw, _ := json.Marshal(map[string]any{"task": base})
+		return string(raw)
+	}
+	obj := func(base map[string]string, field string) string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		m[field] = G
+		raw, _ := json.Marshal(m)
+		return string(raw)
+	}
+	var shapes []shape
+	add := func(route string, base map[string]string, fields ...string) {
+		for _, fld := range fields {
+			shapes = append(shapes, shape{route, obj(base, fld)})
+		}
+	}
+	add("/v1/Snapshot", nil, "repo_id")
+	add("/v1/SendPrompt", map[string]string{"prompt": "hi", "title": "peer"}, "prompt", "title", "id", "repo_id")
+	add("/v1/ArchiveSession", map[string]string{"title": "nope"}, "title", "id", "repo_id")
+	add("/v1/CreateSession", map[string]string{"title": "x", "host": "h1"}, "title", "prompt", "host", "backend", "repo_path", "account")
+	for _, fld := range []string{"id", "title", "command", "name", "kind", "url", "proposal"} {
+		shapes = append(shapes, shape{"/v1/CreateTab", obj(map[string]string{"id": f.me.ID, "command": "x"}, fld)})
+	}
+	add("/v1/CloseTab", map[string]string{"id": f.me.ID, "tab_name": "nope"}, "id", "title", "tab_name")
+	add("/v1/RenameTab", map[string]string{"id": f.me.ID, "tab_name": "nope", "new_name": "n"}, "id", "title", "tab_name", "new_name")
+	add("/v1/ReorderTab", map[string]string{"id": f.me.ID, "tab_name": "nope"}, "id", "title", "tab_name")
+	shapes = append(shapes, shape{"/v1/ListTasks", `{}`})
+	for _, fld := range []string{"prompt", "name", "target_session", "cron_expr", "watch_cmd", "project_path", "host", "on_complete", "program"} {
+		shapes = append(shapes, shape{"/v1/AddTask", task_(fld)})
+	}
+	add("/v1/RemoveTask", map[string]string{"id": "t-mine"}, "id")
+	shapes = append(shapes, shape{"/v1/RemoveTask", `{"id":"t-mine","expect":{"enforce":true,"project_path":"` + G + `"}}`})
+
+	covered := map[string]bool{}
+	for _, sh := range shapes {
+		covered[sh.route] = true
+	}
+	for _, rt := range servedHTTPRoutes() {
+		if rt.sandboxAllowed {
+			require.Truef(t, covered[rt.Path], "%s is admitted to the sandbox scope but has no shape in the differential test", rt.Path)
+		}
+	}
+
+	stamp := regexp.MustCompile(`\d{4}-\d{2}-\d{2}T[0-9:.+\-Z]+`)
+	hexish := regexp.MustCompile(`[0-9a-f]{8,}`)
+	normalize := func(out, guess string) string {
+		esc, _ := json.Marshal(guess)
+		out = strings.ReplaceAll(out, guess, "<G>")
+		out = strings.ReplaceAll(out, string(esc[1:len(esc)-1]), "<G>")
+		out = strings.ReplaceAll(out, hostlayout.Withheld, "<W>")
+		out = stamp.ReplaceAllString(out, "<T>")
+		return hexish.ReplaceAllString(out, "<hex>")
+	}
+	for _, sh := range shapes {
+		codeA, outA := f.call(t, f.secret, sh.route, strings.ReplaceAll(sh.body, G, guessA))
+		codeB, outB := f.call(t, f.secret, sh.route, strings.ReplaceAll(sh.body, G, guessB))
+		assert.Equalf(t, codeA, codeB, "%s %s: the status depends on whether the guess is in the layout", sh.route, sh.body)
+		assert.Equalf(t, normalize(outA, guessA), normalize(outB, guessB),
+			"%s %s: the response depends on whether the caller's guess is in the host layout (an existence oracle)", sh.route, sh.body)
+	}
+
+	// A later read must not depend on it either: the stored text a sandbox
+	// supplied comes back verbatim whether or not it is in the layout.
+	for _, guess := range []string{guessA, guessB} {
+		_, out := f.call(t, f.secret, "/v1/AddTask", `{"task":{"prompt":"`+guess+`","cron_expr":"0 * * * *","target_session":"peer"}}`)
+		assert.Contains(t, out, guess, "the stored prompt comes back as supplied")
+		_, list := f.call(t, f.secret, "/v1/ListTasks", `{}`)
+		assert.Contains(t, list, guess, "and so does a later listing")
+	}
 }
 
 // No admitted route streams: the response boundary buffers a whole response, and

@@ -98,6 +98,15 @@ func (x *Index) Scrub(body []byte) []byte {
 	return []byte(r.Replace(string(body)))
 }
 
+// ScrubString is Scrub for one string.
+func (x *Index) ScrubString(s string) string {
+	r := x.replacer()
+	if r == nil || s == "" {
+		return s
+	}
+	return r.Replace(s)
+}
+
 // replacer returns the compiled replacer for the current generation, building it
 // when the set changed since the last one.
 func (x *Index) replacer() *strings.Replacer {
