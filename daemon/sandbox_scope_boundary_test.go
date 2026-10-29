@@ -269,8 +269,18 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 		out = stamp.ReplaceAllString(out, "<T>")
 		return hexish.ReplaceAllString(out, "<hex>")
 	}
+	// A removal that succeeds consumes its task, so the second guess would be
+	// answered about a task that no longer exists — a difference of STATE, not of
+	// the guess. Restore the fixture's own task before every call.
+	ensureMine := func() {
+		if _, err := task.GetTask("t-mine"); err != nil {
+			addStoreTask(t, task.Task{ID: "t-mine", Prompt: "p", CronExpr: "0 * * * *", TargetSession: "peer", ProjectPath: f.me.Path})
+		}
+	}
 	for _, sh := range shapes {
+		ensureMine()
 		codeA, outA := f.call(t, f.secret, sh.route, strings.ReplaceAll(sh.body, G, guessA))
+		ensureMine()
 		codeB, outB := f.call(t, f.secret, sh.route, strings.ReplaceAll(sh.body, G, guessB))
 		assert.Equalf(t, codeA, codeB, "%s %s: the status depends on whether the guess is in the layout", sh.route, sh.body)
 		assert.Equalf(t, normalize(outA, guessA), normalize(outB, guessB),
@@ -459,13 +469,25 @@ func TestCommittedAddErrorEnvelopeCarriesTheStoredID(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/AddTask", nil)
 	writeHTTPError(rec, r, http.StatusInternalServerError,
 		&mutationCommittedError{err: errors.New("reload failed"), storedID: "ab12cd34"})
-	body := rec.Body.String()
-	assert.Contains(t, body, `"stored_id":"ab12cd34"`)
-	assert.Contains(t, body, `"code":"mutation_committed"`)
+	decode := func(rec *httptest.ResponseRecorder) (code, storedID string) {
+		var env struct {
+			Error struct {
+				Code     string `json:"code"`
+				StoredID string `json:"stored_id"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env), rec.Body.String())
+		return env.Error.Code, env.Error.StoredID
+	}
+	code, storedID := decode(rec)
+	assert.Equal(t, "mutation_committed", code)
+	assert.Equal(t, "ab12cd34", storedID)
 
 	rec = httptest.NewRecorder()
 	writeHTTPError(rec, r, http.StatusInternalServerError, &mutationCommittedError{err: errors.New("reload failed")})
-	assert.NotContains(t, rec.Body.String(), "stored_id", "no stored id, none invented")
+	code, storedID = decode(rec)
+	assert.Equal(t, "mutation_committed", code)
+	assert.Empty(t, storedID, "no stored id, none invented")
 }
 
 // A daemon path ending in a backslash is withheld whole and the envelope stays
@@ -478,4 +500,22 @@ func TestSandboxBodyWithATrailingBackslashPathStaysValidJSON(t *testing.T) {
 	require.True(t, json.Valid(out), "%s", out)
 	assert.NotContains(t, string(out), "backslash-test-project")
 	assert.Contains(t, string(out), hostlayout.Withheld)
+}
+
+// No path a sandbox supplies is ever resolved, stat'ed or validated against the
+// host: the expectation on a RemoveTask is ignored without being inspected, so the
+// same removal gets the same answer whatever the expectation names — existing or
+// not, absolute or relative, empty, or malformed.
+func TestSandboxRemoveTaskNeverInspectsTheExpectedPath(t *testing.T) {
+	f := newScopeFixture(t)
+	f.useScheduler()
+	for _, expected := range []string{f.me.Path, "/srv/not-a-real-project-b3e1", "/", "", "relative/path", "/nonexistent/../x", "~", "/proc/self/root"} {
+		addStoreTask(t, task.Task{ID: "t-expect", Prompt: "p", CronExpr: "0 * * * *", TargetSession: "peer", ProjectPath: f.me.Path})
+		body, err := json.Marshal(map[string]any{"id": "t-expect", "expect": map[string]any{"enforce": true, "project_path": expected}})
+		require.NoError(t, err)
+		code, out := f.call(t, f.secret, "/v1/RemoveTask", string(body))
+		assert.Equalf(t, http.StatusOK, code, "expect.project_path=%q must neither block nor change the answer: %s", expected, out)
+		_, err = task.GetTask("t-expect")
+		assert.Errorf(t, err, "the removal took effect for expect.project_path=%q", expected)
+	}
 }
