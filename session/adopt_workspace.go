@@ -213,12 +213,14 @@ func (p *sandboxProvisioner) leakedBackend() Backend {
 		c.SessionDir, c.RemotePID = p.sessionDir, p.remotePID
 		c.RemoteAddr, c.AgentServerVersion, c.TokenRef = p.remoteAddr, p.agentServerVersion, p.tokenRef
 		c.CallbackRef, c.CallbackReverse = p.callbackRef, p.callbackReverse()
+		c.LaunchUnconfirmed = p.launchAttempted && !positivePID(p.remotePID)
 		return &sshBackend{provisioner: p, cleanup: &c}
 	}
 	return &sandboxBackend{provisioner: p, cleanup: &SandboxRuntimeCleanupData{
 		SSHCommand: p.sshCmd, SessionDir: p.sessionDir, RemotePID: p.remotePID,
 		RemoteAddr: p.remoteAddr, AgentServerVersion: p.agentServerVersion, TokenRef: p.tokenRef,
 		CallbackRef: p.callbackRef, CallbackReverse: p.callbackReverse(),
+		LaunchUnconfirmed: p.launchAttempted && !positivePID(p.remotePID),
 	}}
 }
 

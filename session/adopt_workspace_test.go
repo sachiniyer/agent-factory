@@ -690,3 +690,20 @@ func TestRollbackAdoptionWithAnUnconfirmedStopKeepsTheIdentity(t *testing.T) {
 	ok.rollbackAdoption(ok.ArchivedWorkspace())
 	assert.False(t, ok.runtimeCleanupStateUnknown)
 }
+
+// #6016 review: a launch that returned no pid stays fail-closed across a restart.
+func TestLeakedNoPIDLaunchStaysFailClosedAfterRestart(t *testing.T) {
+	p := &sandboxProvisioner{
+		sessionDir: "/d", sshCmd: "ssh recorded-host", tokenRef: "new-ref", launchAttempted: true,
+		spec: ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/d", Branch: "b"}},
+	}
+	cleanup := p.leakedBackend().(*sandboxBackend).cleanup
+	assert.True(t, cleanup.LaunchUnconfirmed)
+
+	// Persisted and reloaded: the rebuilt provisioner still refuses to reap blind.
+	backend, _, err := restoreRuntimeCleanup("t", "sandbox", &RuntimeCleanupData{Sandbox: cleanup})
+	require.NoError(t, err)
+	rebuilt := backend.(*sandboxBackend).provisioner
+	assert.True(t, rebuilt.launchAttempted)
+	assert.ErrorIs(t, rebuilt.reap(), ErrWorkspaceStateUnknown, "no pid after a launch: reap fails closed instead of removing the dir")
+}
