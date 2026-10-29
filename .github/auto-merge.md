@@ -23,6 +23,8 @@ Under continuous merging every master Build is cancelled by the next push (`canc
 
 A PR labelled `fix-master` (Build + Lint still required on its head) is exempt from the red halt, so a red master can always be repaired through the merger.
 
+**Test (macOS) halt.** `Test (macOS)` is the only place the darwin tests run, on master's `pr.yml`, and its run (hence `Build`) is not something `build.yml`/`lint.yml` verification sees. After a green Build/Lint verdict the merger reads the latest **completed** macOS verdict (`.github/scripts/macos-verdict.js`: master's recent `pr.yml` runs newest-first, first run whose macOS job concluded success/failure; a cancelled or still-running job is skipped). A red verdict halts exactly like a red master — `fix-master` PRs excepted — and clears when a later completed run is green. An unreadable verdict warns and proceeds. `pr.yml` no longer cancels an in-progress master run (one runs, only the newest waits), so a verdict arrives every ~15-30 minutes during active merging. The release workflows (`auto-release.yml`, `stable-release.yml`) run the same read before their preflight: a red latest verdict blocks the release; no verdict warns and proceeds (re-running the 10x-billed macOS job inside each release would triple its bill for commits it already tested).
+
 Other halt: an open `master broken by merge batch <sha>` issue while master still fails the composition check.
 
 ## UNKNOWN mergeability, and how verification re-wakes the merger

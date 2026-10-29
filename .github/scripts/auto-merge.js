@@ -33,6 +33,7 @@ const MASTER_WORKFLOWS = [
   "web-selftest.yml",
 ];
 const DOCS_WORKFLOW = "docs.yml";
+const { latestMacosVerdict } = require("./macos-verdict.js");
 
 // Phase 1: cheap, for every open master PR. No review threads here.
 const CANDIDATE_QUERY = `
@@ -548,7 +549,25 @@ async function mergeAll({ github, core, context }) {
   const { owner, repo } = context.repo;
   // Only merge onto a verified master head. A failed read throws: no merge.
   const verdict = await verifyMasterHead(github, core, owner, repo);
-  const red = verdict.status === "red";
+  let red = verdict.status === "red";
+  // Test (macOS) runs only on master's pr.yml and its run (hence Build) is often
+  // cancelled by the next merge, so verifyMasterHead cannot see it. Read its
+  // latest completed verdict directly; a red one halts like a red Build. An
+  // unreadable verdict warns and proceeds — it must not freeze all merging.
+  let macos = null;
+  if (!red && verdict.status === "ok") {
+    try {
+      macos = await latestMacosVerdict({ github, owner, repo, branch: BASE });
+    } catch (error) {
+      core.warning(`Could not read the Test (macOS) verdict: ${error.message}`);
+    }
+    if (macos && macos.verdict === "failure") {
+      red = true;
+      verdict.status = "red";
+      verdict.states["pr.yml (Test (macOS))"] = "red";
+      verdict.runs["pr.yml (Test (macOS))"] = { id: macos.runId, html_url: macos.url };
+    }
+  }
   const lines = Object.entries(verdict.states).map(([wf, st]) => {
     const run = verdict.runs[wf];
     return `- \`${wf}\`: ${st}${run ? ` ([run ${run.id}](${run.html_url}))` : ""}`;
