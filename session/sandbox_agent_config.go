@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
+	toml "github.com/pelletier/go-toml/v2"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -143,21 +143,55 @@ func readOperatorAgentFile(agent, home, file string) ([]byte, error) {
 		return nil, err
 	}
 	if agent == tmux.ProgramCodex && file == "config.toml" {
-		data = forceCodexFileCredentialStore(data)
+		if data, err = forceCodexFileCredentialStore(data); err != nil {
+			return nil, err
+		}
 	}
 	return data, nil
 }
 
-var codexCredStoreLine = regexp.MustCompile(`(?m)^[ \t]*cli_auth_credentials_store[ \t]*=.*\n?`)
+const codexCredStoreKey = "cli_auth_credentials_store"
 
 // forceCodexFileCredentialStore makes a copied codex config.toml use the
 // file-based credential store. A config carrying
 // `cli_auth_credentials_store = "keyring"` makes codex ignore the account's
 // auth.json and use the MACHINE-WIDE identity, so every account would silently
-// authenticate as the same person (the hazard sessionenv.Account documents). The
-// key is removed wherever it appears and re-added at the top level, where TOML
-// requires a bare key to sit.
-func forceCodexFileCredentialStore(data []byte) []byte {
-	cleaned := codexCredStoreLine.ReplaceAll(data, nil)
-	return append([]byte("cli_auth_credentials_store = \"file\"\n"), cleaned...)
+// authenticate as the same person (the hazard sessionenv.Account documents).
+//
+// The file is PARSED, not pattern-matched: TOML spells one key many ways (bare,
+// "quoted", 'literal', with escapes such as "cli_auth_\u0063redentials_store",
+// dotted, inside a [table] or an inline table), and a text match covers only the
+// ones it lists. The key is removed from every table at any depth and the
+// top-level setting is set to "file". A file that does not parse is refused, never
+// copied through unexamined. The re-encoded file keeps every value but not the
+// operator's comments or layout.
+func forceCodexFileCredentialStore(data []byte) ([]byte, error) {
+	var tree map[string]any
+	if err := toml.Unmarshal(data, &tree); err != nil {
+		return nil, fmt.Errorf("codex config.toml does not parse as TOML, so it is not copied: %w", err)
+	}
+	if tree == nil {
+		tree = map[string]any{}
+	}
+	dropCodexCredStoreKey(tree)
+	tree[codexCredStoreKey] = "file"
+	out, err := toml.Marshal(tree)
+	if err != nil {
+		return nil, fmt.Errorf("re-encoding codex config.toml: %w", err)
+	}
+	return out, nil
+}
+
+func dropCodexCredStoreKey(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		delete(t, codexCredStoreKey)
+		for _, child := range t {
+			dropCodexCredStoreKey(child)
+		}
+	case []any:
+		for _, child := range t {
+			dropCodexCredStoreKey(child)
+		}
+	}
 }

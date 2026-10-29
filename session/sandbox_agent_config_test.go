@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	toml "github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -109,21 +110,89 @@ func TestAgentConfigForcesTheCodexFileCredentialStore(t *testing.T) {
 	require.NoError(t, w.syncAgentConfigIn(time.Minute))
 	got := read(t, filepath.Join(w.AccountDir(), "config.toml"))
 	assert.NotContains(t, got, "keyring")
-	assert.Contains(t, got, `cli_auth_credentials_store = "file"`)
-	assert.Contains(t, got, `model = "o3"`, "the rest of the operator's config is kept")
-	assert.Less(t, indexOf(got, "cli_auth_credentials_store"), indexOf(got, "[profiles.a]"),
-		"the bare key must sit above every table to stay top-level")
+	assert.Equal(t, "file", decodeCodexConfig(t, got)[codexCredStoreKey])
+	assert.Equal(t, "o3", decodeCodexConfig(t, got)["model"], "the rest of the operator's config is kept")
 	assert.NotContains(t, got, "OPERATORS-OWN-CODEX-LOGIN")
 	assert.NoFileExists(t, filepath.Join(w.AccountDir(), "auth.json"))
 }
 
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
+func decodeCodexConfig(t *testing.T, body string) map[string]any {
+	t.Helper()
+	var tree map[string]any
+	require.NoError(t, toml.Unmarshal([]byte(body), &tree), body)
+	return tree
+}
+
+// countCredStoreKeys counts the key at any depth of a decoded config.
+func countCredStoreKeys(v any) int {
+	n := 0
+	switch t := v.(type) {
+	case map[string]any:
+		for k, child := range t {
+			if k == codexCredStoreKey {
+				n++
+			}
+			n += countCredStoreKeys(child)
+		}
+	case []any:
+		for _, child := range t {
+			n += countCredStoreKeys(child)
 		}
 	}
-	return -1
+	return n
+}
+
+// However TOML spells the credential-store key, the copy ends with exactly one,
+// at the top level, set to "file": never the operator's value.
+func TestForceCodexFileCredentialStoreCoversEverySpelling(t *testing.T) {
+	spellings := map[string]string{
+		"bare":                "cli_auth_credentials_store = \"keyring\"\n",
+		"basic quoted":        "\"cli_auth_credentials_store\" = \"keyring\"\n",
+		"literal quoted":      "'cli_auth_credentials_store' = 'keyring'\n",
+		"escaped quoted":      "\"cli_auth_\\u0063redentials_store\" = \"keyring\"\n",
+		"spaced around equal": "  cli_auth_credentials_store   =   \"keyring\"   # operator\n",
+		"dotted":              "profiles.x.cli_auth_credentials_store = \"keyring\"\n",
+		"dotted quoted":       "profiles.x.\"cli_auth_credentials_store\" = \"keyring\"\n",
+		"in a table":          "[profiles.x]\ncli_auth_credentials_store = \"keyring\"\n",
+		"in a quoted table":   "[profiles.x]\n\"cli_auth_credentials_store\" = \"keyring\"\n",
+		"inline table":        "profiles = { x = { cli_auth_credentials_store = \"keyring\" } }\n",
+		"array of tables":     "[[hooks]]\ncli_auth_credentials_store = \"keyring\"\n",
+		"quoted top, table":   "\"cli_auth_credentials_store\" = \"keyring\"\n[profiles.x]\ncli_auth_credentials_store = \"auto\"\n",
+	}
+	for name, body := range spellings {
+		t.Run(name, func(t *testing.T) {
+			out, err := forceCodexFileCredentialStore([]byte("model = \"o3\"\n" + body))
+			require.NoError(t, err)
+			tree := decodeCodexConfig(t, string(out))
+			assert.Equal(t, "file", tree[codexCredStoreKey], string(out))
+			assert.Equal(t, 1, countCredStoreKeys(tree), "no other spelling survives: %s", out)
+			assert.NotContains(t, string(out), "keyring")
+			assert.Equal(t, "o3", tree["model"])
+		})
+	}
+	t.Run("absent key is added", func(t *testing.T) {
+		out, err := forceCodexFileCredentialStore([]byte("model = \"o3\"\n"))
+		require.NoError(t, err)
+		assert.Equal(t, "file", decodeCodexConfig(t, string(out))[codexCredStoreKey])
+	})
+	t.Run("empty file", func(t *testing.T) {
+		out, err := forceCodexFileCredentialStore(nil)
+		require.NoError(t, err)
+		assert.Equal(t, "file", decodeCodexConfig(t, string(out))[codexCredStoreKey])
+	})
+}
+
+// A config that does not parse is refused: it is not copied, so the keyring setting
+// it may hide never reaches the sandbox.
+func TestAgentConfigRefusesAnUnparsableCodexConfig(t *testing.T) {
+	operatorHome(t)
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), ".codex", "config.toml"),
+		[]byte("\"cli_auth_credentials_store\" = \"keyring\"\nthis is = = not toml [\n"), 0o600))
+	_, err := forceCodexFileCredentialStore([]byte("a = [\n"))
+	require.Error(t, err)
+	w := configWorkspace(t, "codex", "box1", "codex:config.toml")
+	require.NoError(t, w.syncAgentConfigIn(time.Minute))
+	assert.NoFileExists(t, filepath.Join(w.AccountDir(), "config.toml"))
 }
 
 // Session A's placement never lands in B's scope.
