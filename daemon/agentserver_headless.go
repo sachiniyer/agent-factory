@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -419,7 +420,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 
 	// A previous agent-server for this workspace may have been killed hard and left
 	// its editor running (#6092); end it now rather than when someone next opens one.
-	if err := hs.reapCrashedEditors(); err != nil {
+	if err := hs.acquireEditorNamespace(); err != nil && !errors.Is(err, errEditorWorkspaceBusy) {
 		log.WarningLog.Printf("agent-server: sweeping a previous server's editor: %v", err)
 	}
 

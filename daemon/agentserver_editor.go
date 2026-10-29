@@ -13,7 +13,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The workspace's editor, run on the HOST the agent-server lives on (W5.4, #5571).
@@ -43,10 +42,10 @@ type agentEditorResponse struct {
 type agentEditor struct {
 	once sync.Once
 	sup  *vscodeSupervisor
-	// reapOnce / lock: the crash sweep (reapCrashedEditors) runs once, and the
-	// namespace lock it takes is held for the life of the process.
-	reapOnce sync.Once
-	lock     *os.File
+	// lock is the namespace lock acquireEditorNamespace holds for the life of the
+	// process; lockMu serializes acquiring it.
+	lockMu sync.Mutex
+	lock   *os.File
 	// hook replaces the real start in tests, which have no editor binary.
 	hook func() (vscodeEndpoint, error)
 }
@@ -79,40 +78,52 @@ func (hs *headlessServer) editorNamespaceKey() string {
 	return hs.inst.ID
 }
 
-// reapCrashedEditors ends editors a previous agent-server for THIS workspace left
-// behind when it was SIGKILLed or OOM-killed (#6092). An editor starts in its own
-// process group, so nothing kills it with its parent.
+// errEditorWorkspaceBusy means another live agent-server holds this workspace's
+// editor namespace, so this one must not start an editor in it.
+var errEditorWorkspaceBusy = errors.New("another agent-server for this workspace is running on this host and owns its editor; stop it, or use that server")
+
+// acquireEditorNamespace makes this server the sole owner of its workspace's
+// editor namespace, and ends editors a previous owner left behind (#6092).
 //
-// It takes an exclusive non-blocking flock on a file in the workspace's namespace
-// directory and holds it for the life of this process. The kernel drops the lock
-// when a process dies however it dies, so holding it proves no other agent-server
-// is alive for this namespace; failing to take it means one is, and nothing is
-// swept. Only then does it run the supervisor's persisted-owner reap, which
-// signals a process only after confirming pid + start identity + boot + nonce
-// against the record it wrote — never by name alone, the same rule as #6016.
-func (hs *headlessServer) reapCrashedEditors() error {
+// Ownership IS an exclusive non-blocking flock on a file in the namespace
+// directory, held for the life of the process; the kernel drops it when the
+// process dies however it dies. Every editor start goes through here first, so a
+// server that does not hold the lock never starts an editor (it gets
+// errEditorWorkspaceBusy), and therefore every record in the directory belongs
+// either to the lock holder or to a dead owner. That makes "the lock was free"
+// equal "no live owner", so the sweep below can never reap a live server's
+// editor — the unsafe state (two live servers writing one namespace) cannot
+// arise. A lock this server already holds is a no-op; one it could not take is
+// retried on the next call, since the holder may have exited since.
+//
+// With the lock held it runs the supervisor's persisted-owner reap, which still
+// confirms pid + start identity + boot + nonce against each record before it
+// signals — never by name alone, the same rule as #6016. It runs once, on
+// acquisition, before this server has started any editor of its own.
+func (hs *headlessServer) acquireEditorNamespace() error {
 	if hs.hasNoEditorIdentity() || hs.editorNamespaceKey() == hs.inst.ID {
-		return nil // no crash-stable identity to look under
+		return nil // a per-launch namespace has no other owner to coordinate with
 	}
-	var err error
-	hs.editor.reapOnce.Do(func() {
-		sup := hs.editorSupervisor()
-		var dir string
-		if dir, err = vscodeSocketDirIn(sup.namespace); err != nil {
-			return
-		}
-		var f *os.File
-		if f, err = os.OpenFile(filepath.Join(dir, ".workspace.lock"), os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW, 0o600); err != nil {
-			return
-		}
-		if lerr := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); lerr != nil {
-			_ = f.Close() // a live agent-server owns this workspace; leave its editor
-			return
-		}
-		hs.editor.lock = f
-		err = sup.stopAllPersisted()
-	})
-	return err
+	hs.editor.lockMu.Lock()
+	defer hs.editor.lockMu.Unlock()
+	if hs.editor.lock != nil {
+		return nil
+	}
+	sup := hs.editorSupervisor()
+	dir, err := vscodeSocketDirIn(sup.namespace)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, ".workspace.lock"), os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = f.Close()
+		return errEditorWorkspaceBusy
+	}
+	hs.editor.lock = f
+	return sup.stopAllPersisted()
 }
 
 func (hs *headlessServer) editorSupervisor() *vscodeSupervisor {
@@ -133,15 +144,15 @@ func (hs *headlessServer) ensureEditor() (vscodeEndpoint, error) {
 	if hs.inst == nil {
 		return vscodeEndpoint{}, errors.New("this agent-server has no workspace to open")
 	}
+	if err := hs.acquireEditorNamespace(); err != nil {
+		return vscodeEndpoint{}, fmt.Errorf("start the workspace editor: %w", err)
+	}
 	worktree := strings.TrimSpace(hs.inst.GetWorktreePath())
 	if worktree == "" {
 		return vscodeEndpoint{}, errors.New("the workspace has no directory to open in the editor")
 	}
 	if strings.TrimSpace(hs.inst.ID) == "" {
 		return vscodeEndpoint{}, errors.New("the workspace has no stable id to own an editor under")
-	}
-	if err := hs.reapCrashedEditors(); err != nil {
-		log.WarningLog.Printf("agent-server: sweeping a previous server's editor: %v", err)
 	}
 	return hs.editorSupervisor().ensureServerForInstance(hs.agentEditorKey(), hs.inst.ID, worktree)
 }
