@@ -324,20 +324,39 @@ function isCodex(login) {
   return (login || "").replace(/\[bot\]$/, "") === CODEX_LOGIN;
 }
 
-// A P1 Codex thread with no RESOLVED/ACCEPTED/[gate-ack] reply. Truncated
-// pagination fails closed (treated as unanswered).
-function hasUnansweredP1(pr) {
+// A Codex thread of one of `levels` with no RESOLVED/ACCEPTED/[gate-ack] reply.
+// Truncated pagination fails closed (treated as unanswered).
+function hasUnansweredFinding(pr, levels) {
   const threads = pr.reviewThreads || { nodes: [] };
   if (threads.pageInfo && threads.pageInfo.hasNextPage) return true;
   for (const thread of threads.nodes || []) {
     const comments = thread.comments || { nodes: [] };
     const [first, ...replies] = comments.nodes || [];
     if (!first || !isCodex(first.author && first.author.login)) continue;
-    if (!(first.body || "").includes("P1 Badge")) continue;
+    if (!levels.some((level) => (first.body || "").includes(`${level} Badge`))) continue;
     if (comments.pageInfo && comments.pageInfo.hasNextPage) return true;
     if (!replies.some((c) => ACK_RE.test(c.body || ""))) return true;
   }
   return false;
+}
+
+const hasUnansweredP1 = (pr) => hasUnansweredFinding(pr, ["P1"]);
+
+// Detail (the detail-app integration) authors its PRs on `detail/...` branches
+// and answers its own Codex findings. Those PRs are cheap to hold, and an
+// unanswered P2 accuracy finding had left eight docs on master describing
+// behaviour that was never shipped (#6006), so they also block on P2. Every
+// other PR keeps the throughput-mode rule: only P1 blocks.
+const DETAIL_BRANCH_PREFIX = "detail/";
+const isDetailPr = (pr) => typeof pr.headRefName === "string" && pr.headRefName.startsWith(DETAIL_BRANCH_PREFIX);
+const UNANSWERED_P1_REASON = "unanswered P1 Codex finding";
+const UNANSWERED_DETAIL_P2_REASON = "unanswered Codex P2 on a Detail PR";
+
+// The review-thread skip reason for a PR, or null. P1 is reported first.
+function reviewBlockReason(pr) {
+  if (hasUnansweredP1(pr)) return UNANSWERED_P1_REASON;
+  if (isDetailPr(pr) && hasUnansweredFinding(pr, ["P2"])) return UNANSWERED_DETAIL_P2_REASON;
+  return null;
 }
 
 // Build and Lint must each have run and every run of that name succeeded.
@@ -382,11 +401,10 @@ function selectCandidates(prs) {
 
 // Full selection once reviewThreads are attached (tests use this directly).
 function selectMergeable(prs) {
-  return selectCandidates(prs).map((e) =>
-    e.reason === null && hasUnansweredP1(e.pr)
-      ? { pr: e.pr, reason: "unanswered P1 Codex finding" }
-      : e,
-  );
+  return selectCandidates(prs).map((e) => {
+    const reason = e.reason === null ? reviewBlockReason(e.pr) : null;
+    return reason ? { pr: e.pr, reason } : e;
+  });
 }
 
 function noteRateLimit(core, label, rl) {
@@ -559,9 +577,10 @@ async function mergeAll({ github, core, context }) {
   });
   const phase1 = selectCandidates(prs);
   await attachThreads(github, core, owner, repo, phase1.filter((e) => !e.reason).map((e) => e.pr));
-  let selected = phase1.map((e) =>
-    e.reason === null && hasUnansweredP1(e.pr) ? { pr: e.pr, reason: "unanswered P1 Codex finding" } : e,
-  );
+  let selected = phase1.map((e) => {
+    const reason = e.reason === null ? reviewBlockReason(e.pr) : null;
+    return reason ? { pr: e.pr, reason } : e;
+  });
   if (red) {
     selected = selected.map((e) =>
       e.reason === null && !e.pr.labels.nodes.some((l) => l.name === FIX_LABEL)
@@ -667,7 +686,7 @@ async function reportBroken({ github, core, context, merged }) {
 module.exports = {
   runReadState,
   checkHalt, checkDebounce, shouldDebounce, settleBroken, mergeAll, reportBroken,
-  workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, checksGreen, evaluate,
+  workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, hasUnansweredFinding, isDetailPr, reviewBlockReason, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
   resolveUnknownMergeable, isTruncated, ACK_RE, branchDeletionDecision,
 };
