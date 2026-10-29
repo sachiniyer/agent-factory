@@ -995,11 +995,12 @@ What the sandbox host needs, and what af does to it:
   one ssh argument that the remote login shell parses). The static `af` binary
   af copies over also has to run there: see the glibc rule under
   [Docker](#docker-backend) for the dynamic build.
-- **Git identity is rewritten.** Provisioning runs `git config --global`
-  on the host to set `user.name` "Agent Factory" and `user.email`
-  `af@agent-factory.local`, and adds `safe.directory "*"`. That is the host
-  user's global git config, so point `sandbox.ssh` at a user whose global git
-  identity you do not mind changing.
+- **Git identity is repo-local.** After the clone, provisioning writes the
+  committer identity into the workspace's own `.git/config` (`git config
+  --local`): the operator's `user.name`/`user.email` as git resolves them on
+  the daemon host, with "Agent Factory" / `af@agent-factory.local` as a
+  fallback when neither is set. The host user's global git config is left
+  untouched.
 - **Credentials.** The clone uses value-free GitHub credentials: no token value is
   written into the clone's config. The per-session agent-server token goes
   through stdin into a `0600` file in the session directory, never through argv
