@@ -1111,8 +1111,26 @@ func TestTaskSessionLifecycle_StandDownDischargeFlushedOnJoinTimeoutPath(t *test
 	workers.Add(1)
 	go func() { defer workers.Done(); <-release }()
 
+	// An in-flight CreateSession holds the repo start lock across provisioning
+	// and the prompt send. The pre-join checkpoint must not wait on it (#6031 P1):
+	// nothing before the join may block on a lock a repo operation can hold
+	// without bound.
+	startLock := manager.startLockForRepo(repo.ID)
+	startLock.Lock()
+	t.Cleanup(startLock.Unlock)
+
 	httpClosed, controlClosed := false, false
-	joined := drainDaemon(manager, nil, func() error { return nil }, &httpClosed, &controlClosed, make(chan struct{}), &workers)
+	var joined bool
+	drained := make(chan struct{})
+	go func() {
+		joined = drainDaemon(manager, nil, func() error { return nil }, &httpClosed, &controlClosed, make(chan struct{}), &workers)
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the pre-join checkpoint blocked on the repo start lock")
+	}
 	require.False(t, joined, "precondition: the join timed out, so no final save runs")
 
 	raw, err := config.LoadRepoInstances(repo.ID)

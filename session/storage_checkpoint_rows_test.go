@@ -69,7 +69,7 @@ func TestCheckpointLiveRows_NeverOverwritesNewerState(t *testing.T) {
 
 			storage, err := NewStorage(ms, "")
 			require.NoError(t, err)
-			require.NoError(t, storage.CheckpointLiveRows([]*Instance{oldRoot, worker}, tc.isCurrent))
+			require.NoError(t, storage.CheckpointLiveRows([]*Instance{oldRoot, worker}, tc.isCurrent, nil))
 
 			got := map[string]string{}
 			for _, row := range readDisk(t, ms, repoPath) {
@@ -93,7 +93,7 @@ func TestCheckpointLiveRows_LeavesRowsWithoutALiveInstanceByteForByte(t *testing
 
 	storage, err := NewStorage(ms, "")
 	require.NoError(t, err)
-	require.NoError(t, storage.CheckpointLiveRows([]*Instance{worker}, nil))
+	require.NoError(t, storage.CheckpointLiveRows([]*Instance{worker}, nil, nil))
 
 	got := map[string]string{}
 	for _, row := range readDisk(t, ms, repoPath) {

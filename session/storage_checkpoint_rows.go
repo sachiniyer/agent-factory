@@ -26,7 +26,11 @@ import (
 //
 // Any targeted persist that commits after this releases the lock simply applies on
 // top, exactly as it would after any other write.
-func (s *Storage) CheckpointLiveRows(instances []*Instance, isCurrent func(*Instance) bool) error {
+//
+// adjust, when non-nil, edits each refreshed row just before it is written. It
+// lets the caller persist a decision memory has made but whose own write has not
+// landed (an owed marker clear) without taking any lock beyond this file lock.
+func (s *Storage) CheckpointLiveRows(instances []*Instance, isCurrent func(*Instance) bool, adjust func(*InstanceData)) error {
 	grouped := make(map[string][]*Instance)
 	for _, inst := range instances {
 		rid := inst.repoIDForStorage()
@@ -64,6 +68,9 @@ func (s *Storage) CheckpointLiveRows(instances []*Instance, isCurrent func(*Inst
 				for i := range onDisk {
 					if onDisk[i].Title != data.Title || !(data.ID != "" && onDisk[i].ID == data.ID || data.ID == "" && onDisk[i].ID == "") {
 						continue
+					}
+					if adjust != nil {
+						adjust(&data)
 					}
 					b, err := json.Marshal(data)
 					if err != nil {

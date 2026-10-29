@@ -146,26 +146,55 @@ func drainDaemon(
 // row's own targeted persist covers it) where a lock-order deadlock inside the
 // stop grace is not.
 func (m *Manager) checkpointLiveRows() error {
-	// Land owed stand-down discharges first. The join-timeout path skips the final
-	// SaveInstancesForShutdown (and its flush), so this checkpoint can be the last
-	// durable write: without the flush it would persist a marker memory has
-	// already discharged, and the next start would re-arm a teardown the worker
-	// stood down.
-	m.FlushOwedSettlements()
-	isCurrent := func(inst *session.Instance) bool {
+	// m.mu is only TRY-locked, here and below (see above).
+	tryMu := func(fn func()) bool {
 		for attempt := 0; attempt < 20; attempt++ {
 			if m.mu.TryLock() {
 				defer m.mu.Unlock()
-				for _, cur := range m.instances {
-					if cur == inst {
-						return true
-					}
-				}
-				return false
+				fn()
+				return true
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
 		return false
 	}
-	return m.storage.CheckpointLiveRows(m.InstancesSnapshot(), isCurrent)
+	isCurrent := func(inst *session.Instance) bool {
+		current := false
+		tryMu(func() {
+			for _, cur := range m.instances {
+				if cur == inst {
+					current = true
+					return
+				}
+			}
+		})
+		return current
+	}
+
+	// Owed stand-down discharges (#4730) must reach this checkpoint: the join
+	// timeout skips the final save and its FlushOwedSettlements, so this can be
+	// the last durable write, and persisting a marker memory already discharged
+	// would re-arm a teardown the worker stood down. They are applied to the rows
+	// being written rather than flushed through FlushOwedSettlements, because that
+	// path takes the repo start lock, which CreateSession holds across
+	// provisioning and the prompt send: nothing before the join may wait on a
+	// lock an in-flight repository operation can hold for an unbounded time. When
+	// the owed set cannot be read without blocking, nothing is written: a stale
+	// marker is worse than no checkpoint, and the final save covers a clean join.
+	type owedRow struct{ id, title string }
+	owed := make(map[owedRow]bool)
+	if !tryMu(func() {
+		for _, entry := range m.dischargeOwed {
+			owed[owedRow{entry.instance.ID, entry.instance.Title}] = true
+		}
+	}) {
+		log.WarningLog.Printf("pre-drain checkpoint skipped: the owed-discharge set could not be read without blocking (#5846)")
+		return nil
+	}
+	adjust := func(data *session.InstanceData) {
+		if owed[owedRow{data.ID, data.Title}] {
+			data.PendingOnComplete = nil
+		}
+	}
+	return m.storage.CheckpointLiveRows(m.InstancesSnapshot(), isCurrent, adjust)
 }
