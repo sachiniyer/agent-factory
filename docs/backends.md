@@ -585,8 +585,10 @@ back (see [Archive & restore](#archive-restore)).
 > the official Darwin builds are static, so there af cannot reach the system
 > resolver and connects by name (resolving in `ssh` each step) as it did before.
 > A cgo build dials through `getaddrinfo` directly — unless Go's pure resolver is
-> forced on instead (the `netgo` build tag, or `GODEBUG=netdns=go`), in which case
-> it behaves like the static build. Either way, once af pins, `ssh` does no
+> forced on instead (the `netgo` build tag, or `GODEBUG=netdns=go`). af still
+> believes it has the system resolver there (it keys that off the `cgo` build tag
+> alone), so it does not fall back to `getent`: a name only NSS can answer fails
+> the probe, and af connects by name as it did before. Either way, once af pins, `ssh` does no
 > resolving at all — the connection is made for it — so every step of a session
 > goes to the same place regardless.
 >
