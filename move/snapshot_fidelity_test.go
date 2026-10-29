@@ -308,3 +308,36 @@ func TestRunKeepsTheSourceWhenAFlaggedFileIsStaleAtTheDestination(t *testing.T) 
 	assert.NotContains(t, f.calls, "start")
 	assert.NotContains(t, f.calls, "archive")
 }
+
+// #6033: paths that git quotes (spaces, non-ASCII) go through the same flag clear
+// and existence test as plain ones. A sparse checkout of them verifies, and a real
+// missing edit among them still fails.
+func TestVerifyCommandHandlesQuotedSparsePaths(t *testing.T) {
+	dir := repoWithWork(t)
+	names := []string{"ünï cödé.txt", "sp ace.txt", "tab\tname.txt"}
+	for _, n := range names {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, n), []byte("v1\n"), 0o644))
+	}
+	run(t, dir, "add", "-A")
+	run(t, dir, "commit", "-q", "-m", "quoted paths")
+	// sparse: the first (quoted by git) is absent, outside the cone; the others are present and flagged.
+	run(t, dir, "update-index", "--skip-worktree", names[0])
+	require.NoError(t, os.Remove(filepath.Join(dir, names[0])))
+	run(t, dir, "update-index", "--assume-unchanged", names[1], names[2])
+	require.NoError(t, os.WriteFile(filepath.Join(dir, names[1]), []byte("edited\n"), 0o644))
+
+	snap, err := TakeSnapshot(context.Background(), dir, "feat", "s", t.TempDir())
+	require.NoError(t, err)
+	dst, sh := destinationOf(t, snap)
+	run(t, dst, "update-index", "--skip-worktree", names[0])
+	require.NoError(t, os.Remove(filepath.Join(dst, names[0])))
+	run(t, dst, "update-index", "--assume-unchanged", names[1], names[2])
+	sh(snap.OverlayCommand())
+	require.NoError(t, snap.CheckTree(sh(snap.VerifyCommand())), "a faithful sparse destination verifies")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dst, names[1]), []byte("v1\n"), 0o644))
+	run(t, dst, "add", names[1]) // index holds the old blob, flagged
+	run(t, dst, "update-index", "--assume-unchanged", names[1])
+	require.NoError(t, os.WriteFile(filepath.Join(dst, names[1]), []byte("stale\n"), 0o644))
+	require.ErrorContains(t, snap.CheckTree(sh(snap.VerifyCommand())), "not the snapshot's", "a real difference still fails")
+}
