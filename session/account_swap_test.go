@@ -638,10 +638,11 @@ func TestRespawnForAccountSwapRecordsThePreflightedBaseNotTheReresolvedOne(t *te
 
 // In the pane-fallback state the launch base is the pane's frozen, flagged
 // command. A current override that differs from it (changed BEFORE preflight)
-// is not that command, so the plan must record no runtime base at all rather
-// than the fresh resolution: the next same-agent swap would trust a command that
-// never ran and refuse its extra words as undeclared (#6049 review).
-func TestValidateAccountSwapRecordsNoRuntimeBaseWhenTheLaunchBaseIsThePaneFallback(t *testing.T) {
+// is not that command, so the recorded base must be DERIVED from the launched
+// command — the frozen program minus af's declared flags — and never taken from
+// the fresh resolution, which would leave false RuntimeProgram evidence the next
+// same-agent swap refuses as an undeclared argument (#6049 review).
+func TestValidateAccountSwapDerivesTheRuntimeBaseFromTheLaunchedPaneCommand(t *testing.T) {
 	inst, _ := flaggedPaneSwapInstance(t)
 	cfg := config.DefaultConfig()
 	cfg.ProgramOverrides = map[string]string{tmux.ProgramCodex: "codex --model other"}
@@ -652,8 +653,8 @@ func TestValidateAccountSwapRecordsNoRuntimeBaseWhenTheLaunchBaseIsThePaneFallba
 	require.NotNil(t, plan)
 	require.Equal(t, "codex -c check_for_update_on_startup=false", plan.base,
 		"the launch base is the frozen pane command, not the current override")
-	require.Empty(t, plan.runtimeBase,
-		"nothing may be recorded as RuntimeProgram: neither the flagged pane command nor the re-resolved override is a proven clean base")
+	require.Equal(t, "codex", plan.runtimeBase,
+		"the recorded base is the launched command minus af's declared flag, not the re-resolved override")
 }
 
 func TestStopForAccountSwapStopsEveryCredentialBearingPane(t *testing.T) {
@@ -990,6 +991,14 @@ func TestValidateAccountSwapAdmitsCodexPaneFallbackCarryPlan(t *testing.T) {
 		[]string{"-c", "check_for_update_on_startup=false", "resume", carryTestID},
 		plan.proof.GeneratedArgs,
 		"the proof declares the recorded flag and the appended resume words")
+	// The recorded runtime base is the launched BASE minus af's declared flag —
+	// never the carry's `resume <id>`, which is added on top at launch. Recording
+	// the resumed command would make the next same-agent swap refuse it as pinning
+	// an existing conversation, and recording nothing would leave that fallback
+	// (#6049 review).
+	require.Equal(t, tmux.ProgramCodex, plan.runtimeBase,
+		"a carried pane-fallback swap still records a reusable, selector-free base")
+	require.Empty(t, tmux.ConversationSelectorArgs(plan.runtimeBase))
 
 	// The proof must satisfy the account boundary, the same check the
 	// ApplyAccount step inside validateAccountSwapPlan just passed.

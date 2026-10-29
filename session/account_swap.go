@@ -28,8 +28,9 @@ type accountSwapLaunchPlan struct {
 	// (base can be the pane's frozen program, which carries them), and never
 	// re-resolved from configuration at the respawn boundary — a
 	// program_overrides edit between preflight and respawn must not make
-	// RuntimeProgram claim a command that never ran (#6049 review). Empty when no
-	// clean base of the launched command can be proven; nothing is then recorded.
+	// RuntimeProgram claim a command that never ran (#6049 review). It is the
+	// launched base itself, or that base minus af's declared flags; empty only
+	// when the removal cannot be proven, and nothing is then recorded.
 	runtimeBase         string
 	program             string
 	proof               sessionenv.AccountLaunchProof
@@ -343,15 +344,20 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	resolvedProgram := resolution.command
 	// What RuntimeProgram records for this launch, decided now and carried in the
 	// plan. The launch base is clean unless it is the pane's frozen program with
-	// af's own declared flags (the pane-fallback state). Then no clean base of
-	// the COMMAND being launched can be derived or proven equivalent to a fresh
-	// resolution (an override may have changed before preflight while the frozen
-	// pane command is what launches), so NOTHING is recorded rather than false
-	// evidence: the next swap falls back to the pane's recorded declaration,
-	// exactly as it did before this respawn.
+	// af's own declared flags (the pane-fallback state). Then the clean base is
+	// DERIVED from the launched command itself: the pane's frozen program minus
+	// exactly the words af's recorded declaration says it authored, accepted only
+	// when that removal is provable. It is never taken from a fresh resolution of
+	// the configuration (an override may have changed before preflight while the
+	// frozen pane command is what launches). A conversation carry's `resume <id>`
+	// is added on top of this base at launch, so it never enters it. If the base
+	// cannot be proven, nothing is recorded rather than false evidence.
 	runtimeBase := resolvedProgram
 	if len(paneGeneratedArgs) > 0 {
-		runtimeBase = ""
+		var proven bool
+		if runtimeBase, proven = sessionenv.StripDeclaredArgs(resolvedProgram, paneGeneratedArgs); !proven {
+			runtimeBase = ""
+		}
 	}
 	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
 		return fmt.Errorf("cannot switch session %q to account %q because its resolved program pins an existing conversation with arguments %s; an account swap must choose which conversation the replacement opens (the carried one or a fresh one), so remove those arguments and retry", i.Title, name, strings.Join(args, " "))

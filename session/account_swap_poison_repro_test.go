@@ -169,7 +169,8 @@ func TestPoisonReproEndToEndRespawnRecordsCleanBase(t *testing.T) {
 	require.True(t, launched, "the respawn spawned the flagged codex program")
 
 	// 4. The next swap keeps succeeding through the ordinary extension path:
-	//    RuntimeProgram is the clean base, which differs from the flagged pane
+	//    RuntimeProgram is the clean base derived from the launched command (the
+	//    flagged pane program minus af's declared flag), which differs from that
 	//    program, so the seeding gate does not fire and the proof describes the
 	//    injected flag as an ordinary trailing extension (the #5479 control shape).
 	reenterLimitResumeFence(t, inst)
