@@ -32,6 +32,7 @@ import {
 } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { InFlightOp, Liveness, type SessionData } from "./types.js";
+import { OptimisticSessions } from "./optimistic.js";
 
 // Minimal DOM for sessionRow units (the same hand-rolled approach as
 // phone-header.test.ts): createElement/createElementNS feed h() and icon(),
@@ -153,6 +154,30 @@ test("the reserved root agent is openable without a lifecycle verb (#5406)", () 
   }) as Array<[string, Partial<SessionData>]>) {
     assert.equal(isOpenableSession(sess({ ...root, ...over })), false, `root fails closed: ${name}`);
   }
+});
+
+test("root is not openable while any op is in flight; idle root and non-root rows unchanged (#6104)", () => {
+  const root = { is_root: true, can_kill: true };
+  assert.equal(isOpenableSession(sess(root)), true, "idle root opens");
+  for (const [name, op] of Object.entries(InFlightOp)) {
+    if (op === InFlightOp.None) continue;
+    assert.equal(isOpenableSession(sess({ ...root, in_flight_op: op })), false, `root with ${name} in flight`);
+  }
+  // The real optimistic projection of a root delete / archive: it sets the op and
+  // clears the verbs but not user_killed, so the op itself must fence the row.
+  for (const kind of ["kill", "archive"] as const) {
+    const model = new OptimisticSessions();
+    const row = sess({ ...root, liveness: Liveness.Ready, worktree: { repo_path: "/repo" } });
+    model.reset([row]);
+    assert.ok(model.begin(kind, row));
+    const projected = model.project()[0];
+    assert.equal(projected.user_killed, undefined);
+    assert.equal(isOpenableSession(projected), false, `root ${kind} pending`);
+  }
+  // Non-root rows keep routing through isActionableSession.
+  assert.equal(isOpenableSession(sess({ lifecycle_action: "archive" })), true);
+  assert.equal(isOpenableSession(sess({ lifecycle_action: "archive", in_flight_op: InFlightOp.Killing })), true,
+    "a non-root row is unchanged by this fence (its verbs are cleared by the projection)");
 });
 
 test("a healthy root row is clickable and carries no lifecycle controls (#5406)", () => {
