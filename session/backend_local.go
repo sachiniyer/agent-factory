@@ -257,9 +257,12 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if workDir != "" {
 			resolution := resolveLaunchProgramForInstance(i)
 			runtimeProgram = resolution.command
-			program := injectSystemPromptWithEnv(resolution.command, resolveSkillTarget(i, resolution.command), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
+			program := injectSystemPromptWithEnv(prepareResumeConversation(i, resolution.command), resolveSkillTarget(i, resolution.command), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
+			// A re-spawn here resumes the session's own recorded conversation or
+			// starts fresh (#4797), never the latest one on a shared account home.
+			tmuxSession.SetExactResumeOnly(true)
 		}
 		// And a flagged row's reattach is recovery-inert (ReattachInert): it only
 		// keeps a live pane bound. Through RestoreWithResult it also refreshed the

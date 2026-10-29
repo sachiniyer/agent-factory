@@ -224,6 +224,13 @@ func prepareResumeConversation(i *Instance, program string) string {
 func prepareExactResumeConversation(i *Instance, program string) (string, bool) {
 	conv := i.AgentConversation()
 	if !conv.HasID() {
+		// A launch pinned to a specific conversation before the agent tab exists
+		// (an adopted workspace's archived one): the same exact id, never a guess.
+		i.mu.RLock()
+		conv = i.carriedConversation
+		i.mu.RUnlock()
+	}
+	if !conv.HasID() {
 		return program, false
 	}
 	if rewritten, ok := tmux.ResumeProgramWithConversationID(program, conv.Agent, conv.ID); ok {
