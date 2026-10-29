@@ -27,7 +27,9 @@ import (
 // untracked and ignored state, which the proof must not disturb.
 func preservedHostDir(t *testing.T, branch string) (dir, worktree string) {
 	t.Helper()
-	dir = t.TempDir()
+	// Resolved at creation: on macOS t.TempDir is under /var, a symlink to
+	// /private/var, and git reports the canonical path.
+	dir = canonicalTempDir(t)
 	run := func(where string, args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", where, "-c", "user.name=t", "-c", "user.email=t@example.com"}, args...)...)
@@ -60,6 +62,14 @@ func preservedHostDir(t *testing.T, branch string) (dir, worktree string) {
 	require.NoError(t, os.WriteFile(exclude, []byte("*.ign\n"), 0o644))
 	write("keep.ign", "i")
 	return dir, worktree
+}
+
+// canonicalTempDir is t.TempDir with its symlinks resolved.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	return dir
 }
 
 func adoptGitOut(t *testing.T, where string, args ...string) string {
@@ -146,7 +156,7 @@ func TestAdoptProofRefusesWhatItCannotProve(t *testing.T) {
 		assert.Contains(t, err.Error(), "missing")
 	})
 	t.Run("the previous agent-server still runs", func(t *testing.T) {
-		cmd := exec.Command("sh", "-c", "sleep 30", "x", dir)
+		cmd := exec.Command("sh", "-c", "sleep 30; exit 0", "x", dir)
 		require.NoError(t, cmd.Start())
 		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 		_, err := runAdoptCheck(t, dir, "af/feature", itoa(cmd.Process.Pid))
@@ -563,4 +573,31 @@ func TestMarkStartedLockedIsTheOnePath(t *testing.T) {
 	inst.markStartedLocked(true) // already started: no change, no touch
 	inst.mu.Unlock()
 	assert.Equal(t, before, inst.UpdatedAt)
+}
+
+// A symlinked session dir (a symlinked home, /var vs /private/var): the recorded
+// dir and the running server's argv can spell the same directory differently. The
+// server's argv carries the physical path, so a survivor must be found by the
+// canonical spelling too, not read as "not running" (which would fail open and
+// start a second server beside it).
+func TestAdoptProofFindsASurvivorThroughASymlinkedSessionDir(t *testing.T) {
+	real, worktree := preservedHostDir(t, "af/feature")
+	link := filepath.Join(canonicalTempDir(t), "home-link")
+	require.NoError(t, os.Symlink(real, link))
+	before := treeFingerprint(t, worktree)
+
+	// The survivor's command line names the PHYSICAL dir, as an agent-server's does.
+	cmd := exec.Command("sh", "-c", "sleep 30; exit 0", "x", filepath.Join(real, "af"))
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	_, err := runAdoptCheck(t, link, "af/feature", itoa(cmd.Process.Pid))
+	require.Error(t, err, "the recorded dir is the link, the survivor names the real dir")
+	assert.Contains(t, err.Error(), "still running")
+
+	// With no survivor the same symlinked dir is proven present.
+	got, err := runAdoptCheck(t, link, "af/feature", "")
+	require.NoError(t, err)
+	assert.Equal(t, worktree, got)
+	assert.Equal(t, before, treeFingerprint(t, worktree))
 }
