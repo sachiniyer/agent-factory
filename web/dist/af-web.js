@@ -17239,6 +17239,12 @@ function skippedRepoRepairHint(reason) {
 function isActionableSession(s) {
   return typeof s.id === "string" && s.id !== "" && (s.lifecycle_action === "archive" || s.lifecycle_action === "restore");
 }
+function isOpenableSession(s) {
+  if (isActionableSession(s)) {
+    return true;
+  }
+  return s.is_root === true && typeof s.id === "string" && s.id !== "" && !isCreating(s) && s.user_killed !== true && s.startup_state_unknown !== true && s.pending_account_swap === void 0 && !s.unreachable;
+}
 function retryActionForSession(s) {
   if (isPendingManualHandoffDeliveryUnconfirmed(s) || isPendingAgentHandoffDeliveryUnconfirmed(s)) {
     return {
@@ -19437,9 +19443,9 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const status = rowStatus(s);
   const operator = operatorKind(s);
   const creating = isCreating(s);
-  const actionable = isActionableSession(s);
+  const actionable = isOpenableSession(s);
   const killable = isKillableSession(s);
-  const managed = actionable || killable;
+  const managed = isActionableSession(s) || killable;
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const outageDetail = unreachableDetail(s);
   const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
@@ -19915,7 +19921,7 @@ function openFromRail(id) {
 }
 function focusTerminal() {
   const selected = selectedSessionData();
-  if (!selected || !isActionableSession(selected)) {
+  if (!selected || !isOpenableSession(selected)) {
     focusRail();
     return;
   }
@@ -21329,7 +21335,7 @@ function syncSplit(state) {
   const tok = token;
   const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
   const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
-  const runtimeSelected = selected && isActionableSession(selected) ? selected : null;
+  const runtimeSelected = selected && isOpenableSession(selected) ? selected : null;
   const runtimeSessionId = runtimeSelected ? selId : null;
   const tabIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabIdentity) : ["0:"];
   const tabRealIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabRealId) : [""];
@@ -21565,7 +21571,7 @@ function onKeydown(e) {
     return;
   }
   const selected = selectedSessionData();
-  const actionableSelected = selected && isActionableSession(selected) ? selected : null;
+  const actionableSelected = selected && isOpenableSession(selected) ? selected : null;
   const focus = state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
   const action = decideKey(
     e.key,
@@ -21582,7 +21588,7 @@ function onKeydown(e) {
       orderedIds: filterSessions(
         orderedSessions(scopeToProject(state.sessions, state.selectedProject)),
         state.statusFilter
-      ).filter(isActionableSession).map((s) => s.id),
+      ).filter(isOpenableSession).map((s) => s.id),
       selectedId: actionableSelected ? state.selectedId : null,
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,

@@ -17,6 +17,7 @@ import {
   markDeliveredActionForSession,
   isActionableSession,
   isKillableSession,
+  isOpenableSession,
   sessionRow,
   skippedRepoReasonLabel,
   skippedRepoRepairHint,
@@ -131,6 +132,34 @@ test("rail actionability is granted only by the daemon projection (#2234)", () =
     false,
     "a malformed id-less capability fails closed",
   );
+});
+
+test("the reserved root agent is openable without a lifecycle verb (#5406)", () => {
+  // The daemon withholds archive/restore from root by design, so a healthy root
+  // projects can_kill and is_root but no lifecycle_action. It must still open.
+  const root = { is_root: true, can_kill: true };
+  assert.equal(isOpenableSession(sess(root)), true, "healthy root opens");
+  assert.equal(isActionableSession(sess(root)), false, "root still gets no archive/restore verb");
+  assert.equal(isOpenableSession(sess({ lifecycle_action: "archive" })), true, "actionable rows still open");
+  assert.equal(isOpenableSession(sess({ can_kill: true })), false, "a non-root row without a verb stays inert");
+  for (const [name, over] of Object.entries({
+    "id-less": { id: undefined },
+    creating: { in_flight_op: InFlightOp.Creating },
+    "kill pending": { user_killed: true },
+    "startup unknown": { startup_state_unknown: true },
+    "account swap": { pending_account_swap: {} },
+    unreachable: { unreachable: { since: "2026-10-28T00:00:00Z", error: "x" } },
+  }) as Array<[string, Partial<SessionData>]>) {
+    assert.equal(isOpenableSession(sess({ ...root, ...over })), false, `root fails closed: ${name}`);
+  }
+});
+
+test("a healthy root row is clickable and carries no lifecycle controls (#5406)", () => {
+  const { el, open } = row({ is_root: true, can_kill: true });
+  assert.notEqual(el.getAttribute("aria-disabled"), "true", "root must not read as disabled");
+  assert.ok(!el.className.includes("af-row-inert"), "root must not be styled inert");
+  el.click();
+  assert.equal(open.calls, 1, "a click on root reaches the open callback");
 });
 
 test("kill addressability is independent and fails closed", () => {

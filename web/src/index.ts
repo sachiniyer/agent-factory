@@ -128,6 +128,7 @@ import type { TerminalStatus } from "./terminal.js";
 import {
   AppShell,
   isActionableSession,
+  isOpenableSession,
   orderedSessions,
   clearLoginDraft,
   renderLogin,
@@ -676,7 +677,7 @@ function openFromRail(id: string): void {
  *  switchTab already sets focus:"rail" for exactly this reason. */
 function focusTerminal(): void {
   const selected = selectedSessionData();
-  if (!selected || !isActionableSession(selected)) {
+  if (!selected || !isOpenableSession(selected)) {
     // A kill-only startup-unknown row has a stable management target but no
     // confirmed runtime binding. Keep every caller behind the same daemon-owned
     // lifecycle fence as row clicks; focusing whatever SplitView happens to
@@ -3004,7 +3005,7 @@ function syncSplit(state: AppState): void {
   // so bind SplitView only when the daemon also projected a lifecycle capability.
   // This is the stream-side choke point complement to focusTerminal's keyboard
   // fence: neither merely selecting nor attaching can reuse an uncertain binding.
-  const runtimeSelected = selected && isActionableSession(selected) ? selected : null;
+  const runtimeSelected = selected && isOpenableSession(selected) ? selected : null;
   const runtimeSessionId = runtimeSelected ? selId : null;
   // The ordered tab identities, so the split view can (a) know the live tab count and
   // (b) reject a drop whose drag-time snapshot no longer matches (a mid-drag reorder).
@@ -3376,7 +3377,7 @@ function onKeydown(e: KeyboardEvent): void {
   // stale, so we never honor terminal mode without a live, visible pane. The pure state
   // machine (nav.ts) decides the rest; index.ts only performs the effect.
   const selected = selectedSessionData();
-  const actionableSelected = selected && isActionableSession(selected) ? selected : null;
+  const actionableSelected = selected && isOpenableSession(selected) ? selected : null;
   const focus: KeyboardFocus =
     state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
   // The selected session's tab shape drives the nav-mode tab keys (1-9 / t / w).
@@ -3400,7 +3401,7 @@ function onKeydown(e: KeyboardEvent): void {
         // daemon's lifecycle capability, exactly like pointer-open. A kill-only
         // startup-unknown row remains visible/removable but cannot become a pane
         // target through j/k.
-        .filter(isActionableSession)
+        .filter(isOpenableSession)
         .map((s) => s.id),
       selectedId: actionableSelected ? state.selectedId : null,
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
