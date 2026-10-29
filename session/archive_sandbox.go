@@ -887,13 +887,27 @@ func (i *Instance) markBranchPushed() {
 // else (no URL, unreachable, auth). A var so tests need no network.
 var branchOnOrigin = branchOnOriginViaGit
 
+// lsRemoteArgs is the probe's git invocation. It carries the same
+// environment-backed credential helper the session's clone installs
+// (githubEnvironmentCredential), so a private origin reachable only through
+// GH_TOKEN/GITHUB_TOKEN answers the probe exactly as it answered the clone — a
+// plain ls-remote cannot use those variables (#6003). The helper holds variable
+// NAMES only; the git child reads them from its environment.
+func lsRemoteArgs(originURL, branch string) []string {
+	var args []string
+	if key, helper, ok := githubEnvironmentCredential(originURL); ok {
+		args = append(args, "-c", key+"="+helper)
+	}
+	return append(args, "ls-remote", "--exit-code", "--heads", originURL, "refs/heads/"+branch)
+}
+
 func branchOnOriginViaGit(originURL, branch string) (bool, error) {
 	if strings.TrimSpace(originURL) == "" {
 		return false, errors.New("the repository has no origin remote")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", "--heads", originURL, "refs/heads/"+branch)
+	cmd := exec.CommandContext(ctx, "git", lsRemoteArgs(originURL, branch)...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	cmd.WaitDelay = dockerWaitDelay
 	out, err := cmd.CombinedOutput()

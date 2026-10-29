@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -551,4 +553,41 @@ func TestBranchOnOriginViaGitSeparatesAbsentFromUnreachable(t *testing.T) {
 	assert.Error(t, err, "an unreachable origin is unknown, not absent")
 	_, err = branchOnOriginViaGit("", "pushed")
 	assert.Error(t, err)
+}
+
+// #6003: the origin probe authenticates the way the session's clone does — via
+// the environment credential helper — not with a bare ls-remote that cannot use
+// GH_TOKEN/GITHUB_TOKEN.
+func TestLsRemoteArgsCarryTheCloneCredentialHelper(t *testing.T) {
+	args := lsRemoteArgs("https://github.com/o/r.git", "af/s")
+	require.GreaterOrEqual(t, len(args), 6)
+	assert.Equal(t, "-c", args[0])
+	key, helper, ok := githubEnvironmentCredential("https://github.com/o/r.git")
+	require.True(t, ok)
+	assert.Equal(t, key+"="+helper, args[1], "the exact helper the clone installs")
+	assert.Equal(t, []string{"ls-remote", "--exit-code", "--heads", "https://github.com/o/r.git", "refs/heads/af/s"}, args[2:])
+	assert.NotContains(t, strings.Join(args, " "), "secret-token", "names only, never a value")
+
+	// Origins the clone gives no helper get none here either.
+	for _, u := range []string{"git@github.com:o/r.git", "https://git.example.com/o/r.git", "/srv/repo.git"} {
+		assert.Equal(t, []string{"ls-remote", "--exit-code", "--heads", u, "refs/heads/af/s"}, lsRemoteArgs(u, "af/s"), u)
+	}
+}
+
+// The helper in the probe's exact argument form really answers git's credential
+// request from GH_TOKEN, and falls back to GITHUB_TOKEN.
+func TestLsRemoteCredentialHelperAnswersFromTheTokenEnvironment(t *testing.T) {
+	args := lsRemoteArgs("https://github.com/o/r.git", "b")
+	for env, want := range map[string]string{
+		"GH_TOKEN=secret-token":     "password=secret-token",
+		"GITHUB_TOKEN=other-secret": "password=other-secret",
+	} {
+		cmd := exec.Command("git", args[0], args[1], "credential", "fill")
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GH_TOKEN=", "GITHUB_TOKEN=", env)
+		cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		assert.Contains(t, string(out), "username=x-access-token")
+		assert.Contains(t, string(out), want)
+	}
 }
