@@ -188,8 +188,9 @@ reveal the menu on hover or keyboard focus. Archive and Delete session each open
   daemon refuses it. For a remote session, it asks for confirmation first, then
   provisions a fresh sandbox from the pushed branch and relaunches the agent; the
   old sandbox's conversation does not return. Restoring an SSH or sandbox session
-  archived without a push is refused for now (its workspace stays on its host).
-  Reveal **Archived** in the filter first.
+  archived without a push reattaches its preserved workspace — the tree, index and
+  ignored files come back exactly as archived and the agent resumes its
+  conversation. Reveal **Archived** in the filter first.
 - **Delete session** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.
