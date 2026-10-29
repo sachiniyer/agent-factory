@@ -417,7 +417,7 @@ In the TUI, an automation that has stopped firing — or whose expression the sc
 
 The daemon is the single scheduler host: it evaluates cron expressions and supervises watch scripts.
 
-- Every `af` invocation ensures the daemon is running whenever an enabled task exists, and the daemon keeps running after the TUI exits.
+- On the default local target, every `af` invocation ensures the daemon is running whenever an enabled task exists, and the daemon keeps running after the TUI exits. A remote-targeted `af` never starts a local daemon — the target owns the schedule (see [remote daemons](cli.md#remote-daemons)).
 - To keep tasks firing across **reboots** without opening `af`, register the user-level autostart unit (a systemd user service on Linux, a launchd agent on macOS):
 
 ```bash
