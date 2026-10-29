@@ -20,6 +20,11 @@ import (
 //     on whether the caller's own text is in the host's layout, an existence
 //     oracle across projects.
 //
+// Classification follows the value's ORIGIN, not its container: a value a sandbox
+// can write is caller text wherever it is read back. A daemon-composed string that
+// may embed caller text is classWithheld — never sent — or built only from daemon
+// facts; it is never classDaemon.
+//
 // The table is keyed by the Go TYPE that owns the field and the field's JSON name,
 // and the boundary walks each response by the route's response type. Two tests make
 // an unclassified field impossible to miss: every string-kind field reachable from
@@ -33,6 +38,12 @@ type stringClass int8
 const (
 	classDaemon stringClass = iota + 1
 	classCaller
+	// classWithheld marks a string the daemon composes from facts that can embed
+	// caller text (a delivery alarm's last error names a target session), so it is
+	// never sent to a sandbox at all: the snapshot empties it for a sandbox
+	// credential (TestSandboxScope_StoreThenReadDoesNotDependOnMembership). If it
+	// ever did arrive it would be scrubbed like a daemon string, the safe default.
+	classWithheld
 )
 
 // sandboxStringClasses classifies the string fields a sandbox response can carry.
@@ -50,8 +61,8 @@ var sandboxStringClasses = map[reflect.Type]map[string]stringClass{
 		"target_session": classCaller, "last_run_status": classDaemon,
 	},
 	reflect.TypeFor[SnapshotResponse](): {"boot_id": classDaemon, "caller": classDaemon},
-	reflect.TypeFor[DeliveryAlarm]():    {"task_id": classDaemon, "task_name": classDaemon, "target_session": classDaemon, "last_error": classDaemon},
-	reflect.TypeFor[SkippedRepo]():      {"repo_id": classDaemon, "reason": classDaemon},
+	reflect.TypeFor[DeliveryAlarm]():    {"task_id": classWithheld, "task_name": classWithheld, "target_session": classWithheld, "last_error": classWithheld},
+	reflect.TypeFor[SkippedRepo]():      {"repo_id": classWithheld, "reason": classWithheld},
 	reflect.TypeFor[MutationOutcome]():  {"code": classDaemon, "warning": classDaemon},
 	reflect.TypeFor[ArchiveSessionResponse](): {
 		"archived_path": classDaemon, "warning": classDaemon,

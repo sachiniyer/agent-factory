@@ -392,6 +392,77 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 	assert.Contains(t, out, "created-1", "anti-vacuous: the create succeeded and returned the projected row")
 }
 
+// STORE-THEN-READ: a value a sandbox can WRITE is caller text wherever it is read
+// back, so reading it back must not depend on whether it is in the host layout
+// either — a per-request differential cannot see an oracle whose write and read
+// are separate requests. For every settable string field of every route that
+// stores something (AddTask, CreateTab, RenameTab), write A (in the layout) and B
+// (not), read back through every read route (ListTasks, Snapshot), and require the
+// reads to match apart from the literal guess.
+//
+// Delivery alarms are the one daemon-composed string that embeds a task's target
+// and last error, so they are withheld from a sandbox outright (snapshot): that
+// is asserted here too, with the reason they are unreachable.
+func TestSandboxScope_StoreThenReadDoesNotDependOnMembership(t *testing.T) {
+	f := newScopeFixture(t)
+	f.useScheduler()
+	guessA := f.me.Path
+	guessB := "/srv/not-a-real-project-b3e1"
+	require.NotEqual(t, hostlayout.Default.ScrubString(guessA), guessA, "anti-vacuous: guess A is in the layout")
+
+	writes := map[string]map[string]any{
+		"/v1/AddTask":   {"task": map[string]any{"prompt": "p", "cron_expr": "0 * * * *", "target_session": "peer"}},
+		"/v1/CreateTab": {"id": f.me.ID, "command": "x"},
+		"/v1/RenameTab": {"id": f.me.ID, "tab_name": "nope", "new_name": "n"},
+	}
+	reads := map[string]string{"/v1/ListTasks": `{}`, "/v1/Snapshot": `{}`}
+
+	stamp := regexp.MustCompile(`\d{4}-\d{2}-\d{2}T[0-9:.+\-Z]+`)
+	hexish := regexp.MustCompile(`[0-9a-f]{8,}`)
+	normalize := func(out, guess string) string {
+		esc, _ := json.Marshal(guess)
+		out = strings.ReplaceAll(out, guess, "<G>")
+		out = strings.ReplaceAll(out, string(esc[1:len(esc)-1]), "<G>")
+		out = strings.ReplaceAll(out, hostlayout.Withheld, "<W>")
+		out = stamp.ReplaceAllString(out, "<T>")
+		return hexish.ReplaceAllString(out, "<hex>")
+	}
+	cycle := func(route string, path []string, guess string) map[string]string {
+		require.NoError(t, task.DeleteAllTasks())
+		body := cloneJSONMap(writes[route])
+		setJSONPath(body, path, guess)
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		f.call(t, f.secret, route, string(raw))
+		got := map[string]string{}
+		for readRoute, readBody := range reads {
+			_, out := f.call(t, f.secret, readRoute, readBody)
+			got[readRoute] = out
+		}
+		return got
+	}
+	checked := 0
+	for route := range writes {
+		for _, path := range stringFieldPaths(requestTypes[route], nil) {
+			a := cycle(route, path, guessA)
+			b := cycle(route, path, guessB)
+			for readRoute := range reads {
+				assert.Equalf(t, normalize(a[readRoute], guessA), normalize(b[readRoute], guessB),
+					"write %s field %s, read %s: the read-back depends on whether the stored text is in the host layout", route, strings.Join(path, "."), readRoute)
+				checked++
+			}
+		}
+	}
+	require.Greater(t, checked, 40, "the store-then-read matrix shrank unexpectedly (%d cases)", checked)
+
+	// The one daemon-composed string that can embed caller text, a delivery alarm,
+	// never reaches a sandbox: watch-task diagnostics are emptied for a sandbox
+	// credential (and a sandbox cannot create the watch tasks that raise them).
+	_, snap := f.call(t, f.secret, "/v1/Snapshot", `{}`)
+	assert.NotContains(t, snap, "delivery_alarms")
+	assert.NotContains(t, snap, "skipped_repos")
+}
+
 // Every string a sandbox response can carry is classified (sandbox_classify.go):
 // reflection over each admitted route's response type, and over what the
 // InstanceData and Task projections actually let through, fails on any string
