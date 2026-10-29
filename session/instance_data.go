@@ -624,7 +624,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// workspace is still on the host, and a kill of the row must reap it.
 		preservedArchive := liveness == LiveArchived && hadPersistedCleanupHandle && data.keepsPreservedWorkspaceHandle()
 		if preservedArchive || (liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle)) {
-			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
+			backend, teardown, cleanupErr := restoreRuntimeCleanupWithAccount(data.Title, data.BackendType, data.RuntimeCleanup,
+				restoredAccount{Name: data.Account, Agent: data.AccountAgent, Program: data.Program})
 			if cleanupErr != nil {
 				if data.UserKilled && data.RuntimeCleanup == nil && data.KilledWithoutLiveRuntime {
 					// Inert-at-kill tombstone: the kill was committed against an inert
