@@ -175,10 +175,7 @@ func (p *sandboxProvisioner) stopUnadoptedServer() {
 // record its runtime identity (see sandboxProvisioner.persistIdentity). A row
 // without a restartable provisioner ignores it.
 func (i *Instance) SetRuntimeIdentityPersist(persist func(*Instance) error) {
-	i.mu.Lock()
-	b := i.backend
-	i.mu.Unlock()
-	if p := reattachProvisioner(b); p != nil {
+	if p := reattachProvisioner(i.currentBackend()); p != nil {
 		i.mu.Lock()
 		p.persistIdentity = persist
 		i.mu.Unlock()
@@ -226,9 +223,10 @@ func (i *Instance) noteAdoptedRestart() {
 // would attach a different program to the surviving tmux handle. A row without a
 // script is reported as not restartable rather than restarted wrongly.
 func (i *Instance) retireLaunchScript() {
+	b := i.currentBackend()
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	switch be := i.backend.(type) {
+	switch be := b.(type) {
 	case *sandboxBackend:
 		if be.cleanup != nil {
 			be.cleanup.LaunchScript = ""
