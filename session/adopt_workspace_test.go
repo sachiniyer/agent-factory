@@ -564,3 +564,129 @@ func TestMarkStartedLockedIsTheOnePath(t *testing.T) {
 	inst.mu.Unlock()
 	assert.Equal(t, before, inst.UpdatedAt)
 }
+
+// leakRow builds a row whose retained sandbox backend carries a pid and token ref,
+// with the provisioner's commands routed through run.
+func leakRow(t *testing.T, pid, ref string, run func(time.Duration, string, io.Reader, bool) ([]byte, error)) *Instance {
+	t.Helper()
+	backend, teardown, err := restoreRuntimeCleanup("t", "sandbox", &RuntimeCleanupData{Sandbox: &SandboxRuntimeCleanupData{
+		SSHCommand: "ssh recorded-host", SessionDir: "/d", RemotePID: pid, TokenRef: ref,
+	}})
+	require.NoError(t, err)
+	backend.(*sandboxBackend).provisioner.runCommandFn = run
+	return &Instance{Title: "t", Branch: "b", ID: "s1", Path: t.TempDir(), backend: backend, runtimeTeardown: teardown, started: true,
+		archivedWorkspace: &ArchivedWorkspaceData{Dir: "/d"}}
+}
+
+// A failed adopting provision that cannot confirm the server it started is gone
+// hands that server's identity back, instead of dropping it with the provisioner.
+func TestAbandonAdoptionKeepsTheIdentityOfAServerItCouldNotStop(t *testing.T) {
+	fail := func(time.Duration, string, io.Reader, bool) ([]byte, error) {
+		return nil, errors.New("ssh: connection refused")
+	}
+	ok := func(time.Duration, string, io.Reader, bool) ([]byte, error) { return nil, nil }
+	build := func(run func(time.Duration, string, io.Reader, bool) ([]byte, error), pid string, launched bool) *sandboxProvisioner {
+		return &sandboxProvisioner{
+			sessionDir: "/d", sshCmd: "ssh recorded-host", remotePID: pid, tokenRef: "new-ref", remoteAddr: "127.0.0.1:9", launchAttempted: launched,
+			spec: ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/d", Branch: "b"}}, runCommandFn: run,
+		}
+	}
+	t.Run("an unconfirmed kill leaks the new identity", func(t *testing.T) {
+		p := build(fail, "777", true)
+		require.Error(t, p.provisionFailure(errors.New("banner never appeared")))
+		res := p.adoptionFailureResult()
+		require.NotNil(t, res.Backend)
+		require.NotNil(t, res.Teardown)
+		cleanup := res.Backend.(*sandboxBackend).cleanup
+		assert.Equal(t, "777", cleanup.RemotePID, "the NEW server's pid, not the archived server's")
+		assert.Equal(t, "new-ref", cleanup.TokenRef)
+		assert.Equal(t, "/d", cleanup.SessionDir)
+	})
+	t.Run("a launch with no usable pid leaks too", func(t *testing.T) {
+		p := build(ok, "", true)
+		require.Error(t, p.provisionFailure(errors.New("launch failed")))
+		assert.NotNil(t, p.adoptionFailureResult().Backend)
+	})
+	t.Run("a confirmed kill leaks nothing", func(t *testing.T) {
+		p := build(ok, "777", true)
+		require.Error(t, p.provisionFailure(errors.New("banner never appeared")))
+		assert.Nil(t, p.adoptionFailureResult().Backend)
+	})
+	t.Run("a failure before any launch leaks nothing", func(t *testing.T) {
+		p := build(fail, "", false)
+		require.Error(t, p.provisionFailure(errors.New("host prerequisites missing")))
+		assert.Nil(t, p.adoptionFailureResult().Backend)
+	})
+}
+
+// The double failure: the adopting provision fails AND its server cannot be
+// confirmed stopped. The row records the new identity, persisted and unknown; no
+// adoption proceeds; a retry that can reach the host reaps the survivor first.
+func TestDoubleFailureKeepsTheNewServerIdentityThenRetryReapsItFirst(t *testing.T) {
+	var scripts []string
+	reachable := false
+	run := func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		scripts = append(scripts, script)
+		if !reachable {
+			return nil, errors.New("ssh: connection refused")
+		}
+		return nil, nil
+	}
+	row := leakRow(t, "111", "old-ref", run)
+	require.Equal(t, "111", row.preservedRemotePID(), "premise: the archived server's identity")
+
+	// The failed adopting provision's leaked identity reaches the row.
+	leaked := &sandboxProvisioner{
+		sessionDir: "/d", sshCmd: "ssh recorded-host", remotePID: "777", tokenRef: "new-ref", remoteAddr: "127.0.0.1:9", launchAttempted: true,
+		spec: ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/d", Branch: "b"}}, runCommandFn: run,
+	}
+	require.Error(t, leaked.provisionFailure(errors.New("banner never appeared")))
+	row.retainProvisionResultCleanup(leaked.adoptionFailureResult())
+
+	assert.Equal(t, "777", row.preservedRemotePID(), "a restore now checks the survivor's pid, not only the old one")
+	stored := row.ToInstanceData().ForStorage()
+	require.NotNil(t, stored.RuntimeCleanup, "the identity is persisted, so the orphan sweep and a kill can reach it")
+	assert.Equal(t, "777", stored.RuntimeCleanup.Sandbox.RemotePID)
+	assert.Equal(t, "new-ref", stored.RuntimeCleanup.Sandbox.TokenRef)
+	assert.True(t, row.runtimeCleanupStateUnknown)
+
+	// No adoption proceeds while the host cannot confirm.
+	scripts = nil
+	_, err := row.provisionForRestore()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not confirmed stopped")
+	assert.True(t, row.runtimeCleanupStateUnknown, "still unknown")
+	assert.NotNil(t, row.ArchivedWorkspace())
+
+	// The retry reaches the host: the survivor is reaped (identity-checked kill of
+	// pid 777) before anything else, and only then is the mark cleared.
+	reachable = true
+	scripts = nil
+	require.NoError(t, row.confirmStoppedBeforeAdopt())
+	require.NotEmpty(t, scripts)
+	assert.Contains(t, scripts[0], "777", "the survivor is targeted by its recorded pid")
+	assert.False(t, row.runtimeCleanupStateUnknown)
+}
+
+// A rollback whose stop is unconfirmed keeps the identity and marks the row.
+func TestRollbackAdoptionWithAnUnconfirmedStopKeepsTheIdentity(t *testing.T) {
+	run := func(time.Duration, string, io.Reader, bool) ([]byte, error) {
+		return nil, errors.New("ssh: connection refused")
+	}
+	row := leakRow(t, "777", "new-ref", run)
+	attachStoppableAgent(t, row, true) // the stop RPC fails
+	w := row.ArchivedWorkspace()
+
+	row.rollbackAdoption(w)
+
+	assert.True(t, row.runtimeCleanupStateUnknown, "an unconfirmed stop marks the row unknown")
+	assert.Equal(t, "777", row.preservedRemotePID(), "the server's identity is still recorded")
+	assert.Equal(t, w, row.ArchivedWorkspace())
+	assert.True(t, row.started)
+
+	// And a confirmed stop (the RPC works) leaves the row clean.
+	ok := leakRow(t, "777", "new-ref", func(time.Duration, string, io.Reader, bool) ([]byte, error) { return nil, nil })
+	attachStoppableAgent(t, ok, false)
+	ok.rollbackAdoption(ok.ArchivedWorkspace())
+	assert.False(t, ok.runtimeCleanupStateUnknown)
+}

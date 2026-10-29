@@ -111,7 +111,7 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
-		return ProvisionResult{}, p.provisionFailure(err)
+		return p.failedProvision(err)
 	}
 	return res, nil
 }
