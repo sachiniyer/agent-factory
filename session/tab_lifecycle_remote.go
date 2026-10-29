@@ -251,6 +251,10 @@ func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 			}
 		}
 	}
+	// Taken ahead of the roster read, and a reason to read it: a row the sandbox
+	// does not hold must be noticed even when nothing else is pending (#5954).
+	rows := i.offBoxPTYRowsLocked()
+	work = work || len(rows) > 0
 	remote := i.capabilitiesLocked().Workspace == WorkspaceRemote
 	hasClient := i.remoteClient != nil
 	i.mu.RUnlock()
@@ -281,6 +285,13 @@ func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 		byID[td.ID] = td
 	}
 	changed = i.retryPendingRemoteClose(rs, byID)
+	for _, id := range i.retireLostOffBoxTabs(rows, byID) {
+		// End the stream outside i.mu: a subscriber must see it end, not block on
+		// an id the new sandbox will never serve.
+		rs.closeTabStream(id)
+		changed = true
+		i.markLoadRuntimeReplaced()
+	}
 	rosterChanged, adopted := i.applyOffBoxRoster(byID)
 	for _, id := range adopted {
 		// An adopted replacement may reuse a closed id: lift its terminal mark, as
