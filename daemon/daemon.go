@@ -661,7 +661,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("quiescing for a daemon-owned upgrade hand-off")
 	}
 
-	drainDaemon(manager, closeHTTP, closeControl, &httpClosed, &controlClosed, stopCh, wg)
+	joined := drainDaemon(manager, closeHTTP, closeControl, &httpClosed, &controlClosed, stopCh, wg)
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under
@@ -671,6 +671,13 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return nil
 	}
 
+	if !joined {
+		// A joined goroutine is wedged. Whatever it holds, the final save would
+		// queue behind it past the SIGKILL grace, and a write taken while
+		// admitted writers can still commit is unsound (see drainDaemon), so
+		// nothing is written; drainDaemon logged what was left behind (#5846).
+		return nil
+	}
 	if err := manager.SaveInstancesForShutdown(); err != nil {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
