@@ -782,6 +782,39 @@ func (s *Storage) saveInstances(instances []*Instance, withLock func(path string
 				reconcilePendingArchiveRows(group, checkpoint.inFlightArchive, onDisk)
 				group = mergeCommittedArchiveRows(group, onDisk, checkpoint.prePushArchive)
 			}
+			// A same-titled on-disk row whose stable ID differs from the
+			// in-memory instance is a replacement the daemon has not observed:
+			// refreshDaemonInstances keeps the old in-memory pointer by title
+			// even when the disk row's ID differs, so the checkpoint would write
+			// the stale instance and clobber the replacement's identity — the
+			// data-loss class persistInstanceData's title+ID guard exists to
+			// prevent. Drop the stale in-memory row and let the on-disk
+			// replacement survive the wholesale rewrite (it is no longer in
+			// inMemoryTitles, so preserveUnmaterializedGhostRows keeps it
+			// verbatim). An empty ID on either side is a legacy record and still
+			// matches, mirroring stableIDMatchesForDaemon (#6048 review).
+			replaced := make(map[string]struct{})
+			for i := range group {
+				for _, d := range onDisk {
+					if d.Title == group[i].Title && !stableIDMatches(d.ID, group[i].ID) {
+						replaced[group[i].Title] = struct{}{}
+						break
+					}
+				}
+			}
+			if len(replaced) > 0 {
+				kept := make([]InstanceData, 0, len(group))
+				for _, g := range group {
+					if _, drop := replaced[g.Title]; drop {
+						continue
+					}
+					kept = append(kept, g)
+				}
+				group = kept
+				for title := range replaced {
+					delete(inMemoryTitles, title)
+				}
+			}
 			ghosts := preserveUnmaterializedGhostRows(onDisk, onDiskRaw, inMemoryTitles)
 			jsonData, err := marshalCheckpointInstances(group, ghosts)
 			if err != nil {

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // DeleteInstanceByStableID is the LAST step of a session kill, and the #1917
@@ -158,4 +160,34 @@ func TestSaveInstancesWithin_HeldLock(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The checkpoint rewrites a repo's instances.json wholesale from the in-memory
+// group. A same-titled on-disk row whose stable ID differs from the in-memory
+// instance is a replacement the daemon has not observed (refreshDaemonInstances
+// keeps the old in-memory pointer by title even when the disk row's ID differs),
+// so the checkpoint would write the stale instance and clobber the replacement's
+// identity — the data-loss class persistInstanceData's title+ID guard prevents.
+// The checkpoint must drop the stale in-memory row and preserve the on-disk
+// replacement verbatim instead (#6048 review).
+func TestSaveInstances_ReplacementIdentityNotOverwrittenByStaleInMemory(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	// The on-disk row is a replacement: same title, different stable ID.
+	replacement := InstanceData{Title: "a", ID: "id-new", Path: repoPath}
+	seedDisk(t, state, repoPath, []InstanceData{replacement})
+
+	// The in-memory instance is the stale one the daemon kept by title.
+	stale := makeAliveInstance("a", repoPath)
+	stale.ID = "id-old"
+	storage, err := NewStorage(state, "")
+	require.NoError(t, err)
+	require.NoError(t, storage.SaveInstances([]*Instance{stale}))
+
+	got := rowsByTitle(t, state, repoPath)
+	require.Contains(t, got, "a")
+	assert.Equal(t, "id-new", got["a"].ID,
+		"the on-disk replacement's stable ID must not be clobbered by the stale in-memory instance")
 }

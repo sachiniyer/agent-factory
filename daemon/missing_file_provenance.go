@@ -85,7 +85,15 @@ var saveRestoredRepoRecords = func(m *Manager, repoID string, instances []*sessi
 	if err := m.storage.SaveInstancesWithin(instances, budget); err != nil {
 		return nil, err
 	}
-	raw, err := config.LoadState().GetInstances(repoID)
+	// Read the restored rows back through LoadRepoInstances directly, not
+	// config.LoadState().GetInstances: LoadState() saves a default state.json
+	// when the file is missing, and SaveState() takes an unbounded WithFileLock
+	// (config.WithFileLock). This restore runs inside refreshLocked under m.mu,
+	// so a peer holding state.json.lock would freeze every repo's snapshot and
+	// session mutation and block shutdown from draining the poll. GetInstances
+	// only delegates to LoadRepoInstances, so reading the repo file directly
+	// avoids the state-file lock entirely (#6048 review).
+	raw, err := config.LoadRepoInstances(repoID)
 	if err != nil {
 		return nil, err
 	}
