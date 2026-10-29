@@ -702,6 +702,9 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle st
 // Returns whether anything changed.
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
 	changed := false
+	if inst.ReconcileTabManagementSnapshot(d.TabManagement) {
+		changed = true
+	}
 	// A combined agent+account handoff replaces the process behind the same row
 	// and tmux address. Reconcile every source CurrentAgentName consults before
 	// later action predicates choose which agent's accounts to load.

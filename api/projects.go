@@ -3,12 +3,14 @@ package api
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/projectclone"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -41,7 +43,7 @@ var registerProjectViaDaemon = routedRegisterProject
 
 func newProjectsAddCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "add <path>",
+		Use:     "add <path-or-git-url>",
 		Aliases: []string{"register"},
 		Short:   "Add a project: register a repo by path with a stable local identity",
 		Long: `Add a project by registering a git checkout with a stable, machine-local
@@ -66,6 +68,13 @@ With --daemon-url (or AF_DAEMON_URL) the registration goes to that daemon and th
 path is a path ON ITS HOST, sent as typed: absolute or starting with ~, never
 relative.
 
+Instead of a path, give a git URL (https://host/owner/repo, ssh://host/owner/repo
+or git@host:owner/repo) and the DAEMON clones it on its own host, with its own
+credentials (ssh keys, credential helper), under its projects_root (default
+<af home>/projects), then registers it. The URL is validated by the daemon: file://,
+local paths, option-like values and URLs with an embedded password are refused.
+Re-adding the same URL returns the existing project.
+
 'register' is a deprecated alias for 'add'.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -76,11 +85,20 @@ relative.
 			// remote target selected. Resolve against the caller's cwd before the
 			// daemon (which may run from /) sees the path. ResolveUserPath expands
 			// ~ and calls filepath.Abs; remote registry routing is a separate change.
-			path, err := projectArgPath(args[0])
-			if err != nil {
-				return jsonError(err)
+			var project config.Project
+			var err error
+			if projectclone.LooksLikeURL(args[0]) {
+				// A URL names a repository, not a path on any machine: it goes to
+				// the daemon verbatim (local or remote) and is cloned THERE. The
+				// daemon validates it; this side resolves nothing.
+				project, err = registerProjectViaDaemon(daemon.RegisterProjectRequest{URL: strings.TrimSpace(args[0])})
+			} else {
+				var path string
+				if path, err = projectArgPath(args[0]); err != nil {
+					return jsonError(err)
+				}
+				project, err = registerProjectViaDaemon(daemon.RegisterProjectRequest{Path: path})
 			}
-			project, err := registerProjectViaDaemon(daemon.RegisterProjectRequest{Path: path})
 			if err != nil {
 				return jsonError(err)
 			}

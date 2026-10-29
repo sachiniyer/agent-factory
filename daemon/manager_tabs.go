@@ -325,6 +325,7 @@ func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (st
 		// Stop before removing the last durable UI retry handle. An unknown result
 		// leaves the tab intact so the user can retry instead of orphaning an editor.
 		vscodeKey = daemonInstanceKey(repoID, title)
+		m.stopRemoteEditor(instance)
 		if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
 			return "", fmt.Errorf("cannot close the last VS Code tab because editor teardown could not be confirmed: %w", err)
 		}

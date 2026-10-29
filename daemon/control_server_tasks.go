@@ -128,8 +128,11 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		// into an error envelope carrying the shared committed code — which is
 		// what every existing consumer reads. The envelope covers the handlers
 		// that answer OK; these answer with an error (#3036).
+		// Carries the stored id: an error has no response body, and a caller that
+		// did not choose the id (a sandbox credential's add) could otherwise never
+		// address the task that now exists (#5890).
 		return &mutationCommittedError{err: fmt.Errorf(
-			"%s %w", taskAddCommittedErrorPrefix, reloadErr)}
+			"%s %w", taskAddCommittedErrorPrefix, reloadErr), storedID: created.ID}
 	}
 	return nil
 }
@@ -242,6 +245,13 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
+	return s.removeTask(req, resp, nil)
+}
+
+// removeTask is RemoveTask with an optional admission predicate evaluated on the
+// record loaded under the tasks-file lock, so a scoped caller's authorization is
+// atomic with the delete (#5889).
+func (s *controlServer) removeTask(req RemoveTaskRequest, resp *RemoveTaskResponse, admit func(task.Task) error) error {
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
@@ -250,7 +260,7 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 		return err
 	}
 	defer unlock()
-	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
+	if err := task.RemoveTaskChecked(req.ID, req.Expect, admit); err != nil {
 		return err
 	}
 	resp.OK = true

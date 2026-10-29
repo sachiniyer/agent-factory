@@ -86,13 +86,19 @@ var ErrPreservedWorkspaceGone = errors.New("the preserved workspace is gone from
 //	OTHER <reason>  anything else; the caller refuses
 //
 // It writes nothing. The pid check reads the process's command line, which holds
-// the session dir through the af binary path.
+// the session dir through the af binary path, and matches both the recorded
+// spelling and the canonical one (a symlinked home, /var vs /private/var): the
+// running server's argv carries the physical path. A live pid whose command line
+// cannot be read is refused, never taken for a stranger.
 func adoptCheckScript(dir, branch, oldPID string) string {
 	return fmt.Sprintf(`d=%s; b=%s; pid=%s
 if [ ! -d "$d" ] || [ ! -e "$d/workspace" ]; then echo GONE; exit 0; fi
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
   cmd=$(ps -ww -p "$pid" -o command= 2>/dev/null)
+  canon=$(cd "$d" 2>/dev/null && pwd -P)
+  if [ -z "$cmd" ]; then echo "OTHER cannot read the command line of live process $pid"; exit 0; fi
   case "$cmd" in *"$d"*) echo "RUNNING $pid"; exit 0;; esac
+  if [ -n "$canon" ]; then case "$cmd" in *"$canon"*) echo "RUNNING $pid"; exit 0;; esac; fi
 fi
 if [ ! -e "$d/workspace/.git" ]; then echo "OTHER the preserved clone has no git repository"; exit 0; fi
 wt=$(git -C "$d/workspace" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$b" '/^worktree /{p=substr($0,10)} /^branch /{if($2==b){print p; exit}}')

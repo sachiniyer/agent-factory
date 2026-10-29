@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -77,4 +78,23 @@ func TestGateHostPickIsInertWithoutAHost(t *testing.T) {
 	sent = false
 	require.NoError(t, gateHostPick(nil, daemon.HostPickOnTask, "box1", func() error { sent = true; return nil }))
 	assert.True(t, sent, "a capable daemon receives the pick")
+}
+
+// #5968: the capability probe is a READ. Whatever uncertainty it carries (a
+// timeout after connecting, a lost or malformed response) must not make the
+// refusal classify as a mutation that may have landed — nothing was sent, so the
+// form keeps its draft.
+func TestGateHostPickProbeFailureIsNeverAnUncertainMutation(t *testing.T) {
+	for name, probeErr := range map[string]error{
+		"transport": &apiclient.TransportError{Err: errors.New("i/o timeout")},
+		"deadline":  context.DeadlineExceeded,
+		"cancelled": context.Canceled,
+	} {
+		stubDaemonHealth(t, daemon.PingResponse{}, probeErr)
+		sent := false
+		err := gateHostPick(nil, daemon.HostPickOnTask, "box1", func() error { sent = true; return nil })
+		require.Errorf(t, err, "%s", name)
+		assert.Falsef(t, sent, "%s", name)
+		assert.Falsef(t, apiclient.IsMutationOutcomeUncertain(err), "%s: a probe failure is not an uncertain mutation", name)
+	}
 }
