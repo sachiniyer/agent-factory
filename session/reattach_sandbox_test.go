@@ -75,7 +75,7 @@ func TestReattachSandboxBindsALiveAgentServerWithoutProvisioning(t *testing.T) {
 	inst, _ := reattachFixture(t, "")
 	require.NoError(t, inst.ReattachSandbox())
 	assert.True(t, inst.started)
-	assert.Equal(t, LiveReady, inst.liveness)
+	assert.Equal(t, LiveRunning, inst.liveness, "reachability is not idleness")
 	assert.NotNil(t, inst.remoteClient)
 	require.Len(t, inst.Tabs, 1, "the agent tab is seeded exactly as a launch seeds it")
 }
@@ -299,4 +299,44 @@ func TestConfirmCallbackForwardNeedsTheSocketOnTheSandboxHost(t *testing.T) {
 
 	empty := &sandboxProvisioner{}
 	require.Error(t, confirmCallbackForward(empty), "an unknown socket path cannot be confirmed")
+}
+
+// #5973: reachability proves the agent-server answers, not that the agent is
+// idle. A reattached row must not read as idle to ClassifyActivity (which
+// `af sessions watch` and task concurrency consume) before an observation says so.
+func TestReattachDoesNotPublishIdleOnReachability(t *testing.T) {
+	inst, _ := reattachFixture(t, "")
+	inst.ID = "reattach-id"
+	require.NoError(t, inst.ReattachSandbox())
+	assert.NotEqual(t, LiveReady, inst.liveness)
+
+	activity, _ := ClassifyActivity(inst.ToInstanceData())
+	assert.NotEqual(t, ActivityIdle, activity, "a still-working agent must not read as idle")
+}
+
+// #5974: adopting the same runtime provisions nothing, so a recorded callback
+// reason survives unless this reattach positively restored the callback.
+func TestReattachPreservesAPersistedCallbackReason(t *testing.T) {
+	t.Run("no callback was ever granted: the create-time reason stays", func(t *testing.T) {
+		inst, _ := reattachFixture(t, "")
+		inst.callbackUnavailable = "the daemon could not mint one"
+		require.NoError(t, inst.ReattachSandbox())
+		assert.Equal(t, "the daemon could not mint one", inst.callbackUnavailable)
+	})
+	t.Run("a recorded reason is kept over a new loss", func(t *testing.T) {
+		inst, p := reattachFixture(t, "")
+		p.restoreCallbackIdentity("v1.cb", "127.0.0.1:23456:/s.sock")
+		inst.callbackUnavailable = "earlier reason"
+		inst.sandboxCreds = &restoringCreds{err: errors.New("key missing")}
+		require.NoError(t, inst.ReattachSandbox())
+		assert.Equal(t, "earlier reason", inst.callbackUnavailable)
+	})
+	t.Run("positive evidence clears it", func(t *testing.T) {
+		inst, p := reattachFixture(t, "")
+		p.restoreCallbackIdentity("v1.cb", "127.0.0.1:23456:/s.sock")
+		inst.callbackUnavailable = "lost on an earlier reattach"
+		inst.sandboxCreds = &restoringCreds{}
+		require.NoError(t, inst.ReattachSandbox())
+		assert.Empty(t, inst.callbackUnavailable, "credential restored and forward confirmed")
+	})
 }

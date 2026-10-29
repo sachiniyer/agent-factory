@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/projectclone"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -576,6 +578,20 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // loop. A path that is not a git repository keeps the overlay open with an inline
 // error rather than dismissing the user's typing.
 func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
+	if projectclone.LooksLikeURL(path) {
+		// A git URL (W9.10) is cloned by the DAEMON, on its host, so there is
+		// nothing to probe or switch to here: the project appears in the list
+		// when the registration lands.
+		url := strings.TrimSpace(path)
+		if err := projectclone.Validate(url); err != nil {
+			m.projectPickerOverlay.SetAddError(err.Error())
+			return m, nil
+		}
+		m.closeProjectPicker()
+		return m, func() tea.Msg {
+			return projectAddedMsg{root: url, byURL: true, err: registerProjectURLThroughDaemon(url)}
+		}
+	}
 	if isRemoteTarget() {
 		return m.handleRemoteAddProject(path)
 	}
@@ -624,6 +640,10 @@ func (m *home) addProjectCmd(root string) tea.Cmd {
 // happened; the registration just won't persist for the next launch — and is surfaced
 // as a warning rather than an error box, matching the pre-#2456 best-effort write.
 func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil && msg.byURL && !mutationMayHaveLanded(msg.err) {
+		// Nothing else on screen says the clone failed, and the user waited on it.
+		return m, m.handleError(fmt.Errorf("could not add project %s: %w", msg.root, msg.err))
+	}
 	if msg.err != nil {
 		// A registration that may have landed is re-read rather than assumed
 		// either way (#4824): the Projects section shows it if the daemon

@@ -2,6 +2,7 @@ package session
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -296,4 +297,72 @@ func TestCreateLaunch_DeclinedCleansTheCommandRootAndTheDaemonRoot(t *testing.T)
 				"the copy an earlier af left in the daemon's root is af's too")
 		})
 	}
+}
+
+// #5984: a relative inherited root anchors at the launch cwd af composed. Behind
+// a wrapper that may chdir before exec that cwd is unknown, so the target is
+// unresolved — with the reason — and nothing is written, rather than the skill
+// landing under the worktree where the agent will not read it.
+func TestResolveSkillTarget_RelativeRootWithUnknownLaunchCwdIsUnresolved(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+	t.Setenv("GEMINI_CLI_HOME", "rel")
+
+	known := skillTestInstance(t, "gemini", "")
+	target := resolveSkillTarget(known, "gemini")
+	require.Equal(t, filepath.Join(known.GetWorktreePath(), "rel"), target.root,
+		"a bare launch starts in the worktree: its cwd is known")
+
+	wrapped := skillTestInstance(t, "gemini", "")
+	target = resolveSkillTarget(wrapped, "ionice -c 3 gemini")
+	require.Empty(t, target.root, "the wrapper may chdir: af cannot name where the agent reads")
+	require.ErrorContains(t, target.unplaceable(), "cannot tell which directory")
+	_, err := ensureGeminiSkillDir(target)
+	require.Error(t, err, "an unresolved target must report, not place")
+	require.NoFileExists(t, filepath.Join(wrapped.GetWorktreePath(), "rel", ".gemini", "skills", afSkillDirName, "SKILL.md"))
+}
+
+// #5986: with HOME and the agent's variable cleared the agent falls back to the
+// account's OS home, so af resolves that directory instead of declining.
+func TestResolveSkillTarget_ClearedHomeUsesTheOSAccountHome(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+	u, err := user.Current()
+	require.NoError(t, err)
+	require.NotEmpty(t, u.HomeDir)
+
+	gemini := resolveSkillTarget(skillTestInstance(t, "gemini", ""), "env -i gemini")
+	require.NoError(t, errOrNil(gemini))
+	require.Equal(t, filepath.Clean(u.HomeDir), gemini.root)
+
+	codex := resolveSkillTarget(skillTestInstance(t, "codex", ""), "env -i codex")
+	require.NoError(t, errOrNil(codex))
+	require.Equal(t, filepath.Join(filepath.Clean(u.HomeDir), ".codex"), codex.root)
+}
+
+func errOrNil(t skillTarget) error {
+	if t.root == "" {
+		return t.unplaceable()
+	}
+	return nil
+}
+
+// #6004: codex -C moves the working root after Codex resolves its home, so a
+// relative CODEX_HOME still anchors at the pane's start directory and the skill
+// has a place; whitespace-only HOME is a directory name, not an absent HOME.
+func TestResolveSkillTarget_FollowsTheAgentsOwnRootRules(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+	t.Setenv("CODEX_HOME", "")
+
+	inst := skillTestInstance(t, "codex", "")
+	work := inst.GetWorktreePath()
+
+	target := resolveSkillTarget(inst, "CODEX_HOME=rel codex -C nested")
+	require.NoError(t, errOrNil(target))
+	require.Equal(t, filepath.Join(work, "rel"), target.root)
+
+	target = resolveSkillTarget(inst, "env -u CODEX_HOME HOME='   ' codex")
+	require.NoError(t, errOrNil(target))
+	require.Equal(t, filepath.Join(work, "   ", ".codex"), target.root)
 }

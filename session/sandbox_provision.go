@@ -73,6 +73,9 @@ type sandboxWorkspace struct {
 	agentServerToken string
 	// launchScript is the command startAgentServer ran, kept for a restart.
 	launchScript string
+
+	// adoptedWorktree is the linked worktree an adopting launch binds (W8.6).
+	adoptedWorktree string
 }
 
 // bannerJSON is the one JSON line `af agent-server` prints on startup — addr,
@@ -518,6 +521,9 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	}
 	if branch := strings.TrimSpace(w.spec.Branch); branch != "" {
 		args = append(args, "--branch", branch)
+	}
+	if w.adoptedWorktree != "" {
+		args = append(args, "--adopt-worktree", w.adoptedWorktree)
 	}
 	if len(w.spec.AgentPolicy) > 0 {
 		args = append(args, "--policy-file", w.PolicyPath())

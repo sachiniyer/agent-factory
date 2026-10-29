@@ -34,6 +34,15 @@ func (i *Instance) PendingTabCleanup() []TabCleanupData {
 	return append([]TabCleanupData(nil), i.pendingTabCleanup...)
 }
 
+func (i *Instance) hasPendingTabCleanup(h TabCleanupData) bool {
+	for _, p := range i.PendingTabCleanup() {
+		if p.TmuxName == h.TmuxName {
+			return true
+		}
+	}
+	return false
+}
+
 // RetryPendingTabCleanup re-attempts the tmux teardown of every tab whose close
 // was durably committed but never confirmed, and retires each handle whose
 // session is now positively gone. It reports how many handles were retired and
@@ -67,6 +76,12 @@ func (i *Instance) RetryPendingTabCleanupAndWait() (retired, remaining int, anyB
 
 func (i *Instance) retryPendingTabCleanup(wait bool) (retired, remaining int, anyBlind bool) {
 	for _, handle := range i.PendingTabCleanup() {
+		unlock := i.lockTeardown(handle.TabID)
+		if !i.hasPendingTabCleanup(handle) {
+			// Another attempt confirmed it while this one waited its turn.
+			unlock()
+			continue
+		}
 		blind, err := killTabCleanupSession(handle, wait)
 		anyBlind = anyBlind || blind
 		if err != nil {
@@ -74,12 +89,14 @@ func (i *Instance) retryPendingTabCleanup(wait bool) (retired, remaining int, an
 				"session %q: tab cleanup for tmux session %q is still unconfirmed and will be retried on the next daemon start: %v",
 				i.Title, handle.TmuxName, err)
 			remaining++
+			unlock()
 			continue
 		}
 		i.mu.Lock()
 		i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, &handle)
 		i.touchLocked()
 		i.mu.Unlock()
+		unlock()
 		log.InfoLog.Printf("session %q: reaped the leftover tmux session %q of a closed tab", i.Title, handle.TmuxName)
 		retired++
 	}

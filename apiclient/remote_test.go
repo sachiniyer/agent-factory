@@ -532,3 +532,34 @@ func TestDialStream_RemoteThreadsTokenHeaderAndQuery(t *testing.T) {
 		t.Fatalf("?access_token= = %q, want secret-token", gotQueryTok)
 	}
 }
+
+// A URL registration clones inside the request, so its wait must come from the
+// daemon's clone budget, not the generic REST bound: a daemon that answers after
+// remoteRequestTimeout but within the clone budget SUCCEEDS, while an ordinary
+// registration on the same slow daemon still times out (#6093).
+func TestRegisterProjectURL_WaitsForTheCloneBudgetNotTheRestBound(t *testing.T) {
+	withShrunkRemoteTimeouts(t) // remoteRequestTimeout is now 2s
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/RegisterProject", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(remoteRequestTimeout + time.Second):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.RegisterProjectResponse{OK: true}))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c, err := NewRemote(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+
+	if _, err := c.RegisterProject("/srv/repo"); err == nil {
+		t.Fatal("the control: a path registration past the REST bound must time out")
+	}
+	if _, err := c.RegisterProjectURL("https://github.com/o/r.git"); err != nil {
+		t.Fatalf("a clone inside the daemon's budget must not time out client-side: %v", err)
+	}
+}

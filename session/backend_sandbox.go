@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -76,11 +75,20 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=sandbox: cannot resolve repo config for %q: %w", spec.RepoRoot, err)
 	}
-	if err := BackendConfigError(BackendSandbox, cfg); err != nil {
-		return ProvisionResult{}, err
-	}
-	if spec.CloneURL == "" {
-		return ProvisionResult{}, missingOriginError(BackendSandbox, spec.RepoRoot)
+	adopting := spec.Adopt != nil
+	if adopting {
+		// The archived row's own recorded transport reaches the host, whatever the
+		// current sandbox.ssh says (#5571 W8.6); there is nothing to clone.
+		if spec.Adopt.Transport == nil || strings.TrimSpace(spec.Adopt.Transport.SSHCmd) == "" {
+			return ProvisionResult{}, errors.New("backend=sandbox: the archived row recorded no transport to reach its preserved workspace")
+		}
+	} else {
+		if err := BackendConfigError(BackendSandbox, cfg); err != nil {
+			return ProvisionResult{}, err
+		}
+		if spec.CloneURL == "" {
+			return ProvisionResult{}, missingOriginError(BackendSandbox, spec.RepoRoot)
+		}
 	}
 	afBin, err := sshSelfBinary()
 	if err != nil {
@@ -89,7 +97,7 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 
 	p := &sandboxProvisioner{
 		spec:   spec,
-		sshCmd: strings.TrimSpace(cfg.SandboxSSH),
+		sshCmd: adoptedTransportOr(spec, strings.TrimSpace(cfg.SandboxSSH)),
 		afBin:  afBin,
 		// The wire program is the configured name and flags — never af's
 		// auto-detected daemon path, which the sandbox's filesystem does not
@@ -102,7 +110,7 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
-		return ProvisionResult{}, p.reapProvisionFailure(err)
+		return p.failedProvision(err)
 	}
 	return res, nil
 }
@@ -246,18 +254,24 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.checkHostPrereqs(p.hostReadinessKey(), sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
-	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
-	}
-	w.resolveSessionDirSymlinks(sshShortStepTimeout)
-	p.sessionDir = w.SessionDir
-	// The identity is repo-local (#5571 W2.7), so it is written after the clone
-	// that creates the repository.
-	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
-	}
-	if err := w.configureGit(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
+	if p.spec.Adopt != nil {
+		if err := p.beginAdoption(w); err != nil {
+			return ProvisionResult{}, err
+		}
+	} else {
+		if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
+		w.resolveSessionDirSymlinks(sshShortStepTimeout)
+		p.sessionDir = w.SessionDir
+		// The identity is repo-local (#5571 W2.7), so it is written after the clone
+		// that creates the repository.
+		if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
+		if err := w.configureGit(sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
 	}
 	// The binary stage is platform-aware (#5571 W2.2): probe the host's uname,
 	// pick the af build it can actually run (sandbox.binary override / the
@@ -309,6 +323,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		p.callbackSocket = w.CallbackSocketPath()
 	}
 	p.reapMu.Unlock()
+	p.clearStaleAdoptedCallbackSocket()
 	if err := w.writePolicy(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
@@ -361,6 +376,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		return ProvisionResult{}, err
 	}
 
+	if err := p.awaitAdoptedServer(localAddr, token); err != nil {
+		return ProvisionResult{}, err
+	}
+
 	// The endpoint presents the token WE minted — identical to the banner's per
 	// the check above, but the provenance matters: the daemon must never adopt
 	// a credential the remote happened to report.
@@ -369,6 +388,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	log.InfoLog.Printf("sandbox runtime: session %q running via %q (dir %s), agent-server tunneled at %s",
 		p.spec.Title, p.sshCmd, p.sessionDir, endpoint.URL)
 	return ProvisionResult{
+		// Only the branch this runtime actually handed the agent-server via
+		// --branch is the one it ran on (#5971). A runtime that does not take
+		// the daemon's name leaves this empty rather than guess.
+		Branch: strings.TrimSpace(p.spec.Branch),
 		Backend: &sandboxBackend{
 			// The command the sandbox's agent-server was bound to launch
 			// (#5108) — recorded as runtime evidence when the launch RPC
@@ -893,89 +916,3 @@ type sandboxBackend struct {
 }
 
 func (b *sandboxBackend) Type() string { return "sandbox" }
-
-// ErrOutputOverLimit reports that a remote command produced more output than the
-// caller allowed. The command was killed the moment the limit was crossed; nothing
-// past the limit was ever held.
-var ErrOutputOverLimit = errors.New("remote command output exceeded its limit")
-
-// limitedShell is the optional capability of a sandboxShell that can bound a
-// command's stdout while it streams (#5865). The host is untrusted by W7.3's own
-// design, so a response that is read in full before it is checked bounds nothing.
-type limitedShell interface {
-	// RunLimited runs script and returns its stdout, holding at most limit bytes.
-	// Past the limit the command is killed and ErrOutputOverLimit is returned.
-	RunLimited(timeout time.Duration, script string, limit int64) ([]byte, error)
-}
-
-// limitWriter accepts at most limit bytes, then cancels the command and refuses
-// the rest. It never buffers beyond the limit.
-type limitWriter struct {
-	limit    int64
-	buf      bytes.Buffer
-	exceeded bool
-	cancel   context.CancelFunc
-}
-
-func (w *limitWriter) Write(p []byte) (int, error) {
-	if w.exceeded {
-		return 0, ErrOutputOverLimit
-	}
-	room := w.limit - int64(w.buf.Len())
-	if int64(len(p)) > room {
-		w.buf.Write(p[:room])
-		w.exceeded = true
-		w.cancel()
-		return int(room), ErrOutputOverLimit
-	}
-	return w.buf.Write(p)
-}
-
-// RunLimited satisfies limitedShell over the operator's ssh invocation, with the
-// same command composition, process group and deadline as Run.
-func (p *sandboxProvisioner) RunLimited(timeout time.Duration, script string, limit int64) ([]byte, error) {
-	if p.runCommandFn != nil {
-		// A test seam that returns whole buffers cannot stream; it is bounded after
-		// the fact, which is all a seam can honestly do.
-		out, err := p.runCommandFn(timeout, script, nil, false)
-		if err == nil && int64(len(out)) > limit {
-			return nil, ErrOutputOverLimit
-		}
-		return out, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := p.buildRunCommand(ctx, script, nil)
-	out := &limitWriter{limit: limit, cancel: cancel}
-	var stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = out, &boundedBuffer{buf: &stderr, max: 4096}
-	err := cmd.Run()
-	if out.exceeded {
-		return nil, ErrOutputOverLimit
-	}
-	if errors.Is(err, exec.ErrWaitDelay) {
-		err = nil
-	}
-	if err != nil && ctx.Err() != nil {
-		return out.buf.Bytes(), fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, ctx.Err())
-	}
-	return out.buf.Bytes(), err
-}
-
-// boundedBuffer keeps the first max bytes written and discards the rest, so a
-// chatty stderr cannot grow the daemon either.
-type boundedBuffer struct {
-	buf *bytes.Buffer
-	max int
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if room := b.max - b.buf.Len(); room > 0 {
-		if len(p) > room {
-			b.buf.Write(p[:room])
-		} else {
-			b.buf.Write(p)
-		}
-	}
-	return len(p), nil
-}

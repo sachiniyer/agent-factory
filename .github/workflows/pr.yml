@@ -10,8 +10,11 @@ on:
   # GITHUB_TOKEN suppresses push workflows (#3435); pr.yml is in the gate's
   # MASTER_PUSH_WORKFLOWS list so the post-merge dispatch loop re-raises it,
   # and the nightly schedule below is the backstop when nothing re-raises a
-  # suppressed or cancelled run at all. The concurrency group cancels a stale
-  # master run when a newer merge lands, so a burst of merges verifies the tip.
+  # suppressed or cancelled run at all. A master run is NOT cancelled by a newer
+  # merge (see the concurrency block): the group runs one at a time and keeps
+  # only the newest pending run, so Test (macOS) — the only darwin test run —
+  # gets a COMPLETED verdict every ~15-30 minutes instead of being cancelled
+  # mid-run by each merge (9 of 11 master runs, 2026-10-29 01:36Z-03:57Z).
   push:
     branches: [master]
   # Full suite on master once a day. The push lane verifies each landing tip;
@@ -92,8 +95,17 @@ concurrency:
   # Auto Gate's dispatches, #3807's and #4581's, are not probes, so they land in
   # pr-refs/heads/<branch>. Two #4581 dispatches that race on one branch
   # therefore cancel down to one run, and a probe on that branch cancels neither.
+  #
+  # Master is the exception: a run on refs/heads/master is never cancelled by a
+  # newer one. The merger lands a PR every ~10 minutes and the macOS job alone
+  # takes 11-16 minutes, so cancel-in-progress there meant almost no master
+  # commit ever got a macOS verdict (#5818's regression first showed 2h after it
+  # merged). Without cancel, GitHub runs one at a time and replaces an older
+  # PENDING run with the newest, so at most one run waits and the verdict lags
+  # the tip by one run (~30 min worst case) — not by an unbounded number of
+  # cancellations. PR and merge_group runs keep cancelling their stale heads.
   group: ${{ inputs.probe && 'probe-' || 'pr-' }}${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 # Read-only: workflow only checks out source and runs lint/test/build; it never comments on or modifies the PR.
 permissions:

@@ -1101,6 +1101,42 @@ export async function fetchPreviewOrigin(sessionId: string, tabId: string, token
   }
 }
 
+/** A session editor's own origin for a REMOTE viewer (W5.2): the origin itself, and a
+ *  single-use bootstrap URL on it that sets the session's HttpOnly key cookie and
+ *  redirects to the editor root. */
+export interface EditorPortOrigin {
+  origin: string;
+  bootstrapUrl: string;
+}
+
+/**
+ * Asks the daemon for a session's editor-port origin (POST /v1/editor-origin, behind
+ * the operator token). Returns null when the feature is off (network.editor_origin_ports
+ * unset), the pool is full, or anything fails — the caller keeps the same-origin
+ * mirror, which is what every release before this one used. Each call mints a NEW
+ * single-use bootstrap URL, so callers must not cache or replay the result.
+ */
+export async function fetchEditorPortOrigin(sessionId: string, token: string): Promise<EditorPortOrigin | null> {
+  const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
+  const headers: Record<string, string> = {};
+  if (token !== "") {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  try {
+    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    if (!resp.ok) {
+      return null;
+    }
+    const env = (await resp.json()) as Envelope<{ origin?: string; bootstrap_url?: string }>;
+    if (env?.error != null || !env?.data?.origin || !env?.data?.bootstrap_url) {
+      return null;
+    }
+    return { origin: env.data.origin, bootstrapUrl: env.data.bootstrap_url };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Probes a proxied web tab's mirror path and reports whether its dev server is up.
  *
@@ -1220,9 +1256,14 @@ function requireTaskID(id: string, action: string): void {
 }
 
 /** Adds a task (mirrors `af tasks add`). The daemon re-validates (trigger, program)
- *  and owns the write; the created task also arrives via a task.created event. */
+ *  and owns the write; the created task also arrives via a task.created event.
+ *  validate_path asks the daemon to check the picked project is still a git repo
+ *  on ITS host (#5859): the select's options are derived from live state, so a
+ *  path gone stale since it was read — a checkout deleted out from under a
+ *  project row — would otherwise save silently and only fail when the task
+ *  fires. The refusal renders in the modal. */
 export async function addTask(task: TaskData, token: string): Promise<void> {
-  await af("AddTask", { task }, token);
+  await af("AddTask", { task, validate_path: true }, token);
 }
 
 /** Builds the project compare-and-swap from the record the caller displayed —
@@ -1245,10 +1286,13 @@ function projectExpectation(task: TaskMutationRef): ProjectExpectation {
  *  (last_run_*, created_at) untouched. Refuses a task with no stable id, before
  *  issuing the request. Takes the DISPLAYED record: the request pins its project
  *  binding, so a task rebound by another client while this pane was stale is
- *  refused rather than patched (#3230). */
+ *  refused rather than patched (#3230). validate_path rides every patch; the
+ *  daemon applies it only when the patch carries project_path — which the edit
+ *  form always sends — so an edit re-checks the submitted repo the same way
+ *  the TUI form's validateForm re-checks it on every save (#5859). */
 export async function updateTask(task: TaskMutationRef, update: TaskUpdate, token: string): Promise<void> {
   requireTaskID(task.id, "update a task");
-  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token);
+  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task), validate_path: true }, token);
 }
 
 /** Fires a task NOW (mirrors `af tasks trigger`). The daemon runs it through the same

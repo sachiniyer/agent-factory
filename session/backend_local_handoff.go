@@ -27,7 +27,7 @@ func prepareAgentSwapFrom(i *Instance, target, resolved string) (AgentSwapPlan, 
 	// non-scopable target unresolved and drop the ambient af skill the
 	// replacement pane should read (#4430 review round 7).
 	workDir := i.GetWorktreePath()
-	program := injectSystemPrompt(resolved, resolveSkillTargetForAccount(resolved, "", "", workDir), i.guidanceCaps())
+	program := injectSystemPromptWithEnv(resolved, resolveSkillTargetForAccount(resolved, "", "", workDir), i.guidanceCaps(), launchEnvFor(i, workDir))
 	program, conversation := planLaunchConversation(i.ID, program)
 	if workDir == "" {
 		return AgentSwapPlan{}, fmt.Errorf("handoff target %s has no worktree path for launch preflight", target)

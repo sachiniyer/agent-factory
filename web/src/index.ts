@@ -94,7 +94,7 @@ import {
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
-import { restoreShortcutFocus } from "./shortcut-focus.js";
+import { shortcutRepeatGuard, tabCreateKey } from "./tab_create.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
@@ -106,6 +106,7 @@ import {
   tabToKeepOnClose,
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
+import { synthIdentities } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
@@ -128,15 +129,15 @@ import type { TerminalStatus } from "./terminal.js";
 import {
   AppShell,
   isActionableSession,
+  isOpenableSession,
   orderedSessions,
   clearLoginDraft,
   renderLogin,
   sessionTabs,
-  canManageTabs,
   restoreRequiresConfirmation,
   isOffBoxWorkspace,
   canMutateTabRoster,
-  canCreateTabKind,
+  offeredNewTabKinds,
   canCloseTabs,
   tabIdentity,
   tabRealId,
@@ -330,6 +331,7 @@ function mount(): void {
   // included, so it can interrupt the agent (#2517) — and only the ctrl+] detach
   // chord is swallowed here (stopPropagation) so it never leaks into the PTY.
   document.addEventListener("keydown", onKeydown, true);
+  document.addEventListener("keyup", (e) => tabShortcutRepeat.release(e.code), true);
 
   // Follow the OS theme while the choice is System (redesign PR1).
   watchSystemTheme();
@@ -596,6 +598,13 @@ function tabIdsOf(list: SessionData[], id: string | null): string[] {
   return s ? sessionTabs(s).map(tabIdentity) : [];
 }
 
+/** Each tab's legacy kind:name, parallel to tabIdsOf — pairs a backfilled real id
+ *  with the id-less tab it replaced (layout.remapByIdentity, #6001). */
+function tabSynthOf(list: SessionData[], id: string | null): string[] {
+  const s = id ? list.find((x) => x.id === id) : null;
+  return s ? synthIdentities(sessionTabs(s).map((t) => t.kind), sessionTabs(s).map((t) => t.name)) : [];
+}
+
 // Resolve only against an authenticated snapshot, never a partially loaded rail.
 let resolvingRoute = false;
 let routeSelection: string | null = null;
@@ -640,7 +649,7 @@ function moveSelection(id: string): void {
     focus: "rail",
     // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
     // are the same statement even if the roster shrank since the tree was retained.
-    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id))),
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id), tabSynthOf(store.get().sessions, id))),
   });
 }
 
@@ -676,7 +685,7 @@ function openFromRail(id: string): void {
  *  switchTab already sets focus:"rail" for exactly this reason. */
 function focusTerminal(): void {
   const selected = selectedSessionData();
-  if (!selected || !isActionableSession(selected)) {
+  if (!selected || !isOpenableSession(selected)) {
     // A kill-only startup-unknown row has a stable management target but no
     // confirmed runtime binding. Keep every caller behind the same daemon-owned
     // lifecycle fence as row clicks; focusing whatever SplitView happens to
@@ -780,7 +789,7 @@ function switchProject(root: string): void {
     selectedId: keep,
     focus: "rail",
     activeTab: keep
-      ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep)))
+      ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep), tabSynthOf(store.get().sessions, keep)))
       : 0,
   });
 }
@@ -1738,6 +1747,11 @@ function guardedTabRebind(
     .catch((e) => surfaceTabError(e));
 }
 
+/** Session+kind creates in flight. The daemon names each CreateTab uniquely, so a
+ *  double-click would otherwise start two shells or VS Code servers. */
+const pendingTabCreates = new Set<string>();
+const tabShortcutRepeat = shortcutRepeatGuard();
+
 /** Creates the tab kind chosen in the New tab menu on the selected session, then
  *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
  *  mirroring the TUI's `t`, which opens the fresh tab as a pane. The resync is
@@ -1752,22 +1766,30 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
   // so a loopback client can still create tabs.
   // Per KIND, not one bool: the daemon answers separately for each, so a session
   // that may open a web tab but not a shell must be offered exactly that (#3060).
-  if (!sel || tok === null || !canCreateTabKind(sel, kind)) {
+  if (!sel || tok === null || !offeredNewTabKinds(sel).includes(kind)) {
+    return;
+  }
+  const selId = sel.id ?? "";
+  const pendingKey = tabCreateKey(connectionGeneration, selId, kind);
+  if (pendingTabCreates.has(pendingKey)) {
     return;
   }
   clearTabError();
-  const selId = sel.id ?? "";
   const create = kind === "vscode" ? createVSCodeTab : createTab;
   // createTab returns the daemon's resolved, collision-suffixed name; hold it so the
   // rebind lands on the tab THIS create made.
   let createdName = "";
   guardedTabRebind(
     selId,
-    () =>
-      create(selId, sel.title, tok).then((name) => {
-        createdName = name;
-        return fetchProjectedSnapshot(tok);
-      }),
+    () => {
+      pendingTabCreates.add(pendingKey);
+      return create(selId, sel.title, tok)
+        .then((name) => {
+          createdName = name;
+          return fetchProjectedSnapshot(tok);
+        })
+        .finally(() => pendingTabCreates.delete(pendingKey));
+    },
     // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
     // an ordinal, and a concurrent create from another client landing inside this
     // round trip would make it THEIR tab. Resolving the name to its current ordinal in
@@ -2656,6 +2678,7 @@ function openEditTask(task: TaskData): void {
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
             on_complete: value.on_complete ?? "",
+            max_concurrent_runs: value.max_concurrent_runs ?? 0,
             host: (input.host ?? "") !== (task.host ?? "") ? input.host ?? "" : undefined,
             project_path: input.projectPath,
             program: input.program,
@@ -3004,7 +3027,7 @@ function syncSplit(state: AppState): void {
   // so bind SplitView only when the daemon also projected a lifecycle capability.
   // This is the stream-side choke point complement to focusTerminal's keyboard
   // fence: neither merely selecting nor attaching can reuse an uncertain binding.
-  const runtimeSelected = selected && isActionableSession(selected) ? selected : null;
+  const runtimeSelected = selected && isOpenableSession(selected) ? selected : null;
   const runtimeSessionId = runtimeSelected ? selId : null;
   // The ordered tab identities, so the split view can (a) know the live tab count and
   // (b) reject a drop whose drag-time snapshot no longer matches (a mid-drag reorder).
@@ -3185,7 +3208,7 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
   // until syncSplit remaps the layout, that ordinal names a neighbour. A changed
   // selection uses the same retained-layout rule (#1855, as moveSelection).
   const settled = selectedId
-    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId))
+    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId), tabSynthOf(sessions, selectedId))
     : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   // Stamp the daemon's startup-skipped repo set onto the store when the snapshot
@@ -3353,6 +3376,11 @@ function isNativeControl(el: HTMLElement | null): boolean {
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  if (tabShortcutRepeat.swallow(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   const state = store.get();
   if (state.phase !== "app") {
     return;
@@ -3376,7 +3404,7 @@ function onKeydown(e: KeyboardEvent): void {
   // stale, so we never honor terminal mode without a live, visible pane. The pure state
   // machine (nav.ts) decides the rest; index.ts only performs the effect.
   const selected = selectedSessionData();
-  const actionableSelected = selected && isActionableSession(selected) ? selected : null;
+  const actionableSelected = selected && isOpenableSession(selected) ? selected : null;
   const focus: KeyboardFocus =
     state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
   // The selected session's tab shape drives the nav-mode tab keys (1-9 / t / w).
@@ -3400,18 +3428,20 @@ function onKeydown(e: KeyboardEvent): void {
         // daemon's lifecycle capability, exactly like pointer-open. A kill-only
         // startup-unknown row remains visible/removable but cannot become a pane
         // target through j/k.
-        .filter(isActionableSession)
+        .filter(isOpenableSession)
         .map((s) => s.id),
       selectedId: actionableSelected ? state.selectedId : null,
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
+      newTabKinds: actionableSelected
+        ? offeredNewTabKinds(actionableSelected)
+        : [],
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
       tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false,
     },
-    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") },
+    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey, meta: e.metaKey },
   );
   if (action.kind === "none") {
     // Not ours — including Escape while a terminal is focused, which now FORWARDS to
@@ -3444,18 +3474,12 @@ function onKeydown(e: KeyboardEvent): void {
       if (shell) shell.switchTab(action.index);
       else switchTab(action.index);
       break;
-    case "newTab": {
-      const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      shell?.openNewTabPicker(() => {
-        focusRail();
-        // Control+] commonly leaves document.body as the nominal focus target.
-        // Focusing body is a no-op, which can leave the picker item focused after
-        // its hidden ancestors close; the next shortcut is then swallowed as a
-        // native-button key. Give rail navigation a stable DOM focus target.
-        restoreShortcutFocus(navigationTarget, root?.querySelector<HTMLElement>(".af-rail") ?? null);
-      });
+    case "newTab":
+      if (!e.repeat) {
+        tabShortcutRepeat.arm(e.code);
+        createSessionTab(action.tabKind);
+      }
       break;
-    }
     case "closeTab":
       if (shell) shell.closeTab(store.get().activeTab);
       else closeSessionTab(store.get().activeTab);

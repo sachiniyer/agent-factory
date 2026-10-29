@@ -315,8 +315,8 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 	if req.SandboxOwner != "" {
 		// Defense in depth: the check above proved the target exists, so reaching
 		// here means it vanished under us. A sandbox-created task never creates.
-		return "", session.PromptCouldNotConfirm, false, notAttempted(sandboxRefusal(
-			"target session %q no longer exists; a sandbox-created task never creates one; %s", req.Title, notDeliveredMarker))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("%w; %s", sandboxRefusal(
+			"the target session no longer exists; a sandbox-created task never creates one"), notDeliveredMarker))
 	}
 
 	// If the absent target is this repo's daemon-managed root agent — only
