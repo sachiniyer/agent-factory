@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -72,11 +73,33 @@ var missingRecordsRestoreBudget = 2 * time.Second
 // saveRestoredRepoRecords writes a repo's live in-memory sessions back to its
 // instances.json, waiting at most budget for the file lock. A var so a test can
 // stage success and failure without a real storage.
-var saveRestoredRepoRecords = func(m *Manager, instances []*session.Instance, budget time.Duration) error {
+//
+// It returns the titles whose records are on disk afterwards, because the
+// checkpoint projection deliberately omits in-flight rows (a Deleting or pre-push
+// archive, a session still Loading): a successful save does not mean every
+// session landed.
+var saveRestoredRepoRecords = func(m *Manager, repoID string, instances []*session.Instance, budget time.Duration) ([]string, error) {
 	if m.storage == nil {
-		return errNoStorageForRestore
+		return nil, errNoStorageForRestore
 	}
-	return m.storage.SaveInstancesWithin(instances, budget)
+	if err := m.storage.SaveInstancesWithin(instances, budget); err != nil {
+		return nil, err
+	}
+	raw, err := config.LoadState().GetInstances(repoID)
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	titles := make([]string, 0, len(rows))
+	for _, r := range rows {
+		titles = append(titles, r.Title)
+	}
+	return titles, nil
 }
 
 var errNoStorageForRestore = errors.New("manager has no storage")
@@ -114,7 +137,8 @@ func (m *Manager) restoreMissingRecordsLocked(instances map[string]*session.Inst
 			preservedMissingFileRepos.forget(repoID)
 			continue
 		}
-		if err := saveRestoredRepoRecords(m, insts, max(time.Until(deadline), 0)); err != nil {
+		landed, err := saveRestoredRepoRecords(m, repoID, insts, max(time.Until(deadline), 0))
+		if err != nil {
 			// UNKNOWN, not failed-and-forgotten: a lock that stayed held past the
 			// budget says nothing about the records, so nothing was written and
 			// preservation stays ON (the provenance is kept) until a later poll
@@ -126,7 +150,38 @@ func (m *Manager) restoreMissingRecordsLocked(instances map[string]*session.Inst
 			log.WarningLog.Printf("daemon could not restore the missing instances.json records for repo %s from %d live session(s); keeping them preserved in memory and retrying on the next poll: %v", repoID, len(insts), err)
 			continue
 		}
+		onDisk := make(map[string]bool, len(landed))
+		for _, title := range landed {
+			onDisk[title] = true
+		}
+		var pending []string
+		for _, inst := range insts {
+			if !onDisk[inst.Title] {
+				pending = append(pending, inst.Title)
+			}
+		}
+		if len(pending) > 0 {
+			// The checkpoint omitted these in-flight rows; keep protecting them
+			// (the provenance stays) until their record lands.
+			log.WarningLog.Printf("daemon restored the missing instances.json records for repo %s except %d in-flight session(s) the checkpoint cannot write yet (%v); they stay preserved in memory until their records land", repoID, len(pending), pending)
+			continue
+		}
 		preservedMissingFileRepos.forget(repoID)
 		log.WarningLog.Printf("daemon restored the missing instances.json records for repo %s from %d live session(s)", repoID, len(insts))
 	}
+}
+
+// recordsLanded reports whether every session the daemon holds for repoID has
+// its record in the freshly loaded set (next is built from disk rows at the call
+// site). The restore checkpoint cannot write every live session — it omits
+// in-flight rows such as a Deleting or pre-push archive (#6048 review) — so a
+// successful write alone must not end the episode: protection lasts until each
+// session that was live at the moment of loss is durably back.
+func recordsLanded(repoID string, existing, next map[string]*session.Instance) bool {
+	for key := range existing {
+		if id, _ := splitDaemonInstanceKey(key); id == repoID && next[key] == nil {
+			return false
+		}
+	}
+	return true
 }

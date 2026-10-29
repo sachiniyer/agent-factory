@@ -940,11 +940,12 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				preservedMissingFileRepos.repos[repoID] = true
 			}
 		}
-		// Drop provenance for repos that have recovered real rows on disk — an
-		// external rewrite that replaced the rows is observed, not papered over,
-		// so a later legitimate emptying is not over-preserved.
+		// Drop provenance for repos whose records are all back on disk, so a later
+		// legitimate emptying is not over-preserved. Real rows alone are not
+		// enough: the restore checkpoint omits in-flight rows (a Deleting or
+		// pre-push archive), which stay protected until their record lands.
 		for repoID := range preservedMissingFileRepos.repos {
-			if raw, ok := allInstances[repoID]; ok && !missing[repoID] && !(raw == nil || string(raw) == "[]" || string(raw) == "null") {
+			if raw, ok := allInstances[repoID]; ok && !missing[repoID] && !(raw == nil || string(raw) == "[]" || string(raw) == "null") && recordsLanded(repoID, existing, next) {
 				delete(preservedMissingFileRepos.repos, repoID)
 			}
 		}
@@ -974,7 +975,10 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 					}
 					// Present-but-empty AND previously observed missing: keep
 					// protecting the recreated-empty file.
-				} else {
+				} else if !observedMissing[repoID] || next[key] != nil {
+					// Real rows: normal load path. Under provenance, an
+					// existing session whose record never landed (omitted by
+					// the restore checkpoint) is still preserved.
 					continue
 				}
 			}

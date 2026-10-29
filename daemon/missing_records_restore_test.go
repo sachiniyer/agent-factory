@@ -19,9 +19,16 @@ func stubRestoreSave(t *testing.T, err error) *[][]*session.Instance {
 	t.Helper()
 	var calls [][]*session.Instance
 	prev := saveRestoredRepoRecords
-	saveRestoredRepoRecords = func(_ *Manager, insts []*session.Instance, _ time.Duration) error {
+	saveRestoredRepoRecords = func(_ *Manager, _ string, insts []*session.Instance, _ time.Duration) ([]string, error) {
 		calls = append(calls, append([]*session.Instance(nil), insts...))
-		return err
+		if err != nil {
+			return nil, err
+		}
+		titles := make([]string, 0, len(insts))
+		for _, inst := range insts {
+			titles = append(titles, inst.Title)
+		}
+		return titles, nil
 	}
 	t.Cleanup(func() { saveRestoredRepoRecords = prev })
 	return &calls
@@ -143,10 +150,10 @@ func TestRestoreMissingRecords_LockTimeoutKeepsPreservingWithinOneBudget(t *test
 
 	var budgets []time.Duration
 	prev := saveRestoredRepoRecords
-	saveRestoredRepoRecords = func(_ *Manager, _ []*session.Instance, budget time.Duration) error {
+	saveRestoredRepoRecords = func(_ *Manager, _ string, _ []*session.Instance, budget time.Duration) ([]string, error) {
 		budgets = append(budgets, budget)
 		time.Sleep(budget) // a held lock: the wait consumes its whole budget
-		return config.ErrLockTimeout
+		return nil, config.ErrLockTimeout
 	}
 	t.Cleanup(func() { saveRestoredRepoRecords = prev })
 
@@ -165,4 +172,70 @@ func TestRestoreMissingRecords_LockTimeoutKeepsPreservingWithinOneBudget(t *test
 	require.Less(t, budgets[1], budgets[0], "the second repo draws on what the first left")
 	require.True(t, preservedMissingFileRepos.observed()["repo-a"], "a timed-out restore keeps preservation on")
 	require.True(t, preservedMissingFileRepos.observed()["repo-b"])
+}
+
+// The checkpoint projection omits in-flight rows (a Deleting or pre-push
+// archive). With one running and one mid-archive session when the file vanishes,
+// the restore writes only the running one; BOTH must survive the following
+// polls, and protection ends only once the in-flight record lands too (#6048).
+func TestMissingFile_InFlightArchiveSurvivesRestoreOfItsRunningSibling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	silenceWarnings(t)
+	resetPreservedMissingFileReposForTest()
+	t.Cleanup(resetPreservedMissingFileReposForTest)
+
+	prev := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		return &session.Instance{Title: d.Title}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
+
+	repoID := "inflight-archive-repo"
+	running := json.RawMessage(`[{"title":"running"}]`)
+	both := json.RawMessage(`[{"title":"running"},{"title":"archiving"}]`)
+	require.NoError(t, config.SaveRepoInstances(repoID, both))
+	keyRun, keyArch := daemonInstanceKey(repoID, "running"), daemonInstanceKey(repoID, "archiving")
+	run, arch := &session.Instance{Title: "running"}, &session.Instance{Title: "archiving"}
+	existing := map[string]*session.Instance{keyRun: run, keyArch: arch}
+
+	path, err := config.RepoInstancesPath(repoID)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+
+	// Poll 1: the file is gone; both live sessions are preserved.
+	got, _, _, _, err := refreshDaemonInstances(existing)
+	require.NoError(t, err)
+	require.Same(t, run, got[keyRun])
+	require.Same(t, arch, got[keyArch])
+
+	// The restore checkpoint writes only the running row (the archiving row is
+	// excluded by the projection): the save "succeeds" but one record is pending.
+	prevSave := saveRestoredRepoRecords
+	saveRestoredRepoRecords = func(_ *Manager, id string, _ []*session.Instance, _ time.Duration) ([]string, error) {
+		require.NoError(t, config.SaveRepoInstances(id, running))
+		return []string{"running"}, nil
+	}
+	t.Cleanup(func() { saveRestoredRepoRecords = prevSave })
+	(&Manager{}).restoreMissingRecordsLocked(got)
+	require.True(t, preservedMissingFileRepos.observed()[repoID],
+		"a successful save that omitted an in-flight row must not end the protection")
+
+	// Poll 2 and 3: the file carries only the running row, yet the mid-archive
+	// session is still held — it must not be dropped.
+	for i := 0; i < 2; i++ {
+		got, _, _, _, err = refreshDaemonInstances(got)
+		require.NoError(t, err)
+		require.Contains(t, got, keyRun)
+		require.Same(t, arch, got[keyArch], "the in-flight archive must survive the poll after the restore (poll %d)", i+2)
+	}
+	require.True(t, preservedMissingFileRepos.observed()[repoID])
+
+	// Its record lands (the archive's own write): protection ends, both load
+	// through the normal path.
+	require.NoError(t, config.SaveRepoInstances(repoID, both))
+	got, _, _, _, err = refreshDaemonInstances(got)
+	require.NoError(t, err)
+	require.Contains(t, got, keyRun)
+	require.Contains(t, got, keyArch)
+	require.False(t, preservedMissingFileRepos.observed()[repoID], "protection ends once every record is on disk")
 }
