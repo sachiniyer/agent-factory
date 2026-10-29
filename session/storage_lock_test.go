@@ -81,3 +81,81 @@ func TestDeleteInstanceByStableID_ContendedLock_TimesOutInsteadOfHanging(t *test
 		t.Fatal("delete after the lock cleared reported nothing deleted")
 	}
 }
+
+// The daemon's missing-file restore checkpoints through SaveInstancesWithin: a
+// held instances lock must give a bounded ErrLockTimeout, with NO write (the
+// checkpoint never proceeds unlocked), and the same call must succeed once the
+// lock is free (#6048 review).
+func TestSaveInstancesWithin_HeldLock(t *testing.T) {
+	cases := []struct {
+		name   string
+		budget time.Duration
+	}{
+		{"short budget", 100 * time.Millisecond},
+		{"spent budget still returns", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			storage, err := NewStorage(config.LoadState(), "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			live := &Instance{Title: "live", Path: repoPath, started: true}
+			live.SetStatusForTest(Running)
+			repoID := live.repoIDForStorage()
+			path, err := config.RepoInstancesPath(repoID)
+			if err != nil {
+				t.Fatalf("RepoInstancesPath: %v", err)
+			}
+			if err := config.SaveRepoInstances(repoID, []byte(`[{"title":"seed"}]`)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			seedBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read seed: %v", err)
+			}
+			seed := string(seedBytes)
+
+			f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0644)
+			if err != nil {
+				t.Fatalf("open lock: %v", err)
+			}
+			defer f.Close()
+			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+				t.Fatalf("flock: %v", err)
+			}
+
+			done := make(chan error, 1)
+			start := time.Now()
+			go func() { done <- storage.SaveInstancesWithin([]*Instance{live}, tc.budget) }()
+			select {
+			case serr := <-done:
+				if !errors.Is(serr, config.ErrLockTimeout) {
+					t.Fatalf("a held lock must give ErrLockTimeout, got: %v", serr)
+				}
+				if took := time.Since(start); took > 3*time.Second {
+					t.Fatalf("returned after %s, not bounded by the budget", took)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("HUNG: SaveInstancesWithin waited on a held instances lock past its budget")
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil || string(raw) != seed {
+				t.Fatalf("no write may happen without the lock; file = %q, err = %v", raw, err)
+			}
+
+			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+				t.Fatalf("unlock: %v", err)
+			}
+			if err := storage.SaveInstancesWithin([]*Instance{live}, time.Second); err != nil {
+				t.Fatalf("once the lock is free the same call must succeed: %v", err)
+			}
+			raw, _ = os.ReadFile(path)
+			if string(raw) == seed {
+				t.Fatal("the checkpoint did not write after the lock cleared")
+			}
+		})
+	}
+}

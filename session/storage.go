@@ -683,6 +683,28 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 //     carve-out for an older binary's disposable Loading/Deleting projection
 //     (#551) is reaped; durable ghosts are preserved verbatim.
 func (s *Storage) SaveInstances(instances []*Instance) error {
+	return s.saveInstances(instances, config.WithFileLock)
+}
+
+// SaveInstancesWithin is SaveInstances with a DEADLINE on every instances-flock
+// wait, shared across all repos in the call: a lock holder that never lets go
+// surfaces as config.ErrLockTimeout once budget is spent instead of parking the
+// caller. Nothing is written for a repo whose lock was not acquired — the
+// checkpoint never proceeds unlocked. Repos checkpointed before the timeout
+// stay written. Callers on a path with its own budget (the daemon's missing-file
+// restore, bounded by the poll/shutdown grace) use this form (#6048 review).
+func (s *Storage) SaveInstancesWithin(instances []*Instance, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	return s.saveInstances(instances, func(path string, fn func() error) error {
+		// A spent budget still gets one non-blocking attempt, so a free lock is
+		// never refused for being late; a held one times out immediately.
+		return config.WithFileLockTimeout(path, max(time.Until(deadline), time.Millisecond), fn)
+	})
+}
+
+// saveInstances is the checkpoint body; withLock is how each repo's instances
+// flock is taken.
+func (s *Storage) saveInstances(instances []*Instance, withLock func(path string, fn func() error) error) error {
 	// Keep the live instances grouped by their stable storage repo. Each repo is
 	// projected once to decide whether it has anything to checkpoint, then again
 	// inside its file lock so an archive that starts after collection cannot be
@@ -718,7 +740,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		if pathErr != nil {
 			return pathErr
 		}
-		if err := config.WithFileLock(path, func() error {
+		if err := withLock(path, func() error {
 			checkpoint := snapshotInstancesForCheckpoint(repoInstances)
 			if !checkpoint.shouldWrite() {
 				return nil

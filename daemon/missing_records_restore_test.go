@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -18,7 +19,7 @@ func stubRestoreSave(t *testing.T, err error) *[][]*session.Instance {
 	t.Helper()
 	var calls [][]*session.Instance
 	prev := saveRestoredRepoRecords
-	saveRestoredRepoRecords = func(_ *Manager, insts []*session.Instance) error {
+	saveRestoredRepoRecords = func(_ *Manager, insts []*session.Instance, _ time.Duration) error {
 		calls = append(calls, append([]*session.Instance(nil), insts...))
 		return err
 	}
@@ -128,4 +129,40 @@ func TestMissingFile_RestoredThenGenuinelyEmptyIsAuthoritative(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, got2, keyA, "a genuinely empty file af wrote must not resurrect sessions")
 	require.NotContains(t, got2, keyB)
+}
+
+// A lock that stays held past the budget is an explicit UNKNOWN: preservation
+// stays on, and every repo's wait draws on ONE shared budget rather than each
+// getting a fresh one.
+func TestRestoreMissingRecords_LockTimeoutKeepsPreservingWithinOneBudget(t *testing.T) {
+	resetPreservedMissingFileReposForTest()
+	t.Cleanup(resetPreservedMissingFileReposForTest)
+	prevBudget := missingRecordsRestoreBudget
+	missingRecordsRestoreBudget = 300 * time.Millisecond
+	t.Cleanup(func() { missingRecordsRestoreBudget = prevBudget })
+
+	var budgets []time.Duration
+	prev := saveRestoredRepoRecords
+	saveRestoredRepoRecords = func(_ *Manager, _ []*session.Instance, budget time.Duration) error {
+		budgets = append(budgets, budget)
+		time.Sleep(budget) // a held lock: the wait consumes its whole budget
+		return config.ErrLockTimeout
+	}
+	t.Cleanup(func() { saveRestoredRepoRecords = prev })
+
+	markObservedMissing("repo-a")
+	markObservedMissing("repo-b")
+	live := map[string]*session.Instance{
+		daemonInstanceKey("repo-a", "x"): {},
+		daemonInstanceKey("repo-b", "y"): {},
+	}
+	start := time.Now()
+	(&Manager{}).restoreMissingRecordsLocked(live)
+
+	require.Less(t, time.Since(start), 2*time.Second, "the pass must be bounded by one budget, not one per repo")
+	require.Len(t, budgets, 2)
+	require.LessOrEqual(t, budgets[0], 300*time.Millisecond)
+	require.Less(t, budgets[1], budgets[0], "the second repo draws on what the first left")
+	require.True(t, preservedMissingFileRepos.observed()["repo-a"], "a timed-out restore keeps preservation on")
+	require.True(t, preservedMissingFileRepos.observed()["repo-b"])
 }

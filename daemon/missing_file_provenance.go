@@ -3,7 +3,9 @@ package daemon
 import (
 	"errors"
 	"sync"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -60,14 +62,21 @@ func (p *missingFileProvenanceSet) forget(repoID string) {
 	p.mu.Unlock()
 }
 
+// missingRecordsRestoreBudget bounds EVERY instances-flock wait of one restore
+// pass, across all repos it restores. The pass runs on the poll under m.mu, and a
+// checkpoint that waited on a stuck lock holder with no deadline would hang the
+// poll (and a shutdown that reached it past its stop grace, the #5844 class), so
+// the budget sits well inside the 5s stop grace. A var so tests can shorten it.
+var missingRecordsRestoreBudget = 2 * time.Second
+
 // saveRestoredRepoRecords writes a repo's live in-memory sessions back to its
-// instances.json. A var so a test can stage success and failure without a real
-// storage.
-var saveRestoredRepoRecords = func(m *Manager, instances []*session.Instance) error {
+// instances.json, waiting at most budget for the file lock. A var so a test can
+// stage success and failure without a real storage.
+var saveRestoredRepoRecords = func(m *Manager, instances []*session.Instance, budget time.Duration) error {
 	if m.storage == nil {
 		return errNoStorageForRestore
 	}
-	return m.storage.SaveInstances(instances)
+	return m.storage.SaveInstancesWithin(instances, budget)
 }
 
 var errNoStorageForRestore = errors.New("manager has no storage")
@@ -98,13 +107,22 @@ func (m *Manager) restoreMissingRecordsLocked(instances map[string]*session.Inst
 			byRepo[repoID] = append(byRepo[repoID], inst)
 		}
 	}
+	deadline := time.Now().Add(missingRecordsRestoreBudget)
 	for repoID := range observed {
 		insts := byRepo[repoID]
 		if len(insts) == 0 {
 			preservedMissingFileRepos.forget(repoID)
 			continue
 		}
-		if err := saveRestoredRepoRecords(m, insts); err != nil {
+		if err := saveRestoredRepoRecords(m, insts, max(time.Until(deadline), 0)); err != nil {
+			// UNKNOWN, not failed-and-forgotten: a lock that stayed held past the
+			// budget says nothing about the records, so nothing was written and
+			// preservation stays ON (the provenance is kept) until a later poll
+			// can take the lock.
+			if errors.Is(err, config.ErrLockTimeout) {
+				log.WarningLog.Printf("daemon could not take the instances lock for repo %s within %s to restore its missing records; nothing was written, the %d live session(s) stay preserved in memory, and the restore is retried on the next poll: %v", repoID, missingRecordsRestoreBudget, len(insts), err)
+				continue
+			}
 			log.WarningLog.Printf("daemon could not restore the missing instances.json records for repo %s from %d live session(s); keeping them preserved in memory and retrying on the next poll: %v", repoID, len(insts), err)
 			continue
 		}
