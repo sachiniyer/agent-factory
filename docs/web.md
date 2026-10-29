@@ -743,7 +743,10 @@ shows "VS Code is still starting…" and resolves itself.
 
 The editor is stopped when its last VS Code tab is closed, and when the session is
 archived or killed — and, **locally**, on daemon shutdown, so nothing is left
-running. An **off-box** editor is owned by the agent-server on the session's
+running. For an off-box session the stop on tab close is best effort: if the
+agent-server is unreachable at that moment the tab still closes and the failure
+is only logged, so the host-side editor keeps running until the session is
+archived or killed (or the agent-server itself is torn down). An **off-box** editor is owned by the agent-server on the session's
 host, which uses a separate namespace from the daemon's, so a daemon restart does
 not stop it: it keeps running and is relayed again on the next render. If it
 ever dies, the next render starts a fresh one. Nothing about it is persisted: the
