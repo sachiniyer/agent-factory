@@ -10,20 +10,31 @@ import (
 
 // Every string a sandbox can read back is CLASSIFIED, once, here (#5571 W3.5).
 //
-// The response boundary treats the two kinds of string differently, and a
-// hand-kept list of key names drifted (a `program` field slipped past it):
+// The response boundary treats three kinds of string differently, and each earlier
+// attempt that classified by guess drifted (a `program` field slipped past a key
+// list; an `archived_path` that is sometimes a host path and sometimes a branch
+// derived from the caller's title could not carry one class):
 //
-//   - classDaemon: the daemon wrote it (an id, a status, a host path). It is
-//     scrubbed of host layout.
-//   - classCaller: a sandbox supplied it (a title, a prompt, a tab name). It comes
-//     back VERBATIM, never scrubbed — scrubbing it would make the response depend
-//     on whether the caller's own text is in the host's layout, an existence
-//     oracle across projects.
+//   - classCaller: a sandbox supplied it (a title, a prompt, a tab name, a branch
+//     derived from a title). It comes back VERBATIM, never scrubbed — scrubbing it
+//     would make the response depend on whether the caller's own text is in the
+//     host's layout, an existence oracle across projects.
+//   - classDaemon: reserved for CLOSED-VOCABULARY values the daemon chooses from a
+//     fixed set: ids, enums, statuses. Each entry names its vocabulary. A closed
+//     vocabulary cannot embed a path, a message or caller text, so there is nothing
+//     for the scrub to do to it.
+//   - classWithheld: every FREE-FORM daemon string (a path, a message, a tmux name,
+//     a name derived from caller text) and anything that can embed caller text. It
+//     is omitted from sandbox responses; the typed projection removes it.
 //
 // Classification follows the value's ORIGIN, not its container: a value a sandbox
 // can write is caller text wherever it is read back. A daemon-composed string that
-// may embed caller text is classWithheld — never sent — or built only from daemon
-// facts; it is never classDaemon.
+// can embed caller text is withheld or built only from daemon facts, never
+// classDaemon.
+//
+// The scrub (sandbox_scrub.go) is a pure BACKSTOP behind this: with every
+// free-form daemon string omitted, it should find nothing in a success body, and
+// the differential and store-then-read tests assert exactly that.
 //
 // The table is keyed by the Go TYPE that owns the field and the field's JSON name,
 // and the boundary walks each response by the route's response type. Two tests make
@@ -31,48 +42,77 @@ import (
 // an admitted route's response type must have an entry (the projected
 // InstanceData and Task are measured by what their projection lets through), and
 // no entry may name a field that no longer exists. A string with no entry is
-// scrubbed at runtime (the safe default for layout), but the test fails first.
+// scrubbed at runtime, but the test fails first.
 
 type stringClass int8
 
 const (
 	classDaemon stringClass = iota + 1
 	classCaller
-	// classWithheld marks a string the daemon composes from facts that can embed
-	// caller text (a delivery alarm's last error names a target session), so it is
-	// never sent to a sandbox at all: the snapshot empties it for a sandbox
-	// credential (TestSandboxScope_StoreThenReadDoesNotDependOnMembership). If it
-	// ever did arrive it would be scrubbed like a daemon string, the safe default.
 	classWithheld
 )
 
+// fieldSpec is one classified field. vocab is required for classDaemon: the closed
+// vocabulary it draws from.
+type fieldSpec struct {
+	class stringClass
+	vocab string
+}
+
+var (
+	callerText = fieldSpec{class: classCaller}
+	withheld   = fieldSpec{class: classWithheld}
+)
+
+func closedVocab(vocab string) fieldSpec { return fieldSpec{class: classDaemon, vocab: vocab} }
+
 // sandboxStringClasses classifies the string fields a sandbox response can carry.
-var sandboxStringClasses = map[reflect.Type]map[string]stringClass{
+var sandboxStringClasses = map[reflect.Type]map[string]fieldSpec{
 	// The projected session row (sandboxSafeInstanceData). Program is not here: it
 	// is omitted by the projection.
 	reflect.TypeFor[session.InstanceData](): {
-		"id": classDaemon, "task_id": classDaemon, "title": classCaller, "branch": classCaller,
-		"lifecycle_action": classDaemon, "current_agent": classDaemon, "backend_type": classDaemon,
-		"idle_reason": classDaemon, "last_prompt_delivery_status": classDaemon,
+		"id": closedVocab("session id"), "task_id": closedVocab("task id"),
+		"title": callerText, "branch": callerText,
+		"lifecycle_action": closedVocab("lifecycle action enum"), "current_agent": closedVocab("supported agent names"),
+		"backend_type": closedVocab("backend enum"), "idle_reason": closedVocab("idle reason enum"),
+		"last_prompt_delivery_status": closedVocab("delivery status enum"),
 	},
-	// The projected task (sandboxSafeTask).
+	// The projected task (sandboxSafeTask). last_run_status is projected to the
+	// closed head of the status (sandboxRunStatusHead): the rest is free-form.
 	reflect.TypeFor[task.Task](): {
-		"id": classDaemon, "name": classCaller, "prompt": classCaller, "cron_expr": classCaller,
-		"target_session": classCaller, "last_run_status": classDaemon,
+		"id": closedVocab("task id"), "name": callerText, "prompt": callerText, "cron_expr": callerText,
+		"target_session": callerText, "last_run_status": closedVocab("run status heads"),
 	},
-	reflect.TypeFor[SnapshotResponse](): {"boot_id": classDaemon, "caller": classDaemon},
-	reflect.TypeFor[DeliveryAlarm]():    {"task_id": classWithheld, "task_name": classWithheld, "target_session": classWithheld, "last_error": classWithheld},
-	reflect.TypeFor[SkippedRepo]():      {"repo_id": classWithheld, "reason": classWithheld},
-	reflect.TypeFor[MutationOutcome]():  {"code": classDaemon, "warning": classDaemon},
-	reflect.TypeFor[ArchiveSessionResponse](): {
-		"archived_path": classDaemon, "warning": classDaemon,
-	},
-	reflect.TypeFor[session.ArchivedWorkspaceData](): {"branch": classCaller, "dir": classDaemon, "host": classDaemon},
-	reflect.TypeFor[CreateTabResponse]():             {"id": classDaemon, "name": classCaller, "tmux_name": classDaemon},
-	reflect.TypeFor[CloseTabResponse]():              {"name": classCaller},
-	reflect.TypeFor[RenameTabResponse]():             {"name": classCaller},
-	reflect.TypeFor[ReorderTabResponse]():            {"name": classCaller},
-	reflect.TypeFor[SendPromptResponse]():            {"status": classDaemon},
+	reflect.TypeFor[SnapshotResponse]():              {"boot_id": closedVocab("daemon boot id"), "caller": closedVocab("session id")},
+	reflect.TypeFor[DeliveryAlarm]():                 {"task_id": withheld, "task_name": withheld, "target_session": withheld, "last_error": withheld},
+	reflect.TypeFor[SkippedRepo]():                   {"repo_id": withheld, "reason": withheld},
+	reflect.TypeFor[MutationOutcome]():               {"code": closedVocab("outcome code enum"), "warning": withheld},
+	reflect.TypeFor[ArchiveSessionResponse]():        {"archived_path": withheld, "warning": withheld},
+	reflect.TypeFor[session.ArchivedWorkspaceData](): {"branch": callerText, "dir": withheld, "host": withheld},
+	reflect.TypeFor[CreateTabResponse]():             {"id": closedVocab("tab id"), "name": callerText, "tmux_name": withheld},
+	reflect.TypeFor[CloseTabResponse]():              {"name": callerText},
+	reflect.TypeFor[RenameTabResponse]():             {"name": callerText},
+	reflect.TypeFor[ReorderTabResponse]():            {"name": callerText},
+	reflect.TypeFor[SendPromptResponse]():            {"status": closedVocab("delivery status enum")},
+}
+
+// sandboxRunStatusHeads is the closed vocabulary of a task run status's head (the
+// word before the first ':'). The rest of a status is a free-form message that can
+// carry a path or caller text, so a sandbox is shown only the head.
+var sandboxRunStatusHeads = map[string]bool{
+	"started": true, "sent": true, "errored": true, "deferred": true, "parked": true,
+	"dropped": true, "stopped": true, "skipped": true, "ok": true,
+}
+
+// sandboxRunStatusHead projects a run status to its closed head, or "" when the head
+// is not in the vocabulary.
+func sandboxRunStatusHead(status string) string {
+	head, _, _ := strings.Cut(status, ":")
+	head = strings.TrimSpace(head)
+	if sandboxRunStatusHeads[head] {
+		return head
+	}
+	return ""
 }
 
 // sandboxResponseTypes is the response type of every route admitted to the sandbox

@@ -411,7 +411,7 @@ func sandboxSafeTask(t task.Task) task.Task {
 		Enabled:       t.Enabled,
 		CreatedAt:     t.CreatedAt,
 		LastRunAt:     t.LastRunAt,
-		LastRunStatus: t.LastRunStatus,
+		LastRunStatus: sandboxRunStatusHead(t.LastRunStatus),
 	}
 }
 

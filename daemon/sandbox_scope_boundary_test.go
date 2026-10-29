@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -213,6 +214,27 @@ func TestSandboxErrorsAreTypedOrFixed(t *testing.T) {
 	}
 }
 
+// scrubWatch records every time the backstop scrub changes a daemon-class string
+// in a success body. The invariant (#5571 W3.5, fourth oracle round): the typed
+// projection and the classification already removed everything layout-shaped, so
+// the scrub changes NOTHING in any sandbox success body.
+func scrubWatch(t *testing.T) func() []string {
+	t.Helper()
+	var mu sync.Mutex
+	var hits []string
+	sandboxScrubChanged = func(original string) {
+		mu.Lock()
+		hits = append(hits, original)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { sandboxScrubChanged = nil })
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), hits...)
+	}
+}
+
 // requestTypes is the request type of every route admitted to the sandbox scope.
 var requestTypes = map[string]reflect.Type{
 	"/v1/Snapshot":       reflect.TypeFor[SnapshotRequest](),
@@ -282,6 +304,7 @@ func cloneJSONMap(m map[string]any) map[string]any {
 func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) {
 	f := newScopeFixture(t)
 	f.useScheduler()
+	scrubHits := scrubWatch(t)
 	guessA := f.me.Path // a real project path: noted by NewInstance
 	guessB := "/srv/not-a-real-project-b3e1"
 	require.NotEqual(t, hostlayout.Default.ScrubString(guessA), guessA, "anti-vacuous: guess A is in the layout")
@@ -329,12 +352,15 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 
 	stamp := regexp.MustCompile(`\d{4}-\d{2}-\d{2}T[0-9:.+\-Z]+`)
 	hexish := regexp.MustCompile(`[0-9a-f]{8,}`)
+	clock := regexp.MustCompile(`"operation_clock_ms":\d+`)
 	normalize := func(out, guess string) string {
 		esc, _ := json.Marshal(guess)
 		out = strings.ReplaceAll(out, guess, "<G>")
 		out = strings.ReplaceAll(out, string(esc[1:len(esc)-1]), "<G>")
 		out = strings.ReplaceAll(out, hostlayout.Withheld, "<W>")
 		out = stamp.ReplaceAllString(out, "<T>")
+		// The snapshot's operation clock advances between any two reads.
+		out = clock.ReplaceAllString(out, `"operation_clock_ms":0`)
 		return hexish.ReplaceAllString(out, "<hex>")
 	}
 	// A removal that succeeds consumes its task, so the second guess would be
@@ -376,6 +402,7 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 		}
 	}
 	require.Greater(t, checked, 100, "the reflection-driven matrix shrank unexpectedly (%d cases)", checked)
+	assert.Emptyf(t, scrubHits(), "the backstop scrub changed a success body: the projection or the classification let a layout-shaped string through")
 
 	// A later read must not depend on it either: the stored text a sandbox
 	// supplied comes back verbatim whether or not it is in the layout.
@@ -406,6 +433,7 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 func TestSandboxScope_StoreThenReadDoesNotDependOnMembership(t *testing.T) {
 	f := newScopeFixture(t)
 	f.useScheduler()
+	scrubHits := scrubWatch(t)
 	guessA := f.me.Path
 	guessB := "/srv/not-a-real-project-b3e1"
 	require.NotEqual(t, hostlayout.Default.ScrubString(guessA), guessA, "anti-vacuous: guess A is in the layout")
@@ -419,12 +447,15 @@ func TestSandboxScope_StoreThenReadDoesNotDependOnMembership(t *testing.T) {
 
 	stamp := regexp.MustCompile(`\d{4}-\d{2}-\d{2}T[0-9:.+\-Z]+`)
 	hexish := regexp.MustCompile(`[0-9a-f]{8,}`)
+	clock := regexp.MustCompile(`"operation_clock_ms":\d+`)
 	normalize := func(out, guess string) string {
 		esc, _ := json.Marshal(guess)
 		out = strings.ReplaceAll(out, guess, "<G>")
 		out = strings.ReplaceAll(out, string(esc[1:len(esc)-1]), "<G>")
 		out = strings.ReplaceAll(out, hostlayout.Withheld, "<W>")
 		out = stamp.ReplaceAllString(out, "<T>")
+		// The snapshot's operation clock advances between any two reads.
+		out = clock.ReplaceAllString(out, `"operation_clock_ms":0`)
 		return hexish.ReplaceAllString(out, "<hex>")
 	}
 	cycle := func(route string, path []string, guess string) map[string]string {
@@ -454,6 +485,7 @@ func TestSandboxScope_StoreThenReadDoesNotDependOnMembership(t *testing.T) {
 		}
 	}
 	require.Greater(t, checked, 40, "the store-then-read matrix shrank unexpectedly (%d cases)", checked)
+	assert.Emptyf(t, scrubHits(), "the backstop scrub changed a success body: the projection or the classification let a layout-shaped string through")
 
 	// The one daemon-composed string that can embed caller text, a delivery alarm,
 	// never reaches a sandbox: watch-task diagnostics are emptied for a sandbox
@@ -531,10 +563,18 @@ func TestSandboxStringFieldsAreAllClassified(t *testing.T) {
 	fill(reflect.ValueOf(&tk).Elem())
 	check(sandboxSafeTask(tk), taskT)
 
-	// 3. No stale entries.
+	// 3. No stale entries, and classDaemon is reserved for CLOSED vocabularies:
+	// every such entry names the vocabulary it draws from. A free-form daemon string
+	// (a path, a message, a tmux name, a name derived from caller text) is
+	// classWithheld, never classDaemon.
 	for owner, classes := range sandboxStringClasses {
 		fields := jsonFieldsOf(owner)
-		for name := range classes {
+		for name, spec := range classes {
+			if spec.class == classDaemon {
+				assert.NotEmptyf(t, spec.vocab, "%s.%s is classDaemon but names no closed vocabulary: a free-form daemon string must be withheld", owner.Name(), name)
+			} else {
+				assert.Emptyf(t, spec.vocab, "%s.%s names a vocabulary but is not classDaemon", owner.Name(), name)
+			}
 			f, ok := fields[name]
 			assert.Truef(t, ok && isStringKind(f.typ), "sandboxStringClasses names %s.%s, which is not a string field", owner.Name(), name)
 		}

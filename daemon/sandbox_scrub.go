@@ -136,13 +136,28 @@ func sanitizeSandboxError(route string, status int, e map[string]any) {
 	}
 }
 
+// sandboxScrubChanged is called when the backstop scrub actually changes a
+// daemon-class string or key in a success body. In production nil. The tests set
+// it and assert it never fires: the typed projection and the classification
+// should already have removed everything layout-shaped, so the scrub changes
+// NOTHING (#5571 W3.5).
+var sandboxScrubChanged func(original string)
+
+func scrubSandboxString(s string) string {
+	out := hostlayout.Default.ScrubString(s)
+	if out != s && sandboxScrubChanged != nil {
+		sandboxScrubChanged(s)
+	}
+	return out
+}
+
 // scrubSandboxValue walks a decoded JSON value TYPE-DIRECTED by the route's
-// response type, withholding layout strings from every daemon-originated string
-// and leaving caller-originated ones verbatim (sandbox_classify.go). A key the
-// type does not declare, or a string with no classification, is scrubbed — the
-// safe default for layout; TestSandboxStringFieldsAreAllClassified keeps that
-// case empty. A free-text "warning" (a committed-with-follow-up-failure note) can
-// echo what the caller sent, so it is replaced like an error message.
+// response type (sandbox_classify.go): a caller-originated string is left verbatim,
+// a withheld field is omitted (a free-text "warning" is replaced by a constant, so
+// a committed outcome still reads), and everything else — closed-vocabulary
+// daemon values, and any key or string the type does not classify — passes through
+// the backstop scrub, the safe default for layout; TestSandboxStringFieldsAreAllClassified
+// keeps that case empty.
 func scrubSandboxValue(v any, t reflect.Type, caller bool) any {
 	t = derefType(t)
 	switch val := v.(type) {
@@ -150,7 +165,7 @@ func scrubSandboxValue(v any, t reflect.Type, caller bool) any {
 		if caller {
 			return val
 		}
-		return hostlayout.Default.ScrubString(val)
+		return scrubSandboxString(val)
 	case []any:
 		var elem reflect.Type
 		if t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
@@ -171,23 +186,23 @@ func scrubSandboxValue(v any, t reflect.Type, caller bool) any {
 			mapElem = t.Elem()
 		}
 		for k, child := range val {
-			if k == "warning" {
-				if s, ok := child.(string); ok && s != "" {
-					out[hostlayout.Default.ScrubString(k)] = sandboxCommittedMsg
-					continue
-				}
-			}
 			var childType reflect.Type
 			childCaller := caller
 			if f, ok := fields[k]; ok {
 				childType = f.typ
-				if sandboxStringClasses[f.owner][k] == classCaller {
+				switch sandboxStringClasses[f.owner][k].class {
+				case classCaller:
 					childCaller = true
+				case classWithheld:
+					if s, isStr := child.(string); isStr && s != "" && k == "warning" {
+						out[k] = sandboxCommittedMsg
+					}
+					continue
 				}
 			} else if mapElem != nil {
 				childType = mapElem
 			}
-			out[hostlayout.Default.ScrubString(k)] = scrubSandboxValue(child, childType, childCaller)
+			out[scrubSandboxString(k)] = scrubSandboxValue(child, childType, childCaller)
 		}
 		return out
 	default:
