@@ -1183,15 +1183,6 @@ body[data-project-color] [data-af-theme=dark] {
 .af-kb-terminal .af-pane-focused .af-pane-keyboard {
   display: inline;
 }
-.af-term-placement {
-  flex: 0 1 auto;
-  min-width: 0;
-  color: var(--af-ink-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-left: var(--af-space-2);
-}
 .af-term-title-separator {
   color: var(--af-ink);
   font-size: var(--af-type-heading);
