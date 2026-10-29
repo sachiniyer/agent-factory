@@ -58,6 +58,10 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 			// then answers the one execution instead of running the command again.
 			id = i.intentIDLocked(kind, command, requestedName)
 		}
+		if i.intentHeldByOtherShapeLocked(id, kind, command, requestedName) {
+			i.mu.Unlock()
+			return nil, fmt.Errorf("tab id %q is held by an earlier create of a different command whose outcome is unknown; retry that request or use another id", id)
+		}
 		if refused, existing, found := i.tabIDCollisionLocked(id, kind, command); found {
 			// The retry resolved to a tab already on the roster (adopted by the
 			// sweep): it has joined the one execution, so the intent is spent.
@@ -126,7 +130,7 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 		if uncertain {
 			i.recordIntentLocked(id, kind, command, requestedName, displayName)
 		} else {
-			i.clearIntentLocked(kind, command, requestedName)
+			i.consumeIntentLocked(id, kind, command, requestedName)
 		}
 		i.mu.Unlock()
 		if uncertain {
@@ -144,7 +148,7 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 	stale := !i.started || i.tabSpawnBlockedLocked() != nil
 	colErr, existing, collide := i.tabIDCollisionLocked(id, kind, command)
 	adopt := !stale && !collide
-	i.clearIntentLocked(kind, command, requestedName)
+	i.consumeIntentLocked(id, kind, command, requestedName)
 	if adopt {
 		i.Tabs = append(i.Tabs, tab)
 		i.touchLocked()
@@ -197,4 +201,27 @@ func (i *Instance) closeOffBoxTab(tab *Tab) error {
 		return fmt.Errorf("failed to close tab %q: %w", tab.Name, err)
 	}
 	return nil
+}
+
+// ReconcileTabManagementSnapshot adopts the daemon's projected tab-management
+// verdict onto a client row, reporting whether it changed. nil (an older daemon)
+// leaves the row's own derivation in force (#5953).
+func (i *Instance) ReconcileTabManagementSnapshot(v *bool) bool {
+	if v == nil {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.projectedTabManagement == *v {
+		return false
+	}
+	// Report a change only when the capability the TUI renders from differs: a
+	// local row already manages tabs, so recording the projection is invisible.
+	before := i.capabilitiesLocked().TabManagement
+	i.projectedTabManagement = *v
+	if i.capabilitiesLocked().TabManagement == before {
+		return false
+	}
+	i.touchLocked()
+	return true
 }

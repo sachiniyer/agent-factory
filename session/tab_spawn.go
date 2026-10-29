@@ -647,7 +647,7 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
 		return nil, spawnErr
 	}
-	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil, TabKindVSCode); err != nil {
+	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil || i.capabilitiesLocked().RemoteEditor, TabKindVSCode); err != nil {
 		return nil, err
 	}
 	tab := newVSCodeTab()

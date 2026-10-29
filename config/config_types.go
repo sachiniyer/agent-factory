@@ -326,6 +326,12 @@ type Config struct {
 	OnArchiveCommand string `json:"on_archive_command,omitempty" toml:"on_archive_command,omitempty"`
 	// WorktreeRoot controls where new worktrees are created.
 	WorktreeRoot string `json:"worktree_root" toml:"worktree_root"`
+	// ProjectsRoot is the directory on the DAEMON's host under which
+	// `af projects add <git-url>` clones repositories (W9.10). Empty means
+	// <AF home>/projects. Global-only: the daemon creates directories and runs
+	// git there for a possibly-remote caller, so a cloned repository must never
+	// choose where.
+	ProjectsRoot string `json:"projects_root,omitempty" toml:"projects_root,omitempty"`
 	// DetachKeys is the key combination used to detach from an attached session (e.g. "ctrl-w", "ctrl-q").
 	DetachKeys string `json:"detach_keys" toml:"detach_keys"`
 	// UpdateChannel selects which release channel auto-update and

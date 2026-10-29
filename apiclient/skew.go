@@ -114,7 +114,7 @@ func interpretEnvelopeError(route string, status int, envErr *apiproto.EnvelopeE
 		// A committed envelope omits daemon_rejected (daemon/httpserver.go), so
 		// the gateway-status check is the whole provenance rule.
 		if !gatewayStatus {
-			return &mutationCommittedError{detail: envErr.Message}
+			return &mutationCommittedError{detail: envErr.Message, storedID: envErr.StoredID}
 		}
 	case apiproto.ErrorCodeProjectRebound:
 		if envErr.DaemonRejected && !gatewayStatus {
@@ -137,13 +137,17 @@ func interpretEnvelopeError(route string, status int, envErr *apiproto.EnvelopeE
 // their change before the reported follow-up failure. Its marker method keeps
 // the classification usable through errors.Join and other wrappers.
 type mutationCommittedError struct {
-	detail string
+	detail   string
+	storedID string
 }
 
 var _ apiproto.MutationCommittedError = (*mutationCommittedError)(nil)
 
 func (e *mutationCommittedError) Error() string           { return e.detail }
 func (e *mutationCommittedError) MutationCommitted() bool { return true }
+func (e *mutationCommittedError) StoredID() string        { return e.storedID }
+
+var _ apiproto.StoredIDCarrier = (*mutationCommittedError)(nil)
 
 // IsMutationCommitted is apiproto.IsMutationCommitted under this package's name,
 // so client callers classify an outcome without importing the wire package. The

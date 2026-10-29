@@ -6802,6 +6802,24 @@ function formatLimitReset(reset, now) {
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
 }
+function placementShort(s) {
+  const p = s.placement;
+  if (!p || p.kind !== "remote") return "";
+  return p.host || p.backend || "";
+}
+function placementDetail(s) {
+  const p = s.placement;
+  if (!p) return "";
+  const parts = [];
+  if (p.kind === "remote") {
+    parts.push(placementShort(s));
+    if (p.host && p.backend) parts.push(p.backend);
+  } else {
+    parts.push("local");
+  }
+  if (p.location) parts.push(p.location);
+  return parts.filter(Boolean).join(" \xB7 ");
+}
 
 // src/backends.ts
 var HOST_VALUE_PREFIX = "host:";
@@ -7865,6 +7883,17 @@ function sessionFirstComposition(moves) {
     }
   } };
 }
+function applyTerminalTitle(el2, title) {
+  el2.textContent = title;
+  el2.title = title;
+  el2.setAttribute("aria-label", title);
+}
+function applyTerminalPlacement(el2, detail, remote) {
+  const shown = remote && detail !== "";
+  el2.hidden = !shown;
+  el2.textContent = shown ? detail : "";
+  el2.title = shown ? `Where this session runs: ${detail}` : "";
+}
 function terminalChrome(opts) {
   const menu = actionsDisclosure("More session actions");
   menu.trigger.replaceChildren(icon("ellipsis"));
@@ -7900,8 +7929,10 @@ function terminalChrome(opts) {
   const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
   const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
   const newTabs = h("div", { class: "af-term-new-group" }, newTerminal, newVSCode);
-  const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
-  title.setAttribute("aria-label", opts.title);
+  const title = h("span", { class: "af-term-title" });
+  applyTerminalTitle(title, opts.title);
+  const placement = h("span", { class: "af-term-placement" });
+  applyTerminalPlacement(placement, opts.placement?.detail ?? "", opts.placement?.remote ?? false);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
@@ -7926,9 +7957,9 @@ function terminalChrome(opts) {
   tabUnavailable.hidden = true;
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(tabUnavailable, copy, handoff, deliver, actions2, closePane);
+  menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, tabs, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  return { head, title, placement, tabs, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -8472,6 +8503,7 @@ var ConfigPane = class {
     const explainFocusedKey = active instanceof HTMLElement && active.classList.contains("af-config-explain-trigger") ? active.getAttribute("data-key") : null;
     const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
     const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
+    const saveFocusedKey = active instanceof HTMLButtonElement && active.closest(".af-config-list") !== null && active.classList.contains("af-config-save") ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -8496,6 +8528,10 @@ var ConfigPane = class {
           focusedConfigTextCaret.end ?? focusedConfigTextCaret.start
         );
       }
+    } else if (saveFocusedKey !== null) {
+      this.el.querySelector(
+        `.af-config-list [aria-label="${CSS.escape(saveFocusedKey)}"]`
+      )?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -13944,6 +13980,7 @@ function adoptedSynthIdentities(prevIds, ids, nextSynth) {
   const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
   const isNewReal = (id) => id !== "" && !isSynth(id) && !prevIds.includes(id);
   const adopted = /* @__PURE__ */ new Set();
+  const fallback = /* @__PURE__ */ new Set();
   const vanished = new Set(prevIds.filter((id) => id !== "" && isSynth(id) && !ids.includes(id)));
   const unpaired = /* @__PURE__ */ new Set();
   ids.forEach((id, i) => {
@@ -13970,11 +14007,11 @@ function adoptedSynthIdentities(prevIds, ids, nextSynth) {
   for (const id of prevIds) {
     if (shared.has(id)) {
       key = id;
-    } else if (vanished.has(id) && gapOfNew.has(key)) {
-      adopted.add(id);
+    } else if (vanished.has(id) && !adopted.has(id) && gapOfNew.has(key)) {
+      fallback.add(id);
     }
   }
-  return adopted;
+  return { exact: adopted, fallback };
 }
 function remapByIdentity(root2, prevIds, ids, nextSynth) {
   if (prevIds.length === 0) {
@@ -14008,7 +14045,8 @@ function remapByIdentity(root2, prevIds, ids, nextSynth) {
   const max = ids.length - 1;
   const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
   if (maxLeaf) {
-    const adopted = adoptedSynthIdentities(prevIds, ids, nextSynth);
+    const { exact, fallback } = adoptedSynthIdentities(prevIds, ids, nextSynth);
+    const adopted = /* @__PURE__ */ new Set([...exact, ...fallback]);
     const deadIdentity = (tab) => {
       const prev = prevIds[tab];
       if (prev === void 0 || prev === "") {
@@ -14016,8 +14054,10 @@ function remapByIdentity(root2, prevIds, ids, nextSynth) {
       }
       return !isSynth(prev) || !adopted.has(prev);
     };
+    const exactHolderAtMax = moved.has(maxLeaf.id) || exact.has(prevIds[maxLeaf.tab] ?? "");
+    const tentative = (tab) => fallback.has(prevIds[tab] ?? "");
     for (const leaf of leaves(cur)) {
-      if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
+      if (!moved.has(leaf.id) && leaf.tab >= ids.length && (deadIdentity(leaf.tab) || exactHolderAtMax && tentative(leaf.tab))) {
         cur = closeLeaf(cur, leaf.id) ?? cur;
       }
     }
@@ -16885,8 +16925,9 @@ function taskFormModal(opts) {
   hostSelect.setAttribute("aria-describedby", hostHint.id);
   const keepHost = opts.seed?.host ?? "";
   let hostOptions = [];
+  let hostTouched = false;
   const renderHosts = () => {
-    const previous = hostSelect.value || keepHost;
+    const previous = hostSelection(hostTouched, hostSelect.value, keepHost);
     hostSelect.replaceChildren(h("option", { value: "" }, "Repo backend"));
     for (const o of hostOptions) {
       const opt = h("option", { value: o.name }, o.status === "available" ? o.name : `${o.name} \u2014 unavailable`);
@@ -16904,7 +16945,10 @@ function taskFormModal(opts) {
   const hostField = field("Host", hostSelect);
   hostField.append(hostHint);
   renderHosts();
-  hostSelect.addEventListener("change", renderHosts);
+  hostSelect.addEventListener("change", () => {
+    hostTouched = true;
+    renderHosts();
+  });
   let hostSeq = 0;
   const loadHostsFor = (repoPath) => {
     const seq = ++hostSeq;
@@ -17060,6 +17104,9 @@ function editTaskModal(projects, task, callbacks) {
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
+}
+function hostSelection(touched, current, seed) {
+  return touched ? current : seed;
 }
 
 // src/project-menu-focus.ts
@@ -18728,6 +18775,7 @@ var AppShell = class {
     }
     const chrome = terminalChrome({
       title: selected.title,
+      placement: { detail: placementDetail(selected), remote: selected.placement?.kind === "remote" },
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       newTab: (kind) => {
@@ -19178,9 +19226,8 @@ var AppShell = class {
     if (!selected || !this.headTitle) {
       return;
     }
-    this.headTitle.textContent = selected.title;
-    this.headTitle.title = selected.title;
-    this.headTitle.setAttribute("aria-label", selected.title);
+    applyTerminalTitle(this.headTitle, selected.title);
+    if (this.terminalChrome) applyTerminalPlacement(this.terminalChrome.placement, placementDetail(selected), selected.placement?.kind === "remote");
     if (this.terminalChrome) {
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
@@ -19402,6 +19449,12 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
       " \xB7 ",
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch)
     );
+  }
+  const place = placementShort(s);
+  if (place) {
+    const placed = h("span", { class: "af-row-place" }, place);
+    placed.title = placementDetail(s);
+    branchParts.push(" \xB7 ", placed);
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);

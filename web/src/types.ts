@@ -130,8 +130,19 @@ export const Status = {
  * only present for a LimitReached row with a known reset time (omitzero on a
  * time.Time, mirroring the TabExitData.at precedent).
  */
+/** Where a session runs (#5571 W6.4); additive, derived by the daemon per snapshot. */
+export interface Placement {
+  kind: "local" | "remote";
+  host?: string;
+  backend?: string;
+  /** Workspace directory: the worktree locally, the host directory for ssh/sandbox. */
+  location?: string;
+}
+
 export interface SessionData {
   id?: string;
+  /** Absent on a daemon that predates W6.4; surfaces then show nothing extra. */
+  placement?: Placement;
   title: string;
   branch: string;
   path?: string;

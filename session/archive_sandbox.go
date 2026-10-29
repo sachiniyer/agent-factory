@@ -253,6 +253,11 @@ func restoreSandboxRuntimeWith(i *Instance, confirmLive bool, provision func() (
 // a fresh sandbox.
 func (i *Instance) provisionForRestore() (*ArchivedWorkspaceData, error) {
 	if w := i.preservedWorkspaceOwed(); w != nil {
+		// A server af started here and could not confirm stopped is reaped first;
+		// no adoption proceeds beside a survivor (W8.6).
+		if err := i.confirmStoppedBeforeAdopt(); err != nil {
+			return nil, err
+		}
 		return i.restorePreservedWorkspace(w)
 	}
 	return nil, i.reprovisionRemoteWith(nil)
@@ -466,6 +471,13 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 	}()
 	res, err := rt.Provision(spec)
 	if err != nil {
+		if adopt != nil && res.Backend != nil {
+			// The adopting provision started a server it could not confirm stopped.
+			// Record ITS identity on the row (persisted, unknown) rather than keep
+			// only the archived server's: a later restore then checks the right pid
+			// and a kill or the orphan sweep can reach the survivor.
+			i.retainProvisionResultCleanup(res)
+		}
 		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, err)
 	}
 	// A runtime-set reason (the mid-provision loss detected before the env

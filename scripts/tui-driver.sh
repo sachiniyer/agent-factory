@@ -1092,6 +1092,35 @@ _af_tasks_list_visible() {
     _af_tasks_dialog_has "$_AF_TASKS_LIST_TITLE"
 }
 
+# _af_task_dialog_open — a task dialog of ANY mode is up: the footer-anchored
+# overlay marker OR the titled list. The footer is width-tiered and CLIPPED (the
+# list's "r run now · x toggle · D delete · ? back · esc" is 46 cells, so at the
+# 40x10 floor its "esc" is cut off and the footer marker misses), which let a
+# still-open list read as "closed" (#6017). The list title is not width-tiered,
+# so closing/waiting is decided on either signal.
+_af_task_dialog_open() {
+    local screen; screen="$(cat)"
+    _af_tasks_overlay_visible <<<"$screen" || _af_tasks_list_visible <<<"$screen"
+}
+
+# af_assert_no_overlay [label] — fail, printing the screen, when ANY rounded
+# modal frame holds the view at the CURRENT size (#6017). Every step that is
+# about to send a global key (C, ",", m, n, …) calls this first, so an overlay
+# that swallowed the previous step's close is reported as the real precondition
+# failure rather than as a dropped key and a long timeout. Content-independent
+# on purpose: it recognises a complete rounded frame, not one dialog's footer,
+# so a clipped or width-tiered footer cannot hide an open overlay.
+af_assert_no_overlay() {
+    local label="${1:-before a global key}" screen
+    screen="$(af_capture)"
+    if _af_task_dialog_open <<<"$screen" || _af_tasks_dialog_has '[[:alnum:]]' <<<"$screen"; then
+        _af_log "an overlay holds focus ${label} (${AF_DRIVER_COLS:-?}x${AF_DRIVER_ROWS:-?}):"
+        printf '%s\n' "$screen" >&2
+        _af_fail "an overlay holds focus ${label} — a global key would be swallowed by it"
+        return 1
+    fi
+}
+
 # _af_wait_for_tasks_overlay_state <0|1> [timeout_s] [label] — wait for the
 # dialog-specific frame/footer pair to disappear or appear.
 _af_wait_for_tasks_overlay_state() {
@@ -1100,7 +1129,7 @@ _af_wait_for_tasks_overlay_state() {
     while :; do
         screen="$(af_capture)"
         visible=0
-        _af_tasks_overlay_visible <<<"$screen" && visible=1
+        _af_task_dialog_open <<<"$screen" && visible=1
         if [ "$visible" -eq "$expected" ]; then
             return 0
         fi
@@ -1130,7 +1159,7 @@ af_close_tasks() {
     deadline=$(( $(_af_now) + 4 ))
     while :; do
         screen="$(af_capture)"
-        if ! _af_tasks_overlay_visible <<<"$screen"; then
+        if ! _af_task_dialog_open <<<"$screen"; then
             return 0
         fi
         [ "$(_af_now)" -ge "$deadline" ] && break

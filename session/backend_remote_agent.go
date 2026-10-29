@@ -31,6 +31,7 @@ func (b *remoteAgentBackend) Capabilities() Capabilities {
 		TerminalTab:      true,
 		InteractiveInput: true,
 		LoopbackRelay:    true,
+		RemoteEditor:     true,
 		Handoff:          false,
 	}
 }

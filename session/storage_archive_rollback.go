@@ -143,6 +143,8 @@ func (d InstanceData) ForStorage() InstanceData {
 	// instances.json row and be read back as fact by an older binary.
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
+	d.Placement = nil
+	d.TabManagement = nil
 	d.ArchiveWarning = ""
 	// A live-probe outage is exactly the class of transient observation the
 	// fields above are scrubbed for: re-derived by the restarted daemon's own

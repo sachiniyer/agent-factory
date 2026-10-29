@@ -22,8 +22,11 @@ type lifecycleSandbox struct {
 	tabs        map[string]TabData // id → row, as /v1/agent/tabs reports it
 	executions  map[string]int     // command → times it was started
 	closeCalls  []string
-	dropCreate  bool // execute, then hang up without answering
-	closeDown   bool // hang up on every close
+	dropCreate  bool            // execute, then hang up without answering
+	closeDown   bool            // hang up on every close
+	refuseNew   bool            // refuse a create that would start a new execution (a definitive answer)
+	hold        chan struct{}   // when set, a create answers only once it is closed
+	stuck       map[string]bool // ids whose tmux teardown fails: the row goes, the command stays (#6022)
 	genSeq      int
 	rosterCalls int
 }
@@ -44,6 +47,18 @@ func newLifecycleSandbox(t *testing.T) (*lifecycleSandbox, *Instance) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		sb.mu.Lock()
 		td, exists := sb.tabs[req.ID]
+		if exists && td.Command != req.Command {
+			sb.mu.Unlock()
+			ws.encode(w, map[string]any{"data": nil, "error": map[string]any{
+				"message": "tab id already holds a different command", "code": "conflict"}})
+			return
+		}
+		if !exists && sb.refuseNew {
+			sb.mu.Unlock()
+			ws.encode(w, map[string]any{"data": nil, "error": map[string]any{
+				"message": "refused", "code": "refused"}})
+			return
+		}
 		if !exists {
 			sb.genSeq++
 			kind, _ := ParseTabKindName(req.Kind)
@@ -53,7 +68,11 @@ func newLifecycleSandbox(t *testing.T) (*lifecycleSandbox, *Instance) {
 			sb.executions[req.Command]++
 		}
 		drop := sb.dropCreate
+		hold := sb.hold
 		sb.mu.Unlock()
+		if hold != nil {
+			<-hold
+		}
 		if drop {
 			hangUp(w)
 			return
@@ -68,6 +87,13 @@ func newLifecycleSandbox(t *testing.T) (*lifecycleSandbox, *Instance) {
 		// The generation is compared HERE, with the removal, the way the real
 		// agent-server does it (#5996): a mismatch is tab_gone, never a close.
 		td, held := sb.tabs[req.ID]
+		if !down && sb.stuck[req.ID] {
+			delete(sb.tabs, req.ID)
+			sb.mu.Unlock()
+			ws.encode(w, map[string]any{"data": nil, "error": map[string]any{
+				"message": "teardown unconfirmed", "code": "internal"}})
+			return
+		}
 		gone := !held || (req.Gen != "" && td.Gen != req.Gen)
 		if !down && !gone {
 			sb.closeCalls = append(sb.closeCalls, req.ID)

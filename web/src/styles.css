@@ -1471,6 +1471,8 @@ body[data-project-color] [data-af-theme="dark"] {
 .af-term-menu[hidden] { display: none; }
 .af-term-menu button { width: 100%; }
 .af-term-menu button { text-align: left; }
+.af-term-placement { color: var(--af-ink-muted); font-size: var(--af-type-body); padding: var(--af-space-1) var(--af-space-2); overflow-wrap: anywhere; }
+.af-term-placement[hidden] { display: none; }
 .af-term-title-separator { color: var(--af-ink); font-size: var(--af-type-heading); }
 
 /* A durable incomplete-archive notice, sourced from the daemon snapshot rather

@@ -406,6 +406,14 @@ type Instance struct {
 	// archivedWorkspace records where this archived off-box session's work lives
 	// (#5571 W8.5); nil for a live row or one archived before the field.
 	archivedWorkspace *ArchivedWorkspaceData
+	// placement is the daemon-projected place this row runs (#5571 W6.4). Set on
+	// a client row built from a snapshot, which has no runtime to derive it from.
+	placement *PlacementData
+	// projectedTabManagement is the daemon's verdict that this off-box session
+	// serves shell and process tabs (#5953). A client row built from a snapshot has
+	// no live agent-server to read the advertisement from, so it adopts the
+	// projection instead.
+	projectedTabManagement bool
 	// accountAgent is the agent namespace Account was selected in. It must be
 	// durable rather than re-derived at refresh time: a program_overrides edit
 	// after the pin can resolve the recorded Program to a different agent's
@@ -651,6 +659,8 @@ type Instance struct {
 	// Guarded by i.mu; in memory — a restart before the retry loses the mapping,
 	// and the sandbox's own roster then still holds the tab it started.
 	tabCreateIntents map[string]*tabCreateIntent
+	// tabTeardown serializes teardown attempts per tab id (lockTeardown).
+	tabTeardown map[string]*teardownGate
 
 	// tabSpawnClaims reserves the FULL tmux session names of sibling spawns
 	// still in flight — derived under i.mu, released once the append resolves

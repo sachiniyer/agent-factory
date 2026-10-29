@@ -139,8 +139,30 @@ export function sessionFirstComposition(moves: [HTMLElement, HTMLElement][]) {
   } };
 }
 
+/** The terminal head's title element is owned by the title alone: its text, its
+ *  tooltip (which exists so a TRUNCATED title stays readable, #2224/#3981) and its
+ *  aria-label are all the session title. One writer, shared by the initial render
+ *  and every patch. */
+export function applyTerminalTitle(el: Pick<HTMLElement, "textContent" | "title" | "setAttribute">, title: string): void {
+  el.textContent = title;
+  el.title = title;
+  el.setAttribute("aria-label", title);
+}
+
+/** Where the session runs (#5571 W6.4) has its OWN element and tooltip, in the
+ *  Actions panel (a details surface), so it cannot collide with the head's title,
+ *  tab and meta contracts (#2458, #2224, #3981). Shown only for an off-box
+ *  session, like the rail row: a local session says nothing extra. `detail` is
+ *  placementDetail(); "" or a local placement hides the element. */
+export function applyTerminalPlacement(el: Pick<HTMLElement, "textContent" | "title" | "hidden">, detail: string, remote: boolean): void {
+  const shown = remote && detail !== "";
+  el.hidden = !shown;
+  el.textContent = shown ? detail : "";
+  el.title = shown ? `Where this session runs: ${detail}` : "";
+}
+
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; newTab(kind: "shell" | "vscode"): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
+export function terminalChrome(opts: { title: string; placement?: { detail: string; remote: boolean }; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; newTab(kind: "shell" | "vscode"): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
   const menu = actionsDisclosure("More session actions");
   menu.trigger.replaceChildren(icon("ellipsis"));
   menu.trigger.title = "More session actions";
@@ -171,8 +193,10 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
   const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
   const newTabs = h("div", { class: "af-term-new-group" }, newTerminal, newVSCode);
-  const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
-  title.setAttribute("aria-label", opts.title);
+  const title = h("span", { class: "af-term-title" });
+  applyTerminalTitle(title, opts.title);
+  const placement = h("span", { class: "af-term-placement" });
+  applyTerminalPlacement(placement, opts.placement?.detail ?? "", opts.placement?.remote ?? false);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
@@ -204,9 +228,9 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   tabUnavailable.hidden = true;
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(tabUnavailable, copy, handoff, deliver, actions, closePane);
+  menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, tabs, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  return { head, title, placement, tabs, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
 }
 
 /** Split leaves share the same title/close treatment as the main tab row. */

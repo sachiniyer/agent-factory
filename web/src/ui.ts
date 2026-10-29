@@ -23,7 +23,7 @@ import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
-import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure, placeMenu } from "./components.js";
+import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, applyTerminalTitle, applyTerminalPlacement, actionsDisclosure, placeMenu } from "./components.js";
 import { type DragPayload, type TabDropResult, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
@@ -53,6 +53,8 @@ import {
   isPendingManualHandoffDeliveryUnconfirmed,
   isPendingManualSwapDeliveryConfirmable,
   OPERATOR_KIND_LABELS,
+  placementDetail,
+  placementShort,
   type OperatorKind,
   operatorKind,
   rowStatus,
@@ -2296,6 +2298,7 @@ export class AppShell {
     }
     const chrome = terminalChrome({
       title: selected.title,
+      placement: { detail: placementDetail(selected), remote: selected.placement?.kind === "remote" },
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       newTab: (kind) => {
@@ -2889,9 +2892,8 @@ export class AppShell {
     if (!selected || !this.headTitle) {
       return;
     }
-    this.headTitle.textContent = selected.title;
-    this.headTitle.title = selected.title;
-    this.headTitle.setAttribute("aria-label", selected.title);
+    applyTerminalTitle(this.headTitle, selected.title);
+    if (this.terminalChrome) applyTerminalPlacement(this.terminalChrome.placement, placementDetail(selected), selected.placement?.kind === "remote");
     if (this.terminalChrome) {
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
@@ -3355,6 +3357,12 @@ export function sessionRow(
       " · ",
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch),
     );
+  }
+  const place = placementShort(s);
+  if (place) {
+    const placed = h("span", { class: "af-row-place" }, place);
+    placed.title = placementDetail(s);
+    branchParts.push(" · ", placed);
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);

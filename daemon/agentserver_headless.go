@@ -80,6 +80,8 @@ type headlessServer struct {
 	// archive collapses concurrent /v1/agent/archive requests onto one in-flight
 	// archive (#2997 finding 2). See singleFlightArchive.
 	archive singleFlightArchive
+	// editor is the workspace's code-server supervisor (W5.4), created on first use.
+	editor agentEditor
 }
 
 // tabKeeper is the tab-roster surface the /v1/agent/tab-* routes bind to
@@ -470,6 +472,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// tmux session or worktree is orphaned. Durability of in-progress work is the
 	// driving daemon's job (archive = push branch, epic §5), not the agent-server's.
 	_ = closeTCP.close()
+	if err := hs.stopEditor(); err != nil {
+		log.WarningLog.Printf("agent-server: workspace editor teardown on shutdown: %v", err)
+	}
 	if err := hs.shutdownWorkspace(); err != nil {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)
 	}
@@ -507,6 +512,8 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// W7.1: stop the agent and start it again in this workspace, resuming the
 	// provider's conversation. Advertised as the "relaunch" feature.
 	mux.HandleFunc("/v1/agent/relaunch", rpcHandler(hs.Relaunch))
+	mux.HandleFunc(agentproto.EditorPath, rpcHandler(hs.Editor))
+	mux.HandleFunc(agentproto.EditorStopPath, rpcHandler(hs.EditorStop))
 	// W7.5: swap the agent for another in this workspace. Advertised as the
 	// "agent-swap" feature.
 	mux.HandleFunc("/v1/agent/swap-agent", rpcHandler(hs.SwapAgent))
@@ -554,6 +561,9 @@ var agentServerWireFeatures = []string{
 	// "relaunch": POST /v1/agent/relaunch — stop the agent and start it again
 	// in this workspace with the provider's resume (#5571 W7.1).
 	session.RelaunchFeature,
+	// "editor": POST /v1/agent/editor and /v1/agent/relay?target=editor — the
+	// workspace's own code-server, relayed to the daemon (#5571 W5.4).
+	agentproto.EditorFeature,
 	// "agent-swap": POST /v1/agent/swap-agent — replace the agent with another
 	// in this workspace, resolving the new agent's program on this host (#5571 W7.5).
 	session.SwapAgentFeature,
@@ -845,6 +855,9 @@ func (hs *headlessServer) Archive(_ struct{}, resp *agentArchiveResponse) error 
 }
 
 func (hs *headlessServer) Kill(_ struct{}, resp *agentOKResponse) error {
+	if err := hs.stopEditor(); err != nil {
+		log.WarningLog.Printf("agent-server: workspace editor teardown: %v", err)
+	}
 	if err := hs.as.Kill(false); err != nil {
 		return err
 	}
