@@ -97,6 +97,10 @@ type home struct {
 	// See releaseTerminalToAttach for why a raw-proxy attach must have them.
 	releaseTerminal func() error
 	restoreTerminal func() error
+	// tookTerminal records that a full-screen attach (raw proxy or tea.ExecProcess
+	// takeover) has had the real terminal at least once, so Run's exit path knows
+	// to leave it the way the shell expects (#6063).
+	tookTerminal atomic.Bool
 	// appConfig stores persistent application configuration
 	appConfig *config.Config
 	// appState stores persistent application state like seen help screens

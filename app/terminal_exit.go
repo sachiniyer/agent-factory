@@ -1,0 +1,74 @@
+package app
+
+import (
+	"io"
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+// terminalExitRestore is written once af is done with the terminal, on every exit
+// path, when a full-screen attach ever had it (#6063). An attach is a raw byte
+// proxy (or a nested tmux client) that drives the terminal itself — alt screen,
+// scroll region, cursor, SGR, mouse and paste reporting — and bubbletea's own
+// shutdown only undoes what bubbletea knows it set. If anything the attach did
+// outlives the TUI the shell resumes drawing into it: a stale scroll region, a
+// hidden cursor, a cursor parked mid-screen inside the attach's last frame.
+//
+// Order matters, and mirrors tmux.NeutralTerminalRestore: reporting modes off
+// first, then geometry, then the buffer switch, then cosmetics on the buffer the
+// shell lands on. The final "\r\x1b[J" erases from the shell's cursor down — never
+// above it, so the launch line stays (the #4785 trap: clearing the whole main
+// screen leaves a blank pane) — which is exactly where an attach frame that
+// reached the main screen sits.
+const terminalExitRestore = "" +
+	"\x1b[?1003l\x1b[?1002l\x1b[?1000l" + // mouse tracking off
+	"\x1b[?1015l\x1b[?1006l\x1b[?1005l" + // mouse encodings off
+	"\x1b[?1004l\x1b[?2004l" + // focus reporting and bracketed paste off
+	"\x1b[?1l\x1b>" + // cursor keys and keypad normal
+	"\x1b[?7h" + // autowrap on
+	"\x1b[r" + // scroll region = full screen (alt buffer)
+	"\x1b[?1049l" + // leave the alt screen (a no-op if already on the main one)
+	"\x1b[r" + // scroll region again on the main buffer
+	"\x1b[0m" + // SGR reset
+	"\x1b[?25h" + // cursor visible
+	"\r\x1b[J" // erase from the shell's cursor down
+
+// terminalExitWriter is where terminalExitRestore goes; swappable for tests.
+var terminalExitWriter io.Writer = os.Stdout
+
+// restoreTerminalAtExit writes terminalExitRestore if a full-screen attach ever
+// took the terminal. A run that never attached writes nothing, so quitting
+// without attaching stays byte-for-byte what it was.
+func (m *home) restoreTerminalAtExit(out io.Writer) {
+	if m.tookTerminal.Load() {
+		_, _ = io.WriteString(out, terminalExitRestore)
+	}
+}
+
+// guardTerminalOnSignal restores the terminal on the signals bubbletea does not
+// turn into a clean quit (it consumes SIGINT and SIGTERM, which end p.Run and so
+// reach the deferred restore; SIGHUP and SIGQUIT would otherwise end the process
+// with the attach's state on the terminal). It writes the restore and re-raises
+// the signal with its default action, so the process still dies as it would have.
+// The returned func stops the guard.
+func (m *home) guardTerminalOnSignal(out io.Writer) func() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGQUIT)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-sigs:
+			m.restoreTerminalAtExit(out)
+			signal.Reset(sig)
+			if s, ok := sig.(syscall.Signal); ok {
+				_ = syscall.Kill(os.Getpid(), s)
+			}
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(sigs)
+		close(done)
+	}
+}
