@@ -255,8 +255,22 @@ func (s *remoteAgentServer) CanRelaunch() (bool, error) {
 
 // Relaunch asks the sandbox to relaunch its agent in place. Its own budget: the
 // call waits for the old agent to exit.
+//
+// The sandbox resets ITS broker and repaints its own subscribers, but this
+// daemon's broker is another subscriber of the old pane: its upstream socket
+// survives an in-place respawn, and remoteClientlessChannel deliberately drops
+// the sandbox's repaint (the daemon paints its own). So a client still attached
+// here would keep the pre-relaunch screen and miss the replacement's output
+// until something unrelated reconnected it (#5871). On success every broker
+// takes the same recovery a respawned local pane gets: stale capture released,
+// ring discarded, fresh dial, every attached client re-seeded with a repaint of
+// the replacement's screen.
 func (s *remoteAgentServer) Relaunch() error {
-	return s.rc.callWithin("/v1/agent/relaunch", struct{}{}, nil, AgentRelaunchCallTimeout)
+	if err := s.rc.callWithin("/v1/agent/relaunch", struct{}{}, nil, AgentRelaunchCallTimeout); err != nil {
+		return err
+	}
+	s.resetBrokerCaptures()
+	return nil
 }
 
 // A runtime with no live sandbox cannot relaunch in it: the typed
