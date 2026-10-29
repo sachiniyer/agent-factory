@@ -346,3 +346,15 @@ func TestEditorPort_ReassignmentPrefersTheLongestIdlePort(t *testing.T) {
 	}
 	assert.Equal(t, []int{9102, 9101, 9100}, got, "never-used first, then least recently freed")
 }
+
+func TestEditorPort_ProbePageIsServedWithoutACredentialAndCarriesNothing(t *testing.T) {
+	f := newEditorPortFixture(t)
+	rec := f.do(f.portA, editorPortProbePath)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+	body := rec.Body.String()
+	assert.Contains(t, body, editorPortProbeMessage)
+	assert.NotContains(t, body, f.sidA, "the probe names no session")
+	assert.Empty(t, f.served, "the probe never reaches the editor proxy")
+	assert.Empty(t, rec.Result().Cookies(), "the probe sets no cookie")
+}

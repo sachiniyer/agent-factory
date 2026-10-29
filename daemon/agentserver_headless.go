@@ -47,6 +47,9 @@ import (
 // controlServer resolves an AgentServer out of the multi-session Manager,
 // headlessServer holds the one it owns directly.
 type headlessServer struct {
+	// adopted is set when this server was started over a preserved worktree
+	// (#5571 W8.6); its non-first-time launch respawns the agent there.
+	adopted bool
 	// as is the single workspace's agent-server — the local in-process
 	// implementation over tmux (same runtime as the daemon's local sessions),
 	// exposed here over the wire.
@@ -226,6 +229,10 @@ type AgentServerOptions struct {
 	// Branch is the exact branch the daemon named for this session (#5571 W2.4).
 	// Empty derives it from this host's own branch_prefix, as before.
 	Branch string
+	// AdoptWorktree is an existing linked worktree this server binds instead of
+	// creating one (#5571 W8.6). The provisioning daemon proved it present and on
+	// Branch before starting this process.
+	AdoptWorktree string
 	// PolicyFile is the daemon-resolved operator policy (config.AgentPolicy).
 	// When set, this process answers every config read from it and never reads
 	// or creates anything under its own host's af home (#5571 W2.5); a file it
@@ -387,7 +394,14 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("agent-server: %w", err)
 	}
 
+	if opts.AdoptWorktree != "" {
+		if err := instance.AdoptExistingWorktree(opts.AdoptWorktree); err != nil {
+			return fmt.Errorf("agent-server: %w", err)
+		}
+	}
+
 	hs := &headlessServer{
+		adopted: opts.AdoptWorktree != "",
 		as:      instance.AgentServer(),
 		inst:    instance,
 		program: resolvedProgram,
@@ -456,7 +470,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// tmux session or worktree is orphaned. Durability of in-progress work is the
 	// driving daemon's job (archive = push branch, epic §5), not the agent-server's.
 	_ = closeTCP.close()
-	if err := hs.as.Kill(false); err != nil {
+	if err := hs.shutdownWorkspace(); err != nil {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)
 	}
 	return nil
@@ -596,6 +610,9 @@ func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResp
 }
 
 func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
+	if hs.adopted && !req.FirstTimeSetup && hs.inst != nil {
+		return hs.launchAdopted(req, resp)
+	}
 	var codexSnap session.ConversationCaptureSnapshot
 	codex := tmux.DetectAgentFromCommand(hs.program) == tmux.ProgramCodex
 	if hs.inst != nil && req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {
@@ -824,68 +841,6 @@ func (hs *headlessServer) Archive(_ struct{}, resp *agentArchiveResponse) error 
 		return err
 	}
 	resp.Branch = branch
-	return nil
-}
-
-// StopPreserving stops the agent and its tabs and leaves the workspace on disk
-// (#5571 W8.5): archive without publishing. The process then exits, since nothing
-// is left for it to serve; its shutdown path kills a workspace it no longer holds,
-// which is a no-op.
-func (hs *headlessServer) StopPreserving(_ struct{}, resp *agentOKResponse) error {
-	stopper, ok := hs.as.(session.WorkspaceStopper)
-	if !ok {
-		return session.ErrPreserveUnsupported
-	}
-	if err := stopper.StopPreservingWorkspace(); err != nil {
-		return err
-	}
-	resp.OK = true
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
-	}()
-	return nil
-}
-
-// Relaunch stops the agent and starts it again in this workspace. Nothing is
-// pushed, reaped or re-cloned: the branch, tree and uncommitted work stay as
-// they are.
-func (hs *headlessServer) Relaunch(_ struct{}, resp *agentOKResponse) error {
-	r, ok := hs.as.(session.AgentRelauncher)
-	if !ok {
-		return session.ErrRelaunchUnsupported
-	}
-	if err := r.Relaunch(); err != nil {
-		return err
-	}
-	resp.OK = true
-	return nil
-}
-
-type agentSwapRequest struct {
-	Target string `json:"target"`
-}
-
-// agentSwapResponse carries the command the host resolved and launched, which the
-// driving daemon records as the new runtime's evidence.
-type agentSwapResponse struct {
-	OK      bool   `json:"ok"`
-	Program string `json:"program"`
-}
-
-// SwapAgent replaces the agent with another in this workspace. The branch, tree
-// and uncommitted work stay as they are; nothing is pushed, reaped or re-cloned.
-func (hs *headlessServer) SwapAgent(req agentSwapRequest, resp *agentSwapResponse) error {
-	sw, ok := hs.as.(session.AgentSwapper)
-	if !ok {
-		return session.ErrHandoffUnsupported
-	}
-	program, err := sw.SwapAgentTo(req.Target)
-	if err != nil {
-		return err
-	}
-	resp.OK = true
-	resp.Program = program
 	return nil
 }
 

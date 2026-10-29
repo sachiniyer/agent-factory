@@ -349,6 +349,10 @@ type InstanceData struct {
 	// respawns from them. Additive + omitempty on the TabData.ID rollforward
 	// precedent: records written before this field simply have none.
 	PendingTabCleanup []TabCleanupData `json:"pending_tab_cleanup,omitempty"`
+	// PendingRemoteTabClose is PendingTabCleanup for off-box tabs: closes the
+	// sandbox never confirmed (#5571, #5957). The roster row is gone, so this
+	// record is the only handle on a command that may still be running there.
+	PendingRemoteTabClose []RemoteTabCleanupData `json:"pending_remote_tab_close,omitempty"`
 	// RebuildTeardownPending records that a recovery rebuilt this worktree at a
 	// new identity while sessions bound to it still answered has-session, and
 	// the teardown of those stale panes is unconfirmed. The next attempt cannot
@@ -613,7 +617,14 @@ type TabData struct {
 	// omitempty + additive, mirroring the InstanceData.ID / BranchCreatedByUs
 	// rollforward precedent: a record written before #1738 has no id, and
 	// restoreLocalTabs backfills a fresh one on load.
-	ID   string `json:"id,omitempty"`
+	ID string `json:"id,omitempty"`
+	// Gen identifies this INCARNATION of the tab: minted when the process is
+	// spawned, so a close-and-recreate under the same id (allowed) is a different
+	// tab to anything that fences on it (#5571, #5955, #5960). Sent by the
+	// agent-server on create and in its roster; the daemon records it and applies
+	// exit evidence only to the incarnation that produced it. omitempty: rows from
+	// before the field carry none and are never fenced in.
+	Gen  string `json:"gen,omitempty"`
 	Name string `json:"name"`
 	// The wire names it as `kind_name`, the word `tab_kinds[].kind` uses too.
 	Kind     TabKind `json:"kind"`
@@ -682,6 +693,15 @@ type TabCleanupData struct {
 	// must kill, and the token a later spawn must not re-derive. An entry with no
 	// name would be untargetable, so CloseTab never records one.
 	TmuxName string `json:"tmux_name"`
+}
+
+// RemoteTabCleanupData names an off-box tab whose close the sandbox has not
+// confirmed. The stable id is the whole handle — the sandbox addresses its tabs
+// by it — and Gen pins the incarnation, so a retry can never close a later tab
+// that reused the id.
+type RemoteTabCleanupData struct {
+	TabID string `json:"tab_id"`
+	Gen   string `json:"gen,omitempty"`
 }
 
 // Storage handles saving and loading instances using the state interface.

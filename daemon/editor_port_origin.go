@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -52,6 +53,7 @@ import (
 const (
 	editorPortStoreFile      = "editor-origin-ports.json"
 	editorPortBootstrapPath  = "/_af/editor-bootstrap"
+	editorPortProbePath      = "/_af/editor-probe"
 	editorPortCookiePrefix   = "af_editor_" //nolint:gosec // cookie name prefix, not a credential
 	editorPortBootstrapTTL   = 60 * time.Second
 	editorPortMaxPendingBoot = 4
@@ -428,6 +430,10 @@ func (cs *controlServer) editorPortHandler(port int, w http.ResponseWriter, r *h
 		writeEditorPortExpiredPage(w)
 		return
 	}
+	if r.URL.Path == editorPortProbePath && r.Method == http.MethodGet {
+		writeEditorPortProbePage(w)
+		return
+	}
 	if r.URL.Path == editorPortBootstrapPath && r.Method == http.MethodGet {
 		key, ok := m.editorPorts.consumeBootstrap(r.URL.Query().Get("t"), sid)
 		if !ok {
@@ -501,6 +507,24 @@ func (cs *controlServer) editorPortHandler(port int, w http.ResponseWriter, r *h
 		rest:          rest,
 		previewOrigin: true,
 	})
+}
+
+// editorPortProbeMessage is what the probe page posts to its parent: a fixed,
+// secret-free string, so the signal is that it arrived at all.
+const editorPortProbeMessage = "af-editor-origin-ok"
+
+// writeEditorPortProbePage answers the browser's reachability probe (#6002). The
+// daemon cannot tell whether the viewer can reach an allocated editor port (it may
+// not be forwarded or exposed through `tailscale serve`), so the client frames this
+// page before navigating. It is served before the key check — the viewer has no
+// credential yet and the page carries nothing — and no-store so a stale yes cannot
+// outlive the listener.
+func writeEditorPortProbePage(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = io.WriteString(w, `<!doctype html><html><head><meta charset="utf-8"><title>af editor probe</title></head>`+
+		`<body><script>parent.postMessage(`+strconv.Quote(editorPortProbeMessage)+`,"*")</script></body></html>`)
 }
 
 // editorPortServe is the proxy core an authorized request reaches; a var so a test
