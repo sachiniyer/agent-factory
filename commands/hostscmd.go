@@ -175,6 +175,9 @@ func finishBracketedHost(h config.HostConfig, dest string) (config.HostConfig, e
 // bracketed-IPv6 and port rules.
 func parseSSHURLDestination(dest string) (config.HostConfig, error) {
 	var h config.HostConfig
+	if err := refuseUnbracketedIPv6URL(dest); err != nil {
+		return h, err
+	}
 	u, err := url.Parse(dest)
 	if err != nil {
 		return h, fmt.Errorf("%q is not a valid ssh:// URL: %w", dest, err)
@@ -197,6 +200,29 @@ func parseSSHURLDestination(dest string) (config.HostConfig, error) {
 		h.Port = n
 	}
 	return h, nil
+}
+
+// refuseUnbracketedIPv6URL refuses an ssh:// destination whose host part has a
+// colon outside brackets and more than one colon overall. RFC 3986 puts an IPv6
+// literal in brackets, so `ssh://user@2001:db8::1` is not a URL authority:
+// net/url would read the last group as a port and af would save, and probe, a
+// different machine (#6067). Refusing is the only reading that cannot guess
+// wrong. A single colon (`host:port`) is still a port, and the scheme-less
+// `user@2001:db8::1` keeps its documented whole-address reading.
+func refuseUnbracketedIPv6URL(dest string) error {
+	authority := strings.TrimPrefix(dest, "ssh://")
+	if i := strings.IndexAny(authority, "/?#"); i >= 0 {
+		authority = authority[:i]
+	}
+	userinfo := ""
+	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
+		userinfo, authority = authority[:i+1], authority[i+1:]
+	}
+	if strings.HasPrefix(authority, "[") || strings.Count(authority, ":") < 2 {
+		return nil
+	}
+	return fmt.Errorf("%q has an IPv6 address outside brackets, which a URL cannot express; "+
+		"put it in brackets and add the port after them, for example ssh://%s[%s]:22", dest, userinfo, authority)
 }
 
 func hostPort(port, dest string) (int, error) {

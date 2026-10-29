@@ -31,8 +31,18 @@ func TestParseHostDestinationForms(t *testing.T) {
 		{"url bracketed ipv6 with port", "ssh://ubuntu@[2001:db8::1]:2222", config.HostConfig{Host: "2001:db8::1", User: "ubuntu", Port: 2222}, ""},
 		{"url bracketed ipv6 no port", "ssh://ubuntu@[2001:db8::1]", config.HostConfig{Host: "2001:db8::1", User: "ubuntu"}, ""},
 		{"url bracketed ipv6 no user", "ssh://[2001:db8::1]:2222/", config.HostConfig{Host: "2001:db8::1", Port: 2222}, ""},
+		// The scheme-less forms keep their documented reading: more than one colon is
+		// a whole IPv6 address, because without a URL there is nothing to bracket.
+		{"scp-like bare ipv6 with user", "ubuntu@2001:db8::abcd:22", config.HostConfig{Host: "2001:db8::abcd:22", User: "ubuntu"}, ""},
 		{"bracketed ipv6 with port", "ubuntu@[2001:db8::1]:2222", config.HostConfig{Host: "2001:db8::1", User: "ubuntu", Port: 2222}, ""},
 		{"bracketed ipv6 no port", "[2001:db8::1]", config.HostConfig{Host: "2001:db8::1"}, ""},
+		// #6067: an unbracketed IPv6 literal is not a URL authority. Refused with the
+		// bracketed form named, never saved under a guessed host (net/url read
+		// `...:abcd:22` as host 2001:db8::abcd on port 22).
+		{"url unbracketed ipv6", "ssh://ubuntu@2001:db8::1", config.HostConfig{}, "ssh://ubuntu@[2001:db8::1]:22"},
+		{"url unbracketed ipv6 looks like port", "ssh://ubuntu@2001:db8::abcd:22", config.HostConfig{}, "ssh://ubuntu@[2001:db8::abcd:22]:22"},
+		{"url unbracketed ipv6 no user", "ssh://2001:db8::1/", config.HostConfig{}, "ssh://[2001:db8::1]:22"},
+		{"url unbracketed ipv6 with port-like tail", "ssh://u@fe80::1:2222", config.HostConfig{}, "outside brackets"},
 		{"url bad port", "ssh://box1.example:notaport", config.HostConfig{}, "ssh://"},
 		{"url port out of range", "ssh://box1.example:70000", config.HostConfig{}, "1 to 65535"},
 		{"url ipv6 bad port", "ssh://[2001:db8::1]:0", config.HostConfig{}, "1 to 65535"},
