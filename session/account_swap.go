@@ -226,15 +226,15 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	resolution := resolveLaunchProgramForInstance(i)
 	// paneGeneratedArgs seeds the launch proof (accountLaunchProof) with the
 	// pane's still-recorded af-authored argument declaration when the swap base
-	// came from the pane's frozen program. That program already carries af's own
+	// is the pane's frozen program. That program already carries af's own
 	// injected flags (e.g. codex's startup-update-check flag #5433); recomputing
 	// the declaration from that base treats af's words as the user's — an
 	// undeclared argument — so the proof must seed from the recorded declaration
-	// instead. It is populated only for a same-agent pane-fallback base
-	// (RuntimeProgram empty, resolvedProgram matching the pane's frozen
-	// program); cross-agent and built-in override bases either do not carry
-	// af's words or keep the positional-extension shape GeneratedArgsBetween
-	// already describes.
+	// instead. It is populated only for a same-agent swap whose resolved base
+	// matches the pane's frozen program, regardless of whether that base came
+	// from RuntimeProgram or the empty-evidence pane-fallback; cross-agent and
+	// built-in override bases either do not carry af's words or keep the
+	// positional-extension shape GeneratedArgsBetween already describes.
 	var paneGeneratedArgs []string
 	// paneTrustedExecutable is the executable provenance the pane recorded
 	// alongside paneGeneratedArgs. It is empty for an untrusted absolute
@@ -306,17 +306,24 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 				resolution.trustBase = builtInProgramOverride(resolveResolvedConfigForInstance(i), enum, established)
 			}
 		}
-		// When the resolved base IS the pane's frozen program and runtime
-		// evidence was empty, that command already carries af's injected flags
-		// (the pane-fallback state after an unverified reattach, or a record
+		// When the resolved base IS the pane's frozen program, that command
+		// already carries af's injected flags (the pane-fallback state after an
+		// unverified reattach, a launch whose pane query failed, or a record
 		// predating runtime-program evidence): seed the launch proof from the
 		// pane's still-recorded declaration so af's own words are declared
 		// rather than treated as undeclared user arguments (#5433). The string
 		// match scopes the seeding to the base the pane actually recorded a
 		// declaration for — a committed retry whose frozen base matches the
 		// pane, or a fresh pane-fallback — and the proof fails closed when a
-		// caller records no matching declaration.
-		if !runtimeEstablished && resolution.command != "" &&
+		// caller records no matching declaration. The seeding fires whether the
+		// base came from RuntimeProgram or the empty-evidence pane-fallback: a
+		// successful pane-fallback swap records the flagged pane program as
+		// durable RuntimeProgram evidence, so the next swap reaches this gate
+		// with runtimeEstablished true yet the same recorded declaration is still
+		// the provenance the boundary already accepts for that base. Requiring
+		// runtimeEstablished to be false (the earlier gate) left af's own flag
+		// undeclared on that next swap and the swap was refused.
+		if resolution.command != "" &&
 			resolution.command == i.ResolvedPaneProgram() {
 			paneGeneratedArgs = i.ResolvedPaneGeneratedArgs()
 			paneTrustedExecutable = i.ResolvedPaneTrustedExecutable()
