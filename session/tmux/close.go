@@ -168,6 +168,13 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// itself: an unbounded kill-session against a wedged server blocks
 	// daemon.KillSession forever behind its kills-in-flight guard, leaving the
 	// session undeletable until the daemon restarts.
+	// Sessions grouped with this one share its windows, so they go first: the
+	// source kill below would otherwise leave the window, and the process in it,
+	// alive behind a mate (#6078). Best-effort — a mate that is already gone is
+	// the desired end state.
+	for _, mate := range t.groupMateSessions() {
+		_ = r.tmux("kill-session", "-t", exactTarget(mate))
+	}
 	if err := r.tmux("kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
 		switch {
 		case r.unknown:
