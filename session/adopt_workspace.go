@@ -34,6 +34,10 @@ type AdoptSpec struct {
 	// from. Every host command of the adoption — the GONE probe first of all —
 	// rides it, never the current host list or repo config.
 	Transport *RecordedTransport
+
+	// leaked is set by a failed provision that started a server it could not confirm
+	// stopped; see abandonAdoption.
+	leaked bool
 }
 
 // RecordedTransport is a preserved workspace's own route to its host.
@@ -166,6 +170,10 @@ func (p *sandboxProvisioner) abandonAdoption(cause error) error {
 		if out, kerr := p.Run(sshShortStepTimeout, "( "+kill+" )", nil, true); kerr != nil {
 			cleanup = append(cleanup, fmt.Errorf("stopping the agent-server it started: %s: %w", strings.TrimSpace(string(out)), kerr))
 		}
+	} else if p.launchAttempted {
+		// A launch ran but no usable pid came back, so the server it started cannot
+		// be targeted: that is unconfirmed, not clean.
+		cleanup = append(cleanup, fmt.Errorf("the agent-server it started reported no usable pid (%q)", p.remotePID))
 	}
 	if p.account != nil {
 		if aerr := p.account.teardownAccount(sshShortStepTimeout); aerr != nil {
@@ -173,9 +181,53 @@ func (p *sandboxProvisioner) abandonAdoption(cause error) error {
 		}
 	}
 	if len(cleanup) > 0 {
+		// af started a server it could not confirm stopped: its identity must reach
+		// the row, not be dropped with this provisioner (leakedBackend).
+		p.spec.Adopt.leaked = true
 		return fmt.Errorf("%w (the preserved workspace at %s was not touched, but %w)", cause, p.sessionDir, errors.Join(cleanup...))
 	}
 	return fmt.Errorf("%w (the preserved workspace at %s was not touched)", cause, p.sessionDir)
+}
+
+// failedProvision is a failed provision's return: the cleanup first, then what it
+// hands back (the error is computed before the result, which depends on it).
+func (p *sandboxProvisioner) failedProvision(err error) (ProvisionResult, error) {
+	ferr := p.provisionFailure(err)
+	return p.adoptionFailureResult(), ferr
+}
+
+// adoptionFailureResult is what a failed provision hands back alongside its error:
+// empty normally, but the NEW server's identity when an adopting provision started
+// a server it could not confirm stopped. The row then records that identity
+// (retainProvisionResultCleanup), so a restore checks the right pid and a kill or
+// the orphan sweep can target the survivor, instead of the row keeping only the
+// archived server's old identity.
+func (p *sandboxProvisioner) adoptionFailureResult() ProvisionResult {
+	if p.spec.Adopt == nil || !p.spec.Adopt.leaked {
+		return ProvisionResult{}
+	}
+	return ProvisionResult{Backend: p.leakedBackend(), Teardown: p.reap}
+}
+
+// leakedBackend is the backend naming the server this adopting provision started.
+func (p *sandboxProvisioner) leakedBackend() Backend {
+	if p.label() == string(BackendSSH) {
+		var c SSHRuntimeCleanupData
+		if t := p.spec.Adopt.Transport; t != nil && t.SSH != nil {
+			c = *t.SSH
+		}
+		c.SessionDir, c.RemotePID = p.sessionDir, p.remotePID
+		c.RemoteAddr, c.AgentServerVersion, c.TokenRef = p.remoteAddr, p.agentServerVersion, p.tokenRef
+		c.CallbackRef, c.CallbackReverse = p.callbackRef, p.callbackReverse()
+		c.LaunchUnconfirmed = p.launchAttempted && !positivePID(p.remotePID)
+		return &sshBackend{provisioner: p, cleanup: &c}
+	}
+	return &sandboxBackend{provisioner: p, cleanup: &SandboxRuntimeCleanupData{
+		SSHCommand: p.sshCmd, SessionDir: p.sessionDir, RemotePID: p.remotePID,
+		RemoteAddr: p.remoteAddr, AgentServerVersion: p.agentServerVersion, TokenRef: p.tokenRef,
+		CallbackRef: p.callbackRef, CallbackReverse: p.callbackReverse(),
+		LaunchUnconfirmed: p.launchAttempted && !positivePID(p.remotePID),
+	}}
 }
 
 // OwesPreservedWorkspace reports whether this row holds an unpushed preserved
@@ -261,8 +313,17 @@ func (i *Instance) restorePreservedWorkspaceWith(w *ArchivedWorkspaceData, repro
 // account synced for it are stopped, and the row is put back as a preserved
 // archive so a retry adopts it again and a kill still reaps it.
 func (i *Instance) rollbackAdoption(w *ArchivedWorkspaceData) {
+	var stopErr error
 	if stopper, ok := i.AgentServer().(WorkspaceStopper); ok {
-		_ = stopper.StopPreservingWorkspace()
+		stopErr = stopper.StopPreservingWorkspace()
+	} else {
+		stopErr = ErrPreserveUnsupported
+	}
+	if stopErr != nil {
+		// The stop RPC did not confirm. Fall back to the identity kill, which acts
+		// on the pid and token af recorded for this server; only if that cannot
+		// confirm either is the server unaccounted for.
+		stopErr = i.confirmServerStopped()
 	}
 	i.releaseSyncedAccount()
 	i.stopRemoteTransport()
@@ -271,11 +332,66 @@ func (i *Instance) rollbackAdoption(w *ArchivedWorkspaceData) {
 	i.agentSrv = nil
 	i.remoteClient = nil
 	i.archivedWorkspace = cloneArchivedWorkspace(w)
+	if stopErr != nil {
+		// af never forgets the identity of a server it started: the backend and
+		// teardown installed by the adoption stay, carrying its pid and token ref,
+		// and the row is marked unknown so that is persisted, visible to the orphan
+		// sweep, and blocks any further adoption until confirmStoppedBeforeAdopt.
+		i.runtimeCleanupStateUnknown = true
+		log.WarningLog.Printf("adopt rollback for %q: the agent-server it started is not confirmed stopped (%v); its identity stays recorded and the next restore reaps it first", i.Title, stopErr)
+	}
 	// started is left exactly as the restore fence set it: AbortRestoreToLost does
 	// not restore it, and both a manual and an automatic recovery refuse a row that
 	// is not started, which would strand the preserved workspace with no retry.
 	i.touchLocked()
 	i.mu.Unlock()
+}
+
+// confirmServerStopped runs the identity-checked kill against the agent-server
+// recorded in this row's cleanup identity, over its recorded transport. Success
+// means the process is gone (or was never this session's); anything else is
+// unconfirmed. With no recorded pid there is nothing to target, which is also
+// unconfirmed when the row is marked unknown.
+func (i *Instance) confirmServerStopped() error {
+	p := i.sandboxProvisioner()
+	if p == nil {
+		return errors.New("no recorded transport to reach the host")
+	}
+	pid := p.remotePID
+	if !positivePID(pid) {
+		return fmt.Errorf("no usable pid recorded for the agent-server (%q)", pid)
+	}
+	if t, err := i.recordedTransport(); err == nil && t.Prepare != nil {
+		if err := t.Prepare(); err != nil {
+			return err
+		}
+	}
+	kill := remotePIDIdentityKillScript(pid, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef)
+	if out, err := p.Run(sshShortStepTimeout, "( "+kill+" )", nil, true); err != nil {
+		return fmt.Errorf("stopping agent-server %s: %s: %w", pid, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// confirmStoppedBeforeAdopt gates every further adoption on a row left unknown by
+// an unconfirmed stop: the survivor is reaped first, and only a confirmed stop
+// (or proof it is gone) clears the mark. Anything else refuses, so a second
+// server is never started beside a survivor.
+func (i *Instance) confirmStoppedBeforeAdopt() error {
+	i.mu.RLock()
+	unknown := i.runtimeCleanupStateUnknown
+	i.mu.RUnlock()
+	if !unknown {
+		return nil
+	}
+	if err := i.confirmServerStopped(); err != nil {
+		return fmt.Errorf("session %q: an agent-server af started in its preserved workspace is not confirmed stopped (%v); not starting another beside it — retry once the host is reachable, or kill the session", i.Title, err)
+	}
+	i.mu.Lock()
+	i.runtimeCleanupStateUnknown = false
+	i.touchLocked()
+	i.mu.Unlock()
+	return nil
 }
 
 // AdoptExistingWorktree binds this in-sandbox instance to a worktree that already

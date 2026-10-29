@@ -284,7 +284,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		// Best-effort reap whatever the failed provision left behind. Preserve any
 		// cleanup failure in the returned error: no Instance exists yet to own a
 		// retry handle, so silently dropping it would hide an orphan.
-		return ProvisionResult{}, p.provisionFailure(err)
+		return p.failedProvision(err)
 	}
 	res.Backend = &sshBackend{
 		// The command the sandbox's agent-server was bound to launch (#5108) —
