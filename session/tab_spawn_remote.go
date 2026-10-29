@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 )
 
 // Off-box shell and process tabs (#5571 W4.5). A sandbox whose agent-server
@@ -138,10 +137,11 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 		}
 		return nil, fmt.Errorf("failed to create %s tab in the sandbox: %w", TabKindName(kind), err)
 	}
+	// The daemon is the name authority: the sandbox names a tab against its own
+	// roster, which does not hold the daemon's web or other tmux-less tabs, so
+	// adopting its name could duplicate one. The name reserved for this create is
+	// kept, re-derived only if something took it since (#5962).
 	name := displayName
-	if strings.TrimSpace(td.Name) != "" {
-		name = td.Name
-	}
 	tab := &Tab{ID: id, Name: name, Kind: kind, Command: command, Exit: tabExitFromData(td.Exit), gen: td.Gen}
 
 	i.mu.Lock()
@@ -150,6 +150,13 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 	adopt := !stale && !collide
 	i.consumeIntentLocked(id, kind, command, requestedName)
 	if adopt {
+		others := make(map[string]bool, len(i.tabDisplayClaims))
+		for n := range i.tabDisplayClaims {
+			if n != displayName {
+				others[n] = true
+			}
+		}
+		tab.Name = uniqueTabNameReserving(i.Tabs, others, displayName)
 		i.Tabs = append(i.Tabs, tab)
 		i.touchLocked()
 	}
