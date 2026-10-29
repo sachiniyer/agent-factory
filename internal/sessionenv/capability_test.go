@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,18 +69,20 @@ func TestCapability_ClaimCarriesTheAdmittedValuesAndIsSingleUse(t *testing.T) {
 }
 
 func TestCapability_RefusedClaimsDoNotConsume(t *testing.T) {
-	b, sock := startBroker(t, paneOf("s", os.Getpid()+1)) // tmux says another pid is the pane root
+	var cur atomic.Pointer[PaneInfo]
+	cur.Store(&PaneInfo{Session: "s", RootPID: os.Getpid() + 1}) // tmux says another pid is the pane root
+	b, sock := startBroker(t, func(context.Context, string) (PaneInfo, error) { return *cur.Load(), nil })
 	token, err := b.Mint(testCap())
 	require.NoError(t, err)
 	// A pre-claim from a process that is not the pane root.
 	_, err = claimAs(t, sock, token, "%1")
 	require.ErrorContains(t, err, "is not the root of pane")
 
-	b.lookup = paneOf("other-session", os.Getpid())
+	cur.Store(&PaneInfo{Session: "other-session", RootPID: os.Getpid()})
 	_, err = claimAs(t, sock, token, "%1")
 	require.ErrorContains(t, err, "not in the launch's session")
 
-	b.lookup = paneOf("s", os.Getpid())
+	cur.Store(&PaneInfo{Session: "s", RootPID: os.Getpid()})
 	_, err = claimAs(t, sock, token, "%1")
 	require.NoError(t, err, "the real pane root can still claim after strangers failed")
 }

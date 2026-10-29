@@ -3,7 +3,6 @@
 package sessionenv
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -66,6 +65,7 @@ const (
 	capabilityTTL        = 15 * time.Minute
 	capabilityMaxRecords = 1024
 	claimIOTimeout       = 5 * time.Second
+	claimMaxMessage      = 64 << 10
 )
 
 type capRecord struct {
@@ -167,6 +167,8 @@ func (b *CapabilityBroker) Claim(ctx context.Context, token, paneID string, peer
 }
 
 type claimRequest struct {
+	// Hello asks the server to prove who it is before the shim sends the token.
+	Hello bool
 	Token string
 	Pane  string
 }
@@ -177,8 +179,7 @@ type claimResponse struct {
 	Cap   *Capability
 }
 
-// Serve answers claims on ln until it is closed. The peer pid comes from the
-// kernel, per connection.
+// Serve answers claims on ln until it is closed.
 func (b *CapabilityBroker) Serve(ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
@@ -189,15 +190,30 @@ func (b *CapabilityBroker) Serve(ln net.Listener) {
 	}
 }
 
+// serveConn reads each request through readAttestedLine, so the caller's pid is
+// the sender of THAT message where the platform can attest it (Linux), not
+// whoever connected.
 func (b *CapabilityBroker) serveConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(claimIOTimeout))
-	var req claimRequest
-	if err := json.NewDecoder(bufio.NewReaderSize(conn, 4096)).Decode(&req); err != nil {
+	if enableAttestation(conn) != nil {
 		return
 	}
-	resp := claimResponse{Error: "launch capability refused"}
-	if pid, err := peerPID(conn); err == nil {
+	enc := json.NewEncoder(conn)
+	for round := 0; round < 2; round++ {
+		line, pid, err := readAttestedLine(conn)
+		if err != nil {
+			return
+		}
+		var req claimRequest
+		if json.Unmarshal(line, &req) != nil {
+			return
+		}
+		if req.Hello {
+			_ = enc.Encode(claimResponse{OK: true})
+			continue
+		}
+		resp := claimResponse{Error: "launch capability refused"}
 		ctx, cancel := context.WithTimeout(context.Background(), claimIOTimeout)
 		c, cerr := b.Claim(ctx, req.Token, req.Pane, pid)
 		cancel()
@@ -206,14 +222,30 @@ func (b *CapabilityBroker) serveConn(conn net.Conn) {
 		} else {
 			resp.Error = cerr.Error()
 		}
+		_ = enc.Encode(resp)
+		return
 	}
-	_ = json.NewEncoder(conn).Encode(resp)
 }
 
-// ClaimCapability is the shim's side. It authenticates the SERVER before it
-// sends anything and before it trusts the answer: a same-user process can
-// unlink and re-bind the socket path and answer "granted" for any command, so
-// the answering process must be this very executable (see exeIdentity).
+// ClaimCapability is the shim's side. A same-user process can unlink and
+// re-bind the socket path and answer "granted" for any command, so it accepts a
+// message only from a process that is this executable.
+//
+// Whose identity is checked matters. A connection's credentials name the process
+// that created or connected the socket, and a listener can be bound by one
+// process, inherited by a forked child that serves it, and the creator then
+// exec'd into the real af: the creator passes any executable check while the
+// child writes the answers (#6179 review, reproduced by
+// TestCapability_ForkThenExecResponderIsRefused). So where the kernel attests
+// the sender of each message (Linux, SCM_CREDENTIALS) the identity checked is
+// that of the process that wrote THIS message, and it is checked on the hello
+// before the token is sent and again on the answer.
+//
+// Where it cannot (macOS has LOCAL_PEERPID, which is per connection, and no
+// per-message sender attestation) the check is per connection and the
+// fork-then-exec bypass above remains. That is a stated residual, not a
+// guarantee: see perMessageAttestation.
+//
 // Every failure refuses.
 func ClaimCapability(socket, token string) (Capability, error) {
 	conn, err := net.DialTimeout("unix", socket, claimIOTimeout)
@@ -222,19 +254,38 @@ func ClaimCapability(socket, token string) (Capability, error) {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(claimIOTimeout))
-	server, err := peerPID(conn)
-	if err != nil {
-		return Capability{}, fmt.Errorf("launch capability refused: cannot identify the claim endpoint: %w", err)
+	if err := enableAttestation(conn); err != nil {
+		return Capability{}, fmt.Errorf("launch capability refused: cannot attest the claim endpoint: %w", err)
 	}
-	if err := sameExecutableAsSelf(server); err != nil {
-		return Capability{}, fmt.Errorf("launch capability refused: the claim endpoint is not af: %w", err)
+	enc := json.NewEncoder(conn)
+
+	exchange := func(req claimRequest) (claimResponse, error) {
+		if err := enc.Encode(req); err != nil {
+			return claimResponse{}, err
+		}
+		line, sender, err := readAttestedLine(conn)
+		if err != nil {
+			return claimResponse{}, fmt.Errorf("launch capability refused: %w", err)
+		}
+		if err := sameExecutableAsSelf(sender); err != nil {
+			return claimResponse{}, fmt.Errorf("launch capability refused: the claim endpoint is not af: %w", err)
+		}
+		var resp claimResponse
+		if err := json.Unmarshal(line, &resp); err != nil {
+			return claimResponse{}, fmt.Errorf("launch capability refused: %w", err)
+		}
+		return resp, nil
 	}
-	if err := json.NewEncoder(conn).Encode(claimRequest{Token: token, Pane: os.Getenv("TMUX_PANE")}); err != nil {
+	// The hello comes first so the token is never sent to a responder that
+	// has not yet proved it is af.
+	if hello, err := exchange(claimRequest{Hello: true}); err != nil {
 		return Capability{}, err
+	} else if !hello.OK {
+		return Capability{}, errors.New("launch capability refused: the claim endpoint did not answer the hello")
 	}
-	var resp claimResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return Capability{}, fmt.Errorf("launch capability refused: %w", err)
+	resp, err := exchange(claimRequest{Token: token, Pane: os.Getenv("TMUX_PANE")})
+	if err != nil {
+		return Capability{}, err
 	}
 	if !resp.OK || resp.Cap == nil {
 		return Capability{}, errors.New(resp.Error)
