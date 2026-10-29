@@ -82,17 +82,21 @@ func flaggedPaneSwapInstanceForRespawn(t *testing.T, extraAccounts ...string) (
 	return inst, target, &newSessions, &spawns
 }
 
-// poisonRuntimeProgramWithFlaggedBase simulates the durable evidence a
-// successful pane-fallback swap's respawn records: the swap prepared its launch
-// against the pane's flagged frozen program, and the respawn boundary
-// (respawnWithConversation → setRuntimeLaunch(declarationBase, ts)) writes that
-// flagged prepared.base as RuntimeProgram. The mock exec cannot answer a pane
-// root probe, so the record carries the command alone (pid=0, startID=0), exactly
-// the "pane query that cannot answer records the command alone" contract.
+// poisonRuntimeProgramWithFlaggedBase simulates the durable evidence an
+// earlier version's respawn recorded before the clean-base fix: that respawn
+// boundary (respawnWithConversation → setRuntimeLaunch(declarationBase, ts))
+// wrote the flagged prepared.base as RuntimeProgram, although RuntimeProgram's
+// contract holds the clean override-resolved base command. A row last respawned
+// by such a version reaches the seeding gate with runtimeEstablished true and
+// RuntimeProgram equal to the pane's frozen program, so the seeding-path change
+// (which still fires in that state) is what keeps its next swap from being
+// refused for af's own flag. The mock exec cannot answer a pane root probe, so
+// the record carries the command alone (pid=0, startID=0), exactly the "pane
+// query that cannot answer records the command alone" contract.
 func poisonRuntimeProgramWithFlaggedBase(t *testing.T, inst *Instance) {
 	t.Helper()
 	require.Equal(t, poisonFlagged, inst.ResolvedPaneProgram(),
-		"poison seeds from the flagged pane program the swap respawn recorded")
+		"poison seeds from the flagged pane program the earlier version's respawn recorded")
 	inst.mu.Lock()
 	inst.setRuntimeEvidenceLocked(poisonFlagged, 0, 0)
 	inst.mu.Unlock()
@@ -110,17 +114,20 @@ func reenterLimitResumeFence(t *testing.T, inst *Instance) {
 	require.NoError(t, inst.BeginLimitResume())
 }
 
-// TestPoisonReproEndToEndRespawnRecordsFlaggedBase is the end-to-end reproduction:
-// after a successful pane-fallback account swap, the swap's own respawn boundary
-// records af's flag-carrying pane program as durable RuntimeProgram evidence,
-// and the NEXT automatic swap on that session must keep succeeding — not be
-// refused for af's own injected flag as an undeclared argument.
+// TestPoisonReproEndToEndRespawnRecordsCleanBase is the end-to-end reproduction:
+// after a successful pane-fallback account swap, the swap's own respawn
+// boundary records the clean override-resolved base (RuntimeProgram's
+// contract), not the flagged pane program the proof was declared against — so
+// the NEXT automatic swap on that session succeeds through the ordinary
+// extension path rather than being refused for af's own injected flag as an
+// undeclared argument.
 //
-// Before the fix, the second swap was refused: RuntimeProgram being non-empty
-// routed the plan off the pane-declaration seeding gate, so the proof recomputed
-// from the flagged base declared nothing and ValidateAccountCommand rejected
+// Before the fix, the respawn recorded the flagged prepared base as
+// RuntimeProgram: the next swap reached the seeding gate with
+// runtimeEstablished true, and (before the seeding-gate change) the gate
+// refused to fire, recomputing the proof from the flagged base and rejecting
 // af's own `-c check_for_update_on_startup=false` as a user argument.
-func TestPoisonReproEndToEndRespawnRecordsFlaggedBase(t *testing.T) {
+func TestPoisonReproEndToEndRespawnRecordsCleanBase(t *testing.T) {
 	inst, _, newSessions, spawns := flaggedPaneSwapInstanceForRespawn(t, "next")
 
 	// 1. The first pane-fallback swap succeeds: the seeding gate vouches for
@@ -141,12 +148,13 @@ func TestPoisonReproEndToEndRespawnRecordsFlaggedBase(t *testing.T) {
 		"the replacement pane set starts under the selected account")
 	require.Greater(t, *newSessions, 0, "the respawn spawned a fresh agent pane")
 
-	// 3. The respawn poisoned RuntimeProgram: it recorded the flagged prepared
-	//    base (the pane program that carries af's injected flag) as durable
-	//    runtime evidence, although RuntimeProgram's contract holds the clean
-	//    override-resolved base command.
-	require.Equal(t, poisonFlagged, inst.RuntimeProgram(),
-		"the swap respawn records the flagged prepared base as RuntimeProgram (the poison)")
+	// 3. The respawn recorded the CLEAN override-resolved base as RuntimeProgram
+	//    (its contract), not the flagged pane program the proof was declared
+	//    against: a same-agent pane-fallback swap's proof base carries af's own
+	//    injected flag, and recording that would poison every later reader of
+	//    RuntimeProgram.
+	require.Equal(t, tmux.ProgramCodex, inst.RuntimeProgram(),
+		"the respawn records the clean override-resolved base, not the flagged pane program")
 	require.Equal(t, poisonFlagged, inst.ResolvedPaneProgram(),
 		"the pane still carries the flagged program")
 	require.Equal(t, []string{"-c", "check_for_update_on_startup=false"}, inst.ResolvedPaneGeneratedArgs(),
@@ -160,17 +168,19 @@ func TestPoisonReproEndToEndRespawnRecordsFlaggedBase(t *testing.T) {
 	}
 	require.True(t, launched, "the respawn spawned the flagged codex program")
 
-	// 4. The next swap must keep succeeding exactly as the first did. Before the
-	//    fix this was refused with "could not be proven safe" naming af's own flag.
+	// 4. The next swap keeps succeeding through the ordinary extension path:
+	//    RuntimeProgram is the clean base, which differs from the flagged pane
+	//    program, so the seeding gate does not fire and the proof describes the
+	//    injected flag as an ordinary trailing extension (the #5479 control shape).
 	reenterLimitResumeFence(t, inst)
 	require.NoError(t, inst.ValidateAccountSwap("next"),
 		"after a pane-fallback swap the next automatic swap must keep succeeding")
 	nextPlan := cloneAccountSwapLaunchPlan(inst.accountSwapLaunch)
 	require.NotNil(t, nextPlan)
-	require.Equal(t, poisonFlagged, nextPlan.base,
-		"the next swap's base is still the flagged pane program (now via RuntimeProgram)")
+	require.Equal(t, tmux.ProgramCodex, nextPlan.base,
+		"the next swap's base is the clean runtime program the respawn recorded")
 	require.Equal(t, []string{"-c", "check_for_update_on_startup=false"}, nextPlan.proof.GeneratedArgs,
-		"the next swap's proof still declares af's flag from the pane's recording")
+		"the next swap's proof describes the injected flag as an ordinary trailing extension")
 }
 
 // TestPoisonReproNextManualSwapSucceedsWithPoisonedRuntimeEvidence confirms the
@@ -193,6 +203,58 @@ func TestPoisonReproNextManualSwapSucceedsWithPoisonedRuntimeEvidence(t *testing
 	require.NotEmpty(t, program)
 	require.NoError(t, inst.ValidateManualAccountSwap("next", "", false),
 		"the next manual swap after a poisoned RuntimeProgram must succeed")
+}
+
+// TestPoisonReproSeedingRefusesUndeclaredUserArg is the negative test for the
+// relaxed seeding gate: the gate fires (RuntimeProgram matches the pane's frozen
+// program, the state an earlier version's poisoned respawn left behind), but a
+// pane whose recorded program carries a user-supplied argument af did not declare
+// must still be refused. Only af's own declared flags may pass.
+//
+// The pane's frozen program carries the operator's --dangerous-flag after af's own
+// injected startup-update flag, and the recorded GeneratedArgs vouch only for
+// af's own words. The seeding gate fires because RuntimeProgram matches the pane,
+// but the proof's base-suffix check (GenerateAccountLaunchProof's accountBaseWords
+// match against trustedBaseArgs) sees the user flag where af's declaration expects
+// its own — the proof fails closed and ValidateAccountCommand refuses the swap.
+func TestPoisonReproSeedingRefusesUndeclaredUserArg(t *testing.T) {
+	carryAmbientProviderHomes(t)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramCodex: tmux.ProgramCodex}
+	require.NoError(t, config.SaveConfig(cfg))
+	registerAccount(t, tmux.ProgramCodex, "work")
+	inst := accountSwapTestInstanceWithProgram(tmux.ProgramCodex)
+	inst.Path = initTempGitRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	// A pane whose frozen program carries a user-supplied argument af did not
+	// declare: the recorded GeneratedArgs vouch only for af's own startup-update
+	// flag, not the operator's --dangerous-flag. RuntimeProgram holds that same
+	// flagged program — the state an earlier version's poisoned respawn left
+	// behind — so the seeding gate fires.
+	const userFlagged = "codex -c check_for_update_on_startup=false --dangerous-flag"
+	ts := tmux.NewTmuxSession(inst.Title, userFlagged)
+	setLaunchProgram(ts, userFlagged, sessionenv.AccountLaunchProof{
+		GeneratedArgs: []string{"-c", "check_for_update_on_startup=false"},
+	})
+	inst.mu.Lock()
+	inst.Tabs = []*Tab{newAgentTab(ts)}
+	inst.setRuntimeEvidenceLocked(userFlagged, 0, 0)
+	inst.mu.Unlock()
+	require.Equal(t, userFlagged, inst.RuntimeProgram(),
+		"RuntimeProgram matches the pane's frozen program: the seeding gate fires")
+	require.Equal(t, userFlagged, inst.ResolvedPaneProgram(),
+		"the pane carries a user-supplied flag af did not declare")
+
+	// The seeding gate fires (RuntimeProgram == ResolvedPaneProgram), but the
+	// proof's base suffix does not match af's recorded declaration: the base
+	// ends in the user's --dangerous-flag where af's declaration expects its own
+	// -c flag, so the proof fails closed and the account boundary refuses the
+	// swap. Only af's own declared flags may pass.
+	require.Error(t, inst.ValidateAccountSwap("work"),
+		"the seeding gate must not vouch for a user-supplied argument af did not declare")
 }
 
 // TestPoisonReproSeedingDoesNotWidenAdmission confirms the fix does not widen

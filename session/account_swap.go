@@ -315,11 +315,14 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		// match scopes the seeding to the base the pane actually recorded a
 		// declaration for — a committed retry whose frozen base matches the
 		// pane, or a fresh pane-fallback — and the proof fails closed when a
-		// caller records no matching declaration. The seeding fires whether the
-		// base came from RuntimeProgram or the empty-evidence pane-fallback: a
-		// successful pane-fallback swap records the flagged pane program as
-		// durable RuntimeProgram evidence, so the next swap reaches this gate
-		// with runtimeEstablished true yet the same recorded declaration is still
+		// caller records no matching declaration (a user-supplied argument af
+		// did not author keeps the base suffix from matching the recorded
+		// words, so only af's own declared flags may pass). The seeding fires
+		// whether the base came from RuntimeProgram or the empty-evidence
+		// pane-fallback: a row last respawned by a version that recorded the
+		// flagged pane program as RuntimeProgram (the poison the clean-base
+		// respawn boundary now prevents) still reaches this gate with
+		// runtimeEstablished true yet the same recorded declaration is still
 		// the provenance the boundary already accepts for that base. Requiring
 		// runtimeEstablished to be false (the earlier gate) left af's own flag
 		// undeclared on that next swap and the swap was refused.
