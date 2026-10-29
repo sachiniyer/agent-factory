@@ -5,10 +5,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The workspace's editor, run on the HOST the agent-server lives on (W5.4, #5571).
@@ -38,6 +43,10 @@ type agentEditorResponse struct {
 type agentEditor struct {
 	once sync.Once
 	sup  *vscodeSupervisor
+	// reapOnce / lock: the crash sweep (reapCrashedEditors) runs once, and the
+	// namespace lock it takes is held for the life of the process.
+	reapOnce sync.Once
+	lock     *os.File
 	// hook replaces the real start in tests, which have no editor binary.
 	hook func() (vscodeEndpoint, error)
 }
@@ -49,8 +58,61 @@ type agentEditor struct {
 // live in a directory of their own, so neither can match the other's processes.
 // Keyed by the stable id, it also keeps one session's sweeps off another's.
 func (hs *headlessServer) editorNamespace() string {
-	sum := sha256.Sum256([]byte(hs.inst.ID))
+	sum := sha256.Sum256([]byte(hs.editorNamespaceKey()))
 	return "ws-" + hex.EncodeToString(sum[:6])
+}
+
+// editorNamespaceKey is what names the workspace across an agent-server restart
+// (#6092). inst.ID is minted fresh by every launch, so a namespace keyed on it
+// could never be found again after a crash: the replacement server would look in a
+// directory of its own and the old editor's owner record would sit unread forever.
+// The repository path and title are what the driving daemon passes on every launch
+// of the same session, so they survive the crash. Only the namespace is stable: the
+// records inside stay keyed by inst.ID, and the startup sweep is gated on a lock a
+// live server holds (reapCrashedEditors), so two live servers that happen to share
+// a repo and title never reap each other. Without both (tests, embedded use) it
+// falls back to the per-launch id.
+func (hs *headlessServer) editorNamespaceKey() string {
+	if hs.repoPath != "" && hs.title != "" {
+		return hs.repoPath + "\x00" + hs.title
+	}
+	return hs.inst.ID
+}
+
+// reapCrashedEditors ends editors a previous agent-server for THIS workspace left
+// behind when it was SIGKILLed or OOM-killed (#6092). An editor starts in its own
+// process group, so nothing kills it with its parent.
+//
+// It takes an exclusive non-blocking flock on a file in the workspace's namespace
+// directory and holds it for the life of this process. The kernel drops the lock
+// when a process dies however it dies, so holding it proves no other agent-server
+// is alive for this namespace; failing to take it means one is, and nothing is
+// swept. Only then does it run the supervisor's persisted-owner reap, which
+// signals a process only after confirming pid + start identity + boot + nonce
+// against the record it wrote — never by name alone, the same rule as #6016.
+func (hs *headlessServer) reapCrashedEditors() error {
+	if hs.hasNoEditorIdentity() || hs.editorNamespaceKey() == hs.inst.ID {
+		return nil // no crash-stable identity to look under
+	}
+	var err error
+	hs.editor.reapOnce.Do(func() {
+		sup := hs.editorSupervisor()
+		var dir string
+		if dir, err = vscodeSocketDirIn(sup.namespace); err != nil {
+			return
+		}
+		var f *os.File
+		if f, err = os.OpenFile(filepath.Join(dir, ".workspace.lock"), os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW, 0o600); err != nil {
+			return
+		}
+		if lerr := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); lerr != nil {
+			_ = f.Close() // a live agent-server owns this workspace; leave its editor
+			return
+		}
+		hs.editor.lock = f
+		err = sup.stopAllPersisted()
+	})
+	return err
 }
 
 func (hs *headlessServer) editorSupervisor() *vscodeSupervisor {
@@ -77,6 +139,9 @@ func (hs *headlessServer) ensureEditor() (vscodeEndpoint, error) {
 	}
 	if strings.TrimSpace(hs.inst.ID) == "" {
 		return vscodeEndpoint{}, errors.New("the workspace has no stable id to own an editor under")
+	}
+	if err := hs.reapCrashedEditors(); err != nil {
+		log.WarningLog.Printf("agent-server: sweeping a previous server's editor: %v", err)
 	}
 	return hs.editorSupervisor().ensureServerForInstance(hs.agentEditorKey(), hs.inst.ID, worktree)
 }

@@ -281,3 +281,64 @@ func TestEditorSocketPathFitsARealisticMacHomeWithHeadroom(t *testing.T) {
 		}
 	}
 }
+
+// #6092: an agent-server SIGKILLed on a remote host leaves its editor running (its
+// own process group, no parent-death signal). The replacement server gets a fresh
+// instance id, so the namespace is keyed on the repo + title the daemon passes on
+// every launch, and the replacement's startup sweep reaps the old editor by its
+// recorded identity.
+func TestReplacementAgentServerReapsTheCrashedServersEditor(t *testing.T) {
+	shortAFHome(t)
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	newServer := func(id, repo, title string) *headlessServer {
+		hs := &headlessServer{inst: &session.Instance{ID: id}, repoPath: repo, title: title}
+		hs.editorSupervisor().configuredBinary = func() string { return binary }
+		hs.editorSupervisor().startGrace = 5 * time.Second
+		t.Cleanup(hs.editorSupervisor().Stop)
+		return hs
+	}
+	start := func(hs *headlessServer) *vscodeServer {
+		sup := hs.editorSupervisor()
+		_, err := sup.ensureServerForInstance(hs.agentEditorKey(), hs.inst.ID, t.TempDir())
+		if err != nil && !errors.Is(err, errVSCodeStarting) {
+			t.Fatalf("start editor for %s: %v", hs.inst.ID, err)
+		}
+		sup.mu.Lock()
+		defer sup.mu.Unlock()
+		s := sup.servers[hs.agentEditorKey()]
+		require.NotNil(t, s)
+		return s
+	}
+
+	crashed := newServer("launch-1", "/srv/repo", "feature")
+	require.NoError(t, crashed.reapCrashedEditors()) // takes the namespace lock
+	orphan := start(crashed)
+	require.True(t, orphan.alive())
+
+	// Another workspace on the same host: different title, so a different namespace.
+	other := newServer("launch-x", "/srv/repo", "other")
+	require.NoError(t, other.reapCrashedEditors())
+	bystander := start(other)
+	require.True(t, bystander.alive())
+
+	replacement := newServer("launch-2", "/srv/repo", "feature")
+	require.Equal(t, crashed.editorNamespace(), replacement.editorNamespace(), "the namespace must survive a new instance id")
+	require.NotEqual(t, crashed.editorNamespace(), other.editorNamespace())
+
+	// While the first server is alive (it holds the namespace lock) a same-keyed
+	// server must not reap its editor.
+	require.NoError(t, replacement.reapCrashedEditors())
+	require.True(t, orphan.alive(), "a live agent-server's editor is never swept")
+
+	// The crash: the kernel releases the dead process's lock. A fresh replacement
+	// then finds the record and reaps the editor.
+	require.NoError(t, crashed.editor.lock.Close())
+	replacement2 := newServer("launch-3", "/srv/repo", "feature")
+	require.NoError(t, replacement2.reapCrashedEditors())
+	select {
+	case <-orphan.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the crashed server's editor was not reaped by the replacement")
+	}
+	require.True(t, bystander.alive(), "another workspace's editor is untouched")
+}
