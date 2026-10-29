@@ -345,3 +345,24 @@ func TestTakeoverPrivateSessionKeepsTheSourceOptions(t *testing.T) {
 	assert.Less(t, strings.Index(strings.Join(r.attachArgs(), " "), "show-options"), strings.Index(strings.Join(r.attachArgs(), " "), "key-table"),
 		"the copy runs before the routing options so they win")
 }
+
+// The scripts handed to tmux's run-shell are parsed by sh: every word the route
+// interpolates must come back as exactly the intended argv. shellQuote is the only
+// quoting in the path, so round-trip hostile session names through a real sh.
+func TestTakeoverShellQuotingRoundTrips(t *testing.T) {
+	for _, name := range []string{
+		"af_af-login-codex-work", "plain", "with space", "it's", `dq"uote`, "$(touch /tmp/x)", "a;b|c&d", "back\\slash", "star*glob", "=eq", "-dash",
+	} {
+		out, err := exec.Command("sh", "-c", `printf '%s\n' `+shellQuote(name)).Output()
+		require.NoError(t, err, name)
+		assert.Equal(t, name+"\n", string(out), "sh must hand back exactly the session name %q as one word", name)
+	}
+
+	// The scripts themselves parse as shell and name the right targets as ONE word.
+	cw, _ := config.ParseDetachKey("ctrl-w")
+	r := newTakeoverRoute("it's a login", cw, "ctrl+w")
+	for _, script := range []string{r.mirrorSessionOptionsScript(), r.mirrorRootScript()} {
+		require.NoError(t, exec.Command("sh", "-n", "-c", script).Run(), "must parse as shell: %s", script)
+	}
+	assert.Contains(t, r.mirrorSessionOptionsScript(), `show-options -t '=it'\''s a login'`)
+}
