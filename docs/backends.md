@@ -9,10 +9,12 @@ A session's **backend** decides *where* its workspace and agent run. Every
 backend exposes the same session surface — attach, preview, prompt delivery, the
 live PTY stream — so the TUI, CLI, and daemon drive a containerised session much
 like a local one. Tab admission follows what each kind needs: shell/process tabs
-need a local PTY and process, so those remain local-only; a VS Code tab on an
-off-box session opens the editor running on the session's host, rooted at the
-workspace and relayed through the agent-server (code-server or openvscode-server
-must be installed there; af detects it and never installs it). A metadata-only web tab spawns neither and can be added
+need a local PTY and process, so those remain local-only; an off-box session
+serves them too, in the workspace, when its agent-server advertises a tab API;
+a VS Code tab on an off-box session opens the editor running on the
+session's host, rooted at the workspace and relayed through the agent-server
+(code-server or openvscode-server must be installed there; af detects it and
+never installs it). A metadata-only web tab spawns neither and can be added
 to an off-box session (docker, ssh, sandbox, hook) when its target is an external
 HTTPS URL, or a loopback address (including `--port`): the daemon's web-tab proxy
 reaches the workspace's own `127.0.0.1:<port>` through the agent-server's port
