@@ -138,7 +138,7 @@ func TestHostsAdd_UnreachableKeepsTheEntryAndNamesTheOperatorOwnedFix(t *testing
 
 func TestHostsAdd_ReadyAndFlags(t *testing.T) {
 	f := &hostsFake{hosts: map[string]config.HostConfig{}, reply: daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{
-		{Name: "gpu", Probed: true, Reachable: true, Readiness: "ready"},
+		{Name: "gpu", Probed: true, Reachable: true, Complete: true, Readiness: "ready"},
 	}}}
 	installHostsFake(t, f)
 	hostsAddDefault, hostsAddIdentityFile = true, "/home/me/.ssh/gpu"
@@ -203,7 +203,7 @@ func TestHostsCheck_ExitCodesSeparateBlockedFromUnreachable(t *testing.T) {
 	f := &hostsFake{hosts: map[string]config.HostConfig{"a": {Host: "a.example"}}}
 	installHostsFake(t, f)
 
-	f.reply = daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{{Name: "a", Probed: true, Reachable: true}}}
+	f.reply = daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{{Name: "a", Probed: true, Reachable: true, Complete: true}}}
 	_, err := runHosts(t, hostsCheckCmd)
 	assert.NoError(t, err)
 
@@ -214,6 +214,10 @@ func TestHostsCheck_ExitCodesSeparateBlockedFromUnreachable(t *testing.T) {
 	f.reply = daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{{Name: "a", Probed: true, Error: "down"}}}
 	_, err = runHosts(t, hostsCheckCmd)
 	assert.ErrorIs(t, err, errHostsUnreachableOrBusy)
+
+	f.reply = daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{{Name: "a", Probed: true, Reachable: true, Readiness: "blocked"}}}
+	_, err = runHosts(t, hostsCheckCmd)
+	assert.ErrorIs(t, err, errHostsCheckIncomplete, "a reachable host whose probe could not be read is a third outcome, not a silent exit 0")
 }
 
 func TestHostsList(t *testing.T) {
@@ -223,4 +227,81 @@ func TestHostsList(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "a\tu@a.example\n")
 	assert.Contains(t, out, "b\tb.example:22 (default)\n")
+}
+
+// af hosts check treats a reachable host whose probe af could not read as
+// unknown, never ready — the same contract doctor honors (#5841). It must not
+// print "ready" or exit 0, and the cached verdict stays visible next to the
+// unknown, as doctor shows it.
+func TestHostsCheck_IncompleteProbeIsUnknownNeverReady(t *testing.T) {
+	f := &hostsFake{hosts: map[string]config.HostConfig{"a": {Host: "a.example"}}}
+	installHostsFake(t, f)
+
+	// Reachable, no problems, but git/tmux/gh did not all give a recognised
+	// answer (truncated/garbled output, banner noise, a broken tmux -V).
+	f.reply = daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{
+		{Name: "a", Probed: true, Reachable: true, Readiness: "blocked"},
+	}}
+	out, err := runHosts(t, hostsCheckCmd, "a")
+	require.ErrorIs(t, err, errHostsCheckIncomplete, "an incomplete probe must not exit 0")
+	assert.NotContains(t, out, "ready (git, tmux and gh answered)", "an incomplete probe is never ready")
+	assert.Contains(t, out, "a: unknown: the host answered but not with a recognisable git, tmux and gh report")
+	assert.Contains(t, out, "cached state: blocked", "a cached block stays visible next to the unknown")
+	assert.Contains(t, out, "prints no banner or extra output", "the remedy names the banner-noise cause")
+	assert.Contains(t, out, "af hosts check a", "the remedy re-runs this command")
+
+	// A reply that does not carry the field — an older daemon — decodes
+	// Complete false and so also reads as unknown, never ready.
+	f.reply = daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{
+		{Name: "a", Probed: true, Reachable: true},
+	}}
+	out, err = runHosts(t, hostsCheckCmd, "a")
+	require.ErrorIs(t, err, errHostsCheckIncomplete)
+	assert.NotContains(t, out, "ready (git, tmux and gh answered)")
+	assert.Contains(t, out, "a: unknown: the host answered but not with a recognisable git, tmux and gh report")
+}
+
+// af hosts add saves a host whose probe was incomplete but reports it not ready
+// and exits non-zero, like it does for a host missing a tool — instead of
+// printing "ready" and succeeding (#5841). The entry is still kept: the fix is
+// on the host or the network, and `af hosts check <name>` is the loop.
+func TestHostsAdd_IncompleteProbeIsNotReadyButKeepsEntry(t *testing.T) {
+	f := &hostsFake{hosts: map[string]config.HostConfig{}, reply: daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{
+		{Name: "box1", Probed: true, Reachable: true},
+	}}}
+	installHostsFake(t, f)
+	out, err := runHosts(t, hostsAddCmd, "box1", "ubuntu@box1.ts.net")
+	require.ErrorIs(t, err, errHostsNotReady, "a saved-but-incomplete host exits non-zero")
+	assert.Contains(t, out, "saved host box1 (ubuntu@box1.ts.net)")
+	assert.Contains(t, out, "box1: unknown: the host answered but not with a recognisable git, tmux and gh report")
+	assert.NotContains(t, out, "ready (git, tmux and gh answered)")
+	assert.Contains(t, f.hosts, "box1", "the entry is kept either way")
+	assert.Equal(t, "box1.ts.net", f.hosts["box1"].Host)
+	assert.Equal(t, []daemon.CheckHostRequest{{Host: "box1"}}, f.checks)
+}
+
+func TestRenderHostCheck_UnknownArmMirrorsDoctor(t *testing.T) {
+	hostsPosture = func() string { return "" }
+	t.Cleanup(func() { hostsPosture = globalHostKeyPosture })
+
+	entry := config.HostConfig{Host: "box.example"}
+	var out bytes.Buffer
+	renderHostCheck(&out, daemon.HostCheckResult{
+		Name: "box", Probed: true, Reachable: true, Readiness: "blocked",
+	}, entry)
+	rendered := out.String()
+	assert.NotContains(t, rendered, "ready (git, tmux and gh answered)")
+	assert.Contains(t, rendered, "box: unknown: the host answered but not with a recognisable git, tmux and gh report; cached state: blocked")
+	assert.Contains(t, rendered, "fix: check that a non-interactive `"+sshRemedyCommand(entry)+"` prints no banner or extra output for a plain command, then run `af hosts check box`")
+
+	// No cached verdict: the suffix is omitted, the verdict still reads unknown.
+	var out2 bytes.Buffer
+	renderHostCheck(&out2, daemon.HostCheckResult{Name: "box", Probed: true, Reachable: true}, config.HostConfig{Host: "box.example"})
+	assert.NotContains(t, out2.String(), "cached state:")
+	assert.Contains(t, out2.String(), "box: unknown: the host answered but not with a recognisable git, tmux and gh report\n")
+
+	// A complete answer still renders ready.
+	var out3 bytes.Buffer
+	renderHostCheck(&out3, daemon.HostCheckResult{Name: "box", Probed: true, Reachable: true, Complete: true}, config.HostConfig{Host: "box.example"})
+	assert.Contains(t, out3.String(), "box: ready (git, tmux and gh answered)")
 }
