@@ -6,12 +6,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -359,4 +362,42 @@ func TestAgentSwapRetiresTheStoredLaunchScript(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "predates restartable launches")
 	assert.False(t, h.ran("echo relaunched"))
+}
+
+// The restart's adoption sends the EXACT conversation the daemon recorded, so the
+// host never has to pick one itself (#4797, #5995 review).
+func TestRestartAdoptionLaunchCarriesTheRecordedConversation(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	p.launchScript = "echo relaunched & echo $!"
+	inst.mu.Lock()
+	inst.reportedConversation = AgentConversationData{Agent: "claude", ID: "conv-recorded-123"}
+	inst.mu.Unlock()
+	require.Empty(t, inst.Tabs, "the fixture row holds its conversation on the handle, as a reloaded row does")
+
+	require.NoError(t, inst.ReattachSandbox())
+	require.Len(t, h.lifecycle, 2)
+	assert.Contains(t, h.lifecycle[1], "launch")
+	assert.Contains(t, h.lifecycle[1], "conv-recorded-123", "the launch must name the recorded conversation exactly")
+}
+
+func TestRefuseGuessedRespawnOnlyWhenTheSessionIsGoneAndAnIDIsRecorded(t *testing.T) {
+	newInst := func(alive bool) *Instance {
+		exec := cmd_test.MockCmdExec{
+			RunFunc: func(c *exec.Cmd) error {
+				if strings.Contains(c.String(), "has-session") && !alive {
+					return errors.New("no session")
+				}
+				return nil
+			},
+			OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, nil },
+		}
+		return &Instance{Title: "t", Tabs: []*Tab{newAgentTab(tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_t", "claude", nil, exec))}}
+	}
+	conv := AgentConversationData{Agent: "claude", ID: "conv-1"}
+
+	assert.NoError(t, newInst(true).RefuseGuessedRespawn(conv), "a surviving session is reattached, never respawned")
+	assert.NoError(t, newInst(false).RefuseGuessedRespawn(AgentConversationData{}), "no recorded id: nothing to be exact about")
+	err := newInst(false).RefuseGuessedRespawn(conv)
+	require.Error(t, err, "a gone session with an exact id recorded must not be respawned onto a guess")
+	assert.Contains(t, err.Error(), "conv-1")
 }

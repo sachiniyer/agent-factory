@@ -149,7 +149,9 @@ func (i *Instance) ReattachSandbox() error {
 		// it: an ordinary agent-server destroys its worktree on SIGTERM. It stays
 		// running and recorded (adoptPending), and the next reattach finishes the
 		// adoption.
-		srv := &remoteAgentServer{rc: rc}
+		// inst is set so Launch sends the EXACT recorded conversation id: a bare
+		// server would omit it and the host could resume onto another one (#4797).
+		srv := &remoteAgentServer{rc: rc, inst: i}
 		if aerr := errors.Join(srv.Provision(false), srv.Launch(false)); aerr != nil {
 			p.abandonUnadoptedTunnel()
 			return fmt.Errorf("reattach %q: adopting the restarted agent-server failed (it is left running with its workspace; the next reattach retries): %w", i.Title, aerr)

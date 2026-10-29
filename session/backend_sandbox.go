@@ -859,10 +859,17 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// A subshell so `exit "$rc"` reports rm's status as this group's status
 	// without terminating anything that might follow it.
 	removeAndConfirm := "( " + rm + "; rc=$?; " + respond + `; exit "$rc" )`
+	afPath := p.sessionDir + "/" + sshAfBinaryName
+	// A restart records the PID it launched on the HOST before af learns it, so a
+	// daemon that exited in between leaves a row naming the dead server while the
+	// restarted one runs. Reaping removes the session directory under whatever
+	// still runs there, so the host's record is consulted too and a live match is
+	// stopped (or the reap refused) first.
+	hostKill := "( " + remoteRecordedPIDKillScript(p.agentServerPIDPath(), p.remotePID, afPath, p.tokenRef) + " )"
 	if p.remotePID == "" {
-		return removeAndConfirm, expect
+		return hostKill + " && " + removeAndConfirm, expect
 	}
-	kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef)
+	kill := remotePIDIdentityKillScript(p.remotePID, afPath, p.tokenRef)
 	// A SUBSHELL, not a { } group. The identity-kill script ends in `exit 0` when
 	// the process is already gone — the common case after a clean shutdown — and a
 	// group command runs in the CURRENT shell, so that exit terminated the whole
@@ -870,7 +877,7 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// looked like "exited 0, never confirmed": the directory survived and the
 	// record was retained forever. A subshell contains the exit and yields it as
 	// the group's status, which is what `&&` needs.
-	return "( " + kill + " ) && " + removeAndConfirm, expect
+	return hostKill + " && ( " + kill + " ) && " + removeAndConfirm, expect
 }
 
 // sandboxReapNonce makes each reap's challenge unique, so a marker captured from
