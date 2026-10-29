@@ -1011,8 +1011,10 @@ What the sandbox host needs, and what af does to it:
   daemon already gives sandboxes a working callback.
   When that is not the case the create is **not** refused: the session is created
   without a callback credential and the reason is reported (`callback_unavailable_reason`
-  in the backend picker). Only the `/v1/Snapshot` route is admitted for this
-  credential, answering with the caller's own session.
+  in the backend picker). The credential admits a bounded `af` surface —
+  `Snapshot` returns the caller's project (the sandbox-safe projection
+  withholds the tmux name and the repository paths), and every other admitted
+  route is bounded by its handler to the caller's own project.
 - **Daemon restart.** The agent-server is started with `nohup`, so it
   outlives a daemon restart on the host, and on start the daemon reattaches
   to it: it re-dials the tunnel and rebinds the same agent-server, with no
