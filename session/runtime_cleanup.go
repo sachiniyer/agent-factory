@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,6 +10,32 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+// errPreservedWorkspaceHandleErased is the cause carried by a preserved archived
+// row whose runtime-cleanup handle did not survive to a reload. A binary rolled
+// back to before #5886 clears RuntimeCleanup on every archived checkpoint, so a
+// downgrade round trip erases the only identity that names the preserved
+// directory, and a row written before the handle was published carries none to
+// rebuild either. The row still owes the reap, so FromInstanceData fail-closes
+// it (unavailablePreservedArchiveReap) instead of installing the nil teardown a
+// no-op kill would delete through — the #5867 orphan the handle was meant to
+// prevent.
+var errPreservedWorkspaceHandleErased = errors.New("the preserved workspace's reap handle is missing; a binary rolled back to before #5886 erases it on every archived checkpoint, and a row predating the handle's publication leaves none to rebuild")
+
+// unavailablePreservedArchiveReap is the fail-closed teardown for a preserved
+// unpushed archive whose runtime-cleanup handle is gone. It returns the
+// unknown-state sentinel so the destructive kill boundary retains the only
+// record pointing at the preserved directory instead of laundering the missing
+// handle into a no-op delete that orphans it (the #5867 regression a downgrade to
+// before #5886 re-opens). The durable archived_workspace field remains on the row
+// and the API, so an operator can reap the directory by hand or restore the
+// session while af holds the row.
+func unavailablePreservedArchiveReap(title, backendType string, cause error) func() error {
+	return func() error {
+		return fmt.Errorf("%w: session %q is a preserved archived workspace (backend %q) whose runtime-cleanup handle is unavailable (%v); retaining the record rather than deleting it as if the workspace were already reaped — reap its directory by hand via the archived_workspace field, or restore the session",
+			ErrWorkspaceStateUnknown, title, backendType, cause)
+	}
+}
 
 // RuntimeCleanupData is the storage-only teardown identity committed alongside a
 // remote session's kill tombstone or an unknown cleanup outcome. It is

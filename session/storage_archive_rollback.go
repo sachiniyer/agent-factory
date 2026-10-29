@@ -232,6 +232,23 @@ func (d InstanceData) ForStorage() InstanceData {
 			// the reap of it, and a restart must not lose the handle that names what
 			// af made (#5867). A fresh snapshot staged the private field; a reloaded
 			// row carries only the public one.
+			//
+			// This publication is intentionally NOT fenced against a binary rolled
+			// back to before #5886. That release's ForStorage case lv == LiveArchived
+			// clears RuntimeCleanup unconditionally, so a single checkpoint on the
+			// rolled-back binary erases the handle; the naive fence (projecting
+			// RuntimeCleanupStateUnknown, as the ordinary-sandbox branch does) cannot
+			// help, because the old LiveArchived case runs first and clears the flag
+			// too. A fence that survives the rolled-back checkpoint would have to
+			// project the row's liveness away from LiveArchived so the old branch
+			// never runs, but liveness is read by many raw disk readers that do not
+			// roll the rollback fence forward (RecordedLiveness/IsArchivedData callers
+			// across api, daemon, commands, app), so that change is out of scope here.
+			// The gap is contained on the load side instead: FromInstanceData
+			// fail-closes a preserved archive whose handle is gone (#5867), so a kill
+			// retains the only record pointing at the directory af made instead of
+			// silently orphaning it. The durable archived_workspace field survives the
+			// rolled-back checkpoint, so an operator can still reap or restore by hand.
 			if d.runtimeCleanup != nil {
 				d.RuntimeCleanup = d.runtimeCleanup.clone()
 			}
