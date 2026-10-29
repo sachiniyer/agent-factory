@@ -934,8 +934,15 @@ admitted off-box). A **Lost** sandbox session (one whose
 sandbox answered that its agent is gone) is reachable, so recovery **relaunches
 the agent in place**: the sandbox's agent-server stops the agent (if it is still
 running) and starts it again in its existing workspace with the provider's resume,
-rebuilding the worktree on the recorded branch if it was deleted. The branch, the
-tree and any uncommitted work are otherwise untouched, and nothing is pushed,
+rebuilding the worktree if it was deleted: on the recorded branch when that
+branch still exists (its tip is kept), or — when the branch is gone too — by
+recreating it from the recorded base commit (falling back to the origin default
+branch, then `HEAD`), which is only attempted when the agent's exact recorded
+conversation can be resumed; otherwise the rebuild is refused and the session
+stays Lost. A rebuilt worktree runs the repository's `post_worktree_commands`
+again, so installs or builds with side effects repeat on that recovery. When the
+worktree still exists, the branch, the tree and any uncommitted work are untouched
+and no hooks re-run. Either way nothing is pushed,
 reaped, re-cloned or re-provisioned. The same relaunch serves `retry-limit` on a
 dead agent. A sandbox built before the relaunch route existed (it advertises the
 `relaunch` feature on `/v1/health`) falls back to replacing the sandbox: recovery

@@ -815,13 +815,16 @@ var sessionsAttachCmd = &cobra.Command{
 var sessionsWhoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "Identify the current Agent Factory session",
-	Long: "Returns the session info for the current session. With a daemon credential (AF_DAEMON_TOKEN), the daemon reports the session that credential is bound to — the narrowed projection a sandbox receives withholds the tmux name. Otherwise it matches the current tmux session name against stored sessions.\n\n" +
+	Long: "Returns the session info for the current session. With a session-bound daemon credential (a sandbox credential, supplied as AF_DAEMON_TOKEN or --token), the daemon reports the session that credential is bound to — the narrowed projection a sandbox receives withholds the tmux name and the repository paths. An ordinary operator token (including the output of 'af token show') is bound to no session, so it resolves nothing by itself: whoami then falls back to the tmux path. Otherwise it matches the current tmux session name against stored sessions.\n\n" +
 		"The tmux path requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. " +
 		"When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; " +
 		"otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error on that path.\n\n" +
 		"Identity is not scoped: you are the session you are, in whatever project it " +
 		"belongs to. --repo therefore acts as an assertion — it checks that the " +
-		"resolved session really is in that project, and errors if it is not.",
+		"resolved session really is in that project, and errors if it is not. The " +
+		"assertion needs the session's recorded repository: a session-bound credential " +
+		"receives a projection without it, so there --repo is validated as a project " +
+		"but is not compared — a success does not verify the project.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()

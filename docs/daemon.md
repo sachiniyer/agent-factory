@@ -37,8 +37,14 @@ paragraph because it's why `af` doesn't corrupt itself:
 - **Keeps sessions alive.** If a local session's process dies unexpectedly, the
   daemon re-spawns it in place — the worktree and record are preserved, so the
   agent comes back where it was. An off-box (docker/ssh/sandbox/hook) session whose
-  agent dies is relaunched in place when its sandbox is reachable, and otherwise
-  re-provisioned from its pushed branch as a fresh agent. The always-on [root agent](configuration.md#root-agents-always-ensured)
+  agent dies is handled by what its sandbox answers. A sandbox that answers and
+  whose agent-server advertises `relaunch` has the agent relaunched in place. One
+  that answers but predates `relaunch`, or that is confirmed to have no sandbox at
+  all, is re-provisioned from its pushed branch as a fresh agent (after a
+  preserve push where work could be lost). A sandbox whose reachability cannot be
+  determined — an outage, a timeout — is left intact and retried with backoff: unreachable is
+  not dead, so a network outage never replaces it. A relaunch that is attempted and fails is
+  reported and retried, not replaced. The always-on [root agent](configuration.md#root-agents-always-ensured)
   is re-created rather than re-spawned — its record is replaced, but its recorded
   conversation and its tabs are carried across, so it comes back on the same
   context with the same tab strip. When that conversation cannot be resumed the
