@@ -75,7 +75,8 @@ type InstanceData struct {
 	CanKill bool `json:"can_kill,omitempty"`
 	// CanHandoff is the projection-only agent-swap capability shared by the TUI and
 	// web (#2013): true when this session's agent can be handed off in place — a
-	// local-worktree backend (Capabilities().Handoff) in a runtime state that admits
+	// local-worktree backend, or an ssh/sandbox one whose agent-server advertises
+	// agent-swap (Capabilities().Handoff), in a runtime state that admits
 	// the swap (ValidateRuntimeAction(RuntimeActionHandoff)). It is derived live by
 	// ToInstanceData from the SAME two predicates the TUI's handoff gate reads
 	// (app/handle_handoff.go), so a browser — which cannot run those Go predicates —
