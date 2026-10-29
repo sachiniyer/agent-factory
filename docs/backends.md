@@ -770,34 +770,32 @@ edits and hooks saved in the TUI included. It never carries `sandbox.ssh`, `host
 
 The agent's work lives in the sandbox's workspace, not on the daemon host, so
 `git status` in your own checkout shows nothing. You do not need ssh to the host
-to look at it, or to hand the agent something: every client can open the same two
-tabs a local session has, and both run in the workspace.
+to look at it, or to hand the agent something: every client (TUI, web, phone,
+`af` against a remote daemon) opens the same tabs a local session has, and they
+run in the workspace.
 
-1. **Find it.** `af sessions get <title>` names where the session runs in
-   `placement`: `host`, `backend`, and `location` (the workspace directory on the
-   host). The TUI and web rails show the host beside the branch, and the web
-   header shows the full line.
-2. **Status and diff.** Open a shell tab — `af sessions tab-create <title> --kind
-   shell`, the TUI's new-tab key, or the web's new-tab menu — and run `git status`
-   and `git diff` in it. It is the agent's workspace, so the branch and uncommitted
-   changes are the agent's own. Tab output streams into the pane in the TUI, the
-   web and on a phone alike.
-3. **Browse and edit files.** Open a VS Code tab — `af sessions tab-create <title>
+1. **Status and diff.** Open a shell tab — `af sessions tab-create <title> --kind
+   shell`, the TUI's new-tab key, or the web's `+` menu — and run `git status`
+   and `git diff`. It is the agent's own workspace, so the branch and uncommitted
+   changes are the agent's. The shell is listed once the sandbox's agent-server
+   serves the tab API; against one that does not, the picker says so instead of
+   creating a tab.
+2. **Browse and edit files.** Open a VS Code tab — `af sessions tab-create <title>
    --kind vscode`. The editor runs on the host, rooted at the workspace, and the
    daemon relays it, so a remote client reaches it through the same authenticated
    origin as any other tab. The host needs `code-server` or `openvscode-server`;
    af detects one and does not install it, and a missing one shows the install
-   hint in the tab.
-4. **Hand the agent a file.** Put the file in the workspace — drag it into the VS
+   hint in the tab. See [VS Code tabs](web.md#vs-code-tabs).
+3. **Hand the agent a file.** Put the file in the workspace — drag it into the VS
    Code explorer, or paste its contents into a shell tab (`cat > notes.md`) — then
    tell the agent where it is with `af sessions send-prompt <title> "read
    notes.md"`. The agent sees what is on disk in the workspace; there is no
    separate upload channel.
 
-An **archived** sandbox keeps its workspace on the host (see [Archive &
-restore](#archive-restore)), and `placement.location` then names the preserved
-directory. There is no live agent to ask, so read it from the host or restore the
-session first.
+An **archived** sandbox that was archived without pushing keeps its workspace on
+the host (see [Archive & restore](#archive-restore)): there is no live agent to
+ask, so read the files from the host, or restore the session to get the tabs
+back.
 
 ---
 
