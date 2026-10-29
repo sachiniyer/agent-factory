@@ -41,17 +41,52 @@ function stripFences(text) {
     if (fence) {
       const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
       if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
+      out.push("");
       continue;
     }
     const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     // A backtick fence's info string may not contain a backtick (that is a span).
     if (open && !(open[1][0] === "`" && open[2].includes("`"))) {
       fence = { char: open[1][0], length: open[1].length };
+      out.push("");
       continue;
     }
     out.push(line);
   }
   return out.join("\n");
+}
+
+// Blanks every complete code span (to spaces, keeping each newline), so lines
+// stay where they were. CommonMark spans may cross line breaks but never a
+// paragraph boundary, so each run of non-blank lines is scanned on its own.
+function maskCodeSpans(text) {
+  const blank = (t) => t.replace(/[^\n]/g, " ");
+  return text
+    .split(/(\n[ \t]*\n)/)
+    .map((chunk, i) => {
+      if (i % 2 === 1) return chunk; // the blank-line separator itself
+      let out = "";
+      let k = 0;
+      while (k < chunk.length) {
+        if (chunk[k] !== "`") { out += chunk[k++]; continue; }
+        let n = 0;
+        while (chunk[k + n] === "`") n++;
+        let j = k + n;
+        let close = -1;
+        while (j < chunk.length) {
+          if (chunk[j] !== "`") { j++; continue; }
+          let m = 0;
+          while (chunk[j + m] === "`") m++;
+          if (m === n) { close = j; break; }
+          j += m;
+        }
+        if (close < 0) { out += chunk.slice(k, k + n); k += n; continue; }
+        out += blank(chunk.slice(k, close + n));
+        k = close + n;
+      }
+      return out;
+    })
+    .join("");
 }
 
 function stripCodeSpans(text) {
@@ -119,8 +154,34 @@ function parseClosingRefs(title, body) {
   }
 
   const lineStart = new RegExp(`^${keyword}`, "i");
-  const prose = stripFences(String(body || "").replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?(?:-->|$)/g, " "));
-  for (const line of prose.split("\n")) {
+  // Fences first, then code spans over the WHOLE body with its line structure
+  // kept: a span may cross line breaks, so a "Fixes #N" line between an opening
+  // and a closing backtick is code, not a declaration.
+  const unmasked = stripFences(String(body || "").replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?(?:-->|$)/g, (c) => c.replace(/[^\n]/g, " ")));
+  const prose = maskCodeSpans(unmasked);
+  const rawLines = unmasked.split("\n");
+  // A column-0 line that directly follows a blockquote or list-item line (no
+  // blank line between) is a LAZY CONTINUATION of that container's paragraph, not
+  // a root paragraph: "> quote\nFixes #1" is quoted text. A blank line (or a
+  // fence, which stripFences leaves as one) ends the container.
+  const containerStart = /^ {0,3}(?:>|(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$))/;
+  let inContainer = false;
+  let listItem = false;
+  let afterBlank = false;
+  const lines = prose.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Blank-ness and container markers are read BEFORE span masking: a line that
+    // is only a code span is text, not a blank line.
+    const raw = rawLines[i];
+    if (raw.trim() === "") { afterBlank = true; continue; }
+    // After a blank line a blockquote is over, but a list item continues for as
+    // long as lines stay indented under it ("- a\n\n    more\nFixes #1" — the
+    // last line is still the item's lazy continuation).
+    if (afterBlank && !(listItem && /^(?: {2,}|\t)/.test(raw))) inContainer = false;
+    afterBlank = false;
+    if (containerStart.test(raw)) { inContainer = true; listItem = !/^ {0,3}>/.test(raw); continue; }
+    if (inContainer) continue;
     const k = lineStart.exec(line);
     if (k) readList(line.slice(k[0].length), found);
   }
@@ -190,4 +251,4 @@ async function run({ github, core, context }) {
   }
 }
 
-module.exports = { parseClosingRefs, closeFixedIssues, run, stripFences, stripCodeSpans, MAX_RANGE };
+module.exports = { parseClosingRefs, closeFixedIssues, run, stripFences, stripCodeSpans, maskCodeSpans, MAX_RANGE };

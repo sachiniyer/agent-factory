@@ -62,3 +62,6 @@ site/
 
 # Local docs virtualenv (see requirements-docs.txt)
 .venv-docs/
+
+# .github/scripts test-only dependencies (the oracle for close-fixed-issues); never committed.
+.github/scripts/node_modules/

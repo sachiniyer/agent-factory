@@ -75,6 +75,18 @@ test('ranges up to 20 are expanded; wider or backwards ones are ignored', () => 
   assert.deepEqual(p('', 'Fixes #5\u2013#7'), [5, 6, 7]);
 });
 
+test('a multi-line code span hides a column-0 line; a lazy continuation of a quote or list item is not a declaration', () => {
+  assert.deepEqual(p('', 'text `\nFixes #123\n`'), []);
+  assert.deepEqual(p('', '`\nFixes #123\n`'), []);
+  assert.deepEqual(p('', '``\nFixes #123\n``\nFixes #4'), [4]);
+  assert.deepEqual(p('', 'a `b\n\nFixes #5\n\nc` d'), [5]); // a span never crosses a paragraph break
+  assert.deepEqual(p('', '> quote\nFixes #123'), []);
+  assert.deepEqual(p('', '- item\nFixes #123'), []);
+  assert.deepEqual(p('', '> quote\n\nFixes #6'), [6]);
+  assert.deepEqual(p('', '- item\n\nFixes #7'), [7]);
+  assert.deepEqual(p('', '- item\n\n    more\nFixes #123'), []);
+});
+
 test('the list stops at the first non-item; a trailing ")" or "." is fine', () => {
   assert.deepEqual(p('', 'Fixes #1, refs #2'), [1]);
   assert.deepEqual(p('', 'Fixes #1\nRefs #2'), [1]);
