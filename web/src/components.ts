@@ -139,6 +139,18 @@ export function sessionFirstComposition(moves: [HTMLElement, HTMLElement][]) {
   } };
 }
 
+/** The ONE place the terminal head's title element is written, shared by the
+ *  initial render and every patch (rename, status change, tab switch), so they
+ *  cannot disagree. The visible text is the title alone (#2458 keeps the head to
+ *  the title and its separator); where the session runs (#5571 W6.4, #6038) rides
+ *  the tooltip, not the text, and a full host path stays out of a head that has to
+ *  survive a narrow pane. */
+export function applyTerminalTitle(el: Pick<HTMLElement, "textContent" | "title" | "setAttribute">, title: string, placement?: string): void {
+  el.textContent = title;
+  el.title = placement ? `${title} · ${placement}` : title;
+  el.setAttribute("aria-label", title);
+}
+
 /** One stable title/tab row; patching it never reparents a terminal. */
 export function terminalChrome(opts: { title: string; placement?: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
   const menu = actionsDisclosure();
@@ -147,11 +159,8 @@ export function terminalChrome(opts: { title: string; placement?: string; copyLi
     button.addEventListener("click", () => { menu.close(); run(); });
     return button;
   };
-  // Where the session runs (#5571 W6.4) rides the title's tooltip, not its text:
-  // #2458 keeps the head to the title and its separator, and a full host path does
-  // not belong in a head that has to survive a narrow pane.
-  const title = h("span", { class: "af-term-title", title: opts.placement ? `${opts.title} · ${opts.placement}` : opts.title }, opts.title);
-  title.setAttribute("aria-label", opts.title);
+  const title = h("span", { class: "af-term-title" });
+  applyTerminalTitle(title, opts.title, opts.placement);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
