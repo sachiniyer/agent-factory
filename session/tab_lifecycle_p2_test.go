@@ -3,6 +3,7 @@ package session
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -156,4 +157,146 @@ func TestConditionalCloseSpendsRetainedTeardown(t *testing.T) {
 	assert.Equal(t, []TabCleanupData{{TabID: "closed-stuck", TmuxName: stuck}}, inst.PendingTabCleanup())
 
 	require.ErrorIs(t, inst.CloseTabByIDIfGen("never-existed", "g"), ErrTabGone)
+}
+
+// A retry of a request shape that has an intent never mints a new id, even when
+// every matching intent is already being retried: it joins that attempt, so the
+// command cannot run a second time (#6030, property 1).
+func TestRetryJoinsInFlightIntentWhenNoneIsFree(t *testing.T) {
+	sb, inst := newLifecycleSandbox(t)
+	sb.mu.Lock()
+	sb.dropCreate = true
+	sb.mu.Unlock()
+	_, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+	require.Error(t, err)
+	require.Equal(t, 1, sb.execs("deploy.sh"))
+	var lost string
+	inst.mu.RLock()
+	for id := range inst.tabCreateIntents {
+		lost = id
+	}
+	inst.mu.RUnlock()
+	require.NotEmpty(t, lost)
+
+	hold := make(chan struct{})
+	sb.mu.Lock()
+	sb.dropCreate = false
+	sb.hold = hold
+	sb.mu.Unlock()
+
+	var wg sync.WaitGroup
+	got := make([]*Tab, 2)
+	run := func(k int) {
+		defer wg.Done()
+		tab, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+		assert.NoError(t, err)
+		got[k] = tab
+	}
+	wg.Add(1)
+	go run(0)
+	require.Eventually(t, func() bool {
+		inst.mu.RLock()
+		defer inst.mu.RUnlock()
+		_, inFlight := inst.tabCreateInFlight[lost]
+		return inFlight
+	}, 5*time.Second, 5*time.Millisecond, "the first retry must be in flight")
+	wg.Add(1)
+	go run(1)
+	time.Sleep(150 * time.Millisecond) // let the second retry reach its join
+	close(hold)
+	wg.Wait()
+
+	require.NotNil(t, got[0])
+	require.NotNil(t, got[1])
+	assert.Equal(t, lost, got[0].ID)
+	assert.Equal(t, lost, got[1].ID, "the second retry joins the in-flight attempt")
+	assert.Equal(t, 1, sb.execs("deploy.sh"), "the command ran once")
+	assert.Equal(t, sb.ids(), rosterIDs(inst))
+}
+
+// Teardown attempts for one tab are serialized: a conditional close retrying a
+// teardown waits for the attempt already running, and the reserved name is
+// released only once an attempt confirms (#6030, property 4).
+func TestTeardownAttemptsForOneTabAreSerialized(t *testing.T) {
+	const agentName = "af_serialize_agent"
+	reapable := agentName + "__t1"
+	mockExec, aliveFn, _ := cleanupExec(map[string]bool{agentName: true, reapable: true}, nil)
+	pty := persistPtyFactory{t: t, cmdExec: mockExec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, mockExec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	data := cleanupInstanceData(t, agentName, agentName+"__shell")
+	data.PendingTabCleanup = []TabCleanupData{{TabID: "t1", TmuxName: reapable}}
+	inst, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	release := inst.lockTeardown("t1") // an attempt is mid-teardown
+	done := make(chan error, 1)
+	go func() { done <- inst.CloseTabByIDIfGen("t1", "g") }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("a second attempt ran while the first was tearing down: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	assert.True(t, aliveFn(reapable), "the session must not be touched by the waiting attempt")
+	require.Len(t, inst.PendingTabCleanup(), 1, "the reservation holds while an attempt runs")
+
+	release()
+	require.ErrorIs(t, <-done, ErrTabGone)
+	assert.False(t, aliveFn(reapable))
+	assert.Empty(t, inst.PendingTabCleanup(), "the confirming attempt releases the name")
+
+	// Unrelated tabs do not queue behind it.
+	other := inst.lockTeardown("t1")
+	otherDone := make(chan struct{})
+	go func() { inst.lockTeardown("t2")(); close(otherDone) }()
+	select {
+	case <-otherDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("teardown of a different tab blocked")
+	}
+	other()
+}
+
+// A definitive answer consumes only the intent of the request it answers: a
+// different-shape create that reuses the id and is refused leaves the original
+// attempt's intent, so the sweep can still adopt its running execution and its
+// id-less retry still joins it (#6030, property 1).
+func TestRefusedConflictingCreateKeepsTheOriginalIntent(t *testing.T) {
+	sb, inst := newLifecycleSandbox(t)
+	sb.mu.Lock()
+	sb.dropCreate = true
+	sb.mu.Unlock()
+	_, err := inst.AddProcessTabWithID("shared-id", "A.sh", "")
+	require.Error(t, err)
+	sb.mu.Lock()
+	sb.dropCreate = false
+	sb.mu.Unlock()
+
+	// Same id, different command: the sandbox's id idempotency answers with A's
+	// tab, which the daemon refuses as a conflict for B.
+	_, err = inst.AddProcessTabWithID("shared-id", "B.sh", "")
+	require.Error(t, err)
+	assert.Equal(t, 0, sb.execs("B.sh"), "B must not run")
+	inst.mu.RLock()
+	_, kept := inst.tabCreateIntents["shared-id"]
+	inst.mu.RUnlock()
+	require.True(t, kept, "B's refusal consumed A's intent")
+
+	t.Run("the sweep still adopts A's execution", func(t *testing.T) {
+		assert.True(t, inst.ReconcileOffBoxTabs())
+		assert.Equal(t, sb.ids(), rosterIDs(inst))
+		assert.Equal(t, 1, sb.execs("A.sh"))
+	})
+	t.Run("an id-less retry of A joins it, never a fresh run", func(t *testing.T) {
+		tab, err := inst.AddProcessTabWithID("", "A.sh", "")
+		require.NoError(t, err)
+		assert.Equal(t, "shared-id", tab.ID)
+		assert.Equal(t, 1, sb.execs("A.sh"))
+	})
 }

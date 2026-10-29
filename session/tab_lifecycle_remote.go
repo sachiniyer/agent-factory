@@ -50,10 +50,14 @@ type tabCreateIntent struct {
 // request minted, or "". Intents are kept per minted id, so two same-shape
 // creates whose answers were both lost each keep their own (#6021); a retry
 // takes the oldest one no other attempt is currently re-running, which is how a
-// second retry reaches the second execution rather than joining the first.
+// second retry reaches the second execution rather than joining the first; when
+// every one is being re-run it joins the oldest of those.
 // Caller holds i.mu.
 func (i *Instance) intentIDLocked(kind TabKind, command, requestedName string) string {
-	var pick *tabCreateIntent
+	var free, running *tabCreateIntent
+	older := func(a, b *tabCreateIntent) bool {
+		return b == nil || a.at.Before(b.at) || (a.at.Equal(b.at) && a.id < b.id)
+	}
 	for id, in := range i.tabCreateIntents {
 		if time.Since(in.at) > tabIntentTTL {
 			delete(i.tabCreateIntents, id)
@@ -62,25 +66,37 @@ func (i *Instance) intentIDLocked(kind TabKind, command, requestedName string) s
 		if in.kind != kind || in.command != command || in.requested != requestedName {
 			continue
 		}
-		if _, running := i.tabCreateInFlight[id]; running {
-			continue
-		}
-		if pick == nil || in.at.Before(pick.at) || (in.at.Equal(pick.at) && in.id < pick.id) {
-			pick = in
+		if _, inFlight := i.tabCreateInFlight[id]; inFlight {
+			if older(in, running) {
+				running = in
+			}
+		} else if older(in, free) {
+			free = in
 		}
 	}
-	if pick == nil {
-		return ""
+	// A shape with an intent never mints a new id: with none free, the retry
+	// joins an attempt already in flight (and so its one execution) rather than
+	// starting the command again (#6030).
+	switch {
+	case free != nil:
+		return free.id
+	case running != nil:
+		return running.id
 	}
-	return pick.id
+	return ""
 }
 
-// consumeIntentLocked retires the intent that minted id once a create has
-// resolved to it — by a fresh create, or by joining a tab already on the roster
-// (the sweep's adoption). Other intents of the same shape are untouched. Caller
-// holds i.mu.
-func (i *Instance) consumeIntentLocked(id string) {
-	delete(i.tabCreateIntents, id)
+// consumeIntentLocked retires the intent a create has resolved: the one that
+// minted id for THIS request shape — by a fresh create, a definitive refusal, or
+// joining a tab already on the roster (the sweep's adoption). A different request
+// that merely reused the id (and was refused for it) answers nothing about the
+// original attempt, whose execution may still be running unseen, so its intent
+// stays (#6030). Caller holds i.mu.
+func (i *Instance) consumeIntentLocked(id string, kind TabKind, command, requestedName string) {
+	if in := i.tabCreateIntents[id]; in != nil &&
+		in.kind == kind && in.command == command && in.requested == requestedName {
+		delete(i.tabCreateIntents, id)
+	}
 }
 
 // recordIntentLocked keeps id as the identity of this attempt after an uncertain
