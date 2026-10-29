@@ -334,6 +334,9 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	program, proof := respawnLaunchProgram(
 		i, resolvedProgram, declarationBase, resolution.trustBase, resume, prepared)
 	setLaunchProgram(ts, program, proof)
+	// A re-spawn resumes this session's own recorded conversation or starts fresh
+	// (#4797): never the latest one on a shared account home.
+	ts.SetExactResumeOnly(true)
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: %w", err))
 	}

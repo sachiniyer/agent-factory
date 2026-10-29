@@ -553,7 +553,7 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
 		// Program AND declaration together: the resume flags are af-authored, so a
 		// stale declaration would refuse an account-scoped restore (#3083 review).
-		t.rewriteProgramCmdByAf(resumeProgram)
+		t.rewriteProgramCmdByAf(t.resumeRewrite())
 		if err := t.Start(workDir); err != nil {
 			return RestoreReattached, err
 		}
