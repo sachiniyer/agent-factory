@@ -521,7 +521,18 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	if isSandbox {
 		instances = projectRowsForSandbox(instances, sandboxProjectID, sandboxProjectErr == nil)
 		resp.Caller = sandboxOwnerID
-		resp.Capabilities = &SnapshotCapabilities{HostPick: true, DeliverHostPick: true, TaskHost: true}
+		// Project only what the sandbox scope HONORS, not the operator's full
+		// triple: every bit here is a promise that the daemon honors that wire
+		// field for this credential, and the client's preflight refuses a pick
+		// when the bit is absent (#5571 W6.3). The scope's AddTask path clears
+		// Task.Host (stampSandboxTask), and /v1/DeliverPrompt — the sole bearer
+		// of DeliverPromptRequest.Host — is not admitted to the scope at all
+		// (no sandboxAllowed), so advertising those two would be a false claim
+		// the preflight would trust. HostPick is honored: a sandbox create
+		// requires --host and the create path keeps it. Advertising the other
+		// two would let `af tasks add --host` pass preflight and be silently
+		// dropped, exactly the fail-closed protection the bit exists to produce.
+		resp.Capabilities = &SnapshotCapabilities{HostPick: true}
 		alarms = nil
 		// A repo ID is operator identity a sandbox must not learn — the
 		// sandboxSafeInstanceData projection already withholds Path/Worktree/
