@@ -1,7 +1,6 @@
 package session
 
 import (
-	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -564,9 +563,7 @@ func TestInjectSystemPrompt_OpencodeExportedConfigEnvDoesNotAffectOtherAgents(t 
 func captureOpencodeInfoLog(t *testing.T) *logtest.Buffer {
 	t.Helper()
 	var buf logtest.Buffer
-	orig := log.InfoLog
-	log.InfoLog = stdlog.New(&buf, "INFO: ", 0)
-	t.Cleanup(func() { log.InfoLog = orig })
+	log.CaptureOutput(t, log.InfoLog, "INFO: ", &buf)
 	return &buf
 }
 
