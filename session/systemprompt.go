@@ -265,6 +265,29 @@ func shellQuote(s string) string {
 // (codex/gemini/amp/devin/opencode) keep the full doc: they are opted into
 // globally, so one file cannot vary per session.
 func injectSystemPrompt(resolved string, target skillTarget, caps guidanceCaps) string {
+	return injectSystemPromptWithEnv(resolved, target, caps, launchEnv{})
+}
+
+// launchEnv is the launch's own environment inputs: the session's merged
+// exact-name pass-through list and the directory the pane starts in. The
+// opencode seam asks whether a name the user supplied will survive the pane's
+// filter, and that answer depends on both (#5981). The zero value gives the
+// conservative "no extras, remote workDir" answer. It is deliberately not part
+// of skillTarget, which identifies WHERE the skill lands and is compared by
+// value.
+type launchEnv struct {
+	passthrough []string
+	workDir     string
+}
+
+// launchEnvFor is the launch environment of session i starting in workDir.
+func launchEnvFor(i *Instance, workDir string) launchEnv {
+	return launchEnv{passthrough: SessionEnvPassthroughForInstance(i), workDir: workDir}
+}
+
+// injectSystemPromptWithEnv is injectSystemPrompt for a launch whose
+// environment inputs are known.
+func injectSystemPromptWithEnv(resolved string, target skillTarget, caps guidanceCaps, env launchEnv) string {
 	switch tmux.DetectAgentFromCommand(resolved) {
 	case tmux.ProgramClaude:
 		pluginDir, err := ensurePluginDir(caps)
@@ -348,7 +371,7 @@ func injectSystemPrompt(resolved string, target skillTarget, caps guidanceCaps) 
 		// behavior) and the pane still gets af's config. The inline-assignment
 		// channel (opencodeCarriesConfigEnv) is in the command string, which
 		// FilterForCommand never touches, so it is not subject to this gate.
-		if opencodeCarriesConfigEnv(resolved) || opencodeExportedConfigReachesPane(resolved, target.passthrough, target.workDir) {
+		if opencodeCarriesConfigEnv(resolved) || opencodeExportedConfigReachesPane(resolved, env.passthrough, env.workDir) {
 			// INFO, not WARNING (#2166): the user pointed OPENCODE_CONFIG at
 			// their own file (program_overrides assignment OR exported env var
 			// that the pane's allowlist will actually deliver) and af is
@@ -422,7 +445,7 @@ func injectSystemPrompt(resolved string, target skillTarget, caps guidanceCaps) 
 // converse matters as much: a value the user explicitly named in the session's
 // pass-through list reaches the pane even for a spelling the grant refuses, and
 // af must not shadow it with a command-prefix assignment (#5981). passthrough
-// and workDir are the launch's own (skillTarget carries them); zero values give
+// and workDir are the launch's own (launchEnv carries them); zero values give
 // the conservative "no extras, remote workDir" answer.
 func opencodeExportedConfigReachesPane(resolved string, passthrough []string, workDir string) bool {
 	if os.Getenv("OPENCODE_CONFIG") == "" {

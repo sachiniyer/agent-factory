@@ -18,10 +18,10 @@ func TestInjectSystemPrompt_OpencodeExplicitPassthroughConfigWins(t *testing.T) 
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	t.Setenv("OPENCODE_CONFIG", "/home/me/mine.jsonc")
-	listed := skillTarget{}.withLaunchEnvironment([]string{"OPENCODE_CONFIG"}, "")
+	listed := launchEnv{passthrough: []string{"OPENCODE_CONFIG"}}
 
 	for _, resolved := range []string{"./opencode", "ionice -c 3 opencode", "opencode --model x"} {
-		if got := injectSystemPrompt(resolved, listed, fullGuidanceCaps); got != resolved {
+		if got := injectSystemPromptWithEnv(resolved, skillTarget{}, fullGuidanceCaps, listed); got != resolved {
 			t.Errorf("OPENCODE_CONFIG is in the pass-through list: %q must come back unchanged, af shadowed it to %q", resolved, got)
 		}
 		// The same exported value WITHOUT the list is the pre-existing split:
@@ -34,8 +34,8 @@ func TestInjectSystemPrompt_OpencodeExplicitPassthroughConfigWins(t *testing.T) 
 	}
 
 	// A pass-through list that does not name OPENCODE_CONFIG changes nothing.
-	other := skillTarget{}.withLaunchEnvironment([]string{"SOMETHING_ELSE"}, "")
-	if got := injectSystemPrompt("./opencode", other, fullGuidanceCaps); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
+	other := launchEnv{passthrough: []string{"SOMETHING_ELSE"}}
+	if got := injectSystemPromptWithEnv("./opencode", skillTarget{}, fullGuidanceCaps, other); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
 		t.Errorf("an unrelated pass-through name must not suppress injection; got %q", got)
 	}
 }
@@ -52,12 +52,12 @@ func TestInjectSystemPrompt_OpencodeExportedConfigUsesRealWorkDir(t *testing.T) 
 	workDir := t.TempDir()
 	resolved := filepath.Join(workDir, "bin", "opencode")
 
-	got := injectSystemPrompt(resolved, skillTarget{}.withLaunchEnvironment(nil, workDir), fullGuidanceCaps)
+	got := injectSystemPromptWithEnv(resolved, skillTarget{}, fullGuidanceCaps, launchEnv{workDir: workDir})
 	if !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
 		t.Errorf("in-worktree executable: the pane filters the export out, so af must inject; got %q", got)
 	}
 	// Listing the name restores the user's value at the pane, so it wins.
-	got = injectSystemPrompt(resolved, skillTarget{}.withLaunchEnvironment([]string{"OPENCODE_CONFIG"}, workDir), fullGuidanceCaps)
+	got = injectSystemPromptWithEnv(resolved, skillTarget{}, fullGuidanceCaps, launchEnv{passthrough: []string{"OPENCODE_CONFIG"}, workDir: workDir})
 	if got != resolved {
 		t.Errorf("in-worktree executable with OPENCODE_CONFIG listed: expected unchanged, got %q", got)
 	}
