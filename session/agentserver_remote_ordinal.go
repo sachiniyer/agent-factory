@@ -1,6 +1,9 @@
 package session
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // --- data plane: one remote WS per tab, fanned by the shared ptyBroker ---
 
@@ -72,10 +75,10 @@ func (s *remoteAgentServer) takeBrokersLocked() []*ptyBroker {
 
 // ensureBoundBroker is the broker of a tab opened through the ordinal plane,
 // keyed by the STABLE ID the tab resolved to, never by an ordinal (#5952, #5996
-// property 2). The ordinal is resolved from the id each time the channel dials,
-// so a reorder after the subscription started cannot attach a redial, a repaint
-// or an input to a different tab; the live socket stays on the tab it was bound
-// to when it opened.
+// property 2). What goes on the wire is decided from that id at each dial (see
+// wireTarget), so a reorder after the subscription started cannot attach a
+// redial, a repaint or an input to a different tab; the live socket stays on the
+// tab it was bound to when it opened.
 func (s *remoteAgentServer) ensureBoundBroker(tabID string) (*ptyBroker, error) {
 	if _, err := s.ordinalOf(tabID); err != nil {
 		return nil, err
@@ -94,11 +97,56 @@ func (s *remoteAgentServer) ensureBoundBroker(tabID string) (*ptyBroker, error) 
 	if s.ordBound == nil {
 		s.ordBound = make(map[string]*ptyBroker)
 	}
-	var ch clientlessChannel = &remoteClientlessChannel{rc: s.rc, resolve: func() (int, error) { return s.ordinalOf(tabID) }}
+	var ch clientlessChannel = &remoteClientlessChannel{rc: s.rc, label: tabID,
+		route: func() (int, string, error) { return s.wireTarget(tabID) }}
 	if s.boundChannel != nil {
 		ch = s.boundChannel(tabID)
 	}
 	br := newPTYBroker(ch)
 	s.ordBound[tabID] = br
 	return br, nil
+}
+
+// wireTarget is what to send a sandbox to address tabID: the daemon NEVER puts an
+// ordinal from its own roster on the wire, because a local reorder changes that
+// roster without the sandbox's, and the sandbox reads ?tab= against its own. An
+// agent-server that speaks id addressing is told the id. Only a legacy one gets
+// an ordinal, translated from ITS roster fetched for this very dial; an id absent
+// there is refused (ErrTabGone), never guessed (#5952).
+func (s *remoteAgentServer) wireTarget(tabID string) (tab int, byID string, err error) {
+	if s.nativeFor(tabID) {
+		return 0, tabID, nil
+	}
+	tab, err = s.sandboxOrdinal(tabID)
+	return tab, "", err
+}
+
+// sandboxOrdinal is tabID's slot in the SANDBOX's own roster.
+func (s *remoteAgentServer) sandboxOrdinal(tabID string) (int, error) {
+	agentTab := false
+	if s.inst != nil {
+		if idx, ok := s.inst.TabIndexByID(tabID); ok && idx == 0 {
+			agentTab = true
+		}
+	}
+	roster, err := s.rc.tabs()
+	if err != nil {
+		s.mu.Lock()
+		legacy := s.idPlaneKnown && !slices.Contains(s.features, tabAPIFeature)
+		s.mu.Unlock()
+		if legacy && agentTab {
+			// A server without the tab API has a fixed roster whose only tab is
+			// the agent tab, pinned to slot 0.
+			return 0, nil
+		}
+		return 0, fmt.Errorf("remote session %q cannot resolve tab %q against the sandbox's roster: %w", s.rc.title, tabID, err)
+	}
+	for idx, td := range roster {
+		// The daemon's agent tab is the sandbox's agent-kind tab until the
+		// sandbox has been told its id (#5997); every other tab is matched by id.
+		if td.ID == tabID || (agentTab && td.Kind == TabKindAgent) {
+			return idx, nil
+		}
+	}
+	return 0, fmt.Errorf("remote session %q tab id %q is not in the sandbox's roster: %w", s.rc.title, tabID, ErrTabGone)
 }

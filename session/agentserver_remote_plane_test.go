@@ -84,12 +84,24 @@ type planeHarness struct {
 	s       *remoteAgentServer
 	ord     map[string]*planeChannel
 	id      map[string]*planeChannel
+	ws      *tabWireServer
 }
 
 func newPlaneHarness(t *testing.T, tabIDs ...string) *planeHarness {
 	t.Helper()
 	h := &planeHarness{ord: map[string]*planeChannel{}, id: map[string]*planeChannel{}}
 	ws := newTabWireServer(t)
+	h.ws = ws
+	ws.route("/v1/agent/preview", map[string]any{"content": "screen"})
+	// The SANDBOX's own roster: agent tab first, then the given tabs in the order
+	// the sandbox holds them. A local reorder on the daemon never changes it.
+	ws.mux.HandleFunc("/v1/agent/tabs", func(w http.ResponseWriter, r *http.Request) {
+		rows := []TabData{{ID: "sandbox-agent", Kind: TabKindAgent, Name: agentTabName}}
+		for _, id := range tabIDs {
+			rows = append(rows, TabData{ID: id, Kind: TabKindShell, Name: id})
+		}
+		ws.encode(w, map[string]any{"data": map[string]any{"tabs": rows}, "error": nil})
+	})
 	ws.mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		failing, modern := h.failing, h.modern
@@ -101,7 +113,7 @@ func newPlaneHarness(t *testing.T, tabIDs ...string) *planeHarness {
 			}
 			return
 		}
-		features := []string{}
+		features := []string{tabAPIFeature}
 		if modern {
 			features = append(features, tabIDAddressingFeature)
 		}
@@ -304,6 +316,19 @@ func TestPlaneSwitchModel(t *testing.T) {
 					fail("resize on a tab with %d live subscriptions: %v", len(live[id]), err)
 				}
 			}
+			// The daemon never puts an ordinal from its own roster on the wire: a
+			// tab is addressed by id, or by its slot in the SANDBOX's roster.
+			for n, tab := range tabIDs {
+				tabN, byID, err := h.s.wireTarget(tab)
+				switch {
+				case err != nil:
+					fail("wire target of %s: %v", tab, err)
+				case byID != "" && byID != tab:
+					fail("%s addressed as id %q", tab, byID)
+				case byID == "" && tabN != n+1:
+					fail("%s addressed by ordinal %d, the sandbox holds it at %d", tab, tabN, n+1)
+				}
+			}
 			for tab, subs := range live {
 				if len(subs) == 0 {
 					continue
@@ -321,25 +346,46 @@ func TestPlaneSwitchModel(t *testing.T) {
 	}
 }
 
-// An ordinal-plane channel resolves its ordinal from the stable id each time it
-// dials or repaints, so a reorder cannot move it to another tab (#5952).
-func TestOrdinalBoundChannelFollowsTheIDNotTheSlot(t *testing.T) {
-	h := newPlaneHarness(t, "t1", "t2")
-	ch := &remoteClientlessChannel{rc: h.s.rc, resolve: func() (int, error) { return h.s.ordinalOf("t1") }}
-	idx, err := ch.ordinal()
-	require.NoError(t, err)
-	assert.Equal(t, 1, idx)
+// A repaint or redial of a channel bound to A addresses A in the SANDBOX's
+// roster after a local reorder, with the id probe failing or confirmed: the
+// daemon's own ordinals never reach the wire (#5952).
+func TestSnapshotAfterLocalReorderAddressesTheBoundTab(t *testing.T) {
+	for _, probe := range []string{"probe-failed", "legacy", "confirmed"} {
+		t.Run(probe, func(t *testing.T) {
+			h := newPlaneHarness(t, "t1", "t2")
+			switch probe {
+			case "probe-failed":
+				h.setProbe(true, false)
+			case "confirmed":
+				h.setProbe(false, true)
+			}
+			ch := &remoteClientlessChannel{rc: h.s.rc, label: "t1", route: func() (int, string, error) { return h.s.wireTarget("t1") }}
 
-	h.s.inst.mu.Lock()
-	h.s.inst.Tabs[1], h.s.inst.Tabs[2] = h.s.inst.Tabs[2], h.s.inst.Tabs[1]
-	h.s.inst.mu.Unlock()
-	idx, err = ch.ordinal()
-	require.NoError(t, err)
-	assert.Equal(t, 2, idx, "t1 moved to slot 2 and the channel followed the id")
+			// The daemon reorders its own roster: t1 now sits in slot 2 there.
+			h.s.inst.mu.Lock()
+			h.s.inst.Tabs[1], h.s.inst.Tabs[2] = h.s.inst.Tabs[2], h.s.inst.Tabs[1]
+			h.s.inst.mu.Unlock()
 
-	h.s.inst.mu.Lock()
-	h.s.inst.Tabs = h.s.inst.Tabs[:2]
-	h.s.inst.mu.Unlock()
-	_, err = ch.ordinal()
-	assert.ErrorIs(t, err, ErrTabGone, "a closed tab is gone, not whichever tab holds its slot")
+			_, err := ch.Snapshot()
+			require.NoError(t, err)
+			h.ws.mu.Lock()
+			body := h.ws.bodies["/v1/agent/preview"]
+			h.ws.mu.Unlock()
+			if probe == "confirmed" {
+				assert.Equal(t, "t1", body["tab_id"], "addressed by stable id")
+			} else {
+				assert.EqualValues(t, 1, body["tab"], "the sandbox holds t1 at slot 1, whatever the daemon's order")
+				assert.Nil(t, body["tab_id"])
+			}
+		})
+	}
+
+	t.Run("an id absent from the sandbox's roster is refused", func(t *testing.T) {
+		h := newPlaneHarness(t, "t1")
+		h.s.inst.mu.Lock()
+		h.s.inst.Tabs = append(h.s.inst.Tabs, &Tab{ID: "ghost", Name: "ghost", Kind: TabKindShell})
+		h.s.inst.mu.Unlock()
+		_, _, err := h.s.wireTarget("ghost")
+		require.ErrorIs(t, err, ErrTabGone)
+	})
 }

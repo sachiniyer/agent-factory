@@ -35,10 +35,13 @@ type remoteClientlessChannel struct {
 	// tabID, when set, addresses the tab by stable id (#5571 W4.4) and tab is
 	// unused: stream dial and repaint both bind the id inside the sandbox.
 	tabID string
-	// resolve, when set, yields the tab's CURRENT ordinal from the stable id it
-	// was bound to, at each dial and repaint, so a reorder after the subscription
-	// began cannot move the channel to another tab (ordinal plane only).
-	resolve func() (int, error)
+	// route, when set, decides at each dial and repaint what goes on the wire for
+	// the tab this channel was bound to by stable id: the id itself where the
+	// sandbox speaks id addressing, else the SANDBOX's own ordinal for it (never
+	// one from the daemon's roster, which a local reorder changes without the
+	// sandbox). label names the tab in logs.
+	route func() (tab int, tabID string, err error)
+	label string
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -80,15 +83,19 @@ func (c *remoteClientlessChannel) tabLabel() string {
 	if c.tabID != "" {
 		return c.tabID
 	}
+	if c.label != "" {
+		return c.label
+	}
 	return strconv.Itoa(c.tab)
 }
 
-// ordinal is the ordinal this channel addresses right now.
-func (c *remoteClientlessChannel) ordinal() (int, error) {
-	if c.resolve != nil {
-		return c.resolve()
+// target is what to put on the wire for this channel right now: a stable id, or
+// (ordinal plane) the sandbox's own ordinal for the tab it is bound to.
+func (c *remoteClientlessChannel) target() (tab int, tabID string, err error) {
+	if c.route != nil {
+		return c.route()
 	}
-	return c.tab, nil
+	return c.tab, c.tabID, nil
 }
 
 func newRemoteClientlessChannel(rc *remoteAgentClient, tab int) *remoteClientlessChannel {
@@ -114,12 +121,12 @@ func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		return nil, fmt.Errorf("remote clientless capture already started")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	tab, err := c.ordinal()
+	tab, tabID, err := c.target()
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	conn, err := c.rc.dialStream(ctx, tab, c.tabID, c.remoteSeq)
+	conn, err := c.rc.dialStream(ctx, tab, tabID, c.remoteSeq)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -271,12 +278,12 @@ func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	// repaint lands exactly at any client width (#1688, #5571 W4.2). Against an
 	// agent-server that predates it, the grid call returns the joined screen only
 	// and the repaint stays the screen-only best effort it was.
-	if c.tabID != "" {
-		return c.rc.previewGridByID(c.tabID)
-	}
-	tab, err := c.ordinal()
+	tab, tabID, err := c.target()
 	if err != nil {
 		return PaneSnapshot{}, err
+	}
+	if tabID != "" {
+		return c.rc.previewGridByID(tabID)
 	}
 	return c.rc.previewGrid(tab)
 }
