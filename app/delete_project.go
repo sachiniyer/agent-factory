@@ -209,6 +209,12 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 		// expresses no preference — and registry mode — resolve to, exactly
 		// as newHome and switchProject's failure branch set it.
 		m.store.SetHookCount(0)
+		// The deleted project's scope is gone, so any stale remote read-only
+		// reason it armed no longer applies. Reset the pane to its default
+		// (editable) state — a fresh launch outside a repo starts editable
+		// too, and the next switchProject re-derives the flag from the live
+		// target.
+		m.hooksPane.SetReadOnly("")
 		m.hooksPane.SetCommands(nil)
 		if m.appConfig != nil {
 			m.program = m.appConfig.DefaultProgram

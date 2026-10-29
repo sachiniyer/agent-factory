@@ -756,6 +756,12 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 			m.program = m.appConfig.DefaultProgram
 		}
 		m.store.SetHookCount(len(resolved.PostWorktreeCommands))
+		// The target is local, so the hooks shown are saveable on this
+		// checkout. Clear any stale remote read-only reason so the pane
+		// stops refusing n/enter/D — a mid-session remote→local target flip
+		// (af target clear) would otherwise leave the pane permanently
+		// read-only with a banner pointing at the no-longer-targeted host.
+		m.hooksPane.SetReadOnly("")
 		m.hooksPane.SetCommands(resolved.PostWorktreeCommands)
 	} else {
 		log.WarningLog.Printf("switch project: failed to resolve config for %s: %v", repo.Root, err)
@@ -765,6 +771,10 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		// project's in-repo config (#1686). At startup the pane starts empty, so
 		// this only matters on an in-place switch.
 		m.store.SetHookCount(0)
+		// The target is local even though config failed to resolve, so a
+		// hooks save would still write to this checkout's in-repo config.
+		// Clear any stale remote read-only reason so the pane is editable.
+		m.hooksPane.SetReadOnly("")
 		m.hooksPane.SetCommands(nil)
 		// Same reasoning for the program (#2138): a config we cannot parse tells
 		// us nothing about this project's preference, so fall back to the global
