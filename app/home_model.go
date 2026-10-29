@@ -44,6 +44,9 @@ type home struct {
 	// quitSaveFailure is the text of the save error that last aborted a quit; the
 	// same error again on the next quit is the user's choice to discard and leave.
 	quitSaveFailure string
+	// quitAttempted marks that handleQuit ran during the current input message, so
+	// Update can tell a repeated quit from any other input (#5898).
+	quitAttempted bool
 	// projectPathResolutions retains successful Git identity lookups across the
 	// 750ms Projects poll. It is event-loop-owned like the rest of home state.
 	projectPathResolutions map[string]projectPathResolution
