@@ -146,6 +146,12 @@ func drainDaemon(
 // row's own targeted persist covers it) where a lock-order deadlock inside the
 // stop grace is not.
 func (m *Manager) checkpointLiveRows() error {
+	// Land owed stand-down discharges first. The join-timeout path skips the final
+	// SaveInstancesForShutdown (and its flush), so this checkpoint can be the last
+	// durable write: without the flush it would persist a marker memory has
+	// already discharged, and the next start would re-arm a teardown the worker
+	// stood down.
+	m.FlushOwedSettlements()
 	isCurrent := func(inst *session.Instance) bool {
 		for attempt := 0; attempt < 20; attempt++ {
 			if m.mu.TryLock() {
