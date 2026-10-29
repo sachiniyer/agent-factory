@@ -75,8 +75,16 @@ type DeleteProjectResponse struct {
 // `af projects add` does this (see api/projects.go), and the web only ever
 // supplies daemon-host paths. Registration is idempotent: a known checkout is a
 // no-op success that returns the existing identity.
+//
+// URL is the alternative to Path (W9.10): a git URL the DAEMON clones, on its own
+// host and with its own credentials, under the configured projects_root, and
+// then registers. Exactly one of Path and URL is given. The URL is validated on
+// the daemon (https, ssh and scp-like forms only; never file://, a path, or a
+// value that could be read as an option), because it may come from a remote
+// client.
 type RegisterProjectRequest struct {
 	Path string `json:"path"`
+	URL  string `json:"url,omitempty"`
 }
 
 // RegisterProjectResponse carries the durable identity the registration
