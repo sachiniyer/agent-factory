@@ -900,7 +900,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// Fresh output. Only a live pane produces bytes, and a dead one yields "" —
 		// so this is affirmative on its own, no probe needed.
 		observedAlive = true
-		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
+		m.settleChurnedLiveness(instance, obs.Captured, content, epoch)
 	case hasPrompt:
 		// A matched prompt means the CAPTURE SUCCEEDED: hasPrompt is a substring test
 		// over content, and every failure path in HasUpdated returns content "". So
