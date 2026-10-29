@@ -579,19 +579,28 @@ back (see [Archive & restore](#archive-restore)).
 > **Which resolver picks the address, and when it matters.** af resolves the name
 > the same way `ssh` does — through the system resolver (`getaddrinfo`, which
 > follows `nsswitch.conf` and so uses LDAP, `sssd` or mDNS too), not with Go's own.
-> In a `CGO_ENABLED=0` (static) build Go's resolver skips NSS, so af reaches
-> `getaddrinfo` through `getent ahosts`, dials the answers in order and pins the
-> first that answers; a cgo build dials through `getaddrinfo` directly. Either
-> way, once af pins, `ssh` does no resolving at all — the connection is made for
-> it — so every step of a session goes to the same place regardless.
+> In a `CGO_ENABLED=0` (static) build Go's resolver skips NSS, so where `getent`
+> is available af reaches `getaddrinfo` through `getent ahosts`, dials the
+> answers in order and pins the first that answers. `getent` is not on macOS, and
+> the official Darwin builds are static, so there af cannot reach the system
+> resolver and connects by name (resolving in `ssh` each step) as it did before.
+> A cgo build dials through `getaddrinfo` directly — unless Go's pure resolver is
+> forced on instead (the `netgo` build tag, or `GODEBUG=netdns=go`), in which case
+> it behaves like the static build. Either way, once af pins, `ssh` does no
+> resolving at all — the connection is made for it — so every step of a session
+> goes to the same place regardless.
 >
-> af and `ssh` therefore agree on which machines a name answers with, so the
-> `known_hosts` entry an earlier `ssh` recorded against that name matches the
-> machine af pins. A name that itself hands back **different machines on different
-> calls** — a rotating round-robin — can still pin one the entry does not cover; the
-> session then fails to start naming the host, nothing runs on the wrong machine,
-> verification refuses it before authenticating, and the earlier advice to point
-> `ssh.host` at one machine covers it.
+> af and `ssh` use the same resolver, so the `known_hosts` entry an earlier `ssh`
+> recorded against that name ordinarily matches the machine af pins — but the
+> same resolver does not guarantee the same *address*, and that is still where this
+> can bite. A name that hands back **different machines on different calls** — a
+> rotating round-robin — can pin one the entry does not cover; and even with the
+> same answers, af's probe pins whichever address actually answers the dial (it
+> tries them in order, racing IPv6 and IPv4), so a multi-address name whose
+> addresses hold different host keys can pin one the earlier `ssh` did not land
+> on. The session then fails to start naming the host, nothing runs on the wrong
+> machine, verification refuses it before authenticating, and the earlier advice
+> to point `ssh.host` at one machine covers it.
 >
 > **`accept-new` pins only once it knows the host.** On the very first connection to
 > a host there is no entry to check against, so `accept-new` would simply record
