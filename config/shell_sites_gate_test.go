@@ -214,7 +214,7 @@ var shellSiteRegistry = map[string][]classifiedSite{
 
 	"session/host_program.go:(hostProgramProber).probePath": {{
 		class: afAuthored,
-		note:  "the login-shell PATH probe — the hostProbePathOnly const; the program name never reaches a shell (#5571 W2.1, #5768), only the nonce is a positional argument",
+		note:  "the login-shell PATH probe — the hostProbePathOnly / hostProbePathOnlyFish / hostProbePathOnlyCsh consts (one per login-shell family); the program name never reaches a shell (#5571 W2.1, #5768), only the nonce is a positional argument",
 	}},
 
 	// ---- not a shell at all ----

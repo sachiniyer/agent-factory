@@ -11,9 +11,11 @@ import (
 )
 
 // probeReply renders what the real probe prints: whatever the login profile
-// wrote, then the nonce fence, then the login PATH.
+// wrote, then the nonce fence, then the login PATH. The nonce is always the
+// trailing argv element across all shell families (POSIX/fish keep an af-probe
+// $0 placeholder; csh/tcsh do not), so it is read from the last slot.
 func probeReply(argv []string, profile, loginPATH string) []byte {
-	return []byte(profile + "\n" + argv[5] + "\n" + loginPATH + "\n")
+	return []byte(profile + "\n" + argv[len(argv)-1] + "\n" + loginPATH + "\n")
 }
 
 // executableFile makes a real executable under dir and returns its path.
@@ -27,7 +29,7 @@ func executableFile(t *testing.T, dir, name string) string {
 
 // loginPATHProber answers the PATH probe with loginPATH after profile noise.
 func loginPATHProber(profile, loginPATH string) hostProgramProber {
-	return newTestProber(func(_ context.Context, argv []string) ([]byte, error) {
+	return newTestProber(func(_ context.Context, _ string, argv []string) ([]byte, error) {
 		return probeReply(argv, profile, loginPATH), nil
 	})
 }
@@ -100,7 +102,7 @@ func TestResolveProgramOnHostTable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var argvs [][]string
-			prober := newTestProber(func(_ context.Context, argv []string) ([]byte, error) {
+			prober := newTestProber(func(_ context.Context, _ string, argv []string) ([]byte, error) {
 				argvs = append(argvs, append([]string(nil), argv...))
 				return probeReply(argv, tc.profile, loginDir), nil
 			})
@@ -148,7 +150,7 @@ func TestResolveProgramOnHostComputedExecutable(t *testing.T) {
 		`env -u "$NAME" claude`,
 	} {
 		t.Run(program, func(t *testing.T) {
-			prober := newTestProber(func(context.Context, []string) ([]byte, error) {
+			prober := newTestProber(func(context.Context, string, []string) ([]byte, error) {
 				t.Fatal("a refused command must not probe")
 				return nil, nil
 			})
@@ -259,7 +261,7 @@ func TestResolveProgramOnHostRunsVerbatimWhatItCannotResolve(t *testing.T) {
 
 // A command with no executable word fails like an empty program.
 func TestResolveProgramOnHostAllAssignmentsIsNoExecutable(t *testing.T) {
-	prober := newTestProber(func(context.Context, []string) ([]byte, error) {
+	prober := newTestProber(func(context.Context, string, []string) ([]byte, error) {
 		t.Fatal("no executable word — no probe may run")
 		return nil, nil
 	})

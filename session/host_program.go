@@ -17,6 +17,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // remoteProgramForHost resolves the configured program for REMOTE execution.
@@ -78,14 +79,39 @@ const hostProgramProbeWaitDelay = time.Second
 // repository-authored and untrusted, so keeping it out of every script is also
 // what keeps it inert (#5571 W2.1).
 //
-// $1 is a per-probe nonce that fences the answer: a login profile's own output
-// lands before the fence and is ignored (#5727).
-const hostProbePathOnly = `printf '\n%s\n%s\n' "$1" "$PATH"`
+// Each script prints a per-probe nonce fence followed by the login PATH. A
+// login profile's own output lands before the fence and is ignored (#5727).
+// The script spelling and the positional convention are shell-FAMILY-specific
+// because the probe runs under the account's real login shell, and the POSIX
+// argv semantics the original probe assumed do not hold for fish or the csh
+// family: fish has no $1 (it numbers its arguments through $argv) and its $PATH
+// is a list, not a colon-separated string; csh/tcsh map -c's trailing args to
+// $1.. (there is no POSIX $0 placeholder, so a leading "af-probe" $0 lands the
+// nonce in $2) and tcsh rejects -l outright ("valid only if -l is the only flag
+// specified"), so the csh family reaches login mode through the argv[0] "-"
+// convention instead. hostProbeSpec turns the basename into the right argv.
+const (
+	// POSIX family (sh, bash, dash, ksh, mksh, zsh): run as
+	// `<shell> -l -c hostProbePathOnly af-probe <nonce>`, so $0 = af-probe and
+	// the nonce is $1.
+	hostProbePathOnly = `printf '\n%s\n%s\n' "$1" "$PATH"`
+	// fish: run as `fish -l -c hostProbePathOnlyFish af-probe <nonce>`, so
+	// $argv = (af-probe, nonce) and the nonce is $argv[2]; $PATH is a list that
+	// is joined back into the colon-separated form the walk expects.
+	hostProbePathOnlyFish = `printf '\n%s\n%s\n' $argv[2] (string join : -- $PATH)`
+	// csh/tcsh: run as `<login> -c hostProbePathOnlyCsh <nonce>` (the login shell
+	// is reached through the argv[0] "-" convention), and -c's trailing args are
+	// $1.. with no $0 placeholder, so the nonce is $1 already.
+	hostProbePathOnlyCsh = `printf '\n%s\n%s\n' "$1" "$PATH"`
+)
 
-// hostProgramRunner executes one probe argv on the local host. Tests inject a
-// fake so the exact argv — login flags, positional argument, uninterpolated
-// script — is what gets asserted.
-type hostProgramRunner func(ctx context.Context, argv []string) ([]byte, error)
+// hostProgramRunner executes one probe on the local host. execPath is the
+// binary to execve; argv is the full argument vector the shell sees, so argv[0]
+// is the login name — the shell executable for the POSIX and fish families,
+// "-basename" for the csh/tcsh family, which reaches login mode that way. Tests
+// inject a fake so the exact argv — login flags, positional argument,
+// uninterpolated script — is what gets asserted.
+type hostProgramRunner func(ctx context.Context, execPath string, argv []string) ([]byte, error)
 
 // hostProgramProber carries the inputs of a host-side program resolution so
 // tests can drive resolveProgramOnHost without a real login shell.
@@ -159,7 +185,8 @@ func resolveProgramOnHost(ctx context.Context, program string, p hostProgramProb
 		return "", "", fmt.Errorf("agent program %q computes its PATH at run time, so af cannot resolve %q on %s: write the PATH as a literal value or the executable as an absolute path", program, exe.Name, p.host)
 	}
 
-	adopted := p.adoptedPATH(ctx)
+	loginPath, probed := p.probePath(ctx)
+	adopted := mergeHostPATH(loginPath, p.processPATH)
 	// The command's own PATH, when it names one, is the whole lookup — the
 	// process PATH must not silently override it (#5726). Otherwise the pane
 	// gets the login PATH merged with the spawning environment's, so that is
@@ -171,9 +198,6 @@ func resolveProgramOnHost(ctx context.Context, program string, p hostProgramProb
 	}
 	abs, decided := p.findOnPATH(exe.Name, search)
 	if !decided {
-		// A relative or empty PATH entry comes before any absolute match, and
-		// it means the pane's working directory, which is not known here. The
-		// pane's own shell is the only thing that can answer, so it does.
 		return program, adopted, nil
 	}
 	if abs != "" {
@@ -182,7 +206,14 @@ func resolveProgramOnHost(ctx context.Context, program string, p hostProgramProb
 	if exe.HasPATH {
 		return "", "", fmt.Errorf("agent program %q not found on %s in the command's own PATH %q", exe.Name, p.host, exe.PATH)
 	}
-	return "", "", fmt.Errorf("agent program %q not found on %s (login-shell PATH %q)", exe.Name, p.host, search)
+	if probed {
+		return "", "", fmt.Errorf("agent program %q not found on %s (login-shell PATH %q)", exe.Name, p.host, search)
+	}
+	// The probe produced no fence, so `search` is only the spawning environment
+	// PATH the login profile never augmented — name it honestly instead of
+	// mislabelling it the login-shell PATH, which is the silent failure #5727
+	// hid by discarding the probe's error for a non-POSIX login shell.
+	return "", "", fmt.Errorf("agent program %q not found on %s in the spawning environment PATH %q; the login-shell PATH for account shell %q could not be probed — see the startup log", exe.Name, p.host, search, p.shell)
 }
 
 // pathShapedWord reports whether a computed executable word still contains a
@@ -193,8 +224,12 @@ func pathShapedWord(program string, exe sessionenv.ProgramExecutable) bool {
 }
 
 // adoptedPATH is the login PATH merged with the PATH this process already had.
+// A failed probe (no fence) is logged once inside probePath and reduced here to
+// the spawning environment PATH; the callers that run a command verbatim do not
+// need the probe's verdict, only its PATH-shaped result.
 func (p hostProgramProber) adoptedPATH(ctx context.Context) string {
-	return mergeHostPATH(p.probePath(ctx), p.processPATH)
+	loginPath, _ := p.probePath(ctx)
+	return mergeHostPATH(loginPath, p.processPATH)
 }
 
 // findOnPATH walks path the way the pane's sh does: each entry is joined to the
@@ -230,23 +265,69 @@ func canExecuteFile(path string) bool {
 }
 
 // probePath fetches the login shell's PATH. Output before the nonce fence (a
-// login profile's) is discarded; a probe that fails or never prints the fence
-// yields "".
-func (p hostProgramProber) probePath(ctx context.Context) string {
+// login profile's) is discarded. probed is false when the probe failed or the
+// fence never appeared; with the family-aware argv that is no longer the silent
+// path it was for fish/csh/tcsh (#5727), but it is still the signal the caller
+// uses to label a not-found diagnostic. The warning is logged here so every
+// caller — the verbatim paths and the not-found path — surfaces it once instead
+// of quietly degrading to the spawning environment PATH.
+func (p hostProgramProber) probePath(ctx context.Context) (path string, probed bool) {
 	nonce := p.nonce()
-	out, _ := p.run(ctx, []string{p.shell, "-l", "-c", hostProbePathOnly, "af-probe", nonce})
-	return parseHostProbeOutput(string(out), nonce)
+	script, loginName, pre, trail := hostProbeSpec(p.shell, nonce)
+	argv := []string{loginName}
+	argv = append(argv, pre...)
+	argv = append(argv, "-c", script)
+	argv = append(argv, trail...)
+	out, runErr := p.run(ctx, p.shell, argv)
+	path, fence := parseHostProbeOutput(string(out), nonce)
+	if !fence {
+		reason := "the nonce fence was not present in the login shell's output"
+		if runErr != nil {
+			reason = fmt.Sprintf("the probe exited with an error: %v", runErr)
+		}
+		log.WarningLog.Printf("agent-server: could not probe the login-shell PATH on %s for account shell %q (%s); "+
+			"the agent pane will use the spawning environment PATH, which may miss tool versions the login profile installs",
+			p.host, p.shell, reason)
+		return "", false
+	}
+	return path, true
 }
 
-// parseHostProbeOutput returns the line after the first nonce fence.
-func parseHostProbeOutput(out, nonce string) string {
+// hostProbeSpec turns the account's login shell basename into the probe script
+// and the argv pieces (other than the invariant -c flag) that drive the PATH
+// probe. fish and the csh/tcsh family don't share the POSIX positional-argv
+// convention: fish numbers its arguments through $argv and exposes $PATH as a
+// list, and tcsh rejects -l except as the sole argument (so the csh/tcsh family
+// reaches login mode through the argv[0] "-" convention and puts the nonce in
+// $1 with no $0 placeholder). Splitting the -c flag out of this keeps the single
+// shell-invocation site — and the #3566 drain-gate entry — in probePath, where
+// the program-name-never-reaches-a-shell proof lives.
+func hostProbeSpec(shell, nonce string) (script, loginName string, pre, trail []string) {
+	switch filepath.Base(shell) {
+	case "fish":
+		// fish has no $0-like positional; -l is its login flag, $argv is the list.
+		return hostProbePathOnlyFish, shell, []string{"-l"}, []string{"af-probe", nonce}
+	case "csh", "tcsh":
+		// The login shell is reached by an argv[0] that starts with "-", the
+		// universal csh-family login convention (tcsh's -l flag is valid only
+		// alone). The nonce is $1, since csh/tcsh has no POSIX $0 placeholder.
+		return hostProbePathOnlyCsh, "-" + filepath.Base(shell), nil, []string{nonce}
+	default:
+		// POSIX family: -l selects the login shell, $0 = af-probe, $1 = nonce.
+		return hostProbePathOnly, shell, []string{"-l"}, []string{"af-probe", nonce}
+	}
+}
+
+// parseHostProbeOutput returns the line after the first nonce fence and whether
+// that fence was present.
+func parseHostProbeOutput(out, nonce string) (string, bool) {
 	lines := strings.Split(out, "\n")
 	for i, line := range lines {
 		if strings.TrimSpace(line) == nonce && i+1 < len(lines) {
-			return strings.TrimSpace(lines[i+1])
+			return strings.TrimSpace(lines[i+1]), true
 		}
 	}
-	return ""
+	return "", false
 }
 
 // randomProbeNonce returns an unguessable fence for one probe.
@@ -343,13 +424,19 @@ func loginShellName(getenv func(string) string) string {
 	return "/bin/sh"
 }
 
-// execProbeRunner runs one probe argv with the same hardening as the claude
+// execProbeRunner runs one probe with the same hardening as the claude
 // first-run probe (#856): own process group so rc-file children die with the
-// shell, WaitDelay so a backgrounded pipe-holder cannot stall the read.
-func execProbeRunner(ctx context.Context, argv []string) ([]byte, error) {
+// shell, WaitDelay so a backgrounded pipe-holder cannot stall the read. The
+// executable is execPath; argv[0] is the login name the shell sees, which is
+// execPath for the POSIX and fish families and "-basename" for the csh/tcsh
+// family (its login-shell convention).
+func execProbeRunner(ctx context.Context, execPath string, argv []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, hostProgramProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd := exec.CommandContext(ctx, execPath, argv[1:]...)
+	if len(argv) > 0 {
+		cmd.Args[0] = argv[0]
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
