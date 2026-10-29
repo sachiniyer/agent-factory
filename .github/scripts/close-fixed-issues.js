@@ -60,7 +60,15 @@ const closedLine = (pr) => `Closed by #${pr} (merged)`;
 
 // Closes each listed issue that is open, is an issue (not a PR) and was not
 // already closed by this PR. Per-issue failures warn and never fail the caller.
-async function closeFixedIssues({ github, core, owner, repo, pr, title, body }) {
+//
+// Only a PR merged into the repository's default branch closes anything: a
+// stacked PR merges into another PR's branch, and its issues are not fixed until
+// the stack lands on the default branch.
+async function closeFixedIssues({ github, core, owner, repo, pr, title, body, baseRef, defaultBranch }) {
+  if (!baseRef || !defaultBranch || baseRef !== defaultBranch) {
+    core.info(`PR #${pr} merged into ${baseRef || "an unknown base"}, not ${defaultBranch || "the default branch"}: closing nothing`);
+    return [];
+  }
   const issues = parseClosingRefs(title, body).filter((n) => n !== pr);
   const closed = [];
   for (const number of issues) {
@@ -77,7 +85,10 @@ async function closeFixedIssues({ github, core, owner, repo, pr, title, body }) 
       });
       closed.push(number);
     } catch (error) {
-      core.warning(`#${number}: could not close: ${error.message}`);
+      // A fork PR's GITHUB_TOKEN is read-only: the write is refused. That is
+      // expected, so warn and carry on rather than failing the run.
+      const why = error.status === 403 ? "token is read-only (fork PR?)" : error.message;
+      core.warning(`#${number}: could not close: ${why}`);
     }
   }
   if (closed.length) core.notice(`PR #${pr} closed ${closed.map((n) => `#${n}`).join(", ")}.`);
@@ -90,7 +101,11 @@ async function run({ github, core, context }) {
   const pr = Number(process.env.PR_NUMBER);
   if (!Number.isInteger(pr)) throw new Error("PR_NUMBER missing");
   const { owner, repo } = context.repo;
-  await closeFixedIssues({ github, core, owner, repo, pr, title: process.env.PR_TITLE, body: process.env.PR_BODY });
+  await closeFixedIssues({
+    github, core, owner, repo, pr,
+    title: process.env.PR_TITLE, body: process.env.PR_BODY,
+    baseRef: process.env.PR_BASE_REF, defaultBranch: process.env.DEFAULT_BRANCH,
+  });
 }
 
 module.exports = { parseClosingRefs, closeFixedIssues, run, stripNonProse, MAX_RANGE };

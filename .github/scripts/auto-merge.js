@@ -662,7 +662,10 @@ async function mergeAll({ github, core, context }) {
       if (!usingPat) {
         try {
           const { data } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
-          await closeFixedIssues({ github, core, owner, repo, pr: pr.number, title: data.title, body: data.body });
+          await closeFixedIssues({
+            github, core, owner, repo, pr: pr.number, title: data.title, body: data.body,
+            baseRef: data.base && data.base.ref, defaultBranch: data.base && data.base.repo && data.base.repo.default_branch,
+          });
         } catch (error) {
           core.warning(`#${pr.number}: could not close its fixed issues: ${error.message}`);
         }

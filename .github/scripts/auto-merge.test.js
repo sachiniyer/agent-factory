@@ -223,7 +223,7 @@ test('after a GITHUB_TOKEN merge the merger closes the issues the PR lists; a PA
     const updates = [];
     const { github } = await runWith({}, undefined, (g) => {
       if (pat) process.env.USING_PAT = 'true';
-      g.rest.pulls.get = async ({ pull_number }) => ({ data: { title: 't', body: pull_number === 1 ? 'Fixes #40-#41, #42' : 'Refs #43' } });
+      g.rest.pulls.get = async ({ pull_number }) => ({ data: { title: 't', body: pull_number === 1 ? 'Fixes #40-#41, #42' : 'Refs #43', base: { ref: 'master', repo: { default_branch: 'master' } } } });
       g.rest.issues = {
         get: async () => ({ data: { state: 'open', body: 'b' } }),
         update: async (a) => { updates.push(a.issue_number); },
@@ -233,4 +233,13 @@ test('after a GITHUB_TOKEN merge the merger closes the issues the PR lists; a PA
     assert.deepEqual(github.merged, [1, 2]);
     assert.deepEqual(updates, pat ? [] : [40, 41, 42], pat ? 'PAT merges are handled by the workflow' : 'only the Fixes list closes');
   }
+});
+
+test('the merger closes nothing for a merged PR whose base is not the default branch', async () => {
+  const updates = [];
+  await runWith({}, undefined, (g) => {
+    g.rest.pulls.get = async () => ({ data: { title: 't', body: 'Fixes #40', base: { ref: 'siyer/parent', repo: { default_branch: 'master' } } } });
+    g.rest.issues = { get: async () => ({ data: { state: 'open', body: 'b' } }), update: async (a) => { updates.push(a.issue_number); } };
+  });
+  assert.deepEqual(updates, []);
 });

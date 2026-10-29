@@ -73,7 +73,7 @@ test('closeFixedIssues: one PATCH per open issue, appending the line, no comment
     4: { state: 'open', body: 'x', pull_request: {} },
     5: { state: 'open', body: 'already\n\nClosed by #9 (merged)' },
   }, log);
-  const closed = await closeFixedIssues({ github, core, owner: 'o', repo: 'r', pr: 9, title: 't', body: 'Fixes #1-#5, #6, #9' });
+  const closed = await closeFixedIssues({ github, core, owner: 'o', repo: 'r', pr: 9, title: 't', body: 'Fixes #1-#5, #6, #9', baseRef: 'master', defaultBranch: 'master' });
   assert.deepEqual(closed, [1, 2]);
   assert.deepEqual(log.map((a) => a.issue_number), [1, 2]);
   assert.equal(log[0].body, 'old body\n\nClosed by #9 (merged)');
@@ -84,7 +84,31 @@ test('closeFixedIssues: one PATCH per open issue, appending the line, no comment
 
 test('closeFixedIssues: Refs-only PR touches nothing', async () => {
   const log = [];
-  const closed = await closeFixedIssues({ github: mkGithub({ 1: { state: 'open', body: '' } }, log), core, owner: 'o', repo: 'r', pr: 9, title: 'Refs #1', body: 'Refs #1' });
+  const closed = await closeFixedIssues({ github: mkGithub({ 1: { state: 'open', body: '' } }, log), core, owner: 'o', repo: 'r', pr: 9, title: 'Refs #1', body: 'Refs #1', baseRef: 'master', defaultBranch: 'master' });
   assert.deepEqual(closed, []);
   assert.equal(log.length, 0);
+});
+
+test('closeFixedIssues: a PR merged into a non-default base (a stacked PR) closes nothing', async () => {
+  const log = [];
+  const github = mkGithub({ 1: { state: 'open', body: 'b' } }, log);
+  for (const [baseRef, defaultBranch] of [['siyer/parent-branch', 'master'], ['master', 'main'], [undefined, 'master'], ['master', undefined]]) {
+    const closed = await closeFixedIssues({ github, core, owner: 'o', repo: 'r', pr: 9, title: 'Fixes #1', body: '', baseRef, defaultBranch });
+    assert.deepEqual(closed, [], `${baseRef} vs ${defaultBranch}`);
+  }
+  assert.equal(log.length, 0);
+  // Control: the same PR into the default branch does close it.
+  assert.deepEqual(await closeFixedIssues({ github, core, owner: 'o', repo: 'r', pr: 9, title: 'Fixes #1', body: '', baseRef: 'master', defaultBranch: 'master' }), [1]);
+});
+
+test('closeFixedIssues: a read-only token (fork PR) warns and finishes instead of throwing', async () => {
+  const warns = [];
+  const github = { rest: { issues: {
+    get: async () => ({ data: { state: 'open', body: 'b' } }),
+    update: async () => { const e = new Error('Resource not accessible by integration'); e.status = 403; throw e; },
+  } } };
+  const closed = await closeFixedIssues({ github, core: { info() {}, notice() {}, warning: (m) => warns.push(m) }, owner: 'o', repo: 'r', pr: 9, title: 'Fixes #1, #2', body: '', baseRef: 'master', defaultBranch: 'master' });
+  assert.deepEqual(closed, []);
+  assert.equal(warns.length, 2);
+  assert.match(warns[0], /read-only/);
 });
