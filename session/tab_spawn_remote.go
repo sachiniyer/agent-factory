@@ -173,7 +173,13 @@ func (i *Instance) ReconcileTabManagementSnapshot(v *bool) bool {
 	if i.projectedTabManagement == *v {
 		return false
 	}
+	// Report a change only when the capability the TUI renders from differs: a
+	// local row already manages tabs, so recording the projection is invisible.
+	before := i.capabilitiesLocked().TabManagement
 	i.projectedTabManagement = *v
+	if i.capabilitiesLocked().TabManagement == before {
+		return false
+	}
 	i.touchLocked()
 	return true
 }
