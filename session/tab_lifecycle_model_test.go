@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -13,13 +14,15 @@ import (
 // A model-based check of the create-intent bookkeeping (#6030). The hand-written
 // interleavings kept missing the next case, so this drives a random sequence
 // over a small alphabet — create with or without an id, shape A or B, outcome
-// success / definitive refusal / lost answer, sweep, close (also with the
+// success / definitive refusal / lost answer, sweep, intent expiry, a daemon-side tab taking a
+// name a create holds, close (also with the
 // daemon's persist failing) — against the fake
 // sandbox and checks the invariants after every step:
 //
 //   - nothing executes twice: a create either rejoins an execution whose outcome
 //     the daemon never saw, or (only when none exists) starts a new one;
 //   - the daemon never holds a tab the sandbox lacks, and never twice;
+//   - tab names are unique across the whole roster, adopted tabs included;
 //   - a step whose commit fails leaves the daemon state, intents included,
 //     exactly as it was;
 //   - after a final sweep, every execution the sandbox still holds is on the
@@ -47,6 +50,8 @@ func runIntentModel(t *testing.T, seed int64, depth int, shapes, ids []string) {
 	for _, s := range shapes {
 		unresolved[s] = map[string]bool{}
 	}
+	local := map[string]bool{} // daemon-only tabs the sandbox never hears of
+	localN := 0
 	var trace []string
 	fail := func(format string, args ...any) {
 		t.Helper()
@@ -65,7 +70,7 @@ func runIntentModel(t *testing.T, seed int64, depth int, shapes, ids []string) {
 	}
 
 	for step := 0; step < depth; step++ {
-		switch op := rng.Intn(10); {
+		switch op := rng.Intn(12); {
 		case op < 6: // create
 			shape := shapes[rng.Intn(len(shapes))]
 			id := ""
@@ -97,7 +102,6 @@ func runIntentModel(t *testing.T, seed int64, depth int, shapes, ids []string) {
 			case outcome != 1:
 				wantNew = 1
 			}
-			_ = held
 			if got := totalExecs() - execsBefore; got != wantNew {
 				fail("executions grew by %d, want %d (err=%v)", got, wantNew, err)
 			}
@@ -111,12 +115,37 @@ func runIntentModel(t *testing.T, seed int64, depth int, shapes, ids []string) {
 			if err == nil {
 				require.NotNil(t, tab)
 				forget(tab.ID)
+			} else if outcome == 2 && id != "" && heldHere && held.Command == shape {
+				// A lost answer for an id the sandbox already runs re-records the
+				// intent: it is unresolved again, and joinable.
+				unresolved[shape][id] = true
 			}
 		case op < 8: // sweep
 			trace = append(trace, "sweep")
 			inst.ReconcileOffBoxTabs()
+		case op == 8: // every replay window runs out (#6023)
+			trace = append(trace, "expire")
+			inst.mu.Lock()
+			for _, in := range inst.tabCreateIntents {
+				in.at = time.Now().Add(-tabIntentTTL - time.Second)
+			}
+			inst.mu.Unlock()
+			// No retry rejoins an execution any more; the sweep still owes each
+			// unresolved one a place on the roster, which the final check holds.
+			for _, s := range shapes {
+				unresolved[s] = map[string]bool{}
+			}
+		case op == 9: // a daemon-side tab takes a name a create may already hold (#5962)
+			shape := shapes[rng.Intn(len(shapes))]
+			trace = append(trace, "web("+shape+")")
+			localN++
+			id := fmt.Sprintf("web-%d", localN)
+			local[id] = true
+			inst.mu.Lock()
+			inst.Tabs = append(inst.Tabs, &Tab{ID: id, Name: uniqueTabNameReserving(inst.Tabs, nil, processTabBaseName("", shape)), Kind: TabKindWeb, URL: "http://example.invalid"})
+			inst.mu.Unlock()
 		default: // close a rostered tab
-			ids := sortedKeys(rosterIDs(inst))
+			ids := sortedKeys(withoutLocal(rosterIDs(inst), local))
 			if len(ids) == 0 {
 				continue
 			}
@@ -149,19 +178,25 @@ func runIntentModel(t *testing.T, seed int64, depth int, shapes, ids []string) {
 
 		// Every step: the daemon roster is a subset of the sandbox's.
 		inSandbox := sb.ids()
-		for id := range rosterIDs(inst) {
+		for id := range withoutLocal(rosterIDs(inst), local) {
 			if !inSandbox[id] {
 				fail("daemon holds %q the sandbox lacks", id)
 			}
 		}
 		inst.mu.RLock()
 		seen := map[string]bool{}
-		for _, tab := range inst.Tabs[1:] {
-			if seen[tab.ID] {
+		names := map[string]bool{}
+		for _, tab := range inst.Tabs {
+			if tab.ID != "" && seen[tab.ID] {
 				inst.mu.RUnlock()
 				fail("daemon roster holds %q twice", tab.ID)
 			}
 			seen[tab.ID] = true
+			if names[tab.Name] {
+				inst.mu.RUnlock()
+				fail("two tabs are named %q", tab.Name)
+			}
+			names[tab.Name] = true
 		}
 		inst.mu.RUnlock()
 	}
@@ -170,7 +205,7 @@ func runIntentModel(t *testing.T, seed int64, depth int, shapes, ids []string) {
 	sb.dropCreate, sb.refuseNew = false, false
 	sb.mu.Unlock()
 	inst.ReconcileOffBoxTabs()
-	if got, want := rosterIDs(inst), sb.ids(); fmt.Sprint(sortedKeys(got)) != fmt.Sprint(sortedKeys(want)) {
+	if got, want := withoutLocal(rosterIDs(inst), local), sb.ids(); fmt.Sprint(sortedKeys(got)) != fmt.Sprint(sortedKeys(want)) {
 		fail("after a final sweep daemon roster %v != sandbox %v", sortedKeys(got), sortedKeys(want))
 	}
 }
@@ -199,6 +234,16 @@ func intentStateSnapshot(i *Instance) intentSnapshot {
 	snap.Closes = append(snap.Closes, i.pendingRemoteClose...)
 	snap.Cleanups = append(snap.Cleanups, i.pendingTabCleanup...)
 	return snap
+}
+
+func withoutLocal(ids, local map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for id := range ids {
+		if !local[id] {
+			out[id] = true
+		}
+	}
+	return out
 }
 
 func sortedKeys(m map[string]bool) []string {
