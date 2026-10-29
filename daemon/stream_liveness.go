@@ -1,7 +1,11 @@
 package daemon
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -21,43 +25,45 @@ import (
 // on its own.
 const streamLivenessErrorBodyLimit = 1024
 
-// streamLivenessTitleTruncationMarker signals that a stream refusal trimmed an
-// over-long title to fit the WS dial buffer (streamLivenessErrorBodyLimit), so a
-// reader does not mistake a truncated title for the real one.
-const streamLivenessTitleTruncationMarker = "…"
-
-// streamTargetLivenessError mirrors promptTargetLivenessError's refusal but caps
-// the title so the daemon's JSON failure envelope fits the WS dial's 1 KiB body
-// buffer (streamLivenessErrorBodyLimit). For any title short enough that the
-// verbatim refusal already fits (the common case), the message is byte-identical
-// to the send-prompt path; only a title long enough to overflow the buffer is
-// trimmed on a rune boundary with a visible marker, keeping the liveness status
-// and the restore off-ramp in the part the client can read. The full title still
-// resolves the session on the daemon side — this trims only the human-readable
-// refusal, not the resolution.
+// streamTargetLivenessError mirrors promptTargetLivenessError's refusal for the
+// WS attach path, where the whole JSON envelope must fit the 1 KiB the dial
+// client reads (streamLivenessErrorBodyLimit). A title short enough that the
+// verbatim refusal fits (the common case) gets it byte-identical. Otherwise the
+// refusal drops the title echo (the %q label — decoration) and keeps what the
+// reader must act on: the liveness status and the restore command with the REAL
+// title, since restore resolves by exact title and a shortened one would name a
+// session that does not exist. If even that command cannot fit, the refusal says
+// so and gives the generic form rather than presenting a runnable-looking
+// command with the wrong argument. Every size decision is a handful of linear
+// passes: a title longer than the budget is never rendered at all.
 func streamTargetLivenessError(title string, liveness session.Liveness) error {
-	full := promptTargetLivenessError(title, liveness)
-	if full == nil {
+	if len(title) <= streamLivenessErrorBodyLimit {
+		full := promptTargetLivenessError(title, liveness)
+		if full == nil {
+			return nil
+		}
+		if streamRefusalEnvelopeSize(full.Error()) <= streamLivenessErrorBodyLimit {
+			return full
+		}
+	} else if promptTargetLivenessError("", liveness) == nil {
 		return nil
 	}
-	if streamRefusalEnvelopeSize(full.Error()) <= streamLivenessErrorBodyLimit {
-		return full
+	const tooLong = "(its title is too long to repeat here)"
+	switch liveness {
+	case session.LiveLost:
+		return errors.New("target session is Lost; prompt not delivered; recover it first " + tooLong)
+	case session.LiveDead:
+		return errors.New("target session is Dead; prompt not delivered; recover it first " + tooLong)
 	}
-	// The title drives the overflow (it appears in the %q label and the
-	// shellsuggest restore command). Shrink it on a rune boundary with a marker
-	// until the rendered envelope fits the buffer.
-	r := []rune(title)
-	for max := len(r); max > 0; max -= 8 {
-		capped := string(r[:max]) + streamLivenessTitleTruncationMarker
-		if trimmed := promptTargetLivenessError(capped, liveness); trimmed != nil &&
-			streamRefusalEnvelopeSize(trimmed.Error()) <= streamLivenessErrorBodyLimit {
-			return trimmed
+	// Archived: the only other refusing state.
+	if len(title) <= streamLivenessErrorBodyLimit {
+		cmd := shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, title)
+		msg := fmt.Sprintf("target session is Archived; prompt not delivered; restore it first (%s)", cmd)
+		if streamRefusalEnvelopeSize(msg) <= streamLivenessErrorBodyLimit {
+			return errors.New(msg)
 		}
 	}
-	// A title so pathological that even a one-rune prefix overflows (should not
-	// happen): return the verbatim refusal so the gate still refuses; the client
-	// falls back to the handshake status, which still names the failure.
-	return full
+	return errors.New("target session is Archived; prompt not delivered; restore it first with `af sessions restore -- <title>` " + tooLong)
 }
 
 // streamRefusalEnvelopeSize returns the byte length of the failure envelope the

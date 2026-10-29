@@ -166,32 +166,42 @@ func TestStreamTargetLivenessError_FitsDialBufferForLongTitle(t *testing.T) {
 		t.Fatalf("short refusal envelope %d exceeds the dial buffer %d", streamRefusalEnvelopeSize(short.Error()), streamLivenessErrorBodyLimit)
 	}
 
-	// A title long enough to overflow the buffer verbatim is capped: the rendered
-	// envelope fits the 1 KiB dial buffer and still names the liveness status and
-	// the restore off-ramp.
+	// A title long enough to overflow the buffer verbatim keeps the status and the
+	// restore command with the REAL title (restore resolves by exact title), and
+	// still fits: only the title echo in the label is dropped.
 	longTitle := strings.Repeat("x", 600)
 	long := streamTargetLivenessError(longTitle, session.LiveArchived)
 	if long == nil {
 		t.Fatal("Archived liveness must refuse even for a long title")
 	}
 	if size := streamRefusalEnvelopeSize(long.Error()); size > streamLivenessErrorBodyLimit {
-		t.Fatalf("capped refusal envelope %d exceeds the dial buffer %d (message: %q)", size, streamLivenessErrorBodyLimit, long.Error())
+		t.Fatalf("refusal envelope %d exceeds the dial buffer %d (message: %q)", size, streamLivenessErrorBodyLimit, long.Error())
 	}
 	if !strings.Contains(long.Error(), "is Archived") {
-		t.Fatalf("capped refusal lost the liveness status: %q", long.Error())
+		t.Fatalf("refusal lost the liveness status: %q", long.Error())
 	}
-	if !strings.Contains(long.Error(), "af sessions restore") {
-		t.Fatalf("capped refusal lost the restore off-ramp: %q", long.Error())
+	if want := "af sessions restore -- " + longTitle; !strings.Contains(long.Error(), want) {
+		t.Fatalf("refusal must carry the restore command with the real, unaltered title: %q", long.Error())
 	}
-	// The cap must not be a no-op for a title this long: the verbatim refusal
-	// would overflow, so the stream path must have trimmed it.
-	if long.Error() == promptTargetLivenessError(longTitle, session.LiveArchived).Error() {
-		t.Fatal("a 600-byte title's verbatim refusal overflows the dial buffer; the stream path must trim it")
+	if strings.Contains(long.Error(), "…") {
+		t.Fatalf("refusal must not present a shortened title: %q", long.Error())
 	}
-	// The marker signals the trim so a reader does not mistake the prefix for the
-	// whole title.
-	if !strings.Contains(long.Error(), streamLivenessTitleTruncationMarker) {
-		t.Fatalf("capped refusal must mark the trimmed title with %q: %q", streamLivenessTitleTruncationMarker, long.Error())
+
+	// A title too long for any command to fit gets generic guidance, never a
+	// runnable-looking command with a wrong argument, and is decided without
+	// rendering the title at all.
+	huge := strings.Repeat("y", 4<<20)
+	gen := streamTargetLivenessError(huge, session.LiveArchived)
+	if gen == nil || streamRefusalEnvelopeSize(gen.Error()) > streamLivenessErrorBodyLimit {
+		t.Fatalf("a huge title must still get a refusal that fits the buffer: %v", gen)
+	}
+	if !strings.Contains(gen.Error(), "is Archived") || !strings.Contains(gen.Error(), "af sessions restore -- <title>") || strings.Contains(gen.Error(), "yyyy") {
+		t.Fatalf("huge-title refusal must be generic guidance with no title fragment: %q", gen.Error())
+	}
+	for _, l := range []session.Liveness{session.LiveLost, session.LiveDead} {
+		if e := streamTargetLivenessError(huge, l); e == nil || streamRefusalEnvelopeSize(e.Error()) > streamLivenessErrorBodyLimit {
+			t.Fatalf("liveness %v: huge title must still refuse within the buffer: %v", l, e)
+		}
 	}
 
 	// A nil liveness (a live session) stays nil — the cap is only applied to a
