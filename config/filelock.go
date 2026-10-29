@@ -55,6 +55,10 @@ type lockedTarget struct {
 	// that end in a refusal. The decision is never made on this string —
 	// see confirmDir.
 	dirResolved string
+	// retargeted is set when the path now resolves somewhere other than
+	// dirResolved while the lock was being opened; the acquisition is refused
+	// with it rather than re-pinned (#6130).
+	retargeted error
 	// dirFD is that same directory, held open for the length of the critical
 	// section. Every syscall that creates, renames or stats inside it goes
 	// through this fd rather than through dir, so a link ABOVE the file cannot
@@ -404,6 +408,9 @@ func (t *lockedTarget) withLock(fn func() error) error {
 			return unix.Openat(t.dirFD, name, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC, 0644)
 		}, t.repinIfReplaced)
 		if err != nil {
+			if t.retargeted != nil {
+				return t.retargeted
+			}
 			return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
 		}
 		if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
@@ -621,8 +628,9 @@ func openLockWithRetry[T any](lockPath string, open func() (T, error), onENOENT 
 // `stow -D && stow`, a restored home), and openat(O_CREAT) through the stale fd
 // would report ENOENT forever, so the target is re-pinned from the path and the
 // stale fd closed. Nothing has been read under the lock yet, and the caller's
-// confirm() still runs once the lock is held, so the lock and the write agree on
-// the directory the path now names, and a link that moved is still refused. The
+// confirm() still runs once the lock is held. The re-pin happens only when the
+// path still resolves to the destination pinned at the start; a link that now
+// resolves elsewhere is recorded in t.retargeted and the acquisition refused. The
 // returned string is the evidence for the retry-episode warning.
 func (t *lockedTarget) repinIfReplaced() string {
 	var pinned, now unix.Stat_t
@@ -635,6 +643,17 @@ func (t *lockedTarget) repinIfReplaced() string {
 		return fmt.Sprintf("fd dev=%d ino=%d nlink=%d matches %s dev=%d ino=%d: the directory is the one pinned",
 			pinned.Dev, pinned.Ino, pinned.Nlink, t.dir, now.Dev, now.Ino)
 	}
+	// Re-pin only a directory replaced at the SAME resolved destination. A link
+	// that now resolves elsewhere is a retarget, not a replacement: adopting it
+	// would make confirmDir compare the new directory with itself (#6130).
+	resolved, evalErr := filepath.EvalSymlinks(t.dir)
+	if evalErr != nil || resolved != t.dirResolved {
+		t.retargeted = fmt.Errorf("the directory holding %s moved while af was working on it: %s now reaches %s, "+
+			"but af pinned %s — nothing was written; re-run the command (resolve error: %v)",
+			t.link, t.dir, resolved, t.dirResolved, evalErr)
+		return fmt.Sprintf("fd dev=%d ino=%d differs from %s dev=%d ino=%d: the path now resolves to %q, not the pinned %q; refusing to re-pin",
+			pinned.Dev, pinned.Ino, t.dir, now.Dev, now.Ino, resolved, t.dirResolved)
+	}
 	fresh, err := openPinnedDir(t.dir)
 	if err != nil {
 		return fmt.Sprintf("fd dev=%d ino=%d nlink=%d differs from %s dev=%d ino=%d: the directory was replaced, re-pin failed: %v",
@@ -643,9 +662,6 @@ func (t *lockedTarget) repinIfReplaced() string {
 	stale := t.dirFD
 	t.dirFD = fresh
 	_ = unix.Close(stale)
-	if resolved, evalErr := filepath.EvalSymlinks(t.dir); evalErr == nil {
-		t.dirResolved = resolved
-	}
 	return fmt.Sprintf("fd dev=%d ino=%d nlink=%d differs from %s dev=%d ino=%d: the directory was replaced, re-pinned from the path",
 		pinned.Dev, pinned.Ino, pinned.Nlink, t.dir, now.Dev, now.Ino)
 }
