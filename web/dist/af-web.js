@@ -7881,10 +7881,16 @@ function sessionFirstComposition(moves) {
     }
   } };
 }
-function applyTerminalTitle(el2, title, placement) {
+function applyTerminalTitle(el2, title) {
   el2.textContent = title;
-  el2.title = placement ? `${title} \xB7 ${placement}` : title;
+  el2.title = title;
   el2.setAttribute("aria-label", title);
+}
+function applyTerminalPlacement(el2, detail, remote) {
+  const shown = remote && detail !== "";
+  el2.hidden = !shown;
+  el2.textContent = shown ? detail : "";
+  el2.title = shown ? `Where this session runs: ${detail}` : "";
 }
 function terminalChrome(opts) {
   const menu = actionsDisclosure();
@@ -7897,7 +7903,9 @@ function terminalChrome(opts) {
     return button;
   };
   const title = h("span", { class: "af-term-title" });
-  applyTerminalTitle(title, opts.title, opts.placement);
+  applyTerminalTitle(title, opts.title);
+  const placement = h("span", { class: "af-term-placement" });
+  applyTerminalPlacement(placement, opts.placement?.detail ?? "", opts.placement?.remote ?? false);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
@@ -7928,9 +7936,9 @@ function terminalChrome(opts) {
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(newTabSlot, copy, handoff, deliver, actions2, closePane);
+  menu.panel.append(placement, newTabSlot, copy, handoff, deliver, actions2, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, fontDecrease, fontIncrease, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  return { head, title, placement, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -18927,7 +18935,7 @@ var AppShell = class {
     }
     const chrome = terminalChrome({
       title: selected.title,
-      placement: placementDetail(selected),
+      placement: { detail: placementDetail(selected), remote: selected.placement?.kind === "remote" },
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
@@ -19369,7 +19377,8 @@ var AppShell = class {
     if (!selected || !this.headTitle) {
       return;
     }
-    applyTerminalTitle(this.headTitle, selected.title, placementDetail(selected));
+    applyTerminalTitle(this.headTitle, selected.title);
+    if (this.terminalChrome) applyTerminalPlacement(this.terminalChrome.placement, placementDetail(selected), selected.placement?.kind === "remote");
     if (this.terminalChrome) {
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
