@@ -172,8 +172,19 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// source kill below would otherwise leave the window, and the process in it,
 	// alive behind a mate (#6078). Best-effort — a mate that is already gone is
 	// the desired end state.
-	for _, mate := range t.groupMateSessions() {
-		_ = r.tmux("kill-session", "-t", exactTarget(mate))
+	//
+	// Skipped when this close has already seen the server fail to answer (the
+	// process-tree capture or an earlier command tripped the deadline): the listing
+	// would spend another full deadline against the same wedged server, which is
+	// exactly what the rest of this path refuses to do. The loop stops at the first
+	// mate kill that trips it for the same reason.
+	if !r.unknown && !errors.Is(captureErr, ErrTmuxTimeout) {
+		for _, mate := range t.groupMateSessions() {
+			if r.unknown {
+				break
+			}
+			_ = r.tmux("kill-session", "-t", exactTarget(mate))
+		}
 	}
 	if err := r.tmux("kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
 		switch {

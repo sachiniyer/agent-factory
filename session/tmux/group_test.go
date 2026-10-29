@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGroupMatesFromListing(t *testing.T) {
@@ -52,5 +53,27 @@ has-session)     exit 1 ;;`)
 	want := []string{"=af-takeover-aa:", "=af-takeover-bb:", "=afsrc:"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("kill-session targets = %v, want mates first then the source: %v", got, want)
+	}
+}
+
+// #6078 CI: a wedged server must not cost Close an extra deadline for the mate
+// listing. The capture's list-panes trips the deadline; the listing is skipped, so
+// Close spends the same two deadlines it did before grouped-session teardown.
+func TestCloseOnWedgedServerSkipsTheGroupMateListing(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "calls")
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho \"$1\" >> " + log + "\nsleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	shortTmuxTimeout(t, 200*time.Millisecond)
+
+	ts := NewTmuxSessionFromSanitizedName("afwedged", "")
+	_, _ = ts.Close()
+
+	b, _ := os.ReadFile(log)
+	if strings.Contains(string(b), "list-sessions") {
+		t.Fatalf("Close listed group mates against a wedged server (calls: %q)", strings.Fields(string(b)))
 	}
 }

@@ -1637,16 +1637,21 @@ _expect_config_agent_attaches_in_tmux() {
         sleep "$AF_DRIVER_POLL"
     done
 
-    # We are inside the config agent's tmux session now. Detach its client so
+    # We are inside the config agent's tmux session now, on this client's PRIVATE
+    # grouped session (#6075), with the configured detach key advertised in its
+    # status line. Leave the way a user does — the detach key itself (#6064) — so
     # control returns to the TUI (the app then reaps the session and reloads
-    # config). The session is af_af-config-<n> on this same server.
+    # config). `tmux detach-client -s <af_af-config-n>` is no longer a way out: the
+    # client is attached to its own private session, not to that one. The shared
+    # session is af_af-config-<n> on this same server.
     local cfg
     cfg="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^af_af-config-' | head -1)"
     if [ -z "$cfg" ]; then
         _af_log "#2019: takeover landed but no af_af-config-* session was found to detach"
         return 1
     fi
-    tmux detach-client -s "$cfg" 2>/dev/null || true
+    af_assert_screen 'ctrl+w leaves' 'the takeover names its detach key (#6064)' || return 1
+    af_send C-w
 
     # Back in the TUI, and NOT via the error path.
     af_wait_for 'Agent Factory' "$AF_DRIVER_TIMEOUT" 'returned to the TUI after the config-agent takeover' || return 1
