@@ -23,6 +23,7 @@ func (m *Manager) refreshInstanceStatusPublishingOutage(repoID string, instance 
 	// Off-box tab bookkeeping rides the same per-instance sweep: pending closes,
 	// uncertain creates and exit evidence all wait on the sandbox answering, and
 	// this is where its reachability is already being probed (#5955, #5957).
+	instance.ReconcileAgentTabID()
 	tabsChanged := instance.ReconcileOffBoxTabs()
 	after := instance.ToInstanceData().Unreachable
 	if (unreachableDataEqual(before, after) && !tabsChanged) || instance.GetInFlightOp() != session.OpNone {
