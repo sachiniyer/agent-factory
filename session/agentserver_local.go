@@ -28,6 +28,9 @@ import (
 type localAgentServer struct {
 	inst *Instance
 
+	// acctSwap records how the last account swap ended (W7.6).
+	acctSwap accountSwapRecorder
+
 	mu sync.Mutex
 	// afterTabResolve is a deterministic race-test seam. Production leaves it
 	// nil; tests use it to pause between tab resolution and broker-map locking.

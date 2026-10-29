@@ -143,6 +143,25 @@ func TestSandboxDaemonE2E(t *testing.T) {
 		return strings.Contains(host.exec(t, "git -c safe.directory='*' -C /repo.git log --all --format=%s 2>&1"), "sbx-e2e-work")
 	}
 	commitWork()
+	// Uncommitted state the restore must hand back exactly: a staged file, an
+	// unstaged edit, an untracked file and an ignored one.
+	// Every step must succeed: a fixture step that silently fails leaves the
+	// fingerprint comparing two identical gaps. The exclude file is resolved with
+	// --git-path (a linked worktree's info/exclude lives in the common dir) and its
+	// directory is created first.
+	host.execOK(t, "cd "+workspace()+" && echo staged > staged.txt && git add staged.txt && echo edited >> e2e-work.txt && echo loose > untracked.txt && "+
+		"ex=$(git rev-parse --git-path info/exclude) && mkdir -p \"$(dirname \"$ex\")\" && echo '*.ign' >> \"$ex\" && echo ignored > keep.ign")
+	// stdout only, and every file must exist: a missing one fails loudly rather than
+	// reading as an identical absence before and after.
+	treeState := func() string {
+		return host.execOK(t, "cd "+workspace()+" && git status --porcelain --ignored && git rev-parse HEAD && cat e2e-work.txt staged.txt untracked.txt keep.ign")
+	}
+	stateAtArchive := treeState()
+	for _, want := range []string{"A  staged.txt", "?? untracked.txt", "!! keep.ign"} {
+		if !strings.Contains(stateAtArchive, want) {
+			t.Fatalf("the fixture does not hold %q, so the fingerprint would not cover it:\n%s", want, stateAtArchive)
+		}
+	}
 
 	// --- default archive (W8.5): nothing is published, the workspace stays -------
 	var archived daemon.ArchiveSessionResponse
@@ -162,28 +181,31 @@ func TestSandboxDaemonE2E(t *testing.T) {
 	if row := find(title); row == nil || row.ArchivedWorkspace == nil || row.ArchivedWorkspace.Dir != loc.Dir {
 		t.Fatalf("the archived row does not report where the work lives: %+v", row)
 	}
-	if got := host.exec(t, "cat "+workspace()+"/e2e-work.txt"); got != "e2e" {
-		t.Fatalf("the preserved workspace on the host lost the session's file; e2e-work.txt = %q", got)
+	if got := treeState(); got != stateAtArchive {
+		t.Fatalf("archiving changed the workspace:\nbefore:\n%s\nafter:\n%s", stateAtArchive, got)
 	}
-	// Restore of an unpushed preserved row is refused (until W8.6) and names where the
-	// work is, through both restore routes — and touches nothing.
-	for _, route := range []string{"/v1/RestoreArchived", "/v1/RestoreSession"} {
-		var err error
-		if route == "/v1/RestoreArchived" {
-			err = h.tryHTTPPost(route, daemon.RestoreArchivedRequest{Title: title, RepoID: repoID}, &daemon.RestoreArchivedResponse{})
-		} else {
-			err = h.tryHTTPPost(route, daemon.RestoreSessionRequest{Title: title, RepoID: repoID}, &daemon.RestoreSessionResponse{})
-		}
-		if err == nil || !strings.Contains(err.Error(), loc.Dir) || !strings.Contains(err.Error(), "W8.6") {
-			t.Fatalf("%s of a preserved, unpushed row = %v, want a refusal naming %q", route, err, loc.Dir)
-		}
+	// --- restore (W8.6): the preserved workspace is reattached, not re-cloned ----
+	post("/v1/RestoreArchived", daemon.RestoreArchivedRequest{Title: title, RepoID: repoID}, &daemon.RestoreArchivedResponse{})
+	waitFor(t, "the preserved session to be live again", 90*time.Second, func() bool {
+		r := find(title)
+		return r != nil && r.Liveness != session.LiveArchived && agentServers() > 0
+	})
+	if got := treeState(); got != stateAtArchive {
+		t.Fatalf("restore did not hand back the workspace exactly as archived:\nbefore:\n%s\nafter:\n%s", stateAtArchive, got)
 	}
-	if got := host.exec(t, "cat "+workspace()+"/e2e-work.txt"); got != "e2e" {
-		t.Fatalf("a refused restore disturbed the preserved workspace; e2e-work.txt = %q", got)
+	if originHasWork() {
+		t.Fatalf("restoring a preserved workspace published its commit to origin")
 	}
-	// Killing the archived row still reaps what af made.
+	if row := find(title); row == nil || row.ArchivedWorkspace != nil {
+		t.Fatalf("a restored row must no longer report a preserved workspace: %+v", row)
+	}
+	post("/v1/SendPrompt", daemon.SendPromptRequest{Title: title, RepoID: repoID, Prompt: "preserved-restore-marker"}, &sent)
+	waitFor(t, "the reattached agent to echo a prompt", 60*time.Second, func() bool {
+		return strings.Contains(preview(title, 0), "preserved-restore-marker")
+	})
+	// Killing the restored row reaps what af made.
 	post("/v1/KillSession", daemon.KillSessionRequest{Title: title, RepoID: repoID}, &daemon.KillSessionResponse{})
-	waitFor(t, "the host to be clean after the preserved row is killed", 30*time.Second, func() bool {
+	waitFor(t, "the host to be clean after the restored row is killed", 30*time.Second, func() bool {
 		return agentServers() == 0 && sessionDirs() == ""
 	})
 

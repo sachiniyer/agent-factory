@@ -363,6 +363,12 @@ func preflightAccountSwapCandidates(swap *autoAccountSwap, validate func(string)
 // the exact selected-account launch plan can be frozen. Any failed or incomplete
 // read is a refusal that leaves the existing runtime and identity untouched.
 func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Config) (*autoAccountSwap, error) {
+	return m.admitAccountSwapWith(instance, global, instance.ValidateAccountSwap)
+}
+
+// admitAccountSwapWith is admitAccountSwap with the per-candidate launch proof
+// injected: the local frozen-launch proof, or a sandbox session's off-box one.
+func (m *Manager) admitAccountSwapWith(instance *session.Instance, global *config.Config, validate func(string) error) (*autoAccountSwap, error) {
 	swap, err := m.accountSwapOpportunityFromFacts(instance, global)
 	if err != nil {
 		return nil, err
@@ -376,7 +382,7 @@ func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Co
 	if instanceHasVSCodeTab(instance) {
 		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab: integrated login shells can override the selected account from shell startup files, so af cannot prove their identity boundary", instance.Title)
 	}
-	admitted, err := preflightAccountSwapCandidates(swap, instance.ValidateAccountSwap)
+	admitted, err := preflightAccountSwapCandidates(swap, validate)
 	if err == nil {
 		testHookAccountSwapBeforeAdmissionReturns()
 	}

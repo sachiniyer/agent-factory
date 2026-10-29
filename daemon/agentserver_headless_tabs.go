@@ -73,6 +73,15 @@ func (hs *headlessServer) TabCreate(req agentTabCreateRequest, resp *agentTabCre
 // prevent.
 type agentTabCloseRequest struct {
 	ID string `json:"id"`
+	// Gen, when set, makes the close conditional on the tab's incarnation: the
+	// match is checked atomically with the removal, so a retried close cannot
+	// take down a newer tab that reused the id. A mismatch is a 404 tab_gone.
+	Gen string `json:"gen,omitempty"`
+}
+
+// genCloser is the conditional close a real *session.Instance serves.
+type genCloser interface {
+	CloseTabByIDIfGen(tabID, gen string) error
 }
 
 // TabClose closes the tab req.ID names through the same CloseTabByID the
@@ -87,8 +96,18 @@ func (hs *headlessServer) TabClose(req agentTabCloseRequest, resp *agentOKRespon
 	if err != nil {
 		return err
 	}
-	if err := tabs.CloseTabByID(req.ID); err != nil {
-		return err
+	closeErr := error(nil)
+	if req.Gen != "" {
+		gc, ok := tabs.(genCloser)
+		if !ok {
+			return fmt.Errorf("this agent-server cannot close a tab conditionally on its generation")
+		}
+		closeErr = gc.CloseTabByIDIfGen(req.ID, req.Gen)
+	} else {
+		closeErr = tabs.CloseTabByID(req.ID)
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	resp.OK = true
 	return nil

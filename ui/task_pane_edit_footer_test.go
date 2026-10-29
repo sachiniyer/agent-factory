@@ -143,7 +143,7 @@ func TestTaskPaneEditFooterTabCountReachesVerbStop(t *testing.T) {
 		return lines[len(lines)-1]
 	}
 	for stop := 0; stop < taskFocusCount; stop++ {
-		if !textStopAt(stop) {
+		if !textStopAt(stop, tp.capApplies()) {
 			continue
 		}
 		tp.focusIndex = stop
@@ -161,7 +161,7 @@ func TestTaskPaneEditFooterTabCountReachesVerbStop(t *testing.T) {
 		for i := 0; i < presses; i++ {
 			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
 		}
-		assert.Falsef(t, textStopAt(tp.focusIndex),
+		assert.Falsef(t, textStopAt(tp.focusIndex, tp.capApplies()),
 			"stop %d advertised %d tab press(es); following them must land where r/x/D fire, not on another typing field", stop, presses)
 		landed := footer()
 		assert.NotContainsf(t, landed, "→",

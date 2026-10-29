@@ -27,6 +27,7 @@ var (
 	agentServerRepo            string
 	agentServerTitle           string
 	agentServerBranch          string
+	agentServerAdoptWorktree   string
 	agentServerPolicyFile      string
 	agentServerProgram         string
 	agentServerProgramResolved bool
@@ -75,6 +76,7 @@ branch before shutdown), not this server's.`,
 			RepoPath:              repo,
 			Title:                 agentServerTitle,
 			Branch:                agentServerBranch,
+			AdoptWorktree:         agentServerAdoptWorktree,
 			PolicyFile:            agentServerPolicyFile,
 			Program:               agentServerProgram,
 			ProgramResolved:       agentServerProgramResolved,
@@ -114,6 +116,8 @@ func init() {
 		"Session title for the workspace (required)")
 	agentServerCmd.Flags().StringVar(&agentServerBranch, "branch", "",
 		"Exact git branch for the workspace's worktree (default: derived from branch_prefix and the title)")
+	agentServerCmd.Flags().StringVar(&agentServerAdoptWorktree, "adopt-worktree", "",
+		"Bind this existing linked worktree instead of creating one (set by the provisioning daemon when it reattaches an archived workspace)")
 	agentServerCmd.Flags().StringVar(&agentServerPolicyFile, "policy-file", "",
 		"Operator policy file written by the provisioning daemon; when set, this server reads no config from the host's af home")
 	agentServerCmd.Flags().StringVar(&agentServerProgram, "program", "",

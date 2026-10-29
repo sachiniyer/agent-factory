@@ -361,7 +361,7 @@ func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (st
 		// abandoned either — the commit persisted a cleanup handle for it, which the
 		// next daemon start sweeps and which reserves its name against a colliding
 		// spawn in the meantime (#2669).
-		m.warn().Printf("CloseTab %q committed, but runtime teardown could not be confirmed; its tmux session is retained for cleanup: %v", name, committed.TeardownErr)
+		m.warn().Printf("CloseTab %q committed, but runtime teardown could not be confirmed; its cleanup handle (tmux session or sandbox tab) is retained and retried: %v", name, committed.TeardownErr)
 	case committed.Settled != nil:
 		// Teardown confirmed the session is gone, so retire its cleanup handle on
 		// disk. Best-effort by design: a failed write only leaves a handle whose

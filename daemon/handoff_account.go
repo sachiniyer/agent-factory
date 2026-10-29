@@ -38,6 +38,11 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 		return HandoffSessionResponse{}, fmt.Errorf("session %q was replaced or removed", instance.Title)
 	}
 	instance = current
+	// A sandbox session on a listed host rotates its account in place through its
+	// agent-server (#5571 W7.6); nothing below applies to it.
+	if instance.OffBoxAccountHandoffApplies() {
+		return m.handoffAccountOffBox(req, instance, repoID, key)
+	}
 	// A local account handoff can rebuild a vanished persisted worktree through
 	// the shared respawn path. Acquire repository admission before the handoff can
 	// commit an identity or stop a pane; a timeout therefore remains an untouched,

@@ -413,6 +413,7 @@ af agent-server [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--adopt-worktree` | `string` | Bind this existing linked worktree instead of creating one (set by the provisioning daemon when it reattaches an archived workspace) |
 | `--branch` | `string` | Exact git branch for the workspace's worktree (default: derived from branch_prefix and the title) |
 | `--listen` | `string` | HTTP TCP bind address (host:port); :0 lets the kernel pick a free port (default `127.0.0.1:0`) |
 | `--policy-file` | `string` | Operator policy file written by the provisioning daemon; when set, this server reads no config from the host's af home |
@@ -920,6 +921,9 @@ Settable keys:
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
+  network.editor_origin_ports  port pool for per-session VS Code editor origins, e.g. "9100-9119" or "9100,9105-9107", or ""
+                             to disable (default ""). Each session's editor gets one loopback port, kept across restarts;
+                             expose the same ports behind your front door (tailscale serve --https=<port>). Next daemon start.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
   watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
@@ -1668,8 +1672,9 @@ Set the display color of a registered project.
 <project> is a prj_ id or a path inside the project's checkout. <color> is a hex
 color such as '#2f5fd8' or '2f5fd8'. Pass "" to clear the color.
 
-The web client paints the frame around the session and the browser tab's
-favicon with this color, so you can find the project's tab or window quickly.
+The web client uses this color as its accent, fills the top bar with it, and
+paints the browser tab's favicon with it, so you can find the project's tab or
+window quickly.
 
 Against a remote daemon (--daemon-url) <project> is a prj_ id or an absolute
 checkout path on the daemon's host, resolved by that daemon's registry.
@@ -2238,8 +2243,11 @@ named one — use it from inside a session when your work is done. --self and a
 An ssh or sandbox session publishes nothing by default: the agent stops and the
 workspace stays on its host, owned by the archived row, and the output names where
 (archived_workspace). Pass --push to push the branch to origin first; docker and
-hook sessions always push. Restoring a session archived without a push is not
-available yet (#5571 W8.6) — the work is untouched on the host. In-place (--here) sessions cannot be archived because af does not own
+hook sessions always push. Restoring a session archived without a push
+reattaches that workspace — the tree, index and ignored files come back exactly as
+archived and the agent resumes its conversation; nothing is cloned, pushed or
+re-hooked. If the host proves the workspace gone, restore re-provisions onto the
+recorded branch or fails. In-place (--here) sessions cannot be archived because af does not own
 their worktree. Local archives print the relocated worktree path on success.
 
 ```
