@@ -676,7 +676,7 @@ concurrent writers wait their turn instead of failing or retrying.
 
 A host in the global `hosts` list is probed for `git`, `tmux` (3.2 or newer) and
 `gh` without creating a session on it. `af doctor` shows one row per listed host
-(ready, blocked with the missing tool, or unreachable), and the daemon repeats
+(ready, blocked with the missing tool, unreachable, or unknown), and the daemon repeats
 the probe about every ten minutes, so the host pickers show a recent verdict
 instead of "not probed yet". An unreachable host or an unreadable reply records
 nothing: it can neither mark a host ready nor clear an earlier blocked verdict.
