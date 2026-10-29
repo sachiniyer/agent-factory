@@ -75,8 +75,10 @@ func clonePlacement(p *PlacementData) *PlacementData {
 }
 
 // placementLocked derives the placement from the row's own state. Caller holds
-// i.mu. worktreePath is the local worktree path already projected into data.
-func (i *Instance) placementLocked(backendType, worktreePath string) *PlacementData {
+// i.mu. backend is the runtime read under that lock (or via currentBackend),
+// never the bare field. worktreePath is the local worktree path already
+// projected into data.
+func (i *Instance) placementLocked(backend Backend, backendType, worktreePath string) *PlacementData {
 	if !isSandboxBackendType(backendType) && backendType != "remote" {
 		return &PlacementData{Kind: PlacementLocal, Location: worktreePath}
 	}
@@ -85,7 +87,7 @@ func (i *Instance) placementLocked(backendType, worktreePath string) *PlacementD
 	case i.archivedWorkspace != nil && i.archivedWorkspace.Dir != "":
 		p.Location = path.Join(i.archivedWorkspace.Dir, sshWorkspaceSubdir)
 	default:
-		if provider, ok := i.backend.(runtimeCleanupProvider); ok {
+		if provider, ok := backend.(runtimeCleanupProvider); ok {
 			if data := provider.runtimeCleanupData(); data != nil {
 				switch {
 				case data.SSH != nil && data.SSH.SessionDir != "":
@@ -103,35 +105,56 @@ func (i *Instance) placementLocked(backendType, worktreePath string) *PlacementD
 // no runtime of its own, so it returns the placement the daemon projected; the
 // daemon's own rows derive it live.
 func (i *Instance) Placement() *PlacementData {
+	// currentBackend takes i.mu itself, so read it before the lock below rather
+	// than nesting two read locks around a pending writer.
+	backend := i.currentBackend()
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if i.placement != nil {
 		return clonePlacement(i.placement)
 	}
 	bt := ""
-	if i.backend != nil {
-		bt = i.backend.Type()
+	if backend != nil {
+		bt = backend.Type()
 	}
 	wt := ""
 	if i.gitWorktree != nil {
 		wt = i.gitWorktree.GetWorktreePath()
 	}
-	return i.placementLocked(bt, wt)
+	return i.placementLocked(backend, bt, wt)
 }
 
 // ReconcilePlacementSnapshot adopts the placement a daemon snapshot projected
 // onto a client row, reporting whether it changed. A nil placement (an older
 // daemon) leaves the row's own derivation in force.
+//
+// "Changed" is judged against the placement the row currently shows, which for a
+// row with nothing adopted yet is its own derivation: a snapshot that merely
+// restates what the row already derives is not a change, and must not repaint.
 func (i *Instance) ReconcilePlacementSnapshot(p *PlacementData) bool {
 	if p == nil {
 		return false
 	}
+	backend := i.currentBackend()
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.placement != nil && *i.placement == *p {
+	current := i.placement
+	if current == nil {
+		bt := ""
+		if backend != nil {
+			bt = backend.Type()
+		}
+		wt := ""
+		if i.gitWorktree != nil {
+			wt = i.gitWorktree.GetWorktreePath()
+		}
+		current = i.placementLocked(backend, bt, wt)
+	}
+	same := *current == *p
+	i.placement = clonePlacement(p)
+	if same {
 		return false
 	}
-	i.placement = clonePlacement(p)
 	i.touchLocked()
 	return true
 }

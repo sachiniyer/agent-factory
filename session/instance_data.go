@@ -312,7 +312,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		data.Worktree.RepoPath = i.repoIdentityPath
 	}
 	if i.backend != nil {
-		data.Placement = i.placementLocked(data.BackendType, data.Worktree.WorktreePath)
+		data.Placement = i.placementLocked(i.backend, data.BackendType, data.Worktree.WorktreePath)
 	}
 
 	return data
