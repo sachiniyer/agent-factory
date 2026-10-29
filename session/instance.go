@@ -399,6 +399,10 @@ type Instance struct {
 	// runtime cleanup handle, which a teardown clears: restore and recovery
 	// re-provision from this so a pick never silently moves to another machine.
 	Host string `json:"host,omitempty"`
+	// branchUnpushed: Branch is the name af chose at create and nothing has
+	// published it, so it is not a restore checkpoint (#5972). Persisted as
+	// BranchUnpushed; false for any row an older af wrote.
+	branchUnpushed bool
 	// archivedWorkspace records where this archived off-box session's work lives
 	// (#5571 W8.5); nil for a live row or one archived before the field.
 	archivedWorkspace *ArchivedWorkspaceData
