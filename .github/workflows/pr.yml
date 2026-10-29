@@ -883,8 +883,31 @@ jobs:
       # enough to absorb a build phase four times the measured one. Go has to win
       # that race with room to spare: its panic names the stuck goroutines, and
       # the runner kill this would otherwise become names nothing.
+      #
+      # Stall report (#5766), report-only. Three runs ended this step ~10 minutes
+      # after `=== RUN TestDeleteTabConsentEvidence`, long before the 30m above, so
+      # the log held no stack. `-exec` runs every test binary under
+      # scripts/ci-test-exec.sh, which watches that binary's OWN output (stdout of
+      # `go test ./...` is no signal: it holds back all but one package, and #6040
+      # fired on that silence). After 300s with no output from one binary it writes
+      # a report and asks the binary for a goroutine dump (SIGUSR2, handled in
+      # internal/testguard). It never kills a binary or fails the step; the next
+      # step turns each report into a warning annotation.
       - name: Run tests
-        run: go test -v -race -count=1 -timeout 30m ./...
+        env:
+          AF_STALL_DIR: ${{ runner.temp }}/stall
+        run: go test -v -race -count=1 -timeout 30m -exec "$PWD/scripts/ci-test-exec.sh" ./...
+
+      - name: Report stalled test binaries
+        if: always()
+        env:
+          AF_STALL_DIR: ${{ runner.temp }}/stall
+        run: |
+          for f in "$AF_STALL_DIR"/*.txt; do
+            [ -e "$f" ] || continue
+            echo "::warning title=Test binary made no progress (#5766)::$(head -1 "$f")"
+            cat "$f"
+          done
 
   build:
     name: ${{ inputs.probe && 'Build (skipped by probe)' || 'Build' }}
