@@ -13920,6 +13920,7 @@ function adoptedSynthIdentities(prevIds, ids, nextSynth) {
   const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
   const isNewReal = (id) => id !== "" && !isSynth(id) && !prevIds.includes(id);
   const adopted = /* @__PURE__ */ new Set();
+  const fallback = /* @__PURE__ */ new Set();
   const vanished = new Set(prevIds.filter((id) => id !== "" && isSynth(id) && !ids.includes(id)));
   const unpaired = /* @__PURE__ */ new Set();
   ids.forEach((id, i) => {
@@ -13946,11 +13947,11 @@ function adoptedSynthIdentities(prevIds, ids, nextSynth) {
   for (const id of prevIds) {
     if (shared.has(id)) {
       key = id;
-    } else if (vanished.has(id) && gapOfNew.has(key)) {
-      adopted.add(id);
+    } else if (vanished.has(id) && !adopted.has(id) && gapOfNew.has(key)) {
+      fallback.add(id);
     }
   }
-  return adopted;
+  return { exact: adopted, fallback };
 }
 function remapByIdentity(root2, prevIds, ids, nextSynth) {
   if (prevIds.length === 0) {
@@ -13984,7 +13985,8 @@ function remapByIdentity(root2, prevIds, ids, nextSynth) {
   const max = ids.length - 1;
   const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
   if (maxLeaf) {
-    const adopted = adoptedSynthIdentities(prevIds, ids, nextSynth);
+    const { exact, fallback } = adoptedSynthIdentities(prevIds, ids, nextSynth);
+    const adopted = /* @__PURE__ */ new Set([...exact, ...fallback]);
     const deadIdentity = (tab) => {
       const prev = prevIds[tab];
       if (prev === void 0 || prev === "") {
@@ -13992,8 +13994,10 @@ function remapByIdentity(root2, prevIds, ids, nextSynth) {
       }
       return !isSynth(prev) || !adopted.has(prev);
     };
+    const exactHolderAtMax = moved.has(maxLeaf.id) || exact.has(prevIds[maxLeaf.tab] ?? "");
+    const tentative = (tab) => fallback.has(prevIds[tab] ?? "");
     for (const leaf of leaves(cur)) {
-      if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
+      if (!moved.has(leaf.id) && leaf.tab >= ids.length && (deadIdentity(leaf.tab) || exactHolderAtMax && tentative(leaf.tab))) {
         cur = closeLeaf(cur, leaf.id) ?? cur;
       }
     }
