@@ -44,6 +44,7 @@ import {
   canHandoff,
   compareSessionsForRail,
   isArchived,
+  hasInFlightOp,
   isCreating,
   idleReasonDetail,
   unreachableDetail,
@@ -162,7 +163,10 @@ export function isActionableSession(s: SessionData): s is ActionableSession {
  *  alone would leave a healthy root unclickable. Root still fails closed on the same
  *  durable causes that make any other row inert (#4394). Opening is deliberately
  *  separate from the lifecycle verbs: those stay keyed to isActionableSession, so
- *  root never grows an Archive or Restore control. */
+ *  root never grows an Archive or Restore control. The root exception is "openable
+ *  unless an op is in flight or it is gone" (#6104): the optimistic kill/archive
+ *  projection sets in_flight_op but not user_killed, and it clears the verbs that
+ *  keep ordinary rows inert, so root must read the op itself. */
 export function isOpenableSession(s: SessionData): s is SessionData & { id: string } {
   if (isActionableSession(s)) {
     return true;
@@ -171,7 +175,7 @@ export function isOpenableSession(s: SessionData): s is SessionData & { id: stri
     s.is_root === true &&
     typeof s.id === "string" &&
     s.id !== "" &&
-    !isCreating(s) &&
+    !hasInFlightOp(s) &&
     s.user_killed !== true &&
     s.startup_state_unknown !== true &&
     s.pending_account_swap === undefined &&

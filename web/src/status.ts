@@ -181,6 +181,14 @@ export function isWorking(s: SessionData): boolean {
   return rowStatus(s).kind === null;
 }
 
+/** True while ANY client-visible op is in flight (create, kill, archive, restore,
+ * replace, respawn). Every one of them either has no live pane yet or is about to
+ * end the current one, so a row carrying one is not a place to open or stay bound
+ * to. One predicate rather than a list, so a new op is fenced by default (#6104). */
+export function hasInFlightOp(s: SessionData): boolean {
+  return (s.in_flight_op ?? InFlightOp.None) !== InFlightOp.None;
+}
+
 /** True only for the daemon-owned create operation. Unlike isWorking (which also
  * includes a running agent and every other in-flight operation), this is used to
  * keep a not-yet-attachable row inert until its completed projection arrives. */

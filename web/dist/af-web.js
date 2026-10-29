@@ -6598,6 +6598,9 @@ function rowStatus(s) {
 function isWorking(s) {
   return rowStatus(s).kind === null;
 }
+function hasInFlightOp(s) {
+  return (s.in_flight_op ?? InFlightOp.None) !== InFlightOp.None;
+}
 function isCreating(s) {
   return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
 }
@@ -17411,7 +17414,7 @@ function isOpenableSession(s) {
   if (isActionableSession(s)) {
     return true;
   }
-  return s.is_root === true && typeof s.id === "string" && s.id !== "" && !isCreating(s) && s.user_killed !== true && s.startup_state_unknown !== true && s.pending_account_swap === void 0 && !s.unreachable;
+  return s.is_root === true && typeof s.id === "string" && s.id !== "" && !hasInFlightOp(s) && s.user_killed !== true && s.startup_state_unknown !== true && s.pending_account_swap === void 0 && !s.unreachable;
 }
 function retryActionForSession(s) {
   if (isPendingManualHandoffDeliveryUnconfirmed(s) || isPendingAgentHandoffDeliveryUnconfirmed(s)) {
