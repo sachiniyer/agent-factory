@@ -30,7 +30,7 @@ export AF_STALL_DUMP=1
 stamp_age() {
 	local now mtime
 	now=$(date +%s)
-	mtime=$(stat -c %Y "$last" 2>/dev/null || stat -f %m "$last")
+	mtime=$(stat -c %Y "$last" 2>/dev/null || stat -f %m "$last" 2>/dev/null || echo "$now")
 	echo $((now - mtime))
 }
 
@@ -50,6 +50,8 @@ runner=$!
 		# for EOF on that pipe, so a sleep outliving the binary would hold it
 		# open for up to 10s per binary.
 		sleep 10 >/dev/null 2>&1 </dev/null
+		# The binary finished and the wrapper removed the stamp while we slept.
+		[ -e "$last" ] || break
 		[ "$fired" = 1 ] && continue
 		age=$(stamp_age)
 		[ "$age" -lt "$stall" ] && continue
@@ -76,7 +78,12 @@ dog=$!
 
 wait "$runner"
 status=$?
-pkill -P "$dog" 2>/dev/null
-kill "$dog" 2>/dev/null
+# Reap the watchdog silently: bash reports a killed job as "Terminated" followed
+# by the subshell's whole source text, and a grep for stall reports in a hang's
+# log would then match that text.
+# Not pkill -P: killing the watchdog's sleep makes the watchdog print
+# "Terminated" itself. The orphaned sleep holds no output fd (redirected above)
+# and ends within 10s.
+{ kill "$dog"; wait "$dog"; } 2>/dev/null
 rm -f "$last"
 exit "$status"
