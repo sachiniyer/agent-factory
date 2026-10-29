@@ -46,6 +46,15 @@ func (c *Client) KillSession(ctx context.Context, req daemon.KillSessionRequest)
 	return c.callCtx(ctx, "KillSession", req, &daemon.KillSessionResponse{})
 }
 
+// WorkspaceFacts asks the daemon to measure an off-box session's workspace for
+// its kill confirmation (#5571 W8.2). It takes a ctx because the measurement
+// crosses to another host and the kill dialog waits on it.
+func (c *Client) WorkspaceFacts(ctx context.Context, req daemon.WorkspaceFactsRequest) (daemon.WorkspaceFactsResponse, error) {
+	var resp daemon.WorkspaceFactsResponse
+	err := c.callCtx(ctx, "WorkspaceFacts", req, &resp)
+	return resp, err
+}
+
 // ArchiveSession asks the daemon to archive a session (#1028) and returns the
 // relocated worktree's new path.
 func (c *Client) ArchiveSession(req daemon.ArchiveSessionRequest) (string, error) {
@@ -218,7 +227,20 @@ func (c *Client) ResumeStatusPoll(req daemon.ResumeStatusPollRequest) error {
 // the daemon over these same HTTP routes the web UI uses, so the transport alone
 // cannot tell them apart and each client says which it is.
 func (c *Client) AddTask(t task.Task, actor task.Actor) error {
-	return c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &daemon.AddTaskResponse{})
+	_, err := c.AddTaskResult(t, actor)
+	return err
+}
+
+// AddTaskResult is AddTask returning the record the daemon stored, or nil when
+// the daemon predates the field or answered a committed-with-warning error. For a
+// remote target it also asks the daemon to validate the task's project path on its
+// own host (#5859).
+func (c *Client) AddTaskResult(t task.Task, actor task.Actor) (*task.Task, error) {
+	var resp daemon.AddTaskResponse
+	if err := c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Task, nil
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the
@@ -235,7 +257,7 @@ func (c *Client) AddTask(t task.Task, actor task.Actor) error {
 // actor names the calling surface for the audit trail — see AddTask.
 func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
 	var resp daemon.UpdateTaskResponse
-	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor)}, &resp); err != nil {
+	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil
@@ -434,6 +456,16 @@ func (c *Client) RegisterProject(path string) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// SetProjectColor sets or clears (empty color) a registered project's display
+// color through the daemon — the single writer. HTTP twin of SetProjectColor.
+func (c *Client) SetProjectColor(req daemon.SetProjectColorRequest) (config.Project, error) {
+	var resp daemon.SetProjectColorResponse
+	if err := c.call("SetProjectColor", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
 // RebindProject moves a registered project's stable identity to the checkout at
 // path through the daemon — the single writer (#960) — which resolves the path
 // on its own filesystem, refuses a root another project owns, and publishes
@@ -504,8 +536,14 @@ func (c *Client) SendPrompt(req daemon.SendPromptRequest) (session.PromptDeliver
 // config.ListProjects run on the daemon's host), so a remote `af projects list`
 // describes the targeted machine rather than this one.
 func (c *Client) ListProjects() ([]config.Project, error) {
+	return c.ListProjectsContext(context.Background())
+}
+
+// ListProjectsContext is ListProjects bound to ctx, for a caller (the TUI's
+// poll) that must be able to abandon the read.
+func (c *Client) ListProjectsContext(ctx context.Context) ([]config.Project, error) {
 	var resp daemon.ListProjectsResponse
-	if err := c.call("ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
+	if err := c.callCtx(ctx, "ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Projects, nil

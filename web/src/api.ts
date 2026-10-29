@@ -25,7 +25,7 @@
 // a stored token (see shouldForgetToken) — a rotated token re-prompts once instead
 // of wedging the app.
 
-import type { BackendCatalog } from "./backends.js";
+import { type BackendCatalog, hostFromChoiceValue } from "./backends.js";
 import type { ProgramCatalog } from "./programs.js";
 import type {
   OnCompleteOption,
@@ -450,7 +450,13 @@ export async function createSession(input: CreateSessionInput, token: string): P
   // default that `af sessions create` (with no --backend) honours. Absent is the
   // only way to mean "let the repo decide" (#1933).
   const backend = (input.backend ?? "").trim();
-  if (backend !== "") {
+  const host = hostFromChoiceValue(backend);
+  if (host !== "") {
+    // A listed-host row of the same <select> (#5571 W6.3): the pick is `host`, and
+    // NO backend is sent — a host IS the ssh placement, and the daemon refuses a
+    // host paired with any other backend.
+    body.host = host;
+  } else if (backend !== "") {
     body.backend = backend;
   }
   // `account` is sent ONLY when the user picked one, for the same reason: absent is
@@ -1092,6 +1098,42 @@ export async function fetchPreviewOrigin(sessionId: string, tabId: string, token
     return env?.data?.origin ?? "";
   } catch {
     return "";
+  }
+}
+
+/** A session editor's own origin for a REMOTE viewer (W5.2): the origin itself, and a
+ *  single-use bootstrap URL on it that sets the session's HttpOnly key cookie and
+ *  redirects to the editor root. */
+export interface EditorPortOrigin {
+  origin: string;
+  bootstrapUrl: string;
+}
+
+/**
+ * Asks the daemon for a session's editor-port origin (POST /v1/editor-origin, behind
+ * the operator token). Returns null when the feature is off (network.editor_origin_ports
+ * unset), the pool is full, or anything fails — the caller keeps the same-origin
+ * mirror, which is what every release before this one used. Each call mints a NEW
+ * single-use bootstrap URL, so callers must not cache or replay the result.
+ */
+export async function fetchEditorPortOrigin(sessionId: string, token: string): Promise<EditorPortOrigin | null> {
+  const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
+  const headers: Record<string, string> = {};
+  if (token !== "") {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  try {
+    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    if (!resp.ok) {
+      return null;
+    }
+    const env = (await resp.json()) as Envelope<{ origin?: string; bootstrap_url?: string }>;
+    if (env?.error != null || !env?.data?.origin || !env?.data?.bootstrap_url) {
+      return null;
+    }
+    return { origin: env.data.origin, bootstrapUrl: env.data.bootstrap_url };
+  } catch {
+    return null;
   }
 }
 

@@ -185,12 +185,22 @@ type ArchiveSessionRequest struct {
 	// follow-up). Retained TUI actions send it; one-shot CLI callers resolve by
 	// {Title, RepoID}.
 	ID string `json:"id"`
+	// Push publishes an off-box session's branch to origin before its sandbox is
+	// reaped. The default (false) publishes nothing: the agent stops and the
+	// workspace stays on its host, owned by the archived row (#5571 W8.5).
+	// docker and hook sessions keep no host directory to leave in place, so they
+	// push whatever this says.
+	Push bool `json:"push,omitempty"`
 }
 
 type ArchiveSessionResponse struct {
 	OK bool `json:"ok"`
 	// ArchivedPath is the new on-disk location of the relocated worktree.
 	ArchivedPath string `json:"archived_path"`
+	// ArchivedWorkspace says where an off-box session's work lives after the
+	// archive: the preserved directory on its host, or the pushed branch (#5571
+	// W8.5). Absent for a local archive.
+	ArchivedWorkspace *session.ArchivedWorkspaceData `json:"archived_workspace,omitempty"`
 	// Warning is the FLAT, pre-#3036 wire field, retained for the one direction
 	// the envelope structurally cannot serve: gob encodes the embedded
 	// MutationOutcome as a NESTED field, so a NEWER daemon answering an OLDER
@@ -303,6 +313,11 @@ type DeliverPromptRequest struct {
 	// retain a provable not-attempted outcome without claiming TaskID ownership.
 	TaskRepoID string `json:"-"`
 	TaskOrigin bool   `json:"-"`
+	// SandboxOwner is the sandbox session that created the task being delivered
+	// (task.Task.SandboxOwner, #5571 W3.5). Daemon-internal like TaskRepoID: it
+	// rides the gob loopback only. When set the delivery is re-authorized against
+	// the owner's project and NEVER auto-creates its target.
+	SandboxOwner string `json:"-"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a
@@ -636,6 +651,9 @@ type PingResponse struct {
 	// two releases honors one and silently drops the other.
 	DeliverHostPick bool `json:"deliver_host_pick,omitempty"`
 	TaskHost        bool `json:"task_host,omitempty"`
+	// ConfigHostsEdit: the daemon honors SetConfigValueRequest.HostsEdit. An older
+	// daemon drops the field, so an edit must see true here first.
+	ConfigHostsEdit bool `json:"config_hosts_edit,omitempty"`
 	// (The guarded-rebind capability is its wire method instead of a Ping bit —
 	// #4888 review: RebindProjectGuarded exists only on daemons that enforce
 	// the expected_root/expected_checkout_id pair, so a guarded send is refused
@@ -802,6 +820,13 @@ type ExplainConfigResponse struct {
 type SetConfigValueRequest struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
+	// HostsEdit, with Key "hosts", asks the daemon to apply ONE per-entry edit to
+	// the host table (add or remove) as a single read-modify-write under the config
+	// file lock, instead of replacing the whole table from a copy the client read
+	// earlier (#5855). Value is ignored then. Nil (omitted) is the ordinary write.
+	// A daemon that predates it would ignore the field and write the (empty) Value,
+	// so a client must read PingResponse.ConfigHostsEdit first.
+	HostsEdit *config.HostsEdit `json:"hosts_edit,omitempty"`
 }
 type SetConfigValueResponse struct {
 	// Result is config.SetResult verbatim — key, canonical value, path, and

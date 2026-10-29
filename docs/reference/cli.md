@@ -36,6 +36,11 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af daemon uninstall`](#af-daemon-uninstall) — Remove the daemon autostart unit
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
+- [`af hosts`](#af-hosts) — Add, list, check and remove sandbox hosts
+- [`af hosts add`](#af-hosts-add) — Save a host and check that it can run a session
+- [`af hosts check`](#af-hosts-check) — Probe a host (or every saved host) for what a session needs
+- [`af hosts list`](#af-hosts-list) — Show the saved hosts
+- [`af hosts remove`](#af-hosts-remove) — Drop a host from the list
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
 - [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
@@ -130,6 +135,7 @@ af [flags]
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
+- [`af hosts`](#af-hosts) — Add, list, check and remove sandbox hosts
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
 - [`af proposal`](#af-proposal) — Write proposals together with agents
@@ -200,11 +206,19 @@ real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the config
 directory, so without it a session would authenticate as whoever that key belongs
 to while every visible signal reported the selected account.
 
-Account-scoped sessions require the local or docker backend, and tmux 3.2 or newer. af
-refuses rather than falling back, because a fallback would run on the ambient
-account while reporting the one you asked for.
+Account-scoped sessions need tmux 3.2 or newer and run on the local backend, the docker backend, or an ssh
+session placed on a host in the global host list (--host <name>). On a listed host
+af syncs the session's account — only its credential files — into that session's
+own directory on the host, never the remote user's global agent config, writes
+refreshes back, and removes it when the session is killed or archived. A default
+account (default_accounts) is applied the same way; on a target that is not a listed
+host it is not applied, and the session runs on the host's own credentials. An
+explicit --account on such a target is refused, naming the remedy. af refuses rather
+than falling back, because a fallback would run on the ambient account while
+reporting the one you asked for. Sessions on one host share its ssh user, so they can
+read each other's synced credentials.
 
-ssh, sandbox and hook refuse by design, not because the work is pending. docker
+sandbox and hook targets cannot be listed, so they refuse an explicit account. docker
 bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
 
 By default af never switches accounts on its own. With limit_auto_resume enabled,
@@ -399,6 +413,7 @@ af agent-server [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--adopt-worktree` | `string` | Bind this existing linked worktree instead of creating one (set by the provisioning daemon when it reattaches an archived workspace) |
 | `--branch` | `string` | Exact git branch for the workspace's worktree (default: derived from branch_prefix and the title) |
 | `--listen` | `string` | HTTP TCP bind address (host:port); :0 lets the kernel pick a free port (default `127.0.0.1:0`) |
 | `--policy-file` | `string` | Operator policy file written by the provisioning daemon; when set, this server reads no config from the host's af home |
@@ -906,6 +921,9 @@ Settable keys:
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
+  network.editor_origin_ports  port pool for per-session VS Code editor origins, e.g. "9100-9119" or "9100,9105-9107", or ""
+                             to disable (default ""). Each session's editor gets one loopback port, kept across restarts;
+                             expose the same ports behind your front door (tailscale serve --https=<port>). Next daemon start.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
   watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
@@ -930,7 +948,7 @@ Settable keys:
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
-  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root} (global-only)
+  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config} (global-only)
   default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
@@ -1216,6 +1234,10 @@ af daemon restart [flags]
 
 Report daemon liveness, config freshness, and supervision
 
+With --daemon-url (or AF_DAEMON_URL, or a saved target) this reads the TARGET's
+health route and reports whether it responds, its version, phase and boot
+identity — never this machine's sockets or autostart unit.
+
 Print a read-only snapshot of the background daemon: whether it is responding
 on the control socket, the control and HTTP socket paths (and whether their
 files are present), the recorded and responding pids, whether the installed
@@ -1401,6 +1423,141 @@ af doctor [flags]
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af hosts
+
+Add, list, check and remove sandbox hosts
+
+Manage the global host list that sandbox sessions run on.
+
+  af hosts add box1 ubuntu@box1.tailnet.ts.net   save the host, then check it
+  af hosts check [box1]                          probe git, tmux and gh on the host
+  af hosts list                                  show the saved hosts
+  af hosts remove box1                           drop the host from the list
+
+You own connectivity (a tailnet, a VPN, a key in your agent): af opens no tunnel
+and edits no ssh config. If the host cannot be reached or is missing a tool, the
+entry is still saved and the command says what to fix; rerun 'af hosts check'.
+
+```
+af hosts
+```
+
+**Subcommands**
+
+- [`af hosts add`](#af-hosts-add) — Save a host and check that it can run a session
+- [`af hosts check`](#af-hosts-check) — Probe a host (or every saved host) for what a session needs
+- [`af hosts list`](#af-hosts-list) — Show the saved hosts
+- [`af hosts remove`](#af-hosts-remove) — Drop a host from the list
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Print the result as a JSON envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts add
+
+Save a host and check that it can run a session
+
+Save <name> as a sandbox host and probe it.
+
+<ssh-destination> is [user@]host[:port] (an ssh:// URL works too), for example ubuntu@box1.tailnet.ts.net.
+The name is what 'af sessions create --host <name>' takes. The host is probed
+for git, tmux (3.2 or newer) and gh, and every missing tool is reported with
+its fix. The entry is kept either way; use --no-check to skip the probe.
+
+```
+af hosts add <name> <ssh-destination> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--default` |  | Make this the default host |
+| `--host-key-verification` | `string` | strict \| accept-new \| insecure (default: the global ssh.host_key_verification) |
+| `--identity-file` | `string` | Absolute path of the ssh key for this host |
+| `--no-check` |  | Save the host without probing it |
+| `--workspace-root` | `string` | Absolute directory on the host under which each session's dir is created (default ~/.af-sessions) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts check
+
+Probe a host (or every saved host) for what a session needs
+
+Ask the daemon to probe a saved host for git, tmux (3.2 or newer) and gh, and
+record the answer so the host pickers show it. With no name every saved host is
+probed. Exits non-zero when a host is not ready or could not be reached.
+
+```
+af hosts check [name]
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts list
+
+Show the saved hosts
+
+```
+af hosts list
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts remove
+
+Drop a host from the list
+
+Remove <name> from the saved hosts. Sessions already running on it keep
+running: each one carries its own connection settings, so a tunnel re-dial or a
+daemon restart does not need the entry; only new sessions can no longer pick it. A host that is the default is
+refused unless you pass --clear-default.
+
+```
+af hosts remove <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--clear-default` |  | Also clear default_host when it names this host |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af keys
 
 Show the effective TUI key bindings (defaults plus [keys] rebinds)
@@ -1515,8 +1672,12 @@ Set the display color of a registered project.
 <project> is a prj_ id or a path inside the project's checkout. <color> is a hex
 color such as '#2f5fd8' or '2f5fd8'. Pass "" to clear the color.
 
-The web client paints the frame around the session and the browser tab's
-favicon with this color, so you can find the project's tab or window quickly.
+The web client uses this color as its accent, fills the top bar with it, and
+paints the browser tab's favicon with it, so you can find the project's tab or
+window quickly.
+
+Against a remote daemon (--daemon-url) <project> is a prj_ id or an absolute
+checkout path on the daemon's host, resolved by that daemon's registry.
 
 ```
 af projects color <project> <color>
@@ -2079,8 +2240,14 @@ With --self, archive the current session (resolved via whoami) instead of a
 named one — use it from inside a session when your work is done. --self and a
 <title> argument are mutually exclusive.
 
-Sandboxes publish work before removal; restore recreates them from the published
-branch. In-place (--here) sessions cannot be archived because af does not own
+An ssh or sandbox session publishes nothing by default: the agent stops and the
+workspace stays on its host, owned by the archived row, and the output names where
+(archived_workspace). Pass --push to push the branch to origin first; docker and
+hook sessions always push. Restoring a session archived without a push
+reattaches that workspace — the tree, index and ignored files come back exactly as
+archived and the agent resumes its conversation; nothing is cloned, pushed or
+re-hooked. If the host proves the workspace gone, restore re-provisions onto the
+recorded branch or fails. In-place (--here) sessions cannot be archived because af does not own
 their worktree. Local archives print the relocated worktree path on success.
 
 ```
@@ -2091,6 +2258,7 @@ af sessions archive [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--push` |  | Push an ssh/sandbox session's branch to origin before archiving. Without it nothing is published: the agent stops and the workspace stays on its host (docker and hook sessions always push) |
 | `--self` |  | Archive the current session (resolved via whoami); use from inside a session when your work is done |
 
 **Global flags**
@@ -2288,8 +2456,10 @@ that, a handoff is recorded — the swap and the branch tip at the moment it
 happened — so a reviewer reading the resulting diff can tell which agent wrote
 which part.
 
-Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
-sandbox is a different lifecycle and is not supported yet.
+Local-worktree sessions and ssh/sandbox sessions whose agent-server supports it
+can be handed off in place: the sandbox's agent-server swaps the agent in the same
+workspace and resolves the new agent's program on its own host. An account-scoped
+sandbox session, and docker or hook sessions, cannot be handed off yet.
 
 Examples:
   af sessions handoff fix-auth --account personal
@@ -2499,14 +2669,21 @@ Fails if the session is not restorable, or if its origin repository is gone.
 The restored worktree path is printed on success.
 
 For a sandbox session (docker/ssh/hook) whose sandbox still ANSWERS but whose
-agent is gone, restore first pushes the sandbox's work to origin, because
-recovery re-clones from there and anything unpushed would be destroyed. If that
-push fails, or if af cannot tell whether the sandbox is gone or merely
-unreachable, the restore REFUSES and the session stays recoverable.
+agent is gone, restore relaunches the agent in place: the sandbox's
+agent-server stops the agent and starts it again in its existing workspace,
+so the branch, the tree and any uncommitted work are untouched, and nothing
+is pushed, reaped, re-cloned or re-provisioned. A sandbox whose agent-server
+does not advertise the relaunch feature on /v1/health (an older build, before
+the relaunch route existed) falls back to replacing the sandbox: that pushes
+its work to origin first, because recovery re-clones from there and anything
+unpushed would be destroyed. If that push fails, or if af cannot tell whether
+the sandbox is gone or merely unreachable, the restore REFUSES and the session
+stays recoverable.
 
---force-reap replaces the sandbox anyway, without the push. It discards whatever
-that sandbox has not pushed, so it is for a sandbox you know is expendable. It
-applies to this one session and this one command; there is no global equivalent.
+--force-reap replaces the sandbox anyway, skipping the relaunch and the push.
+It discards whatever that sandbox has not pushed, so it is for a sandbox you
+know is expendable. It applies to this one session and this one command; there
+is no global equivalent.
 
 ```
 af sessions restore <title> [flags]
@@ -3039,9 +3216,9 @@ af sessions watch [title] [flags]
 
 Identify the current Agent Factory session
 
-Returns the session info for the current tmux session by matching the tmux session name against stored sessions.
+Returns the session info for the current session. With a daemon credential (AF_DAEMON_TOKEN), the daemon reports the session that credential is bound to — the narrowed projection a sandbox receives withholds the tmux name. Otherwise it matches the current tmux session name against stored sessions.
 
-Requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error.
+The tmux path requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error on that path.
 
 Identity is not scoped: you are the session you are, in whatever project it belongs to. --repo therefore acts as an assertion — it checks that the resolved session really is in that project, and errors if it is not.
 

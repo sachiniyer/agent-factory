@@ -47,6 +47,9 @@ import (
 // controlServer resolves an AgentServer out of the multi-session Manager,
 // headlessServer holds the one it owns directly.
 type headlessServer struct {
+	// adopted is set when this server was started over a preserved worktree
+	// (#5571 W8.6); its non-first-time launch respawns the agent there.
+	adopted bool
 	// as is the single workspace's agent-server — the local in-process
 	// implementation over tmux (same runtime as the daemon's local sessions),
 	// exposed here over the wire.
@@ -228,6 +231,10 @@ type AgentServerOptions struct {
 	// Branch is the exact branch the daemon named for this session (#5571 W2.4).
 	// Empty derives it from this host's own branch_prefix, as before.
 	Branch string
+	// AdoptWorktree is an existing linked worktree this server binds instead of
+	// creating one (#5571 W8.6). The provisioning daemon proved it present and on
+	// Branch before starting this process.
+	AdoptWorktree string
 	// PolicyFile is the daemon-resolved operator policy (config.AgentPolicy).
 	// When set, this process answers every config read from it and never reads
 	// or creates anything under its own host's af home (#5571 W2.5); a file it
@@ -325,8 +332,20 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("af agent-server: %w", rerr)
 	}
 	if loginPATH != "" {
+		// The session directory holding the staged af keeps PATH precedence
+		// over whatever the login profile put first (#5877).
+		loginPATH = session.PinPATHDir(loginPATH, session.SessionBinDir(os.Args[0]))
 		if err := os.Setenv("PATH", loginPATH); err != nil {
 			log.WarningLog.Printf("agent-server: could not adopt login-shell PATH for the agent pane: %v", err)
+		}
+	}
+
+	// An account-scoped sandbox proves executable attribution BEFORE any pane can
+	// receive the scope: the resolved command must name an absolute executable, not
+	// a bare name a workspace-relative PATH entry could answer (#5571 W7.4).
+	if agent := os.Getenv(session.AccountScopeAgentEnv); agent != "" {
+		if err := session.RequireAttributedAccountProgram(resolvedProgram, agent); err != nil {
+			return fmt.Errorf("af agent-server: %w", err)
 		}
 	}
 
@@ -348,6 +367,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		// The daemon holds this session as a remote workspace and admits its tabs
 		// accordingly; the injected guidance must match (#5571 W3.3).
 		HostedRemotely: true,
+		// What /v1/health tells the daemon this server speaks; the guidance
+		// follows it rather than a static floor (#5878).
+		AdvertisedFeatures: agentServerWireFeatures,
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,
@@ -362,7 +384,26 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("failed to build workspace instance: %w", err)
 	}
 
+	// The relaunch (W7.1) and agent swap respawn through the local runtime, and a
+	// respawn that rebuilds a deleted worktree must make its stale-pane teardown
+	// obligation durable first. The driving daemon installs those callbacks on ITS
+	// instances; this one needs its own, backed by a marker in the session dir (#5824).
+	sessionDir, sdErr := runtimetoken.SessionDir()
+	if sdErr != nil {
+		return fmt.Errorf("agent-server: %w", sdErr)
+	}
+	if err := instance.InstallDurableRebuildTeardown(sessionDir, session.RebuildTeardownKey(opts.RepoPath, opts.Title)); err != nil {
+		return fmt.Errorf("agent-server: %w", err)
+	}
+
+	if opts.AdoptWorktree != "" {
+		if err := instance.AdoptExistingWorktree(opts.AdoptWorktree); err != nil {
+			return fmt.Errorf("agent-server: %w", err)
+		}
+	}
+
 	hs := &headlessServer{
+		adopted: opts.AdoptWorktree != "",
 		as:      instance.AgentServer(),
 		inst:    instance,
 		program: resolvedProgram,
@@ -434,7 +475,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	if err := hs.stopEditor(); err != nil {
 		log.WarningLog.Printf("agent-server: workspace editor teardown on shutdown: %v", err)
 	}
-	if err := hs.as.Kill(false); err != nil {
+	if err := hs.shutdownWorkspace(); err != nil {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)
 	}
 	return nil
@@ -466,11 +507,20 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
 	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
+	mux.HandleFunc("/v1/agent/workspace-facts", rpcHandler(hs.WorkspaceFacts))
+	mux.HandleFunc("/v1/agent/stop", rpcHandler(hs.StopPreserving))
 	// W7.1: stop the agent and start it again in this workspace, resuming the
 	// provider's conversation. Advertised as the "relaunch" feature.
 	mux.HandleFunc("/v1/agent/relaunch", rpcHandler(hs.Relaunch))
 	mux.HandleFunc(agentproto.EditorPath, rpcHandler(hs.Editor))
 	mux.HandleFunc(agentproto.EditorStopPath, rpcHandler(hs.EditorStop))
+	// W7.5: swap the agent for another in this workspace. Advertised as the
+	// "agent-swap" feature.
+	mux.HandleFunc("/v1/agent/swap-agent", rpcHandler(hs.SwapAgent))
+	// W7.6: rotate the account scope and relaunch. Advertised as the
+	// "account-swap" feature.
+	mux.HandleFunc("/v1/agent/swap-account", rpcHandler(hs.SwapAccount))
+	mux.HandleFunc("/v1/agent/swap-account-status", rpcHandler(hs.SwapAccountStatus))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -514,6 +564,12 @@ var agentServerWireFeatures = []string{
 	// "editor": POST /v1/agent/editor and /v1/agent/relay?target=editor — the
 	// workspace's own code-server, relayed to the daemon (#5571 W5.4).
 	agentproto.EditorFeature,
+	// "agent-swap": POST /v1/agent/swap-agent — replace the agent with another
+	// in this workspace, resolving the new agent's program on this host (#5571 W7.5).
+	session.SwapAgentFeature,
+	// "account-swap": POST /v1/agent/swap-account — rotate the staged account
+	// scope in and relaunch the agent on it (#5571 W7.6).
+	session.AccountSwapFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version
@@ -564,6 +620,9 @@ func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResp
 }
 
 func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
+	if hs.adopted && !req.FirstTimeSetup && hs.inst != nil {
+		return hs.launchAdopted(req, resp)
+	}
 	var codexSnap session.ConversationCaptureSnapshot
 	codex := tmux.DetectAgentFromCommand(hs.program) == tmux.ProgramCodex
 	if hs.inst != nil && req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {
@@ -578,8 +637,12 @@ func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKRespons
 	}
 	if codex && hs.inst != nil {
 		// Before the spawn, so the capture can tell the new rollout from old ones.
+		// Correlated against the directory the launch command actually runs the
+		// agent in (an `env -C DIR codex` moves it off the worktree), not the
+		// worktree; unscoped when that is not provable (#5861).
 		codexSnap = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(
-			codexHomeFor(hs.program, hs.inst.GetWorktreePath()), hs.inst.GetWorktreePath())
+			codexHomeFor(hs.program, hs.inst.GetWorktreePath()),
+			session.LaunchCaptureWorkingDir(hs.program, hs.inst.GetWorktreePath()))
 	}
 	if err := hs.as.Launch(req.FirstTimeSetup); err != nil {
 		return err
@@ -791,21 +854,6 @@ func (hs *headlessServer) Archive(_ struct{}, resp *agentArchiveResponse) error 
 	return nil
 }
 
-// Relaunch stops the agent and starts it again in this workspace. Nothing is
-// pushed, reaped or re-cloned: the branch, tree and uncommitted work stay as
-// they are.
-func (hs *headlessServer) Relaunch(_ struct{}, resp *agentOKResponse) error {
-	r, ok := hs.as.(session.AgentRelauncher)
-	if !ok {
-		return session.ErrRelaunchUnsupported
-	}
-	if err := r.Relaunch(); err != nil {
-		return err
-	}
-	resp.OK = true
-	return nil
-}
-
 func (hs *headlessServer) Kill(_ struct{}, resp *agentOKResponse) error {
 	if err := hs.stopEditor(); err != nil {
 		log.WarningLog.Printf("agent-server: workspace editor teardown: %v", err)
@@ -894,4 +942,14 @@ func (hs *headlessServer) eventsHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	serveEvents(hs.events, conn)
+}
+
+// WorkspaceFacts measures this server's workspace for the daemon's kill
+// confirmation (#5571 W8.2). Read-only: git status/rev-list/for-each-ref/reflog.
+func (hs *headlessServer) WorkspaceFacts(_ struct{}, resp *session.WorkspaceFacts) error {
+	if hs.inst == nil {
+		return fmt.Errorf("this agent-server has no workspace")
+	}
+	*resp = session.MeasureWorkspaceAt(hs.inst.GetWorktreePath(), hs.inst.Path)
+	return nil
 }

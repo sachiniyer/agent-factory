@@ -384,7 +384,7 @@ func (i *Instance) AddProcessTabWithID(id, command, requestedName string) (resul
 		tabID = newTabID()
 	}
 	tab := &Tab{ID: tabID, Name: displayName, Kind: TabKindProcess, Command: command, tmux: procTmux,
-		accountScope: procTmux.Account(), Exit: exit}
+		accountScope: procTmux.Account(), Exit: exit, gen: newTabID()}
 	i.mu.Lock()
 	// Re-check started AND status under the write lock before appending (see
 	// AddShellTab): Kill can have flipped started=false and snapshotted Tabs for

@@ -539,9 +539,8 @@ it still binds and serves the tokenless network posture its config asks for —
 the *running* daemon is the one that decides. If `af daemon status` shows a
 listener `bound` on a network address, take that at face value and restart the
 daemon (`af daemon restart`) so the refusing build owns the socket. Guarding a
-newer CLI's writes to an *older* remote daemon, the upgrade supervisor's
-listener expectations, and live-vs-disk drift reporting in `af daemon status`
-and `af doctor` are tracked as follow-ups (#5183, #5184, #5185).
+newer CLI's writes to an *older* remote daemon and live-vs-disk drift reporting
+in `af daemon status` and `af doctor` are tracked as follow-ups (#5184, #5185).
 
 On a network you fully trust — a private Tailscale tailnet, a locked-down VPN —
 a tokenless listener may feel reasonable, and `network.allow_unauthenticated_network = true`
@@ -550,6 +549,18 @@ port at all, bind loopback and reach it over the tailnet with SSH
 port-forwarding (Option 1), or set the token.
 
 ---
+
+## Which verbs follow the target
+
+With `--daemon-url`, `AF_DAEMON_URL` or a saved target (`af target set`), every `af` verb does one of three things, and none of them answers about the wrong machine without saying so:
+
+| Verbs | With a remote target |
+|---|---|
+| `af` (the TUI), `sessions`, `tasks`, `projects`, `proposal`, `quota`, `daemon status`, global `config set` / `config unset` | **Follow the target.** They read and write that daemon over its API and never fall back to this machine. `af daemon status` reports the target's health route (version, phase, boot id), not this machine's sockets or autostart unit. |
+| `token show` / `token rotate`, `daemon restart` / `install` / `uninstall` / `adopt`, `doctor`, `reset`, `config get` / `list` / `validate` / `migrate`, `config set` / `unset --project`, `accounts`, `hosts` | **Refuse**, naming the daemon they declined to act on, because they read or change a file, process or unit that exists only on the machine they run on and no daemon API stands in for it. Run them on the daemon host (for example over ssh). |
+| `target`, `upgrade`, `bug-report`, `version`, `keys`, `debug`, `api`, `sessions whoami` | **Act on this client** by design: its binary, its saved target, its terminal or tmux pane, or this build's static catalogs. |
+
+A skew error against a remote daemon names that daemon and a remedy you can run from the client: `the daemon at http://box:8443 is out of date … ssh box 'af upgrade && af daemon restart'`. A new verb has to pick one of the three: `commands/targetclass_test.go` fails the build for a verb with no class.
 
 ## Rotating the token
 

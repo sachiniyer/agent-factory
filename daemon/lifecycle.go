@@ -66,6 +66,14 @@ type DaemonListenerStatus struct {
 	PreviewBound      bool   `json:"preview_bound"`
 	PreviewListenAddr string `json:"preview_listen_addr,omitempty"`
 	PreviewBoundAddr  string `json:"preview_bound_addr,omitempty"`
+	// TCPBindError / PreviewBindError carry the last bind failure while that
+	// listener is not accepting, and BindRetrying says the daemon is still
+	// retrying it in the background (#5571 W9.9), so `af daemon status` shows a
+	// listener that lost a startup race (a tailnet IP not yet assigned) as
+	// pending rather than silently absent.
+	TCPBindError     string `json:"tcp_bind_error,omitempty"`
+	PreviewBindError string `json:"preview_bind_error,omitempty"`
+	BindRetrying     bool   `json:"bind_retrying,omitempty"`
 }
 
 type daemonLifecycleSnapshot struct {
@@ -359,6 +367,24 @@ func (l *daemonLifecycle) setPreviewBound(addr string) {
 	defer l.mu.Unlock()
 	l.listeners.PreviewBound = true
 	l.listeners.PreviewBoundAddr = addr
+}
+
+func (l *daemonLifecycle) setTCPBindError(msg string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners.TCPBindError = msg
+}
+
+func (l *daemonLifecycle) setPreviewBindError(msg string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners.PreviewBindError = msg
+}
+
+func (l *daemonLifecycle) setBindRetrying(retrying bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners.BindRetrying = retrying
 }
 
 func (l *daemonLifecycle) clearPreviewBound() {

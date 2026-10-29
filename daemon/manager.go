@@ -16,6 +16,11 @@ import (
 
 // Manager owns the daemon's authoritative session mutations.
 type Manager struct {
+	// advisory scopes best-effort background work (host-readiness probes) that
+	// must never delay shutdown: drainDaemon cancels it FIRST, before it closes the
+	// transports or joins anything, so a probe's ssh child is killed rather than
+	// waited on (#5839). Zero-value safe; see advisory.go.
+	advisory advisoryScope
 	// cfg is the FROZEN startup config. It is read only by the keys that
 	// deliberately do NOT hot-reload: root_agents (its next-daemon-start contract,
 	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and
@@ -101,6 +106,10 @@ type Manager struct {
 	// can invent correctly-shaped hosts without a credential, so the miss path must
 	// not do per-session work (#2743 review).
 	editorLabels *editorLabelIndex
+
+	// editorPorts serves per-session editor origins to remote viewers from the
+	// network.editor_origin_ports pool (W5.2); see editor_port_origin.go.
+	editorPorts *editorPortOrigins
 
 	// limitDetector is the resolved usage-limit matcher set (#1146), built from
 	// cfg.LimitPatterns (it compiles the override regexes) and reused across poll
@@ -802,6 +811,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		previewOrigins:            newPreviewOriginRegistry(),
 		editorOriginSecret:        editorSecret,
 		editorLabels:              newEditorLabelIndex(),
+		editorPorts:               newEditorPortOrigins(),
 		pollReloadCh:              make(chan struct{}, 1),
 		ready:                     make(chan struct{}),
 		lifecycle:                 lifecycle,

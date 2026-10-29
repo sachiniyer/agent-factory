@@ -78,6 +78,7 @@ import { emptyQuotaState } from "./quota.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
+import type { HostOption } from "./backends.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
 import {
   addProjectModal,
@@ -105,6 +106,7 @@ import {
   tabToKeepOnClose,
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
+import { synthIdentities } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
@@ -229,6 +231,12 @@ const connectionGate = createLatestRequestGate();
  *  Tokenless ("") is a valid credential (#1696), so a null token — not a falsy one —
  *  is the "not authorized yet" case. Rejecting there is safe: every caller degrades
  *  to the repo default rather than blocking its form. */
+/** The listed hosts for a project (ListBackends.hosts, #5571 W6.3). */
+const loadHosts = (repoPath: string): Promise<HostOption[]> =>
+  token === null
+    ? Promise.reject(new Error("not authorized"))
+    : listBackends(repoPath, token).then((catalog) => catalog.hosts ?? []);
+
 const loadPrograms = (repoPath: string): Promise<ProgramCatalog> =>
   token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 /** The create form's account registry (#3844). The registry itself is not
@@ -589,6 +597,13 @@ function tabIdsOf(list: SessionData[], id: string | null): string[] {
   return s ? sessionTabs(s).map(tabIdentity) : [];
 }
 
+/** Each tab's legacy kind:name, parallel to tabIdsOf — pairs a backfilled real id
+ *  with the id-less tab it replaced (layout.remapByIdentity, #6001). */
+function tabSynthOf(list: SessionData[], id: string | null): string[] {
+  const s = id ? list.find((x) => x.id === id) : null;
+  return s ? synthIdentities(sessionTabs(s).map((t) => t.kind), sessionTabs(s).map((t) => t.name)) : [];
+}
+
 // Resolve only against an authenticated snapshot, never a partially loaded rail.
 let resolvingRoute = false;
 let routeSelection: string | null = null;
@@ -633,7 +648,7 @@ function moveSelection(id: string): void {
     focus: "rail",
     // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
     // are the same statement even if the roster shrank since the tree was retained.
-    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id))),
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id), tabSynthOf(store.get().sessions, id))),
   });
 }
 
@@ -773,7 +788,7 @@ function switchProject(root: string): void {
     selectedId: keep,
     focus: "rail",
     activeTab: keep
-      ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep)))
+      ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep), tabSynthOf(store.get().sessions, keep)))
       : 0,
   });
 }
@@ -2578,6 +2593,7 @@ function openAddTask(): void {
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -2626,6 +2642,7 @@ function openEditTask(task: TaskData): void {
     editTaskModal(projects, task, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -2635,6 +2652,9 @@ function openEditTask(task: TaskData): void {
         const m = modal;
         m.setBusy(true);
         const value = buildTask(input);
+        // `host` is patched only when CHANGED (undefined drops out of the JSON): an
+        // unrelated edit must not re-validate, and fail on, a host removed from the
+        // list since the task was written.
         void updateTask(
           task,
           {
@@ -2644,6 +2664,8 @@ function openEditTask(task: TaskData): void {
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
             on_complete: value.on_complete ?? "",
+            max_concurrent_runs: value.max_concurrent_runs ?? 0,
+            host: (input.host ?? "") !== (task.host ?? "") ? input.host ?? "" : undefined,
             project_path: input.projectPath,
             program: input.program,
           },
@@ -3172,7 +3194,7 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
   // until syncSplit remaps the layout, that ordinal names a neighbour. A changed
   // selection uses the same retained-layout rule (#1855, as moveSelection).
   const settled = selectedId
-    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId))
+    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId), tabSynthOf(sessions, selectedId))
     : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   // Stamp the daemon's startup-skipped repo set onto the store when the snapshot

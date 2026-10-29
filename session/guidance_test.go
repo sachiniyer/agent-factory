@@ -88,6 +88,20 @@ func TestInSandboxInstanceRendersFromTheRemoteProjection(t *testing.T) {
 	assert.Equal(t, noCallbackGuidanceCaps, in.guidanceCaps())
 }
 
+// A sandbox whose agent-server advertises tab-api serves shell and process tabs
+// off-box (W4.5), so its guidance teaches them (#5878); one that does not
+// advertise it keeps the refusal.
+func TestHostedGuidanceFollowsTheAdvertisedTabAPI(t *testing.T) {
+	in := &Instance{hostedRemotely: true, advertisedFeatures: []string{tabAPIFeature, tabIDAddressingFeature}}
+	caps := in.guidanceCaps()
+	assert.True(t, caps.Callback)
+	assert.True(t, caps.Shell, "an advertised tab-api means shell tabs work")
+	assert.Contains(t, caps.Reference(), "--kind shell")
+
+	old := &Instance{hostedRemotely: true, advertisedFeatures: []string{tabIDAddressingFeature}}
+	assert.False(t, old.guidanceCaps().Shell)
+}
+
 // Each distinct projection gets its own generated file, so two sessions with
 // different capabilities on one host never overwrite the guidance the other
 // reads — the flap #5577 closed for the callbackless pair.

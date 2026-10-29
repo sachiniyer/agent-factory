@@ -58,6 +58,10 @@ func ParseBackendKind(s string) (BackendKind, error) {
 // source, and optional restore branch used to start an `af agent-server` for one
 // workspace. Each runtime reads its own settings from the resolved repo config.
 type ProvisionSpec struct {
+	// Adopt, when set, provisions over a workspace an archive preserved on the
+	// host instead of creating one (#5571 W8.6): nothing is cloned, fetched or
+	// reaped, and the dir is verified read-only first.
+	Adopt *AdoptSpec
 	// RepoRoot is the absolute repo root the session is created against.
 	RepoRoot string
 	// Title is the session title. A sandbox runtime uses it as the single
@@ -99,6 +103,11 @@ type ProvisionSpec struct {
 	// value from repo config or the sandbox. Empty means the credential has no
 	// carrier and the provisioner opens no -R.
 	CallbackSocket string
+	// CallbackRef is the opaque reference CallbackToken derives from (#5571
+	// W3.6). It is not a secret; the provisioner persists it with the runtime
+	// identity so a restarted daemon can re-derive and re-register the same
+	// credential for the still-running sandbox.
+	CallbackRef string
 	// CallbackRevalidate re-checks the minted credential's posture INSIDE
 	// provisioning, at the last step that can still keep a dead credential out
 	// of the launched agent-server's environment — after the clone/binary
@@ -155,6 +164,12 @@ type ProvisionSpec struct {
 	// container's `af` would look up an account that does not exist in it — so an
 	// off-box backend has to carry the resolved DIRECTORY and place it itself.
 	Account sessionenv.Account
+	// AccountSyncHost is the name of the LISTED host (global host list, W6.1) this
+	// provision may send Account's credentials to (#5571 W7.3). It is the only
+	// licence: set by the ssh runtime when the host resolved to a host-list entry,
+	// never from a repository's own config. Empty with a non-empty Account means
+	// the target is not licensed and the provision refuses rather than send.
+	AccountSyncHost string
 	// SessionEnvPassthrough contains exact global-only variable names approved
 	// for the agent. Sandboxed runtimes pass names, never values, to their
 	// version-matched agent-server.
@@ -183,8 +198,10 @@ type ProvisionResult struct {
 	// serialized by the runtime; docker/SSH latch answered outcomes and leave
 	// unknown outcomes retryable, while hook runs its idempotent delete once.
 	Teardown func() error
-	// Branch is the branch name the daemon passed the runtime (ProvisionSpec.Branch),
-	// recorded on the new Instance so surfaces show it from the first frame.
+	// Branch is the branch the runtime actually put the agent-server on: set only
+	// by a runtime that handed ProvisionSpec.Branch to it (docker, sandbox/ssh),
+	// and left empty by one that did not (hook), so the Instance never records a
+	// name nothing used (#5971).
 	Branch string
 
 	// CallbackUnavailable carries the reason no callback credential was

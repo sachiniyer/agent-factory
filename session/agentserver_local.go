@@ -28,6 +28,9 @@ import (
 type localAgentServer struct {
 	inst *Instance
 
+	// acctSwap records how the last account swap ended (W7.6).
+	acctSwap accountSwapRecorder
+
 	mu sync.Mutex
 	// afterTabResolve is a deterministic race-test seam. Production leaves it
 	// nil; tests use it to pause between tab resolution and broker-map locking.
@@ -49,6 +52,9 @@ type localAgentServer struct {
 	closed bool
 	// relaunch collapses overlapping Relaunch requests onto one attempt (W7.1).
 	relaunch relaunchFlight
+	// agentOpMu serializes the operations that replace the agent process — a
+	// relaunch and an agent swap — so two of them never interleave (W7.1/W7.5).
+	agentOpMu sync.Mutex
 }
 
 // AgentServer returns the cached agent-server for this instance's runtime (#1592
@@ -566,6 +572,21 @@ func (s *localAgentServer) Archive() (string, error) {
 }
 
 // trustLiveGeneration is threaded straight to Backend.Kill (#3413).
+// StopPreservingWorkspace stops the agent and every tab and leaves the workspace
+// in place (#5571 W8.5): the same data-plane teardown as Kill, then a tab
+// teardown that keeps the worktree.
+func (s *localAgentServer) StopPreservingWorkspace() error {
+	s.mu.Lock()
+	s.closed = true
+	brokers := s.brokers
+	s.brokers = nil
+	s.mu.Unlock()
+	for _, br := range brokers {
+		br.close()
+	}
+	return s.inst.teardownTabs(teardownKill{keepWorkspace: true})
+}
+
 func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	// Tear every tab's data plane down first so the clientless captures stop and
 	// each subscriber's NextEvent returns io.EOF, then kill the underlying session.

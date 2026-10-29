@@ -357,6 +357,9 @@ func (m *Manager) stopVSCodeForInstance(key, instanceID string) error {
 	// daemonInstanceKey; drop the session's cached relay transport with the
 	// editor so removed sessions do not accumulate them. It is rebuilt on demand.
 	m.evictRelayTransport(key)
+	// And withdraw the session's editor-origin key (W5.2): the editor is going away
+	// (archive, kill, swap), so no cookie issued for it may outlive it.
+	m.editorPorts.invalidate(instanceID)
 	err := m.vscode.stopForInstance(key, instanceID)
 	if err != nil {
 		m.warn().Printf("vscode: could not determine or complete teardown for session id %q: %v", instanceID, err)
@@ -455,7 +458,7 @@ func forwardAppCookies(r *http.Request) {
 	r.Header.Del("Cookie")
 	var b strings.Builder
 	for _, c := range cookies {
-		if c.Name == webtabTokenCookie || c.Name == previewTokenCookie {
+		if c.Name == webtabTokenCookie || c.Name == previewTokenCookie || strings.HasPrefix(c.Name, editorPortCookiePrefix) {
 			continue
 		}
 		if b.Len() > 0 {

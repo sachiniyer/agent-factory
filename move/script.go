@@ -81,7 +81,14 @@ func RunScript(ctx context.Context, cmdline string, spec ScriptSpec, h Host) err
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	out := &tailBuffer{max: scriptTailBytes}
 	cmd.Stdout, cmd.Stderr = out, out
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	// The whole group goes whatever the exit: a script that backgrounds a transfer
+	// and exits (nonzero or not) must not leave it writing into a destination the
+	// caller is about to verify, use or reap. Cancel only fires on cancellation.
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	if err != nil {
 		tail := strings.TrimSpace(out.String())
 		return fmt.Errorf("move script failed (the session was not moved): %w: %s", err, tail)
 	}

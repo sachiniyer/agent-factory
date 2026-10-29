@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -101,4 +103,71 @@ func TestSandboxCredentials_MintReadsTheLiveEndpoint(t *testing.T) {
 	creds.Revoke()
 	_, ok = m.sandboxTokens.sessionFor(cred.Token)
 	assert.False(t, ok, "revoking through the credentials object must reach the registry")
+}
+
+// The callback credential survives a daemon restart (#5571 W3.6): the registry
+// is memory-only, but the secret is derived from the persisted ref, so a fresh
+// registry re-registers the very secret the sandbox already holds.
+func TestSandboxCallbackCredentialSurvivesARegistryRestart(t *testing.T) {
+	m := applyConfigTestManager(t)
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	cred, err := newSandboxCredentials(m, "sess-a").Mint()
+	require.NoError(t, err)
+	require.NotEmpty(t, cred.Ref, "the grant must carry the ref the row persists")
+
+	// A restarted daemon: an empty registry over the same AF home (same key).
+	m.sandboxTokens.revokeAll()
+	_, ok := m.sandboxTokens.sessionFor(cred.Token)
+	require.False(t, ok, "anti-vacuous: nothing is registered before the restore")
+
+	require.NoError(t, newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref))
+	owner, ok := m.sandboxTokens.sessionFor(cred.Token)
+	require.True(t, ok, "the secret the sandbox already holds must be accepted again with no re-delivery")
+	assert.Equal(t, "sess-a", owner)
+
+	// The ref is bound to the session: restoring it for another session
+	// registers a different secret, never the first session's.
+	require.NoError(t, newSandboxCredentials(m, "sess-b").RestoreCallback(cred.Ref))
+	owner, ok = m.sandboxTokens.sessionFor(cred.Token)
+	require.True(t, ok)
+	assert.Equal(t, "sess-a", owner, "session b's restore must not take over session a's credential")
+}
+
+// A restore never invents a key: with the key gone the credential the sandbox
+// holds cannot be re-derived, and a fresh key would only derive a stranger.
+func TestSandboxCallbackRestoreRefusesWithoutTheKey(t *testing.T) {
+	m := applyConfigTestManager(t)
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	cred, err := newSandboxCredentials(m, "sess-a").Mint()
+	require.NoError(t, err)
+
+	keyPath, err := runtimetoken.KeyPath()
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(keyPath))
+	require.Error(t, newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref))
+	_, statErr := os.Stat(keyPath)
+	assert.True(t, os.IsNotExist(statErr), "a failed restore must not write a replacement key")
+}
+
+// A restore whose callback endpoint is not bound registers nothing and says why
+// (#5897): sshd would accept the persisted -R to a socket nobody listens on, so
+// reporting the callback restored would leave every call dead.
+func TestSandboxCallbackRestoreRefusesWhileTheEndpointIsDown(t *testing.T) {
+	m := applyConfigTestManager(t)
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	cred, err := newSandboxCredentials(m, "sess-a").Mint()
+	require.NoError(t, err)
+	m.sandboxTokens.revokeAll()
+
+	m.setSandboxEndpointSocket("") // the endpoint failed to bind on this start
+	err = newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), errSandboxEndpointDown().Error())
+	_, ok := m.sandboxTokens.sessionFor(cred.Token)
+	assert.False(t, ok, "no credential may be registered for a callback path that is dead")
+
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	require.NoError(t, newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref))
+	_, ok = m.sandboxTokens.sessionFor(cred.Token)
+	assert.True(t, ok, "control: with the endpoint bound the same restore registers")
 }

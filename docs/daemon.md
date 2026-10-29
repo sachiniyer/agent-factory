@@ -36,8 +36,9 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 - **Keeps sessions alive.** If a local session's process dies unexpectedly, the
   daemon re-spawns it in place — the worktree and record are preserved, so the
-  agent comes back where it was. An off-box (docker/ssh/sandbox/hook) session that
-  dies is re-provisioned from its pushed branch instead, as a fresh agent. The always-on [root agent](configuration.md#root-agents-always-ensured)
+  agent comes back where it was. An off-box (docker/ssh/sandbox/hook) session whose
+  agent dies is relaunched in place when its sandbox is reachable, and otherwise
+  re-provisioned from its pushed branch as a fresh agent. The always-on [root agent](configuration.md#root-agents-always-ensured)
   is re-created rather than re-spawned — its record is replaced, but its recorded
   conversation and its tabs are carried across, so it comes back on the same
   context with the same tab strip. When that conversation cannot be resumed the
@@ -66,9 +67,10 @@ exists so cron schedules are evaluated promptly, and the TUI ensures it on
 its first control call. `af` commands that need a live daemon ensure one when
 they execute, while read-only listings like `af sessions list` deliberately
 do not spawn one — they fall back to disk. With `--daemon-url`/`AF_DAEMON_URL`,
-the read verbs (`list`, `get`, `watch`, `preview`, `attach`), `tasks`, and
-global `config` writes dial the remote daemon, which must already be running;
-most other verbs still reach the local daemon (see
+nearly every verb dials the remote daemon, which must already be running:
+`af sessions` (with a few per-verb exceptions), `af tasks`,
+`af projects add`/`rebind`/`delete`/`list`, `af quota`, and global `config`
+writes all follow the target and never fall back to the local socket (see
 [remote daemons](cli.md#remote-daemons)).
 For interactive use you usually don't have to think about it at all.
 
@@ -94,10 +96,12 @@ unavailable manager or older daemon is reported as unknown rather than guessed.
 
 ## Sockets
 
-The daemon listens on two local Unix sockets under `$AGENT_FACTORY_HOME`
-(default `~/.agent-factory`): an internal control socket the TUI and CLI use, and
-the HTTP/JSON socket (`daemon-http.sock`) for the public API. Both are
-owner-only (`0600`). It also binds TCP listeners: the web listener on
+The daemon listens on local Unix sockets under `$AGENT_FACTORY_HOME`
+(default `~/.agent-factory`): an internal control socket the TUI and CLI use, the
+HTTP/JSON socket (`daemon-http.sock`) for the public API, and a sandbox callback
+socket (`sandbox-callback.sock`) the in-sandbox `af` reaches over the
+supervised SSH connection. All are owner-only (`0600`). It also binds TCP
+listeners: the web listener on
 `network.listen_addr` (default `127.0.0.1:8443`) serves the bundled web client
 and the same HTTP API — set the key to `""` to turn it off — and, when
 `network.preview_listen_addr` is set (empty by default), a per-tab preview

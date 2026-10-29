@@ -67,8 +67,10 @@ that, a handoff is recorded — the swap and the branch tip at the moment it
 happened — so a reviewer reading the resulting diff can tell which agent wrote
 which part.
 
-Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
-sandbox is a different lifecycle and is not supported yet.
+Local-worktree sessions and ssh/sandbox sessions whose agent-server supports it
+can be handed off in place: the sandbox's agent-server swaps the agent in the same
+workspace and resolves the new agent's program on its own host. An account-scoped
+sandbox session, and docker or hook sessions, cannot be handed off yet.
 
 Examples:
   af sessions handoff fix-auth --account personal

@@ -233,31 +233,51 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// validation like every other write.
 	"ConfirmHandoffDelivery": blockedDuringProbation,
 	"CreateSession":          blockedDuringProbation,
-	"CreateTab":              blockedDuringProbation,
-	"DeleteProject":          blockedDuringProbation,
-	"DeliverPrompt":          blockedDuringProbation,
-	"HandoffSession":         blockedDuringProbation,
-	"HandoffSessionV2":       blockedDuringProbation,
-	"KillSession":            blockedDuringProbation,
-	"PauseStatusPoll":        blockedDuringProbation,
-	"ReapConfigAgent":        blockedDuringProbation,
-	"RegisterProject":        blockedDuringProbation,
-	"ReloadTasks":            blockedDuringProbation,
-	"RemoveTask":             blockedDuringProbation,
-	"RestartTask":            blockedDuringProbation,
-	"RenameTab":              blockedDuringProbation,
-	"ReorderTab":             blockedDuringProbation,
-	"RestoreArchived":        blockedDuringProbation,
-	"RestoreSession":         blockedDuringProbation,
-	"ResumeFromLimit":        blockedDuringProbation,
-	"ResumeStatusPoll":       blockedDuringProbation,
-	"SendPrompt":             blockedDuringProbation,
-	"SetConfigValue":         blockedDuringProbation,
-	"UnsetConfigValue":       blockedDuringProbation,
-	"SpawnConfigAgent":       blockedDuringProbation,
-	"RebindProject":          blockedDuringProbation,
-	"SetProjectColor":        blockedDuringProbation,
-	"RebindProjectGuarded":   blockedDuringProbation,
+	// CheckHost looks read-only (it creates nothing on the host) and is NOT
+	// admitted, unlike ListBackends and the other lookups. A lookup answers from
+	// state the daemon already holds; this one acts on the outside world as the
+	// operator: it opens ssh connections to their hosts, and under the accept-new
+	// posture it appends the host's key to the af-owned known_hosts in the shared
+	// home (prepareSSHHostKeyStore). A candidate under validation may be rolled
+	// back, and a rolled-back daemon must not leave behind trust decisions or
+	// readiness verdicts it learned while unproven. A refusal here costs a retry
+	// once probation releases; the readiness cache is only advisory until then,
+	// and the supervisor's refresh timer stands down for the same window.
+	"CheckHost":            blockedDuringProbation,
+	"CreateTab":            blockedDuringProbation,
+	"DeleteProject":        blockedDuringProbation,
+	"DeliverPrompt":        blockedDuringProbation,
+	"HandoffSession":       blockedDuringProbation,
+	"HandoffSessionV2":     blockedDuringProbation,
+	"KillSession":          blockedDuringProbation,
+	"PauseStatusPoll":      blockedDuringProbation,
+	"ReapConfigAgent":      blockedDuringProbation,
+	"RegisterProject":      blockedDuringProbation,
+	"ReloadTasks":          blockedDuringProbation,
+	"RemoveTask":           blockedDuringProbation,
+	"RestartTask":          blockedDuringProbation,
+	"RenameTab":            blockedDuringProbation,
+	"ReorderTab":           blockedDuringProbation,
+	"RestoreArchived":      blockedDuringProbation,
+	"RestoreSession":       blockedDuringProbation,
+	"ResumeFromLimit":      blockedDuringProbation,
+	"ResumeStatusPoll":     blockedDuringProbation,
+	"SendPrompt":           blockedDuringProbation,
+	"SetConfigValue":       blockedDuringProbation,
+	"UnsetConfigValue":     blockedDuringProbation,
+	"SpawnConfigAgent":     blockedDuringProbation,
+	"RebindProject":        blockedDuringProbation,
+	"SetProjectColor":      blockedDuringProbation,
+	"RebindProjectGuarded": blockedDuringProbation,
+	// WorkspaceFacts is a read: it asks an already-bound session's agent-server (or
+	// the local disk) to run git status, rev-list and for-each-ref over the
+	// session's own workspace and reports what it counted. It opens no connection
+	// the session does not already hold (unlike CheckHost), writes no state and
+	// records no verdict, so there is nothing for a rolled-back daemon to leave
+	// behind. A kill confirmation must not have to wait out a probation for the
+	// facts it warns with; a refusal would read as "unmeasured", which is the
+	// worse answer.
+	"WorkspaceFacts": allowedDuringProbation,
 	// AccountLogin registers a credential directory in the daemon host's
 	// agent-factory home and starts a process on it (#3384). Both halves are
 	// mutations of the very candidate an upgrade supervisor is mid-validation on,

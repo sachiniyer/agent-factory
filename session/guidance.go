@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"strings"
 )
 
@@ -69,10 +70,17 @@ func guidanceCapsFor(callbackUnavailable bool, c Capabilities) guidanceCaps {
 func (i *Instance) guidanceCaps() guidanceCaps {
 	callbackUnavailable := i.CallbackUnavailable() != ""
 	i.mu.RLock()
-	hosted := i.hostedRemotely
+	hosted, advertised := i.hostedRemotely, i.advertisedFeatures
 	i.mu.RUnlock()
 	if hosted {
-		return guidanceCapsFor(callbackUnavailable, (&remoteAgentBackend{}).Capabilities())
+		// The remote backend's declaration is only the floor; the daemon lifts it
+		// for a sandbox advertising the tab API (capabilitiesLocked, W4.5), so the
+		// guidance lifts it by the same advertisement (#5878).
+		caps := (&remoteAgentBackend{}).Capabilities()
+		if slices.Contains(advertised, tabAPIFeature) {
+			caps.TabManagement = true
+		}
+		return guidanceCapsFor(callbackUnavailable, caps)
 	}
 	return guidanceCapsFor(callbackUnavailable, i.Capabilities())
 }

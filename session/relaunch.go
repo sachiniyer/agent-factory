@@ -133,7 +133,13 @@ func relaunchFallsBackToReprovision(err error) bool {
 func (s *localAgentServer) Relaunch() error { return s.relaunchWith(s.inst.relaunchLocalAgent) }
 
 // relaunchWith runs one relaunch through the single-flight guard.
-func (s *localAgentServer) relaunchWith(run func() error) error { return s.relaunch.do(run) }
+func (s *localAgentServer) relaunchWith(run func() error) error {
+	return s.relaunch.do(func() error {
+		s.agentOpMu.Lock()
+		defer s.agentOpMu.Unlock()
+		return run()
+	})
+}
 
 // relaunchFlight makes a relaunch ONE serialized operation across its whole
 // stop/start. The route discards request cancellation, so a daemon that timed

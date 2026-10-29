@@ -388,6 +388,15 @@ func TestAgentServerProgramAcceptsOnlyGeneratedGrammar(t *testing.T) {
 			t.Fatalf("--policy-file %q must be rejected: only an absolute path is read", bad)
 		}
 	}
+	withAdopt := append(append([]string(nil), withBranch...), "--adopt-worktree", "/srv/af-session/workspace-wt")
+	if got, ok := agentServerProgram(withAdopt); !ok || got != "opencode --model test" {
+		t.Fatalf("handoff reattaching a preserved worktree = (%q, %v), want (opencode command, true)", got, ok)
+	}
+	for _, bad := range []string{"", "relative", "-rf"} {
+		if _, ok := agentServerProgram(append(append([]string(nil), base...), "--adopt-worktree", bad)); ok {
+			t.Fatalf("--adopt-worktree %q must be rejected: only an absolute path is bound", bad)
+		}
+	}
 	malformed := append(append([]string(nil), base...), "--program-resolved")
 	if got, ok := agentServerProgram(malformed); ok || got != "" {
 		t.Fatalf("malformed handoff = (%q, %v), want no program", got, ok)

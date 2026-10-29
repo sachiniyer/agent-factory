@@ -85,8 +85,10 @@ func TestSandboxBackendsDoNotAdvertiseTabManagement(t *testing.T) {
 }
 
 // TestSandboxBackendsDoNotAdvertiseHandoff is the handoff half of the same
-// contract (#2013): an off-box backend must not claim it can swap its agent in
-// place, AND its SwapAgent must actually refuse. The bit and the behavior are
+// contract (#2013): an off-box backend's STATIC declaration must not claim it can
+// swap its agent in place, AND its SwapAgent must actually refuse when there is no
+// live sandbox to ask. A sandbox whose agent-server advertises the swap route
+// lifts the bit per instance (W7.5, handoff_inplace_test.go). The bit and the behavior are
 // asserted together for the same reason as TabManagement above — a capability
 // that lies in either direction is worse than one that is simply false.
 func TestSandboxBackendsDoNotAdvertiseHandoff(t *testing.T) {

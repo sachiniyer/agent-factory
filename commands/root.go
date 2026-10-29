@@ -54,11 +54,18 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 		// keeps the usage/flag help on flag-PARSE errors (which fail before this
 		// hook runs) while suppressing it for genuine runtime errors across every
 		// subcommand, since cobra checks the root command's SilenceUsage (#1749).
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			cmd.Root().SilenceUsage = true
+			// Before anything else runs: a verb that can only act on THIS machine
+			// refuses a remote target here, rather than answering about the wrong
+			// host (W9.4). See targetclass.go for the table.
+			if err := refuseLocalOnlyUnderRemoteTarget(cmd); err != nil {
+				return err
+			}
 			if configWarningsToStderr(cmd) {
 				config.SetInteractiveWarningWriter(os.Stderr)
 			}
+			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -102,12 +109,21 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			if err != nil {
 				return fmt.Errorf("failed to get current directory: %w", err)
 			}
-			if err := git.EnsureGitInstalled(); err != nil {
-				return err
+			// A remote target (--daemon-url / AF_DAEMON_URL / a saved target, W9.7)
+			// owns the projects, tasks and sessions this TUI shows, so THIS
+			// machine's cwd and git are irrelevant: it launches in registry mode
+			// and the project comes from the target's registry. Resolving the cwd
+			// repo here would scope the TUI to a local checkout the daemon has
+			// never heard of.
+			remote := apiclient.IsRemoteTarget()
+			if !remote {
+				if err := git.EnsureGitInstalled(); err != nil {
+					return err
+				}
 			}
 
 			var repo *config.RepoContext
-			if git.IsGitRepo(currentDir) {
+			if !remote && git.IsGitRepo(currentDir) {
 				repo, err = config.CurrentRepo()
 				if err != nil {
 					return fmt.Errorf("failed to determine project context: %w", err)
@@ -161,7 +177,12 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			// The daemon hosts the task scheduler (#782), so make sure
 			// it is up whenever an enabled task exists. In the background:
 			// daemon launch can take a few seconds and must not delay the TUI.
-			go launchEnsureDaemonForTasks()
+			// Never against a remote target: the daemon there is not ours to
+			// start, and ensureDaemonForTasks would spawn a LOCAL one for a
+			// local task list the remote TUI does not show.
+			if !remote {
+				go launchEnsureDaemonForTasks()
+			}
 
 			// From here bubbletea owns the terminal; a stderr write would
 			// tear the screen, so later config warnings are log-only.
@@ -415,6 +436,7 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(targetCmd)
+	rootCmd.AddCommand(hostsCmd)
 	rootCmd.AddCommand(accountsCmd)
 	rootCmd.AddCommand(quotaCmd)
 	rootCmd.AddCommand(api.SessionsCmd)

@@ -88,9 +88,6 @@ func (wl *webListeners) rollbackWebBindLocked(addr string, bindErr error, oldCon
 		wl.webConfigAddr = ""
 		wl.webBoundAddr = ""
 		wl.webGen++
-		if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
-			log.WarningLog.Printf("the control listener on %s is no longer accepting: revoked %d sandbox callback credential(s) issued against it", oldBoundAddr, n)
-		}
 		return fmt.Errorf("apply network.listen_addr %q: %w — and the rollback re-bind of the previous address %q also failed: %v — the daemon has no TCP listener", addr, bindErr, oldBoundAddr, rbErr)
 	}
 	wl.adoptWebListenerLocked(oldConfigAddr, rollback, rbInfo)
