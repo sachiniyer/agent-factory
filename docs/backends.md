@@ -835,12 +835,15 @@ them. The script runs on the daemon box, never from repository config.
   only); `AF_SSH_DEST` — the destination (`user@host` or an ssh alias);
   `AF_SSH_FULL` — the complete command including the destination. So
   `rsync -e "$AF_SSH" file "$AF_SSH_DEST:dir/"` and
-  `$AF_SSH "$AF_SSH_DEST" 'cmd'` reach the same machine af does. The same three
+  `sh -c "$AF_SSH \"\$@\"" af-ssh "$AF_SSH_DEST" 'cmd'` reach the same machine af does.
+  The variables are shell command lines that may contain quoted options (a
+  `ProxyCommand` with spaces), so never expand them unquoted: run them through
+  `sh -c` with positional arguments, as `examples/move-script/move.sh` does. The same three
   values are in the JSON as `ssh`, `ssh_dest` and `ssh_full`. A free-form
   `sandbox.ssh` command already embeds its host and af cannot split it, so there
   `AF_SSH` and `AF_SSH_DEST` are empty and only `AF_SSH_FULL` is set: run
-  `$AF_SSH_FULL 'cmd'` and, instead of `rsync -e`, pipe tar:
-  `tar -C src -c . | $AF_SSH_FULL 'tar -C dir -x'`.
+  `sh -c "$AF_SSH_FULL \"\$@\"" af-ssh-full 'cmd'` and, instead of `rsync -e`, pipe tar:
+  `tar -C src -c . | sh -c "$AF_SSH_FULL \"\$@\"" af-ssh-full 'tar -C dir -x'`.
 - **exit:** `0` continues; anything else aborts. Any failure before the session
   row switches leaves the local session running exactly as before and reaps the
   half-built sandbox workspace.
