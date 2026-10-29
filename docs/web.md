@@ -228,8 +228,9 @@ There is no nine-tab limit: the strip scrolls as it fills. In navigation mode,
 that kind. `w` asks to delete the active deletable tab, and `1`–`9` select a tab
 without attaching. Clicking a tab selects and attaches it.
 
-When a backend cannot create local tabs, the **Terminal** and **VS Code** buttons
-are hidden and **…** explains the restriction.
+When a backend cannot create local tabs, the **Terminal** button is hidden, the
+**VS Code** button stays when an editor can run on the session's host, and **…**
+explains the restriction.
 Archived sessions must be restored before creating tabs. Agents can also create
 [web tabs](#web-tabs) for dev-server previews through the CLI or API; these do not
 appear as a creation button in the pane header.
