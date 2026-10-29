@@ -7881,6 +7881,11 @@ function sessionFirstComposition(moves) {
     }
   } };
 }
+function applyTerminalTitle(el2, title, placement) {
+  el2.textContent = title;
+  el2.title = placement ? `${title} \xB7 ${placement}` : title;
+  el2.setAttribute("aria-label", title);
+}
 function terminalChrome(opts) {
   const menu = actionsDisclosure();
   const action = (label, className, run) => {
@@ -7891,8 +7896,8 @@ function terminalChrome(opts) {
     });
     return button;
   };
-  const title = h("span", { class: "af-term-title", title: opts.placement ? `${opts.title} \xB7 ${opts.placement}` : opts.title }, opts.title);
-  title.setAttribute("aria-label", opts.title);
+  const title = h("span", { class: "af-term-title" });
+  applyTerminalTitle(title, opts.title, opts.placement);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
@@ -19364,9 +19369,7 @@ var AppShell = class {
     if (!selected || !this.headTitle) {
       return;
     }
-    this.headTitle.textContent = selected.title;
-    this.headTitle.title = selected.title;
-    this.headTitle.setAttribute("aria-label", selected.title);
+    applyTerminalTitle(this.headTitle, selected.title, placementDetail(selected));
     if (this.terminalChrome) {
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
