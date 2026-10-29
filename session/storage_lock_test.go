@@ -191,3 +191,56 @@ func TestSaveInstances_ReplacementIdentityNotOverwrittenByStaleInMemory(t *testi
 	assert.Equal(t, "id-new", got["a"].ID,
 		"the on-disk replacement's stable ID must not be clobbered by the stale in-memory instance")
 }
+
+// A conflicting-ID replacement that is itself a Loading/Deleting row with no
+// retention marker looks like a disposable legacy transient to the ghost reaper.
+// The checkpoint must still keep it verbatim: with the stale in-memory row
+// dropped, reaping it would lose BOTH records and orphan the replacement
+// (#6048 review).
+func TestSaveInstances_TransientReplacementRowIsRetainedVerbatim(t *testing.T) {
+	for name, status := range map[string]Status{"loading": Loading, "deleting": Deleting} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			replacement := InstanceData{Title: "a", ID: "id-new", Path: repoPath, Status: status}
+			require.True(t, isLegacyTransientGhostRow(replacement), "fixture: must look like a disposable transient")
+			seedDisk(t, state, repoPath, []InstanceData{replacement})
+
+			stale := makeAliveInstance("a", repoPath)
+			stale.ID = "id-old"
+			storage, err := NewStorage(state, "")
+			require.NoError(t, err)
+			require.NoError(t, storage.SaveInstances([]*Instance{stale}))
+
+			got := rowsByTitle(t, state, repoPath)
+			require.Contains(t, got, "a", "the transient replacement must not be reaped")
+			assert.Equal(t, "id-new", got["a"].ID)
+		})
+	}
+}
+
+// A spent shared budget must be a genuinely non-blocking attempt: no extra wait
+// per remaining repo (#6048 review). The timeout error names the budget it
+// waited, so a zero budget reads "after 0s", not a minimum floor.
+func TestSaveInstancesWithin_SpentBudgetIsNonBlocking(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	storage, err := NewStorage(config.LoadState(), "")
+	require.NoError(t, err)
+	live := &Instance{Title: "live", Path: repoPath, started: true}
+	live.SetStatusForTest(Running)
+	path, err := config.RepoInstancesPath(live.repoIDForStorage())
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances(live.repoIDForStorage(), []byte(`[{"title":"seed"}]`)))
+
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	require.NoError(t, err)
+	defer f.Close()
+	require.NoError(t, syscall.Flock(int(f.Fd()), syscall.LOCK_EX))
+
+	err = storage.SaveInstancesWithin([]*Instance{live}, 0)
+	require.ErrorIs(t, err, config.ErrLockTimeout)
+	assert.Contains(t, err.Error(), "after 0s", "a spent budget must not be padded with a minimum wait")
+}

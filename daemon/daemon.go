@@ -937,7 +937,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		for key := range existing {
 			repoID, _ := splitDaemonInstanceKey(key)
 			if missing[repoID] {
-				preservedMissingFileRepos.repos[repoID] = true
+				preservedMissingFileRepos.oweLocked(repoID, key)
 			}
 		}
 		// Drop provenance for repos whose records are all back on disk, so a later
@@ -945,16 +945,13 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		// enough: the restore checkpoint omits in-flight rows (a Deleting or
 		// pre-push archive), which stay protected until their record lands.
 		for repoID := range preservedMissingFileRepos.repos {
-			if raw, ok := allInstances[repoID]; ok && !missing[repoID] && !(raw == nil || string(raw) == "[]" || string(raw) == "null") && recordsLanded(repoID, existing, next) {
-				delete(preservedMissingFileRepos.repos, repoID)
+			if raw, ok := allInstances[repoID]; ok && !missing[repoID] && !(raw == nil || string(raw) == "[]" || string(raw) == "null") && preservedMissingFileRepos.landedLocked(repoID, existing, next) {
+				preservedMissingFileRepos.forgetLocked(repoID)
 			}
 		}
-		// Snapshot the provenance set under the lock so the preserve loop reads
+		// Snapshot the owed identities under the lock so the preserve loop reads
 		// a stable view.
-		observedMissing := make(map[string]bool, len(preservedMissingFileRepos.repos))
-		for repoID := range preservedMissingFileRepos.repos {
-			observedMissing[repoID] = true
-		}
+		owedKeys := preservedMissingFileRepos.owedSnapshotLocked()
 		preservedMissingFileRepos.mu.Unlock()
 		for key, inst := range existing {
 			repoID, _ := splitDaemonInstanceKey(key)
@@ -970,12 +967,12 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			// in-memory sessions are dropped.
 			if ok && !missing[repoID] {
 				if raw == nil || string(raw) == "[]" || string(raw) == "null" {
-					if !observedMissing[repoID] {
+					if !owedKeys[key] {
 						continue
 					}
 					// Present-but-empty AND previously observed missing: keep
 					// protecting the recreated-empty file.
-				} else if !observedMissing[repoID] || next[key] != nil {
+				} else if !owedKeys[key] || next[key] != nil {
 					// Real rows: normal load path. Under provenance, an
 					// existing session whose record never landed (omitted by
 					// the restore checkpoint) is still preserved.

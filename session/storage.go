@@ -696,9 +696,10 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 func (s *Storage) SaveInstancesWithin(instances []*Instance, budget time.Duration) error {
 	deadline := time.Now().Add(budget)
 	return s.saveInstances(instances, func(path string, fn func() error) error {
-		// A spent budget still gets one non-blocking attempt, so a free lock is
-		// never refused for being late; a held one times out immediately.
-		return config.WithFileLockTimeout(path, max(time.Until(deadline), time.Millisecond), fn)
+		// A spent budget (0) is a genuinely non-blocking attempt: a free lock is
+		// never refused for being late, a held one times out at once without
+		// sleeping, so a pass over many repos cannot overrun the shared deadline.
+		return config.WithFileLockTimeout(path, max(time.Until(deadline), 0), fn)
 	})
 }
 
@@ -789,20 +790,56 @@ func (s *Storage) saveInstances(instances []*Instance, withLock func(path string
 			// the stale instance and clobber the replacement's identity — the
 			// data-loss class persistInstanceData's title+ID guard exists to
 			// prevent. Drop the stale in-memory row and let the on-disk
-			// replacement survive the wholesale rewrite (it is no longer in
-			// inMemoryTitles, so preserveUnmaterializedGhostRows keeps it
-			// verbatim). An empty ID on either side is a legacy record and still
+			// replacement survive the wholesale rewrite verbatim (retained below
+			// outside the ghost reaper). An empty ID on either side is a legacy record and still
 			// matches, mirroring stableIDMatchesForDaemon (#6048 review).
 			replaced := make(map[string]struct{})
+			replacedID := make(map[string]string)
 			for i := range group {
 				for _, d := range onDisk {
 					if d.Title == group[i].Title && !stableIDMatches(d.ID, group[i].ID) {
 						replaced[group[i].Title] = struct{}{}
+						replacedID[group[i].Title] = group[i].ID
 						break
 					}
 				}
 			}
+			var replacements []json.RawMessage
 			if len(replaced) > 0 {
+				// The conflicting on-disk row is retained UNCONDITIONALLY and
+				// verbatim: handing it to preserveUnmaterializedGhostRows would let
+				// that helper reap it as a disposable legacy transient when it is a
+				// Loading/Deleting row with no retention marker, and with the stale
+				// in-memory row already dropped the checkpoint would then lose both
+				// records and orphan the replacement session (#6048 review).
+				best := make(map[string]int)
+				restDisk := make([]InstanceData, 0, len(onDisk))
+				restRaw := make([]json.RawMessage, 0, len(onDisk))
+				for i, d := range onDisk {
+					if _, isReplaced := replaced[d.Title]; !isReplaced {
+						restDisk = append(restDisk, d)
+						if i < len(onDiskRaw) {
+							restRaw = append(restRaw, onDiskRaw[i])
+						}
+						continue
+					}
+					if stableIDMatches(d.ID, replacedID[d.Title]) {
+						continue // the stale instance's own durable record: superseded
+					}
+					if prev, ok := best[d.Title]; !ok || d.UpdatedAt.After(onDisk[prev].UpdatedAt) {
+						best[d.Title] = i
+					}
+				}
+				for _, i := range best {
+					raw := json.RawMessage(nil)
+					if i < len(onDiskRaw) {
+						raw = onDiskRaw[i]
+					} else {
+						raw, _ = json.Marshal(onDisk[i])
+					}
+					replacements = append(replacements, stripRemovedInstanceDataWireKeys(raw))
+				}
+				onDisk, onDiskRaw = restDisk, restRaw
 				kept := make([]InstanceData, 0, len(group))
 				for _, g := range group {
 					if _, drop := replaced[g.Title]; drop {
@@ -815,7 +852,7 @@ func (s *Storage) saveInstances(instances []*Instance, withLock func(path string
 					delete(inMemoryTitles, title)
 				}
 			}
-			ghosts := preserveUnmaterializedGhostRows(onDisk, onDiskRaw, inMemoryTitles)
+			ghosts := append(preserveUnmaterializedGhostRows(onDisk, onDiskRaw, inMemoryTitles), replacements...)
 			jsonData, err := marshalCheckpointInstances(group, ghosts)
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)

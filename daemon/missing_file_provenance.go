@@ -28,11 +28,17 @@ import (
 type missingFileProvenanceSet struct {
 	mu    sync.Mutex
 	repos map[string]bool
+	// owed names the sessions (daemon instance keys) that were live when the
+	// file was observed missing and whose records have not landed yet. Protection
+	// is per identity, not per repo: once a session's record is back on disk its
+	// later removal (another process killing it, an administrator rewriting the
+	// roster) is authoritative and must not be undone (#6048 review).
+	owed map[string]bool
 }
 
 // preservedMissingFileRepos is the singleton instance of the observed-missing
 // provenance set above.
-var preservedMissingFileRepos = &missingFileProvenanceSet{repos: make(map[string]bool)}
+var preservedMissingFileRepos = &missingFileProvenanceSet{repos: make(map[string]bool), owed: make(map[string]bool)}
 
 // resetPreservedMissingFileReposForTest clears the provenance set. Tests that
 // stage a present-but-empty file without a prior missing-file observation must not
@@ -42,6 +48,7 @@ var preservedMissingFileRepos = &missingFileProvenanceSet{repos: make(map[string
 func resetPreservedMissingFileReposForTest() {
 	preservedMissingFileRepos.mu.Lock()
 	preservedMissingFileRepos.repos = make(map[string]bool)
+	preservedMissingFileRepos.owed = make(map[string]bool)
 	preservedMissingFileRepos.mu.Unlock()
 }
 
@@ -56,11 +63,53 @@ func (p *missingFileProvenanceSet) observed() map[string]bool {
 	return out
 }
 
+// oweLocked records that key (a live session of repoID) is owed a record after
+// repoID's file was observed missing. Caller holds p.mu.
+func (p *missingFileProvenanceSet) oweLocked(repoID, key string) {
+	p.repos[repoID] = true
+	p.owed[key] = true
+}
+
+// forgetLocked ends one repo's observed-missing episode. Caller holds p.mu.
+func (p *missingFileProvenanceSet) forgetLocked(repoID string) {
+	delete(p.repos, repoID)
+	for key := range p.owed {
+		if id, _ := splitDaemonInstanceKey(key); id == repoID {
+			delete(p.owed, key)
+		}
+	}
+}
+
 // forget ends one repo's observed-missing episode.
 func (p *missingFileProvenanceSet) forget(repoID string) {
 	p.mu.Lock()
-	delete(p.repos, repoID)
+	p.forgetLocked(repoID)
 	p.mu.Unlock()
+}
+
+// settle marks the sessions whose records landed (by title) as no longer owed,
+// and ends the episode when nothing is owed any more.
+func (p *missingFileProvenanceSet) settle(repoID string, landedTitles []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, title := range landedTitles {
+		delete(p.owed, daemonInstanceKey(repoID, title))
+	}
+	for key := range p.owed {
+		if id, _ := splitDaemonInstanceKey(key); id == repoID {
+			return
+		}
+	}
+	p.forgetLocked(repoID)
+}
+
+// owedSnapshotLocked copies the owed keys. Caller holds p.mu.
+func (p *missingFileProvenanceSet) owedSnapshotLocked() map[string]bool {
+	out := make(map[string]bool, len(p.owed))
+	for key := range p.owed {
+		out[key] = true
+	}
+	return out
 }
 
 // missingRecordsRestoreBudget bounds EVERY instances-flock wait of one restore
@@ -169,8 +218,10 @@ func (m *Manager) restoreMissingRecordsLocked(instances map[string]*session.Inst
 			}
 		}
 		if len(pending) > 0 {
-			// The checkpoint omitted these in-flight rows; keep protecting them
-			// (the provenance stays) until their record lands.
+			// The checkpoint omitted these in-flight rows; keep protecting THEM
+			// (and only them) until their record lands: the sessions whose records
+			// did land are settled, so removing one later is respected.
+			preservedMissingFileRepos.settle(repoID, landed)
 			log.WarningLog.Printf("daemon restored the missing instances.json records for repo %s except %d in-flight session(s) the checkpoint cannot write yet (%v); they stay preserved in memory until their records land", repoID, len(pending), pending)
 			continue
 		}
@@ -179,15 +230,16 @@ func (m *Manager) restoreMissingRecordsLocked(instances map[string]*session.Inst
 	}
 }
 
-// recordsLanded reports whether every session the daemon holds for repoID has
-// its record in the freshly loaded set (next is built from disk rows at the call
-// site). The restore checkpoint cannot write every live session — it omits
-// in-flight rows such as a Deleting or pre-push archive (#6048 review) — so a
-// successful write alone must not end the episode: protection lasts until each
-// session that was live at the moment of loss is durably back.
-func recordsLanded(repoID string, existing, next map[string]*session.Instance) bool {
-	for key := range existing {
-		if id, _ := splitDaemonInstanceKey(key); id == repoID && next[key] == nil {
+// landedLocked reports whether every session still owed a record for repoID has
+// it in the freshly loaded set (next is built from disk rows at the call site),
+// or has left memory so nothing is owed for it. The restore checkpoint cannot
+// write every live session — it omits in-flight rows such as a Deleting or
+// pre-push archive (#6048 review) — so a successful write alone must not end the
+// episode: protection lasts until each owed session is durably back. Caller holds
+// p.mu.
+func (p *missingFileProvenanceSet) landedLocked(repoID string, existing, next map[string]*session.Instance) bool {
+	for key := range p.owed {
+		if id, _ := splitDaemonInstanceKey(key); id == repoID && existing[key] != nil && next[key] == nil {
 			return false
 		}
 	}

@@ -239,3 +239,63 @@ func TestMissingFile_InFlightArchiveSurvivesRestoreOfItsRunningSibling(t *testin
 	require.Contains(t, got, keyArch)
 	require.False(t, preservedMissingFileRepos.observed()[repoID], "protection ends once every record is on disk")
 }
+
+// Protection is per owed identity, not per repo-wide episode: once a session's
+// record has landed, removing it (another process killing it, an administrator
+// rewriting the roster) is authoritative and must not be undone by the partial
+// recovery still owed to a different, in-flight session (#6048 review).
+func TestMissingFile_RestoredSessionRemovedLaterStaysRemoved(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	silenceWarnings(t)
+	resetPreservedMissingFileReposForTest()
+	t.Cleanup(resetPreservedMissingFileReposForTest)
+
+	prev := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		return &session.Instance{Title: d.Title}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
+
+	repoID := "partial-recovery-removal-repo"
+	all := json.RawMessage(`[{"title":"keep"},{"title":"killed"},{"title":"archiving"}]`)
+	require.NoError(t, config.SaveRepoInstances(repoID, all))
+	keyKeep, keyKilled, keyArch := daemonInstanceKey(repoID, "keep"), daemonInstanceKey(repoID, "killed"), daemonInstanceKey(repoID, "archiving")
+	keep, killed, arch := &session.Instance{Title: "keep"}, &session.Instance{Title: "killed"}, &session.Instance{Title: "archiving"}
+
+	path, err := config.RepoInstancesPath(repoID)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+	got, _, _, _, err := refreshDaemonInstances(map[string]*session.Instance{keyKeep: keep, keyKilled: killed, keyArch: arch})
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+
+	// The restore lands keep and killed; the in-flight archive stays owed.
+	var written [][]string
+	prevSave := saveRestoredRepoRecords
+	saveRestoredRepoRecords = func(_ *Manager, id string, insts []*session.Instance, _ time.Duration) ([]string, error) {
+		titles := make([]string, 0, len(insts))
+		for _, inst := range insts {
+			titles = append(titles, inst.Title)
+		}
+		written = append(written, titles)
+		require.NoError(t, config.SaveRepoInstances(id, json.RawMessage(`[{"title":"keep"},{"title":"killed"}]`)))
+		return []string{"keep", "killed"}, nil
+	}
+	t.Cleanup(func() { saveRestoredRepoRecords = prevSave })
+	(&Manager{}).restoreMissingRecordsLocked(got)
+	require.True(t, preservedMissingFileRepos.observed()[repoID], "the archive's record is still owed")
+
+	// Another process kills the already-restored session: the file now carries
+	// only keep.
+	require.NoError(t, config.SaveRepoInstances(repoID, json.RawMessage(`[{"title":"keep"}]`)))
+	got, _, _, _, err = refreshDaemonInstances(got)
+	require.NoError(t, err)
+	require.NotContains(t, got, keyKilled, "a restored session removed afterwards must stay removed")
+	require.Same(t, arch, got[keyArch], "the still-owed in-flight session is still protected")
+	require.Contains(t, got, keyKeep)
+
+	// And the next restore pass never writes the removed session back.
+	(&Manager{}).restoreMissingRecordsLocked(got)
+	require.Len(t, written, 2)
+	require.NotContains(t, written[1], "killed", "the removed session must not be written back on the same poll")
+}
