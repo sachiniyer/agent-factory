@@ -7,7 +7,7 @@ task is actually firing.
 
 A task delivers a prompt to an AI agent session automatically. Every task has exactly one **trigger** — a cron schedule (`cron_expr`) or a long-running watch script (`watch_cmd`) — and one **delivery mode**: create a fresh session per fire, or send the prompt into an existing session (`target_session`).
 
-Tasks are hosted by the agent-factory daemon, which starts automatically whenever `af` runs and an enabled task exists. There are no per-task OS scheduler units — see [Daemon lifecycle](#daemon-lifecycle) and [Migration notes](#migration-notes).
+Tasks are hosted by the agent-factory daemon, which starts automatically whenever `af` runs against the default local target and an enabled task exists. There are no per-task OS scheduler units — see [Daemon lifecycle](#daemon-lifecycle) and [Migration notes](#migration-notes).
 
 ## Trigger × delivery matrix
 
@@ -417,7 +417,7 @@ In the TUI, an automation that has stopped firing — or whose expression the sc
 
 The daemon is the single scheduler host: it evaluates cron expressions and supervises watch scripts.
 
-- On the default local target, every `af` invocation ensures the daemon is running whenever an enabled task exists, and the daemon keeps running after the TUI exits. A remote-targeted `af` never starts a local daemon — the target owns the schedule (see [remote daemons](cli.md#remote-daemons)).
+- On the default local target, every `af` invocation ensures the daemon is running whenever an enabled task exists, and the daemon keeps running after the TUI exits. Remote-targeted task and TUI operations never start a local daemon for scheduling — the target owns the schedule (see [remote daemons](cli.md#remote-daemons)). `af upgrade` is client-local and still restarts this machine's daemon by default.
 - To keep tasks firing across **reboots** without opening `af`, register the user-level autostart unit (a systemd user service on Linux, a launchd agent on macOS):
 
 ```bash
