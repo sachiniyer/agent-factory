@@ -2880,8 +2880,11 @@ no PTY and spawns no process. An external HTTPS URL is iframed
 directly, and a loopback target (including --port) is served from the session's
 own workspace through the agent-server's port relay, so it shows what listens on
 that port in the sandbox rather than on the daemon host. Plain-HTTP external URLs
-cannot be framed by an HTTPS Agent Factory UI. Shell and process tabs still
-require local runtime/worktree resources.
+cannot be framed by an HTTPS Agent Factory UI. Shell and process tabs are
+admitted when the session's agent-server advertises "tab-api" (a current build
+does): they run on the session's host. An older agent-server without that
+advertisement keeps the refusal, because those kinds then need a daemon-side
+worktree the off-box session does not have.
 
 ```
 af sessions tab-create <title> [flags]
@@ -2923,8 +2926,10 @@ step rather than a dead end.
 
 The agent tab can't be deleted — use "af sessions kill" to tear down the whole
 session. Deleting a tab or session that doesn't exist is an error, not a silent
-success. On remote sessions, admitted metadata-only web tabs can be deleted;
-PTY-backed kinds are never admitted there.
+success. On remote sessions, metadata-only web tabs can be deleted, and so can shell and
+process tabs when the session's agent-server advertises "tab-api" (it closes
+them on the session's host); an older agent-server without that advertisement
+never admits those kinds.
 
 ```
 af sessions tab-delete <title> [flags]
@@ -2966,9 +2971,10 @@ success — that is what the tab is actually called, and what the other tab verb
 now address it by.
 
 The rename persists across a daemon/af restart and does not disturb the tab's
-running process. On remote sessions, admitted metadata-only web tabs can be
-renamed; PTY-backed kinds are never admitted there. Archived sessions still
-have to be restored first.
+running process. On remote sessions, metadata-only web tabs can be renamed, and so can process
+tabs when the session's agent-server advertises "tab-api"; an older
+agent-server without that advertisement never admits process tabs. Archived
+sessions still have to be restored first.
 
 ```
 af sessions tab-rename <title> [flags]
@@ -3006,9 +3012,10 @@ can be moved in front of it. That is structural, not cosmetic — the agent tab 
 identified by its position throughout a session's lifecycle.
 
 The new order persists across a daemon/af restart and does not disturb any tab's
-running process. On remote sessions, admitted metadata-only web tabs can be
-reordered; PTY-backed kinds are never admitted there. Archived sessions still
-have to be restored first.
+running process. On remote sessions, metadata-only web tabs can be reordered, and so can shell
+and process tabs when the session's agent-server advertises "tab-api"; an older
+agent-server without that advertisement never admits those kinds. Archived
+sessions still have to be restored first.
 
 ```
 af sessions tab-reorder <title> [flags]

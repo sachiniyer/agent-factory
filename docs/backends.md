@@ -830,8 +830,7 @@ repo on your infra, starts an **`af agent-server`** there, and echoes that
 server's authed endpoint (`{url, token}`); the daemon then
 drives the session over that `ws://` stream — so a hook session matches a local,
 docker, or ssh one on attach, type, resize, preview, archive/restore, and kill.
-Like the other off-box backends it admits web tabs (external HTTPS, or loopback via the port relay); shell,
-and process tabs need a daemon-side worktree; a VS Code tab opens the editor on the session's host.
+Like the other off-box backends it admits web tabs (external HTTPS, or loopback via the port relay). Shell and process tabs are admitted when the `af agent-server` your `launch_cmd` starts advertises `tab-api` (a current build does): they then run on the session's host, with the daemon keeping a roster row for each; an older agent-server without `tab-api` keeps the refusal, since those kinds would need a daemon-side worktree. A VS Code tab opens the editor on the session's host.
 
 ```json
 {
