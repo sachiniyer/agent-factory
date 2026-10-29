@@ -426,35 +426,58 @@ export function tabsRebound(
 
 const isSynth = (id: string): boolean => /^\d+:/.test(id);
 
+/** The legacy `kind:name` form of every tab, parallel to the roster. A tab that
+ *  has a real id still HAS a kind and a name, so this is what its id-less
+ *  predecessor was tracked as — the exact key that pairs a backfill (#6001). */
+export function synthIdentities(kinds: readonly number[], names: readonly string[]): string[] {
+  return kinds.map((k, i) => `${k}:${names[i] ?? ""}`);
+}
+
 /** The synthesized identities in `prevIds` that a real id in `ids` replaced (#1779:
  *  the daemon resolves an id-less tab's real id after a snapshot tracked it as
- *  `kind:name`). Matching is by position between the identities both lists share:
- *  within each gap between consecutive shared anchors, the k-th vanished synthesized
- *  id pairs with the k-th new real id. Anything left unpaired was really closed. */
-function adoptedSynthIdentities(prevIds: string[], ids: string[]): Set<string> {
+ *  `kind:name`). A vanished synthesized id is ADOPTED when
+ *   1. a new real id's own `kind:name` (`nextSynth`, parallel to `ids`) is exactly
+ *      that id — the precise pairing, and the only one that can tell a closed
+ *      legacy tab from its live neighbour (#6001); else
+ *   2. a new real id remains unpaired in the same gap between identities both lists
+ *      share. Here the ids carry no name, so WHICH vanished tab received it cannot
+ *      be told; every candidate in that gap is kept alive rather than guessing a
+ *      positional pairing that can bind the id to the CLOSED tab and drop the live
+ *      pane's. A gap with no new real id adopts nothing: those tabs really closed. */
+function adoptedSynthIdentities(prevIds: string[], ids: string[], nextSynth?: readonly string[]): Set<string> {
   const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
-  const gone = new Map<string, string[]>(); // gap key → vanished synthesized ids
+  const isNewReal = (id: string): boolean => id !== "" && !isSynth(id) && !prevIds.includes(id);
+  const adopted = new Set<string>();
+  // 1. exact pairing by the new tab's kind:name.
+  const vanished = new Set(prevIds.filter((id) => id !== "" && isSynth(id) && !ids.includes(id)));
+  const unpaired = new Set<number>();
+  ids.forEach((id, i) => {
+    if (!isNewReal(id)) {
+      return;
+    }
+    const synth = nextSynth?.[i];
+    if (synth !== undefined && vanished.has(synth) && !adopted.has(synth)) {
+      adopted.add(synth);
+    } else {
+      unpaired.add(i);
+    }
+  });
+  // 2. per gap between shared anchors, any unpaired new real id adopts the gap.
+  const gapOfNew = new Set<string>();
   let key = "";
+  ids.forEach((id, i) => {
+    if (shared.has(id)) {
+      key = id;
+    } else if (unpaired.has(i)) {
+      gapOfNew.add(key);
+    }
+  });
+  key = "";
   for (const id of prevIds) {
     if (shared.has(id)) {
       key = id;
-    } else if (id !== "" && isSynth(id)) {
-      gone.set(key, [...(gone.get(key) ?? []), id]);
-    }
-  }
-  const adopted = new Set<string>();
-  key = "";
-  const fresh = new Map<string, number>(); // gap key → new real ids consumed
-  for (const id of ids) {
-    if (shared.has(id)) {
-      key = id;
-    } else if (id !== "" && !isSynth(id) && !prevIds.includes(id)) {
-      const n = fresh.get(key) ?? 0;
-      const synth = gone.get(key)?.[n];
-      if (synth !== undefined) {
-        adopted.add(synth);
-      }
-      fresh.set(key, n + 1);
+    } else if (vanished.has(id) && gapOfNew.has(key)) {
+      adopted.add(id);
     }
   }
   return adopted;
@@ -492,7 +515,12 @@ function adoptedSynthIdentities(prevIds: string[], ids: string[]): Set<string> {
  *
  *  Node references are preserved when nothing moves, so the common no-op resync does
  *  not churn a rebuild. */
-export function remapByIdentity(root: LayoutNode, prevIds: string[], ids: string[]): LayoutNode {
+export function remapByIdentity(
+  root: LayoutNode,
+  prevIds: string[],
+  ids: string[],
+  nextSynth?: readonly string[],
+): LayoutNode {
   if (prevIds.length === 0) {
     return root; // nothing was bound yet — no leaf can be stale
   }
@@ -569,7 +597,7 @@ export function remapByIdentity(root: LayoutNode, prevIds: string[], ids: string
     // "some backfill happened somewhere": a session-wide flag let one id-less tab's
     // backfill mark every other missing synthesized tab alive, so a closed legacy tab
     // survived and the clamp evicted the real survivor's pane (#5982).
-    const adopted = adoptedSynthIdentities(prevIds, ids);
+    const adopted = adoptedSynthIdentities(prevIds, ids, nextSynth);
     // A !moved leaf is DEAD (its tab was genuinely closed) when its prev identity is a
     // real id that's gone from `ids`, or a synthesized `kind:name` that no real id
     // adopted (a closed pre-#1738 legacy tab). An adopted survivor (synthesized id

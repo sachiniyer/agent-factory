@@ -13913,35 +13913,46 @@ function tabsRebound(prevIds, prevKinds, prevTargets, ids, kinds, targets) {
   );
 }
 var isSynth = (id) => /^\d+:/.test(id);
-function adoptedSynthIdentities(prevIds, ids) {
+function synthIdentities(kinds, names) {
+  return kinds.map((k, i) => `${k}:${names[i] ?? ""}`);
+}
+function adoptedSynthIdentities(prevIds, ids, nextSynth) {
   const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
-  const gone = /* @__PURE__ */ new Map();
+  const isNewReal = (id) => id !== "" && !isSynth(id) && !prevIds.includes(id);
+  const adopted = /* @__PURE__ */ new Set();
+  const vanished = new Set(prevIds.filter((id) => id !== "" && isSynth(id) && !ids.includes(id)));
+  const unpaired = /* @__PURE__ */ new Set();
+  ids.forEach((id, i) => {
+    if (!isNewReal(id)) {
+      return;
+    }
+    const synth = nextSynth?.[i];
+    if (synth !== void 0 && vanished.has(synth) && !adopted.has(synth)) {
+      adopted.add(synth);
+    } else {
+      unpaired.add(i);
+    }
+  });
+  const gapOfNew = /* @__PURE__ */ new Set();
   let key = "";
+  ids.forEach((id, i) => {
+    if (shared.has(id)) {
+      key = id;
+    } else if (unpaired.has(i)) {
+      gapOfNew.add(key);
+    }
+  });
+  key = "";
   for (const id of prevIds) {
     if (shared.has(id)) {
       key = id;
-    } else if (id !== "" && isSynth(id)) {
-      gone.set(key, [...gone.get(key) ?? [], id]);
-    }
-  }
-  const adopted = /* @__PURE__ */ new Set();
-  key = "";
-  const fresh = /* @__PURE__ */ new Map();
-  for (const id of ids) {
-    if (shared.has(id)) {
-      key = id;
-    } else if (id !== "" && !isSynth(id) && !prevIds.includes(id)) {
-      const n = fresh.get(key) ?? 0;
-      const synth = gone.get(key)?.[n];
-      if (synth !== void 0) {
-        adopted.add(synth);
-      }
-      fresh.set(key, n + 1);
+    } else if (vanished.has(id) && gapOfNew.has(key)) {
+      adopted.add(id);
     }
   }
   return adopted;
 }
-function remapByIdentity(root2, prevIds, ids) {
+function remapByIdentity(root2, prevIds, ids, nextSynth) {
   if (prevIds.length === 0) {
     return root2;
   }
@@ -13973,7 +13984,7 @@ function remapByIdentity(root2, prevIds, ids) {
   const max = ids.length - 1;
   const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
   if (maxLeaf) {
-    const adopted = adoptedSynthIdentities(prevIds, ids);
+    const adopted = adoptedSynthIdentities(prevIds, ids, nextSynth);
     const deadIdentity = (tab) => {
       const prev = prevIds[tab];
       if (prev === void 0 || prev === "") {
@@ -14348,6 +14359,7 @@ var SplitView = class {
     const archivedChanged = archived !== this.archived;
     this.archived = archived;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
+    const nextSynth = synthIdentities(tabKinds, tabNames);
     if (sessionId === null || token2 === null) {
       this.teardown();
       this.sessionId = null;
@@ -14359,7 +14371,7 @@ var SplitView = class {
     if (sessionId === this.sessionId) {
       this.tabCount = tabCount;
       const before = this.tree;
-      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
+      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds, nextSynth);
       this.tree = validate(settled, tabCount);
       this.retain(sessionId, this.tree, tabIds);
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
@@ -14375,7 +14387,7 @@ var SplitView = class {
     this.forgetFocusHistory();
     this.sessionId = sessionId;
     this.tabCount = tabCount;
-    this.tree = validate(this.retainedTree(sessionId, tabIds) ?? singleLeaf(initialTab), tabCount);
+    this.tree = validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount);
     this.retain(sessionId, this.tree, tabIds);
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
     this.reconcile();
@@ -14393,25 +14405,25 @@ var SplitView = class {
    *  bar then highlights Agent over a pane showing tab N, and the next close computes
    *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
-  settledTab(sessionId, tabIds) {
+  settledTab(sessionId, tabIds, nextSynth) {
     if (sessionId === this.sessionId) {
       if (!this.tree || !this.focusedId) {
         return 0;
       }
-      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds);
+      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds, nextSynth);
       return findLeaf(remapped, this.focusedId)?.tab ?? 0;
     }
-    const retained = this.retainedTree(sessionId, tabIds);
+    const retained = this.retainedTree(sessionId, tabIds, nextSynth);
     return retained ? leaves(retained)[0]?.tab ?? 0 : 0;
   }
   /** The retained tree for `sessionId`, remapped onto `tabIds` — the only supported
    *  way to read one. Returns null for a session never shown. */
-  retainedTree(sessionId, tabIds) {
+  retainedTree(sessionId, tabIds, nextSynth) {
     const rec = this.trees.get(sessionId);
     if (!rec) {
       return null;
     }
-    return remapByIdentity(rec.tree, rec.ids, tabIds);
+    return remapByIdentity(rec.tree, rec.ids, tabIds, nextSynth);
   }
   /** Retains `tree` for `sessionId` together with the identities it is bound against. */
   retain(sessionId, tree, ids) {
@@ -19868,6 +19880,10 @@ function tabIdsOf(list, id) {
   const s = id ? list.find((x) => x.id === id) : null;
   return s ? sessionTabs(s).map(tabIdentity) : [];
 }
+function tabSynthOf(list, id) {
+  const s = id ? list.find((x) => x.id === id) : null;
+  return s ? synthIdentities(sessionTabs(s).map((t) => t.kind), sessionTabs(s).map((t) => t.name)) : [];
+}
 var resolvingRoute = false;
 var routeSelection = null;
 var createSelectionIntent = new CreateSelectionIntent();
@@ -19903,7 +19919,7 @@ function moveSelection(id) {
     focus: "rail",
     // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
     // are the same statement even if the roster shrank since the tree was retained.
-    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id)))
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id), tabSynthOf(store.get().sessions, id)))
   });
 }
 function openFromRail(id) {
@@ -19972,7 +19988,7 @@ function switchProject(root2) {
     selectedProject: root2,
     selectedId: keep,
     focus: "rail",
-    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep))) : 0
+    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep), tabSynthOf(store.get().sessions, keep))) : 0
   });
 }
 function selectedSession2() {
@@ -21433,7 +21449,7 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
       selectedId = null;
     }
   }
-  const settled = selectedId ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId)) : 0;
+  const settled = selectedId ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId), tabSynthOf(sessions, selectedId)) : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({
     sessions,
