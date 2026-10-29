@@ -1650,7 +1650,10 @@ _expect_config_agent_attaches_in_tmux() {
         _af_log "#2019: takeover landed but no af_af-config-* session was found to detach"
         return 1
     fi
-    af_assert_screen 'ctrl\+w leaves' 'the takeover names its detach key (#6064)' || return 1
+    # The chrome vanishing says the takeover began, not that its client has drawn
+    # its status line; wait for the hint (bounded, on the screen — never the clock).
+    # If it never appears the takeover is not advertising its key, a real failure.
+    af_wait_for 'ctrl\+w leaves' "$AF_DRIVER_TIMEOUT" 'the takeover names its detach key (#6064)' || return 1
     af_send C-w
 
     # Back in the TUI, and NOT via the error path.
