@@ -4,8 +4,10 @@ package testguard
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/pprof"
 	"syscall"
 )
@@ -27,9 +29,29 @@ func init() {
 	signal.Notify(ch, syscall.SIGUSR2)
 	go func() {
 		for range ch {
-			fmt.Fprintf(os.Stderr, "\n=== goroutine dump (%s, pid %d) ===\n", StallDumpMarker, os.Getpid())
-			_ = pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
-			fmt.Fprintf(os.Stderr, "=== end goroutine dump (pid %d) ===\n", os.Getpid())
+			writeStallDump()
 		}
 	}()
+}
+
+// writeStallDump writes the dump to AF_STALL_DIR/goroutines-<pid>.dump and to
+// stderr. `go test` buffers a package's output, so stderr alone is lost when the
+// step is killed from outside, which is the #5766 case; the file survives it and
+// is printed by the workflow's report step.
+func writeStallDump() {
+	var out []io.Writer = []io.Writer{os.Stderr}
+	if dir := os.Getenv("AF_STALL_DIR"); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err == nil {
+			f, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("goroutines-%d.dump", os.Getpid())), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if err == nil {
+				defer f.Close()
+				defer f.Sync()
+				out = append(out, f)
+			}
+		}
+	}
+	w := io.MultiWriter(out...)
+	fmt.Fprintf(w, "\n=== goroutine dump (%s, pid %d, %s) ===\n", StallDumpMarker, os.Getpid(), filepath.Base(os.Args[0]))
+	_ = pprof.Lookup("goroutine").WriteTo(w, 2)
+	fmt.Fprintf(w, "=== end goroutine dump (pid %d) ===\n", os.Getpid())
 }

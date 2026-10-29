@@ -908,6 +908,12 @@ jobs:
             echo "::warning title=Test binary made no progress (#5766)::$(head -1 "$f")"
             cat "$f"
           done
+          for f in "$AF_STALL_DIR"/*.dump; do
+            [ -e "$f" ] || continue
+            echo "::group::$(basename "$f")"
+            cat "$f"
+            echo "::endgroup::"
+          done
 
   build:
     name: ${{ inputs.probe && 'Build (skipped by probe)' || 'Build' }}

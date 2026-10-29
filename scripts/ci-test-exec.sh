@@ -13,7 +13,9 @@
 # 2026-10-29, against STALL_SECONDS=300 and a hang that went >9 minutes silent.
 #
 # On a stall it writes a report file and, once, asks the binary for a goroutine
-# dump with SIGUSR2 (only if the binary carries the handler, see
+# dump with SIGUSR2, written to AF_STALL_DIR/goroutines-<pid>.dump as well as
+# stderr: go test buffers a package's output, so stderr is lost when the step is
+# killed from outside, which is the #5766 case (only if the binary carries the handler, see
 # internal/testguard/stalldump_unix.go). Nothing is killed and the exit status is
 # the binary's own.
 set -u -o pipefail
@@ -35,14 +37,19 @@ stamp_age() {
 # Each line the binary prints (stdout or stderr) refreshes the timestamp.
 "$@" 2>&1 | while IFS= read -r line || [ -n "$line" ]; do
 	printf '%s\n' "$line"
-	touch "$last"
+	# A write, not a touch: a builtin, so no fork per line, and a real write
+	# moves the mtime on every platform (a truncate of an empty file may not).
+	echo . >"$last"
 done &
 runner=$!
 
 (
 	fired=0
 	while kill -0 "$runner" 2>/dev/null; do
-		sleep 10
+		# The sleep must not inherit this wrapper's stdout/stderr: go test waits
+		# for EOF on that pipe, so a sleep outliving the binary would hold it
+		# open for up to 10s per binary.
+		sleep 10 >/dev/null 2>&1 </dev/null
 		[ "$fired" = 1 ] && continue
 		age=$(stamp_age)
 		[ "$age" -lt "$stall" ] && continue
@@ -69,6 +76,7 @@ dog=$!
 
 wait "$runner"
 status=$?
+pkill -P "$dog" 2>/dev/null
 kill "$dog" 2>/dev/null
 rm -f "$last"
 exit "$status"
