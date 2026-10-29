@@ -1016,12 +1016,38 @@ What the sandbox host needs, and what af does to it:
   withholds the tmux name and the repository paths), and every other admitted
   route is bounded by its handler to the caller's own project.
 - **Daemon restart.** The agent-server is started with `nohup`, so it
-  outlives a daemon restart on the host, and on start the daemon reattaches
-  to it: it re-dials the tunnel and rebinds the same agent-server, with no
-  re-provision. A row that cannot be reattached (no persisted runtime identity,
-  or the agent-server is gone) stays Lost, and recovery pushes its work to
-  `origin`, then re-provisions a fresh sandbox from the branch. An unreachable
-  host alone is not death and never triggers that replacement.
+  outlives a daemon restart on the host, and on start the daemon tries to
+  reattach to it in the background (`ReattachSandbox`): it re-dials the tunnel
+  and rebinds the same agent-server, with no re-provision. What happens next
+  depends on the row:
+  - **Reattach succeeds.** The row is live again with the same agent-server.
+    Nothing is pushed, replaced or restarted.
+  - **Reattach is not attempted or fails** (no persisted runtime identity, the
+    host does not answer, or the agent-server does not answer). The row stays
+    Lost and holds *no* agent-server client: it carries the "not provisioned"
+    sentinel (`ErrRemoteSandboxNotProvisioned`), which restore reads as
+    *absent* (`probeAbsent` in `daemon/restore.go` and `daemon/lostrestore.go`),
+    not as a sandbox that answered dead. Absent means replacement is
+    unconditional: the old runtime is torn down and a fresh sandbox is
+    provisioned from the session's branch on `origin`. **Nothing is pushed
+    first, so work the sandbox never pushed is not preserved on this path**;
+    only what already reached `origin` comes back. Provisioning needs the
+    host, so a host that is still unreachable fails that attempt and the row
+    stays Lost, but that is the provision failing, not a guard.
+  - **A live client sees the agent die** (no restart involved, or the row was
+    reattached first). If the agent-server answers that the agent is gone, the
+    sandbox is still there, so recovery (and a manual restore) pushes its work
+    to `origin` before replacing it (`probeAnsweredDead`), and refuses to
+    replace anything if that push does not land. If it does not answer at all,
+    the probe is unknown and replacement is refused: unreachable is not dead.
+  - **`--force-reap`** replaces a sandbox that answered dead, or one that could
+    not be probed, without pushing it; it still requires the session's branch
+    to be known so the replacement never lands on the default branch.
+
+Work that matters should therefore reach `origin` before a daemon restart can
+leave a row un-reattached. For an `ssh`/`sandbox` session, the default archive
+leaves the workspace on the host and restore reattaches it (W8.5/W8.6), so an
+archived session does not depend on a push at all.
 
 ### What survives, and what doesn't
 
