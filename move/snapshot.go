@@ -390,10 +390,16 @@ func verifyStaged(ctx context.Context, worktree string, env []string) error {
 }
 
 // VerifyCommand is the shell snippet that, run in the destination workspace,
-// prints the tree its working tree hashes to (ignored files excluded, as in the
-// snapshot). CheckTree compares the output.
+// prints the tree its working tree hashes to (untracked ignored files excluded,
+// tracked ones kept, as in the snapshot). CheckTree compares the output.
 func (s *Snapshot) VerifyCommand() string {
-	return `d=$(mktemp -d) && GIT_INDEX_FILE="$d/index" git add -A && GIT_INDEX_FILE="$d/index" git write-tree; rc=$?; rm -rf "$d"; exit $rc`
+	// Built the way the snapshot was: start from the destination's own index (so
+	// tracked files stay in the set even when they match an ignore rule), then fold
+	// the working tree in with add -A. An empty index would drop every tracked-but-
+	// ignored file and fail a faithful destination.
+	return `d=$(mktemp -d) && idx=$(git rev-parse --path-format=absolute --git-path index) && ` +
+		`{ [ ! -f "$idx" ] || cp "$idx" "$d/index"; } && ` +
+		`GIT_INDEX_FILE="$d/index" git add -A && GIT_INDEX_FILE="$d/index" git write-tree; rc=$?; rm -rf "$d"; exit $rc`
 }
 
 // CheckTree reports whether got, the output of VerifyCommand at the destination,
