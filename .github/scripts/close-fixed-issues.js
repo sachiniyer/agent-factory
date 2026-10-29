@@ -1,11 +1,22 @@
-// Closes the issues a merged PR lists after a closing keyword.
+// Closes the issues a merged PR declares it fixes.
 //
 // GitHub closes only the FIRST issue of "Fixes #a, #b, #c" (each number needs its
 // own keyword) and ignores ranges like "#5975-#5980", so bundle PRs left issues
 // open after merging. This reads the PR's title and body itself, then closes each
-// listed issue of THIS repository as completed with one PATCH that appends
+// declared issue of THIS repository as completed with one PATCH that appends
 // "Closed by #<PR> (merged)" to its body — no comment, since comments cost gate
 // runs. It never closes on "Refs", never touches another repo, never reopens.
+//
+// THE RULE IS DELIBERATELY NARROW. A false close is worse than a miss (a sweep
+// catches misses), and stripping Markdown constructs one at a time (fenced
+// blocks, code spans, indented blocks, ...) kept leaving another path that
+// closed an example. So this acts only on unambiguous declarations:
+//   (a) the PR TITLE, a keyword anywhere in it ("fix: x (Fixes #3)"), outside
+//       backtick code spans; and
+//   (b) BODY lines that BEGIN at column 0 with the keyword, outside fenced
+//       blocks and HTML comments.
+// Indented lines (including 4-space code blocks), blockquotes, list items, inline
+// code and mid-sentence mentions ("this fixes #9") never close anything.
 
 const MAX_RANGE = 20;
 const KEYWORD = "(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)";
@@ -66,43 +77,52 @@ function stripCodeSpans(text) {
   return out;
 }
 
-function stripNonProse(text) {
-  return stripCodeSpans(stripFences(String(text || "")).replace(/<!--[\s\S]*?(?:-->|$)/g, " "));
-}
-
-// Issue numbers listed after a closing keyword, ascending and de-duplicated.
-// A range wider than MAX_RANGE (or backwards) is ignored whole.
-function parseClosingRefs(...texts) {
-  const found = new Set();
-  const head = new RegExp(`(?<![\\w/#-])${KEYWORD}\\b:?[ \\t]*`, "gi");
+// Adds the issue numbers listed at the start of `rest` (the text right after a
+// keyword) to `found`, and returns how much it consumed. A range wider than
+// MAX_RANGE (or backwards) is ignored whole.
+function readList(rest, found) {
   const item = new RegExp(`^${ITEM}`);
   const sep = new RegExp(`^${SEPARATOR}`);
-  for (const raw of texts) {
-    const text = stripNonProse(raw);
-    let m;
-    while ((m = head.exec(text))) {
-      let rest = text.slice(head.lastIndex);
-      let consumed = 0;
-      for (;;) {
-        const it = item.exec(rest);
-        if (!it) break;
-        // An oversize number poisons the whole item (including a range that has
-        // one oversize end): nothing from it is closed, and the list stops.
-        if (it[1].length > MAX_DIGITS || (it[2] !== undefined && it[2].length > MAX_DIGITS)) break;
-        const start = Number(it[1]);
-        const end = it[2] === undefined ? start : Number(it[2]);
-        if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && end >= start && end - start + 1 <= MAX_RANGE) {
-          for (let n = start; n <= end; n++) found.add(n);
-        }
-        rest = rest.slice(it[0].length);
-        consumed += it[0].length;
-        const s = sep.exec(rest);
-        if (!s) break;
-        rest = rest.slice(s[0].length);
-        consumed += s[0].length;
-      }
-      head.lastIndex += consumed;
+  let consumed = 0;
+  for (;;) {
+    const it = item.exec(rest);
+    if (!it) break;
+    // An oversize number poisons the whole item (including a range that has
+    // one oversize end): nothing from it is closed, and the list stops.
+    if (it[1].length > MAX_DIGITS || (it[2] !== undefined && it[2].length > MAX_DIGITS)) break;
+    const start = Number(it[1]);
+    const end = it[2] === undefined ? start : Number(it[2]);
+    if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && end >= start && end - start + 1 <= MAX_RANGE) {
+      for (let n = start; n <= end; n++) found.add(n);
     }
+    rest = rest.slice(it[0].length);
+    consumed += it[0].length;
+    const s = sep.exec(rest);
+    if (!s) break;
+    rest = rest.slice(s[0].length);
+    consumed += s[0].length;
+  }
+  return consumed;
+}
+
+// Issue numbers the PR declares fixed, ascending and de-duplicated (see the rule
+// at the top of this file).
+function parseClosingRefs(title, body) {
+  const found = new Set();
+  const keyword = `${KEYWORD}\\b:?[ \\t]*`;
+
+  const titleText = stripCodeSpans(String(title || "").replace(/\r?\n/g, " "));
+  const anywhere = new RegExp(`(?<![\\w/#-])${keyword}`, "gi");
+  let m;
+  while ((m = anywhere.exec(titleText))) {
+    anywhere.lastIndex += readList(titleText.slice(anywhere.lastIndex), found);
+  }
+
+  const lineStart = new RegExp(`^${keyword}`, "i");
+  const prose = stripFences(String(body || "").replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?(?:-->|$)/g, " "));
+  for (const line of prose.split("\n")) {
+    const k = lineStart.exec(line);
+    if (k) readList(line.slice(k[0].length), found);
   }
   return [...found].sort((a, b) => a - b);
 }
@@ -170,4 +190,4 @@ async function run({ github, core, context }) {
   }
 }
 
-module.exports = { parseClosingRefs, closeFixedIssues, run, stripNonProse, MAX_RANGE };
+module.exports = { parseClosingRefs, closeFixedIssues, run, stripFences, stripCodeSpans, MAX_RANGE };

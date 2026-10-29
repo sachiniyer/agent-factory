@@ -2,15 +2,68 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { parseClosingRefs: p, closeFixedIssues } = require('./close-fixed-issues.js');
 
-test('single keyword, lists with commas, "and", "&", and plain spaces', () => {
+// The grammar is deliberately narrow: only the title, and body lines that BEGIN
+// at column 0 with the keyword, outside fenced blocks.
+
+test('a column-0 body line closes exactly the listed issues: lists, separators, keyword forms', () => {
   assert.deepEqual(p('', 'Fixes #5'), [5]);
+  assert.deepEqual(p('', 'Fixes #1, #2'), [1, 2]);
   assert.deepEqual(p('', 'Fixes #1, #2, #3'), [1, 2, 3]);
   assert.deepEqual(p('', 'Closes #1, #2 and #3'), [1, 2, 3]);
   assert.deepEqual(p('', 'Resolves #1, #2, and #3'), [1, 2, 3]);
   assert.deepEqual(p('', 'fixes #1 #2 #3'), [1, 2, 3]);
-  assert.deepEqual(p('', 'Fixes #1 & #2'), [1, 2]);
+  assert.deepEqual(p('', 'FIXES #1 & #2'), [1, 2]);
   assert.deepEqual(p('', 'Fixes: #7'), [7]);
-  assert.deepEqual(p('', 'Fixed #1, closed #2, resolved #3'), [1, 2, 3]);
+  assert.deepEqual(p('', 'Fixed #1, closed #2'), [1]);
+  assert.deepEqual(p('', 'Closed #2'), [2]);
+  assert.deepEqual(p('', 'Intro paragraph.\n\nFixes #1, #2\nCloses #4\n\nMore text #9'), [1, 2, 4]);
+  assert.deepEqual(p('', 'Fixes #1\r\nCloses #2\r\n'), [1, 2]);
+});
+
+test('the title closes anywhere in it, including a parenthesised last item', () => {
+  assert.deepEqual(p('feat: thing (Fixes #3)', ''), [3]);
+  assert.deepEqual(p('fix: x, closes #4 and #5', ''), [4, 5]);
+  assert.deepEqual(p('Fixes #6', 'no declaration'), [6]);
+  assert.deepEqual(p('feat: thing (Fixes #3)', 'Fixes #1, #2'), [1, 2, 3]);
+  assert.deepEqual(p('Use `Fixes #123` in titles', ''), []);
+  assert.deepEqual(p('Use ``Fixes #123`` in titles', ''), []);
+  assert.deepEqual(p('Refs #3', ''), []);
+});
+
+test('NOTHING that is not a column-0 declaration closes: indented, quoted, listed, mid-sentence, inline code, comments', () => {
+  const none = (body) => assert.deepEqual(p('', body), [], JSON.stringify(body));
+  none('    Fixes #123');                      // 4-space indented code block
+  none('\tFixes #123');                       // tab-indented code block
+  none('  Fixes #123');                        // any indentation
+  none('Example:\n\n    Fixes #123\n');
+  none('> Fixes #123');                        // blockquote
+  none('> > Fixes #123');
+  none('- Fixes #123');                        // list items
+  none('* Fixes #123');
+  none('1. Fixes #123');
+  none('- [ ] Fixes #123');
+  none('this fixes #9');                       // mid-sentence
+  none('Use `Fixes #123` to link');
+  none('Use ``Fixes #123`` to link');
+  none('`Fixes #123`');                        // starts with a code span
+  none('``Fixes #123``');
+  none('<!-- Fixes #5 -->');
+  none('<!--\nFixes #5\n-->');
+  none('See Fixes #5 above');
+  none('Refs #5');
+  none('Related to #5, see #6');
+  none('Prefixes #3 and unfixes #4');
+  none('Fixes the bug in #5');
+});
+
+test('fenced blocks of 3+ backticks or tildes are ignored, closed only by an equal-or-longer fence of the same character', () => {
+  assert.deepEqual(p('', 'Intro\n```\nFixes #5\n```\nFixes #6'), [6]);
+  assert.deepEqual(p('', '~~~md\nCloses #5\n~~~\nCloses #6'), [6]);
+  assert.deepEqual(p('', '````\n```\nFixes #5\n```\n````\nFixes #6'), [6]);
+  assert.deepEqual(p('', '~~~~\n~~~\nCloses #5\n~~~~\nCloses #6'), [6]);
+  assert.deepEqual(p('', '```js\nFixes #5\n```\nFixes #6'), [6]);
+  assert.deepEqual(p('', '```\n~~~\nFixes #5\n```\nFixes #6'), [6]);
+  assert.deepEqual(p('', '```\nunterminated\nFixes #5'), []);
 });
 
 test('ranges up to 20 are expanded; wider or backwards ones are ignored', () => {
@@ -19,23 +72,14 @@ test('ranges up to 20 are expanded; wider or backwards ones are ignored', () => 
   assert.equal(p('', 'Fixes #100-#119').length, 20);
   assert.deepEqual(p('', 'Fixes #100-#120'), []);
   assert.deepEqual(p('', 'Fixes #9-#3'), []);
-  assert.deepEqual(p('', 'Fixes #5–#7'), [5, 6, 7]);
+  assert.deepEqual(p('', 'Fixes #5\u2013#7'), [5, 6, 7]);
 });
 
-test('a last item followed by ")" or punctuation is still closed', () => {
-  assert.deepEqual(p('feat: thing (Fixes #12)', ''), [12]);
-  assert.deepEqual(p('', '(Fixes #1, #2)'), [1, 2]);
-  assert.deepEqual(p('', 'Fixes #1, #2.'), [1, 2]);
-  assert.deepEqual(p('', 'Fixes #1, #2\n\nMore text #9'), [1, 2]);
-});
-
-test('Refs and non-keywords never close; the list stops at a non-item', () => {
-  assert.deepEqual(p('', 'Refs #5'), []);
-  assert.deepEqual(p('', 'Related to #5, see #6'), []);
+test('the list stops at the first non-item; a trailing ")" or "." is fine', () => {
   assert.deepEqual(p('', 'Fixes #1, refs #2'), [1]);
   assert.deepEqual(p('', 'Fixes #1\nRefs #2'), [1]);
-  assert.deepEqual(p('', 'Prefixes #3 and unfixes #4'), []);
-  assert.deepEqual(p('', 'Fixes the bug in #5'), []);
+  assert.deepEqual(p('', 'Fixes #1, #2.'), [1, 2]);
+  assert.deepEqual(p('', 'Fixes #1 (and #2)'), [1]);
 });
 
 test('another repository, URLs and non-numeric refs are never closed', () => {
@@ -45,12 +89,13 @@ test('another repository, URLs and non-numeric refs are never closed', () => {
   assert.deepEqual(p('', 'Fixes #12abc'), []);
 });
 
-test('code blocks, inline code and HTML comments are ignored', () => {
-  assert.deepEqual(p('', 'Intro\n```\nFixes #5\n```\nFixes #6'), [6]);
-  assert.deepEqual(p('', '~~~md\nCloses #5\n~~~\n'), []);
-  assert.deepEqual(p('', 'Use `Fixes #5` to link'), []);
-  assert.deepEqual(p('', '<!-- Fixes #5 -->\nFixes #6'), [6]);
-  assert.deepEqual(p('', '```\nunterminated Fixes #5'), []);
+test('references with more than 7 digits are rejected before any range is expanded (no hang)', () => {
+  assert.deepEqual(p('', 'Fixes #9007199254740992'), []);
+  assert.deepEqual(p('', 'Fixes #9007199254740992-#9007199254740993'), []);
+  assert.deepEqual(p('', 'Fixes #5-#99999999999'), []);
+  assert.deepEqual(p('', 'Fixes #1, #12345678, #3'), [1]);
+  assert.deepEqual(p('', 'Fixes #9999999'), [9999999]);
+  assert.deepEqual(p('', 'Fixes #99999999999999999999999'), []);
 });
 
 test('title and body are both read; duplicates collapse; result is ascending', () => {
@@ -111,33 +156,6 @@ test('closeFixedIssues: a read-only token (fork PR) warns and finishes instead o
   assert.deepEqual(closed, []);
   assert.equal(warns.length, 2);
   assert.match(warns[0], /read-only/);
-});
-
-test('code spans are stripped by delimiter length (CommonMark), not as separate empty spans', () => {
-  assert.deepEqual(p('', 'Use `Fixes #123` to link'), []);
-  assert.deepEqual(p('', 'Use ``Fixes #123`` to link'), []);
-  assert.deepEqual(p('', 'Use ```Fixes #123``` to link'), []);
-  assert.deepEqual(p('', 'Use ``a `Fixes #123` b`` to link'), []);
-  assert.deepEqual(p('', 'Use ``Fixes #1`` then Fixes #2'), [2]);
-  // A run of a different length does not close the span, so the text stays prose
-  // only when a matching closer exists; an unmatched opener is literal.
-  assert.deepEqual(p('', 'Odd ` backtick then Fixes #5'), [5]);
-  assert.deepEqual(p('', '``Fixes #7` not closed'), [7]);
-  // Fenced blocks of 3+ backticks or tildes, closed by an equal-or-longer fence.
-  assert.deepEqual(p('', '````\n```\nFixes #5\n```\n````\nFixes #6'), [6]);
-  assert.deepEqual(p('', '~~~~\n~~~\nCloses #5\n~~~~\nCloses #6'), [6]);
-  assert.deepEqual(p('', '```js\nFixes #5\n```\nFixes #6'), [6]);
-  // A tilde line does not close a backtick fence.
-  assert.deepEqual(p('', '```\n~~~\nFixes #5\n```\nFixes #6'), [6]);
-});
-
-test('references with more than 7 digits are rejected before any range is expanded (no hang)', () => {
-  assert.deepEqual(p('', 'Fixes #9007199254740992'), []);
-  assert.deepEqual(p('', 'Fixes #9007199254740992-#9007199254740993'), []);
-  assert.deepEqual(p('', 'Fixes #5-#99999999999'), []);
-  assert.deepEqual(p('', 'Fixes #1, #12345678, #3'), [1]);
-  assert.deepEqual(p('', 'Fixes #9999999'), [9999999]);
-  assert.deepEqual(p('', 'Fixes #99999999999999999999999'), []);
 });
 
 test('closeFixedIssues reports every failed close to its caller', async () => {
