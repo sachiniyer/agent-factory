@@ -14169,6 +14169,8 @@ function webFallbackMs() {
 }
 var PREVIEW_PROBE_HOST = "afprobe.localhost";
 var PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
+var EDITOR_PROBE_MESSAGE = "af-editor-origin-ok";
+var EDITOR_PROBE_PATH = "/_af/editor-probe";
 function previewProbeMs() {
   const override = globalThis.__afPreviewProbeMs;
   return typeof override === "number" ? override : 2500;
@@ -14181,6 +14183,27 @@ function previewOriginReachable(origin, fresh = false) {
   } catch {
     return Promise.resolve(false);
   }
+  return framedReachable(port, `http://${PREVIEW_PROBE_HOST}:${port}/`, PREVIEW_PROBE_MESSAGE, fresh);
+}
+function editorOriginReachable(origin, fresh = false) {
+  let key;
+  try {
+    key = "editor:" + new URL(origin).origin;
+  } catch {
+    return Promise.resolve(false);
+  }
+  return framedReachable(key, new URL(EDITOR_PROBE_PATH, origin).href, EDITOR_PROBE_MESSAGE, fresh);
+}
+function editorOriginUnreachableMessage(origin) {
+  let port = "";
+  try {
+    port = new URL(origin).port;
+  } catch {
+  }
+  const which = port !== "" ? `port ${port}` : "the editor port";
+  return `This editor's own address (${which}) is not reachable from this browser, so it is shown on the shared address instead. Expose ${which} the same way as the af port (for example \`tailscale serve --tcp=${port} tcp://127.0.0.1:${port}\`).`;
+}
+function framedReachable(port, probeSrc, probeMessage, fresh) {
   if (fresh) {
     previewReachable.delete(port);
   } else {
@@ -14210,13 +14233,13 @@ function previewOriginReachable(origin, fresh = false) {
       resolve(ok);
     };
     const onMessage = (e) => {
-      if (e.source === frame.contentWindow && e.data === PREVIEW_PROBE_MESSAGE) {
+      if (e.source === frame.contentWindow && e.data === probeMessage) {
         finish(true);
       }
     };
     const timer = window.setTimeout(() => finish(false), previewProbeMs());
     window.addEventListener("message", onMessage);
-    frame.src = `http://${PREVIEW_PROBE_HOST}:${port}/`;
+    frame.src = probeSrc;
     document.body.appendChild(frame);
   });
   previewReachable.set(port, probe);
@@ -14964,10 +14987,17 @@ var SplitView = class {
         editorPortOpenHref = "";
       }
       if (previewSrcOnce === null && isVSCode && mayUsePreviewOrigin && !this.archived && !canUsePreviewOrigin(window.location)) {
-        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then((r) => {
-          editorPortBootstrap = r !== null;
-          editorPortOpenHref = r?.origin ?? "";
-          return r?.bootstrapUrl ?? "";
+        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then(async (r) => {
+          if (r === null) {
+            return "";
+          }
+          if (!await editorOriginReachable(r.origin, fresh)) {
+            console.warn(editorOriginUnreachableMessage(r.origin));
+            return "";
+          }
+          editorPortBootstrap = true;
+          editorPortOpenHref = r.origin;
+          return r.bootstrapUrl;
         });
       }
       if (previewSrcOnce === null) {
