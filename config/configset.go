@@ -891,7 +891,8 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	// anything but the key asked for — plus the machine-managed schema marker
 	// written just above — is a refusal that names what would have moved.
 	if guarded {
-		if drift := configRewriteDrift(before, resulting, w.key, SchemaVersionField); drift != "" {
+		intended := structuredIntendedPayload(w.structured, before, w.key, w.encoded)
+		if drift := configRewriteDriftFor(before, resulting, intended, w.key, SchemaVersionField); drift != "" {
 			return nil, ConfigDigest{}, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
 		}
 	}

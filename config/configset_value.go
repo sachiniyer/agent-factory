@@ -487,6 +487,14 @@ type byteRange struct {
 // table as one expression, so replacing session_env_passthrough cannot strand
 // half of the old value in the file. Unrelated expressions stay byte-identical.
 // root_agent is a field-wise patch: omitted profile members are retained.
+//
+// Header matching is case-insensitive throughout: go-toml v2 resolves table
+// headers through a folded field index, so [HOSTS.box1] decodes into the same
+// Hosts entry as [hosts.box1]. Locating the table to remove or merge by an
+// exact-byte header comparison would miss a case-variant spelling the loader
+// accepted, leaving the stale block on disk to silently merge with — or be
+// unioned into — the freshly appended canonical table on the next load, so
+// any spelling the loader accepts is a spelling the writer removes.
 func setTOMLStructured(content, key, definition string) (string, error) {
 	definition, err := preserveStructuredMembers(content, key, definition)
 	if err != nil {
@@ -533,6 +541,57 @@ func canonicalStructuredTOMLValue(content, key string) (string, error) {
 	return string(encoded), nil
 }
 
+// intendedStructuredGlobalConfig returns a deep copy of before with the field
+// named by key replaced by the value this structured write encodes — the payload
+// the writer MEANT to land, decoded from its own TOML with no merge onto before
+// and no post-load sanitizing — or nil when that cannot be established. It is
+// the value configRewriteDriftFor's intended parameter supplies so a whole-table
+// rewrite that left a stale case-variant block on disk reports the ghost as
+// drift instead of pasting it into the expectation. Callers pass nil for a
+// scalar or a field the gate does not cover; the guard then falls back to its
+// original field-wide exemption.
+func intendedStructuredGlobalConfig(before *Config, key, encoded string) *Config {
+	snap := snapshotConfig(before)
+	var fresh Config
+	if err := toml.Unmarshal([]byte(encoded), &fresh); err != nil {
+		return nil
+	}
+	if !assignIntendedField(reflect.ValueOf(snap).Elem(), reflect.ValueOf(&fresh).Elem(), key) {
+		return nil
+	}
+	return snap
+}
+
+// structuredIntendedPayload returns the intended payload for a global write's
+// drift gate: the decoded value of encoded for a whole-table structured write,
+// nil otherwise (the gate then falls back to its original field-wide exemption).
+func structuredIntendedPayload(structured bool, before *Config, key, encoded string) *Config {
+	if !structured {
+		return nil
+	}
+	return intendedStructuredGlobalConfig(before, key, encoded)
+}
+
+// assignIntendedField copies key's value from fresh onto snap. Fresh is a
+// standalone decode of the write's TOML, so key's field is the payload ALONE
+// (not merged with before's value the way a decode onto a populated map would
+// be); snap is a deep copy of before, so every other field stays. Whether the
+// guard's exemption actually uses the intended value is decided by
+// intendedMapPayload, so this helper only checks that the field resolves and is
+// assignable.
+func assignIntendedField(snap, fresh reflect.Value, key string) bool {
+	dst, ok := taggedFieldByKey(snap, key)
+	if !ok || !dst.CanSet() {
+		return false
+	}
+	src, ok := taggedFieldByKey(fresh, key)
+	if !ok || !src.IsValid() || !src.Type().AssignableTo(dst.Type()) {
+		return false
+	}
+	dst.Set(src)
+	return true
+}
+
 // projectStructuredCurrentValue returns the typed, writer-accepted form of a
 // structured personal-project value. root_agent needs its source shape as well
 // as its decoded value: enabled=false and program="" are meaningful when
@@ -572,6 +631,27 @@ func projectStructuredCurrentValue(cfg *ProjectConfig, key string) (string, bool
 	return editorValue(reflect.ValueOf(value)), true
 }
 
+// lookupTOMLDocKey returns the value at key in a document decoded into a
+// generic map[string]any, matching the key case-insensitively. go-toml v2
+// folds struct FIELD names case-insensitively but preserves a generic map's
+// keys exactly as the TOML header spells them, so a [HOSTS.box1] table the
+// loader decoded into an existing config field appears in a generic document
+// under "HOSTS", not "hosts". A direct doc[key] lookup would miss it and the
+// preserve step would drop its members from the replacement. The file is
+// known to load (the writer refuses otherwise), so two headers that fold to
+// the same key cannot both be present: the case-insensitive match is exact.
+func lookupTOMLDocKey(doc map[string]any, key string) (any, bool) {
+	if v, ok := doc[key]; ok {
+		return v, true
+	}
+	for k, v := range doc {
+		if strings.EqualFold(k, key) {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
 // preserveStructuredMembers retains omitted root_agent profile fields and
 // carries fields this binary does not know
 // from the old target table into its replacement. The loader deliberately
@@ -587,7 +667,7 @@ func preserveStructuredMembers(content, key, definition string) (string, error) 
 	if err := toml.Unmarshal([]byte(definition), &replacementDoc); err != nil {
 		return "", err
 	}
-	existing, exists := existingDoc[key]
+	existing, exists := lookupTOMLDocKey(existingDoc, key)
 	replacement, replaces := replacementDoc[key]
 	if !exists || !replaces {
 		return definition, nil
@@ -758,7 +838,7 @@ func removeTOMLTopLevelValue(content, key string) (string, error) {
 				end := leadingTableCommentStart(data, start, currentBlock.start)
 				ranges = append(ranges, byteRange{start: currentBlock.start, end: end})
 			}
-			isTarget := len(parts) > 0 && parts[0] == key
+			isTarget := len(parts) > 0 && strings.EqualFold(parts[0], key)
 			blockStart := start
 			if isTarget && currentBlock != nil {
 				blockStart = leadingTableCommentStart(data, start, currentBlock.start)
@@ -766,7 +846,7 @@ func removeTOMLTopLevelValue(content, key string) (string, error) {
 			currentTable = parts
 			currentBlock = &tableBlock{start: blockStart, target: isTarget}
 		case unstable.KeyValue:
-			if len(currentTable) == 0 && len(parts) > 0 && parts[0] == key {
+			if len(currentTable) == 0 && len(parts) > 0 && strings.EqualFold(parts[0], key) {
 				raw := expr.Raw
 				start, end := wholeLineRange(data, int(raw.Offset), int(raw.Offset+raw.Length))
 				ranges = append(ranges, byteRange{start: start, end: end})

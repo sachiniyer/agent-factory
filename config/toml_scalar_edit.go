@@ -111,7 +111,7 @@ func setTOMLScalarWithLeadingComments(content, section, leaf, encoded string, co
 			// so an insert has to land after the whole value rather than in the
 			// middle of it — which is why this updates the bookkeeping below
 			// instead of skipping the line outright.
-			if curSection == section && strings.TrimSpace(line) != "" {
+			if strings.EqualFold(curSection, section) && strings.TrimSpace(line) != "" {
 				lastContentIdxInTarget = i
 			}
 			continue
@@ -120,7 +120,13 @@ func setTOMLScalarWithLeadingComments(content, section, leaf, encoded string, co
 			if firstHeaderIdx == -1 {
 				firstHeaderIdx = i
 			}
-			if name == section && targetHeaderIdx == -1 {
+			// A [section] header is matched case-insensitively: go-toml v2
+			// folds table headers into the same field as the canonical
+			// lowercase spelling, so [WEB] is the same table as [web]. An
+			// exact-byte compare would miss a case-variant header the loader
+			// accepted, drop its leaves, and append a duplicate canonical
+			// block — corrupting the file or splitting one setting in two.
+			if strings.EqualFold(name, section) && targetHeaderIdx == -1 {
 				targetHeaderIdx = i
 			}
 			curSection = name
@@ -146,7 +152,7 @@ func setTOMLScalarWithLeadingComments(content, section, leaf, encoded string, co
 				return rebuild()
 			}
 		}
-		if curSection != section {
+		if !strings.EqualFold(curSection, section) {
 			continue
 		}
 		if m := keyRe.FindStringSubmatch(line); m != nil {
@@ -361,7 +367,11 @@ func deleteTOMLScalarRange(content, section, leaf string, forMove bool) (string,
 				return rebuild(), nil, "", true
 			}
 		}
-		if curSection != section {
+		// A [section] header is matched case-insensitively (see setTOMLScalar):
+		// [WEB] is the same table as [web] to the loader, so an unset must
+		// find the leaf under either spelling or it would leave the line in
+		// place and report a no-op.
+		if !strings.EqualFold(curSection, section) {
 			continue
 		}
 		if keyRe.MatchString(line) || tomlScalarLineMatches(line, "", leaf) {
