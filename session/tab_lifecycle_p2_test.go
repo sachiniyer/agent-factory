@@ -385,3 +385,65 @@ func TestExpiredIntentIsAdoptedNotDiscarded(t *testing.T) {
 		assert.Empty(t, inst.tabCreateIntents)
 	})
 }
+
+// A restored sandbox is a fresh one that never heard of the session's shell and
+// process tabs: their rows are retired instead of erroring ErrTabGone forever
+// (#5954).
+func TestReplacedSandboxRetiresRowsItDoesNotHold(t *testing.T) {
+	setup := func(t *testing.T) (*lifecycleSandbox, *Instance, *Tab, *Tab) {
+		sb, inst := newLifecycleSandbox(t)
+		shell, err := inst.AddShellTabWithID("")
+		require.NoError(t, err)
+		proc, err := inst.AddProcessTabWithID("", "tail -f log", "")
+		require.NoError(t, err)
+		inst.mu.Lock()
+		inst.Tabs = append(inst.Tabs, &Tab{ID: "web-1", Name: "docs", Kind: TabKindWeb, URL: "https://example.com"})
+		inst.mu.Unlock()
+		return sb, inst, shell, proc
+	}
+
+	t.Run("the replacement holds none of them", func(t *testing.T) {
+		sb, inst, shell, proc := setup(t)
+		sb.mu.Lock()
+		sb.tabs = map[string]TabData{} // archive reaped the old sandbox; the new one is empty
+		sb.mu.Unlock()
+
+		require.True(t, inst.ReconcileOffBoxTabs())
+		ids := rosterIDs(inst)
+		assert.NotContains(t, ids, shell.ID)
+		assert.NotContains(t, ids, proc.ID)
+		assert.Contains(t, ids, "web-1", "a metadata-only tab has no sandbox runtime to lose")
+		assert.Equal(t, agentTabName, inst.Tabs[0].Name)
+
+		as := inst.AgentServer().(*remoteAgentServer)
+		_, err := as.SubscribeTab(shell.ID, 0)
+		assert.ErrorIs(t, err, ErrTabGone, "its stream ends rather than hanging on a dead id")
+	})
+
+	t.Run("a tab the sandbox still holds stays", func(t *testing.T) {
+		_, inst, shell, proc := setup(t)
+		inst.ReconcileOffBoxTabs()
+		assert.Contains(t, rosterIDs(inst), shell.ID)
+		assert.Contains(t, rosterIDs(inst), proc.ID)
+	})
+
+	t.Run("a different incarnation under the same id is not the row's runtime", func(t *testing.T) {
+		sb, inst, shell, _ := setup(t)
+		sb.mu.Lock()
+		td := sb.tabs[shell.ID]
+		td.Gen = "another-incarnation"
+		sb.tabs[shell.ID] = td
+		sb.mu.Unlock()
+		inst.ReconcileOffBoxTabs()
+		assert.NotContains(t, rosterIDs(inst), shell.ID)
+	})
+
+	t.Run("a row created after the roster was read is not retired", func(t *testing.T) {
+		_, inst, shell, _ := setup(t)
+		// The snapshot predates the row, as it does for a create that finishes
+		// while the sweep's read is in flight.
+		retired := inst.retireLostOffBoxTabs(map[string]string{}, map[string]TabData{})
+		assert.Empty(t, retired)
+		assert.Contains(t, rosterIDs(inst), shell.ID)
+	})
+}

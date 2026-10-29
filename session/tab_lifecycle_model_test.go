@@ -14,7 +14,7 @@ import (
 // A model-based check of the create-intent bookkeeping (#6030). The hand-written
 // interleavings kept missing the next case, so this drives a random sequence
 // over a small alphabet — create with or without an id, shape A or B, outcome
-// success / definitive refusal / lost answer, sweep, intent expiry, a daemon-side tab taking a
+// success / definitive refusal / lost answer, sweep, a replaced sandbox, intent expiry, a daemon-side tab taking a
 // name a create holds, close (also with the
 // daemon's persist failing) — against the fake
 // sandbox and checks the invariants after every step:
@@ -70,7 +70,7 @@ func runIntentModel(t *testing.T, seed int64, depth int, shapes, ids []string) {
 	}
 
 	for step := 0; step < depth; step++ {
-		switch op := rng.Intn(12); {
+		switch op := rng.Intn(13); {
 		case op < 6: // create
 			shape := shapes[rng.Intn(len(shapes))]
 			id := ""
@@ -135,6 +135,22 @@ func runIntentModel(t *testing.T, seed int64, depth int, shapes, ids []string) {
 			for _, s := range shapes {
 				unresolved[s] = map[string]bool{}
 			}
+		case op == 12: // the sandbox is replaced (archive → restore): a fresh one holds nothing
+			trace = append(trace, "replace-sandbox")
+			sb.mu.Lock()
+			sb.tabs = map[string]TabData{}
+			sb.mu.Unlock()
+			for _, s := range shapes {
+				unresolved[s] = map[string]bool{}
+			}
+			// A restore outlasts the replay window, and the sweep's read of the new
+			// sandbox's roster proves the executions it never held are gone.
+			inst.mu.Lock()
+			for _, in := range inst.tabCreateIntents {
+				in.at = time.Now().Add(-tabIntentTTL - time.Second)
+			}
+			inst.mu.Unlock()
+			inst.ReconcileOffBoxTabs()
 		case op == 9: // a daemon-side tab takes a name a create may already hold (#5962)
 			shape := shapes[rng.Intn(len(shapes))]
 			trace = append(trace, "web("+shape+")")
