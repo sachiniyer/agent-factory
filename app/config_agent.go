@@ -203,6 +203,7 @@ type configAgentDoneMsg struct {
 // Instance: `tmux attach-session` needs only a session NAME, while the WS route
 // needs an Instance to resolve a byte source — and an Instance is a row.
 func (m *home) enterConfigAgent(sessionName, socketPath string) tea.Cmd {
+	m.tookTerminal.Store(true)
 	cmd := execConfigAgentAttach(sessionName, socketPath)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return configAgentDoneMsg{sessionName: sessionName, err: err}
