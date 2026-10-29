@@ -67,3 +67,25 @@ func TestScrubQuotedKeyMixedCaseSchemeStrandsNoToken(t *testing.T) {
 		}
 	}
 }
+
+// TestScrubQuotedKeyMarkerPrefixedValueIsNotProse pins the #6057 review: the
+// prose exemption must not bypass the exact-marker safeguard. A bare value that
+// merely BEGINS with a redaction marker is a credential with a marker glued on,
+// and brackets alone do not make a lowercase value credential-shaped.
+func TestScrubQuotedKeyMarkerPrefixedValueIsNotProse(t *testing.T) {
+	for _, in := range []string{
+		`"api_key": [redacted-secret]actualcredential`,
+		`"api_key": [redacted]actualcredential`,
+		`'secret': [redacted-secret]actualcredential`,
+	} {
+		if got := Scrub(in); strings.Contains(got, "actualcredential") {
+			t.Errorf("credential behind a marker prefix survived: in %q out %q", in, got)
+		}
+	}
+	// The exact marker is still left alone (idempotence).
+	for _, in := range []string{`"api_key": [redacted-secret]`, `"api_key": [redacted]`} {
+		if got := Scrub(in); got != in {
+			t.Errorf("an exact marker was re-wrapped: in %q out %q", in, got)
+		}
+	}
+}

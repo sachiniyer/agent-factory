@@ -226,6 +226,14 @@ func quotedKeyBeforeProse(key, tail string) bool {
 // than of a noun: a digit, a letter-case mix, or a base64/URL-safe symbol.
 // Plain lowercase words ("tracked", "worktree") and hyphenated nouns do not.
 func credentialShaped(word string) bool {
+	// A word carrying a redaction marker is never prose: the exact-marker
+	// safeguard (isMarker) passes only a COMPLETE marker value, and a marker with
+	// text glued on is a credential a marker was prefixed to. Brackets are
+	// otherwise ignored below, so without this `[redacted-secret]actualcredential`
+	// would read as a lowercase noun.
+	if strings.Contains(word, "[redacted") {
+		return true
+	}
 	var lower, upper bool
 	for _, r := range word {
 		switch {
