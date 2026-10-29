@@ -96,6 +96,68 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingInstancesFile(t *tes
 	require.Contains(t, warnBuf.String(), "instances.json", "expected warning to name the missing instances.json file; got: %q", warnBuf.String())
 }
 
+// TestRefreshDaemonInstances_PreservesInstancesAfterInstancesFileRecreatedEmpty
+// pins the second half of the missing-file fix: preservation must survive the
+// file being RECREATED as an empty "[]". When a preserved session next performs
+// any targeted write, UpdateRepoInstances reads the still-missing file as "[]"
+// and unconditionally saves that result back, so the file reappears on disk as a
+// real empty "[]" even though persistence returned "not found". On the following
+// poll Missing[repoID] is false and the repo is present in allInstances, so
+// without the present-but-empty arm of the preservation guard the sessions that
+// survived the deletion poll would be dropped on the very next tick — preserving
+// them only until the next write. A present-but-empty repo is therefore preserved
+// exactly like a missing-file repo, and the warning keeps firing.
+func TestRefreshDaemonInstances_PreservesInstancesAfterInstancesFileRecreatedEmpty(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	warnBuf := teeWarnings(t)
+
+	prevFromInstance := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		return &session.Instance{}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
+
+	missingRepoID := "midlife-vanish-repo"
+	missingJSON, err := json.Marshal([]session.InstanceData{{Title: "running-session"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances(missingRepoID, missingJSON))
+	missingKey := daemonInstanceKey(missingRepoID, "running-session")
+	missingInst := &session.Instance{}
+	existing := map[string]*session.Instance{missingKey: missingInst}
+
+	// The file is deleted out from under the daemon.
+	missingPath, err := config.RepoInstancesPath(missingRepoID)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(missingPath))
+
+	// First poll after the file vanishes: preserved.
+	got, _, _, _, err := refreshDaemonInstances(existing)
+	require.NoError(t, err)
+	require.Same(t, missingInst, got[missingKey], "first poll must preserve the live session")
+
+	// A preserved session's targeted write (or any UpdateRepoInstances call that
+	// finds no matching row) reads the missing file as "[]" and saves it back,
+	// recreating a real empty instances.json on disk.
+	require.NoError(t, config.SaveRepoInstances(missingRepoID, json.RawMessage("[]")))
+	// The file now exists and is empty: NOT missing, but present-but-empty.
+	recreatedPath, err := config.RepoInstancesPath(missingRepoID)
+	require.NoError(t, err)
+	_, statErr := os.Stat(recreatedPath)
+	require.NoError(t, statErr, "fixture: the instances.json file must have been recreated")
+
+	// Second poll, feeding the first poll's preserved map back as `existing`:
+	// the file is no longer missing, but present-but-empty, so preservation must
+	// STILL fire or the session would be dropped on the tick after the write.
+	got2, _, _, _, err := refreshDaemonInstances(got)
+	require.NoError(t, err)
+	require.Same(t, missingInst, got2[missingKey],
+		"a present-but-empty instances.json (recreated by a preserved session's targeted write) must keep the live session preserved; preserving only until the next write drops it on the following poll")
+
+	// The warning keeps naming the repo and the missing/empty storage.
+	require.Contains(t, warnBuf.String(), missingRepoID, "expected warning naming missing/empty-file repo %q; got: %q", missingRepoID, warnBuf.String())
+	require.Contains(t, warnBuf.String(), "instances.json", "expected warning to name the missing/empty instances.json; got: %q", warnBuf.String())
+}
+
 // TestRefreshDaemonInstances_PreservesInstancesForMissingInstancesFileAcrossPolls
 // pins that the loss is not recovered and not periodic: a missing file carries no
 // file signature, so the per-tick row-outcome cache never keys a replay for it and
