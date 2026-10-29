@@ -636,6 +636,26 @@ func TestRespawnForAccountSwapRecordsThePreflightedBaseNotTheReresolvedOne(t *te
 	require.NotContains(t, spawns[0], "changed-after-preflight")
 }
 
+// In the pane-fallback state the launch base is the pane's frozen, flagged
+// command. A current override that differs from it (changed BEFORE preflight)
+// is not that command, so the plan must record no runtime base at all rather
+// than the fresh resolution: the next same-agent swap would trust a command that
+// never ran and refuse its extra words as undeclared (#6049 review).
+func TestValidateAccountSwapRecordsNoRuntimeBaseWhenTheLaunchBaseIsThePaneFallback(t *testing.T) {
+	inst, _ := flaggedPaneSwapInstance(t)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramCodex: "codex --model other"}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	plan := cloneAccountSwapLaunchPlan(inst.accountSwapLaunch)
+	require.NotNil(t, plan)
+	require.Equal(t, "codex -c check_for_update_on_startup=false", plan.base,
+		"the launch base is the frozen pane command, not the current override")
+	require.Empty(t, plan.runtimeBase,
+		"nothing may be recorded as RuntimeProgram: neither the flagged pane command nor the re-resolved override is a proven clean base")
+}
+
 func TestStopForAccountSwapStopsEveryCredentialBearingPane(t *testing.T) {
 	var mu sync.Mutex
 	var killed []string
