@@ -670,3 +670,95 @@ func TestPrepareNonAccountUser_HomeInsideAnEnclosingMountIsNeverChowned(t *testi
 		assert.NotContains(t, joined, " chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir))
 	})
 }
+
+// #5950: a HOME that resolves to "/" (or a system directory) is refused before
+// any chown runs — the recursive chown must never widen to the container root.
+func TestPrepareNonAccountUser_UnsafeResolvedHomeIsRefusedBeforeAnyChown(t *testing.T) {
+	for _, home := range []string{"/", "/usr", "/etc", "/home", "/var"} {
+		t.Run(home, func(t *testing.T) {
+			var calls [][]string
+			t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+				calls = append(calls, append([]string(nil), args...))
+				if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+					return []byte(dockerNonRootImageUser + "\n"), nil
+				}
+				if isMountTableExec(args) {
+					return []byte(home + "\n" + dockerWorkspaceDir + "\n" +
+						mountinfoLine(1, "/", "overlay") + "\n" + mountinfoLine(2, "/data", "ext4") + "\n"), nil
+				}
+				return nil, nil
+			}))
+			p := &dockerProvisioner{containerID: "cid"}
+			err := p.prepareNonAccountUser()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "refusing to chown")
+			assert.Contains(t, err.Error(), "HOME")
+			for _, c := range calls {
+				assert.NotContains(t, strings.Join(c, " "), "chown", "no chown of any form may run: %v", c)
+			}
+			assert.Empty(t, p.containerUser, "a refused provisioning must not switch the exec user")
+		})
+	}
+}
+
+func TestPrepareNonAccountUser_WorkspaceResolvingToRootIsRefused(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+			return []byte(dockerNonRootImageUser + "\n"), nil
+		}
+		if isMountTableExec(args) {
+			return []byte(dockerContainerHome + "\n/\n" + mountinfoLine(1, "/", "overlay") + "\n"), nil
+		}
+		return nil, nil
+	}))
+	p := &dockerProvisioner{containerID: "cid"}
+	require.Error(t, p.prepareNonAccountUser())
+	for _, c := range calls {
+		assert.NotContains(t, strings.Join(c, " "), "chown", "%v", c)
+	}
+}
+
+func TestUnchownableHome(t *testing.T) {
+	assert.NoError(t, unchownableHome("/root"))
+	assert.NoError(t, unchownableHome("/home/dev"))
+	assert.NoError(t, unchownableHome("/opt/app/home"))
+	for _, bad := range []string{"/", "//", "/usr", "/usr/", "/etc"} {
+		assert.Error(t, unchownableHome(bad), bad)
+	}
+}
+
+// A "/" root must report every other mount beneath it (the old prefix check
+// built "//" and matched none).
+func TestMountPointsUnderRootFindsEveryMount(t *testing.T) {
+	assert.ElementsMatch(t, []string{"/data", "/root/x"}, mountPointsUnder([]string{"/", "/data", "/root/x"}, "/"))
+}
+
+// #5951: every mount kind under HOME is pruned — read-only named volumes, rw
+// named volumes and read-only binds alike — because the prune set is the whole
+// mount table, not the bind mounts.
+func TestPrepareNonAccountUser_PrunesReadOnlyAndNamedVolumesUnderHome(t *testing.T) {
+	ro := fmt.Sprintf("%d 1 0:%d / %s ro,relatime - ext4 /dev/vdb ro", 20, 20, dockerContainerHome+"/rovol")
+	named := fmt.Sprintf("%d 1 0:%d /volumes/data/_data %s rw,relatime - ext4 /dev/vda1 rw", 21, 21, dockerContainerHome+"/named")
+	rovolume := fmt.Sprintf("%d 1 0:%d /volumes/cfg/_data %s ro,relatime - ext4 /dev/vda1 rw", 22, 22, dockerContainerHome+"/cfg")
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
+			return []byte(dockerNonRootImageUser + "\n"), nil
+		}
+		if isMountTableExec(args) {
+			return []byte(dockerContainerHome + "\n" + dockerWorkspaceDir + "\n" +
+				mountinfoLine(1, "/", "overlay") + "\n" + ro + "\n" + named + "\n" + rovolume + "\n"), nil
+		}
+		return nil, nil
+	}))
+	p := &dockerProvisioner{containerID: "cid"}
+	require.NoError(t, p.prepareNonAccountUser())
+	joined := strings.Join(findExecCall(calls, "--user 0:0", "-prune"), " ")
+	for _, m := range []string{"/rovol", "/named", "/cfg"} {
+		assert.Contains(t, joined, "-path "+shellQuote(dockerContainerHome+m), "mount %s must be pruned", m)
+	}
+	assert.NotContains(t, joined, "chown -R")
+}

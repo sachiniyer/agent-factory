@@ -84,8 +84,17 @@ func stampProcessTabExit(i *Instance, tabID string, tabTmux *tmux.TmuxSession) b
 		return false
 	}
 	exit := &TabExit{Status: status, StatusKnown: statusKnown, At: at}
-	stamped := updateTabByID(i, tabID, func(copy *Tab) {
+	// Fenced on the probed incarnation (#5960): the probe ran against tabTmux
+	// outside the lock, and the id can since have been closed and re-created for
+	// a different command. The id alone cannot tell the two apart; the tmux
+	// handle can. A row that already records an ending keeps it.
+	stamped := false
+	updateTabByID(i, tabID, func(copy *Tab) {
+		if copy.tmux != tabTmux || copy.Exit != nil {
+			return
+		}
 		copy.Exit = exit
+		stamped = true
 		i.touchLocked()
 	})
 	if stamped {

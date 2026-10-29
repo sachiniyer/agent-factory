@@ -15,21 +15,29 @@ import (
 // Split out of archive.go, which had grown past the file-length limit holding
 // both verbs (#1145); nothing here changed in the move.
 
-// restoreRemoteSession restores an archived off-box session (docker/ssh/hook) by
-// re-provisioning a fresh sandbox that clones the pushed branch back and
-// relaunching the agent (#1592 Phase 4 PR6) — the remote analogue of
-// RestoreArchived's worktree-move body, sharing its guards + locks. It reuses
-// RestoreFromArchive unchanged: BeginRestore fences the restore, then the
-// backend's Recover (recoverSandbox) re-provisions + relaunches + flips the
-// session live. The code survives via origin; a fresh agent runs on the pushed
-// branch (the pre-archive conversation lived only in the disposed sandbox).
+// restoreRemoteSession restores an archived off-box session (docker/ssh/hook) —
+// the remote analogue of RestoreArchived's worktree-move body, sharing its guards
+// + locks. It reuses RestoreFromArchive unchanged: BeginRestore fences the
+// restore, then the backend's Recover (recoverSandbox) brings the runtime back
+// and flips the session live.
+//
+// An ssh/sandbox row archived without a push (#5571 W8.5) keeps its workspace on
+// its host, and the restore REATTACHES it (W8.6): a new agent-server over the
+// existing worktree, the agent relaunched with its recorded conversation, nothing
+// cloned, pushed or re-hooked. Only a workspace the host proves gone, or a row
+// that was pushed (and docker/hook, which always push), gets a fresh sandbox that
+// clones the pushed branch back (#1592 Phase 4 PR6).
 func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance, title string) (string, error) {
+	what := "re-provisioning its sandbox"
+	if instance.ArchivedWorkspace() != nil {
+		what = "restoring its preserved workspace"
+	}
 	if err := instance.RestoreFromArchive(); err != nil {
 		// On a re-provision/relaunch failure RestoreFromArchive left the instance
 		// Lost; persist that and surface the failure (an explicit retry re-provisions
 		// from the still-pushed branch).
 		m.persistInstance(repoID, instance)
-		return "", fmt.Errorf("failed to restore remote session %q (re-provisioning its sandbox): %w", title, err)
+		return "", fmt.Errorf("failed to restore remote session %q (%s): %w", title, what, err)
 	}
 	// A FRESH sandbox now backs this session, so its accumulated remote-loss
 	// failures describe a sandbox that is gone (#1794). Reset BEFORE the persist
@@ -51,7 +59,7 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 	// (#5436).
 	m.clearLostRestoreEpisode(stableSessionKey(repoID, instance))
 	m.persistRuntimeReplacement(repoID, title, instance)
-	m.info().Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
+	m.info().Printf("restored remote session %q (repo %s): runtime back, agent relaunched", title, repoID)
 	return restoredArchiveResult(instance, instance.GetWorktreePath())
 }
 
@@ -90,13 +98,6 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, session.I
 // one body avoids a second title lookup between those sibling paths.
 func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, title string) (string, error) {
 	req := RestoreArchivedRequest{ID: instance.ID, Title: title, RepoID: repoID}
-	// The one choke point for every archived restore (RestoreArchived, RestoreSession,
-	// and so TUI, web, CLI and task-driven restores): a row archived without a push
-	// keeps its work on its host, and restoring it re-provisions over that directory
-	// (#5571 W8.5). Refused before any fence is raised; W8.6 lifts it.
-	if err := instance.RestoreRefusedForPreservedWorkspace(); err != nil {
-		return "", err
-	}
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
