@@ -216,11 +216,6 @@ func vscodeSocketDirIn(ns string) (string, error) {
 	return sockDir, nil
 }
 
-// vscodeSocketDirPath resolves the socket directory without creating it. Cleanup
-// discovery uses this form so a daemon shutting down because its AF home was
-// deleted cannot resurrect that home merely by checking for persisted editors.
-func vscodeSocketDirPath() (string, error) { return vscodeSocketDirPathIn("") }
-
 // vscodeNamespaceDirName is the directory name of an owner namespace. The empty
 // namespace is the daemon's own (vscodeSocketDirName); an agent-server runs in one
 // of its own (W5.4), so the records and sockets of the editors it starts live in a
@@ -235,6 +230,10 @@ func vscodeNamespaceDirName(ns string) string {
 	return vscodeSocketDirName + "-" + ns
 }
 
+// vscodeSocketDirPathIn resolves one namespace's socket directory without
+// creating it. Cleanup discovery uses this form so a daemon shutting down
+// because its AF home was deleted cannot resurrect that home merely by checking
+// for persisted editors.
 func vscodeSocketDirPathIn(ns string) (string, error) {
 	dir, err := config.GetConfigDir()
 	if err != nil {
