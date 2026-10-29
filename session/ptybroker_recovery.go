@@ -190,6 +190,16 @@ func (b *ptyBroker) recoverCapture(onlyIfNoHealthyCapture bool) {
 	if stop != nil {
 		stop()
 	}
+	// A pane-REPLACING recovery (not a re-dial of the same pane) invalidates
+	// anything the channel remembers about the old pane's stream, such as a
+	// remote channel's ?since cursor: the replacement's ring starts over, so a
+	// cursor that happens to line up with it would be taken for "history replays
+	// contiguously" and the repaint the new screen needs would be skipped (#5871).
+	if !onlyIfNoHealthyCapture {
+		if pr, ok := b.ch.(interface{ PaneReplaced() }); ok {
+			pr.PaneReplaced()
+		}
+	}
 
 	// Discard the dead pane's buffered output (#1840). This is the ONLY point where
 	// that is race-free: the old readLoop has been joined by the stop above and the

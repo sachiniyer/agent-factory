@@ -70,6 +70,40 @@ func (s *remoteAgentServer) takeBrokersLocked() []*ptyBroker {
 	return all
 }
 
+// resetBrokerCaptures runs the respawn recovery on every tab's broker after the
+// sandbox replaced its agent process in place (#5871). The brokers are
+// snapshotted under s.mu and reset outside it: the teardown joins a read loop
+// and must not stall a concurrent Subscribe/Input/Resize. A no-op once Kill has
+// latched closed; a broker reachable from two maps is reset once.
+func (s *remoteAgentServer) resetBrokerCaptures() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	seen := map[*ptyBroker]bool{}
+	var all []*ptyBroker
+	add := func(br *ptyBroker) {
+		if br != nil && !seen[br] {
+			seen[br] = true
+			all = append(all, br)
+		}
+	}
+	for _, br := range s.brokers {
+		add(br)
+	}
+	for _, br := range s.idBrokers {
+		add(br)
+	}
+	for _, br := range s.ordBound {
+		add(br)
+	}
+	s.mu.Unlock()
+	for _, br := range all {
+		br.resetCapture()
+	}
+}
+
 // ensureBoundBroker is the broker of a tab opened through the ordinal plane,
 // keyed by the STABLE ID the tab resolved to, never by an ordinal (#5952, #5996
 // property 2). What goes on the wire is decided from that id at each dial (see
