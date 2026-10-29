@@ -883,14 +883,8 @@ jobs:
       # enough to absorb a build phase four times the measured one. Go has to win
       # that race with room to spare: its panic names the stuck goroutines, and
       # the runner kill this would otherwise become names nothing.
-      #
-      # Stall watchdog (#5766): three runs ended this step ~10 minutes after
-      # `=== RUN TestDeleteTabConsentEvidence`, long before the 30m above could
-      # fire, so the log held no stack. After 7 silent minutes (the longest quiet
-      # stretch in a healthy run was ~5) the wrapper SIGQUITs the test binaries,
-      # and each prints every goroutine before exiting.
       - name: Run tests
-        run: scripts/ci-stall-watchdog.sh 420 -- go test -v -race -count=1 -timeout 30m ./...
+        run: go test -v -race -count=1 -timeout 30m ./...
 
   build:
     name: ${{ inputs.probe && 'Build (skipped by probe)' || 'Build' }}
