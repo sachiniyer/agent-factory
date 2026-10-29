@@ -16,6 +16,7 @@ package credscrub
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/redactspan"
 	"github.com/sachiniyer/agent-factory/internal/redactx"
@@ -196,10 +197,56 @@ func Redactions(s string) []redactspan.Span {
 	return spans
 }
 
+// quotedKeyBeforeProse reports whether key, which closes with a quote
+// (`"feat-redesign-pr1-tokens": `), is followed by a BARE value that is not
+// credential-shaped — prose after a quoted title that merely ends in a key word
+// (#6054). tail is the text after the key: the bare value, plus for the scheme
+// form the whitespace and second word. Quoted values are unaffected (a quoted
+// value after a quoted key is JSON, and is redacted whatever it says), and so
+// is an unquoted key (`password=correcthorse`): only a quoted key makes the
+// colon prose punctuation as often as an assignment.
+func quotedKeyBeforeProse(key, tail string) bool {
+	key = strings.TrimRight(key, ": \t=")
+	if key == "" || (key[len(key)-1] != '"' && key[len(key)-1] != '\'') {
+		return false
+	}
+	tail = strings.TrimSpace(tail)
+	if tail == "" || tail[0] == '"' || tail[0] == '\'' {
+		return false
+	}
+	for _, word := range strings.Fields(tail) {
+		if credentialShaped(word) {
+			return false
+		}
+	}
+	return true
+}
+
+// credentialShaped reports whether word carries the texture of a secret rather
+// than of a noun: a digit, a letter-case mix, or a base64/URL-safe symbol.
+// Plain lowercase words ("tracked", "worktree") and hyphenated nouns do not.
+func credentialShaped(word string) bool {
+	var lower, upper bool
+	for _, r := range word {
+		switch {
+		case r >= '0' && r <= '9', strings.ContainsRune("+/=_~.", r):
+			return true
+		case r >= 'a' && r <= 'z':
+			lower = true
+		case r >= 'A' && r <= 'Z':
+			upper = true
+		}
+	}
+	return lower && upper
+}
+
 func appendKeyedSchemeSpans(spans []redactspan.Span, s string) []redactspan.Span {
 	for _, loc := range keyedSchemeSecret.FindAllStringSubmatchIndex(s, -1) {
 		if len(loc) >= 6 && loc[3] < loc[1] {
 			scheme := s[loc[4]:loc[5]]
+			if quotedKeyBeforeProse(s[loc[2]:loc[3]], s[loc[5]:loc[1]]) {
+				continue
+			}
 			// The whole-field marker is not evidence of the historical stranded
 			// credential shape. Preserve the established exception: only the
 			// credential marker triggers recovery of a following token.
@@ -240,6 +287,9 @@ func appendKeyValueSpans(spans []redactspan.Span, s string) []redactspan.Span {
 		// This skip is only safe because `value` is the COMPLETE value; see
 		// markerValues for why, and keyValueSecret for the boundary that makes it true.
 		if isMarker(value) {
+			continue
+		}
+		if quotedKeyBeforeProse(s[loc[2]:loc[3]], value) {
 			continue
 		}
 		if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
