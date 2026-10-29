@@ -187,3 +187,36 @@ func TestExampleMoveScriptKeepsQuotedSSHOptions(t *testing.T) {
 	assert.Contains(t, lines, "ARG:"+proxy, "the quoted option reaches ssh as ONE argument")
 	assert.NotContains(t, lines, "ARG:ProxyCommand=nc", "and is not split on its spaces")
 }
+
+// #5998: a tracked file that matches an ignore rule is part of the snapshot, so it
+// is part of what the destination is checked against; a faithful destination
+// passes and a missing or changed one fails.
+func TestVerifyCommandKeepsTrackedFilesThatMatchAnIgnoreRule(t *testing.T) {
+	dir := repoWithWork(t)
+	// ignored.txt matches .gitignore but is force-added, hence tracked.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("tracked anyway\n"), 0o644))
+	run(t, dir, "add", "-f", "ignored.txt")
+	run(t, dir, "commit", "-q", "-m", "track an ignored path")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("modified tracked ignored\n"), 0o644))
+
+	snap, err := TakeSnapshot(context.Background(), dir, "feat", "s", t.TempDir())
+	require.NoError(t, err)
+	assert.Equal(t, "modified tracked ignored", run(t, dir, "show", snap.Commit+":ignored.txt"), "premise: the snapshot carries it")
+
+	dst := t.TempDir()
+	run(t, dst, "init", "-q", "-b", "other")
+	run(t, dst, "fetch", "-q", snap.BundlePath, "refs/heads/feat:refs/heads/feat", snap.Ref+":"+snap.Ref)
+	run(t, dst, "checkout", "-q", "feat")
+	sh := func(script string) string {
+		cmd := exec.Command("sh", "-c", script)
+		cmd.Dir = dst
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return string(out)
+	}
+	sh(snap.OverlayCommand())
+	require.NoError(t, snap.CheckTree(sh(snap.VerifyCommand())), "a faithful destination passes")
+
+	require.NoError(t, os.Remove(filepath.Join(dst, "ignored.txt")))
+	require.ErrorContains(t, snap.CheckTree(sh(snap.VerifyCommand())), "not the snapshot's", "a missing tracked-ignored file is caught")
+}
