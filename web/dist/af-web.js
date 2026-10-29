@@ -7328,14 +7328,14 @@ function requireTaskID(id, action) {
   }
 }
 async function addTask(task, token2) {
-  await af("AddTask", { task }, token2);
+  await af("AddTask", { task, validate_path: true }, token2);
 }
 function projectExpectation(task) {
   return { enforce: true, project_path: task.project_path ?? "" };
 }
 async function updateTask(task, update, token2) {
   requireTaskID(task.id, "update a task");
-  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token2);
+  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task), validate_path: true }, token2);
 }
 async function triggerTask(task, token2) {
   requireTaskID(task.id, "trigger a task");
