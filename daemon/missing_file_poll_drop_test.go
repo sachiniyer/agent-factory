@@ -110,6 +110,12 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingInstancesFile(t *tes
 func TestRefreshDaemonInstances_PreservesInstancesAfterInstancesFileRecreatedEmpty(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	warnBuf := teeWarnings(t)
+	// Provenance is package-level and keyed by repoID; a prior test that
+	// observed the same repoID as missing would otherwise seed it. This test
+	// sets provenance itself on the first (missing-file) poll, but reset so the
+	// assertion that the SECOND poll preserves via provenance (not via a stale
+	// entry from a sibling test) is unambiguous.
+	resetPreservedMissingFileReposForTest()
 
 	prevFromInstance := fromInstanceDataForRefresh
 	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
@@ -201,6 +207,95 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingInstancesFileAcrossP
 	got3, _, _, _, err := refreshDaemonInstances(got2)
 	require.NoError(t, err)
 	require.Same(t, missingInst, got3[missingKey], "steady state must keep the live session preserved")
+}
+
+// TestRefreshDaemonInstances_DropsInstancesForLegitimatelyEmptyInstancesFile
+// pins the other half of the provenance fix: when instances.json is
+// LEGITIMATELY emptied — another agent-factory process kills the repo's last
+// session or an administrator replaces the roster with "[]" — the daemon never
+// observed a missing-file episode for it, so the file's present-but-empty state
+// is the authoritative state, not data loss to paper over. The stale in-memory
+// sessions are dropped (not preserved forever) and no warning fires, restoring
+// the behavior a present-but-empty file had before the missing-file fix. The
+// provenance set is what distinguishes this from a file the daemon watched
+// vanish and was then recreated empty by a preserved session's write.
+func TestRefreshDaemonInstances_DropsInstancesForLegitimatelyEmptyInstancesFile(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	silenceWarnings(t)
+	resetPreservedMissingFileReposForTest()
+
+	prevFromInstance := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		return &session.Instance{}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
+
+	// A repo whose roster an external actor replaced with "[]" — the daemon
+	// never saw its file go missing, so it has no provenance to preserve from.
+	legitEmptyRepoID := "legit-empty-repo"
+	require.NoError(t, config.SaveRepoInstances(legitEmptyRepoID, json.RawMessage("[]")))
+	legitKey := daemonInstanceKey(legitEmptyRepoID, "running-session")
+	legitInst := &session.Instance{}
+	existing := map[string]*session.Instance{legitKey: legitInst}
+
+	got, _, _, _, err := refreshDaemonInstances(existing)
+	require.NoError(t, err, "refreshDaemonInstances returned error on legitimately-empty repo")
+	// The stale in-memory session is dropped: the empty file is the
+	// authoritative state, not a loss to preserve from, so the live instance
+	// must not be carried back into the next snapshot.
+	require.NotContains(t, got, legitKey,
+		"a legitimately emptied instances.json (never observed missing) must not preserve stale in-memory sessions; they should be dropped so an admin or another process that emptied the roster is respected")
+}
+
+// TestRefreshDaemonInstances_ClearsProvenanceWhenInstancesFileRecovers pins that
+// a recovered file does not stay preserved forever: once a missing file is
+// rewritten with real rows, the daemon clears its provenance, so a LATER
+// legitimate emptying of the same repo (with no fresh missing-file observation)
+// is treated as the authoritative empty state — not as a sequel of the original
+// loss. Without this, a one-time deletion would lock the repo's sessions in
+// memory across every later emptying for the life of the daemon.
+func TestRefreshDaemonInstances_ClearsProvenanceWhenInstancesFileRecovers(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	silenceWarnings(t)
+	resetPreservedMissingFileReposForTest()
+
+	prevFromInstance := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		return &session.Instance{}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
+
+	repoID := "recover-then-empty-repo"
+	origJSON, err := json.Marshal([]session.InstanceData{{Title: "running-session"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances(repoID, origJSON))
+	key := daemonInstanceKey(repoID, "running-session")
+	inst := &session.Instance{}
+
+	// First poll: the file is missing, so the session is preserved and provenance is set.
+	missingPath, err := config.RepoInstancesPath(repoID)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(missingPath))
+	got, _, _, _, err := refreshDaemonInstances(map[string]*session.Instance{key: inst})
+	require.NoError(t, err)
+	require.Same(t, inst, got[key], "missing file must preserve the live session")
+
+	// The file is rewritten with its real rows again — the repo recovered.
+	require.NoError(t, config.SaveRepoInstances(repoID, origJSON))
+	// A poll that sees the recovered rows clears provenance (the normal load path
+	// owns the repo again); the session is reconciled against the on-disk row.
+	got2, _, _, _, err := refreshDaemonInstances(got)
+	require.NoError(t, err)
+	require.Contains(t, got2, key, "a recovered file must load its rows through the normal path")
+
+	// A later legitimate emptying: replace the roster with "[]" WITHOUT a prior
+	// missing-file observation since recovery. The stale session must be
+	// dropped — the empty file is the authoritative state, not a sequel.
+	require.NoError(t, config.SaveRepoInstances(repoID, json.RawMessage("[]")))
+	got3, _, _, _, err := refreshDaemonInstances(got2)
+	require.NoError(t, err)
+	require.NotContains(t, got3, key,
+		"after the file recovered and was later legitimately emptied, the stale session must be dropped; a one-time deletion must not lock the repo in memory across every later emptying")
 }
 
 // TestManager_RefreshLocked_MissingFilePreservesTaskRunSlotAgainstCap is the
