@@ -537,6 +537,16 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		}
 	}
 
+	// An off-box row names where it runs (#5571 W6.4); a local row says nothing
+	// extra. The place trails the branch so the branch keeps its leading slot.
+	if place := i.Placement().Short(); place != "" {
+		if branch != "" {
+			branch += " · " + place
+		} else {
+			branch = place
+		}
+	}
+
 	// The ⎇ labels the row's branch, so it only leads a row that names one:
 	// in front of a bare idle detail or a repo name it would mark a phrase
 	// that is not a branch (#4174).

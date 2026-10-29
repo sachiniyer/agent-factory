@@ -942,7 +942,7 @@ func (i *Instance) capabilitiesLocked() Capabilities {
 	// process tabs off-box (#5571 W4.5): the static backend declaration is the
 	// floor, the cached advertisement lifts it. Cache read only — no network
 	// under i.mu.
-	if caps.Workspace == WorkspaceRemote && i.offBoxTabAPILocked() {
+	if caps.Workspace == WorkspaceRemote && (i.offBoxTabAPILocked() || i.projectedTabManagement) {
 		caps.TabManagement = true
 	}
 	// A sandbox whose agent-server advertises the swap route can hand its agent

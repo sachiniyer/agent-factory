@@ -86,6 +86,8 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// the remaining refusal and is checked by its own path on both sides.
 		rosterMutable := true
 		data.TabRosterMutable = &rosterMutable
+		tabManagement := i.capabilitiesLocked().TabManagement
+		data.TabManagement = &tabManagement
 		if provider, ok := i.backend.(runtimeCleanupProvider); ok {
 			// Stage the exact off-box teardown identity privately on every snapshot.
 			// ForStorage publishes it for a UserKilled tombstone, an unknown cleanup
@@ -225,6 +227,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	if len(i.pendingTabCleanup) > 0 {
 		data.PendingTabCleanup = append([]TabCleanupData(nil), i.pendingTabCleanup...)
 	}
+	data.PendingRemoteTabClose = i.remoteCloseDataLocked()
 
 	// Keep writing the legacy single TmuxName field (set from the agent tab) for
 	// one release: a binary rolled back to before #930 PR 2 still finds the
@@ -312,8 +315,11 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// an identity, empty stays honest and matches the pre-#1933 projection.
 		data.Worktree.RepoPath = i.repoIdentityPath
 	}
+	if i.backend != nil {
+		data.Placement = i.placementLocked(i.backend, data.BackendType, data.Worktree.WorktreePath)
+	}
 
-	return data
+	return noteHostLayout(data)
 }
 
 // RestoreRelocationRecoveryOriginals reverses the rollback-safe ownership and
@@ -380,7 +386,7 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
-	data = data.RestoreArchiveRollbackFence()
+	data = noteHostLayout(data.RestoreArchiveRollbackFence())
 	// ForStorage publishes an ordinary sandbox row's RuntimeCleanup under a
 	// projected RuntimeCleanupStateUnknown=true so a binary rolled back to the
 	// preceding release rebuilds and preserves the handle instead of loading the
@@ -510,6 +516,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		Host:                     data.Host,
 		branchUnpushed:           data.BranchUnpushed,
 		archivedWorkspace:        cloneArchivedWorkspace(data.ArchivedWorkspace),
+		placement:                clonePlacement(data.Placement),
+		projectedTabManagement:   data.TabManagement != nil && *data.TabManagement,
 		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
@@ -755,6 +763,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// rebuilt from a tombstone.
 		instance.pendingTabCleanup = restoredTabCleanup(data.PendingTabCleanup)
 	}
+	// Pending off-box closes belong to the sandbox backends the branch above never
+	// reaches (#5996): restored for every backend so a restart cannot drop the only
+	// handle on a command still running in a sandbox.
+	instance.pendingRemoteClose = restoredRemoteClose(data.PendingRemoteTabClose)
 
 	// Every return below hands back a row no automatic restore can reach —
 	// inert (started=false), Archived rather than Lost, or vetoed by
@@ -897,98 +909,3 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 // is a package var (not a direct call) so restore-survival tests can inject
 // mock-backed sessions and stay hermetic; production uses the real constructor.
 var restoreTmuxSession = tmux.NewTmuxSessionFromSanitizedName
-
-// restoreLocalTabs rebuilds a local instance's tab list from persisted data.
-//
-//   - New format (data.Tabs present): each tab is reconstructed in order, and
-//     any tab with a persisted tmux name is bound to that exact session so
-//     LocalBackend.Start can reconnect it across a restart.
-//   - Legacy format (no data.Tabs, written before #930 PR 2): synthesize the
-//     single Agent tab from the legacy TmuxName/Program — keeping the EXACT
-//     legacy tmux name so an existing live agent session survives the upgrade.
-//     No shell tab is synthesized: terminal tabs are on-demand only (#1100).
-func restoreLocalTabs(instance *Instance, data InstanceData) {
-	if len(data.Tabs) > 0 {
-		for idx, td := range data.Tabs {
-			kind := tabKindForData(td.Kind)
-			var ts *tmux.TmuxSession
-			if td.TmuxName != "" {
-				ts = restoreTmuxSession(td.TmuxName, tabProgram(kind, td.Command, data.Program))
-				// Keep the restored handle consistent with a fresh process
-				// tab's: the flag only matters if Start is ever invoked, and
-				// after #4479 nothing invokes it — but the invariant costs
-				// nothing and keeps a future Start caller honest.
-				if ts != nil && kind == TabKindProcess {
-					ts.SetRemainOnExit()
-				}
-			}
-			var conversation AgentConversationData
-			if td.Conversation != nil {
-				conversation = *td.Conversation
-			} else if idx == 0 && data.AgentConversation != nil {
-				conversation = *data.AgentConversation
-			}
-			// Backfill a stable id for a legacy tab persisted before #1738 (no id):
-			// mint one now so the restored tab is addressable by a stable id from
-			// this load forward (rollforward, mirroring the InstanceData.ID backfill).
-			id := td.ID
-			if id == "" {
-				id = newTabID()
-			}
-			var handoffs []AgentHandoff
-			if len(td.Handoffs) > 0 {
-				handoffs = append([]AgentHandoff(nil), td.Handoffs...)
-			}
-			instance.Tabs = append(instance.Tabs, &Tab{
-				ID:                            id,
-				Name:                          td.Name,
-				Kind:                          kind,
-				Command:                       td.Command,
-				URL:                           td.URL,
-				Proposal:                      td.Proposal,
-				PushMode:                      td.PushMode,
-				Conversation:                  conversation,
-				Handoffs:                      handoffs,
-				Exit:                          tabExitFromData(td.Exit),
-				tmux:                          ts,
-				accountScope:                  td.AccountScope,
-				accountScopeProvenanceUnknown: idx > 0 && kind.HasTmux() && ts != nil && siblingScopeUnknown(data.Account, td.AccountScope),
-			})
-		}
-		return
-	}
-
-	// Legacy single-session format: the agent tab keeps its exact legacy name.
-	// Reconstruction is not new activity. Build the unpublished instance directly,
-	// just as the current-format loop above does, without invoking mutators.
-	var ts *tmux.TmuxSession
-	if data.TmuxName != "" {
-		ts = restoreTmuxSession(data.TmuxName, data.Program)
-	} else {
-		ts = tmux.NewTmuxSession(data.Title, data.Program)
-	}
-	instance.Tabs = []*Tab{newAgentTab(ts)}
-	if data.AgentConversation != nil {
-		instance.Tabs[0].Conversation = *data.AgentConversation
-	}
-}
-
-// metadataTabsFrom selects the persisted rows whose kind needs nothing from the
-// workspace, for a backend whose workspace did not survive the restart.
-//
-// The agent row is excluded: the backend seeds its own on Launch, bound to the
-// live runtime, and a copied record would be a second one with no runtime behind
-// it. Every other kind is dropped as before — they describe a worktree and a PTY
-// that no longer exist, so a row for them would be an entry every later operation
-// fails on.
-func metadataTabsFrom(data InstanceData) []TabData {
-	var out []TabData
-	for _, td := range data.Tabs {
-		kind := tabKindForData(td.Kind)
-		if kind == TabKindAgent || TabKindRequires(kind) != TabNeedsMetadataOnly {
-			continue
-		}
-		out = append(out, td)
-	}
-	return out
-}

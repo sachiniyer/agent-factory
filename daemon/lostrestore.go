@@ -373,6 +373,13 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	if inst == nil || !lostSessionWantsRestore(inst.LifecycleView()) {
 		return
 	}
+	// A row that still owes a preserved workspace (#5571 W8.6) is restored only by
+	// an explicit restore. Its refusals are decisions about work that may exist
+	// nowhere else (a workspace the host proved gone, an origin that cannot be
+	// asked), and re-asking the host on a timer cannot change them.
+	if inst.OwesPreservedWorkspace() {
+		return
+	}
 
 	// Two keys, deliberately. `key` is the repo/title daemon key: it addresses the
 	// SLOT, which is what the exclusive-operation gates (killsInFlight, the

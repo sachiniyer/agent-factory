@@ -10,7 +10,6 @@ import assert from "node:assert/strict";
 
 import { type NavContext, cycleView, decideKey, nextSelection } from "./nav.js";
 
-import { canManageTabs } from "./ui.js";
 
 const IDS = ["a", "b", "c"];
 
@@ -23,7 +22,7 @@ function ctx(over: Partial<NavContext> = {}): NavContext {
     selectedId: "b",
     tabCount: 1,
     activeTab: 0,
-    tabManagement: true,
+    newTabKinds: ["shell", "vscode"],
     tabClosable: true,
     ...over,
   };
@@ -119,8 +118,17 @@ test("nav mode: 1-9 switch to an existing tab of the selected session", () => {
 });
 
 test("nav mode: t creates a tab; w closes the active non-agent tab", () => {
-  // t always works for a tab-managed session (mirrors TUI `t` → AddShellTab).
-  assert.deepEqual(decideKey("t", ctx()), { kind: "newTab" });
+  // t opens a terminal, mirroring TUI `t` → AddShellTab; T opens VS Code.
+  assert.deepEqual(decideKey("t", ctx()), { kind: "newTab", tabKind: "shell" });
+  assert.deepEqual(decideKey("T", ctx()), { kind: "newTab", tabKind: "vscode" });
+  // Caps Lock flips the reported case; Shift, not case, picks the kind.
+  assert.deepEqual(decideKey("T", ctx(), { shift: false }), { kind: "newTab", tabKind: "shell" });
+  assert.deepEqual(decideKey("t", ctx(), { shift: true }), { kind: "newTab", tabKind: "vscode" });
+  // Ctrl/Cmd+Shift+T stays the browser's reopen-closed-tab.
+  assert.deepEqual(decideKey("T", ctx(), { shift: true, ctrl: true }), { kind: "none" });
+  assert.deepEqual(decideKey("T", ctx(), { shift: true, meta: true }), { kind: "none" });
+  // Shift+Alt+T focuses Chrome's toolbar on Windows and Linux.
+  assert.deepEqual(decideKey("T", ctx(), { shift: true, alt: true }), { kind: "none" });
   // w on the agent tab (index 0) is refused — kill the session instead.
   assert.deepEqual(decideKey("w", ctx({ activeTab: 0 })), { kind: "none" }, "agent tab is unclosable");
   // w on a non-agent tab closes it.
@@ -156,20 +164,20 @@ test("nav mode: a session that can create nothing can still CLOSE what it has (#
   // CreateTab consults Capabilities.RefuseTabKind; CloseTab consults nothing but
   // "is this the agent tab". Tying the × to the create rule stranded agent-created
   // web tabs in an off-box session's bar with no way to remove them.
-  const remote = ctx({ tabManagement: false, tabClosable: true, tabCount: 2, activeTab: 0 });
+  const remote = ctx({ newTabKinds: [], tabClosable: true, tabCount: 2, activeTab: 0 });
   assert.deepEqual(decideKey("t", remote), { kind: "none" }, "no kind is creatable here, so no new tab");
   assert.deepEqual(
-    decideKey("w", ctx({ tabManagement: false, tabClosable: true, tabCount: 2, activeTab: 1 })),
+    decideKey("w", ctx({ newTabKinds: [], tabClosable: true, tabCount: 2, activeTab: 1 })),
     { kind: "closeTab" },
     "but an existing tab is closable — the daemon's CloseTab has no backend gate",
   );
   // The agent tab is still never closable, whatever the session.
-  assert.deepEqual(decideKey("w", ctx({ tabManagement: false, tabClosable: true, tabCount: 2, activeTab: 0 })), {
+  assert.deepEqual(decideKey("w", ctx({ newTabKinds: [], tabClosable: true, tabCount: 2, activeTab: 0 })), {
     kind: "none",
   });
   // And an archived session refuses closes at the daemon, so the key stays inert.
   assert.deepEqual(
-    decideKey("w", ctx({ tabManagement: false, tabClosable: false, tabCount: 2, activeTab: 1 })),
+    decideKey("w", ctx({ newTabKinds: [], tabClosable: false, tabCount: 2, activeTab: 1 })),
     { kind: "none" },
     "archived: the daemon refuses CloseTab, so the affordance must not be offered",
   );
@@ -234,15 +242,12 @@ test("non-sessions views: the session keys pass through, only view switching is 
   assert.deepEqual(decideKey("]", configView), { kind: "switchView", view: "sessions" });
 });
 
-test("the t shortcut opens the picker for any offered kind (#4017)", () => {
-  // The keyboard must expose the same VS Code-only choice as the button.
-  const vscodeOnly = ctx({ tabManagement: canManageTabs({ title: "editor", branch: "editor", tab_kinds: [
-    { kind: "shell", allowed: false }, { kind: "vscode", allowed: true },
-  ] }) });
-  assert.deepEqual(decideKey("t", vscodeOnly), { kind: "newTab" }, "t must open the picker when VS Code is offered");
+test("t opens a terminal tab and T a VS Code tab, each only when offered", () => {
+  const vscodeOnly = ctx({ newTabKinds: ["vscode"] });
+  assert.deepEqual(decideKey("t", vscodeOnly), { kind: "none" }, "t must not fire when no terminal is offered");
+  assert.deepEqual(decideKey("T", vscodeOnly), { kind: "newTab", tabKind: "vscode" });
 
-  const shellOK = ctx({ tabManagement: canManageTabs({ title: "terminal", branch: "terminal", tab_kinds: [
-    { kind: "shell", allowed: true }, { kind: "vscode", allowed: false },
-  ] }) });
-  assert.deepEqual(decideKey("t", shellOK), { kind: "newTab" });
+  const shellOnly = ctx({ newTabKinds: ["shell"] });
+  assert.deepEqual(decideKey("t", shellOnly), { kind: "newTab", tabKind: "shell" });
+  assert.deepEqual(decideKey("T", shellOnly), { kind: "none" }, "T must not fire when VS Code is not offered");
 });

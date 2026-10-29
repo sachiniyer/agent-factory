@@ -3,7 +3,6 @@ package git
 import (
 	"context"
 	"fmt"
-	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,9 +59,7 @@ func TestMoveWorktree_SubmodulesUseDesignedFallbackWithoutWarning(t *testing.T) 
 	t.Cleanup(func() { worktreeMoveFast = realFastMove })
 
 	var warnings logtest.Buffer
-	previousWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = previousWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	gw, _, srcPath := archiveTestWorktreeWithSubmodule(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")

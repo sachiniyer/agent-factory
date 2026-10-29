@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/hostlayout"
 )
 
 type tasksEnvelope struct {
@@ -75,7 +76,17 @@ func tasksFromSchemaBytes(raw []byte) ([]Task, error) {
 	if err := json.Unmarshal(envelope.Tasks, &tasks); err != nil {
 		return nil, fmt.Errorf("failed to parse tasks list: %w", err)
 	}
+	noteTaskLayout(tasks)
 	return tasks, nil
+}
+
+// noteTaskLayout records each task's project path as host layout: the one decode
+// point every load passes through, so a path is in the set before any response
+// can carry it (internal/hostlayout).
+func noteTaskLayout(tasks []Task) {
+	for i := range tasks {
+		hostlayout.Default.Note(tasks[i].ProjectPath)
+	}
 }
 
 func validateTasksEnvelope(raw []byte) error {

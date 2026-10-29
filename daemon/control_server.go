@@ -20,10 +20,14 @@ import (
 )
 
 type controlServer struct {
-	manager    *Manager
-	scheduler  *taskScheduler
-	watchers   *watcherSupervisor
-	shutdownCh chan struct{}
+	// createSessionFn replaces createSession in the sandbox-scoped CreateSession
+	// handler. Nil in production; a test sets it to exercise the response boundary
+	// on a successful create without provisioning a host.
+	createSessionFn func(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error
+	manager         *Manager
+	scheduler       *taskScheduler
+	watchers        *watcherSupervisor
+	shutdownCh      chan struct{}
 	// shutdownOnce is shared by every per-connection controlServer
 	// startControlServer builds: one Shutdown must fire once for the whole
 	// listener, not once per connection. It is nil on servers that cannot shut
@@ -614,30 +618,6 @@ func (s *controlServer) ArchiveSession(req *ArchiveSessionRequest, resp *Archive
 	return s.archiveSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) archiveSession(ctx context.Context, req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	// The `af sessions archive --self` caller this issue is about (#5182):
-	// register the kernel-verified requester before its own pane tree is
-	// reaped, and unregister when the reply is on the wire.
-	defer s.trackTeardownRequester(ctx, req)()
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
-	// commits it, and publishes the full projection inside its operation lock. That
-	// keeps lifecycle event order identical to operation order (#2680).
-	archivedPath, archived, err := s.manager.ArchiveSession(*req)
-	if !resp.record(err) {
-		return err
-	}
-	resp.OK = true
-	resp.ArchivedPath = archivedPath
-	resp.ArchivedWorkspace = archived.ArchivedWorkspace
-	return nil
-}
-
 func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *RestoreArchivedResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
@@ -700,22 +680,6 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 	if err == nil {
 		s.manager.publishEvent(agentproto.EventSessionRestored, restored)
 	}
-	return nil
-}
-
-func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	status, err := s.manager.SendPromptWithStatus(req)
-	if err != nil {
-		return err
-	}
-	resp.OK = true
-	resp.Status = status
 	return nil
 }
 

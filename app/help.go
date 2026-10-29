@@ -364,7 +364,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			{helpKey(keys.KeyRight), "Expand tabs"},
 		}},
 		{title: "Configuration:", rows: []helpRow{
-			{helpKey(keys.KeyConfigAgent), "Configure with assistant"},
+			{helpKey(keys.KeyConfigAgent), "Configure with assistant · " + tmux.DetachKeyDisplay + " leaves"},
 			{helpKey(keys.KeyHooks), "Edit worktree hooks"},
 			{helpKey(keys.KeyConfigEditor), "Edit settings"},
 		}},

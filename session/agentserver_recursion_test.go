@@ -127,3 +127,36 @@ func TestAgentServer_TornDownRemoteRuntime_KillDeletesCleanly(t *testing.T) {
 
 	assert.NoError(t, i.Kill(), "killing a torn-down remote session must succeed so its record deletes")
 }
+
+// TestRemoteRuntimeUnboundReportsTheClientlessRemoteShape pins the predicate the
+// daemon's handoff-recovery gate reads (#5634): an unbound remote row is one with
+// a remote-workspace backend and NO live agent-server client — the exact row
+// AgentServer() hands back the stateless deadRemoteAgentServer sentinel for, and
+// the one the startup reattach (#5571 W1.5) re-binds. The gate's correctness rests
+// on this predicate being true exactly there and false everywhere else.
+func TestRemoteRuntimeUnboundReportsTheClientlessRemoteShape(t *testing.T) {
+	// A client-less remote-workspace row: a reloaded inert sandbox row with
+	// remoteClient nil. AgentServer() is the dead sentinel.
+	clientless := &Instance{Title: "s", backend: newInertSandboxBackend("docker"), liveness: LiveLost}
+	assert.True(t, clientless.RemoteRuntimeUnbound(),
+		"a client-less remote-workspace row is unbound")
+	_, isDead := clientless.AgentServer().(*deadRemoteAgentServer)
+	require.True(t, isDead, "an unbound remote row's AgentServer is the dead sentinel")
+
+	// A BOUND remote row — reattach re-bound it, or a live docker/ssh session —
+	// is NOT unbound: the gate admits it and AgentServer() is the real client.
+	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: "http://127.0.0.1:1", Token: "t"}, "s")
+	require.NoError(t, err)
+	bound := &Instance{Title: "s", backend: newInertSandboxBackend("docker"), remoteClient: rc}
+	assert.False(t, bound.RemoteRuntimeUnbound(), "a bound remote row is not unbound")
+	_, isRemote := bound.AgentServer().(*remoteAgentServer)
+	require.True(t, isRemote, "a bound remote row's AgentServer is the live client, never the sentinel")
+
+	// A local row is never unbound-remote, regardless of its client state.
+	local := &Instance{Title: "s", backend: &LocalBackend{}, liveness: LiveLost}
+	assert.False(t, local.RemoteRuntimeUnbound(), "a local row is never unbound-remote")
+
+	// A not-yet-initialised row (nil backend) is local by default and not unbound.
+	zero := &Instance{Title: "s"}
+	assert.False(t, zero.RemoteRuntimeUnbound(), "a nil backend is local, not unbound-remote")
+}

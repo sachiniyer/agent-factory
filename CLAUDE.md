@@ -223,6 +223,8 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `task/` — task store, cron/watch validation/parsing, session-start helpers
 - `schedule/` — UI-agnostic schedule model behind the task pickers (preset shapes ↔ cron expressions)
 - `quota/` — usage-limit evidence and account selection for limited sessions
+- `proposal/` — proposal store: per-project folders of markdown docs a user and agent sessions edit together, backed by a private git repo under the AF home
+- `move/` — moving a live local worktree session to a sandbox: worktree snapshot, the `move_cmd` contract, all-or-nothing orchestration
 - `daemon/` — always-on background daemon: task scheduler, watcher supervisor, session monitor, control-socket RPCs, autostart unit
 - `preflight/` — pre-launch checks (tmux presence, agent command executables)
 - `doctor/` — `af doctor` diagnostics and verified `--fix` remediations
@@ -233,6 +235,7 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `log/` — logging
 - `internal/` — implementation-only helper packages (af home, autoupdate, ssh relay, program privacy, redaction, test guards, …)
 - `design/` — design tokens and the style-guide template (generator inputs for web/ui/doc CSS)
+- `plugins/` — generated per-agent plugin packagings of the `agent-factory` skill (gen-docs output — do not hand-edit)
 - `scripts/` — dev/CI scripts (gen-docs.sh, lint-file-length.sh, container harnesses, tmux scenario drivers)
 - `docs/` — documentation (remote hooks, etc.)
 - `examples/` — example configurations

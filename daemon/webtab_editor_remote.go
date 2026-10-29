@@ -1,0 +1,129 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/session"
+)
+
+// The VS Code tab of an off-box workspace (W5.4, #5571). The editor runs on the
+// workspace's host under the agent-server (agentserver_editor.go); this is the
+// daemon's side: ask for it, then reverse-proxy to it through the authenticated
+// relay. Everything after the target — the tab proxy, the W5.2 per-session origin
+// and its cookie — is the same code a local editor goes through, so there is no
+// second credential path.
+
+const editorStartTimeout = 30 * time.Second
+
+func editorRelayTransportKey(key string) string { return key + "\x00editor" }
+
+// remoteEditorTarget resolves the web-tab target of an off-box session's editor.
+// "Still starting" and "no editor installed" reuse the local notices; an
+// unreachable relay is an error, never a fallback to a daemon-host editor.
+func (m *Manager) remoteEditorTarget(instance *session.Instance, repoID, title string) (webTabTarget, error) {
+	kind := session.TabKindVSCode
+	if err := instance.TabSpawnBlocked(); err != nil {
+		return webTabTarget{Kind: kind}, err
+	}
+	if instance.UserKilled() {
+		return webTabTarget{Kind: kind}, fmt.Errorf("session %q has been killed", title)
+	}
+	er, ok := instance.AgentServer().(session.EditorRelayer)
+	if !ok {
+		return webTabTarget{Kind: kind}, fmt.Errorf("this session's workspace is off-box and its runtime cannot run an editor there; refusing to open one on the daemon host")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), editorStartTimeout)
+	defer cancel()
+	st, err := er.EnsureEditor(ctx)
+	if err != nil {
+		return webTabTarget{Kind: kind}, err
+	}
+	switch st.State {
+	case agentproto.EditorStateReady:
+	case agentproto.EditorStateStarting:
+		return webTabTarget{Kind: kind}, errVSCodeStarting
+	case agentproto.EditorStateMissing:
+		return webTabTarget{Kind: kind}, &remoteEditorMissingError{host: instance.Host}
+	default:
+		return webTabTarget{Kind: kind}, fmt.Errorf("the workspace editor reported unknown state %q", st.State)
+	}
+	return webTabTarget{URL: vscodeUpstreamURL, Transport: m.editorRelayTransport(instance, repoID, title), Kind: kind, RelayedEditor: true}, nil
+}
+
+// editorRelayTransport is relayTransport's twin for the editor: one cached
+// transport per session whose dialer ignores the address and opens the
+// agent-server's editor relay.
+func (m *Manager) editorRelayTransport(instance *session.Instance, repoID, title string) *http.Transport {
+	key := editorRelayTransportKey(daemonInstanceKey(repoID, title))
+	if v, ok := m.relayTransports.Load(key); ok {
+		if e := v.(relayTransportEntry); e.instance == instance {
+			return e.transport
+		}
+	}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			er, ok := instance.AgentServer().(session.EditorRelayer)
+			if !ok {
+				return nil, errors.New("session has no editor relay")
+			}
+			return er.DialEditor(ctx)
+		},
+		Proxy:           nil,
+		IdleConnTimeout: relayTransportIdleTimeout,
+	}
+	if old, ok := m.relayTransports.Swap(key, relayTransportEntry{instance: instance, transport: tr}); ok {
+		old.(relayTransportEntry).transport.CloseIdleConnections()
+	}
+	return tr
+}
+
+// stopRemoteEditor ends an off-box session's host-side editor when its last VS Code
+// tab closes, as the local editor stops then. Best effort: the host may be
+// unreachable, and the editor stops with the session in any case, so a failure is
+// logged rather than blocking the close.
+func (m *Manager) stopRemoteEditor(instance *session.Instance) {
+	if instance.Capabilities().Workspace != session.WorkspaceRemote {
+		return
+	}
+	er, ok := instance.AgentServer().(session.EditorRelayer)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), editorStartTimeout)
+	defer cancel()
+	if err := er.StopEditor(ctx); err != nil {
+		m.warn().Printf("remote editor of session id %q was not stopped on tab close (it stops with the session): %v", instance.ID, err)
+	}
+}
+
+// remoteEditorMissingError reports that the editor binary is not installed on an
+// off-box session's HOST. It unwraps to errVSCodeBinaryMissing so callers that only
+// ask "is the editor missing" still match, but the proxy checks for this type first:
+// the local install hint sends the user to fix the daemon's machine, which is the
+// wrong one here.
+type remoteEditorMissingError struct {
+	host string // the named host (global `hosts`), or "" for an unnamed backend
+}
+
+func (e *remoteEditorMissingError) Error() string { return remoteEditorInstallHint(e.host) }
+func (e *remoteEditorMissingError) Unwrap() error { return errVSCodeBinaryMissing }
+
+// remoteEditorInstallHint is the text a remote session's VS Code pane shows when
+// the host has no editor. It names the host and gives the install step for THAT
+// machine; the local hint stays for local sessions.
+func remoteEditorInstallHint(host string) string {
+	where := "this session's host"
+	if h := strings.TrimSpace(host); h != "" {
+		where = fmt.Sprintf("this session's host %q", h)
+	}
+	return "code-server is not installed on " + where + " — the editor runs there, not on the machine running af. " +
+		"Install it on that host: https://github.com/coder/code-server#install " +
+		"(or set vscode_server_binary in config.toml on that host)"
+}

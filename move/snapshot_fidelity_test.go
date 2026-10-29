@@ -187,3 +187,157 @@ func TestExampleMoveScriptKeepsQuotedSSHOptions(t *testing.T) {
 	assert.Contains(t, lines, "ARG:"+proxy, "the quoted option reaches ssh as ONE argument")
 	assert.NotContains(t, lines, "ARG:ProxyCommand=nc", "and is not split on its spaces")
 }
+
+// #5998: a tracked file that matches an ignore rule is part of the snapshot, so it
+// is part of what the destination is checked against; a faithful destination
+// passes and a missing or changed one fails.
+func TestVerifyCommandKeepsTrackedFilesThatMatchAnIgnoreRule(t *testing.T) {
+	dir := repoWithWork(t)
+	// ignored.txt matches .gitignore but is force-added, hence tracked.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("tracked anyway\n"), 0o644))
+	run(t, dir, "add", "-f", "ignored.txt")
+	run(t, dir, "commit", "-q", "-m", "track an ignored path")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("modified tracked ignored\n"), 0o644))
+
+	snap, err := TakeSnapshot(context.Background(), dir, "feat", "s", t.TempDir())
+	require.NoError(t, err)
+	assert.Equal(t, "modified tracked ignored", run(t, dir, "show", snap.Commit+":ignored.txt"), "premise: the snapshot carries it")
+
+	dst := t.TempDir()
+	run(t, dst, "init", "-q", "-b", "other")
+	run(t, dst, "fetch", "-q", snap.BundlePath, "refs/heads/feat:refs/heads/feat", snap.Ref+":"+snap.Ref)
+	run(t, dst, "checkout", "-q", "feat")
+	sh := func(script string) string {
+		cmd := exec.Command("sh", "-c", script)
+		cmd.Dir = dst
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return string(out)
+	}
+	sh(snap.OverlayCommand())
+	require.NoError(t, snap.CheckTree(sh(snap.VerifyCommand())), "a faithful destination passes")
+
+	require.NoError(t, os.Remove(filepath.Join(dst, "ignored.txt")))
+	require.ErrorContains(t, snap.CheckTree(sh(snap.VerifyCommand())), "not the snapshot's", "a missing tracked-ignored file is caught")
+}
+
+// destinationOf seeds a clone from the snapshot's bundle at the branch tip and
+// returns it with a shell runner, before the overlay.
+func destinationOf(t *testing.T, snap *Snapshot) (string, func(string) string) {
+	t.Helper()
+	dst := t.TempDir()
+	run(t, dst, "init", "-q", "-b", "other")
+	run(t, dst, "fetch", "-q", snap.BundlePath, "refs/heads/feat:refs/heads/feat", snap.Ref+":"+snap.Ref)
+	run(t, dst, "checkout", "-q", "feat")
+	return dst, func(script string) string {
+		cmd := exec.Command("sh", "-c", script)
+		cmd.Dir = dst
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return string(out)
+	}
+}
+
+// #6024: verification builds its view from the files on disk, never from the
+// destination index's hiding flags. A destination whose flagged file is stale must
+// fail, and a faithful one must pass, whatever flags its index carries.
+func TestVerifyCommandIgnoresHidingFlagsInTheDestinationIndex(t *testing.T) {
+	for _, flags := range [][]string{{"--assume-unchanged"}, {"--skip-worktree"}, {"--assume-unchanged", "--skip-worktree"}} {
+		t.Run(strings.Join(flags, "+"), func(t *testing.T) {
+			dir := repoWithWork(t)
+			run(t, dir, "update-index", "--assume-unchanged", "a.txt")
+			run(t, dir, "update-index", "--skip-worktree", "a.txt")
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("edited under both flags\n"), 0o644))
+			snap, err := TakeSnapshot(context.Background(), dir, "feat", "s", t.TempDir())
+			require.NoError(t, err)
+			require.Equal(t, "edited under both flags", run(t, dir, "show", snap.Commit+":a.txt"), "premise: the snapshot carries the edit")
+
+			dst, sh := destinationOf(t, snap)
+			// The destination holds everything but the flagged file's edit, and carries
+			// the source's flags.
+			sh(snap.OverlayCommand())
+			faithful, err := os.ReadFile(filepath.Join(dst, "a.txt"))
+			require.NoError(t, err)
+			require.Equal(t, "edited under both flags\n", string(faithful), "premise: the overlay delivered the edit")
+			require.NoError(t, snap.CheckTree(sh(snap.VerifyCommand())), "the faithful destination verifies")
+			for _, f := range flags {
+				run(t, dst, "update-index", f, "a.txt")
+			}
+			require.NoError(t, snap.CheckTree(sh(snap.VerifyCommand())), "and still does with the source's flags set")
+
+			require.NoError(t, os.WriteFile(filepath.Join(dst, "a.txt"), []byte("stale\n"), 0o644))
+			require.ErrorContains(t, snap.CheckTree(sh(snap.VerifyCommand())), "not the snapshot's", "a stale flagged file must not verify")
+			assert.Contains(t, run(t, dst, "ls-files", "-v", "a.txt"), "a.txt", "the destination's own index is untouched")
+			assert.NotEqual(t, "H", run(t, dst, "ls-files", "-v", "a.txt")[:1])
+		})
+	}
+}
+
+// An absent skip-worktree file (a sparse checkout) is not a deletion, as in the snapshot.
+func TestVerifyCommandKeepsAbsentSkipWorktreeFiles(t *testing.T) {
+	dir := repoWithWork(t)
+	run(t, dir, "update-index", "--skip-worktree", "a.txt")
+	require.NoError(t, os.Remove(filepath.Join(dir, "a.txt")))
+	snap, err := TakeSnapshot(context.Background(), dir, "feat", "s", t.TempDir())
+	require.NoError(t, err)
+	dst, sh := destinationOf(t, snap)
+	run(t, dst, "update-index", "--skip-worktree", "a.txt")
+	require.NoError(t, os.Remove(filepath.Join(dst, "a.txt")))
+	sh(snap.OverlayCommand())
+	require.NoError(t, snap.CheckTree(sh(snap.VerifyCommand())))
+}
+
+// Run aborts, and the source stays unarchived, when the destination is stale under flags.
+func TestRunKeepsTheSourceWhenAFlaggedFileIsStaleAtTheDestination(t *testing.T) {
+	dir := repoWithWork(t)
+	run(t, dir, "update-index", "--assume-unchanged", "a.txt")
+	run(t, dir, "update-index", "--skip-worktree", "a.txt")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("real edit\n"), 0o644))
+	s := Session{ID: "sess-1", Title: "t", Branch: "feat", Worktree: dir}
+	f := &fakeSteps{}
+	f.verify = func(snap *Snapshot) (string, error) {
+		dst, sh := destinationOf(t, snap)
+		sh(snap.OverlayCommand())
+		run(t, dst, "add", "a.txt") // the index holds the edit, the file then goes stale behind the flag
+		run(t, dst, "update-index", "--assume-unchanged", "a.txt")
+		require.NoError(t, os.WriteFile(filepath.Join(dst, "a.txt"), []byte("stale\n"), 0o644)) // the edit never arrived
+		return sh(snap.VerifyCommand()), nil
+	}
+	err := Run(context.Background(), f, s, Host{Name: "h"}, Options{TempDir: t.TempDir()})
+	require.ErrorContains(t, err, "not the snapshot's")
+	assert.NotContains(t, f.calls, "start")
+	assert.NotContains(t, f.calls, "archive")
+}
+
+// #6033: paths that git quotes (spaces, non-ASCII) go through the same flag clear
+// and existence test as plain ones. A sparse checkout of them verifies, and a real
+// missing edit among them still fails.
+func TestVerifyCommandHandlesQuotedSparsePaths(t *testing.T) {
+	dir := repoWithWork(t)
+	names := []string{"ünï cödé.txt", "sp ace.txt", "tab\tname.txt"}
+	for _, n := range names {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, n), []byte("v1\n"), 0o644))
+	}
+	run(t, dir, "add", "-A")
+	run(t, dir, "commit", "-q", "-m", "quoted paths")
+	// sparse: the first (quoted by git) is absent, outside the cone; the others are present and flagged.
+	run(t, dir, "update-index", "--skip-worktree", names[0])
+	require.NoError(t, os.Remove(filepath.Join(dir, names[0])))
+	run(t, dir, "update-index", "--assume-unchanged", names[1], names[2])
+	require.NoError(t, os.WriteFile(filepath.Join(dir, names[1]), []byte("edited\n"), 0o644))
+
+	snap, err := TakeSnapshot(context.Background(), dir, "feat", "s", t.TempDir())
+	require.NoError(t, err)
+	dst, sh := destinationOf(t, snap)
+	run(t, dst, "update-index", "--skip-worktree", names[0])
+	require.NoError(t, os.Remove(filepath.Join(dst, names[0])))
+	run(t, dst, "update-index", "--assume-unchanged", names[1], names[2])
+	sh(snap.OverlayCommand())
+	require.NoError(t, snap.CheckTree(sh(snap.VerifyCommand())), "a faithful sparse destination verifies")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dst, names[1]), []byte("v1\n"), 0o644))
+	run(t, dst, "add", names[1]) // index holds the old blob, flagged
+	run(t, dst, "update-index", "--assume-unchanged", names[1])
+	require.NoError(t, os.WriteFile(filepath.Join(dst, names[1]), []byte("stale\n"), 0o644))
+	require.ErrorContains(t, snap.CheckTree(sh(snap.VerifyCommand())), "not the snapshot's", "a real difference still fails")
+}

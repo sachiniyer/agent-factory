@@ -13,7 +13,10 @@ import (
 // Relaunch the agent in place (#5571 W7.1): the agent-server stops the agent and
 // starts it again in its EXISTING workspace with the provider's resume. The
 // branch, the tree and any uncommitted work are untouched — nothing is pushed,
-// reaped, re-cloned or re-provisioned, and no post-worktree hook re-runs. A
+// reaped, re-cloned or re-provisioned, and no post-worktree hook re-runs — as
+// long as the worktree still exists. If it was deleted, the respawn rebuilds it
+// (RebuildFromExistingBranch / RebuildFreshFromRecordedBase), which does restart
+// the post-worktree hooks. A
 // sandbox that is reachable and still has its workspace never needs more than
 // this; re-provisioning is for a sandbox that is gone.
 

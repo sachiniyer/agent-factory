@@ -186,3 +186,34 @@ test('post-merge dispatch list includes pr.yml (master-only heavy jobs, #5674)',
   // pr.yml is dispatched with no inputs, so probe mode (workflow_dispatch input) stays off
   assert.equal(new Set(github_runs.dispatched).size, github_runs.dispatched.length);
 });
+
+// Test (macOS) runs only on master's pr.yml; its Build is cancelled with the run,
+// so verifyMasterHead cannot see a red macOS job. The merger reads the verdict
+// itself and halts like a red master — fix-master PRs excepted.
+const withMacos = (conclusion) => (g) => {
+  const actions = g.rest.actions;
+  Object.assign(github_runs.byWf, { 'pr.yml': [{ id: 7, status: 'in_progress', head_sha: 'z'.repeat(40), html_url: 'u' }] });
+  actions.listJobsForWorkflowRun = async () => ({ data: { jobs: [{ name: 'Test (macOS)', status: 'completed', conclusion, html_url: 'j' }] } });
+};
+test('a red Test (macOS) verdict halts merging even with green Build/Lint; fix-master still lands', async () => {
+  const red = await runWith({}, undefined, withMacos('failure'));
+  assert.deepEqual(red.github.merged, []);
+  assert.equal(red.core.outputs.merged, 'false');
+  const fix = await runWith({}, undefined, (g) => {
+    withMacos('failure')(g);
+    const orig = g.graphql;
+    g.graphql = async (q) => { const r = await orig(q); const n = r.repository.pullRequests && r.repository.pullRequests.nodes[0];
+      if (n) n.labels = { nodes: [{ name: 'fix-master' }] }; return r; };
+  });
+  assert.deepEqual(fix.github.merged, [1]);
+});
+
+test('a green Test (macOS) verdict, or an unreadable one, does not stop merging', async () => {
+  assert.deepEqual((await runWith({}, undefined, withMacos('success'))).github.merged, [1, 2]);
+  const unreadable = await runWith({}, undefined, (g) => {
+    withMacos('failure')(g);
+    g.rest.actions.listJobsForWorkflowRun = async () => { throw new Error('502'); };
+  });
+  assert.deepEqual(unreadable.github.merged, [1, 2]);
+  assert.ok(unreadable.core.warnings.some((w) => /Test \(macOS\) verdict/.test(w)));
+});

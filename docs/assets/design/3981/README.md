@@ -1,9 +1,9 @@
 # Session-first phone layout · #3981
 
 A selected terminal at ≤768px gets one 48px chrome row: drawer toggle, truncating
-session title, static Keyboard state and one … disclosure. The disclosure keeps
-project choices, Sessions · Tasks · Config, Light · Dark · System, Disconnect,
-install, pane actions, new-tab choices and the tab switcher reachable. Escape
+session title and the Terminal · VS Code · … buttons. The focused pane's accent
+outline shows keyboard ownership. The … disclosure keeps project choices,
+Sessions · Tasks · Config, install, pane actions and the tab switcher reachable. Escape
 closes it and returns focus. Drawer, Tasks, Config and desktop layouts remain
 available. Opening the drawer preserves the session-first composition and the
 terminal rectangle. Split sessions show the focused pane, with Hide pane in the menu,

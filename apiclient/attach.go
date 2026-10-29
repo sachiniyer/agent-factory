@@ -89,18 +89,20 @@ func (c *Client) AttachStream(ctx context.Context, s StreamSession, tabID string
 	// byte-for-byte and nothing echoes locally. For the CLI (no bubbletea) this is
 	// the only thing putting the terminal into raw mode; for the TUI it snapshots
 	// bubbletea's termios so Restore hands it back exactly.
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	// The hand-back is armed in the SAME step as the terminal is taken, with its
+	// owner reachable before the terminal is borrowed, and handed to the driver
+	// rather than the raw termios. Arming it inside the driver instead would leave
+	// a window — raw mode taken, the driver goroutine not yet scheduled — in which
+	// a signal exits with the user's termios raw, which is the very bug this closes
+	// (#2784, #6083).
+	handback, err := beginRawTerminalHandback(attachStdout, func() (*term.State, error) {
+		return term.MakeRaw(int(os.Stdin.Fd()))
+	})
 	if err != nil {
 		_ = in.Close()
 		_ = sc.Conn.Close(websocket.StatusInternalError, "raw mode")
 		return nil, err
 	}
-	// Arm the hand-back HERE, in the statement right after the one that took the
-	// terminal, and hand it to the driver rather than the raw termios. Arming it
-	// inside the driver instead would leave a window — MakeRaw has already run,
-	// the driver goroutine has not been scheduled yet — in which a signal exits
-	// with the user's termios raw, which is the very bug this closes (#2784).
-	handback := beginTerminalHandback(attachStdout, oldState)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

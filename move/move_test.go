@@ -129,6 +129,8 @@ type fakeSteps struct {
 	reapErr error
 	// destTree, when set, is what the destination reports it holds.
 	destTree string
+	// verify, when set, computes the destination's tree from the snapshot.
+	verify func(*Snapshot) (string, error)
 }
 
 func (f *fakeSteps) step(name string) error {
@@ -145,6 +147,9 @@ func (f *fakeSteps) Provision(context.Context, Session, Host, *Snapshot) (string
 func (f *fakeSteps) VerifyDestination(_ context.Context, _ Session, _ Host, snap *Snapshot) (string, error) {
 	if err := f.step("verify"); err != nil {
 		return "", err
+	}
+	if f.verify != nil {
+		return f.verify(snap)
 	}
 	if f.destTree != "" {
 		return f.destTree, nil
