@@ -896,24 +896,30 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 	}
 	refreshRowOutcomes.prune(allInstances)
 
-	// Preserve in-memory instances whose repo directory vanished from disk
-	// entirely (#736). LoadAllRepoInstances only returns repos that still have
-	// an on-disk instances directory, so an externally-deleted repo dir is
-	// simply absent from allInstances and would otherwise be dropped from
-	// `next`. This is a recoverable disk inconsistency — SaveInstances recreates
-	// missing repo directories — so we re-hydrate the prior instances and log
-	// loudly rather than silently abandoning running sessions. This
-	// parallels the corrupted-JSON handling above, which also re-hydrates from
-	// `existing`. On startup (existing == nil) there is nothing to preserve.
+	// Preserve in-memory instances whose repo storage vanished from disk (#736):
+	// either the repo's instances directory was deleted entirely OR the repo's
+	// instances.json file was deleted while its directory remains. A deleted
+	// directory makes the repo simply absent from allInstances, while a deleted
+	// FILE is still reported by the loader as present-but-empty ("[]") with
+	// Missing[repoID]=true — so the empty branch above calls continue without
+	// touching `existing` either way, and `next` would otherwise drop the
+	// repo's live in-memory sessions. Both are recoverable disk inconsistencies
+	// — SaveInstances recreates missing repo directories and files — so we
+	// re-hydrate the prior instances and log loudly rather than silently
+	// abandoning running sessions. This parallels the corrupted-JSON handling
+	// above, which also re-hydrates from `existing`, and keeps the repo's
+	// in-flight task runs counted against max_concurrent_runs via the
+	// preserved instance itself (#1892). On startup (existing == nil) there is
+	// nothing to preserve.
 	if existing != nil {
 		warnedRepos := make(map[string]bool)
 		for key, inst := range existing {
 			repoID, _ := splitDaemonInstanceKey(key)
-			if _, ok := allInstances[repoID]; ok {
+			if _, ok := allInstances[repoID]; ok && !missing[repoID] {
 				continue
 			}
 			if !warnedRepos[repoID] && !unreadableRepos[repoID] {
-				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory: %s", repoID)
+				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory or instances.json: %s", repoID)
 				warnedRepos[repoID] = true
 			}
 			next[key] = inst
