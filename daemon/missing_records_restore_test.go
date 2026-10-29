@@ -1,0 +1,131 @@
+package daemon
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"testing"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/stretchr/testify/require"
+)
+
+// stubRestoreSave swaps saveRestoredRepoRecords for the test and returns the
+// groups it was asked to write, keyed by call order.
+func stubRestoreSave(t *testing.T, err error) *[][]*session.Instance {
+	t.Helper()
+	var calls [][]*session.Instance
+	prev := saveRestoredRepoRecords
+	saveRestoredRepoRecords = func(_ *Manager, insts []*session.Instance) error {
+		calls = append(calls, append([]*session.Instance(nil), insts...))
+		return err
+	}
+	t.Cleanup(func() { saveRestoredRepoRecords = prev })
+	return &calls
+}
+
+func markObservedMissing(repoID string) {
+	preservedMissingFileRepos.mu.Lock()
+	preservedMissingFileRepos.repos[repoID] = true
+	preservedMissingFileRepos.mu.Unlock()
+}
+
+// The preservation ends only when the records are back on disk: a preserved
+// session set is written from memory, and only then is the episode forgotten.
+func TestRestoreMissingRecords_WritesPreservedSessionsBackAndEndsTheEpisode(t *testing.T) {
+	resetPreservedMissingFileReposForTest()
+	t.Cleanup(resetPreservedMissingFileReposForTest)
+	calls := stubRestoreSave(t, nil)
+
+	a, b, other := &session.Instance{}, &session.Instance{}, &session.Instance{}
+	markObservedMissing("gone-repo")
+	m := &Manager{}
+	m.restoreMissingRecordsLocked(map[string]*session.Instance{
+		daemonInstanceKey("gone-repo", "a"):    a,
+		daemonInstanceKey("gone-repo", "b"):    b,
+		daemonInstanceKey("healthy-repo", "c"): other,
+	})
+
+	require.Len(t, *calls, 1, "one write per restored repo")
+	require.ElementsMatch(t, []*session.Instance{a, b}, (*calls)[0], "every preserved session of the repo, and no other repo's")
+	require.False(t, preservedMissingFileRepos.observed()["gone-repo"], "a restored repo's episode must end")
+}
+
+// A failed write keeps the protection: the sessions stay preserved in memory
+// and the restore is retried, rather than preservation ending with records gone.
+func TestRestoreMissingRecords_FailedWriteKeepsPreservingAndRetries(t *testing.T) {
+	resetPreservedMissingFileReposForTest()
+	t.Cleanup(resetPreservedMissingFileReposForTest)
+	calls := stubRestoreSave(t, errors.New("disk full"))
+
+	markObservedMissing("gone-repo")
+	m := &Manager{}
+	live := map[string]*session.Instance{daemonInstanceKey("gone-repo", "a"): {}}
+	m.restoreMissingRecordsLocked(live)
+	m.restoreMissingRecordsLocked(live)
+
+	require.Len(t, *calls, 2, "the restore is retried on the next poll")
+	require.True(t, preservedMissingFileRepos.observed()["gone-repo"], "protection must outlive a failed restore")
+}
+
+// A repo with nothing left in memory has nothing to restore.
+func TestRestoreMissingRecords_NothingInMemoryClosesTheEpisode(t *testing.T) {
+	resetPreservedMissingFileReposForTest()
+	t.Cleanup(resetPreservedMissingFileReposForTest)
+	calls := stubRestoreSave(t, nil)
+
+	markObservedMissing("gone-repo")
+	(&Manager{}).restoreMissingRecordsLocked(map[string]*session.Instance{})
+
+	require.Empty(t, *calls)
+	require.False(t, preservedMissingFileRepos.observed()["gone-repo"])
+}
+
+// End to end across polls: the file vanishes and the sessions are preserved and
+// restored; af then writes a genuinely empty file (every session gone) and the
+// daemon treats it as authoritative instead of as the deleted file again; and a
+// new session's write between polls no longer drops the other preserved ones,
+// because their rows are back on disk.
+func TestMissingFile_RestoredThenGenuinelyEmptyIsAuthoritative(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	silenceWarnings(t)
+	resetPreservedMissingFileReposForTest()
+	t.Cleanup(resetPreservedMissingFileReposForTest)
+
+	prev := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) { return &session.Instance{}, nil }
+	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
+
+	repoID := "restore-then-empty-repo"
+	rows, err := json.Marshal([]session.InstanceData{{Title: "a"}, {Title: "b"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances(repoID, rows))
+	keyA, keyB := daemonInstanceKey(repoID, "a"), daemonInstanceKey(repoID, "b")
+	a, b := &session.Instance{}, &session.Instance{}
+	existing := map[string]*session.Instance{keyA: a, keyB: b}
+
+	path, err := config.RepoInstancesPath(repoID)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+
+	// Poll 1 sees the file missing: both sessions are preserved, then restored.
+	got, _, _, _, err := refreshDaemonInstances(existing)
+	require.NoError(t, err)
+	require.Same(t, a, got[keyA])
+	require.Same(t, b, got[keyB])
+	// The real storage write is out of scope here; stand in for it by writing the
+	// rows the checkpoint would, and check the episode ends on success.
+	stubRestoreSave(t, nil)
+	(&Manager{}).restoreMissingRecordsLocked(got)
+	require.NoError(t, config.SaveRepoInstances(repoID, rows))
+
+	// af itself later writes an empty roster (every session gone). That is the
+	// authoritative state, not a sequel of the deletion.
+	require.NoError(t, config.SaveRepoInstances(repoID, json.RawMessage("[]")))
+	got2, _, _, _, err := refreshDaemonInstances(got)
+	require.NoError(t, err)
+	require.NotContains(t, got2, keyA, "a genuinely empty file af wrote must not resurrect sessions")
+	require.NotContains(t, got2, keyB)
+}

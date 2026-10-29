@@ -1,6 +1,12 @@
 package daemon
 
-import "sync"
+import (
+	"errors"
+	"sync"
+
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
+)
 
 // missingFileProvenanceSet tracks the set of repos the daemon OBSERVED as missing
 // on a prior poll, so the preservation loop keeps protecting their live in-memory
@@ -34,4 +40,75 @@ func resetPreservedMissingFileReposForTest() {
 	preservedMissingFileRepos.mu.Lock()
 	preservedMissingFileRepos.repos = make(map[string]bool)
 	preservedMissingFileRepos.mu.Unlock()
+}
+
+// observed returns a copy of the repos currently held as observed-missing.
+func (p *missingFileProvenanceSet) observed() map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]bool, len(p.repos))
+	for repoID := range p.repos {
+		out[repoID] = true
+	}
+	return out
+}
+
+// forget ends one repo's observed-missing episode.
+func (p *missingFileProvenanceSet) forget(repoID string) {
+	p.mu.Lock()
+	delete(p.repos, repoID)
+	p.mu.Unlock()
+}
+
+// saveRestoredRepoRecords writes a repo's live in-memory sessions back to its
+// instances.json. A var so a test can stage success and failure without a real
+// storage.
+var saveRestoredRepoRecords = func(m *Manager, instances []*session.Instance) error {
+	if m.storage == nil {
+		return errNoStorageForRestore
+	}
+	return m.storage.SaveInstances(instances)
+}
+
+var errNoStorageForRestore = errors.New("manager has no storage")
+
+// restoreMissingRecordsLocked ends a missing-file episode by repopulating the
+// durable records, not by preserving in memory forever. Preserving a repo whose
+// instances.json vanished only HOLDS its sessions; the file stays gone, and the
+// first targeted write (any session's persist, or a new create) recreates it
+// with just that write's rows, so the other preserved sessions would be dropped
+// on the next poll (#6048 review). So the poll that observes the loss writes the
+// preserved sessions' records back from memory, through the same checkpoint
+// path the shutdown save uses. Only after that write succeeds is the episode
+// over and its provenance forgotten, which is also what keeps a LATER genuinely
+// empty file — af itself writing "[]" because every session is gone, or an
+// administrator replacing the roster — from being mistaken for the deleted one.
+// A failed write leaves the provenance in place, so preservation continues and
+// the restore is retried on the next poll. A repo with nothing left in memory
+// has nothing to restore and its episode is closed. Caller holds m.mu.
+func (m *Manager) restoreMissingRecordsLocked(instances map[string]*session.Instance) {
+	observed := preservedMissingFileRepos.observed()
+	if len(observed) == 0 {
+		return
+	}
+	byRepo := make(map[string][]*session.Instance)
+	for key, inst := range instances {
+		repoID, _ := splitDaemonInstanceKey(key)
+		if observed[repoID] {
+			byRepo[repoID] = append(byRepo[repoID], inst)
+		}
+	}
+	for repoID := range observed {
+		insts := byRepo[repoID]
+		if len(insts) == 0 {
+			preservedMissingFileRepos.forget(repoID)
+			continue
+		}
+		if err := saveRestoredRepoRecords(m, insts); err != nil {
+			log.WarningLog.Printf("daemon could not restore the missing instances.json records for repo %s from %d live session(s); keeping them preserved in memory and retrying on the next poll: %v", repoID, len(insts), err)
+			continue
+		}
+		preservedMissingFileRepos.forget(repoID)
+		log.WarningLog.Printf("daemon restored the missing instances.json records for repo %s from %d live session(s)", repoID, len(insts))
+	}
 }
