@@ -106,6 +106,7 @@ import {
   tabToKeepOnClose,
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
+import { synthIdentities } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
@@ -596,6 +597,13 @@ function tabIdsOf(list: SessionData[], id: string | null): string[] {
   return s ? sessionTabs(s).map(tabIdentity) : [];
 }
 
+/** Each tab's legacy kind:name, parallel to tabIdsOf — pairs a backfilled real id
+ *  with the id-less tab it replaced (layout.remapByIdentity, #6001). */
+function tabSynthOf(list: SessionData[], id: string | null): string[] {
+  const s = id ? list.find((x) => x.id === id) : null;
+  return s ? synthIdentities(sessionTabs(s).map((t) => t.kind), sessionTabs(s).map((t) => t.name)) : [];
+}
+
 // Resolve only against an authenticated snapshot, never a partially loaded rail.
 let resolvingRoute = false;
 let routeSelection: string | null = null;
@@ -640,7 +648,7 @@ function moveSelection(id: string): void {
     focus: "rail",
     // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
     // are the same statement even if the roster shrank since the tree was retained.
-    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id))),
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id), tabSynthOf(store.get().sessions, id))),
   });
 }
 
@@ -780,7 +788,7 @@ function switchProject(root: string): void {
     selectedId: keep,
     focus: "rail",
     activeTab: keep
-      ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep)))
+      ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep), tabSynthOf(store.get().sessions, keep)))
       : 0,
   });
 }
@@ -3185,7 +3193,7 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
   // until syncSplit remaps the layout, that ordinal names a neighbour. A changed
   // selection uses the same retained-layout rule (#1855, as moveSelection).
   const settled = selectedId
-    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId))
+    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId), tabSynthOf(sessions, selectedId))
     : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   // Stamp the daemon's startup-skipped repo set onto the store when the snapshot

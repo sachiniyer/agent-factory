@@ -47,6 +47,7 @@ import {
   setRatio,
   siblingSubtreeOf,
   singleLeaf,
+  synthIdentities,
   type SplitNode,
   splitLeaf,
   TAB_DND_MIME,
@@ -446,6 +447,7 @@ export class SplitView {
     const archivedChanged = archived !== this.archived;
     this.archived = archived;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
+    const nextSynth = synthIdentities(tabKinds, tabNames);
     if (sessionId === null || token === null) {
       this.teardown();
       this.sessionId = null;
@@ -468,7 +470,7 @@ export class SplitView {
       // tab took that slot — the misroute this whole change exists to close. A pane
       // whose tab merely MOVED then finds its identity already matching and is left
       // streaming untouched; only a genuinely replaced tab rebuilds.
-      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
+      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds, nextSynth);
       this.tree = validate(settled, tabCount);
       // Always re-retain: `ids` must track the roster even when the remap left the
       // tree identical, or the record would claim ordinals were bound against a list
@@ -513,7 +515,7 @@ export class SplitView {
     // another window's close — now delivered live by #1815) moved the tabs out from
     // under them. validate() alone only clamps a too-high ordinal, so a pane would
     // come back bound to whatever tab slid into its slot.
-    this.tree = validate(this.retainedTree(sessionId, tabIds) ?? singleLeaf(initialTab), tabCount);
+    this.tree = validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount);
     this.retain(sessionId, this.tree, tabIds);
     // Focus the first pane of the newly shown session by default.
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
@@ -533,7 +535,7 @@ export class SplitView {
    *  bar then highlights Agent over a pane showing tab N, and the next close computes
    *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
-  settledTab(sessionId: string, tabIds: string[]): number {
+  settledTab(sessionId: string, tabIds: string[], nextSynth?: readonly string[]): number {
     if (sessionId === this.sessionId) {
       if (!this.tree || !this.focusedId) {
         return 0;
@@ -542,25 +544,25 @@ export class SplitView {
       // rerender. Resolve the focused leaf against that incoming identity list now;
       // reading its old ordinal would briefly name a neighbour and make observers
       // mistake a roster repaint for a user focus change.
-      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds);
+      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds, nextSynth);
       return findLeaf(remapped, this.focusedId)?.tab ?? 0;
     }
     // Read the REMAPPED tree, exactly as setSession will: this answers "which tab will
     // that pane show once selected?", and the two must agree or the bar highlights one
     // tab while the pane binds another (#1855). Passing the same ids setSession gets is
     // what keeps the answers identical.
-    const retained = this.retainedTree(sessionId, tabIds);
+    const retained = this.retainedTree(sessionId, tabIds, nextSynth);
     return retained ? (leaves(retained)[0]?.tab ?? 0) : 0;
   }
 
   /** The retained tree for `sessionId`, remapped onto `tabIds` — the only supported
    *  way to read one. Returns null for a session never shown. */
-  private retainedTree(sessionId: string, tabIds: string[]): LayoutNode | null {
+  private retainedTree(sessionId: string, tabIds: string[], nextSynth?: readonly string[]): LayoutNode | null {
     const rec = this.trees.get(sessionId);
     if (!rec) {
       return null;
     }
-    return remapByIdentity(rec.tree, rec.ids, tabIds);
+    return remapByIdentity(rec.tree, rec.ids, tabIds, nextSynth);
   }
 
   /** Retains `tree` for `sessionId` together with the identities it is bound against. */
