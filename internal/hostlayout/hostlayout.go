@@ -122,27 +122,32 @@ func (x *Index) replacer() *strings.Replacer {
 	if x.built == x.gen {
 		return x.rep
 	}
-	strs := make([]string, 0, len(x.seen))
+	// Every spelling is a pattern: the raw string and, when it differs, its
+	// JSON-escaped form (the body is JSON: a path with '&', '<', a backslash or
+	// non-ASCII is spelled escaped). ALL of them are sorted longest first, as one
+	// list. A replacer takes the first pattern that matches in argument order, so
+	// an escaped spelling placed after its own raw form lost to it whenever the
+	// raw string is a prefix of the escaped one — a path ending in a backslash
+	// ("/srv/project\\") matches the front of "/srv/project\\\\" and leaves a dangling
+	// escape. Sorting the whole list puts the longer, escaped spelling first.
+	pats := make([]string, 0, 2*len(x.seen))
 	for s := range x.seen {
-		strs = append(strs, s)
-	}
-	// Longest first: a replacer compares in argument order, so a worktree path
-	// inside a project path is replaced whole, not as the project path plus a tail.
-	sort.Slice(strs, func(i, j int) bool {
-		if len(strs[i]) != len(strs[j]) {
-			return len(strs[i]) > len(strs[j])
-		}
-		return strs[i] < strs[j]
-	})
-	pairs := make([]string, 0, 2*len(strs))
-	for _, s := range strs {
-		pairs = append(pairs, s, Withheld)
-		// The body is JSON: a path with '&', '<' or non-ASCII is spelled escaped.
+		pats = append(pats, s)
 		if esc, err := json.Marshal(s); err == nil && len(esc) > 2 {
 			if inner := string(esc[1 : len(esc)-1]); inner != s {
-				pairs = append(pairs, inner, Withheld)
+				pats = append(pats, inner)
 			}
 		}
+	}
+	sort.Slice(pats, func(i, j int) bool {
+		if len(pats[i]) != len(pats[j]) {
+			return len(pats[i]) > len(pats[j])
+		}
+		return pats[i] < pats[j]
+	})
+	pairs := make([]string, 0, 2*len(pats))
+	for _, p := range pats {
+		pairs = append(pairs, p, Withheld)
 	}
 	if len(pairs) == 0 {
 		x.rep = nil

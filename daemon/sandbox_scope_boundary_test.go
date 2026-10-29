@@ -467,3 +467,15 @@ func TestCommittedAddErrorEnvelopeCarriesTheStoredID(t *testing.T) {
 	writeHTTPError(rec, r, http.StatusInternalServerError, &mutationCommittedError{err: errors.New("reload failed")})
 	assert.NotContains(t, rec.Body.String(), "stored_id", "no stored id, none invented")
 }
+
+// A daemon path ending in a backslash is withheld whole and the envelope stays
+// valid JSON (the longer escaped spelling must win over its raw prefix).
+func TestSandboxBodyWithATrailingBackslashPathStaysValidJSON(t *testing.T) {
+	hostlayout.Default.Note(`/srv/backslash-test-project\`)
+	raw, err := json.Marshal(map[string]any{"data": map[string]any{"last_run_status": `errored: /srv/backslash-test-project\`}, "error": nil})
+	require.NoError(t, err)
+	out := sanitizeSandboxBody("/v1/x", http.StatusOK, raw)
+	require.True(t, json.Valid(out), "%s", out)
+	assert.NotContains(t, string(out), "backslash-test-project")
+	assert.Contains(t, string(out), hostlayout.Withheld)
+}

@@ -1,11 +1,13 @@
 package hostlayout
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestScrub(t *testing.T) {
@@ -78,4 +80,38 @@ func BenchmarkRebuildAfterOneNew4000Sessions(b *testing.B) {
 		x.Note(fmt.Sprintf("/home/op/new-%d", i))
 		x.Scrub(body)
 	}
+}
+
+// A path ending in a backslash: its JSON-escaped spelling ends in two, so the raw
+// string is a prefix of its own escaped spelling. The longer spelling must win, or
+// the replacement leaves a dangling escape (and, in a JSON body, an invalid one).
+func TestTrailingBackslashPathIsWithheldWhole(t *testing.T) {
+	const path = `/srv/project\`
+	x := New()
+	x.Note(path)
+
+	// ScrubString on the raw value.
+	assert.Equal(t, Withheld, x.ScrubString(path))
+
+	// Scrub on a JSON body (the raw fallback for a non-decoded body).
+	body := []byte(`{"data":{"note":"` + `/srv/project\\` + `"},"error":null}`)
+	got := x.Scrub(body)
+	assert.True(t, json.Valid(got), "the scrubbed body must still be valid JSON: %s", got)
+	assert.NotContains(t, string(got), "project")
+	assert.Contains(t, string(got), Withheld)
+
+	// A decoded envelope scrubbed per value and re-encoded: fully withheld, valid.
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(body, &doc))
+	doc["data"].(map[string]any)["note"] = x.ScrubString(doc["data"].(map[string]any)["note"].(string))
+	out, err := json.Marshal(doc)
+	require.NoError(t, err)
+	assert.True(t, json.Valid(out))
+	assert.NotContains(t, string(out), "project")
+	assert.Contains(t, string(out), Withheld)
+
+	// Anti-vacuous: with the OLD order (each escaped spelling right after its raw
+	// form) the same input leaves a dangling backslash.
+	old := strings.NewReplacer(path, Withheld, `/srv/project\\`, Withheld)
+	assert.Contains(t, old.Replace(`/srv/project\\`), `\`, "raw-first order leaves the dangling escape")
 }
