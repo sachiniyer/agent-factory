@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -31,7 +32,11 @@ type fakeSession struct {
 }
 
 func newFakeTmux(shared ...string) *fakeTmux {
-	f := &fakeTmux{sessions: map[string]*fakeSession{}, tables: map[string]map[string]string{}}
+	f := &fakeTmux{sessions: map[string]*fakeSession{}, tables: map[string]map[string]string{
+		// What the session's normal pane runs on: tmux's defaults plus the mouse
+		// wheel and drag bindings, and one on a key a detach_keys value can name.
+		"root": {"WheelUpPane": "copy-mode -e", "WheelDownPane": "send-keys -M", "MouseDrag1Pane": "copy-mode -M", "MouseDown1Pane": "select-pane -t =", "C-x": "user-binding"},
+	}}
 	for _, s := range shared {
 		f.sessions[s] = &fakeSession{opts: map[string]string{"prefix": "C-b", "key-table": "root"}}
 	}
@@ -82,6 +87,16 @@ func (f *fakeTmux) run(t *testing.T, args []string) {
 			delete(f.tables, c[3])
 		case "kill-session":
 			delete(f.sessions, c[2])
+		case "run-shell":
+			// The mirror: retarget `list-keys -T root` into this client's table.
+			script := c[1]
+			require.Contains(t, script, "list-keys -T root")
+			m := regexp.MustCompile(`-T (af-detach-\S+) /`).FindStringSubmatch(script)
+			require.NotNil(t, m, "the mirror names the client's own table: %s", script)
+			f.tables[m[1]] = map[string]string{}
+			for k, v := range f.tables["root"] {
+				f.tables[m[1]][k] = v
+			}
 		case "attach-session":
 			_, ok := f.sessions[c[2]]
 			require.True(t, ok, "attach targets the private session: %v", c)
@@ -177,7 +192,10 @@ func TestTakeoverKeyRoutingMatrix(t *testing.T) {
 					}
 				}
 				if ok {
-					assert.Empty(t, f.tables, "no binding remains once every client has left")
+					assert.Len(t, f.tables, 1, "only root remains once every client has left")
+					assert.Contains(t, f.tables, "root")
+					assert.Equal(t, "user-binding", f.tables["root"]["C-x"], "root itself is never modified")
+					assert.NotEqual(t, "detach-client", f.tables["root"][want], "the detach binding never lands in root")
 					assert.Len(t, f.sessions, 1, "only the shared session remains")
 				}
 			})
@@ -238,7 +256,7 @@ func TestTakeoverRefusesAVanishedLoginSession(t *testing.T) {
 	f.run(t, r.attachArgs())
 	assert.True(t, f.failed)
 	assert.Empty(t, f.sessions, "nothing was created, no stray shell")
-	assert.Empty(t, f.tables)
+	assert.Len(t, f.tables, 1, "only root; no table was created")
 }
 
 // Everything that routes keys or shows the hint runs before the attach; commands
@@ -253,4 +271,39 @@ func TestTakeoverConfiguresBeforeItAttaches(t *testing.T) {
 	assert.Contains(t, joined, "status-right ctrl+w leaves")
 	assert.Less(t, strings.Index(joined, "bind-key"), strings.Index(joined, "attach-session"))
 	assert.Less(t, strings.Index(joined, "destroy-unattached on"), strings.Index(joined, "attach-session"))
+}
+
+// #6073: a takeover pane keeps every binding the session's normal pane has —
+// mouse wheel and selection included — and adds only af's detach route; the
+// configured key wins over a root binding on the same key.
+func TestTakeoverKeepsEveryRootBindingAndAddsOnlyTheDetachRoute(t *testing.T) {
+	cw, _ := config.ParseDetachKey("ctrl-w")
+	r := newTakeoverRoute("login", cw, "ctrl+w")
+	f := newFakeTmux("login")
+	root := map[string]string{}
+	for k, v := range f.tables["root"] {
+		root[k] = v
+	}
+	f.run(t, r.attachArgs())
+
+	got := f.tables[r.table]
+	want := map[string]string{"C-w": "detach-client"}
+	for k, v := range root {
+		want[k] = v
+	}
+	assert.Equal(t, want, got, "root's bindings (mouse wheel, drag, selection) plus the detach route, nothing else")
+	for _, k := range []string{"WheelUpPane", "WheelDownPane", "MouseDrag1Pane", "MouseDown1Pane"} {
+		assert.Contains(t, got, k, "mouse binding %s survives in the takeover pane", k)
+	}
+
+	// A root binding on the detach key itself loses to the detach route.
+	f2 := newFakeTmux("login")
+	f2.tables["root"]["C-w"] = "user-binding"
+	f2.run(t, newTakeoverRoute("login", cw, "ctrl+w").attachArgs())
+	for _, tbl := range f2.tables {
+		if v, ok := tbl["C-w"]; ok && tbl["WheelUpPane"] != "" {
+			assert.Equal(t, "detach-client", v, "the configured key wins over a root binding")
+		}
+	}
+	assert.Contains(t, r.mirrorRootScript(), "-T root +/bind-key", "the real script retargets the root listing")
 }

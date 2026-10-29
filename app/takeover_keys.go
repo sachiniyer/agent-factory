@@ -23,6 +23,9 @@ import (
 //     No other client — a second takeover on the same login session included —
 //     is attached to the private session, so none of them sees this binding, and
 //     none of their bindings can be removed by this client leaving (#6075).
+//   - the table starts as a copy of root, so the takeover pane keeps every binding
+//     the session's normal pane has (mouse wheel and selection included) and gains
+//     only the detach route (#6073).
 //   - prefix: tmux consults the prefix before the table, so a detach key equal to
 //     the prefix would never reach its binding (#6074). The takeover therefore
 //     routes the prefix away from the detach key: the prefix is C-b, unless the
@@ -82,12 +85,26 @@ func (r takeoverRoute) attachArgs() []string {
 		"new-session", "-d", "-t", r.session, "-s", r.group, ";",
 		"set-option", "-t", r.group, "prefix", r.prefix(), ";",
 		"set-option", "-t", r.group, "prefix2", "None", ";",
+		"run-shell", r.mirrorRootScript(), ";",
 		"set-option", "-t", r.group, "key-table", r.table, ";",
 		"bind-key", "-T", r.table, r.key, "detach-client", ";",
 		"set-option", "-t", r.group, "status-right", r.display + " leaves", ";",
 		"set-option", "-t", r.group, "destroy-unattached", "on", ";",
 		"attach-session", "-t", r.group,
 	}
+}
+
+// mirrorRootScript copies the root table into this client's table, run by the
+// server before the table is selected (#6073). A session's key-table REPLACES root
+// with no fallback, and root is where the session's normal pane keeps its mouse
+// wheel (scroll into history) and drag (selection) bindings; a table holding only
+// the detach key would silently kill them in the takeover pane. `list-keys -T
+// root` prints valid `bind-key -T root …` commands, so the copy is a retarget of
+// that listing, replayed into the server. The detach binding is added AFTER it, so
+// the configured key wins over a root binding on the same key. A failed copy must
+// not abort the takeover (the detach route still works), hence `|| true`.
+func (r takeoverRoute) mirrorRootScript() string {
+	return "tmux list-keys -T root | sed -E 's/^bind-key( +-r)? +-T root +/bind-key\\1 -T " + r.table + " /' | tmux source-file - || true"
 }
 
 // cleanupArgs are the commands that retire this client's routing: its own table
