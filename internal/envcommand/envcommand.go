@@ -199,9 +199,15 @@ func SplitAssignment(arg string) (name, value string, ok bool) {
 
 // IsLiteral is conservative because the launch tokenizer removes quote
 // provenance. Rejecting a quoted literal '$' is preferable to interpreting an
-// expansion as a path and polling the wrong receipt store.
+// expansion as a path and polling the wrong receipt store. The glob
+// metacharacters * ? [ are refused for the same reason: env -C DIR operands and
+// assignment values run under /bin/sh -c, which performs pathname expansion
+// before env executes, so an unquoted glob operand chdirs to the EXPANDED
+// directory while af models the unexpanded pattern as the proven launch
+// directory — silently breaking capture/correlation. This matches the
+// fail-closed behavior internal/sessionenv already enforces for the same input.
 func IsLiteral(value string) bool {
-	return !strings.ContainsAny(value, "$`;&|<>\n\r") && !strings.HasPrefix(value, "~")
+	return !strings.ContainsAny(value, "$`;&|<>\n\r*?[") && !strings.HasPrefix(value, "~")
 }
 
 func validateName(name string) error {

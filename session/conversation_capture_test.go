@@ -1127,6 +1127,16 @@ func TestLaunchCaptureWorkingDirFollowsEnvChdir(t *testing.T) {
 	assert.Empty(t, LaunchCaptureWorkingDir("cd /tmp && codex", worktree),
 		"a chdir af does not model leaves correlation unscoped, never the worktree")
 	assert.Empty(t, LaunchCaptureWorkingDir("env -C \"$X\" codex", worktree), "a dynamic chdir is unprovable")
+	// An unquoted glob chdir is expanded by /bin/sh -c before env executes, so af
+	// cannot model the unexpanded pattern as the proven cwd — correlation must stay
+	// unscoped rather than bind to a directory the agent is not in (#2248 glob fix).
+	assert.Empty(t, LaunchCaptureWorkingDir("env -C /opt/tools/codex-* codex", worktree),
+		"a glob chdir is shell-expanded at exec time and must not be modeled as the proven cwd")
+	assert.Empty(t, LaunchCaptureWorkingDir("env -C /tmp/a? codex", worktree))
+	assert.Empty(t, LaunchCaptureWorkingDir("env -C /tmp/a[b] codex", worktree))
+	// A literal chdir is still modeled, so the happy path keeps correlation scoped.
+	assert.Equal(t, pathutil.ResolveForCompare(elsewhere),
+		pathutil.ResolveForCompare(LaunchCaptureWorkingDir("env -C "+elsewhere+" codex", worktree)))
 }
 
 func TestCaptureAgentConversation_CodexUnderEnvChdirCorrelatesByEffectiveDir(t *testing.T) {

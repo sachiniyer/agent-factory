@@ -77,6 +77,36 @@ func TestCheckCommandAtRejectsMissingEnvChdir(t *testing.T) {
 	}
 }
 
+// TestCheckCommandAtRejectsGlobChdirEvenWhenLiteralDirExists is the regression
+// lock for the bracket-glob drift: a literal directory legally named like a
+// glob pattern (a[b]) passes preflight's stat guard, but /bin/sh -c expands
+// the bracket to a sibling at launch and the process chdirs elsewhere — so af
+// models the unexpanded pattern while Codex records the expanded cwd, and
+// capture/correlation silently breaks. The shared env parser must fail closed
+// on the glob chdir before the stat is ever consulted.
+func TestCheckCommandAtRejectsGlobChdirEvenWhenLiteralDirExists(t *testing.T) {
+	// A literal directory named "a[b]" is a legal, stat-able path that the
+	// unbracketed shell would have expanded to a sibling.
+	workDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, "a[b]", "bin"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "a[b]", "bin", "codex"), []byte("#!/bin/sh\n"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, "ab", "bin"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "ab", "bin", "codex"), []byte("#!/bin/sh\n"), 0o755))
+
+	t.Setenv("PATH", "/nonexistent")
+
+	for _, command := range []string{
+		"env -C a[b] codex",
+		"env -C ab* codex",
+		"env -C a? codex",
+	} {
+		_, err := CheckCommandAt(command, workDir)
+		require.Error(t, err, "CheckCommandAt(%q) must fail closed on the glob chdir", command)
+		require.Contains(t, err.Error(), "unsupported env invocation",
+			"CheckCommandAt(%q) = %v; want the shared env parser's refusal, not a stat pass", command, err)
+	}
+}
+
 func TestCheckCommandAtUsesShellPathForEnvWrapper(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")
