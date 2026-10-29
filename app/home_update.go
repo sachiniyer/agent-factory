@@ -183,9 +183,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.showTransientMessage(fmt.Sprintf("triggered %s", msg.title))
 	case tea.MouseMsg:
-		defer m.invalidateQuitConfirmationAfter()()
-		if m.recovery != nil {
-			m.recovery = nil
+		dismissed, endInput := m.beginUserInput()
+		defer endInput()
+		if dismissed {
 			return m, nil
 		}
 		// First-class mouse (#1024 R4, closes #1025): every event is
@@ -197,9 +197,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fully sufficient.
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
-		defer m.invalidateQuitConfirmationAfter()()
-		if m.recovery != nil {
-			m.recovery = nil
+		dismissed, endInput := m.beginUserInput()
+		defer endInput()
+		if dismissed {
 			return m, nil
 		}
 		return m.handleKeyPress(msg)

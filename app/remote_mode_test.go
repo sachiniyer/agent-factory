@@ -395,3 +395,31 @@ func TestRemoteScheduleEditWithoutARecordMarksHealthUnknownNotTheOldCronsTimes(t
 	require.Zero(t, got.MissedOccurrences)
 	require.True(t, got.Unassessable, "the row says no verdict is available rather than staying silent")
 }
+
+// #5898 (Codex P1): the task-save recovery notice ("Press any key") appears on a
+// refused quit. Dismissing it leaves the unsaved edit in place, so it must keep
+// the discard confirmation armed — otherwise the next quit is refused all over
+// again and the user can never choose to leave. Every input in that state, key
+// and mouse alike, goes through beginUserInput:
+func TestQuitDiscardConfirmationSurvivesDismissingRecovery(t *testing.T) {
+	for _, name := range []string{"any key", "enter", "the q key", "mouse click"} {
+		t.Run(name, func(t *testing.T) {
+			h := dirtyHooksHome(t)
+			stubHooksSaveFailure(t)
+
+			_, _ = h.handleQuit()
+			require.False(t, h.quitting)
+			require.NotEmpty(t, h.quitSaveFailure)
+			h.recovery = &recoveryNotice{"Cannot save task", "Your changes are retained.", "Press any key to continue."}
+
+			dismissed, end := h.beginUserInput()
+			end()
+			require.True(t, dismissed, "the input is consumed dismissing the notice")
+			require.Nil(t, h.recovery)
+			require.NotEmpty(t, h.quitSaveFailure, "and leaves the confirmation armed")
+
+			_, _ = h.handleQuit()
+			require.True(t, h.quitting, "so the next quit is the user's choice to discard and leave")
+		})
+	}
+}

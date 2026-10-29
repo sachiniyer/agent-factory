@@ -75,7 +75,9 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 // user's answer to the edits that failed to save, so any input in between — a
 // keystroke that resumes editing, a click — may change that edit set, and a
 // later identical error must warn again instead of discarding edits the user
-// never saw refused (#5898). Call as `defer m.invalidateQuitConfirmationAfter()()`.
+// never saw refused (#5898). Dismissing the task-save recovery notice is NOT such
+// input — it leaves the unsaved edit in place, so Update returns for it before
+// this is armed and the confirmation survives to the next quit. Call as `defer m.invalidateQuitConfirmationAfter()()`.
 func (m *home) invalidateQuitConfirmationAfter() func() {
 	if m.quitSaveFailure == "" {
 		return func() {}
@@ -86,6 +88,18 @@ func (m *home) invalidateQuitConfirmationAfter() func() {
 			m.quitSaveFailure = ""
 		}
 	}
+}
+
+// beginUserInput is the shared prologue of a key or mouse message. An input
+// that merely dismisses the recovery notice is consumed by it (dismissed) and
+// touches nothing else, the quit confirmation included; any other input runs
+// with the confirmation disarmed afterwards unless it was itself a quit.
+func (m *home) beginUserInput() (dismissed bool, end func()) {
+	if m.recovery != nil {
+		m.recovery = nil
+		return true, func() {}
+	}
+	return false, m.invalidateQuitConfirmationAfter()
 }
 
 // saveContentPaneState persists any changes from the hooks/task panes and
