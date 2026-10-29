@@ -532,6 +532,44 @@ func TestSandboxRestore_KeepsMetadataTabsBehindTheAgentTab(t *testing.T) {
 	require.Len(t, instance.Tabs, 2, "a retried launch must not duplicate the restored tab")
 }
 
+// #6090: a remote VS Code tab names no worktree path and binds no PTY — the host
+// runs the editor (W5.4) — so it survives a daemon restart like the other off-box
+// tabs. It is staged behind the agent tab, not dropped and not put in slot 0.
+func TestSandboxRestore_KeepsARemoteVSCodeTab(t *testing.T) {
+	for _, backend := range []string{"ssh", "docker", "sandbox", "remote"} {
+		t.Run(backend, func(t *testing.T) {
+			instance, err := FromInstanceData(InstanceData{
+				Title:       "off-box-editor",
+				BackendType: backend,
+				Tabs: []TabData{
+					{ID: "t0", Name: "agent", Kind: TabKindAgent},
+					{ID: "t1", Name: "vscode", Kind: TabKindVSCode},
+					{ID: "t2", Name: "shell", Kind: TabKindShell, TmuxName: "af_x__shell"},
+				},
+			})
+			require.NoError(t, err)
+			require.Empty(t, instance.Tabs, "staged, so the agent keeps slot 0")
+			require.Len(t, instance.pendingMetadataTabs, 1, "the editor is staged; the shell is still dropped")
+			require.Equal(t, TabKindVSCode, tabKindForData(instance.pendingMetadataTabs[0].Kind))
+
+			instance.Tabs = []*Tab{newRemoteAgentTab()}
+			instance.appendPendingMetadataTabsLocked()
+			require.Len(t, instance.Tabs, 2)
+			require.Equal(t, TabKindAgent, instance.Tabs[0].Kind)
+			require.Equal(t, TabKindVSCode, instance.Tabs[1].Kind)
+			require.Equal(t, "t1", instance.Tabs[1].ID, "the same tab, addressable by its stable id")
+
+			// And it survives a recovery that fails before Launch.
+			again, err := FromInstanceData(InstanceData{Title: "off-box-editor", BackendType: backend,
+				Tabs: []TabData{{ID: "t0", Name: "agent", Kind: TabKindAgent}, {ID: "t1", Name: "vscode", Kind: TabKindVSCode}}})
+			require.NoError(t, err)
+			round := again.ToInstanceData()
+			require.Len(t, round.PendingTabs, 1)
+			require.Equal(t, "t1", round.PendingTabs[0].ID)
+		})
+	}
+}
+
 // A sandbox recovery that fails BEFORE Launch leaves restored rows staged and
 // undrained. Both failure paths then persist whatever ToInstanceData returned, so
 // serializing only i.Tabs would write an empty roster and lose the tab permanently
