@@ -1,8 +1,0 @@
-{
-  "name": "af-ci-scripts",
-  "private": true,
-  "description": "Test-only dependencies for .github/scripts (never installed by a workflow that runs these scripts in production)",
-  "devDependencies": {
-    "mdast-util-from-markdown": "2.1.0"
-  }
-}

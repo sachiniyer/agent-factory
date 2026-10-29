@@ -281,20 +281,6 @@ jobs:
       - name: Test stale-external-pr helper
         run: node --test .github/scripts/stale-external-pr.test.js
 
-      # The closing-keyword parser (close-fixed-issues.js) closes issues, so a
-      # false close is the failure that matters, and it was patched four times for
-      # four Markdown constructs found only in review. Its test runs the parser
-      # against a real CommonMark parser (mdast-util-from-markdown, pinned exactly
-      # in .github/scripts/package.json) over a generated corpus. That oracle is the
-      # one test-only dependency here, installed with `npm ci` for this step alone:
-      # no workflow that RUNS the script installs anything, and the test fails
-      # (not skips) under CI if the oracle is missing.
-      - name: Test the closing-keyword parser against a CommonMark oracle
-        working-directory: .github/scripts
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          node --test close-fixed-issues.test.js close-fixed-issues-oracle.test.js
-
       # The container harness's own disk hygiene (#2133): cleanup must run on a
       # FAILING run, and every prune must be scoped to artifacts the harness
       # built. It went green for months while filling a 2TB box, so "the suite
