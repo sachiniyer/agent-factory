@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -677,40 +676,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	return nil
 }
 
-// missingFileProvenanceSet tracks the set of repos the daemon OBSERVED as missing
-// on a prior poll, so the preservation loop keeps protecting their live in-memory
-// sessions after the file is recreated as an empty "[]" (e.g. by a preserved
-// session's targeted write) — without also preserving a repo that was LEGITIMATELY
-// emptied (another process killed the last session, or an administrator replaced
-// the roster with "[]"). A present-but-empty file is preserved only when the
-// daemon previously saw it missing; a genuinely empty file the daemon never
-// observed as missing is the authoritative state and its stale in-memory sessions
-// are dropped. An entry is held only while the file stays missing or
-// present-but-empty; once the file carries real rows again the repo recovers and
-// the entry is dropped. Package-level because refreshDaemonInstances is a free
-// function shared by restoreInstances and refreshLocked; entries are repo-scoped,
-// so a test that reuses a repoID in a different AF home can only miss (and the
-// reset helper clears it between tests).
-type missingFileProvenanceSet struct {
-	mu    sync.Mutex
-	repos map[string]bool
-}
-
-// preservedMissingFileRepos is the singleton instance of the observed-missing
-// provenance set above.
-var preservedMissingFileRepos = &missingFileProvenanceSet{repos: make(map[string]bool)}
-
-// resetPreservedMissingFileReposForTest clears the provenance set. Tests that
-// stage a present-but-empty file without a prior missing-file observation must not
-// inherit provenance from an earlier test that used the same repoID, so a
-// missing-file episode in one test never bleeds into the legitimate-empty
-// assertion of another.
-func resetPreservedMissingFileReposForTest() {
-	preservedMissingFileRepos.mu.Lock()
-	preservedMissingFileRepos.repos = make(map[string]bool)
-	preservedMissingFileRepos.mu.Unlock()
-}
-
 // refreshDaemonInstances materializes the daemon's in-memory instance map from
 // disk. It ALSO returns the ghost task runs: persisted rows whose task run is
 // still in flight but which could not be turned into an Instance (#1892).
@@ -1022,34 +987,4 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 	}
 
 	return next, ghostTaskRuns, skipped, reread, nil
-}
-
-func daemonInstanceKey(repoID, title string) string {
-	return repoID + "\x00" + title
-}
-
-// splitDaemonInstanceKey is the inverse of daemonInstanceKey: it splits a
-// "<repoID>\x00<title>" key back into (repoID, title). A key with no NUL
-// separator (unexpected) is returned as ("", key).
-func splitDaemonInstanceKey(key string) (string, string) {
-	for i := 0; i < len(key); i++ {
-		if key[i] == 0 {
-			return key[:i], key[i+1:]
-		}
-	}
-	return "", key
-}
-
-func daemonInstances(instanceMap map[string]*session.Instance) []*session.Instance {
-	keys := make([]string, 0, len(instanceMap))
-	for key := range instanceMap {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	instances := make([]*session.Instance, 0, len(keys))
-	for _, key := range keys {
-		instances = append(instances, instanceMap[key])
-	}
-	return instances
 }
