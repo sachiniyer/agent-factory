@@ -6,8 +6,14 @@ name: Close fixed issues
 # the same script itself (.github/scripts/close-fixed-issues.js); this workflow
 # covers merges made by a person or a PAT.
 
+# pull_request_target, not pull_request: a fork PR's pull_request token is
+# READ-ONLY, so its closes would be refused. pull_request_target runs with the
+# base repo's token and is safe here because nothing from the PR is ever checked
+# out or executed — the job checks out master, runs only master's script, and reads
+# the PR solely as event-payload text passed through env (never interpolated into
+# a script). The `if:` below keeps it to merged PRs into the default branch.
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
     branches: [master]
 

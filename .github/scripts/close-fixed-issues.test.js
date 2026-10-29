@@ -112,3 +112,63 @@ test('closeFixedIssues: a read-only token (fork PR) warns and finishes instead o
   assert.equal(warns.length, 2);
   assert.match(warns[0], /read-only/);
 });
+
+test('code spans are stripped by delimiter length (CommonMark), not as separate empty spans', () => {
+  assert.deepEqual(p('', 'Use `Fixes #123` to link'), []);
+  assert.deepEqual(p('', 'Use ``Fixes #123`` to link'), []);
+  assert.deepEqual(p('', 'Use ```Fixes #123``` to link'), []);
+  assert.deepEqual(p('', 'Use ``a `Fixes #123` b`` to link'), []);
+  assert.deepEqual(p('', 'Use ``Fixes #1`` then Fixes #2'), [2]);
+  // A run of a different length does not close the span, so the text stays prose
+  // only when a matching closer exists; an unmatched opener is literal.
+  assert.deepEqual(p('', 'Odd ` backtick then Fixes #5'), [5]);
+  assert.deepEqual(p('', '``Fixes #7` not closed'), [7]);
+  // Fenced blocks of 3+ backticks or tildes, closed by an equal-or-longer fence.
+  assert.deepEqual(p('', '````\n```\nFixes #5\n```\n````\nFixes #6'), [6]);
+  assert.deepEqual(p('', '~~~~\n~~~\nCloses #5\n~~~~\nCloses #6'), [6]);
+  assert.deepEqual(p('', '```js\nFixes #5\n```\nFixes #6'), [6]);
+  // A tilde line does not close a backtick fence.
+  assert.deepEqual(p('', '```\n~~~\nFixes #5\n```\nFixes #6'), [6]);
+});
+
+test('references with more than 7 digits are rejected before any range is expanded (no hang)', () => {
+  assert.deepEqual(p('', 'Fixes #9007199254740992'), []);
+  assert.deepEqual(p('', 'Fixes #9007199254740992-#9007199254740993'), []);
+  assert.deepEqual(p('', 'Fixes #5-#99999999999'), []);
+  assert.deepEqual(p('', 'Fixes #1, #12345678, #3'), [1]);
+  assert.deepEqual(p('', 'Fixes #9999999'), [9999999]);
+  assert.deepEqual(p('', 'Fixes #99999999999999999999999'), []);
+});
+
+test('closeFixedIssues reports every failed close to its caller', async () => {
+  const failed = [];
+  const github = { rest: { issues: {
+    get: async () => ({ data: { state: 'open', body: 'b' } }),
+    update: async ({ issue_number }) => { if (issue_number === 2) { const e = new Error('nope'); e.status = 403; throw e; } },
+  } } };
+  const closed = await closeFixedIssues({ github, core: { info() {}, notice() {}, warning() {} }, owner: 'o', repo: 'r', pr: 9, title: 'Fixes #1, #2', body: '', baseRef: 'master', defaultBranch: 'master', failed });
+  assert.deepEqual(closed, [1]);
+  assert.deepEqual(failed.map((f) => f.number), [2]);
+});
+
+const { run } = require('./close-fixed-issues.js');
+test('run(): a failed close fails the job and lands in the job summary; success stays green', async () => {
+  const mk = (updateFails) => {
+    const out = { failed: [], summary: [] };
+    const core = { info() {}, notice() {}, warning() {}, setFailed: (m) => out.failed.push(m),
+      summary: { addHeading(h) { out.summary.push(h); return this; }, addList(l) { out.summary.push(...l); return this; }, write: async () => {} } };
+    const github = { rest: { issues: {
+      get: async () => ({ data: { state: 'open', body: 'b' } }),
+      update: async () => { if (updateFails) { const e = new Error('denied'); e.status = 403; throw e; } },
+    } } };
+    return { out, core, github };
+  };
+  Object.assign(process.env, { PR_NUMBER: '9', PR_TITLE: 't', PR_BODY: 'Fixes #1', PR_BASE_REF: 'master', DEFAULT_BRANCH: 'master' });
+  const bad = mk(true);
+  await run({ github: bad.github, core: bad.core, context: { repo: { owner: 'o', repo: 'r' } } });
+  assert.equal(bad.out.failed.length, 1);
+  assert.ok(bad.out.summary.some((l) => /#1/.test(l)));
+  const good = mk(false);
+  await run({ github: good.github, core: good.core, context: { repo: { owner: 'o', repo: 'r' } } });
+  assert.equal(good.out.failed.length, 0);
+});
