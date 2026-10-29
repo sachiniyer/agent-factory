@@ -406,7 +406,7 @@ func renderHostCheck(w io.Writer, r daemon.HostCheckResult, entry config.HostCon
 		if r.Readiness != "" {
 			fmt.Fprintf(w, "; cached state: %s", r.Readiness)
 		}
-		fmt.Fprintf(w, "\n    fix: check that a non-interactive `ssh` to %q prints no banner or extra output for a plain command, then run `af hosts check %s`\n", r.Name, r.Name)
+		fmt.Fprintf(w, "\n    fix: check that a non-interactive `%s` prints no banner or extra output for a plain command, then run `af hosts check %s`\n", sshRemedyCommand(entry), r.Name)
 	default:
 		fmt.Fprintf(w, "  %s: ready (git, tmux and gh answered)\n", r.Name)
 	}

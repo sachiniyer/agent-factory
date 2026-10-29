@@ -284,14 +284,15 @@ func TestRenderHostCheck_UnknownArmMirrorsDoctor(t *testing.T) {
 	hostsPosture = func() string { return "" }
 	t.Cleanup(func() { hostsPosture = globalHostKeyPosture })
 
+	entry := config.HostConfig{Host: "box.example"}
 	var out bytes.Buffer
 	renderHostCheck(&out, daemon.HostCheckResult{
 		Name: "box", Probed: true, Reachable: true, Readiness: "blocked",
-	}, config.HostConfig{Host: "box.example"})
+	}, entry)
 	rendered := out.String()
 	assert.NotContains(t, rendered, "ready (git, tmux and gh answered)")
 	assert.Contains(t, rendered, "box: unknown: the host answered but not with a recognisable git, tmux and gh report; cached state: blocked")
-	assert.Contains(t, rendered, "fix: check that a non-interactive `ssh` to \"box\" prints no banner or extra output for a plain command, then run `af hosts check box`")
+	assert.Contains(t, rendered, "fix: check that a non-interactive `"+sshRemedyCommand(entry)+"` prints no banner or extra output for a plain command, then run `af hosts check box`")
 
 	// No cached verdict: the suffix is omitted, the verdict still reads unknown.
 	var out2 bytes.Buffer
