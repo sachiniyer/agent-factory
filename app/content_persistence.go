@@ -179,18 +179,26 @@ func (m *home) saveContentPaneState() error {
 	// the pane's baseline but does NOT touch s.tasks, so the post-edit name is
 	// still on the in-memory row right here — capture it before the reload
 	// replaces the pane's list with the active scope's rows.
-	type retargetCandidate struct{ id, name, newPath string }
+	type retargetCandidate struct {
+		id, name, newPath string
+		unconfirmed       bool
+	}
 	var retargetCandidates []retargetCandidate
 	// recordRetargetIfMoved queues a ProjectPath change for the post-reload
-	// cross-repo notice. The save has committed the edit (nil error or
-	// IsMutationCommitted), so the post-edit name is still on the in-memory
-	// row right here — AcknowledgeSavedEdit advances the baseline but does not
-	// touch s.tasks, so the name must be captured before the reload replaces
-	// the pane's list. Record it for both outcomes: a committed-with-warning
-	// save landed the binding too, and the active-scope reload below drops the
-	// row either way, so without a candidate the warning branch would leave the
-	// user with a generic "failed to save task" and no idea where it went.
-	recordRetargetIfMoved := func(edit task.TaskEdit) {
+	// cross-repo notice. The post-edit name is still on the in-memory row right
+	// here — neither AcknowledgeSavedEdit nor HoldUnconfirmedEdit touches
+	// s.tasks, so the name must be captured before the reload replaces the
+	// pane's list. Record it for every outcome that may have landed the
+	// binding: a committed-with-warning save did, and an unknown-outcome save
+	// (#4824) may have (the reply can be lost after the patch committed). The
+	// active-scope reload below drops the row either way, so without a
+	// candidate every one of them leaves the user with a generic "failed to
+	// save task" / "could not be confirmed" and no idea where it went. The
+	// unconfirmed tag marks a candidate whose landing is not yet known, so the
+	// classification below can distinguish "definitely moved" from "likely
+	// moved" — though both queue the same notice, since the alternative is the
+	// #1836 silent drop this machinery exists to prevent.
+	recordRetargetIfMoved := func(edit task.TaskEdit, unconfirmed bool) {
 		if edit.Update.ProjectPath == nil {
 			return
 		}
@@ -203,7 +211,7 @@ func (m *home) saveContentPaneState() error {
 				break
 			}
 		}
-		retargetCandidates = append(retargetCandidates, retargetCandidate{edit.ID, name, *edit.Update.ProjectPath})
+		retargetCandidates = append(retargetCandidates, retargetCandidate{edit.ID, name, *edit.Update.ProjectPath, unconfirmed})
 	}
 	for _, edit := range sp.ConsumeDirty() {
 		err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect)
@@ -226,16 +234,28 @@ func (m *home) saveContentPaneState() error {
 				// The binding change committed with the task, so the reload
 				// below drops a retargeted row the same way — record it so the
 				// cross-repo notice still names where it landed.
-				recordRetargetIfMoved(edit)
+				recordRetargetIfMoved(edit, false)
 			} else if mutationOutcomeUnknown(err) {
 				// The update may have landed with only its reply lost (#4824).
 				// The draft is kept, since only a positive not-found may drop one
 				// (#4798), but it is held out of automatic saves: re-sending it on
 				// the next overlay close could overwrite a change another writer
-				// made in between. The reload below re-reads the task; if it now
-				// carries the edit, the pane settles it and says so, and if not,
-				// the user saves it again by editing the task.
+				// made in between. The active-scope reload below re-reads the
+				// task; a retarget that stayed in the active project settles it
+				// (settleConfirmedDrafts) and says so, and one that did not land
+				// stays held for the user to re-edit.
+				//
+				// A retarget that crossed repos is the gap #4824 left for #1836:
+				// the active-scope reload cannot carry a task that left the
+				// project, so a landed cross-repo retarget's draft never settles
+				// and its row vanishes from the pane. Record it as an unconfirmed
+				// candidate so the post-reload classification treats its absence
+				// as a likely cross-repo landing and echoes the binding — the
+				// same notice the nil-error and committed-with-warning branches
+				// produce — instead of leaving the user with a generic "could not
+				// be confirmed" and a missing row with no idea where it went.
 				sp.HoldUnconfirmedEdit(edit.ID)
+				recordRetargetIfMoved(edit, true)
 				log.WarningLog.Printf("task update outcome unknown: %v", err)
 				saveErr = errors.Join(saveErr, mutationOutcomeError(
 					fmt.Sprintf("saving task %q (the edit is kept, not re-sent)", edit.ID), "the task list", err))
@@ -252,7 +272,7 @@ func (m *home) saveContentPaneState() error {
 		// A ProjectPath patch retargets the task's project binding. The save
 		// committed it; the reload below decides whether the new binding
 		// stayed in the active project or moved it elsewhere.
-		recordRetargetIfMoved(edit)
+		recordRetargetIfMoved(edit, false)
 	}
 	for _, tsk := range sp.ConsumeDeleted() {
 		// tsk is the record as the pane displayed it; pin its project binding
@@ -309,6 +329,14 @@ func (m *home) saveContentPaneState() error {
 		// failed save and the user re-edits a task they can no longer see.
 		// Subdirectory/path retargets that stay in the active repo stay in the
 		// list and produce no notice.
+		//
+		// A retarget whose save could not be confirmed (#4824) is recorded as
+		// an unconfirmed candidate: its absence from the active scope is a
+		// likely cross-repo landing (the reply may have been lost after the
+		// binding moved), so it is announced the same way. A candidate whose ID
+		// is still in the list stayed in scope and falls through to the
+		// settle-or-stay-held path, so a retarget that did not land keeps its
+		// held draft exactly as before — the not-landed control is unchanged.
 		if len(retargetCandidates) > 0 {
 			inScope := make(map[string]bool, len(tasks))
 			for _, t := range tasks {
@@ -325,17 +353,23 @@ func (m *home) saveContentPaneState() error {
 		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
 		// The reload failed, so the in-scope list above is unavailable to
 		// classify each retarget. The save already committed the new
-		// ProjectPath, and the next successful snapshot poll will drop a
-		// cross-repo retarget's row from the pane — without recording the
-		// notice here, the task vanishes with no explanation (the same #1836
-		// silent drop this change exists to surface). Classify the destination
-		// directly from the committed path: a retarget whose newPath resolves
-		// to a different repo than the active scope has left the pane, so echo
-		// its binding the way the successful-reload branch does. A same-repo
-		// subdirectory retarget resolves to the same id and produces no
-		// notice, matching the in-scope check above; with no active scope
-		// (registry mode) every retarget leaves the pane and is announced,
-		// matching the empty list LoadTasksForKnownRepo returns there.
+		// ProjectPath — or, for an unconfirmed candidate, may have — and the
+		// next successful snapshot poll will drop a cross-repo retarget's row
+		// from the pane — without recording the notice here, the task vanishes
+		// with no explanation (the same #1836 silent drop this change exists to
+		// surface). Classify the destination directly from the committed path:
+		// a retarget whose newPath resolves to a different repo than the
+		// active scope has left the pane, so echo its binding the way the
+		// successful-reload branch does. A same-repo subdirectory retarget
+		// resolves to the same id and produces no notice, matching the in-scope
+		// check above; with no active scope (registry mode) every retarget
+		// leaves the pane and is announced, matching the empty list
+		// LoadTasksForKnownRepo returns there. An unconfirmed candidate is
+		// classified the same way: with no list to confirm a landing, the
+		// destination is the only signal, and leaving it unannounced is the
+		// silent drop — a false "rebounded" notice when the patch did not land
+		// is recoverable (the next successful reload shows the row still in
+		// scope), while a silent drop is not.
 		for _, rc := range retargetCandidates {
 			if m.repoID != "" && sameScopeAfterSave(m, rc.newPath) {
 				continue
