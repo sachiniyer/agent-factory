@@ -401,3 +401,60 @@ func TestRefuseGuessedRespawnOnlyWhenTheSessionIsGoneAndAnIDIsRecorded(t *testin
 	require.Error(t, err, "a gone session with an exact id recorded must not be respawned onto a guess")
 	assert.Contains(t, err.Error(), "conv-1")
 }
+
+// Only the restart-adoption launch is flagged for the no-guess guard. An archive
+// restore or Lost recovery launches through the same server with the same recorded
+// conversation, resumes lazily as it always has, and must not be refused (the
+// Sandbox e2e regression on 91c86ad321).
+func TestOnlyTheRestartAdoptionLaunchIsFlaggedForTheNoGuessGuard(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(b), "first_time_setup") { // the launch calls, not the feature probes
+			bodies = append(bodies, string(b))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]bool{"ok": true}})
+	}))
+	t.Cleanup(srv.Close)
+	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: srv.URL, Token: "t"}, "restore")
+	require.NoError(t, err)
+	inst := &Instance{Title: "restore", reportedConversation: AgentConversationData{Agent: "claude", ID: "conv-1"}}
+
+	require.NoError(t, (&remoteAgentServer{rc: rc, inst: inst}).Launch(false))
+	require.NoError(t, (&remoteAgentServer{rc: rc, inst: inst, restartAdoption: true}).Launch(false))
+
+	require.Len(t, bodies, 2)
+	assert.NotContains(t, bodies[0], "restart_adoption", "an ordinary restore launch is not subject to the guard")
+	assert.Contains(t, bodies[0], "conv-1", "but it still sends the recorded conversation, as on master")
+	assert.Contains(t, bodies[1], `"restart_adoption":true`)
+	assert.Contains(t, bodies[1], "conv-1")
+}
+
+// Restart adoption tells the host how many other tabs the daemon's row records, so
+// the host (whose fresh instance holds only the agent tab) can refuse a rebuild
+// under them; an ordinary restore sends nothing of the kind.
+func TestRestartAdoptionProvisionCarriesTheRecordedSiblingTabCount(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(b), "first_time_setup") {
+			bodies = append(bodies, string(b))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]bool{"ok": true}})
+	}))
+	t.Cleanup(srv.Close)
+	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: srv.URL, Token: "t"}, "tabs")
+	require.NoError(t, err)
+	inst := &Instance{Title: "tabs", Tabs: []*Tab{
+		newRemoteAgentTab(),
+		{ID: "sh", Name: "shell", Kind: TabKindShell},
+		{ID: "px", Name: "btop", Kind: TabKindProcess},
+	}}
+
+	require.NoError(t, (&remoteAgentServer{rc: rc, inst: inst}).Provision(false))
+	require.NoError(t, (&remoteAgentServer{rc: rc, inst: inst, restartAdoption: true}).Provision(false))
+
+	require.Len(t, bodies, 2)
+	assert.NotContains(t, bodies[0], "sibling_tabs", "an ordinary restore is unchanged")
+	assert.Contains(t, bodies[1], `"sibling_tabs":2`)
+}

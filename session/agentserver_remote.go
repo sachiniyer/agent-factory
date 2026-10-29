@@ -61,6 +61,9 @@ type remoteAgentServer struct {
 	// holds inst's roster lock across the bounded REST capture (#2200). nil only
 	// for the transport-only NewRemoteAgentServer constructor used by integrations.
 	inst *Instance
+	// restartAdoption is set on the short-lived server a W1.4 restart uses to
+	// adopt the surviving workspace; it rides the Launch request.
+	restartAdoption bool
 	// teardown reaps the off-box workspace AFTER its in-sandbox agent is killed over
 	// REST. nil for an out-of-process `af agent-server` the caller owns. Run
 	// best-effort in Kill so a session kill also removes its sandbox; idempotent
@@ -148,7 +151,13 @@ func (s *remoteAgentServer) noteAdoption() error {
 }
 
 func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
-	err := s.rc.call("/v1/agent/provision", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup}
+	if s.restartAdoption && s.inst != nil {
+		// The restarted server's fresh instance holds only its agent tab; tell it
+		// how many other tabs the daemon's durable row records (W1.4, #6162).
+		req.SiblingTabs = s.inst.nonAgentTabCount()
+	}
+	err := s.rc.call("/v1/agent/provision", req, nil)
 	if err == nil {
 		s.idNative() // warm the feature advertisement (#5571 W4.5)
 	}
@@ -156,7 +165,7 @@ func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
 }
 
 func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
-	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup}
+	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup, RestartAdoption: s.restartAdoption}
 	// Send the recorded conversation so a launch resumes exactly it (#5571 W7.2).
 	// The server resumes it only where its own store still holds it.
 	if s.inst != nil {
@@ -825,6 +834,14 @@ type agentLifecycleReq struct {
 	// Conversation is the daemon's recorded conversation for a launch to resume
 	// (#5571 W7.2). Absent for a first launch and for a pre-field server.
 	Conversation *AgentConversationData `json:"conversation,omitempty"`
+	// RestartAdoption marks the launch that adopts a RESTARTED agent-server's
+	// surviving workspace (W1.4). Only that launch is refused a lazy respawn onto
+	// a guessed conversation; every other restore (an archive restore, a Lost
+	// recovery) keeps resuming the way it always has.
+	RestartAdoption bool `json:"restart_adoption,omitempty"`
+	// SiblingTabs is how many non-agent tabs the daemon's row records, sent with a
+	// restart adoption's Provision so the host can refuse to rebuild under them.
+	SiblingTabs int `json:"sibling_tabs,omitempty"`
 }
 
 // agentLaunchResp carries back the conversation the server launched or resumed.

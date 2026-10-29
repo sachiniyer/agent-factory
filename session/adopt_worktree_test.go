@@ -258,3 +258,88 @@ func TestAdoptExistingWorktreeRefusesToRebuildUnderASurvivingMarkerlessDescendan
 	assert.True(t, os.IsNotExist(statErr), "the tree is not recreated under a possible writer")
 	assert.True(t, inst.RebuildTeardownPending(), "the obligation stays armed so a retry re-proves the teardown")
 }
+
+// The restarted server's fresh instance holds only its agent tab, so a surviving
+// SIBLING shell tab is not in the roster the teardown walks, and a non-blind agent
+// close skips the occupancy check inside it. The rebuild still must not run while
+// that shell has its cwd in the tree: the proof cannot depend on the roster being
+// complete (#5995 review, #6162).
+func TestAdoptExistingWorktreeRefusesToRebuildUnderASurvivingSiblingShellTab(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("the occupancy check reads /proc")
+	}
+	inst, gw, _ := hostedWorkspace(t)
+	path := gw.GetWorktreePath()
+
+	// The sibling shell: not in inst.Tabs, cwd in the worktree.
+	shell := exec.Command("sleep", "300")
+	shell.Dir = path
+	require.NoError(t, shell.Start())
+	t.Cleanup(func() { _ = shell.Process.Kill(); _, _ = shell.Process.Wait() })
+	require.NoError(t, os.RemoveAll(path))
+
+	// The agent's own tmux session closes NON-blind: its panes are listed and it dies.
+	var mu sync.Mutex
+	killed := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			mu.Lock()
+			defer mu.Unlock()
+			args := c.String()
+			switch {
+			case strings.Contains(args, "kill-session"):
+				killed = true
+			case strings.Contains(args, "has-session"):
+				if killed {
+					return errors.New("no session")
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(c.String(), "list-panes") || strings.Contains(c.String(), "display-message") {
+				return []byte(""), nil
+			}
+			return nil, nil
+		},
+	}
+	inst.setTmuxLocked(tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_restart_adopt", "claude", nil, cmdExec))
+
+	err := inst.adoptExistingWorktree()
+	require.Error(t, err, "a surviving sibling that is not in the roster must still refuse the rebuild")
+	assert.Contains(t, err.Error(), "not rebuilding")
+	assert.Nil(t, inst.gitWorktree)
+	_, statErr := os.Stat(path)
+	assert.True(t, os.IsNotExist(statErr), "the tree is not recreated under the sibling")
+}
+
+// The daemon's durable row records the session's tabs even though the restarted
+// server's fresh instance does not. A recorded sibling tab cannot be proven
+// stopped (the cwd-based occupancy check is blind to a writer whose cwd is
+// elsewhere), so the rebuild refuses BEFORE stopping or arming anything.
+func TestAdoptExistingWorktreeRefusesWhenTheDurableRowRecordsSiblingTabs(t *testing.T) {
+	inst, gw, _ := hostedWorkspace(t)
+	path := gw.GetWorktreePath()
+	require.NoError(t, os.RemoveAll(path))
+	inst.SetPersistedSiblingTabs(1)
+
+	killed := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "kill-session") {
+				killed = true
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, nil },
+	}
+	inst.setTmuxLocked(tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_restart_adopt", "claude", nil, cmdExec))
+
+	err := inst.adoptExistingWorktree()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "other tab")
+	assert.False(t, killed, "nothing is stopped on a refusal that needs no stopping")
+	assert.False(t, inst.RebuildTeardownPending(), "and no obligation is armed")
+	_, statErr := os.Stat(path)
+	assert.True(t, os.IsNotExist(statErr), "the tree is not recreated")
+}

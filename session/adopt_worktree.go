@@ -75,6 +75,18 @@ func (i *Instance) adoptExistingWorktree() error {
 		if inPlace {
 			return fmt.Errorf("cannot adopt the in-place workspace: %s is gone", gw.GetWorktreePath())
 		}
+		// The daemon's durable row records the session's tabs even though this fresh
+		// instance holds only its agent tab. A recorded sibling shell or process tab
+		// has no proof it stopped (and its writes by absolute path from another
+		// cwd are invisible to the occupancy check below), so the rebuild refuses
+		// and the session needs attention. #6162 restores the roster.
+		i.mu.RLock()
+		siblings := i.persistedSiblingTabs
+		i.mu.RUnlock()
+		if siblings > 0 {
+			return fmt.Errorf("the worktree at %s is gone, but the session records %d other tab(s) that cannot be proven stopped; "+
+				"not rebuilding under them", gw.GetWorktreePath(), siblings)
+		}
 		// Anything that outlived the deleted worktree is a stale writer: a pane keeps
 		// a cwd inode that is gone, and anything it writes by absolute path lands
 		// while git recreates the checkout. The stale-pane teardown every other
@@ -90,6 +102,18 @@ func (i *Instance) adoptExistingWorktree() error {
 			return fmt.Errorf("the worktree at %s is gone, but the stale-pane teardown could not be made durable before rebuilding: %w", gw.GetWorktreePath(), err)
 		}
 		if err := i.teardownStalePanesForRebuild(gw.GetWorktreePath(), committed, true); err != nil {
+			return fmt.Errorf("the worktree at %s is gone, but what outlived it is not proven stopped; not rebuilding: %w", gw.GetWorktreePath(), err)
+		}
+		// The teardown above only knows the tabs THIS instance holds, and a restarted
+		// agent-server's fresh instance holds just its agent tab: surviving sibling
+		// shell and process tabs are not enumerated, and the occupancy check inside
+		// the teardown runs only after a BLIND close. So the proof that nothing of
+		// this session can still write into the tree must not depend on the roster:
+		// look at the tree itself, unconditionally, and refuse while anything has a
+		// working directory in it (reported, never killed: it could be the
+		// operator's own shell). The check also refuses when the process table
+		// cannot be read.
+		if err := CheckWorktreeOccupants(gw.GetWorktreePath()); err != nil {
 			return fmt.Errorf("the worktree at %s is gone, but what outlived it is not proven stopped; not rebuilding: %w", gw.GetWorktreePath(), err)
 		}
 		if err := gw.RebuildFromExistingBranch(); err != nil {

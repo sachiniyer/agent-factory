@@ -151,7 +151,7 @@ func (i *Instance) ReattachSandbox() error {
 		// adoption.
 		// inst is set so Launch sends the EXACT recorded conversation id: a bare
 		// server would omit it and the host could resume onto another one (#4797).
-		srv := &remoteAgentServer{rc: rc, inst: i}
+		srv := &remoteAgentServer{rc: rc, inst: i, restartAdoption: true}
 		if aerr := errors.Join(srv.Provision(false), srv.Launch(false)); aerr != nil {
 			p.abandonUnadoptedTunnel()
 			return fmt.Errorf("reattach %q: adopting the restarted agent-server failed (it is left running with its workspace; the next reattach retries): %w", i.Title, aerr)

@@ -261,3 +261,26 @@ func refreshRuntimeIdentity(b Backend, p *sandboxProvisioner) {
 		}
 	}
 }
+
+// nonAgentTabCount is how many shell and process tabs this (daemon-side) row
+// records. The restarted agent-server cannot enumerate them, so the count travels
+// with the adoption's Provision.
+func (i *Instance) nonAgentTabCount() int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	n := 0
+	for idx, tab := range i.Tabs {
+		if idx > 0 && tab != nil && tab.Kind != TabKindAgent {
+			n++
+		}
+	}
+	return n
+}
+
+// SetPersistedSiblingTabs records, on the agent-server's fresh instance, how many
+// non-agent tabs the daemon's row says the session has (see adoptExistingWorktree).
+func (i *Instance) SetPersistedSiblingTabs(n int) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.persistedSiblingTabs = n
+}

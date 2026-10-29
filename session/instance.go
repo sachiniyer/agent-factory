@@ -301,9 +301,9 @@ type Instance struct {
 	// CallbackUnavailablePrefix. Mutex-protected; see callback_unavailable.go.
 	callbackUnavailable string
 	// hostedRemotely marks an instance running INSIDE a sandbox, where the daemon
-	// holds the session as a remote workspace. It decides which capability
-	// projection the injected guidance is rendered from (guidance.go, #5571 W3.3).
-	hostedRemotely bool
+	// holds the session as a remote workspace (guidance.go, #5571 W3.3).
+	hostedRemotely       bool
+	persistedSiblingTabs int // non-agent tabs the daemon's row records but this fresh hosted instance lacks (W1.4)
 	// advertisedFeatures is what the hosting agent-server advertises on
 	// /v1/health; guidance lifts the static remote floor by it (#5878).
 	advertisedFeatures []string

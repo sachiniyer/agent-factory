@@ -616,6 +616,11 @@ func (hs *headlessServer) healthHandler(w http.ResponseWriter, r *http.Request) 
 // fresh create materializes the worktree and spawns; a restore reconnects.
 type agentLifecycleRequest struct {
 	FirstTimeSetup bool `json:"first_time_setup"`
+	// RestartAdoption marks the launch that adopts a restarted agent-server's
+	// surviving workspace (W1.4); only it is refused a guessed respawn.
+	RestartAdoption bool `json:"restart_adoption,omitempty"`
+	// SiblingTabs: non-agent tabs the daemon's row records (restart adoption).
+	SiblingTabs int `json:"sibling_tabs,omitempty"`
 	// Conversation is the daemon's recorded conversation for this launch to
 	// resume (#5571 W7.2); honored only where this host's provider store holds it.
 	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
@@ -630,6 +635,9 @@ type agentOKResponse struct {
 }
 
 func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResponse) error {
+	if hs.inst != nil && req.SiblingTabs > 0 {
+		hs.inst.SetPersistedSiblingTabs(req.SiblingTabs)
+	}
 	if err := hs.as.Provision(req.FirstTimeSetup); err != nil {
 		return err
 	}
@@ -640,7 +648,7 @@ func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResp
 func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
 	// A restore-launch that carries the recorded conversation must not respawn a
 	// vanished agent onto a guessed one (#4797): see RefuseGuessedRespawn.
-	if !req.FirstTimeSetup && req.Conversation != nil && hs.inst != nil {
+	if req.RestartAdoption && !req.FirstTimeSetup && req.Conversation != nil && hs.inst != nil {
 		if err := hs.inst.RefuseGuessedRespawn(*req.Conversation); err != nil {
 			return err
 		}
