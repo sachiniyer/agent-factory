@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/configagent"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The `C` hotkey's app-side wiring (phase 3).
@@ -246,14 +247,34 @@ var execConfigAgentAttach = func(sessionName, socketPath string) *exec.Cmd {
 // The per-caller vars stay separate so a test can stub one takeover without
 // disabling the other.
 func bareTmuxAttachCommand(sessionName, socketPath string) *exec.Cmd {
-	args := make([]string, 0, 5)
+	args := make([]string, 0, 16)
 	if socketPath != "" {
 		args = append(args, "-S", socketPath)
 	}
-	args = append(args, "attach-session", "-t", sessionName)
+	args = append(args, bareAttachDetachArgs(sessionName)...)
 	cmd := exec.Command("tmux", args...)
 	cmd.Env = configAgentAttachEnv()
 	return cmd
+}
+
+// bareAttachDetachArgs is the tmux command sequence of a takeover: the same detach
+// key af documents (`detach_keys`, "Leave full-screen" in the help) is bound to
+// detach-client on the bare server before the attach, and the attached client is
+// told which key leaves. A takeover is a real tmux client, so af's raw-proxy byte
+// interception that honours the key for session panes cannot see it; without this
+// the only way out was tmux's own C-b d (#6064). The binding lives on the daemon's
+// bare server, which holds only af-owned handover panes. A byte tmux has no ctrl
+// spelling for degrades to the plain attach, with the tmux default left to leave.
+func bareAttachDetachArgs(sessionName string) []string {
+	attach := []string{"attach-session", "-t", sessionName}
+	key, ok := tmux.DetachKeyTmuxName(tmux.DetachKeyByte)
+	if !ok {
+		return attach
+	}
+	hint := tmux.DetachKeyDisplay + " leaves"
+	out := []string{"bind-key", "-n", key, "detach-client", ";"}
+	out = append(out, attach...)
+	return append(out, ";", "display-message", "-d", "4000", hint)
 }
 
 // configAgentAttachEnv is the current environment with the TMUX marker removed,
