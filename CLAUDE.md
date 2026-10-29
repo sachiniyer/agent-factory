@@ -58,7 +58,7 @@ Working style:
   stays restorable. Use `af sessions kill` only when you explicitly mean to
   permanently destroy the session and prune its owned branch. Don't let sessions
   accumulate.
-- Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
+- Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`. `TMUX_TMPDIR` alone is not isolation: inside an af pane `$TMUX` is set and tmux addresses that server, so `TMUX_TMPDIR=… tmux kill-server` kills the production server (2026-10-29, #6180). Isolation is `env -u TMUX tmux -S <your own socket>`; print `#{pid}` and `#{socket_path}` before any `kill-server`.
 - Before opening a PR run the **cheap local checks** — `gofmt -l .`,
   `go build ./...`, `go vet ./...`, `golangci-lint run --timeout=3m --fast`,
   `scripts/lint-file-length.sh` — and, when the diff touches a generated-docs
