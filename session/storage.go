@@ -793,15 +793,23 @@ func (s *Storage) saveInstances(instances []*Instance, withLock func(path string
 			// replacement survive the wholesale rewrite verbatim (retained below
 			// outside the ghost reaper). An empty ID on either side is a legacy record and still
 			// matches, mirroring stableIDMatchesForDaemon (#6048 review).
+			//
+			// Duplicate disk titles are resolved FIRST, newest UpdatedAt wins (ties
+			// keep the earliest), the same rule dedupeInstanceData applies: only
+			// that authoritative row is compared with the live instance, so an older
+			// stale duplicate cannot supersede a current row matching it.
+			authoritative := make(map[string]int)
+			for i, d := range onDisk {
+				if prev, ok := authoritative[d.Title]; !ok || d.UpdatedAt.After(onDisk[prev].UpdatedAt) {
+					authoritative[d.Title] = i
+				}
+			}
 			replaced := make(map[string]struct{})
 			replacedID := make(map[string]string)
 			for i := range group {
-				for _, d := range onDisk {
-					if d.Title == group[i].Title && !stableIDMatches(d.ID, group[i].ID) {
-						replaced[group[i].Title] = struct{}{}
-						replacedID[group[i].Title] = group[i].ID
-						break
-					}
+				if idx, ok := authoritative[group[i].Title]; ok && !stableIDMatches(onDisk[idx].ID, group[i].ID) {
+					replaced[group[i].Title] = struct{}{}
+					replacedID[group[i].Title] = group[i].ID
 				}
 			}
 			var replacements []json.RawMessage
@@ -823,12 +831,10 @@ func (s *Storage) saveInstances(instances []*Instance, withLock func(path string
 						}
 						continue
 					}
-					if stableIDMatches(d.ID, replacedID[d.Title]) {
-						continue // the stale instance's own durable record: superseded
+					if i != authoritative[d.Title] {
+						continue // an older duplicate of the replacement: superseded
 					}
-					if prev, ok := best[d.Title]; !ok || d.UpdatedAt.After(onDisk[prev].UpdatedAt) {
-						best[d.Title] = i
-					}
+					best[d.Title] = i
 				}
 				for _, i := range best {
 					raw := json.RawMessage(nil)

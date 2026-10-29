@@ -244,3 +244,28 @@ func TestSaveInstancesWithin_SpentBudgetIsNonBlocking(t *testing.T) {
 	require.ErrorIs(t, err, config.ErrLockTimeout)
 	assert.Contains(t, err.Error(), "after 0s", "a spent budget must not be padded with a minimum wait")
 }
+
+// With duplicate disk rows for one title, only the authoritative one (newest
+// UpdatedAt, as dedupeInstanceData resolves them) is compared with the live
+// instance. An older stale duplicate with a different ID must not be taken for a
+// replacement and supersede the current row that matches (#6048 review).
+func TestSaveInstances_OlderDuplicateDiskRowIsNotAReplacement(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	now := time.Now()
+	seedDisk(t, state, repoPath, []InstanceData{
+		{Title: "a", ID: "id-old", Path: repoPath, UpdatedAt: now.Add(-time.Hour)},
+		{Title: "a", ID: "id-current", Path: repoPath, UpdatedAt: now},
+	})
+	live := makeAliveInstance("a", repoPath)
+	live.ID = "id-current"
+	storage, err := NewStorage(state, "")
+	require.NoError(t, err)
+	require.NoError(t, storage.SaveInstances([]*Instance{live}))
+
+	got := readDisk(t, state, repoPath)
+	require.Len(t, got, 1, "the live instance's row survives and the stale duplicate is not resurrected: %+v", got)
+	assert.Equal(t, "id-current", got[0].ID)
+}
