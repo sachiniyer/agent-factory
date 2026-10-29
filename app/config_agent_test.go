@@ -282,7 +282,7 @@ func TestConfigAgentAttachCommandScrubsTMUXAndPinsSocket(t *testing.T) {
 
 	// The socket is pinned BEFORE the subcommand (a tmux global option), and the
 	// session is addressed by name.
-	assert.Equal(t, []string{"tmux", "-S", "/tmp/tmux-1000/default", "bind-key", "-n", "C-w", "detach-client", ";", "attach-session", "-t", "af-config-3", ";", "display-message", "-d", "4000", "ctrl+w leaves"}, cmd.Args,
+	assert.Equal(t, []string{"tmux", "-S", "/tmp/tmux-1000/default", "set-option", "-t", "af-config-3", "key-table", "af-detach-af-config-3", ";", "bind-key", "-T", "af-detach-af-config-3", "C-w", "detach-client", ";", "bind-key", "-T", "af-detach-af-config-3", "C-b", "switch-client", "-T", "prefix", ";", "attach-session", "-t", "af-config-3", ";", "display-message", "-d", "4000", "ctrl+w leaves"}, cmd.Args,
 		"the attach must pin the reported socket with -S and address the session by name")
 
 	// Env is set explicitly (nil would inherit the parent's, TMUX and all).
@@ -310,7 +310,7 @@ func TestConfigAgentAttachWithoutSocketOmitsPin(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
 
 	cmd := execConfigAgentAttach("af-config-4", "")
-	assert.Equal(t, []string{"tmux", "bind-key", "-n", "C-w", "detach-client", ";", "attach-session", "-t", "af-config-4", ";", "display-message", "-d", "4000", "ctrl+w leaves"}, cmd.Args,
+	assert.Equal(t, []string{"tmux", "set-option", "-t", "af-config-4", "key-table", "af-detach-af-config-4", ";", "bind-key", "-T", "af-detach-af-config-4", "C-w", "detach-client", ";", "bind-key", "-T", "af-detach-af-config-4", "C-b", "switch-client", "-T", "prefix", ";", "attach-session", "-t", "af-config-4", ";", "display-message", "-d", "4000", "ctrl+w leaves"}, cmd.Args,
 		"an empty socket path must omit -S entirely, never pass -S \"\"")
 	_, hasTMUX := envValue(cmd.Env, "TMUX")
 	assert.False(t, hasTMUX, "TMUX must be scrubbed even on the default-socket fallback path (#2019)")
@@ -330,10 +330,30 @@ func TestBareAttachHonoursTheConfiguredDetachKey(t *testing.T) {
 		"account login": execAccountLoginAttach,
 	} {
 		args := build("s", "").Args
-		assert.Equal(t, []string{"tmux", "bind-key", "-n", "C-q", "detach-client", ";", "attach-session", "-t", "s", ";", "display-message", "-d", "4000", "ctrl+q leaves"}, args, name)
+		assert.Equal(t, []string{"tmux", "set-option", "-t", "s", "key-table", "af-detach-s", ";", "bind-key", "-T", "af-detach-s", "C-q", "detach-client", ";", "bind-key", "-T", "af-detach-s", "C-b", "switch-client", "-T", "prefix", ";", "attach-session", "-t", "s", ";", "display-message", "-d", "4000", "ctrl+q leaves"}, args, name)
 	}
 
 	tmux.SetDetachKey(0, "ctrl-@")
 	assert.Equal(t, []string{"tmux", "attach-session", "-t", "s"}, execConfigAgentAttach("s", "").Args,
 		"a key tmux has no ctrl spelling for degrades to the plain attach")
+}
+
+// #6064 (Codex P1): the detach binding is scoped to the takeover's own session —
+// never a root-table bind-key, which would turn the shell's ctrl+w into "detach"
+// for every other client on the bare server — and is emptied when it ends.
+func TestBareAttachDetachBindingIsScopedAndCleanedUp(t *testing.T) {
+	args := strings.Join(execConfigAgentAttach("af-config-9", "/sock").Args, " ")
+	assert.NotContains(t, args, "bind-key -n", "no root-table (server-wide) binding")
+	assert.NotContains(t, args, "bind-key -T root")
+	assert.Contains(t, args, "set-option -t af-config-9 key-table af-detach-af-config-9",
+		"the table is selected by the takeover's own session")
+	assert.NotEqual(t, bareDetachTable("a"), bareDetachTable("b"), "one table per takeover")
+
+	var ran []string
+	prev := runBareAttachCleanup
+	runBareAttachCleanup = func(c *exec.Cmd) error { ran = c.Args; return nil }
+	t.Cleanup(func() { runBareAttachCleanup = prev })
+	bareAttachCleanup("af-config-9", "/sock")
+	assert.Equal(t, []string{"tmux", "-S", "/sock", "unbind-key", "-a", "-T", "af-detach-af-config-9"}, ran,
+		"ending the takeover empties exactly its own table")
 }

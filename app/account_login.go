@@ -243,6 +243,7 @@ func accountLoginFinishedStatus(msg accountLoginStartedMsg) string {
 func (m *home) enterAccountLogin(agent, name, sessionName, socketPath string) tea.Cmd {
 	cmd := execAccountLoginAttach(sessionName, socketPath)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		bareAttachCleanup(sessionName, socketPath)
 		return accountLoginDoneMsg{agent: agent, name: name, err: err}
 	})
 }
