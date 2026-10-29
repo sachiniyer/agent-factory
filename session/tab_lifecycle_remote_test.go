@@ -165,6 +165,21 @@ func rosterIDs(i *Instance) map[string]bool {
 	return out
 }
 
+// intentAdopted reports whether the uncertain-create intent for command is still
+// present and whether the sweep latched it as adopted. The refused-adoption
+// tests lean on this: a spawn refused with the session inert or a spawn-block
+// fence up must leave the latch clear so a later sweep retries it.
+func intentAdopted(i *Instance, command string) (present, adopted bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	for _, in := range i.tabCreateIntents {
+		if in.command == command {
+			return true, in.adopted
+		}
+	}
+	return false, false
+}
+
 func (sb *lifecycleSandbox) setExit(id string, status int) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -378,6 +393,65 @@ func TestRemoteTabLifecycleInterleavings(t *testing.T) {
 		require.NoError(t, err)
 		_, err = rs.ensureBrokerByID("term")
 		assert.NoError(t, err, "re-creating the id lifts the mark")
+	})
+
+	t.Run("an adoption refused while the session is inert is retried once started (#5996)", func(t *testing.T) {
+		sb, inst := newLifecycleSandbox(t)
+		sb.mu.Lock()
+		sb.dropCreate = true
+		sb.mu.Unlock()
+		_, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+		require.Error(t, err)
+		require.Equal(t, 1, sb.execs("deploy.sh"), "the sandbox did start it")
+		require.Empty(t, rosterIDs(inst), "nothing is claimed while the outcome is unknown")
+
+		// A sweep while the session is inert: the sandbox roster carries the tab,
+		// but the spawn is refused, so neither the roster row nor the latch moves.
+		inst.mu.Lock()
+		inst.started = false
+		inst.mu.Unlock()
+		require.False(t, inst.ReconcileOffBoxTabs(), "an inert session adopts nothing")
+		require.Empty(t, rosterIDs(inst), "the sandbox tab is not spliced into an inert session")
+		present, adopted := intentAdopted(inst, "deploy.sh")
+		require.True(t, present, "the intent still pins the minted id for a retry")
+		require.False(t, adopted, "a refused adoption must not latch the intent")
+
+		// The session comes back; the next sweep adopts the tab the sandbox
+		// started, instead of skipping a latched intent forever.
+		inst.mu.Lock()
+		inst.started = true
+		inst.mu.Unlock()
+		require.True(t, inst.ReconcileOffBoxTabs(), "the un-latched intent is adopted once started")
+		assert.Equal(t, sb.ids(), rosterIDs(inst), "daemon and sandbox rosters agree")
+		inst.ReconcileOffBoxTabs()
+		assert.Len(t, rosterIDs(inst), 1, "adoption is idempotent")
+	})
+
+	t.Run("an adoption refused under a spawn-block fence is retried once the fence lifts (#5996)", func(t *testing.T) {
+		sb, inst := newLifecycleSandbox(t)
+		sb.mu.Lock()
+		sb.dropCreate = true
+		sb.mu.Unlock()
+		_, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+		require.Error(t, err)
+		require.Equal(t, 1, sb.execs("deploy.sh"), "the sandbox did start it")
+		require.Empty(t, rosterIDs(inst), "nothing is claimed while the outcome is unknown")
+
+		// An archive in flight fences off the spawn while started stays true —
+		// the very case the started-flag guard cannot see. The sweep must refuse
+		// and leave the intent un-latched.
+		inst.SetInFlightOpForTest(OpArchiving)
+		require.False(t, inst.ReconcileOffBoxTabs(), "a fenced session adopts nothing")
+		require.Empty(t, rosterIDs(inst), "the sandbox tab is not spliced under a spawn-block fence")
+		present, adopted := intentAdopted(inst, "deploy.sh")
+		require.True(t, present, "the intent still pins the minted id for a retry")
+		require.False(t, adopted, "a fenced spawn must not latch the intent")
+
+		// The archive aborts; the fence lifts and the next sweep adopts the tab.
+		inst.SetInFlightOpForTest(OpNone)
+		require.True(t, inst.ReconcileOffBoxTabs(), "the un-latched intent is adopted once the fence lifts")
+		assert.Equal(t, sb.ids(), rosterIDs(inst), "daemon and sandbox rosters agree")
+		assert.Len(t, rosterIDs(inst), 1)
 	})
 }
 
