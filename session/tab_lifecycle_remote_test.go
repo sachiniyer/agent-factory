@@ -22,8 +22,9 @@ type lifecycleSandbox struct {
 	tabs        map[string]TabData // id → row, as /v1/agent/tabs reports it
 	executions  map[string]int     // command → times it was started
 	closeCalls  []string
-	dropCreate  bool // execute, then hang up without answering
-	closeDown   bool // hang up on every close
+	dropCreate  bool            // execute, then hang up without answering
+	closeDown   bool            // hang up on every close
+	stuck       map[string]bool // ids whose tmux teardown fails: the row goes, the command stays (#6022)
 	genSeq      int
 	rosterCalls int
 }
@@ -68,6 +69,13 @@ func newLifecycleSandbox(t *testing.T) (*lifecycleSandbox, *Instance) {
 		// The generation is compared HERE, with the removal, the way the real
 		// agent-server does it (#5996): a mismatch is tab_gone, never a close.
 		td, held := sb.tabs[req.ID]
+		if !down && sb.stuck[req.ID] {
+			delete(sb.tabs, req.ID)
+			sb.mu.Unlock()
+			ws.encode(w, map[string]any{"data": nil, "error": map[string]any{
+				"message": "teardown unconfirmed", "code": "internal"}})
+			return
+		}
 		gone := !held || (req.Gen != "" && td.Gen != req.Gen)
 		if !down && !gone {
 			sb.closeCalls = append(sb.closeCalls, req.ID)

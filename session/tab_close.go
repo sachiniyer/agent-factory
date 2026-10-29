@@ -34,7 +34,17 @@ func (i *Instance) closeTabByID(tabID, gen string) error {
 		exists = false
 	}
 	if !exists {
+		absent := idx < 0 || idx >= len(i.Tabs) || i.Tabs[idx].ID != tabID
 		i.mu.Unlock()
+		if gen != "" && absent {
+			// A conditional close is the daemon's retry of an unconfirmed one. The
+			// row may be gone only because an earlier close removed it and then
+			// failed its teardown, leaving a retained handle: "gone" is not the
+			// truth until that handle is spent (#6022).
+			if err := i.settleRetainedTeardown(tabID); err != nil {
+				return err
+			}
+		}
 		return fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
 	}
 	if idx == 0 {
@@ -45,6 +55,30 @@ func (i *Instance) closeTabByID(tabID, gen string) error {
 	handle, rh := i.stageCleanupLocked(tab)
 	i.mu.Unlock()
 	return i.settleRemovedTab(tab, handle, rh)
+}
+
+// settleRetainedTeardown re-attempts the teardown of every cleanup handle a
+// closed tab id still holds and retires the ones now confirmed. A nil return
+// means nothing for tabID remains; a non-nil one means a command may still be
+// running, so the caller must not report the tab as gone.
+func (i *Instance) settleRetainedTeardown(tabID string) error {
+	var first error
+	for _, h := range i.PendingTabCleanup() {
+		if h.TabID != tabID {
+			continue
+		}
+		if _, err := killTabCleanupSession(h, false); err != nil {
+			if first == nil {
+				first = fmt.Errorf("session %q tab id %q: teardown of the closed tab is still unconfirmed: %w", i.Title, tabID, err)
+			}
+			continue
+		}
+		i.mu.Lock()
+		i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, &h)
+		i.touchLocked()
+		i.mu.Unlock()
+	}
+	return first
 }
 
 // stageCleanupLocked records, in the SAME critical section that removes the tab,
