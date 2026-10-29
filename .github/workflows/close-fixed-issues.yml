@@ -1,0 +1,36 @@
+name: Close fixed issues
+
+# Closes the issues a merged PR lists after Fixes/Closes/Resolves (lists and
+# ranges included), which GitHub's own linking only half does. Merges made by the
+# auto-merger use GITHUB_TOKEN and fire no pull_request event, so the merger runs
+# the same script itself (.github/scripts/close-fixed-issues.js); this workflow
+# covers merges made by a person or a PAT.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  close:
+    name: Close fixed issues
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      # The script comes from master, never from the PR head.
+      - uses: actions/checkout@v6
+        with:
+          ref: master
+      - name: Close issues listed after a closing keyword
+        uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        with:
+          script: |
+            await require('./.github/scripts/close-fixed-issues.js').run({ github, core, context });

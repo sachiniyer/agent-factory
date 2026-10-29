@@ -34,6 +34,7 @@ const MASTER_WORKFLOWS = [
 ];
 const DOCS_WORKFLOW = "docs.yml";
 const { latestMacosVerdict } = require("./macos-verdict.js");
+const { closeFixedIssues } = require("./close-fixed-issues.js");
 
 // Phase 1: cheap, for every open master PR. No review threads here.
 const CANDIDATE_QUERY = `
@@ -656,6 +657,16 @@ async function mergeAll({ github, core, context }) {
       lastSha = res.data.sha;
       core.notice(`Merged #${pr.number} at ${pr.headRefOid} -> ${lastSha}`);
       await deleteMergedBranch({ github, core, owner, repo, pr, defaultBranch: BASE });
+      // GITHUB_TOKEN merges fire no pull_request event, so close-fixed-issues.yml
+      // never sees them; a PAT merge does fire it, so only close here without one.
+      if (!usingPat) {
+        try {
+          const { data } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+          await closeFixedIssues({ github, core, owner, repo, pr: pr.number, title: data.title, body: data.body });
+        } catch (error) {
+          core.warning(`#${pr.number}: could not close its fixed issues: ${error.message}`);
+        }
+      }
     } catch (error) {
       // 405/409: head moved, conflict from an earlier merge in this batch, or a
       // protection rule. The next run re-evaluates from fresh state.
