@@ -393,7 +393,7 @@ func (w *sandboxWorkspace) callbackReverseForward() (string, string) {
 	remote := w.CallbackSocketPath()
 	// "remote:local" is ssh's -R grammar, so a colon (or whitespace) in either
 	// path would be re-parsed as part of it.
-	if w.SessionDir == "" || !strings.HasPrefix(remote, "/") || len(remote) > sandboxSocketPathMax ||
+	if w.SessionDir == "" || !strings.HasPrefix(remote, "/") || filepath.Clean(remote) != remote || len(remote) > sandboxSocketPathMax ||
 		strings.ContainsAny(remote, ": \t\n") {
 		return fail("the session directory's socket path is unusable on the sandbox host")
 	}
