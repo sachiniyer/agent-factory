@@ -594,9 +594,12 @@ func (p *dockerProvisioner) runContainer() error {
 		// shared with every other provisioning step (#5382).
 		return fmt.Errorf("backend=docker: `docker run` failed for image %q: %s: %w", p.image, strings.TrimSpace(string(out)), err)
 	}
-	id := strings.TrimSpace(string(out))
+	// The output is stdout and stderr interleaved: when the image is not local
+	// docker writes "Unable to find image…", "Pulling from…" and layer progress
+	// to stderr before printing the id (#4329). Take the id line, never the blob.
+	id := parseCreatedContainerID(out)
 	if id == "" {
-		return fmt.Errorf("backend=docker: `docker run` returned no container id (output: %q)", string(out))
+		return fmt.Errorf("backend=docker: `docker run` exited successfully but printed no container id (output: %q)", strings.TrimSpace(string(out)))
 	}
 	p.containerID = id
 	return nil
@@ -805,15 +808,18 @@ func (p *dockerProvisioner) shortID() string {
 // of the whole blob can't be trusted on the error path, but a line that is nothing
 // but hex digits is unambiguously the id (docker's error lines carry words, spaces
 // and colons). Returns "" when no such line is present — docker failed before
-// creating anything — leaving containerID empty so nothing is reaped.
+// creating anything — leaving containerID empty so nothing is reaped. The id is
+// printed after any image-pull progress, so the last such line wins; progress
+// can end in a bare hex line only if it is not the id's own output.
 func parseCreatedContainerID(out []byte) string {
+	id := ""
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if len(line) >= 12 && isHexString(line) {
-			return line
+			id = line
 		}
 	}
-	return ""
+	return id
 }
 
 // isHexString reports whether every rune of s is a hex digit. A full docker
