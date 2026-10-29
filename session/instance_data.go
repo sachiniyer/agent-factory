@@ -316,7 +316,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		data.Worktree.RepoPath = i.repoIdentityPath
 	}
 
-	return data
+	return noteHostLayout(data)
 }
 
 // RestoreRelocationRecoveryOriginals reverses the rollback-safe ownership and
@@ -383,7 +383,7 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
-	data = data.RestoreArchiveRollbackFence()
+	data = noteHostLayout(data.RestoreArchiveRollbackFence())
 	// ForStorage publishes an ordinary sandbox row's RuntimeCleanup under a
 	// projected RuntimeCleanupStateUnknown=true so a binary rolled back to the
 	// preceding release rebuilds and preserves the handle instead of loading the
