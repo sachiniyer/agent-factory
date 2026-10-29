@@ -265,3 +265,36 @@ func TestWorktreeListWithoutZIsDistrustedWhenAPathSpansLines(t *testing.T) {
 	assert.True(t, ok)
 	assert.Len(t, trees, 2)
 }
+
+// #6012 review: if refs/stash is gone but its reflog survives, the stash entries
+// still exist and teardown destroys them. That is never a zero.
+func TestMeasureWorkspaceAtAStashReflogOutlivingItsRefIsNotZero(t *testing.T) {
+	clone, checkout := cloneWithLinkedCheckout(t)
+	require.NoError(t, os.WriteFile(filepath.Join(checkout, "tracked"), []byte("t"), 0o644))
+	wsGit(t, checkout, "add", "tracked")
+	wsGit(t, checkout, "-c", "user.name=t", "-c", "user.email=t@t", "stash", "push", "-q")
+	common := strings.TrimSpace(string(mustOut(t, exec.Command("git", "-C", checkout, "rev-parse", "--git-common-dir"))))
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(checkout, common)
+	}
+	ref := filepath.Join(common, "refs", "stash")
+	if _, err := os.Stat(ref); err != nil {
+		t.Skip("refs/stash is not a loose file on this ref backend")
+	}
+	require.NoError(t, os.Remove(ref), "delete the ref, keep its reflog")
+	require.FileExists(t, filepath.Join(common, "logs", "refs", "stash"), "premise: the reflog survives")
+
+	f := MeasureWorkspaceAt(checkout, clone)
+	assert.True(t, f.Stashes > 0 || contains(f.Unverified, "stashes"),
+		"a surviving stash reflog must not read as a verified zero: %+v", f)
+	assert.Contains(t, f.Unverified, "stashes")
+}
+
+func contains(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}

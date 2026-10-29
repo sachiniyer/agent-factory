@@ -307,8 +307,8 @@ func (m *repoMeasure) measureBranches(trees []linkedWorktree) {
 // reflog files or packed-refs, so a file check reports a verified zero there while
 // the stash is intact. Absence is concluded only when every question git is asked
 // agrees: `rev-parse --verify --quiet refs/stash` says no such ref (exit 1, no
-// output), `for-each-ref` lists nothing without a warning, and `stash list` is
-// empty and succeeds. A ref that exists but whose reflog or objects git cannot read
+// output), `for-each-ref` lists nothing without a warning, `reflog exists` says no
+// reflog entry survives, and `stash list` is empty and succeeds. A ref that exists but whose reflog or objects git cannot read
 // makes the read fail, and that is unknown, never zero.
 func (m *repoMeasure) measureStash() {
 	_, _, code, err := runWorkspaceGitStatus(m.dir, "rev-parse", "--verify", "--quiet", "refs/stash")
@@ -335,6 +335,18 @@ func (m *repoMeasure) measureStash() {
 	if strings.TrimSpace(string(refs)) != "" {
 		present = true
 	}
+	// The ref can be gone while its reflog survives, and the reflog is where the
+	// stash entries live: `reflog exists` asks git (either ref backend) whether any
+	// entry is left, which neither the ref lookups above nor `stash list` can tell.
+	_, _, ecode, err := runWorkspaceGitStatus(m.dir, "reflog", "exists", "refs/stash")
+	if err != nil || (ecode != 0 && ecode != 1) {
+		m.unverified("stashes")
+		return
+	}
+	orphanedReflog := ecode == 0 && !present
+	if ecode == 0 {
+		present = true
+	}
 	list, _, lcode, err := runWorkspaceGitStatus(m.dir, "stash", "list", "--format=%H")
 	n := countLines(list)
 	if err != nil || lcode != 0 {
@@ -345,8 +357,17 @@ func (m *repoMeasure) measureStash() {
 		m.facts.Stashes = n
 		return
 	}
+	if orphanedReflog {
+		// The reflog survives its ref: the entries are still recoverable work that
+		// teardown destroys, but git no longer lists them as a stash. Count them from
+		// the reflog and call the fact unknown rather than a clean zero.
+		if out, rerr := runWorkspaceGit(m.dir, "reflog", "show", "--format=%H", "refs/stash"); rerr == nil {
+			n = max(n, countLines(out))
+		}
+		m.unverified("stashes")
+	}
 	if present && n == 0 {
-		// The ref is there and the list is empty: git is contradicting itself.
+		// A ref or reflog is there and the list is empty: git is contradicting itself.
 		m.unverified("stashes")
 		n = 1
 	}
