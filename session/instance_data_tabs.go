@@ -1,5 +1,7 @@
 package session
 
+import "github.com/sachiniyer/agent-factory/session/tmux"
+
 // tabDataLocked projects one roster tab into its serializable TabData — the row
 // shape InstanceData.Tabs carries and the agent-server's /v1/agent/tabs roster
 // shares (#5571 W4.3), so the snapshot projection and the wire roster cannot
@@ -31,6 +33,102 @@ func (i *Instance) TabsData() []TabData {
 	out := make([]TabData, 0, len(i.Tabs))
 	for _, tab := range i.Tabs {
 		out = append(out, i.tabDataLocked(tab))
+	}
+	return out
+}
+
+// restoreLocalTabs rebuilds a local instance's tab list from persisted data.
+//
+//   - New format (data.Tabs present): each tab is reconstructed in order, and
+//     any tab with a persisted tmux name is bound to that exact session so
+//     LocalBackend.Start can reconnect it across a restart.
+//   - Legacy format (no data.Tabs, written before #930 PR 2): synthesize the
+//     single Agent tab from the legacy TmuxName/Program — keeping the EXACT
+//     legacy tmux name so an existing live agent session survives the upgrade.
+//     No shell tab is synthesized: terminal tabs are on-demand only (#1100).
+func restoreLocalTabs(instance *Instance, data InstanceData) {
+	if len(data.Tabs) > 0 {
+		for idx, td := range data.Tabs {
+			kind := tabKindForData(td.Kind)
+			var ts *tmux.TmuxSession
+			if td.TmuxName != "" {
+				ts = restoreTmuxSession(td.TmuxName, tabProgram(kind, td.Command, data.Program))
+				// Keep the restored handle consistent with a fresh process
+				// tab's: the flag only matters if Start is ever invoked, and
+				// after #4479 nothing invokes it — but the invariant costs
+				// nothing and keeps a future Start caller honest.
+				if ts != nil && kind == TabKindProcess {
+					ts.SetRemainOnExit()
+				}
+			}
+			var conversation AgentConversationData
+			if td.Conversation != nil {
+				conversation = *td.Conversation
+			} else if idx == 0 && data.AgentConversation != nil {
+				conversation = *data.AgentConversation
+			}
+			// Backfill a stable id for a legacy tab persisted before #1738 (no id):
+			// mint one now so the restored tab is addressable by a stable id from
+			// this load forward (rollforward, mirroring the InstanceData.ID backfill).
+			id := td.ID
+			if id == "" {
+				id = newTabID()
+			}
+			var handoffs []AgentHandoff
+			if len(td.Handoffs) > 0 {
+				handoffs = append([]AgentHandoff(nil), td.Handoffs...)
+			}
+			instance.Tabs = append(instance.Tabs, &Tab{
+				ID:                            id,
+				Name:                          td.Name,
+				Kind:                          kind,
+				Command:                       td.Command,
+				URL:                           td.URL,
+				Proposal:                      td.Proposal,
+				PushMode:                      td.PushMode,
+				Conversation:                  conversation,
+				Handoffs:                      handoffs,
+				Exit:                          tabExitFromData(td.Exit),
+				gen:                           td.Gen,
+				tmux:                          ts,
+				accountScope:                  td.AccountScope,
+				accountScopeProvenanceUnknown: idx > 0 && kind.HasTmux() && ts != nil && siblingScopeUnknown(data.Account, td.AccountScope),
+			})
+		}
+		return
+	}
+
+	// Legacy single-session format: the agent tab keeps its exact legacy name.
+	// Reconstruction is not new activity. Build the unpublished instance directly,
+	// just as the current-format loop above does, without invoking mutators.
+	var ts *tmux.TmuxSession
+	if data.TmuxName != "" {
+		ts = restoreTmuxSession(data.TmuxName, data.Program)
+	} else {
+		ts = tmux.NewTmuxSession(data.Title, data.Program)
+	}
+	instance.Tabs = []*Tab{newAgentTab(ts)}
+	if data.AgentConversation != nil {
+		instance.Tabs[0].Conversation = *data.AgentConversation
+	}
+}
+
+// metadataTabsFrom selects the persisted rows whose kind needs nothing from the
+// workspace, for a backend whose workspace did not survive the restart.
+//
+// The agent row is excluded: the backend seeds its own on Launch, bound to the
+// live runtime, and a copied record would be a second one with no runtime behind
+// it. Every other kind is dropped as before — they describe a worktree and a PTY
+// that no longer exist, so a row for them would be an entry every later operation
+// fails on.
+func metadataTabsFrom(data InstanceData) []TabData {
+	var out []TabData
+	for _, td := range data.Tabs {
+		kind := tabKindForData(td.Kind)
+		if kind == TabKindAgent || TabKindRequires(kind) != TabNeedsMetadataOnly {
+			continue
+		}
+		out = append(out, td)
 	}
 	return out
 }

@@ -198,3 +198,26 @@ func (i *Instance) closeOffBoxTab(tab *Tab) error {
 	}
 	return nil
 }
+
+// ReconcileTabManagementSnapshot adopts the daemon's projected tab-management
+// verdict onto a client row, reporting whether it changed. nil (an older daemon)
+// leaves the row's own derivation in force (#5953).
+func (i *Instance) ReconcileTabManagementSnapshot(v *bool) bool {
+	if v == nil {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.projectedTabManagement == *v {
+		return false
+	}
+	// Report a change only when the capability the TUI renders from differs: a
+	// local row already manages tabs, so recording the projection is invisible.
+	before := i.capabilitiesLocked().TabManagement
+	i.projectedTabManagement = *v
+	if i.capabilitiesLocked().TabManagement == before {
+		return false
+	}
+	i.touchLocked()
+	return true
+}

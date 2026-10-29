@@ -537,6 +537,7 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 	var coded codedError
 	if errors.As(err, &coded) {
 		env := apiproto.FailureWithCode(err.Error(), coded.APIErrorCode())
+		env.Error.StoredID = apiproto.StoredID(err)
 		// An error can carry data the client needs to recover, such as the three
 		// versions of a conflicting proposal save.
 		var withData interface{ EnvelopeData() any }

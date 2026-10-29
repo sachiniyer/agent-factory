@@ -9,8 +9,10 @@ A session's **backend** decides *where* its workspace and agent run. Every
 backend exposes the same session surface — attach, preview, prompt delivery, the
 live PTY stream — so the TUI, CLI, and daemon drive a containerised session much
 like a local one. Tab admission follows what each kind needs: shell/process tabs
-need a local PTY and process, and VS Code needs a daemon-side worktree/editor, so
-those remain local-only. A metadata-only web tab spawns neither and can be added
+need a local PTY and process, so those remain local-only; a VS Code tab on an
+off-box session opens the editor running on the session's host, rooted at the
+workspace and relayed through the agent-server (code-server or openvscode-server
+must be installed there; af detects it and never installs it). A metadata-only web tab spawns neither and can be added
 to an off-box session (docker, ssh, sandbox, hook) when its target is an external
 HTTPS URL, or a loopback address (including `--port`): the daemon's web-tab proxy
 reaches the workspace's own `127.0.0.1:<port>` through the agent-server's port
@@ -780,7 +782,7 @@ server's authed endpoint (`{url, token}`); the daemon then
 drives the session over that `ws://` stream — so a hook session matches a local,
 docker, or ssh one on attach, type, resize, preview, archive/restore, and kill.
 Like the other off-box backends it admits web tabs (external HTTPS, or loopback via the port relay); shell,
-process, and VS Code tabs need a daemon-side worktree.
+and process tabs need a daemon-side worktree; a VS Code tab opens the editor on the session's host.
 
 ```json
 {
@@ -932,8 +934,15 @@ admitted off-box). A **Lost** sandbox session (one whose
 sandbox answered that its agent is gone) is reachable, so recovery **relaunches
 the agent in place**: the sandbox's agent-server stops the agent (if it is still
 running) and starts it again in its existing workspace with the provider's resume,
-rebuilding the worktree on the recorded branch if it was deleted. The branch, the
-tree and any uncommitted work are otherwise untouched, and nothing is pushed,
+rebuilding the worktree if it was deleted: on the recorded branch when that
+branch still exists (its tip is kept), or — when the branch is gone too — by
+recreating it from the recorded base commit (falling back to the origin default
+branch, then `HEAD`), which is only attempted when the agent's exact recorded
+conversation can be resumed; otherwise the rebuild is refused and the session
+stays Lost. A rebuilt worktree runs the repository's `post_worktree_commands`
+again, so installs or builds with side effects repeat on that recovery. When the
+worktree still exists, the branch, the tree and any uncommitted work are untouched
+and no hooks re-run. Either way nothing is pushed,
 reaped, re-cloned or re-provisioned. The same relaunch serves `retry-limit` on a
 dead agent. A sandbox built before the relaunch route existed (it advertises the
 `relaunch` feature on `/v1/health`) falls back to replacing the sandbox: recovery

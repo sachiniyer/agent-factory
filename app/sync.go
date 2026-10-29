@@ -705,6 +705,9 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcilePlacementSnapshot(d.Placement) {
 		changed = true
 	}
+	if inst.ReconcileTabManagementSnapshot(d.TabManagement) {
+		changed = true
+	}
 	// A combined agent+account handoff replaces the process behind the same row
 	// and tmux address. Reconcile every source CurrentAgentName consults before
 	// later action predicates choose which agent's accounts to load.

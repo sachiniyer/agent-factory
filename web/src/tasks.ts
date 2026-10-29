@@ -1076,8 +1076,12 @@ function taskFormModal(opts: {
   hostSelect.setAttribute("aria-describedby", hostHint.id);
   const keepHost = opts.seed?.host ?? "";
   let hostOptions: HostOption[] = [];
+  // The seed only decides the selection until the user touches the field: after
+  // that the current value wins even when it is "" (Repo backend), so clearing a
+  // task's host is not undone by the next render (#5967).
+  let hostTouched = false;
   const renderHosts = (): void => {
-    const previous = hostSelect.value || keepHost;
+    const previous = hostSelection(hostTouched, hostSelect.value, keepHost);
     hostSelect.replaceChildren(h("option", { value: "" }, "Repo backend"));
     for (const o of hostOptions) {
       const opt = h("option", { value: o.name }, o.status === "available" ? o.name : `${o.name} — unavailable`);
@@ -1095,7 +1099,10 @@ function taskFormModal(opts: {
   const hostField = field("Host", hostSelect);
   hostField.append(hostHint);
   renderHosts();
-  hostSelect.addEventListener("change", renderHosts);
+  hostSelect.addEventListener("change", () => {
+    hostTouched = true;
+    renderHosts();
+  });
   let hostSeq = 0;
   const loadHostsFor = (repoPath: string): void => {
     const seq = ++hostSeq;
@@ -1321,4 +1328,11 @@ export function editTaskModal(
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });
+}
+
+/** Which host a re-rendered task form selects (#5967). The seed decides only until
+ *  the user touches the field; after that the current value wins even when it is
+ *  "" (Repo backend), so an explicit clear is never replaced by the seeded host. */
+export function hostSelection(touched: boolean, current: string, seed: string): string {
+  return touched ? current : seed;
 }
