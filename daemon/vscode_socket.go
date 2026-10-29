@@ -199,8 +199,11 @@ func secureVSCodeSocket(socketPath string) error {
 // protecting an openvscode-server socket, whose --socket-path has no mode flag.
 // Together with the 0600 socket this gives the editor exactly the posture of the
 // daemon's own control socket: reachable by the owning user, nobody else.
-func vscodeSocketDir() (string, error) {
-	sockDir, err := vscodeSocketDirPath()
+func vscodeSocketDir() (string, error) { return vscodeSocketDirIn("") }
+
+// vscodeSocketDirIn is vscodeSocketDir for one owner namespace.
+func vscodeSocketDirIn(ns string) (string, error) {
+	sockDir, err := vscodeSocketDirPathIn(ns)
 	if err != nil {
 		return "", err
 	}
@@ -216,7 +219,23 @@ func vscodeSocketDir() (string, error) {
 // vscodeSocketDirPath resolves the socket directory without creating it. Cleanup
 // discovery uses this form so a daemon shutting down because its AF home was
 // deleted cannot resurrect that home merely by checking for persisted editors.
-func vscodeSocketDirPath() (string, error) {
+func vscodeSocketDirPath() (string, error) { return vscodeSocketDirPathIn("") }
+
+// vscodeNamespaceDirName is the directory name of an owner namespace. The empty
+// namespace is the daemon's own (vscodeSocketDirName); an agent-server runs in one
+// of its own (W5.4), so the records and sockets of the editors it starts live in a
+// directory the daemon's shutdown sweep, orphan sweep and `af stop` never open, and
+// the daemon's live in one the agent-server never opens. The two are disjoint by
+// construction: no pattern, pid or name match can cross them, because neither
+// ever lists the other's directory.
+func vscodeNamespaceDirName(ns string) string {
+	if ns == "" {
+		return vscodeSocketDirName
+	}
+	return vscodeSocketDirName + "-" + ns
+}
+
+func vscodeSocketDirPathIn(ns string) (string, error) {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
@@ -242,7 +261,7 @@ func vscodeSocketDirPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolving the af home %q to an absolute path failed: %w", dir, err)
 	}
-	return filepath.Join(abs, vscodeSocketDirName), nil
+	return filepath.Join(abs, vscodeNamespaceDirName(ns)), nil
 }
 
 // vscodeSocketNamePattern matches the socket names vscodeSocketPath mints, and
@@ -379,8 +398,11 @@ func isVSCodeSocketFile(dir string, e os.DirEntry) bool {
 // point anywhere (a deep temp dir under CI), and an over-long path fails inside
 // net.Listen as a bare "invalid argument" that names nothing. Fail early instead,
 // naming the directory the operator can move.
-func vscodeSocketPath(key string) (string, error) {
-	dir, err := vscodeSocketDir()
+func vscodeSocketPath(key string) (string, error) { return vscodeSocketPathIn("", key) }
+
+// vscodeSocketPathIn is vscodeSocketPath for one owner namespace.
+func vscodeSocketPathIn(ns, key string) (string, error) {
+	dir, err := vscodeSocketDirIn(ns)
 	if err != nil {
 		return "", err
 	}
@@ -435,7 +457,7 @@ func vscodeSocketKeyPrefix(key string) string {
 // uncertain answer below keeps the socket.
 func (v *vscodeSupervisor) sweepAbandonedSockets() {
 	v.sweepOnce.Do(func() {
-		dir, err := vscodeSocketDir()
+		dir, err := vscodeSocketDirIn(v.namespace)
 		if err != nil {
 			log.WarningLog.Printf("vscode: %v", err)
 			return

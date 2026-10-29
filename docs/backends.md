@@ -9,8 +9,10 @@ A session's **backend** decides *where* its workspace and agent run. Every
 backend exposes the same session surface — attach, preview, prompt delivery, the
 live PTY stream — so the TUI, CLI, and daemon drive a containerised session much
 like a local one. Tab admission follows what each kind needs: shell/process tabs
-need a local PTY and process, and VS Code needs a daemon-side worktree/editor, so
-those remain local-only. A metadata-only web tab spawns neither and can be added
+need a local PTY and process, so those remain local-only; a VS Code tab on an
+off-box session opens the editor running on the session's host, rooted at the
+workspace and relayed through the agent-server (code-server or openvscode-server
+must be installed there; af detects it and never installs it). A metadata-only web tab spawns neither and can be added
 to an off-box session (docker, ssh, sandbox, hook) when its target is an external
 HTTPS URL, or a loopback address (including `--port`): the daemon's web-tab proxy
 reaches the workspace's own `127.0.0.1:<port>` through the agent-server's port
@@ -780,7 +782,7 @@ server's authed endpoint (`{url, token}`); the daemon then
 drives the session over that `ws://` stream — so a hook session matches a local,
 docker, or ssh one on attach, type, resize, preview, archive/restore, and kill.
 Like the other off-box backends it admits web tabs (external HTTPS, or loopback via the port relay); shell,
-process, and VS Code tabs need a daemon-side worktree.
+and process tabs need a daemon-side worktree; a VS Code tab opens the editor on the session's host.
 
 ```json
 {
