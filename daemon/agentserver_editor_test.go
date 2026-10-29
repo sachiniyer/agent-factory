@@ -16,6 +16,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -258,4 +259,25 @@ func TestDaemonShutdownSweepNeverReapsAnAgentServersEditorAndViceVersa(t *testin
 		t.Fatal("the agent-server's own sweep did not reap its editor, so the test proves nothing")
 	}
 	require.True(t, daemonEditor2.alive(), "an agent-server's sweep reaped the host daemon's editor")
+}
+
+// The product, not just the harness, must fit a real macOS af home: the editor
+// socket lives under ~/.agent-factory, and darwin's sun_path ceiling is 103 bytes
+// (sockpath.Portable). The names are hashed to a fixed width, so only the home
+// varies; this pins the arithmetic for realistic homes with headroom, for both the
+// daemon's editor and a W5.4 agent-server's.
+func TestEditorSocketPathFitsARealisticMacHomeWithHeadroom(t *testing.T) {
+	const headroom = 12 // bytes to spare below the darwin ceiling
+	hs := &headlessServer{inst: &session.Instance{ID: "0123456789abcdef0123456789abcdef"}}
+	nonce := [4]byte{0xde, 0xad, 0xbe, 0xef}
+	for _, home := range []string{
+		"/Users/abcdefghijklmnopqrst/.agent-factory", // a 20-character macOS user
+		"/Users/sachin/.agent-factory",
+	} {
+		for _, ns := range []string{"", hs.editorNamespace()} {
+			path := filepath.Join(home, vscodeNamespaceDirName(ns), vscodeSocketFileName("workspace-"+hs.inst.ID, nonce))
+			assert.LessOrEqual(t, len(path), sockpath.Portable-headroom,
+				"%q (%d bytes) must leave %d bytes below the darwin limit %d", path, len(path), headroom, sockpath.Portable)
+		}
+	}
 }
