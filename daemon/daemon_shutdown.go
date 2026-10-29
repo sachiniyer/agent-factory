@@ -2,9 +2,53 @@ package daemon
 
 import (
 	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
+
+// drainJoinBudget bounds how long drainDaemon waits for joined goroutines (the
+// poll pass, a deferred orphan sweep, the update driver's release lookup, a root
+// create, a mutation's targeted persist) after the first checkpoint is durable.
+// It sits well inside stopDaemonGrace (5s): the stopper SIGKILLs at the grace, so
+// a goroutine that can block longer than that must cost at most its own
+// in-flight work, never the final save (#5846).
+var drainJoinBudget = 2 * time.Second
+
+// checkpointBeforeJoin writes the durable checkpoint that precedes the join (#5846).
+// It is a plain SaveInstances of the in-memory view, the same write the poll loop
+// makes: it does not seal archive admission, so it changes nothing about what the
+// still-running joined goroutines may do. It is skipped when the home directory
+// is gone (see homeDeleted). A var so a test can observe the ordering.
+var checkpointBeforeJoin = func(m *Manager) error {
+	if m.homeDeleted.Load() {
+		return nil
+	}
+	return m.storage.SaveInstances(m.InstancesSnapshot())
+}
+
+// joinWithin runs join and reports whether it returned inside d. A join that does
+// not return is abandoned, not cancelled: its goroutine keeps running until the
+// process exits.
+func joinWithin(d time.Duration, join func()) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		join()
+	}()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
+// markHomeDeleted records that the AF home is gone, so no checkpoint may be
+// written: saving would recreate a skeleton of the deleted home.
+func (m *Manager) markHomeDeleted() { m.homeDeleted.Store(true) }
 
 // drainDaemon quiesces the daemon's externally reachable control planes and
 // daemon-owned writers before the terminal checkpoint. It closes mutation
@@ -22,7 +66,7 @@ func drainDaemon(
 	controlClosed *bool,
 	stopCh chan struct{},
 	wg *sync.WaitGroup,
-) {
+) (joined bool) {
 	// Close mutation admission, then close and JOIN both externally reachable
 	// control planes before taking the terminal snapshot. Closing only their
 	// listeners is insufficient: an ArchiveSession (or any other writer) that
@@ -55,27 +99,38 @@ func drainDaemon(
 		}
 	}
 
+	// Durable checkpoint BEFORE anything is joined (#5846). Admission is closed and
+	// both control planes are joined, so nothing user-driven is in flight: this
+	// captures every mutation made up to now. The joins below can then be bounded
+	// without ever putting the checkpoint behind a goroutine that cannot be
+	// cancelled. Ordering argument: a join that completes is followed by the
+	// final save (daemon.go), which is a superset of this one; a join that does
+	// not complete is abandoned and this checkpoint stands, losing at most that
+	// goroutine's in-flight work, which is never durable until its own persist.
+	if err := checkpointBeforeJoin(m); err != nil {
+		log.ErrorLog.Printf("failed to write the pre-drain checkpoint: %v", err)
+	}
+
 	// Stop and join daemon-owned writers too. The lifecycle gate above also
 	// refuses any scheduler/watcher delivery that reaches the closed transports
 	// during their deferred teardown.
 	close(stopCh)
-	wg.Wait()
-	// The poll is out, so no new root-program inspection can start. Those reads
-	// are side-effect-free and may be blocked forever in uncancellable filesystem
-	// I/O: discard any late result, but never make shutdown wait for the reader.
-	// Active result consumers (notably tests) join explicitly.
-	m.abandonRootProgramDriftInspectionsForShutdown()
-	// The poll loop is out, so no further root-agent create can be launched; wait
-	// for one that already is (#3721). JOINED, never cancelled — a create torn
-	// down mid-provision is the half-created session the always-ensure loop has no
-	// way to reconcile — and BEFORE the final SaveInstances below, so a create
-	// that lands late is persisted rather than overwritten by a save that predates
-	// it. This is also what the poll goroutine's own wg.Wait did while the create
-	// still ran on it.
-	m.waitRootAgentCreatesForShutdown()
-	// RPCs and the poll are gone, and root creates (which can launch a final
-	// conversation capture) are joined. No detached durable writer may now be
-	// admitted; let pre-destructive and permanently stalled work stand down, and
-	// join any mutation already admitted through its targeted persist.
-	m.stopAndWaitBackgroundMutationsForShutdown()
+	joined = joinWithin(drainJoinBudget, func() {
+		wg.Wait()
+		// The poll loop is out, so no further root-agent create can be launched; wait
+		// for one that already is (#3721). JOINED, never cancelled — a create torn
+		// down mid-provision is the half-created session the always-ensure loop has
+		// no way to reconcile — and BEFORE the final SaveInstances, so a create that
+		// lands late is persisted rather than overwritten by a save that predates it.
+		m.abandonRootProgramDriftInspectionsForShutdown()
+		m.waitRootAgentCreatesForShutdown()
+		// RPCs and the poll are gone, and root creates are joined. No detached durable
+		// writer may now be admitted; let pre-destructive and permanently stalled work
+		// stand down, and join any mutation already admitted through its targeted persist.
+		m.stopAndWaitBackgroundMutationsForShutdown()
+	})
+	if !joined {
+		log.WarningLog.Printf("shutdown join exceeded %s; keeping the pre-drain checkpoint and skipping the final save so a wedged goroutine cannot hold exit past the SIGKILL grace (#5846)", drainJoinBudget)
+	}
+	return joined
 }
