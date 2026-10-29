@@ -48,6 +48,10 @@ type Steps interface {
 	// clone) and returns its workspace dir plus a reap that removes the
 	// half-built or unwanted sandbox by its persisted identity.
 	Provision(ctx context.Context, s Session, h Host, snap *Snapshot) (workspace string, reap func() error, err error)
+	// VerifyDestination runs snap.VerifyCommand in the destination workspace and
+	// returns its output; the orchestrator compares it with the snapshot's tree
+	// (Snapshot.CheckTree) before anything else happens to the move.
+	VerifyDestination(ctx context.Context, s Session, h Host, snap *Snapshot) (string, error)
 	// SyncAccount is the W7.3 seam (account sync + credential push, W7.8).
 	SyncAccount(ctx context.Context, s Session, h Host) error
 	// StartAgent starts the agent in the sandbox. It resumes the same
@@ -85,6 +89,9 @@ type Plan struct {
 // probe of the worktree.
 func Describe(ctx context.Context, s Session, h Host, opt Options) (Plan, error) {
 	cmd := firstNonEmpty(h.MoveCmd, opt.DefaultMoveCmd)
+	if err := CheckShallow(ctx, s.Worktree); err != nil {
+		return Plan{}, err
+	}
 	out, err := git(ctx, s.Worktree, nil, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return Plan{}, err
@@ -98,6 +105,7 @@ func Describe(ctx context.Context, s Session, h Host, opt Options) (Plan, error)
 		steps = append(steps, "move script: run on this machine")
 	}
 	steps = append(steps,
+		"verify: the destination's tree equals the snapshot's before the source is released",
 		"sync account and credentials (not implemented yet: W7.3/W7.8)",
 		"start the agent in the sandbox (conversation resume: not implemented yet: W7.2)",
 		"switch the session row to the sandbox backend",
@@ -140,6 +148,16 @@ func Run(ctx context.Context, st Steps, s Session, h Host, opt Options) (err err
 
 	spec := ScriptSpec{SessionID: s.ID, Title: s.Title, Branch: s.Branch, SourceWorktree: s.Worktree, Host: h.Name, DestWorkspace: workspace, Account: s.Account}
 	if err = RunScript(ctx, firstNonEmpty(h.MoveCmd, opt.DefaultMoveCmd), spec, h); err != nil {
+		return err
+	}
+	// The destination must hold exactly what was snapshotted before the agent
+	// starts there or the source is released.
+	got, verr := st.VerifyDestination(ctx, s, h, snap)
+	if verr != nil {
+		err = fmt.Errorf("verify destination: %w", verr)
+		return err
+	}
+	if err = snap.CheckTree(got); err != nil {
 		return err
 	}
 	if err = st.SyncAccount(ctx, s, h); err != nil {

@@ -399,6 +399,10 @@ type Instance struct {
 	// runtime cleanup handle, which a teardown clears: restore and recovery
 	// re-provision from this so a pick never silently moves to another machine.
 	Host string `json:"host,omitempty"`
+	// branchUnpushed: Branch is the name af chose at create and nothing has
+	// published it, so it is not a restore checkpoint (#5972). Persisted as
+	// BranchUnpushed; false for any row an older af wrote.
+	branchUnpushed bool
 	// archivedWorkspace records where this archived off-box session's work lives
 	// (#5571 W8.5); nil for a live row or one archived before the field.
 	archivedWorkspace *ArchivedWorkspaceData
@@ -637,6 +641,16 @@ type Instance struct {
 	// spawn must reserve against both in the same critical section. It is
 	// deliberately NOT part of the roster: nothing renders or respawns from it.
 	pendingTabCleanup []TabCleanupData
+
+	// pendingRemoteClose is pendingTabCleanup for off-box tabs: closes the
+	// sandbox never confirmed (#5957). Persisted with the session; retried by
+	// ReconcileOffBoxTabs. Guarded by i.mu.
+	pendingRemoteClose []RemoteTabCleanupData
+	// tabCreateIntents holds the minted ids of remote creates whose outcome was
+	// uncertain, keyed by request shape, so a retry reuses the id (#5958).
+	// Guarded by i.mu; in memory — a restart before the retry loses the mapping,
+	// and the sandbox's own roster then still holds the tab it started.
+	tabCreateIntents map[string]*tabCreateIntent
 
 	// tabSpawnClaims reserves the FULL tmux session names of sibling spawns
 	// still in flight — derived under i.mu, released once the append resolves

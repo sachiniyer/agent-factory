@@ -982,18 +982,6 @@ func (hs *headlessServer) WorkspaceFacts(_ struct{}, resp *session.WorkspaceFact
 	if hs.inst == nil {
 		return fmt.Errorf("this agent-server has no workspace")
 	}
-	*resp = session.MeasureWorkspace(headlessWorkspaceDir(hs.inst))
+	*resp = session.MeasureWorkspaceAt(hs.inst.GetWorktreePath(), hs.inst.Path)
 	return nil
-}
-
-// headlessWorkspaceDir is the directory the session's work lives in: the agent's
-// own linked worktree, which is what a kill destroys. inst.Path is the clone root
-// the worktree hangs off, and measuring it misses the checkout's uncommitted
-// changes and reports a deleted worktree as present. The root is the fallback for
-// an instance that has no worktree recorded.
-func headlessWorkspaceDir(inst *session.Instance) string {
-	if wt := inst.GetWorktreePath(); wt != "" {
-		return wt
-	}
-	return inst.Path
 }
