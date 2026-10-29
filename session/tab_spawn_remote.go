@@ -59,6 +59,9 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 			id = i.intentIDLocked(kind, command, requestedName)
 		}
 		if refused, existing, found := i.tabIDCollisionLocked(id, kind, command); found {
+			// The retry resolved to a tab already on the roster (adopted by the
+			// sweep): it has joined the one execution, so the intent is spent.
+			i.consumeIntentLocked(id, kind, command, requestedName)
 			i.mu.Unlock()
 			return existing, refused
 		}

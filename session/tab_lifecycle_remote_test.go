@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -427,4 +428,87 @@ func TestCloseTabByIDIfGenFencesTheIncarnation(t *testing.T) {
 	require.NoError(t, inst.CloseTabByIDIfGen(tab.ID, tab.gen))
 	_, still = inst.TabIndexByID(tab.ID)
 	assert.False(t, still)
+}
+
+// Property 1 (execute at most once) across every interleaving of a caller's
+// retry with the status sweep adopting the tab the first, unanswered attempt
+// started (#5996). The intent that holds the minted id must survive the
+// adoption, or a late retry mints a new id and runs the command again.
+func TestRemoteCreateRetryVersusSweepRunsOnce(t *testing.T) {
+	lostCreate := func(t *testing.T) (*lifecycleSandbox, *Instance) {
+		sb, inst := newLifecycleSandbox(t)
+		sb.mu.Lock()
+		sb.dropCreate = true
+		sb.mu.Unlock()
+		_, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+		require.Error(t, err, "the unanswered create is reported")
+		require.Equal(t, 1, sb.execs("deploy.sh"))
+		sb.mu.Lock()
+		sb.dropCreate = false
+		sb.mu.Unlock()
+		return sb, inst
+	}
+	settled := func(t *testing.T, sb *lifecycleSandbox, inst *Instance) {
+		t.Helper()
+		assert.Equal(t, 1, sb.execs("deploy.sh"), "the command ran exactly once")
+		assert.Len(t, rosterIDs(inst), 1, "one tab, not a duplicate")
+		assert.Equal(t, sb.ids(), rosterIDs(inst), "daemon and sandbox agree on the id")
+	}
+
+	t.Run("retry then sweep", func(t *testing.T) {
+		sb, inst := lostCreate(t)
+		retried, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+		require.NoError(t, err)
+		inst.ReconcileOffBoxTabs()
+		settled(t, sb, inst)
+		assert.Contains(t, rosterIDs(inst), retried.ID)
+	})
+
+	t.Run("sweep then retry joins the adopted tab", func(t *testing.T) {
+		sb, inst := lostCreate(t)
+		require.True(t, inst.ReconcileOffBoxTabs(), "the sweep adopts the tab the sandbox started")
+		adopted := rosterIDs(inst)
+		require.Len(t, adopted, 1)
+
+		retried, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+		require.NoError(t, err, "the retry succeeds by joining, not by running again")
+		assert.Contains(t, adopted, retried.ID, "the retry resolved to the adopted id")
+		settled(t, sb, inst)
+
+		// The retry consumed the intent: a deliberate second request is a new run.
+		again, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+		require.NoError(t, err)
+		assert.NotEqual(t, retried.ID, again.ID)
+		assert.Equal(t, 2, sb.execs("deploy.sh"))
+	})
+
+	t.Run("concurrent retry and sweep", func(t *testing.T) {
+		for round := 0; round < 25; round++ {
+			sb, inst := lostCreate(t)
+			var wg sync.WaitGroup
+			wg.Add(3)
+			go func() { defer wg.Done(); inst.ReconcileOffBoxTabs() }()
+			go func() { defer wg.Done(); inst.ReconcileOffBoxTabs() }()
+			go func() {
+				defer wg.Done()
+				_, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+				assert.NoError(t, err)
+			}()
+			wg.Wait()
+			settled(t, sb, inst)
+		}
+	})
+
+	t.Run("an expired intent no longer pins a later request", func(t *testing.T) {
+		sb, inst := lostCreate(t)
+		inst.ReconcileOffBoxTabs()
+		orig := tabIntentTTL
+		tabIntentTTL = 0
+		t.Cleanup(func() { tabIntentTTL = orig })
+		time.Sleep(time.Millisecond)
+		fresh, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+		require.NoError(t, err)
+		assert.Equal(t, 2, sb.execs("deploy.sh"), "after the intent expires the request is a new one")
+		assert.NotEmpty(t, fresh.ID)
+	})
 }

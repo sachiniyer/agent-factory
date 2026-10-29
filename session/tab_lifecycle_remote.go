@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -22,12 +23,24 @@ import (
 // This file holds the daemon-side bookkeeping those rules share. Nothing here
 // holds i.mu across a network call.
 
+// tabIntentTTL bounds how long an uncertain create's identity is remembered. The
+// intent is what lets a caller's retry join the one execution, and it survives
+// the sweep adopting the tab (#5996) so that join works whichever of the retry
+// and the sweep comes first; it cannot live forever, or a later request that
+// really does want a second run would be answered by the first.
+var tabIntentTTL = 10 * time.Minute
+
 // tabCreateIntent is a remote create whose outcome the daemon could not see.
 type tabCreateIntent struct {
 	id      string
 	kind    TabKind
 	command string
 	name    string
+	at      time.Time
+	// adopted records that the sweep already put the sandbox's tab on the roster.
+	// The intent stays until the retry consumes it (or it expires), but there is
+	// nothing left for the sweep to do with it.
+	adopted bool
 }
 
 func tabIntentKey(kind TabKind, command, requestedName string) string {
@@ -37,10 +50,27 @@ func tabIntentKey(kind TabKind, command, requestedName string) string {
 // intentIDLocked returns the id an uncertain earlier attempt at this exact
 // request minted, or "". Caller holds i.mu.
 func (i *Instance) intentIDLocked(kind TabKind, command, requestedName string) string {
-	if in := i.tabCreateIntents[tabIntentKey(kind, command, requestedName)]; in != nil {
-		return in.id
+	key := tabIntentKey(kind, command, requestedName)
+	in := i.tabCreateIntents[key]
+	if in == nil {
+		return ""
 	}
-	return ""
+	if time.Since(in.at) > tabIntentTTL {
+		delete(i.tabCreateIntents, key)
+		return ""
+	}
+	return in.id
+}
+
+// consumeIntentLocked retires the intent for this request once a create has
+// resolved to id — by a fresh create, or by joining a tab already on the roster
+// (the sweep's adoption). Only the intent that minted id is retired. Caller
+// holds i.mu.
+func (i *Instance) consumeIntentLocked(id string, kind TabKind, command, requestedName string) {
+	key := tabIntentKey(kind, command, requestedName)
+	if in := i.tabCreateIntents[key]; in != nil && in.id == id {
+		delete(i.tabCreateIntents, key)
+	}
 }
 
 // recordIntentLocked keeps id as the identity of this request after an uncertain
@@ -50,7 +80,7 @@ func (i *Instance) recordIntentLocked(id string, kind TabKind, command, requeste
 		i.tabCreateIntents = map[string]*tabCreateIntent{}
 	}
 	i.tabCreateIntents[tabIntentKey(kind, command, requestedName)] = &tabCreateIntent{
-		id: id, kind: kind, command: command, name: displayName,
+		id: id, kind: kind, command: command, name: displayName, at: time.Now(),
 	}
 }
 
@@ -148,7 +178,13 @@ func (i *Instance) PendingRemoteTabClose() []RemoteTabCleanupData {
 func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 	i.mu.RLock()
 	rs := i.remoteTabServerCachedLocked()
-	work := len(i.pendingRemoteClose) > 0 || len(i.tabCreateIntents) > 0
+	work := len(i.pendingRemoteClose) > 0
+	for _, in := range i.tabCreateIntents {
+		if !in.adopted && time.Since(in.at) <= tabIntentTTL {
+			work = true
+			break
+		}
+	}
 	if !work {
 		for _, t := range i.Tabs {
 			if t.Kind == TabKindProcess && t.tmux == nil && t.Exit == nil && t.gen != "" {
@@ -240,8 +276,12 @@ func (i *Instance) applyOffBoxRoster(byID map[string]TabData) (changed bool, ado
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	for key, in := range i.tabCreateIntents {
+		if time.Since(in.at) > tabIntentTTL {
+			delete(i.tabCreateIntents, key)
+			continue
+		}
 		td, ok := byID[in.id]
-		if !ok {
+		if !ok || in.adopted {
 			continue
 		}
 		if _, have := i.tabIndexByIDLocked(in.id); !have && i.started && i.tabSpawnBlockedLocked() == nil {
@@ -254,7 +294,11 @@ func (i *Instance) applyOffBoxRoster(byID map[string]TabData) (changed bool, ado
 			changed = true
 			adopted = append(adopted, in.id)
 		}
-		delete(i.tabCreateIntents, key)
+		// The intent is NOT retired here. A caller whose create failed with an
+		// unknown outcome will retry, and that retry must still resolve to this
+		// id and join the one execution (#5996); adopting the row only makes the
+		// join find it. The retry consumes the intent; the TTL bounds the rest.
+		in.adopted = true
 	}
 	for idx, tab := range i.Tabs {
 		if tab.Kind != TabKindProcess || tab.tmux != nil || tab.Exit != nil || tab.gen == "" {
