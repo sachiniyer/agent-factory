@@ -400,7 +400,7 @@ func (i *Instance) reconcileProjectedTabs(target []TabData) bool {
 		// An id-less legacy row stays id-less: the daemon resolves it through its
 		// name/ordinal fallback, and refuses an id it never issued.
 		fresh := &Tab{ID: td.ID, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL,
-			Proposal: td.Proposal, PushMode: td.PushMode, Exit: exit, accountScope: td.AccountScope}
+			Proposal: td.Proposal, PushMode: td.PushMode, Exit: exit, gen: td.Gen, accountScope: td.AccountScope}
 		if cur == nil {
 			changed = true
 			next = append(next, fresh)
