@@ -135,8 +135,17 @@ func TestRestoreUsesTheDeclarationPreservingRewrite(t *testing.T) {
 			"declaration with it; a bare setter leaves the declaration stale and an account-scoped "+
 			"re-spawn then exits 127 (#3083 review). setProgramCmd was removed in #3734, so reaching "+
 			"this assertion means it was reintroduced")
-	require.Contains(t, string(source), "rewriteProgramCmdByAf(resumeProgram)",
+	// The argument is t.resumeRewrite() since #4797: it returns resumeProgram, or
+	// resumeProgramExactOnly for a session that must not resume an account-wide
+	// "latest". Either way the rewrite still goes through rewriteProgramCmdByAf.
+	require.Contains(t, string(source), "rewriteProgramCmdByAf(t.resumeRewrite())",
 		"and it must still be doing that rewrite at all")
+	exact, err := os.ReadFile("resume_exact_only.go")
+	require.NoError(t, err)
+	require.NotContains(t, string(exact), "setProgramCmd(",
+		"the exact-only variant must not reintroduce a bare program setter")
+	require.Contains(t, string(exact), "return resumeProgramExactOnly",
+		"resumeRewrite must hand rewriteProgramCmdByAf a pure program->program function")
 }
 
 // The command and its declaration must be observable only as a PAIR (#3083
