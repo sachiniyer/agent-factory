@@ -73,7 +73,8 @@ type BackendOption struct {
 	Reason string `json:"reason,omitempty"`
 	// CallbackUnavailableReason says a create on this backend will succeed but
 	// the session will have NO af callback — the daemon cannot mint a credential
-	// under its current listener/auth posture (#5571 W3.1). It is advisory, not
+	// while its dedicated sandbox callback endpoint is not running (#5571 W3.1;
+	// network.listen_addr and network.require_token do not decide it). It is advisory, not
 	// a precondition: the backend stays available because a callback-less
 	// session still works, and the text is the SAME refusal the create path
 	// degrades with (one shared check in daemon/sandbox_token.go), so picker and
