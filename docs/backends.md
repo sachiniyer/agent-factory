@@ -775,7 +775,7 @@ to look at it, or to hand the agent something: every client (TUI, web, phone,
 run in the workspace.
 
 1. **Status and diff.** Open a shell tab — `af sessions tab-create <title> --kind
-   shell`, the TUI's new-tab key, or the web's `+` menu — and run `git status`
+   shell`, the TUI's new-tab key, or the web's **Terminal** button — and run `git status`
    and `git diff`. It is the agent's own workspace, so the branch and uncommitted
    changes are the agent's. The shell is listed once the sandbox's agent-server
    serves the tab API; against one that does not, the picker says so instead of
