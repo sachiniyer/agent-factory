@@ -4384,6 +4384,175 @@ test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXT
   }
 });
 
+test("config: a Save-button click keeps focus on the rebuilt field", REAL_FIXTURE, async ({ browser }) => {
+  // The Save-button sibling of the same-key Enter-save test above and the
+  // checkbox/select/click-focused-text siblings below (#5531/#5562). A text row's
+  // Save button (button.af-config-save) is the primary commit gesture, and clicking
+  // it in Chromium focuses the button; its own commit() then rebuilds the pane and
+  // detaches that focused button. The restoration ladder captured only
+  // selects/checkbox/text inputs (focusedConfigControlKey) plus the typed-edit,
+  // toggle, explain, and account controls — no rung named the Save button — so the
+  // rebuild dropped focus to <body> and the user's next `[`/`]` cycled the top-level
+  // view out of config (other printable keys were silently swallowed), the exact
+  // body-focus hazard rerenderKeepingUserState's own header comment warns about.
+  // The fix captures the row's key from its input's `aria-label` (the button itself
+  // carries none) and re-locates the rebuilt row's input after the rebuild.
+  //
+  // The route is intercepted, so the daemon is NOT mutated: network.listen_addr
+  // applies live and would otherwise rebind this very daemon's listener. Only the
+  // canned reply drives configStatus + ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the held save response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // network.listen_addr — a text row. Mark it dirty with a nonce the daemon does
+    // not hold and place the caret at offset 3, then commit by clicking the row's
+    // Save button. The click focuses the button and fires commit() → save, so the
+    // save round-trip begins while the button — not the input — holds focus.
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "abcdef";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "abcdef", inputType: "insertText" }));
+      input.setSelectionRange(3, 3);
+    });
+    const save = pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-save');
+    await save.click();
+    await saveStarted;
+    releaseSave!();
+
+    // The echo proves configStatus drove ConfigPane.update (the close-on-save clear
+    // + the rebuild ran) — the exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt input replaced the focused Save button and
+    // the restoration ladder had no rung for it, so focus fell to <body>.
+    await expect(field).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native INPUT the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix: focus
+    // on <body> let `[` cycle the view out from under the user mid-edit.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+
+    // Typing reaches the rebuilt input at its restored focus instead of falling
+    // onto <body> (where it would be discarded or interpreted as a view shortcut).
+    await p.keyboard.type("Z");
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.value)).toContain("Z");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a Save-button commit via Tab then Enter keeps focus on the rebuilt field", REAL_FIXTURE, async ({ browser }) => {
+  // The keyboard sibling of the Save-button click test above. The mouse gesture
+  // focuses the button via click; the keyboard gesture Tabs onto it (the dirty
+  // status span between the input and the Save button is not focusable, so Tab
+  // lands directly on the Save button) and commits with Enter — the path the
+  // report reproduced (Tab→Enter). Enter on a <button type=button> activates it
+  // without moving focus, so the button genuinely holds focus through the save
+  // round-trip, exactly as the click path does. Before the fix the same body-focus
+  // hazard followed: the rebuild detached the focused button and the restoration
+  // ladder had no rung for it.
+  //
+  // The route is intercepted, so the daemon is NOT mutated.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "abcdef";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "abcdef", inputType: "insertText" }));
+    });
+    const save = pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-save');
+    // Tab from the input onto the Save button — the keyboard gesture. Asserting
+    // the button is focused first proves the precondition: the gesture genuinely
+    // puts focus on the button, so the rebuild's focus loss is the thing under test
+    // (not a Tab that never reached the button).
+    await field.press("Tab");
+    await expect(save).toBeFocused();
+    // Enter activates the focused Save button (click) without moving focus, so
+    // commit() fires while the button holds focus.
+    await save.press("Enter");
+    await saveStarted;
+    releaseSave!();
+
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    // RED without the fix: the rebuilt input replaced the focused Save button and
+    // the restoration ladder had no rung for it, so focus fell to <body>.
+    await expect(field).toBeFocused();
+
+    // Downstream contract: with focus on a native INPUT the document-level keydown
+    // gate (isNativeControl) returns early, so a bare `[` is NOT a view-cycle
+    // shortcut. RED without the fix: focus on <body> let `[` cycle the view.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+
+    await p.keyboard.type("Z");
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.value)).toContain("Z");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
 test("config: a checkbox save keeps focus on the rebuilt control", REAL_FIXTURE, async ({ browser }) => {
   // The checkbox sibling of the same-key Enter-save test above. A bool row commits
   // on `change` — toggling IS the edit — and the save round-trip rebuilds the whole

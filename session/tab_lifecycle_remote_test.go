@@ -62,6 +62,11 @@ func newLifecycleSandbox(t *testing.T) (*lifecycleSandbox, *Instance) {
 		if !exists {
 			sb.genSeq++
 			kind, _ := ParseTabKindName(req.Kind)
+			if req.Kind == "shell" {
+				// The sandbox names a shell against its own roster, which knows
+				// none of the daemon's web tabs (#5962).
+				req.Name = "shell"
+			}
 			td = TabData{ID: req.ID, Gen: "gen-" + req.ID + "-" + string(rune('a'+sb.genSeq)),
 				Name: req.Name, Kind: kind, Command: req.Command}
 			sb.tabs[req.ID] = td

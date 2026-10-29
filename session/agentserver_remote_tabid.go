@@ -38,20 +38,20 @@ func (s *remoteAgentServer) idNative() bool {
 	return native
 }
 
-// nativeFor reports whether tabID should ride the id-native plane. The sandbox
-// knows a tab by the id the daemon supplied at create (W4.5), but the AGENT tab
-// is seeded independently on each side — the daemon's newRemoteAgentTab and the
-// sandbox's newAgentTab mint different random ids — so an agent-tab id sent
-// natively would be ErrTabGone on the far side. The agent tab is pinned to
-// ordinal 0 on both rosters and can neither close nor reorder, so the ordinal
-// bridge is exact for it until the two ids are reconciled.
+// nativeFor reports whether tabID should ride the id-native plane. Every tab is
+// known to the sandbox by the id the daemon supplied; the agent tab is too once
+// the sandbox has been told its id (#5997, agentTabNative). Only an agent-server
+// that predates the "agent-tab-id" feature still has an agent tab it does not
+// know by id, and for that one tab alone the ordinal bridge remains: the agent
+// tab is pinned to slot 0 on both rosters and can neither close nor reorder, so
+// the bridge is exact for it.
 func (s *remoteAgentServer) nativeFor(tabID string) bool {
 	if !s.idNative() {
 		return false
 	}
 	if s.inst != nil {
 		if idx, ok := s.inst.TabIndexByID(tabID); ok && idx == 0 {
-			return false
+			return s.agentTabNative(tabID)
 		}
 	}
 	return true

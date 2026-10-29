@@ -8483,6 +8483,7 @@ var ConfigPane = class {
     const explainFocusedKey = active instanceof HTMLElement && active.classList.contains("af-config-explain-trigger") ? active.getAttribute("data-key") : null;
     const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
     const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
+    const saveFocusedKey = active instanceof HTMLButtonElement && active.closest(".af-config-list") !== null && active.classList.contains("af-config-save") ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -8507,6 +8508,10 @@ var ConfigPane = class {
           focusedConfigTextCaret.end ?? focusedConfigTextCaret.start
         );
       }
+    } else if (saveFocusedKey !== null) {
+      this.el.querySelector(
+        `.af-config-list [aria-label="${CSS.escape(saveFocusedKey)}"]`
+      )?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {

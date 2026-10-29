@@ -300,3 +300,88 @@ func TestRefusedConflictingCreateKeepsTheOriginalIntent(t *testing.T) {
 		assert.Equal(t, 1, sb.execs("A.sh"))
 	})
 }
+
+// Adopting a sandbox tab keeps the name reserved for the create, exactly as a
+// fresh create does: the sandbox names a shell against its own roster, which
+// does not hold the daemon's web tabs (#5962).
+func TestAdoptHonoursTheReservedName(t *testing.T) {
+	addWeb := func(inst *Instance) {
+		inst.mu.Lock()
+		inst.Tabs = append(inst.Tabs, &Tab{ID: "web-1", Name: "shell", Kind: TabKindWeb, URL: "http://example.invalid"})
+		inst.mu.Unlock()
+	}
+	names := func(inst *Instance) map[string]int {
+		inst.mu.RLock()
+		defer inst.mu.RUnlock()
+		out := map[string]int{}
+		for _, tab := range inst.Tabs {
+			out[tab.Name]++
+		}
+		return out
+	}
+
+	t.Run("a fresh create", func(t *testing.T) {
+		_, inst := newLifecycleSandbox(t)
+		addWeb(inst)
+		tab, err := inst.AddShellTabWithID("")
+		require.NoError(t, err)
+		assert.Equal(t, "shell-2", tab.Name)
+		assert.Equal(t, 1, names(inst)["shell"])
+	})
+
+	t.Run("a sweep adoption", func(t *testing.T) {
+		sb, inst := newLifecycleSandbox(t)
+		sb.mu.Lock()
+		sb.dropCreate = true
+		sb.mu.Unlock()
+		addWeb(inst)
+		_, err := inst.AddShellTabWithID("")
+		require.Error(t, err)
+		require.True(t, inst.ReconcileOffBoxTabs())
+		assert.Equal(t, 1, names(inst)["shell"], "the adopted shell must not duplicate the web tab's name")
+		assert.Equal(t, 1, names(inst)["shell-2"])
+	})
+}
+
+// An intent whose replay window ran out is not discarded while its execution may
+// exist: the sweep adopts it, or discards it only on a roster read that lacks
+// the id (#6023).
+func TestExpiredIntentIsAdoptedNotDiscarded(t *testing.T) {
+	expire := func(inst *Instance) {
+		inst.mu.Lock()
+		for _, in := range inst.tabCreateIntents {
+			in.at = time.Now().Add(-tabIntentTTL - time.Second)
+		}
+		inst.mu.Unlock()
+	}
+	t.Run("an orphaned command rejoins the roster after reconnect", func(t *testing.T) {
+		sb, inst := newLifecycleSandbox(t)
+		sb.mu.Lock()
+		sb.dropCreate = true
+		sb.mu.Unlock()
+		_, err := inst.AddProcessTabWithID("", "deploy.sh", "")
+		require.Error(t, err)
+		expire(inst)
+
+		// Another request's roster read must not eat the expired intent either.
+		_, err = inst.AddProcessTabWithID("", "other.sh", "")
+		require.Error(t, err)
+
+		require.True(t, inst.ReconcileOffBoxTabs())
+		assert.Equal(t, sb.ids(), rosterIDs(inst), "both executions are on the roster")
+	})
+	t.Run("a roster read that lacks the id proves it gone", func(t *testing.T) {
+		sb, inst := newLifecycleSandbox(t)
+		sb.mu.Lock()
+		sb.refuseNew = false
+		sb.mu.Unlock()
+		inst.mu.Lock()
+		inst.recordIntentLocked("never-ran", TabKindProcess, "ghost.sh", "", "ghost-sh")
+		inst.mu.Unlock()
+		inst.ReconcileOffBoxTabs()
+		assert.NotEmpty(t, inst.tabCreateIntents, "an unexpired intent waits")
+		expire(inst)
+		inst.ReconcileOffBoxTabs()
+		assert.Empty(t, inst.tabCreateIntents)
+	})
+}

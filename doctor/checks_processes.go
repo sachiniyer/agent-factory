@@ -263,10 +263,27 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// redacted read) falls to the default arm — report-only —
 			// because "I could not read its home" is not "its home is
 			// mine".
+			//
+			// The proof standard mirrors the live-session escaped arm
+			// above. A relative AGENT_FACTORY_HOME is stamped relative to the
+			// launching af process's frame (session/tmux.afHomeDir leaves it
+			// unchanged), which doctor cannot recover, so two distinct homes —
+			// each launched from a different working directory with
+			// AF_HOME=.af — both stamp ".af" and would collapse onto the same
+			// string here. Treating that as a proven match arms killFix for a
+			// process that may belong to another install, so a relative marker
+			// is UNPROVEN ownership, not a confirmed match: it never arms the
+			// kill. An absolute marker is compared by filesystem identity
+			// (os.SameFile via sameHome) rather than filepath.Clean: Clean is
+			// lexical and leaves a symlinked AGENT_FACTORY_HOME — or macOS
+			// /var vs /private/var, or a case-differing spelling on a
+			// case-insensitive volume — comparing unequal to the same home,
+			// which would report a genuine same-home orphan as "belongs to
+			// another agent-factory home" and leave it unfixed.
 			home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
 			hasHome := homeStatus == proctree.EnvFound
 			switch {
-			case hasHome && filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir):
+			case hasHome && filepath.IsAbs(home) && sameHome(home, ctx.opts.ConfigDir):
 				report.addActionableFinding(Finding{
 					Check: "orphaned-process",
 					Detail: fmt.Sprintf("%s was spawned by dead session %s (home %s)",
@@ -274,13 +291,29 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 					FixAction: fmt.Sprintf("kill pid %d", p.PID),
 					fix:       killFix(ctx, p),
 				})
-			case hasHome:
+			case hasHome && filepath.IsAbs(home):
 				report.addAdvisoryFinding(Finding{
 					Check: "orphaned-process",
 					Detail: fmt.Sprintf("%s marks dead session %s but belongs to another "+
 						"agent-factory home (%s) — its session may be live on that install's "+
 						"private tmux server, so it is not fixed from here; run `af doctor` "+
 						"with that home active", describeProc(p), name, home),
+				})
+			case hasHome:
+				// A relative marker is unproven ownership, not a confirmed
+				// foreign home: the marker's originating frame is not
+				// recoverable from here, so the collapsed row must not assert
+				// the definite "from another agent-factory home" claim the
+				// absolute arm makes. A distinct check key (mirroring the
+				// escaped arm) keeps this out of the orphaned-process collapse,
+				// whose summary would otherwise either count an unproven
+				// process as "safe to clean" (if it were actionable) or state a
+				// foreign-home conclusion the detector withheld.
+				report.addAdvisoryFinding(Finding{
+					Check: "foreign-home-unresolved",
+					Detail: fmt.Sprintf("%s marks dead session %s but its AF_HOME (%s) "+
+						"is a relative path that cannot be resolved to a specific agent-factory "+
+						"home — not attributed to this install", describeProc(p), name, home),
 				})
 			default:
 				report.addAdvisoryFinding(Finding{
