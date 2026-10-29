@@ -892,7 +892,7 @@ func spawnFakeDaemonIn(t *testing.T, home, binDir, cwd string) int {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
 	})
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	return pid
 }
 
@@ -1039,7 +1039,7 @@ func spawnFakeDaemonWithDefaultHome(t *testing.T, homeEnv string) int {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
 	})
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	return pid
 }
 
@@ -1110,7 +1110,7 @@ func spawnFakeDaemonWithTildeHome(t *testing.T, afHome, homeEnv string) int {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
 	})
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	return pid
 }
 
