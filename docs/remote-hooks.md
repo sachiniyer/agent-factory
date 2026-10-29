@@ -6,7 +6,7 @@ anything you can provision.
 
 Agent Factory ships first-class off-box backends — [`docker`, `ssh`, and `sandbox`](backends.md) — that need zero scripting. The **remote-hook backend** is the escape hatch for infrastructure those don't model (Kubernetes, Modal, Daytona, a bespoke orchestrator): you provide two shell scripts and `af` runs your session on whatever you provision.
 
-Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `ws://` stream. A remote-hook session matches a local one on attach, type, resize, preview, archive/restore, and kill — the one exception is PTY-backed tabs (shell/process/VS Code), which need a local worktree; external HTTPS web tabs are admitted (see [Capabilities & the agent-server](#capabilities-the-agent-server)).
+Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `ws://` stream. A remote-hook session matches a local one on attach, type, resize, preview, archive/restore, and kill; tab admission follows the instance's per-kind capabilities, not a hook-specific roster (see [Capabilities & the agent-server](#capabilities-the-agent-server)).
 
 > **Transport:** the `af agent-server` serves **plain HTTP** (no TLS — af terminates none of its own). The URL must be `http://` (or `ws://`), and the bearer token travels over the connection, so your `launch_cmd` must make the agent-server reachable from the daemon over a private network or tunnel it controls (a container's published loopback port, an SSH forward, a tailnet address).
 
@@ -282,11 +282,11 @@ Two rules, and they are the whole contract:
 
 ## Capabilities & the agent-server
 
-Because the session is driven through a real `af agent-server`, a remote-hook session matches local and docker/ssh on every capability **except PTY-backed tabs** (shell/process/VS Code):
+Because the session is driven through a real `af agent-server`, a remote-hook session matches local and docker/ssh on every agent-facing capability, with tab admission decided per kind by the instance's capabilities:
 
 - **Attach / input / resize** happen client-side over the agent-server's `ws://` PTY stream — there is no hook attach proxy or preview-capture loop anymore.
 - **Preview / liveness / prompt delivery** go over the same REST surface.
-- The agent-server drives the terminal surface, so a remote session gets its Agent tab with no per-config gating. **PTY-backed tabs (shell, process, VS Code) are not supported** off-box — they need a daemon-side worktree — but an external HTTPS web tab is metadata-only and is admitted; loopback and plain-HTTP web targets are still refused (see [backends.md](backends.md)).
+- The agent-server drives the terminal surface, so a remote session gets its Agent tab with no per-config gating. Tab admission follows the instance's per-kind capabilities, not a fixed hard-coded roster: docs, web (external HTTPS, or loopback via the agent-server's port relay), and VS Code tabs (editor on the session's host) are admitted off-box; shell and process tabs are admitted only when the agent-server advertises `tab-api` and lifts `TabManagement` (see [backends.md](backends.md)).
 
 ## Archive & restore
 
