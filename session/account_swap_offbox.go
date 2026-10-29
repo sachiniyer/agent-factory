@@ -241,6 +241,12 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 	if out, err := w.shell.Run(timeout, script, bytes.NewReader(archive), true); err != nil {
 		return nil, fmt.Errorf("staging account %q on the host failed: %s: %w", acct.Name, strings.TrimSpace(string(out)), err)
 	}
+	// The rotation replaces the whole live scope with this one, so the operator's
+	// selected agent config (model settings, MCP, instructions) is placed here too,
+	// before the agent restarts, as it was at provision.
+	if err := w.syncAgentConfigInto(timeout, w.NextAccountDir()); err != nil {
+		return nil, err
+	}
 	return versions, nil
 }
 

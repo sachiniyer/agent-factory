@@ -896,6 +896,7 @@ Settable keys:
   program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
   session_env_passthrough    compact JSON array of exact environment variable names
+  sandbox_agent_config       compact JSON array of agent:file entries (claude:settings.json, claude:CLAUDE.md, claude:.claude.json, codex:config.toml, codex:AGENTS.md) placed in a sandbox session's account scope
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
   root_agent.enabled         true | false

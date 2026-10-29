@@ -448,6 +448,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "sandbox_agent_config",
+		Type:       "list",
+		Default:    "none",
+		Purpose:    "Agent personalization af places in a sandbox session's own account scope · entries are agent:file from a closed set (claude:settings.json, claude:CLAUDE.md, claude:.claude.json, codex:config.toml, codex:AGENTS.md) · applies only on a host in the global host list, only to an account-scoped session · global-only: a repository must never choose what af copies off the daemon box.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "limit_patterns",
 		Type:       "table",
 		Default:    "none · the built-in patterns are used",

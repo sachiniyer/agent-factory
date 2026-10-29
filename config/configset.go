@@ -221,12 +221,10 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// table writer; the leaf writer checks the name's shape.
 	"hosts": {structured: true},
 	"default_host": {kind: cfgString, validate: func(_, v string) error {
-		if v == "" {
-			return nil
-		}
-		return ValidateHostName(v)
+		return validateOptionalHostName(v)
 	}},
 	"session_env_passthrough": {structured: true},
+	"sandbox_agent_config":    {structured: true},
 	"root_agents":             {structured: true},
 	"root_agent": {structured: true, subkeys: map[string]settableLeafSpec{
 		"enabled": {kind: cfgBool},

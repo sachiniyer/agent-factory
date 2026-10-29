@@ -158,6 +158,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	},
 	"on_archive_command":   func(a, b *config.Config) bool { return a.OnArchiveCommand != b.OnArchiveCommand },
 	"move_cmd":             func(a, b *config.Config) bool { return a.MoveCmd != b.MoveCmd },
+	"sandbox_agent_config": func(a, b *config.Config) bool { return !reflect.DeepEqual(a.SandboxAgentConfig, b.SandboxAgentConfig) },
 	"worktree_root":        func(a, b *config.Config) bool { return a.WorktreeRoot != b.WorktreeRoot },
 	"projects_root":        func(a, b *config.Config) bool { return a.ProjectsRoot != b.ProjectsRoot },
 	"vscode_server_binary": func(a, b *config.Config) bool { return a.VSCodeServerBinary != b.VSCodeServerBinary },
