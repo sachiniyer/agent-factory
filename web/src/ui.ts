@@ -37,7 +37,7 @@ import {
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import type { RegisteredProject } from "./api.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
-import { applyProjectFavicon, applyProjectFrame, projectColor, projectColorRow } from "./project_color.js";
+import { applyProjectColor, applyProjectFavicon, projectColor, projectColorRow } from "./project_color.js";
 import {
   archiveWarningText,
   callbackUnavailableText,
@@ -72,7 +72,7 @@ import { KeyedRows, orderChildren } from "./keyed-rows.js";
 import { sessionKey } from "./sessions.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 import { TasksPane } from "./tasks.js";
-import { type ThemeChoice, currentMode } from "./theme.js";
+import { type ThemeChoice, THEME_CHOICES, currentMode, themeSurfaces } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   type ConfigEntry,
@@ -1379,6 +1379,7 @@ export class AppShell {
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectColor(this.el, null, themeSurfaces);
     applyProjectFavicon(null);
   }
 
@@ -1430,7 +1431,7 @@ export class AppShell {
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
-    applyProjectFrame(this.main, color);
+    applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;

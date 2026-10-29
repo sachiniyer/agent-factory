@@ -277,7 +277,7 @@ not list. They fall into three groups:
   account-login stream `GET /v1/account-login/stream` (bare-session PTY WebSockets
   that serve no Instance); `GET /v1/auth-info`, the tokenless probe that reports
   whether this peer must present a token (see
-  [remote daemon access](remote-http-auth.md)); `GET /v1/preview-auth`; and the
+  [remote daemon access](remote-http-auth.md)); `GET /v1/preview-auth`; `POST /v1/editor-origin`, which mints a session's editor-origin bootstrap URL for a remote viewer (see [Web UI](web.md#per-session-editor-origins-for-remote-viewers)); and the
   web-tab reverse proxy under `/v1/webtab/`.
 - **The profiling endpoint**, `GET /v1/debug/pprof/{profile}`, when it is switched
   on. It is **off by default**, is served on **this socket only** and never on
@@ -441,7 +441,7 @@ work. The vocabulary is closed:
 | `usage-limit` | The session is parked at a [usage-limit wall](usage-limits.md). |
 | `process-exited` | The agent process is gone — the row's liveness is Lost or Dead. |
 | `restore-gave-up` | The process is gone and automatic Lost-session recovery has stopped — either it exhausted its failed-attempt budget, or it confirmed enough restore-and-die cycles to conclude the agent cannot stay up. See `lost_restore_failure` below for the two verdicts. |
-| `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a machine-level resource condition such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
+| `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a condition outside the session itself, such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
 | `recreate-pending` | A recognized recreate notice is waiting, unacknowledged, on the root session. |
 | `prompt-not-delivered` | The last prompt send observed that the prompt did not arrive. |
 | `delivery-unconfirmed` | The last send ended `sent-unverified` or `could-not-confirm` (uncertainty, not failure — see `SendPrompt` above), and no pane change has been observed since. |

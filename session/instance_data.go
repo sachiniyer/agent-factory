@@ -56,6 +56,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		RuntimeStartID:           i.runtimeStartID,
 		Account:                  i.Account,
 		Host:                     i.Host,
+		BranchUnpushed:           i.branchUnpushed,
 		ArchivedWorkspace:        cloneArchivedWorkspace(i.archivedWorkspace),
 		AccountAgent:             i.accountAgent,
 		AccountAutoSelected:      i.accountAutoSelected,
@@ -224,6 +225,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	if len(i.pendingTabCleanup) > 0 {
 		data.PendingTabCleanup = append([]TabCleanupData(nil), i.pendingTabCleanup...)
 	}
+	data.PendingRemoteTabClose = i.remoteCloseDataLocked()
 
 	// Keep writing the legacy single TmuxName field (set from the agent tab) for
 	// one release: a binary rolled back to before #930 PR 2 still finds the
@@ -510,6 +512,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		runtimeStartID:           data.RuntimeStartID,
 		Account:                  data.Account,
 		Host:                     data.Host,
+		branchUnpushed:           data.BranchUnpushed,
 		archivedWorkspace:        cloneArchivedWorkspace(data.ArchivedWorkspace),
 		placement:                clonePlacement(data.Placement),
 		accountAgent:             data.AccountAgent,
@@ -757,6 +760,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// rebuilt from a tombstone.
 		instance.pendingTabCleanup = restoredTabCleanup(data.PendingTabCleanup)
 	}
+	// Pending off-box closes belong to the sandbox backends the branch above never
+	// reaches (#5996): restored for every backend so a restart cannot drop the only
+	// handle on a command still running in a sandbox.
+	instance.pendingRemoteClose = restoredRemoteClose(data.PendingRemoteTabClose)
 
 	// Every return below hands back a row no automatic restore can reach —
 	// inert (started=false), Archived rather than Lost, or vetoed by
@@ -952,6 +959,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
 				Exit:                          tabExitFromData(td.Exit),
+				gen:                           td.Gen,
 				tmux:                          ts,
 				accountScope:                  td.AccountScope,
 				accountScopeProvenanceUnknown: idx > 0 && kind.HasTmux() && ts != nil && siblingScopeUnknown(data.Account, td.AccountScope),

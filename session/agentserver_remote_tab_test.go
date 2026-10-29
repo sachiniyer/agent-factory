@@ -164,7 +164,7 @@ func TestRemoteAgentClient_TabWireSurface(t *testing.T) {
 	srv.assertAuth(t, "/v1/agent/tab-create")
 
 	// --- close: id-only, never an ordinal ------------------------------------
-	require.NoError(t, rc.closeTab("daemon-tab-1"))
+	require.NoError(t, rc.closeTab("daemon-tab-1", ""))
 	assert.Equal(t, "daemon-tab-1", srv.bodies["/v1/agent/tab-close"]["id"])
 	srv.assertAuth(t, "/v1/agent/tab-close")
 
@@ -226,7 +226,7 @@ func TestRemoteAgentClient_TabGoneCodeReconstructsSentinel(t *testing.T) {
 			defer httpSrv.Close()
 			rc := srv.client(t, httpSrv.URL)
 
-			err := rc.closeTab("x")
+			err := rc.closeTab("x", "")
 			require.Error(t, err)
 			assert.Equal(t, tc.wantIdent, errors.Is(err, ErrTabGone),
 				"errors.Is(err, ErrTabGone) for code %q (err: %v)", tc.code, err)

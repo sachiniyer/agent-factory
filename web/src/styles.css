@@ -1261,16 +1261,76 @@ button:disabled,
   border-color: var(--af-accent);
 }
 
-/* A project color replaces the frame's border and the keyboard-focus outline, so
- * the pane always reads as that project. The rail keeps its own focus outline. */
-.af-main-term[data-project-color],
-.af-kb-terminal .af-main-term[data-project-color] {
-  outline-color: var(--af-project-color);
+/* A project color replaces the theme accent everywhere. Each themed chrome element
+ * restates the theme tokens, so the override must also reach those elements. */
+:root[data-af-theme="light"] .af-app[data-project-color],
+.af-app[data-project-color] [data-af-theme="light"] {
+  --af-accent: var(--af-project-accent-light);
 }
-.af-main-term[data-project-color]::after,
-.af-kb-terminal .af-main-term[data-project-color]::after {
-  border-width: calc(var(--af-space-1) / 2);
-  border-color: var(--af-project-color);
+:root[data-af-theme="dark"] .af-app[data-project-color],
+.af-app[data-project-color] [data-af-theme="dark"] {
+  --af-accent: var(--af-project-accent-dark);
+}
+/* Controls mounted straight on <body> — the phone keybar, its paste sheet —
+ * never inherit from the app root, so the same stamp lands there too. */
+:root[data-af-theme="light"] body[data-project-color],
+body[data-project-color] [data-af-theme="light"] {
+  --af-accent: var(--af-project-accent-light);
+}
+:root[data-af-theme="dark"] body[data-project-color],
+body[data-project-color] [data-af-theme="dark"] {
+  --af-accent: var(--af-project-accent-dark);
+}
+
+/* The app bar takes the raw project color, so the current project reads at a
+ * glance. Controls with a raised surface stay as chips on the bar. */
+.af-app[data-project-color] .af-appbar {
+  background: var(--af-project-color);
+  color: var(--af-project-ink);
+}
+/* The accent can equal the bar color, so a ring in it would vanish on the bar. */
+.af-app[data-project-color] .af-appbar :is(button, summary, a):focus-visible {
+  outline-color: var(--af-project-ink);
+}
+/* The project menu is a raised popover inside the bar, not part of it: a
+ * project-ink ring on its raised surface can be near-invisible, so its
+ * controls keep the project accent. */
+.af-app[data-project-color] .af-appbar .af-project-menu :is(button, summary, a):focus-visible {
+  outline-color: var(--af-accent);
+}
+.af-app[data-project-color] .af-appbar .af-term-keyboard {
+  color: inherit;
+}
+.af-app[data-project-color] .af-viewnav,
+.af-app[data-project-color] .af-viewtab,
+.af-app[data-project-color] .af-viewtab:hover,
+.af-app[data-project-color] .af-appbar .af-term-title-separator {
+  background: transparent;
+  color: inherit;
+}
+.af-app[data-project-color] .af-viewtab-active {
+  text-decoration-color: currentColor;
+}
+@media (min-width: 769px) {
+  .af-app[data-project-color] .af-theme-toggle,
+  .af-app[data-project-color] .af-theme-opt,
+  .af-app[data-project-color] .af-theme-opt:hover {
+    background: transparent;
+    color: inherit;
+  }
+  .af-app[data-project-color] .af-theme-opt-active {
+    background: var(--af-surface-raised);
+    color: var(--af-ink);
+  }
+}
+/* On a phone the tools are a raised popover, not part of the colored bar. */
+@media (max-width: 768px) {
+  .af-app[data-project-color] .af-appbar-tools {
+    color: var(--af-ink);
+  }
+  .af-app[data-project-color] .af-appbar-tools :is(button, summary, a):focus-visible {
+    outline-color: var(--af-accent);
+  }
 }
 
 .af-term-head {

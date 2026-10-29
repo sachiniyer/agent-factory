@@ -258,6 +258,13 @@ func addProjectBinding() (*config.RepoContext, string, error) {
 		// worse, against a path it has and the operator did not mean. That is rule 3
 		// of the shared project contract (a command that BINDS never guesses)
 		// applied across the network.
+		if strings.TrimSpace(repoFlag) == "" && credentialBoundCaller() {
+			// A sandbox credential is bound to one session and so to one project;
+			// the daemon stamps that project on the task whatever path is sent, and
+			// the sandbox does not know the daemon host's layout. Nothing is guessed:
+			// the project is the credential's, not this machine's.
+			return nil, "", nil
+		}
 		if strings.TrimSpace(repoFlag) == "" {
 			return nil, "", fmt.Errorf(
 				"--repo is required against the daemon at %s: a task's project path is resolved on the DAEMON's host, "+

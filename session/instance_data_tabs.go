@@ -5,7 +5,7 @@ package session
 // shares (#5571 W4.3), so the snapshot projection and the wire roster cannot
 // drift. Caller holds i.mu.
 func (i *Instance) tabDataLocked(tab *Tab) TabData {
-	td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL, Proposal: tab.Proposal, PushMode: tab.PushMode}
+	td := TabData{ID: tab.ID, Gen: tab.gen, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL, Proposal: tab.Proposal, PushMode: tab.PushMode}
 	if tab.tmux != nil {
 		td.TmuxName = tab.tmux.SanitizedName()
 	}

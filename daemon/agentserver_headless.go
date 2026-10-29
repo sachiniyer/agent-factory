@@ -47,6 +47,9 @@ import (
 // controlServer resolves an AgentServer out of the multi-session Manager,
 // headlessServer holds the one it owns directly.
 type headlessServer struct {
+	// adopted is set when this server was started over a preserved worktree
+	// (#5571 W8.6); its non-first-time launch respawns the agent there.
+	adopted bool
 	// as is the single workspace's agent-server — the local in-process
 	// implementation over tmux (same runtime as the daemon's local sessions),
 	// exposed here over the wire.
@@ -226,6 +229,10 @@ type AgentServerOptions struct {
 	// Branch is the exact branch the daemon named for this session (#5571 W2.4).
 	// Empty derives it from this host's own branch_prefix, as before.
 	Branch string
+	// AdoptWorktree is an existing linked worktree this server binds instead of
+	// creating one (#5571 W8.6). The provisioning daemon proved it present and on
+	// Branch before starting this process.
+	AdoptWorktree string
 	// PolicyFile is the daemon-resolved operator policy (config.AgentPolicy).
 	// When set, this process answers every config read from it and never reads
 	// or creates anything under its own host's af home (#5571 W2.5); a file it
@@ -387,7 +394,14 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("agent-server: %w", err)
 	}
 
+	if opts.AdoptWorktree != "" {
+		if err := instance.AdoptExistingWorktree(opts.AdoptWorktree); err != nil {
+			return fmt.Errorf("agent-server: %w", err)
+		}
+	}
+
 	hs := &headlessServer{
+		adopted: opts.AdoptWorktree != "",
 		as:      instance.AgentServer(),
 		inst:    instance,
 		program: resolvedProgram,
@@ -456,7 +470,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// tmux session or worktree is orphaned. Durability of in-progress work is the
 	// driving daemon's job (archive = push branch, epic §5), not the agent-server's.
 	_ = closeTCP.close()
-	if err := hs.as.Kill(false); err != nil {
+	if err := hs.shutdownWorkspace(); err != nil {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)
 	}
 	return nil
@@ -488,6 +502,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
 	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
+	mux.HandleFunc("/v1/agent/workspace-facts", rpcHandler(hs.WorkspaceFacts))
 	mux.HandleFunc("/v1/agent/stop", rpcHandler(hs.StopPreserving))
 	// W7.1: stop the agent and start it again in this workspace, resuming the
 	// provider's conversation. Advertised as the "relaunch" feature.
@@ -495,6 +510,10 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// W7.5: swap the agent for another in this workspace. Advertised as the
 	// "agent-swap" feature.
 	mux.HandleFunc("/v1/agent/swap-agent", rpcHandler(hs.SwapAgent))
+	// W7.6: rotate the account scope and relaunch. Advertised as the
+	// "account-swap" feature.
+	mux.HandleFunc("/v1/agent/swap-account", rpcHandler(hs.SwapAccount))
+	mux.HandleFunc("/v1/agent/swap-account-status", rpcHandler(hs.SwapAccountStatus))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -538,6 +557,9 @@ var agentServerWireFeatures = []string{
 	// "agent-swap": POST /v1/agent/swap-agent — replace the agent with another
 	// in this workspace, resolving the new agent's program on this host (#5571 W7.5).
 	session.SwapAgentFeature,
+	// "account-swap": POST /v1/agent/swap-account — rotate the staged account
+	// scope in and relaunch the agent on it (#5571 W7.6).
+	session.AccountSwapFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version
@@ -588,6 +610,9 @@ func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResp
 }
 
 func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
+	if hs.adopted && !req.FirstTimeSetup && hs.inst != nil {
+		return hs.launchAdopted(req, resp)
+	}
 	var codexSnap session.ConversationCaptureSnapshot
 	codex := tmux.DetectAgentFromCommand(hs.program) == tmux.ProgramCodex
 	if hs.inst != nil && req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {
@@ -819,68 +844,6 @@ func (hs *headlessServer) Archive(_ struct{}, resp *agentArchiveResponse) error 
 	return nil
 }
 
-// StopPreserving stops the agent and its tabs and leaves the workspace on disk
-// (#5571 W8.5): archive without publishing. The process then exits, since nothing
-// is left for it to serve; its shutdown path kills a workspace it no longer holds,
-// which is a no-op.
-func (hs *headlessServer) StopPreserving(_ struct{}, resp *agentOKResponse) error {
-	stopper, ok := hs.as.(session.WorkspaceStopper)
-	if !ok {
-		return session.ErrPreserveUnsupported
-	}
-	if err := stopper.StopPreservingWorkspace(); err != nil {
-		return err
-	}
-	resp.OK = true
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
-	}()
-	return nil
-}
-
-// Relaunch stops the agent and starts it again in this workspace. Nothing is
-// pushed, reaped or re-cloned: the branch, tree and uncommitted work stay as
-// they are.
-func (hs *headlessServer) Relaunch(_ struct{}, resp *agentOKResponse) error {
-	r, ok := hs.as.(session.AgentRelauncher)
-	if !ok {
-		return session.ErrRelaunchUnsupported
-	}
-	if err := r.Relaunch(); err != nil {
-		return err
-	}
-	resp.OK = true
-	return nil
-}
-
-type agentSwapRequest struct {
-	Target string `json:"target"`
-}
-
-// agentSwapResponse carries the command the host resolved and launched, which the
-// driving daemon records as the new runtime's evidence.
-type agentSwapResponse struct {
-	OK      bool   `json:"ok"`
-	Program string `json:"program"`
-}
-
-// SwapAgent replaces the agent with another in this workspace. The branch, tree
-// and uncommitted work stay as they are; nothing is pushed, reaped or re-cloned.
-func (hs *headlessServer) SwapAgent(req agentSwapRequest, resp *agentSwapResponse) error {
-	sw, ok := hs.as.(session.AgentSwapper)
-	if !ok {
-		return session.ErrHandoffUnsupported
-	}
-	program, err := sw.SwapAgentTo(req.Target)
-	if err != nil {
-		return err
-	}
-	resp.OK = true
-	resp.Program = program
-	return nil
-}
-
 func (hs *headlessServer) Kill(_ struct{}, resp *agentOKResponse) error {
 	if err := hs.as.Kill(false); err != nil {
 		return err
@@ -966,4 +929,14 @@ func (hs *headlessServer) eventsHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	serveEvents(hs.events, conn)
+}
+
+// WorkspaceFacts measures this server's workspace for the daemon's kill
+// confirmation (#5571 W8.2). Read-only: git status/rev-list/for-each-ref/reflog.
+func (hs *headlessServer) WorkspaceFacts(_ struct{}, resp *session.WorkspaceFacts) error {
+	if hs.inst == nil {
+		return fmt.Errorf("this agent-server has no workspace")
+	}
+	*resp = session.MeasureWorkspaceAt(hs.inst.GetWorktreePath(), hs.inst.Path)
+	return nil
 }
