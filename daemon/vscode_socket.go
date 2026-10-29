@@ -410,12 +410,18 @@ func vscodeSocketPathIn(ns, key string) (string, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", fmt.Errorf("generating the VS Code socket name failed: %w", err)
 	}
-	name := vscodeSocketKeyPrefix(key) + "-" + hex.EncodeToString(nonce[:]) + vscodeSocketExt
-	path := filepath.Join(dir, name)
+	path := filepath.Join(dir, vscodeSocketFileName(key, nonce))
 	if err := sockpath.Check("VS Code socket", path); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// vscodeSocketFileName is the socket's basename: 8 hex of the key hash, a dash,
+// 8 hex of nonce, and the extension (22 bytes). Hashed, so its length is fixed
+// whatever the key.
+func vscodeSocketFileName(key string, nonce [4]byte) string {
+	return vscodeSocketKeyPrefix(key) + "-" + hex.EncodeToString(nonce[:]) + vscodeSocketExt
 }
 
 func vscodeSocketKeyPrefix(key string) string {
