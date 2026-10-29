@@ -7891,13 +7891,9 @@ function terminalChrome(opts) {
     });
     return button;
   };
-  const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
+  const title = h("span", { class: "af-term-title", title: opts.placement ? `${opts.title} \xB7 ${opts.placement}` : opts.title }, opts.title);
   title.setAttribute("aria-label", opts.title);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
-  if (opts.placement) {
-    const place = h("span", { class: "af-term-placement", title: opts.placement }, opts.placement);
-    titleBox.insertBefore(place, titleBox.lastChild);
-  }
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
   const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");

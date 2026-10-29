@@ -147,14 +147,12 @@ export function terminalChrome(opts: { title: string; placement?: string; copyLi
     button.addEventListener("click", () => { menu.close(); run(); });
     return button;
   };
-  const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
+  // Where the session runs (#5571 W6.4) rides the title's tooltip, not its text:
+  // #2458 keeps the head to the title and its separator, and a full host path does
+  // not belong in a head that has to survive a narrow pane.
+  const title = h("span", { class: "af-term-title", title: opts.placement ? `${opts.title} · ${opts.placement}` : opts.title }, opts.title);
   title.setAttribute("aria-label", opts.title);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
-  if (opts.placement) {
-    // Where the session runs (#5571 W6.4): muted, after the title, clipped like it.
-    const place = h("span", { class: "af-term-placement", title: opts.placement }, opts.placement);
-    titleBox.insertBefore(place, titleBox.lastChild);
-  }
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
   const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
