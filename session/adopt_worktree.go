@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/session/git"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // adoptExistingWorktree gives a restore-time instance the worktree handle a
@@ -76,16 +75,22 @@ func (i *Instance) adoptExistingWorktree() error {
 		if inPlace {
 			return fmt.Errorf("cannot adopt the in-place workspace: %s is gone", gw.GetWorktreePath())
 		}
-		// An agent that outlived its deleted worktree is a stale writer: it keeps
+		// Anything that outlived the deleted worktree is a stale writer: a pane keeps
 		// a cwd inode that is gone, and anything it writes by absolute path lands
-		// while git recreates the checkout. Stop it, and confirm it is stopped,
-		// BEFORE the rebuild — the same order every other rebuild keeps (see
-		// respawnWithConversation). The directory is conclusively absent, so
-		// there is no work in it to lose; launch re-spawns the agent in the new
-		// checkout. An unconfirmed stop refuses: retry rather than rebuild under
-		// a writer.
-		if err := i.stopSurvivingAgentBeforeRebuild(); err != nil {
-			return err
+		// while git recreates the checkout. The stale-pane teardown every other
+		// rebuild runs does the whole job — arms the durable obligation first,
+		// closes every bound session and WAITS for its process tree, stops the
+		// supervised runtimes, and, when a close was blind (tmux forgot the
+		// ancestry, so the marker sweep is vacuous for a markerless survivor),
+		// refuses while anything still has a cwd in the tree. An unproven teardown
+		// refuses the rebuild and leaves the session needing attention; nothing
+		// is rebuilt under a possible writer.
+		committed := i.RebuildTeardownPending()
+		if err := i.SetRebuildTeardownPending(true); err != nil {
+			return fmt.Errorf("the worktree at %s is gone, but the stale-pane teardown could not be made durable before rebuilding: %w", gw.GetWorktreePath(), err)
+		}
+		if err := i.teardownStalePanesForRebuild(gw.GetWorktreePath(), committed, true); err != nil {
+			return fmt.Errorf("the worktree at %s is gone, but what outlived it is not proven stopped; not rebuilding: %w", gw.GetWorktreePath(), err)
 		}
 		if err := gw.RebuildFromExistingBranch(); err != nil {
 			return fmt.Errorf("the worktree at %s is gone and could not be rebuilt from branch %q: %w", gw.GetWorktreePath(), branch, err)
@@ -100,25 +105,5 @@ func (i *Instance) adoptExistingWorktree() error {
 		i.touchLocked()
 	}
 	i.mu.Unlock()
-	return nil
-}
-
-// stopSurvivingAgentBeforeRebuild stops the agent tmux session this instance is
-// bound to (none on a first adoption) and returns an error unless the stop was
-// confirmed by every tmux command answering.
-func (i *Instance) stopSurvivingAgentBeforeRebuild() error {
-	i.mu.RLock()
-	ts := i.tmuxLocked()
-	i.mu.RUnlock()
-	if ts == nil {
-		return nil
-	}
-	state, err := ts.CloseAndWaitForPaneExit()
-	if err != nil {
-		return fmt.Errorf("the worktree is gone but the agent that outlived it could not be stopped before the rebuild: %w", err)
-	}
-	if state != tmux.PaneStateKnown {
-		return fmt.Errorf("the worktree is gone but whether the agent that outlived it has stopped could not be established; not rebuilding under a possible writer")
-	}
 	return nil
 }

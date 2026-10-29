@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,8 @@ func hostedWorkspace(t *testing.T) (*Instance, *git.GitWorktree, string) {
 	gitOut(t, gw.GetWorktreePath(), "add", "work.txt")
 	gitOut(t, gw.GetWorktreePath(), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "agent work")
 	inst := &Instance{Title: "restart-adopt", Path: repo, branchName: branch, hostedRemotely: true}
+	// What the headless agent-server installs: the durable rebuild-teardown marker.
+	require.NoError(t, inst.InstallDurableRebuildTeardown(t.TempDir(), RebuildTeardownKey(repo, inst.Title)))
 	return inst, gw, branch
 }
 
@@ -203,4 +206,55 @@ func TestAdoptExistingWorktreeRefusesAWorktreeSwitchedToAnotherBranch(t *testing
 	assert.Equal(t, "surviving work", string(data))
 	entries, _ := filepath.Glob(path + "-*")
 	assert.Empty(t, entries, "no second checkout was created")
+}
+
+// A close that was BLIND (tmux has no session, so no pane ancestry was observed)
+// proves nothing about a markerless descendant that survived it. Adoption then
+// refuses to rebuild while anything still has a cwd in the deleted tree, rather
+// than treating "no tmux session" as "all writers stopped" (#5995 review).
+func TestAdoptExistingWorktreeRefusesToRebuildUnderASurvivingMarkerlessDescendant(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("the occupancy check reads /proc")
+	}
+	inst, gw, _ := hostedWorkspace(t)
+	path := gw.GetWorktreePath()
+
+	// A detached process with NO agent-factory marker and its cwd in the worktree.
+	sleeper := exec.Command("sleep", "300")
+	sleeper.Dir = path
+	require.NoError(t, sleeper.Start())
+	t.Cleanup(func() { _ = sleeper.Process.Kill(); _, _ = sleeper.Process.Wait() })
+	require.NoError(t, os.RemoveAll(path))
+
+	// The agent's tmux session is already gone and tmux can neither list its panes
+	// nor name a pane: a conclusive but BLIND close (no ancestry was observed).
+	const agentName = "af_restart_adopt"
+	var missing *exec.ExitError
+	require.ErrorAs(t, exec.Command("sh", "-c", "exit 1").Run(), &missing)
+	missing.Stderr = []byte("can't find session: " + agentName)
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "has-session") {
+				return errors.New("session does not exist")
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(c.String(), "list-panes") {
+				return nil, missing
+			}
+			return nil, nil
+		},
+	}
+	inst.mu.Lock()
+	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", nil, cmdExec))}
+	inst.mu.Unlock()
+
+	err := inst.adoptExistingWorktree()
+	require.Error(t, err, "an unproven teardown must refuse the rebuild")
+	assert.Contains(t, err.Error(), "not rebuilding")
+	assert.Nil(t, inst.gitWorktree, "nothing is adopted")
+	_, statErr := os.Stat(path)
+	assert.True(t, os.IsNotExist(statErr), "the tree is not recreated under a possible writer")
+	assert.True(t, inst.RebuildTeardownPending(), "the obligation stays armed so a retry re-proves the teardown")
 }
