@@ -323,8 +323,9 @@ returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?
 web/vscode tab that owns no PTY; it normally tracks the name but diverges
 after a rename, so read it from the response rather than re-deriving it);
 `CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `RenameTab` returns `{ "name": "<resolved-tab-name>" }`; `ReorderTab` returns `{ "name": "<resolved-tab-name>", "index": <int> }`; `ListTasks` returns
-`{ "tasks": [<task>…] }`; `UpdateTask` returns `{ "ok": true, "task": <task> }`
-(the merged record); the rest return `{ "ok": true }`. The `task` field of
+`{ "tasks": [<task>…] }`; `AddTask` and `UpdateTask` return
+`{ "ok": true, "task": <task> }` (the stored record; an older daemon omits
+`AddTask`'s); the rest return `{ "ok": true }`. The request `task` field of
 `AddTask` is a full task object — the CLI/TUI build and validate it, and the
 daemon re-validates and owns the write. `UpdateTask` instead takes a target `id`
 and a FIELD-LEVEL `update` patch carrying only the fields to change (e.g.
