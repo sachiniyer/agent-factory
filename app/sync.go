@@ -702,6 +702,9 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle st
 // Returns whether anything changed.
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
 	changed := false
+	if inst.ReconcilePlacementSnapshot(d.Placement) {
+		changed = true
+	}
 	if inst.ReconcileTabManagementSnapshot(d.TabManagement) {
 		changed = true
 	}
