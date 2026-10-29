@@ -144,17 +144,32 @@ func (m *Manager) editorRelayTransport(instance *session.Instance, repoID, title
 // unreachable, and the editor stops with the session in any case, so a failure is
 // logged rather than blocking the close.
 func (m *Manager) stopRemoteEditor(instance *session.Instance) {
+	m.remoteEditorStopper(instance)()
+}
+
+// remoteEditorStopper resolves, NOW, everything stopping the remote editor needs
+// from the instance — whether it is remote and its editor relay — and returns the
+// stop as a closure that touches no Instance method. Capabilities() and
+// AgentServer() take instance.mu, which CloseTabByIDWithCommit already holds
+// (write) while it runs its commit callback, and that mutex is not reentrant: a
+// stop that resolved them inside the callback deadlocked every last-VS-Code-tab
+// close, local sessions included (#6165 P1). Callers inside such a callback must
+// resolve the stopper BEFORE it and only invoke the closure within.
+func (m *Manager) remoteEditorStopper(instance *session.Instance) func() {
 	if instance.Capabilities().Workspace != session.WorkspaceRemote {
-		return
+		return func() {}
 	}
 	er, ok := instance.AgentServer().(session.EditorRelayer)
 	if !ok {
-		return
+		return func() {}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), editorStartTimeout)
-	defer cancel()
-	if err := er.StopEditor(ctx); err != nil {
-		m.warn().Printf("remote editor of session id %q was not stopped on tab close (it stops with the session): %v", instance.ID, err)
+	id := instance.ID // a plain field, set at construction
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), editorStartTimeout)
+		defer cancel()
+		if err := er.StopEditor(ctx); err != nil {
+			m.warn().Printf("remote editor of session id %q was not stopped on tab close (it stops with the session): %v", id, err)
+		}
 	}
 }
 

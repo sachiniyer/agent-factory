@@ -410,3 +410,32 @@ func TestGuardRemoteEditorStart_StopsAnEditorWhoseTabWasClosed(t *testing.T) {
 	// And the pre-start check refuses to begin one at all.
 	require.Error(t, m.remoteEditorWanted(inst, key, title))
 }
+
+// #6165 P1: CloseTabByIDWithCommit runs its commit callback under instance.mu, and
+// the final remote-editor sweep inside it used to call locking Instance methods —
+// a non-reentrant self-deadlock on EVERY last-VS-Code-tab close, local sessions
+// included. The close runs under a deadline so a regression fails fast instead of
+// hanging the suite. (A remote instance cannot be built with a fake relayer in this
+// harness; the stopper is resolved before the callback for both kinds, so the local
+// close exercises the same callback path.)
+func TestCloseLastVSCodeTab_DoesNotDeadlockUnderTheInstanceLock(t *testing.T) {
+	m, repoID, title := newVSCodeCreateFixture(t)
+	_, err := m.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"})
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() {
+		_, cerr := m.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"}, "test")
+		done <- cerr
+	}()
+	select {
+	case cerr := <-done:
+		require.NoError(t, cerr)
+	case <-time.After(20 * time.Second):
+		t.Fatal("closing the last VS Code tab deadlocked: the commit callback re-entered instance.mu")
+	}
+	m.mu.Lock()
+	inst := m.instances[daemonInstanceKey(repoID, title)]
+	m.mu.Unlock()
+	require.False(t, instanceHasVSCodeTab(inst))
+}
