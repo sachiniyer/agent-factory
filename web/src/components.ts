@@ -162,13 +162,37 @@ export function applyTerminalPlacement(el: Pick<HTMLElement, "textContent" | "ti
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; placement?: { detail: string; remote: boolean }; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
-  const menu = actionsDisclosure();
+export function terminalChrome(opts: { title: string; placement?: { detail: string; remote: boolean }; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; newTab(kind: "shell" | "vscode"): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
+  const menu = actionsDisclosure("More session actions");
+  menu.trigger.replaceChildren(icon("ellipsis"));
+  menu.trigger.title = "More session actions";
   const action = (label: string, className: string, run: () => void) => {
     const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
     button.addEventListener("click", () => { menu.close(); run(); });
     return button;
   };
+  const newTabButton = (kind: "shell" | "vscode", label: string, glyph: "terminal" | "panels", name: string) => {
+    const button = h("button", { type: "button", class: `af-ghost af-term-action af-term-new af-term-new-${kind}`, title: name },
+      icon(glyph), h("span", { class: "af-term-new-label" }, label));
+    button.setAttribute("aria-label", name);
+    button.hidden = true;
+    // The new tab owns input next; a focused button would swallow the rail keys.
+    // detail counts clicks in one gesture; a fast local create can settle before the
+    // second click of a double-click lands, so the in-flight guard alone misses it.
+    // The first create may already have focused its terminal; a focusing mousedown
+    // here would blur it back to rail mode.
+    button.addEventListener("mousedown", (event) => {
+      if (event.detail > 1) event.preventDefault();
+    });
+    button.addEventListener("click", (event) => {
+      if (event.detail > 1) return;
+      menu.close(); button.blur(); opts.newTab(kind);
+    });
+    return button;
+  };
+  const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
+  const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
+  const newTabs = h("div", { class: "af-term-new-group" }, newTerminal, newVSCode);
   const title = h("span", { class: "af-term-title" });
   applyTerminalTitle(title, opts.title);
   const placement = h("span", { class: "af-term-placement" });
@@ -176,8 +200,6 @@ export function terminalChrome(opts: { title: string; placement?: { detail: stri
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
-  const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
-  keyboard.hidden = true;
   const actions = h("div", { class: "af-term-actions" });
   actions.hidden = true;
   const retry = action("Retry limit", "", opts.retry);
@@ -189,13 +211,8 @@ export function terminalChrome(opts: { title: string; placement?: { detail: stri
   deliver.hidden = true;
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
-  const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
-  copy.title = "Copy link";
-  copy.setAttribute("aria-label", "Copy link");
-  const desktopCopy = action("", "af-copy-link af-copy-link-desktop", opts.copyLink);
-  desktopCopy.append(icon("link"));
-  desktopCopy.title = "Copy link";
-  desktopCopy.setAttribute("aria-label", "Copy link");
+  const copy = action("Copy link", "af-copy-link", opts.copyLink);
+  copy.title = "Copy link to this session";
   // The desktop font-size pair (#5500): terminal text only, beside the other
   // pane-level controls and hidden at the phone breakpoint (where the keybar
   // carries the same controls instead). Each press steps the shared device
@@ -207,23 +224,23 @@ export function terminalChrome(opts: { title: string; placement?: { detail: stri
   const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
   fontIncrease.title = "Increase terminal text size";
   fontIncrease.setAttribute("aria-label", "Increase terminal text size");
-  const newTabSlot = h("div", { class: "af-term-new-slot" });
+  const tabUnavailable = h("span", { class: "af-tab-new-unavailable" });
+  tabUnavailable.hidden = true;
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(placement, newTabSlot, copy, handoff, deliver, actions, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, fontDecrease, fontIncrease, keyboard, retry, menu.el);
-  return { head, title, placement, tabs, keyboard, retry, deliver, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
+  menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions, closePane);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, fontDecrease, fontIncrease, retry, menu.el);
+  return { head, title, placement, tabs, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
 }
 
 /** Split leaves share the same title/close treatment as the main tab row. */
 export function paneChrome(onClose: () => void) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
   const label = h("span", { class: "af-pane-label" });
-  const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
   const close = h("button", { type: "button", class: "af-pane-close", title: "Hide pane" }, icon("x"));
   close.setAttribute("aria-label", "Hide pane");
   close.addEventListener("click", (event) => { event.stopPropagation(); onClose(); });
-  return { head: h("div", { class: "af-pane-head" }, glyph, label, keyboard, close), glyph, label };
+  return { head: h("div", { class: "af-pane-head" }, glyph, label, close), glyph, label };
 }
 
 /** xterm requires resolved colors. ANSI colors remain the terminal's own palette. */

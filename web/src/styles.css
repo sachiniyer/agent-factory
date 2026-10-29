@@ -1361,9 +1361,23 @@ body[data-project-color] [data-af-theme="dark"] {
   gap: var(--af-space-1);
 }
 
-.af-copy-link-desktop {
-  min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
-  justify-content: center;
+/* One click per tab kind. Labels drop when the pane is narrow; the accessible
+ * name stays on the button. */
+.af-term-head { container-type: inline-size; }
+.af-term-new-group {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--af-space-1);
+}
+.af-term-new {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-space-1);
+  white-space: nowrap;
+}
+@container (max-width: 640px) {
+  .af-term-new-label { display: none; }
 }
 /* The A−/A+ text-size pair (#5500): same hit area as the copy-link icon button.
  * These are never toggled by `hidden` — visibility is the phone media rule's
@@ -1374,7 +1388,6 @@ body[data-project-color] [data-af-theme="dark"] {
   justify-content: center;
   min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
 }
-.af-term-menu .af-copy-link-phone { display: none; }
 
 .af-term-action {
   flex: 0 0 auto;
@@ -1455,14 +1468,11 @@ body[data-project-color] [data-af-theme="dark"] {
   color: var(--af-ink);
 }
 .af-term-menu.af-menu-up { top: auto; bottom: calc(100% + var(--af-space-2)); }
-.af-term-menu[hidden], .af-term-keyboard[hidden] { display: none; }
-.af-term-new-slot, .af-term-new-slot .af-tab-new-wrap, .af-term-menu button { width: 100%; }
+.af-term-menu[hidden] { display: none; }
+.af-term-menu button { width: 100%; }
 .af-term-menu button { text-align: left; }
 .af-term-placement { color: var(--af-ink-muted); font-size: var(--af-type-body); padding: var(--af-space-1) var(--af-space-2); overflow-wrap: anywhere; }
 .af-term-placement[hidden] { display: none; }
-.af-term-keyboard, .af-pane-keyboard { color: var(--af-ink); font-size: var(--af-type-body); }
-.af-pane-keyboard { display: none; }
-.af-kb-terminal .af-pane-focused .af-pane-keyboard { display: inline; }
 .af-term-title-separator { color: var(--af-ink); font-size: var(--af-type-heading); }
 
 /* A durable incomplete-archive notice, sourced from the daemon snapshot rather
@@ -1637,87 +1647,8 @@ body[data-project-color] [data-af-theme="dark"] {
   height: var(--af-space-2);
 }
 
-/* The labelled new-tab control and its kind menu. The wrap keeps their lifecycle and
-   outside-click boundary together; the menu itself uses viewport coordinates below. */
-.af-tab-new-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-}
-
-/* The new-tab menu (Terminal / VS Code). Mirrors .af-project-menu's chrome so the two
-   dropdowns read as one component. Fixed positioning deliberately escapes the tab
-   bar's overflow clip; ui.ts aligns its right edge to the caret and recomputes the
-   viewport coordinates whenever the horizontal tab bar scrolls. */
-.af-tab-menu {
-  position: fixed;
-  top: 0;
-  left: 0;
-  min-width: calc(var(--af-space-3) * 9);
-  background: var(--af-surface-raised);
-  border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
-  border-radius: var(--af-radius-dialog);
-  box-shadow: none;
-  padding: var(--af-space-2);
-  z-index: 30;
-}
-
-.af-tab-menu-item {
-  display: block;
-  width: 100%;
-  padding: var(--af-space-2);
-  background: var(--af-surface-raised);
-  color: var(--af-ink);
-  border: none;
-  border-radius: var(--af-radius-control);
-  font: inherit;
-  font-size: var(--af-type-body);
-  text-align: left;
-  cursor: pointer;
-}
-
-.af-tab-menu-item:hover {
-  background: var(--af-surface-raised);
-}
-
-.af-tab-menu-item:focus-visible {
-  outline: calc(var(--af-space-1) * 0.5) solid var(--af-accent);
-  outline-offset: calc(var(--af-space-1) * -0.5);
-}
-
-/* The labelled new-tab button: the tab-bar analogue of the rail's "+ New". */
-.af-tab-new {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--af-space-1);
-  padding: var(--af-space-2);
-  background: transparent;
-  color: var(--af-ink);
-  border: none;
-  border-radius: 0;
-  font: inherit;
-  font-size: var(--af-type-body);
-  font-weight: 400;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.af-tab-new:hover {
-  color: var(--af-ink);
-}
-
-.af-tab-new-plus {
-  font-size: var(--af-type-body);
-}
-
-.af-tab-new-caret {
-  color: var(--af-ink);
-  font-size: var(--af-type-caption);
-}
-
-/* Creation never vanishes silently: archived sessions, off-box runtimes, and a
-   full nine-tab roster each leave a concise, visible reason in the tab bar. */
+/* Creation never vanishes silently: archived sessions and off-box runtimes leave
+   a concise, visible reason in the session actions menu. */
 .af-tab-new-unavailable {
   display: inline-flex;
   align-items: center;
@@ -1726,6 +1657,7 @@ body[data-project-color] [data-af-theme="dark"] {
   font-size: var(--af-type-body);
   white-space: normal;
 }
+.af-tab-new-unavailable[hidden] { display: none; }
 
 /* Operation-error toast (#1592 Phase 5 PR7): a transient banner pinned bottom-right,
  * shown only while `tabError` is set. Tab ops and asynchronous session creation have
@@ -2872,11 +2804,9 @@ body[data-project-color] [data-af-theme="dark"] {
  * so the main pane keeps the full body width whether the drawer is open or shut, and the
  * terminal's own ResizeObserver never sees a width change when it toggles. */
 @media (max-width: 768px) {
-  .af-copy-link-desktop { display: none; }
   /* The head's zoom pair gives way to the keybar's own A−/A+ keys at phone
    * width — one control set per device class, not two stacked (#5500). */
   .af-term-zoom { display: none; }
-  .af-term-menu .af-copy-link-phone { display: inline-flex; }
 
   /* The decorative brand yields entirely. The remaining controls keep DOM/focus
    * order in the grid: drawer + top-level views, then a wider project row + rare
@@ -3066,9 +2996,11 @@ body[data-project-color] [data-af-theme="dark"] {
    * pane row. The min-width chain lets the browser render the title's … glyph. */
   .af-term-head {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
     gap: var(--af-space-2);
   }
+  .af-term-new-group { grid-row: 1; grid-column: 3; }
+  .af-term-new-label { display: none; }
 
   .af-term-head-main {
     grid-row: 1;
@@ -3078,8 +3010,7 @@ body[data-project-color] [data-af-theme="dark"] {
   }
 
   .af-term-title-separator { display: none; }
-  .af-term-keyboard { grid-row: 1; grid-column: 2; white-space: nowrap; }
-  .af-term-head > .af-term-more-wrap { grid-row: 1; grid-column: 3; }
+  .af-term-head > .af-term-more-wrap { grid-row: 1; grid-column: 4; }
   .af-term-head > .af-term-more-wrap .af-term-more-label { display: inline; }
   .af-term-head > .af-term-more-wrap .af-term-more-compact { display: none; }
   .af-term-head > .af-term-more-wrap > .af-term-menu {
@@ -3092,7 +3023,7 @@ body[data-project-color] [data-af-theme="dark"] {
     min-width: 0;
     flex-wrap: nowrap;
   }
-  .af-term-head > .af-term-action:not(.af-copy-link-desktop) { grid-column: 1 / -1; }
+  .af-term-head > .af-term-action { grid-column: 1 / -1; }
 
   /* Touch targets: lift the primary controls to a ~40-44px tap area so nothing on the
    * terminal path depends on a precise tap or a hover that touch never delivers. */
@@ -3107,7 +3038,7 @@ body[data-project-color] [data-af-theme="dark"] {
   }
 
   .af-tab-close,
-  .af-tab-new {
+  .af-term-new {
     min-width: calc(var(--af-space-3) * 2);
     min-height: calc(var(--af-space-3) * 2);
   }
@@ -3778,7 +3709,7 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-appbar-tools[hidden] { display: none; }
   .af-term-head .af-tab,
   .af-term-head .af-term-action,
-  .af-term-head .af-tab-new {
+  .af-session-first .af-term-new {
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
   }
 }
@@ -3859,14 +3790,12 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   }
   .af-session-first .af-nav-toggle { flex-shrink: 0; }
   .af-session-first .af-term-title { order: 1; flex: 1; }
-  .af-session-first .af-term-keyboard { order: 2; flex-shrink: 0; font-size: var(--af-type-caption); }
-  .af-session-first .af-appbar-tools-wrap { order: 3; flex-shrink: 0; }
+  .af-session-first .af-term-new-group { order: 3; flex-shrink: 0; }
+  .af-session-first .af-appbar-tools-wrap { order: 4; flex-shrink: 0; }
   .af-session-first .af-term-head { display: none; }
   .af-session-first .af-appbar-tools { width: calc(100vw - var(--af-space-3)); }
-  .af-session-first .af-project-switch,
-  .af-session-first .af-tab-new { display: none; }
+  .af-session-first .af-project-switch { display: none; }
   .af-session-first .af-project-menu,
-  .af-session-first .af-tab-menu,
   .af-session-first .af-appbar-tools > .af-term-menu {
     display: flex !important; position: static; width: 100%; min-width: 0;
     max-height: none; overflow: visible; padding: 0; border: 0;
@@ -3875,7 +3804,6 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-session-first .af-tabbar { flex: none; width: 100%; }
   .af-session-first .af-tabbar:not(:has(.af-tab:nth-of-type(2))) { display: none; }
   .af-session-first .af-appbar-tools a { min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)); }
-  .af-session-first .af-appbar-tools .af-copy-link-phone { display: inline-flex; }
 }
 
 .af-phone-pane-close { display: none; }

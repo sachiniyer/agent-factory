@@ -9,8 +9,9 @@ use 812px height. The baseline visual suite and all performance budgets passed.
 Before: the session title and project/view navigation disappear, while drawer,
 tabs, PR link, Keyboard and Actions compete for one row.
 
-After: project/view navigation remains above the pane; title, static Keyboard
-and Actions have one row, with a horizontally scrolling tab row beneath. The
+After: project/view navigation remains above the pane; title and the
+Terminal · VS Code · … buttons have one row (the focused pane's accent outline
+shows keyboard ownership), with a horizontally scrolling tab row beneath. The
 same session, viewport heights and themes are used. The title retains its full
 text and tooltip while CSS truncates it with … when needed. Targets are 44px.
 
