@@ -335,12 +335,22 @@ func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (st
 		}
 	}
 
+	// Nothing below may call a locking Instance method from inside the commit
+	// callback (it runs under instance.mu), so the remote stop is resolved here.
+	stopRemote := func() {}
+	if lastVSCode {
+		stopRemote = m.remoteEditorStopper(instance)
+	}
 	committed, err := instance.CloseTabByIDWithCommit(targetID, func(staged session.InstanceData) error {
 		// A proxy that resolved the tab before the first stop can still reach
 		// editor admission without the session op-lock. Sweep again while the
 		// roster is staged but before committing it. An unknown result makes the
 		// transaction restore the exact tab, preserving its durable retry handle.
 		if lastVSCode {
+			// A remote start in flight when the first stop ran can have finished
+			// since (#6089); stop it again before the tab is gone for good.
+			// Resolved before this callback: it runs under instance.mu.
+			stopRemote()
 			if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
 				return fmt.Errorf("final editor teardown stayed unknown: %w", err)
 			}

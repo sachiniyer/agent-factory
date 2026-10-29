@@ -376,3 +376,66 @@ func (f *crashEditorFixture) start(hs *headlessServer) *vscodeServer {
 	require.NotNil(f.t, s)
 	return s
 }
+
+// #6089: the remote start resolves its target before CloseTab can take the last VS
+// Code tab away, and CloseTab's stop can run while the start is still in flight. The
+// guard after the start re-asks whether the editor still has a tab; if not it stops
+// the editor it just started.
+func TestGuardRemoteEditorStart_StopsAnEditorWhoseTabWasClosed(t *testing.T) {
+	m, repoID, title := newVSCodeCreateFixture(t)
+	key := daemonInstanceKey(repoID, title)
+	m.mu.Lock()
+	inst := m.instances[key]
+	m.mu.Unlock()
+	require.NotNil(t, inst)
+	_, err := m.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"})
+	require.NoError(t, err)
+
+	stops := 0
+	stop := func() { stops++ }
+
+	// The tab exists: the editor is wanted and is left running.
+	require.NoError(t, m.guardRemoteEditorStart(inst, key, title, stop))
+	require.Zero(t, stops)
+
+	// The last VS Code tab closes (its own stop already ran) while a start that had
+	// resolved earlier finishes. The guard must stop what that start left behind.
+	_, err = m.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"}, "test")
+	require.NoError(t, err)
+	err = m.guardRemoteEditorStart(inst, key, title, stop)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VS Code tab")
+	assert.Equal(t, 1, stops, "the editor started after the close was stopped")
+
+	// And the pre-start check refuses to begin one at all.
+	require.Error(t, m.remoteEditorWanted(inst, key, title))
+}
+
+// #6165 P1: CloseTabByIDWithCommit runs its commit callback under instance.mu, and
+// the final remote-editor sweep inside it used to call locking Instance methods —
+// a non-reentrant self-deadlock on EVERY last-VS-Code-tab close, local sessions
+// included. The close runs under a deadline so a regression fails fast instead of
+// hanging the suite. (A remote instance cannot be built with a fake relayer in this
+// harness; the stopper is resolved before the callback for both kinds, so the local
+// close exercises the same callback path.)
+func TestCloseLastVSCodeTab_DoesNotDeadlockUnderTheInstanceLock(t *testing.T) {
+	m, repoID, title := newVSCodeCreateFixture(t)
+	_, err := m.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"})
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() {
+		_, cerr := m.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"}, "test")
+		done <- cerr
+	}()
+	select {
+	case cerr := <-done:
+		require.NoError(t, cerr)
+	case <-time.After(20 * time.Second):
+		t.Fatal("closing the last VS Code tab deadlocked: the commit callback re-entered instance.mu")
+	}
+	m.mu.Lock()
+	inst := m.instances[daemonInstanceKey(repoID, title)]
+	m.mu.Unlock()
+	require.False(t, instanceHasVSCodeTab(inst))
+}
