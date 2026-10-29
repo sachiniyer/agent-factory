@@ -56,6 +56,7 @@ func (i *Instance) closeTabByID(tabID, gen string) error {
 	}
 	tab := i.removeTabLocked(idx)
 	handle, rh := i.stageCleanupLocked(tab)
+	i.dropAdoptedIntentsLocked(tabID)
 	i.mu.Unlock()
 	return i.settleRemovedTab(tab, handle, rh)
 }
@@ -239,6 +240,7 @@ func (i *Instance) CloseTabByIDWithCommit(
 		i.mu.Unlock()
 		return CommittedTabClose{}, err
 	}
+	i.dropAdoptedIntentsLocked(tabID)
 	i.mu.Unlock()
 
 	defer i.lockTeardown(tab.ID)()

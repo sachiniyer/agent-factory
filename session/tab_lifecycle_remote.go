@@ -153,14 +153,6 @@ func (i *Instance) stageRemoteCloseLocked(tab *Tab) *RemoteTabCleanupData {
 	if !i.isOffBoxTabLocked(tab) {
 		return nil
 	}
-	// Closing the tab ends the execution an adopted intent was keeping a late
-	// retry joinable to; left behind, it would point a later request at a closed
-	// (or re-created) id.
-	for key, in := range i.tabCreateIntents {
-		if in.id == tab.ID && in.adopted {
-			delete(i.tabCreateIntents, key)
-		}
-	}
 	h := RemoteTabCleanupData{TabID: tab.ID, Gen: tab.gen}
 	for _, p := range i.pendingRemoteClose {
 		if p == h {
@@ -170,6 +162,19 @@ func (i *Instance) stageRemoteCloseLocked(tab *Tab) *RemoteTabCleanupData {
 	i.pendingRemoteClose = append(i.pendingRemoteClose, h)
 	i.touchLocked()
 	return &h
+}
+
+// dropAdoptedIntentsLocked ends the retry-join window of a tab that is now
+// closed: an adopted intent left behind would point a later request at a closed
+// (or re-created) id. It is applied only once the close is COMMITTED — a close
+// whose commit fails rolls back to exactly the pre-close state, intents
+// included. Caller holds i.mu.
+func (i *Instance) dropAdoptedIntentsLocked(tabID string) {
+	for key, in := range i.tabCreateIntents {
+		if in.id == tabID && in.adopted {
+			delete(i.tabCreateIntents, key)
+		}
+	}
 }
 
 // retireRemoteCloseLocked drops a confirmed pending close. Caller holds i.mu.

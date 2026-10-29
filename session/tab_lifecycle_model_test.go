@@ -1,8 +1,10 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -11,18 +13,21 @@ import (
 // A model-based check of the create-intent bookkeeping (#6030). The hand-written
 // interleavings kept missing the next case, so this drives a random sequence
 // over a small alphabet — create with or without an id, shape A or B, outcome
-// success / definitive refusal / lost answer, sweep, close — against the fake
+// success / definitive refusal / lost answer, sweep, close (also with the
+// daemon's persist failing) — against the fake
 // sandbox and checks the invariants after every step:
 //
 //   - nothing executes twice: a create either rejoins an execution whose outcome
 //     the daemon never saw, or (only when none exists) starts a new one;
 //   - the daemon never holds a tab the sandbox lacks, and never twice;
+//   - a step whose commit fails leaves the daemon state, intents included,
+//     exactly as it was;
 //   - after a final sweep, every execution the sandbox still holds is on the
 //     daemon roster exactly once.
 //
 // The seeds are fixed, so a failure names the seed and replays.
 func TestCreateIntentModel(t *testing.T) {
-	const seeds, depth = 150, 14
+	const seeds, depth = 300, 18
 	shapes := []string{"A.sh", "B.sh"}
 	ids := []string{"x", "y"}
 	for seed := int64(1); seed <= seeds; seed++ {
@@ -116,9 +121,28 @@ func runIntentModel(t *testing.T, seed int64, depth int, shapes, ids []string) {
 				continue
 			}
 			id := ids[rng.Intn(len(ids))]
-			trace = append(trace, "close("+id+")")
-			if err := inst.CloseTabByID(id); err != nil {
-				fail("close %s: %v", id, err)
+			switch mode := rng.Intn(3); mode {
+			case 2: // the daemon's own persist fails: the step must change nothing
+				before := intentStateSnapshot(inst)
+				trace = append(trace, "close("+id+",commit-fails)")
+				res, err := inst.CloseTabByIDWithCommit(id, func(InstanceData) error { return errCommitFailed })
+				if err == nil || res.TeardownErr != nil {
+					fail("a failed commit must fail the close (err=%v)", err)
+				}
+				if after := intentStateSnapshot(inst); !reflect.DeepEqual(before, after) {
+					fail("a failed commit changed state:\n before %+v\n after  %+v", before, after)
+				}
+				continue
+			case 1:
+				trace = append(trace, "close("+id+",commit)")
+				if _, err := inst.CloseTabByIDWithCommit(id, func(InstanceData) error { return nil }); err != nil {
+					fail("close %s: %v", id, err)
+				}
+			default:
+				trace = append(trace, "close("+id+")")
+				if err := inst.CloseTabByID(id); err != nil {
+					fail("close %s: %v", id, err)
+				}
 			}
 			forget(id)
 		}
@@ -149,6 +173,32 @@ func runIntentModel(t *testing.T, seed int64, depth int, shapes, ids []string) {
 	if got, want := rosterIDs(inst), sb.ids(); fmt.Sprint(sortedKeys(got)) != fmt.Sprint(sortedKeys(want)) {
 		fail("after a final sweep daemon roster %v != sandbox %v", sortedKeys(got), sortedKeys(want))
 	}
+}
+
+var errCommitFailed = errors.New("persist failed")
+
+// intentStateSnapshot is everything a step on the daemon's side can change: the
+// roster, the create intents, and both pending-cleanup lists.
+type intentSnapshot struct {
+	Tabs     []string
+	Intents  map[string]bool // key → adopted
+	Closes   []RemoteTabCleanupData
+	Cleanups []TabCleanupData
+}
+
+func intentStateSnapshot(i *Instance) intentSnapshot {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	snap := intentSnapshot{Intents: map[string]bool{}}
+	for _, tab := range i.Tabs {
+		snap.Tabs = append(snap.Tabs, tab.ID+"/"+tab.gen+"/"+tab.Name)
+	}
+	for key, in := range i.tabCreateIntents {
+		snap.Intents[key] = in.adopted
+	}
+	snap.Closes = append(snap.Closes, i.pendingRemoteClose...)
+	snap.Cleanups = append(snap.Cleanups, i.pendingTabCleanup...)
+	return snap
 }
 
 func sortedKeys(m map[string]bool) []string {
