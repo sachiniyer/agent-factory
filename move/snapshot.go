@@ -394,12 +394,18 @@ func verifyStaged(ctx context.Context, worktree string, env []string) error {
 // tracked ones kept, as in the snapshot). CheckTree compares the output.
 func (s *Snapshot) VerifyCommand() string {
 	// Built the way the snapshot was: start from the destination's own index (so
-	// tracked files stay in the set even when they match an ignore rule), then fold
-	// the working tree in with add -A. An empty index would drop every tracked-but-
-	// ignored file and fail a faithful destination.
-	return `d=$(mktemp -d) && idx=$(git rev-parse --path-format=absolute --git-path index) && ` +
+	// tracked files stay in the set even when they match an ignore rule), clear the
+	// assume-unchanged and skip-worktree flags it carries for files present on disk
+	// (they make add -A skip a file the move script changed, so a stale destination
+	// would verify), then fold the working tree in with add -A. A flagged file that
+	// is absent keeps its flag, as in clearHidingFlags: clearing it would stage a
+	// deletion nobody made. Quoted (unusual) paths are cleared without the
+	// existence test, which only errs toward comparing more.
+	return `d=$(mktemp -d) && idx=$(git rev-parse --path-format=absolute --git-path index) && top=$(git rev-parse --show-toplevel) && ` +
 		`{ [ ! -f "$idx" ] || cp "$idx" "$d/index"; } && ` +
-		`GIT_INDEX_FILE="$d/index" git add -A && GIT_INDEX_FILE="$d/index" git write-tree; rc=$?; rm -rf "$d"; exit $rc`
+		`{ cd "$top" && git ls-files -v | while IFS= read -r l; do case "$l" in [a-zS]\ *) p=${l#??}; case "$p" in \"*) printf '%s\n' "$p";; *) if [ -e "$p" ] || [ -L "$p" ]; then printf '%s\n' "$p"; fi;; esac;; esac; done > "$d/hidden"; } && ` +
+		`export GIT_INDEX_FILE="$d/index" && git update-index --no-assume-unchanged --stdin < "$d/hidden" && git update-index --no-skip-worktree --stdin < "$d/hidden" && ` +
+		`git add -A && git write-tree; rc=$?; rm -rf "$d"; exit $rc`
 }
 
 // CheckTree reports whether got, the output of VerifyCommand at the destination,
